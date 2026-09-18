@@ -1,0 +1,61 @@
+[project]
+name = "haskie"
+version = "0.1.0"
+description = "Personal document library: markdown conversion, LanceDB search, web UI and MCP server"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "litestar[standard]>=2.23.0",
+    "litestar-mcp>=0.13.2",
+    "lancedb>=0.38.0",
+    "msgspec>=0.19.0",
+    "firecrawl-anydoc>=0.2.4",
+    "pdf-inspector>=1.20.0",
+    "pyromark>=0.9.13",
+    "pypdf>=5.0.0",
+    "fastembed>=0.8.0",
+    "semantic-text-splitter>=0.32.0",
+    "aiosqlite>=0.21.0",
+    "dbos>=3.0.0",
+    "structlog>=25.1.0",
+    "typer>=0.15.0",
+]
+
+[project.scripts]
+haskie = "haskie.cli:cli"
+
+[project.optional-dependencies]
+gpu = ["onnxruntime-gpu>=1.17.0"]  # CUDA for embeddings; Apple Silicon (CoreML) needs nothing extra
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=6.0.0",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.9.0",
+    "ty>=0.0.81",
+]
+
+# The built UI ships inside the wheel, so `uv tool install haskie` serves the web app and not
+# just the API. `mise run build` puts it there; a wheel built without it still runs headless.
+[tool.uv.build-backend]
+source-include = ["src/haskie/web/**"]
+
+[build-system]
+requires = ["uv_build>=0.8.0,<0.12"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ty.src]
+include = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["network: downloads models from Hugging Face"]
+addopts = "-m 'not network'"

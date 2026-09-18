@@ -1,0 +1,11 @@
+[tools]
+python = "3.13"
+uv = "latest"
+bun = "latest"
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+HASKIE_HOME = "{{ env.HASKIE_HOME | default(value=env.HOME ~ '/.haskie') }}"
+
+[task_config]
+includes = ["mise/tasks"]

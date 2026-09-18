@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+.context/
+.coverage
+
+# built by `mise run build`, shipped inside the wheel
+src/haskie/web/

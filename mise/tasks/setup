@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Install Python and web dependencies"
+set -euo pipefail
+uv sync --all-extras
+(cd web && bun install)
