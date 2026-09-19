@@ -1,43 +1,54 @@
-"""Read model over the job history: one `Job` per `index_document` workflow, one `Task` per
-micro-batch below it, and one `BulkJob` per whole-library index or delete. Nothing here is stored;
+"""Read model over the job history: one `Job` per pipeline workflow, one `Task` per micro-batch
+below it, and one `BulkJob` per whole-collection or whole-document job. Nothing here is stored;
 every field comes from DBOS's workflow tables, or - once a job is older than the live window -
 from the day partition `archive` copied it into.
 
-A job has a child workflow per slice of its convert and embed stages plus one for its index stage
-(see `workflows`), so its tasks are the micro-batches inside them: the batch list comes from each
-child's input, the finished count from its step log (`sysdb`, one grouped query for the whole
-page). Counts are summed over the children, so how a stage was sliced never shows here.
+Three workflows carry a document through the pipeline (`dbos_names.PIPELINE_WORKFLOWS`), and each
+is a job of its own: `import_document` converts it, `ensure_embedding` fills its embedding cache,
+`index_collection_document` writes one collection's table from that cache. Every one of them cuts
+its stage into `stage_slice` children with a durable step per micro-batch, so a job's tasks are
+those micro-batches: the batch list comes from each child's input, the finished count from its
+step log (`sysdb`, one grouped query for the whole page). Counts are summed over the children, so
+how a stage was sliced never shows here.
 
 Every other kind of workflow this app runs is listed through one generic read model instead:
-`list_kind` returns a page of `JobRow` for a whole-library job, a model download, a maintenance
-run or an archive round, so the Jobs view has a section per kind and a model still coming down is
-visible as a job instead of only as a 503 on a search. Documents are a kind there too, mapped from
-the `Job` above, because they alone also have tasks, a cancel and a day partition to fall back to.
+`list_kind` returns a page of `JobRow` for a whole-collection job, a model download, a maintenance
+run or an archive round, so the Jobs view has a section per kind. Documents are a kind there too,
+mapped from the `Job` above, because they alone also have tasks, a cancel and a day partition to
+fall back to.
 
-The library and the document are read out of the workflow id (`idx:{library}:{doc}:{uuid}`), never
-out of the recorded input: that makes the library filter an id prefix the database can apply, and
-a page of jobs costs no input payloads at all. Every other kind whose work belongs to one library
-carries the name in the same place (`{prefix}:{library}:{rest}`), and a download reads its kind and
-model out of its id (`dl:{kind}:{model}`), for the same reason.
+Reads only: cancelling a job writes, so it lives in `workflows` beside the ids it writes by.
+
+The action, the collection and the document are read out of the workflow id (`imp:{doc}:{uuid}`,
+`emb:{doc}:{uuid}`, `idx-col:{collection}:{doc}:{uuid}`, through `workflows.job_names`), never out
+of the recorded input: that makes the collection filter an id prefix the database can apply, and a
+page of jobs costs no input payloads at all. Every other kind whose work belongs to one collection
+carries the name in the same place (`{prefix}:{collection}:{rest}`), and a download reads its kind
+and model out of its id (`dl:{kind}:{model}`), for the same reason.
 
 Every listing is a read of SQLite - DBOS's own tables through its `*_async` API, the day
 partitions through `aiosqlite` - so every one of them is awaited. The row builders below take
 what those reads returned and touch nothing: they stay sync.
 """
 
-from typing import Literal
+import asyncio
+from typing import Literal, get_args
 
 import aiosqlite
 import msgspec
 from dbos import DBOS
 
 from haskie import archive, db, models, sysdb, workflows
-from haskie.dbos_names import ACTIVE_STATUS, PENDING_STATUS, STAGE_STEP, STAGE_WORKFLOW
+from haskie.dbos_names import (
+    PENDING_STATUS,
+    PIPELINE_WORKFLOWS,
+    STAGE_STEP,
+    STAGE_WORKFLOW,
+)
 from haskie.errors import InvalidInput, JobNotFound
-from haskie.library import Library
 from haskie.paging import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, OffsetCursor, Order, Page
 from haskie.pipeline import Batch
-from haskie.workflows import STAGE_ORDER, BatchResult, Stage
+from haskie.workflows import STAGE_ORDER, BatchResult, JobAction, Stage, job_names
 
 DONE_TASK_STATUS = frozenset({"SUCCESS", "ERROR"})  # a batch whose step DBOS recorded
 
@@ -52,8 +63,14 @@ LIVE = "live"  # the source name of the DBOS history itself
 
 
 class Job(msgspec.Struct):
+    """One run of one pipeline workflow over one document.
+
+    `collection` is None for an import and an embed: both are collection-independent, and only the
+    index of a member belongs to a collection."""
+
     id: str
-    library: str
+    action: JobAction
+    collection: str | None
     doc: str
     status: str  # DBOS: ENQUEUED | PENDING | SUCCESS | ERROR | CANCELLED | ...
     created_at: float
@@ -65,22 +82,28 @@ class Job(msgspec.Struct):
     archived: bool = False  # read from a day partition: DBOS no longer holds the job
 
 
-BulkKind = Literal["index_library", "delete_library"]
-
-# Workflow name -> the kind the API names it by. A job id that is not one of these two is not a
-# bulk job, which is how `bulk_job` tells an unknown id from a document job.
-BULK_KINDS: dict[str, BulkKind] = {
-    workflows.index_library_workflow.__qualname__: "index_library",
-    workflows.delete_library_workflow.__qualname__: "delete_library",
+# A whole-collection or whole-document job, named as DBOS records it: `workflows` registers
+# `index_collection_workflow`, `delete_collection_workflow` and `delete_document_workflow` under
+# exactly these names, so the workflow name is also the kind the API reports (`test_archive` pins
+# that against the registry).
+BulkKind = Literal["index_collection", "delete_collection", "delete_document"]
+BULK_KINDS: tuple[BulkKind, ...] = get_args(BulkKind)
+BULK_TITLES: dict[BulkKind, str] = {
+    "index_collection": "index collection",
+    "delete_collection": "delete collection",
+    "delete_document": "delete document",
 }
 
 
 class BulkJob(msgspec.Struct):
-    """One whole-library job: what the 202 of an "index all" or a library delete points at."""
+    """One whole-collection or whole-document job: what the 202 of an "index all", a collection
+    delete or a document delete points at.
+
+    `collection` is None for a document delete: it spans every collection the document is in."""
 
     id: str
     kind: BulkKind
-    library: str
+    collection: str | None
     status: str  # DBOS: ENQUEUED | PENDING | SUCCESS | ERROR | CANCELLED | ...
     progress: workflows.BulkProgress | None = None
     error: str | None = None
@@ -103,13 +126,12 @@ class DownloadJob(msgspec.Struct):
     warm: bool = False
 
 
-JobKind = Literal["document", "library", "download", "maintenance", "archive"]
-
-# The sections of the Jobs view, in the order it shows them.
-KIND_ORDER: tuple[JobKind, ...] = ("document", "library", "download", "maintenance", "archive")
+# Declared in the order the Jobs view shows the sections, so `KIND_ORDER` is the type itself.
+JobKind = Literal["document", "collection", "download", "maintenance", "archive"]
+KIND_ORDER: tuple[JobKind, ...] = get_args(JobKind)
 KIND_LABELS: dict[JobKind, str] = {
     "document": "Documents",
-    "library": "Libraries",
+    "collection": "Collections",
     "download": "Model downloads",
     "maintenance": "Maintenance",
     "archive": "Archive",
@@ -123,7 +145,7 @@ class JobRow(msgspec.Struct):
 
     id: str
     kind: JobKind
-    title: str  # human text: "library / doc", "index library X", "download reranker Y"
+    title: str  # human text: "collection / doc", "index collection X", "download reranker Y"
     status: str  # DBOS: ENQUEUED | PENDING | SUCCESS | ERROR | CANCELLED | ...
     created_at: float
     updated_at: float
@@ -142,6 +164,7 @@ class JobKindSummary(msgspec.Struct):
 
 class Task(msgspec.Struct):
     id: str
+    child_id: str  # the `stage_slice` workflow that ran the batch; the task id is `{it}:{seq}`
     stage: Stage
     seq: int
     # convert: PDF pages [start, end); embed: the one part; index: the part range written together
@@ -150,14 +173,6 @@ class Task(msgspec.Struct):
     status: str
     result: int | None  # convert: pages needing OCR; embed/index: chunks
     error: str | None
-
-
-def _names(workflow_id: str) -> tuple[str, str]:
-    """`idx:{library}:{doc}:{uuid}` -> (library, doc); ("?", "?") for any other id.
-
-    `library.safe_name` keeps `:` out of both names, so the split is exact."""
-    parts = workflow_id.split(":", 3)
-    return (parts[1], parts[2]) if len(parts) == 4 and parts[0] == "idx" else ("?", "?")
 
 
 def _download_names(workflow_id: str) -> tuple[str, str]:
@@ -191,25 +206,34 @@ def _download(status) -> DownloadJob:
     )
 
 
-def _library_of(workflow_id: str) -> str:
-    """`{prefix}:{library}:{rest}` -> library; "?" for any other id. Every job that belongs to one
-    library carries the name in the same place (see the module docstring)."""
+def _named(workflow_id: str) -> str:
+    """The name in the second segment of an id (`{prefix}:{name}:{rest}`): the one thing the job
+    is about, whichever kind of name it is. "?" for any other id."""
     parts = workflow_id.split(":", 2)
     return parts[1] if len(parts) == 3 else "?"
 
 
+def _collection_of(workflow_id: str) -> str | None:
+    """The collection a job belongs to; None when it belongs to none.
+
+    Every job of one collection carries the name in the same place (see the module docstring). A
+    document delete is the exception: `del-doc:{doc}:{uuid}` carries a document there, and the
+    delete spans every collection the document is in."""
+    if workflow_id.startswith(f"{workflows.DELETE_DOCUMENT_PREFIX}:"):
+        return None
+    name = _named(workflow_id)
+    return None if name == "?" else name
+
+
 # --- one listing per kind of job ----------------------------------------------------------
 
-# Stage -> the DBOS workflow names it lists. `document` is missing on purpose: it has a listing of
+# Kind -> the DBOS workflow names it lists. `document` is missing on purpose: it has a listing of
 # its own (`list_jobs`), because it is the only kind that also reads the day partitions.
 KIND_NAMES: dict[JobKind, list[str]] = {
-    "library": [
-        workflows.index_library_workflow.__qualname__,
-        workflows.delete_library_workflow.__qualname__,
-    ],
+    "collection": list(BULK_KINDS),
     "download": [models.ensure_model.__qualname__],
-    # `maintain_library` is only the debounced handle that waits: the run itself is the child on
-    # the library's partition, so that is the one worth a row.
+    # `maintain_collection` is only the debounced handle that waits: the run itself is the child
+    # on the collection's partition, so that is the one worth a row.
     "maintenance": [
         workflows.maintain_on_partition.__qualname__,
         workflows.daily_maintenance.__qualname__,
@@ -219,38 +243,43 @@ KIND_NAMES: dict[JobKind, list[str]] = {
 
 # The same table read the other way, for counting active workflows by kind in one query.
 KIND_BY_NAME: dict[str, JobKind] = {
-    workflows.index_document.__qualname__: "document",
+    **dict.fromkeys(PIPELINE_WORKFLOWS, "document"),
     **{name: kind for kind, names in KIND_NAMES.items() for name in names},
 }
 
-# Stage -> the id prefix that keeps one library's jobs only. Downloads and archive rounds belong to
-# no library, so a library filter leaves them alone rather than emptying the section.
-_LIBRARY_PREFIX: dict[JobKind, list[str]] = {
-    "library": [f"{workflows.BULK_INDEX_PREFIX}:", f"{workflows.BULK_DELETE_PREFIX}:"],
+# Kind -> the id prefix that keeps one collection's jobs only. Downloads, document deletes and
+# archive rounds belong to no collection, so a collection filter leaves the section holding them
+# empty rather than unfiltered.
+_COLLECTION_PREFIX: dict[JobKind, list[str]] = {
+    "collection": [f"{workflows.BULK_INDEX_PREFIX}:", f"{workflows.BULK_DELETE_PREFIX}:"],
     "maintenance": [f"{workflows.MAINTAIN_PREFIX}:"],
 }
 
 
 def _checked_kind(kind: str) -> JobKind:
     """A kind is a trust boundary: an unknown one is a mistake in the request, not an empty page."""
-    for known in KIND_ORDER:
-        if kind == known:
-            return known
-    raise InvalidInput(f"unknown job kind {kind!r}; allowed: {', '.join(KIND_ORDER)}")
+    if kind not in KIND_ORDER:
+        raise InvalidInput(f"unknown job kind {kind!r}; allowed: {', '.join(KIND_ORDER)}")
+    return kind
 
 
-def _kind_prefix(kind: JobKind, library: str | None) -> list[str] | None:
-    if library is None:
+def _bulk_kind(name: str | None) -> BulkKind | None:
+    """The kind a whole-collection workflow name stands for; None for any other workflow."""
+    return name if name in BULK_KINDS else None
+
+
+def _kind_prefix(kind: JobKind, collection: str | None) -> list[str] | None:
+    if collection is None:
         return None
-    return [f"{prefix}{library}:" for prefix in _LIBRARY_PREFIX.get(kind, [])] or None
+    return [f"{prefix}{collection}:" for prefix in _COLLECTION_PREFIX.get(kind, [])] or None
 
 
-async def _kind_statuses(kind: JobKind, library: str | None, limit: int, offset: int) -> list:
+async def _kind_statuses(kind: JobKind, collection: str | None, limit: int, offset: int) -> list:
     """One window of the DBOS history for one kind, newest first. Inputs stay on disk; the output
     is loaded only because DBOS carries a workflow's error alongside it."""
     return await DBOS.list_workflows_async(
         name=KIND_NAMES[kind],
-        workflow_id_prefix=_kind_prefix(kind, library),
+        workflow_id_prefix=_kind_prefix(kind, collection),
         sort_desc=True,
         limit=limit,
         offset=offset,
@@ -261,7 +290,7 @@ async def _kind_statuses(kind: JobKind, library: str | None, limit: int, offset:
 
 async def list_kind(
     kind: str,
-    library: str | None = None,
+    collection: str | None = None,
     page_size: int = DEFAULT_PAGE_SIZE,
     cursor: str | None = None,
 ) -> Page[JobRow]:
@@ -274,13 +303,15 @@ async def list_kind(
         raise InvalidInput(f"page_size must be 1..{MAX_PAGE_SIZE}, got {page_size}")
     checked = _checked_kind(kind)
     if checked == "document":
-        page = await list_jobs(library, page_size, cursor)
+        page = await list_jobs(collection, page_size, cursor)
         return Page(items=[_document_row(job) for job in page.items], next_cursor=page.next_cursor)
     offset = _kind_offset(checked, cursor)
     # one row more than the page: its presence is what tells us another page exists
-    found = await _kind_statuses(checked, library, page_size + 1, offset)
+    found = await _kind_statuses(checked, collection, page_size + 1, offset)
+    # every row costs a read of its own (see `_detail`), so the page is built in one round trip
+    rows = await asyncio.gather(*(_kind_row(checked, s) for s in found[:page_size]))
     return Page(
-        items=[await _kind_row(checked, status) for status in found[:page_size]],
+        items=list(rows),
         next_cursor=_cursor(checked, offset + page_size) if len(found) > page_size else None,
     )
 
@@ -340,11 +371,19 @@ async def activity() -> Activity:
     return Activity(jobs=family("job"), tasks=family("task"))
 
 
+def _document_title(job: Job) -> str:
+    """What the job is doing, in one line: an index names the collection it writes, an import and
+    an embed name what they do to the document instead."""
+    if job.collection is not None:
+        return f"{job.collection} / {job.doc}"
+    return f"{job.action} {job.doc}"
+
+
 def _document_row(job: Job) -> JobRow:
     return JobRow(
         id=job.id,
         kind="document",
-        title=f"{job.library} / {job.doc}",
+        title=_document_title(job),
         status=job.status,
         created_at=job.created_at,
         updated_at=job.updated_at,
@@ -375,16 +414,17 @@ def _title(kind: JobKind, status) -> str:
     """Human text for one row: what this job is doing, read out of its id and its workflow name.
 
     `document` never arrives here: it has a row builder of its own (see `list_kind`)."""
-    if kind == "library":
-        verb = "index" if BULK_KINDS.get(status.name) == "index_library" else "delete"
-        return f"{verb} library {_library_of(status.workflow_id)}"
+    if kind == "collection":
+        bulk = _bulk_kind(status.name)  # the listing selects exactly these three names
+        # the second segment is a collection for the two bulk jobs, a document for a delete
+        return f"{BULK_TITLES[bulk]} {_named(status.workflow_id)}" if bulk else "collection job"
     if kind == "download":
         download_kind, model = _download_names(status.workflow_id)
         return f"download {download_kind} {model}"
     if kind == "maintenance":
         if status.name == workflows.daily_maintenance.__qualname__:
             return "daily housekeeping"
-        return f"maintain {_library_of(status.workflow_id)}"
+        return f"maintain {_named(status.workflow_id)}"
     return "archive finished jobs"  # the hourly retention round
 
 
@@ -395,7 +435,7 @@ async def _detail(kind: JobKind, status) -> dict[str, int | str | bool | None]:
     Async because that read is one, even with no wait: the event lives in the system database."""
     if kind == "download":
         return {"warm": models.is_warm(status.workflow_id)}
-    if kind == "library":
+    if kind == "collection":
         progress = await DBOS.get_event_async(
             status.workflow_id, workflows.PROGRESS_EVENT, timeout_seconds=0
         )
@@ -405,12 +445,15 @@ async def _detail(kind: JobKind, status) -> dict[str, int | str | bool | None]:
 
 
 def _job(status, children: list, done_by_child: dict[str, int]) -> Job:
-    library, doc = _names(status.workflow_id)
+    # a listing selects the three pipeline workflows by name, so every id parses; an id of an
+    # older shape is listed as an import of an unknown document rather than failing the page
+    action, collection, doc = job_names(status.workflow_id) or ("import", None, "?")
     totals = [len(found[1]) if (found := workflows.stage_input(c)) else 0 for c in children]
     done = [done_by_child.get(c.workflow_id, 0) for c in children]
     return Job(
         id=status.workflow_id,
-        library=library,
+        action=action,
+        collection=collection,
         doc=doc,
         status=status.status,
         created_at=(status.created_at or 0) / 1000,
@@ -451,14 +494,15 @@ async def _sources(conn: aiosqlite.Connection, source: str) -> list[str]:
 
 
 async def list_jobs(
-    library: str | None = None, page_size: int = DEFAULT_PAGE_SIZE, cursor: str | None = None
+    collection: str | None = None, page_size: int = DEFAULT_PAGE_SIZE, cursor: str | None = None
 ) -> Page[Job]:
-    """One page of jobs, newest first: the live DBOS history, then one day partition at a time
-    until the page is full.
+    """One page of pipeline jobs, newest first: the live DBOS history, then one day partition at a
+    time until the page is full.
 
-    The library filter is the workflow id's prefix in the live history and an indexed column in a
-    partition, so the database cuts the window after it has filtered: a busy library can no longer
-    push a quiet one out of the page (A11). Inputs stay on disk; the output is loaded only because
+    The collection filter is the workflow id's prefix in the live history and an indexed column in
+    a partition, so the database cuts the window after it has filtered: a busy collection can no
+    longer push a quiet one out of the page (A11). It keeps collection index jobs only - an import
+    and an embed belong to no collection. Inputs stay on disk; the output is loaded only because
     DBOS carries a workflow's error alongside it.
 
     A day partition that appears while the page is walked (the archiver runs on its own clock)
@@ -475,9 +519,9 @@ async def list_jobs(
             at = offset if index == 0 else 0
             # one row more than the page: its presence is what tells us this source has more
             found = (
-                await _live_jobs(library, want + 1, at)
+                await _live_jobs(collection, want + 1, at)
                 if name == LIVE
-                else await _archived_jobs(conn, name, library, want + 1, at)
+                else await _archived_jobs(conn, name, collection, want + 1, at)
             )
             items.extend(found[:want])
             if len(found) > want:  # the next page continues inside this source
@@ -488,12 +532,14 @@ async def list_jobs(
     return Page(items=items, next_cursor=None)
 
 
-async def _live_jobs(library: str | None, limit: int, offset: int) -> list[Job]:
+async def _live_jobs(collection: str | None, limit: int, offset: int) -> list[Job]:
     """One window of the DBOS history, newest first, with the batch counts of the whole window
     read in one grouped query."""
     statuses = await DBOS.list_workflows_async(
-        name=workflows.index_document.__qualname__,
-        workflow_id_prefix=f"idx:{library}:" if library else "idx:",
+        name=PIPELINE_WORKFLOWS,
+        workflow_id_prefix=(
+            f"{workflows.COLLECTION_DOCUMENT_PREFIX}:{collection}:" if collection else None
+        ),
         sort_desc=True,
         limit=limit,
         offset=offset,
@@ -516,19 +562,20 @@ async def _live_jobs(library: str | None, limit: int, offset: int) -> list[Job]:
 
 
 async def _archived_jobs(
-    conn: aiosqlite.Connection, table: str, library: str | None, limit: int, offset: int
+    conn: aiosqlite.Connection, table: str, collection: str | None, limit: int, offset: int
 ) -> list[Job]:
-    rows = await archive.job_page(conn, table, library, limit, offset)
+    rows = await archive.job_page(conn, table, collection, limit, offset)
     return [_archived_job(row) for row in rows]
 
 
 def _archived_job(row: tuple) -> Job:
     """One row of a day partition, in `archive.JOB_COLUMNS` order. Nothing is running in an
     archived job: it was copied because it had finished."""
-    job_id, library, doc, status, created_at, completed_at, error, done, total = row
+    job_id, action, collection, doc, status, created_at, completed_at, error, done, total = row
     return Job(
         id=job_id,
-        library=library,
+        action=action,
+        collection=collection,
         doc=doc,
         status=status,
         created_at=created_at / 1000,
@@ -578,6 +625,7 @@ def _archived_task(row: tuple) -> Task:
     _job_id, child_id, stage, seq, page_start, page_end, status, result, error = row
     return Task(
         id=f"{child_id}:{seq}",
+        child_id=child_id,
         stage=stage,
         seq=seq,
         page_start=page_start,
@@ -588,9 +636,10 @@ def _archived_task(row: tuple) -> Task:
     )
 
 
-def _task(id: str, stage: Stage, batch: Batch, status: str, output, error) -> Task:
+def _task(child_id: str, stage: Stage, batch: Batch, status: str, output, error) -> Task:
     return Task(
-        id=id,
+        id=f"{child_id}:{batch.seq}",
+        child_id=child_id,
         stage=stage,
         seq=batch.seq,
         page_start=batch.start,
@@ -622,7 +671,7 @@ async def _stage_tasks(child) -> list[Task]:
         else:
             output = error = None
             status = "PENDING" if child.status == "PENDING" and i == len(steps) else "ENQUEUED"
-        out.append(_task(f"{child.workflow_id}:{batch.seq}", stage, batch, status, output, error))
+        out.append(_task(child.workflow_id, stage, batch, status, output, error))
     return out
 
 
@@ -635,34 +684,21 @@ def _step_outcome(step) -> tuple[int | None, str | None]:
 
 
 async def bulk_job(job_id: str) -> BulkJob:
-    """The state of one whole-library job: its DBOS status plus the progress event a bulk index
-    publishes after every page. `progress` stays None for a delete, which has no pages, and for
-    an index that has not finished its first page yet."""
+    """The state of one whole-collection or whole-document job: its DBOS status plus the progress
+    event a bulk index publishes after every page. `progress` stays None for a delete, which has
+    no pages, and for an index that has not finished its first page yet."""
     status = await DBOS.get_workflow_status_async(job_id)
     if status is None:
         raise JobNotFound(f"job not found: {job_id}")
-    kind = BULK_KINDS.get(status.name)
+    kind = _bulk_kind(status.name)
     if kind is None:  # a job of another kind: not a bulk job
         raise JobNotFound(f"job not found: {job_id}")
     progress = await DBOS.get_event_async(job_id, workflows.PROGRESS_EVENT, timeout_seconds=0)
     return BulkJob(
         id=job_id,
         kind=kind,
-        library=_library_of(job_id),
+        collection=_collection_of(job_id),
         status=status.status,
         progress=progress if isinstance(progress, workflows.BulkProgress) else None,
         error=str(status.error) if status.error else None,
     )
-
-
-async def cancel_job(job_id: str) -> None:
-    """No-op on a job that already finished: its document status is final (A12)."""
-    found = await DBOS.get_workflow_status_async(job_id)
-    if found is None:
-        raise JobNotFound(f"job not found: {job_id}")
-    if found.status not in ACTIVE_STATUS:
-        return
-    await DBOS.cancel_workflow_async(job_id, cancel_children=True)
-    library, doc = _names(job_id)
-    if library != "?":
-        await Library(library).set_status(doc, "cancelled")

@@ -1,11 +1,13 @@
 """Job history retention: day partitions for finished jobs, and a purge of the DBOS history.
 
-DBOS records one workflow per indexed document plus one per stage slice below it, one step per
-micro-batch, and removes none of them: the history the Jobs page reads grows with every document,
-forever. This module bounds it, once an hour (`workflows.archive_jobs`):
+DBOS records one workflow per pipeline run over a document — an import, an embedding, an index
+into one collection — plus one per stage slice below it, one step per micro-batch, and removes
+none of them: the history the Jobs page reads grows with every document, forever. This module
+bounds it, once an hour (`workflows.archive_jobs`):
 
-- copy every finished `index_document` workflow, with the micro-batch results below it, into the
-  table of the UTC day it completed on (`jobs_YYYYMMDD` and `tasks_YYYYMMDD`);
+- copy every finished pipeline workflow (`dbos_names.PIPELINE_WORKFLOWS`), with the micro-batch
+  results below it, into the table of the UTC day it completed on (`jobs_YYYYMMDD` and
+  `tasks_YYYYMMDD`);
 - let DBOS garbage-collect its own tables up to the point that copy reached;
 - drop the partitions of days that fell out of the retention window.
 
@@ -41,7 +43,7 @@ from dbos._dbos import _get_dbos_instance
 from dbos._workflow_commands import garbage_collect
 
 from haskie import db, logs
-from haskie.dbos_names import DOCUMENT_WORKFLOW, STAGE_WORKFLOW
+from haskie.dbos_names import PIPELINE_WORKFLOWS, STAGE_WORKFLOW
 from haskie.settings import RetentionSettings
 
 _log = logs.get_logger(__name__)
@@ -52,15 +54,13 @@ DAY = "%Y%m%d"
 WATERMARK = "archive_watermark_ms"
 HOUR_MS = 3_600_000
 
-# The workflows a job is made of, named as DBOS records them (a workflow's qualname). Every stage
-# slice is a `stage_slice`, so one name covers all of them. Spelt out
-# rather than imported, because `workflows` reads this module; `test_archive` pins both.
-
 # The partition columns, defined once: the inserts and the selects below share them, and `jobs`
-# reads a row positionally in this order.
+# reads a row positionally in this order. `collection` is null for an import and an embed: both
+# are collection-independent (see `jobs.Job`).
 JOB_COLUMNS = (
     "id",
-    "library",
+    "action",  # import | embed | index
+    "collection",
     "doc",
     "status",
     "created_at",  # unix ms, as DBOS records it
@@ -136,12 +136,14 @@ async def ensure_partition(conn: aiosqlite.Connection, day: str) -> None:
         raise ValueError(f"not a day: {day!r}")
     await conn.execute(f"""
     create table if not exists jobs_{day} (
-        id text primary key, library text not null, doc text not null, status text not null,
+        id text primary key, action text not null, collection text, doc text not null,
+        status text not null,
         created_at integer not null, completed_at integer not null, error text,
         tasks_done integer not null, tasks_total integer not null
     )""")
     await conn.execute(
-        f"create index if not exists jobs_{day}_lib on jobs_{day} (library, created_at desc)"
+        f"create index if not exists jobs_{day}_collection on jobs_{day} "
+        "(collection, created_at desc)"
     )
     await conn.execute(f"""
     create table if not exists tasks_{day} (
@@ -196,14 +198,15 @@ def _column_list(columns: tuple[str, ...]) -> str:
 
 
 async def job_page(
-    conn: aiosqlite.Connection, table: str, library: str | None, limit: int, offset: int
+    conn: aiosqlite.Connection, table: str, collection: str | None, limit: int, offset: int
 ) -> list[tuple]:
     """One page of archived jobs of one day, newest first, in `JOB_COLUMNS` order.
 
     `table` must come from `list_partitions`. The id breaks ties on the timestamp, so an offset
-    into a day is stable while the page is walked."""
-    where = "where library = ? " if library else ""
-    params: list[object] = ([library] if library else []) + [limit, offset]
+    into a day is stable while the page is walked. A collection keeps that collection's index
+    jobs only: an import and an embed have no collection to match."""
+    where = "where collection = ? " if collection else ""
+    params: list[object] = ([collection] if collection else []) + [limit, offset]
     return _tuples(
         await conn.execute_fetchall(
             f"select {_column_list(JOB_COLUMNS)} from {table} {where}"
@@ -296,9 +299,10 @@ async def copy_batch(cutoff_ms: int) -> int:
         rows: list[tuple[str, int]] = _tuples(
             await conn.execute_fetchall(
                 "select workflow_uuid, completed_at from workflow_status "
-                "where name = ? and completed_at > ? and completed_at <= ? "
+                f"where name in ({db.placeholders(len(PIPELINE_WORKFLOWS))}) "
+                "and completed_at > ? and completed_at <= ? "
                 "order by completed_at limit ?",
-                (DOCUMENT_WORKFLOW, mark, cutoff_ms, ARCHIVE_PAGE),
+                (*PIPELINE_WORKFLOWS, mark, cutoff_ms, ARCHIVE_PAGE),
             )
         )
         completed: dict[str, int] = dict(rows)
@@ -334,7 +338,8 @@ async def _copy_jobs(conn: aiosqlite.Connection, completed: dict[str, int]) -> N
             f"values ({', '.join('?' * len(JOB_COLUMNS))})",
             (
                 job.id,
-                job.library,
+                job.action,
+                job.collection,
                 job.doc,
                 job.status,
                 status.created_at or 0,
@@ -350,7 +355,7 @@ async def _copy_jobs(conn: aiosqlite.Connection, completed: dict[str, int]) -> N
             [
                 (
                     job.id,
-                    task.id.rsplit(":", 1)[0],  # the task id is `{child workflow id}:{seq}`
+                    task.child_id,
                     task.stage,
                     task.seq,
                     task.page_start,
