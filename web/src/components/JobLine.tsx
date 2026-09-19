@@ -53,7 +53,9 @@ function Progress({ job: j }: { job: JobRow }) {
   const count = (key: string) => (typeof j.detail[key] === 'number' ? j.detail[key] : 0)
   if (j.kind === 'document') {
     const [done, running, total] = [count('tasks_done'), count('tasks_running'), count('tasks_total')]
-    if (total === 0) return <span className="muted">planning</span>
+    // no batches at all: still planning while it runs; when it finished that way, the embed
+    // found its cache and had nothing to compute
+    if (total === 0) return <span className="muted">{ACTIVE.has(j.status) ? 'planning' : j.status === 'SUCCESS' ? 'already computed' : ''}</span>
     return (
       <>
         <Bar done={done} running={running} total={total} />
