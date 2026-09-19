@@ -114,10 +114,6 @@ async def _wait_event(event: threading.Event, timeout: float = WAIT) -> bool:
     return await anyio.to_thread.run_sync(functools.partial(event.wait, timeout))
 
 
-async def _wait(job_id: str):
-    return await wait_for(job_id)
-
-
 async def _add(tmp_path: Path, name: str, content: bytes | str = MD) -> Document:
     """The document row and its file, with no pipeline started: what a test that drives
     `start_import` itself, or that needs a document stuck before `imported`, starts from."""
@@ -220,7 +216,7 @@ async def _await_terminal(workflow_ids: list[str]) -> None:
     """Drain before teardown: a step outliving DBOS.destroy() blocks interpreter exit."""
     for workflow_id in workflow_ids:
         try:
-            await _wait(workflow_id)
+            await wait_for(workflow_id)
         except Exception:  # the outcome is asserted elsewhere; this call only drains
             pass
 
@@ -421,12 +417,12 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
     pdf = await _add(tmp_path, "book.pdf", text_pdf([f"Chapter {i} word{i}" for i in range(1, 26)]))
 
     first = await dbos.start_import(pdf.name)
-    assert await _wait(first) == "imported"
+    assert await wait_for(first) == "imported"
     with pytest.raises(Conflict, match="document is imported; only a queued, failed or cancelled"):
         await dbos.start_import(pdf.name)
     indexing = await dbos.attach("q", pdf.name)
     assert await dbos.start_index_collection_document("q", pdf.name) == indexing, "deduplicated"
-    assert await _wait(indexing) == "indexed"
+    assert await wait_for(indexing) == "indexed"
 
     converting = await jobs.list_tasks(first)
     assert [(t.stage, t.seq, t.page_start, t.page_end, t.status) for t in converting] == [
@@ -480,7 +476,7 @@ async def test_documents_of_one_collection_index_without_conflict(dbos, tmp_path
 
     ids = [await dbos.attach("serial", name) for name in names]
 
-    assert [await _wait(i) for i in ids] == ["indexed"] * len(ids)
+    assert [await wait_for(i) for i in ids] == ["indexed"] * len(ids)
     counts = await Collection("serial").counts()
     assert (counts.total, counts.indexed) == (4, 4)
     assert {h.doc for h in await Collection("serial").search("D3P5", limit=1)} == {"d3.pdf"}
@@ -494,17 +490,17 @@ async def test_workflow_ids_name_their_kind_and_their_names(dbos, tmp_path: Path
 
     import_id = await dbos.start_import(doc.name)
     assert import_id.startswith(f"{workflows.IMPORT_PREFIX}:a.md:"), import_id
-    assert await _wait(import_id) == "imported"
+    assert await wait_for(import_id) == "imported"
     index_id = await dbos.attach("c", doc.name)
     assert index_id.startswith(f"{workflows.COLLECTION_DOCUMENT_PREFIX}:c:a.md:"), index_id
-    assert await _wait(index_id) == "indexed"
+    assert await wait_for(index_id) == "indexed"
 
     assert sorted(await _workflow_ids(dbos_names.EMBED_WORKFLOW)) == sorted(
         {_embed_id(import_id, doc.name), _embed_id(index_id, doc.name)}
     ), "each parent derives its embedding child's id from its own run"
     delete_id = await dbos.start_delete_document(doc.name)
     assert delete_id.startswith(f"{workflows.DELETE_DOCUMENT_PREFIX}:a.md:"), delete_id
-    await _wait(delete_id)
+    await wait_for(delete_id)
 
 
 # --- stage caps and parallelism ----------------------------------------------------
@@ -695,7 +691,7 @@ async def test_documents_run_in_parallel_up_to_workers(
     monkeypatch.setattr(pipeline, "convert_batch", overlap)
 
     ids = [await dbos.start_import(d.name) for d in docs]
-    assert [await _wait(job_id) for job_id in ids] == ["imported"] * len(ids)
+    assert [await wait_for(job_id) for job_id in ids] == ["imported"] * len(ids)
 
     assert overlap.reached.is_set(), "documents never overlapped"
     assert 2 <= overlap.peak <= workers, f"peak {overlap.peak} outside 2..{workers}"
@@ -719,7 +715,7 @@ async def test_batches_of_one_document_run_in_parallel_up_to_workers(
     monkeypatch.setattr(pipeline, "convert_batch", overlap)
 
     job_id = await dbos.start_import(doc.name)
-    assert await _wait(job_id) == "imported"
+    assert await wait_for(job_id) == "imported"
 
     assert overlap.reached.is_set(), "the batches of one document never overlapped"
     assert overlap.peak == workers, f"peak {overlap.peak}, expected {workers}"
@@ -751,7 +747,7 @@ async def test_stage_queues_cap_each_stage_separately(
     monkeypatch.setattr(pipeline, "embed_batch", embedding)
 
     ids = [await dbos.start_import(d.name) for d in docs]
-    assert [await _wait(job_id) for job_id in ids] == ["imported"] * len(ids)
+    assert [await wait_for(job_id) for job_id in ids] == ["imported"] * len(ids)
 
     assert converting.reached.is_set(), "the convert queue never ran two batches at once"
     assert converting.peak == caps["convert"], f"convert peak {converting.peak}, cap {caps}"
@@ -788,7 +784,7 @@ async def test_the_cpu_budget_bounds_every_stage_together(
     monkeypatch.setattr(chunk, "split", running.wrap(chunk.split))
 
     ids = [await dbos.start_import(d.name) for d in docs]
-    assert [await _wait(job_id) for job_id in ids] == ["imported"] * len(ids)
+    assert [await wait_for(job_id) for job_id in ids] == ["imported"] * len(ids)
 
     assert running.peak <= cpu_budget, f"{running.peak} tasks at once, budget {cpu_budget}: {name}"
     assert running.calls == 12, "three documents, two pages each, converted and embedded"
@@ -824,7 +820,7 @@ async def test_embedding_overlaps_conversion_of_other_documents(
 
     converting.release.set()
     embedding.release.set()
-    assert [await _wait(first_job), await _wait(second_job)] == ["imported", "imported"]
+    assert [await wait_for(first_job), await wait_for(second_job)] == ["imported", "imported"]
 
 
 async def test_a_budget_of_one_stops_the_stages_from_overlapping(
@@ -852,7 +848,7 @@ async def test_a_budget_of_one_stops_the_stages_from_overlapping(
     embedding.release.set()  # the slot comes free, and the convert of the second document takes it
     assert await _wait_event(converting.entered), "the convert step never got the freed slot"
     converting.release.set()
-    assert [await _wait(first_job), await _wait(second_job)] == ["imported", "imported"]
+    assert [await wait_for(first_job), await wait_for(second_job)] == ["imported", "imported"]
 
 
 async def test_document_parallelism_caps_a_single_document(
@@ -866,7 +862,7 @@ async def test_document_parallelism_caps_a_single_document(
     monkeypatch.setattr(pipeline, "convert_batch", overlap)
 
     job_id = await dbos.start_import(doc.name)
-    assert await _wait(job_id) == "imported"
+    assert await wait_for(job_id) == "imported"
 
     assert overlap.peak == 1, f"batches overlapped, peak {overlap.peak}"
     assert overlap.order == [0, 1, 2, 3], "one batch after another, in plan order"
@@ -886,9 +882,9 @@ async def test_one_document_creates_a_bounded_number_of_workflows(dbos, tmp_path
     doc = await _add(tmp_path, "p.pdf", text_pdf(["alpha", "beta", "gamma"]))
 
     import_id = await dbos.start_import(doc.name)
-    assert await _wait(import_id) == "imported"
+    assert await wait_for(import_id) == "imported"
     index_id = await dbos.attach("few", doc.name)
-    assert await _wait(index_id) == "indexed"
+    assert await wait_for(index_id) == "indexed"
 
     async def named(prefix: str) -> Counter[str]:
         listed = await DBOS.list_workflows_async(
@@ -931,7 +927,7 @@ async def test_index_groups_parts_into_one_write(dbos, tmp_path: Path) -> None:
     )
 
     job_id = await dbos.attach("grouped", doc.name)
-    assert await _wait(job_id) == "indexed"
+    assert await wait_for(job_id) == "indexed"
 
     tasks = await jobs.list_tasks(job_id)
     assert [(t.stage, t.seq, t.page_start, t.page_end) for t in tasks] == [("index", 0, 0, 3)]
@@ -1025,7 +1021,7 @@ async def test_reindexing_with_unchanged_settings_hits_the_cache(
     computed = sum(spy.calls.values())
 
     job_id = await dbos.start_index_collection_document("again", doc.name)
-    assert await _wait(job_id) == "indexed"
+    assert await wait_for(job_id) == "indexed"
 
     assert sum(spy.calls.values()) == computed == 1, "the embed work did not run again"
     embedding = _embed_id(job_id, doc.name)
@@ -1064,7 +1060,7 @@ async def test_concurrent_attaches_converge_on_one_embedding_run(
     await _until(asked, "the second attach never asked for the embedding")
     gate.release.set()
 
-    assert [await _wait(first), await _wait(second)] == ["indexed", "indexed"]
+    assert [await wait_for(first), await wait_for(second)] == ["indexed", "indexed"]
     shared = _embed_id(first, doc.name)
     ids = sorted(await _workflow_ids(dbos_names.EMBED_WORKFLOW))
     assert ids == sorted({_embed_id(await _import_id(doc.name), doc.name), shared}), (
@@ -1102,7 +1098,7 @@ async def test_reimport_reconverts_and_drops_the_stale_cache(dbos, tmp_path: Pat
     assert len(list(doc.embeddings_dir.glob("*.parquet"))) == 2
     await document.set_status(doc.name, "error", "boom")
 
-    assert await _wait(await dbos.start_import(doc.name)) == "imported"
+    assert await wait_for(await dbos.start_import(doc.name)) == "imported"
 
     after = await embed_cache.entries(doc.name)
     default = (await load_user_settings()).conversion.chunk_size
@@ -1228,7 +1224,7 @@ async def test_maintenance_runs_on_the_collection_partition(
     assert entered == [], "so it has not touched the table"
 
     gate.release.set()
-    assert await _wait(job_id) == "indexed"
+    assert await wait_for(job_id) == "indexed"
 
     assert await _await(finished, "maintenance never finished")
     assert entered == ["onewriter"], "it ran once the index stage let go of the partition"
@@ -1241,7 +1237,7 @@ async def test_maintenance_skips_a_collection_without_a_table(dbos) -> None:
     await Collection.create("empty")
     assert await Collection("empty").note_indexed() == 1
 
-    report = await _wait(
+    report = await wait_for(
         (await workflows.MAINTAIN.debounce_async("empty", 0.0, "empty")).workflow_id
     )
 
@@ -1259,7 +1255,7 @@ async def test_maintenance_skips_a_collection_deleted_while_it_waited(dbos, tmp_
     await attach_document(dbos, "vanish", doc.name)
     await collection.delete()
 
-    report = await _wait(
+    report = await wait_for(
         (await workflows.MAINTAIN.debounce_async("vanish", 0.0, "vanish")).workflow_id
     )
 
@@ -1302,7 +1298,7 @@ async def test_transient_step_failure_is_retried_and_recovers(
 
     monkeypatch.setattr(pipeline, "convert_batch", flaky)
 
-    assert await _wait(await dbos.start_import(doc.name)) == "imported"
+    assert await wait_for(await dbos.start_import(doc.name)) == "imported"
 
     assert calls == [0, 0, 0], "two failures, then the third attempt succeeds"
     assert (await document.get(doc.name)).status == "imported"
@@ -1328,7 +1324,7 @@ async def test_transient_step_failure_gives_up_after_max_attempts(
     job_id = await dbos.start_import(doc.name)
 
     with pytest.raises(workflows.PipelineError, match="RuntimeError: boom"):
-        await _wait(job_id)
+        await wait_for(job_id)
 
     assert calls.count(2) == 3, "step retried max_attempts times"
     row = await document.get(doc.name)
@@ -1355,7 +1351,7 @@ async def test_permanent_step_failure_is_not_retried(dbos, tmp_path: Path, monke
     job_id = await dbos.start_import(doc.name)
 
     with pytest.raises(workflows.PipelineError, match="NeedsOcr: all 1 pages need OCR"):
-        await _wait(job_id)
+        await wait_for(job_id)
 
     assert calls == [0], "a permanent failure is raised by the workflow, not retried by the step"
     row = await document.get(doc.name)
@@ -1382,7 +1378,7 @@ async def test_indexing_a_document_that_is_not_imported_fails_the_membership(
     job_id = await dbos.start_index_collection_document("early", doc.name)
 
     with pytest.raises(workflows.PipelineError, match="document is not imported: queued"):
-        await _wait(job_id)
+        await wait_for(job_id)
     member = await collection.member(doc.name)
     assert member.status == "error" and "not imported" in (member.error or "")
     assert (await document.get(doc.name)).status == "queued", "the document's status is untouched"
@@ -1410,7 +1406,7 @@ async def test_import_resumes_after_a_crash_without_duplicating_chunks(
     gate.release.set()
     await dbos.start()  # restart: same application_version, so recovery picks the workflow up
 
-    assert await _wait(job_id) == "imported"
+    assert await wait_for(job_id) == "imported"
 
     assert (await document.get(doc.name)).status == "imported"
     assert gate.calls.count(0) == 2, "the interrupted batch ran again after recovery"
@@ -1433,12 +1429,13 @@ async def test_adopt_orphans_resumes_only_stale_in_flight_workflows(
         return await real(doc_, batch)
 
     monkeypatch.setattr(pipeline, "convert_batch", slow_pdf)
+    # the finished one first: a cold model load on CI can outlast the gate's patience
+    quick = await _add(tmp_path, "done.md", "# d\n")
+    finished = await dbos.start_import(quick.name)  # done before the stale mark; left alone
+    await wait_for(finished)
     slow = await _add(tmp_path, "slow.pdf", text_pdf(["x"]))
     running = await dbos.start_import(slow.name)
     assert await _wait_event(gate.entered)
-    quick = await _add(tmp_path, "done.md", "# d\n")
-    finished = await dbos.start_import(quick.name)  # finishes fast; must be left alone
-    await _wait(finished)
 
     async with db.connect() as conn:  # pretend everything so far ran under an older build
         await conn.execute("update workflow_status set application_version = 'old-build'")
@@ -1457,7 +1454,7 @@ async def test_adopt_orphans_resumes_only_stale_in_flight_workflows(
     assert await dbos.adopt_orphans() == len(in_flight), "idempotent while they remain stale"
 
     gate.release.set()
-    await _wait(running)  # drain before teardown
+    await wait_for(running)  # drain before teardown
 
 
 async def test_adopt_orphans_runs_in_the_background_on_start(dbos, monkeypatch) -> None:
@@ -1502,7 +1499,7 @@ async def test_cancel_job_marks_the_document_cancelled(dbos, tmp_path: Path, mon
     assert (await jobs.list_jobs()).items[0].status == "CANCELLED"
     gate.release.set()
     with pytest.raises(DBOSAwaitedWorkflowCancelledError):
-        await _wait(job_id)  # let its worker thread observe the cancellation before teardown
+        await wait_for(job_id)  # let its worker thread observe the cancellation before teardown
 
 
 async def test_cancel_job_marks_the_member_cancelled(dbos, tmp_path: Path, monkeypatch) -> None:
@@ -1532,7 +1529,7 @@ async def test_cancel_job_rejects_unknown_ids_and_leaves_finished_jobs_alone(
     await Collection.create("done")
     doc = await import_document(dbos, "g.md", MD, tmp_path)
     job_id = await dbos.attach("done", doc.name)
-    assert await _wait(job_id) == "indexed"
+    assert await wait_for(job_id) == "indexed"
 
     with pytest.raises(JobNotFound, match="job not found: ghost"):
         await workflows.cancel_job("ghost")
@@ -1629,7 +1626,7 @@ async def test_attaching_while_a_delete_runs_is_refused(dbos, tmp_path: Path, mo
         await dbos.start_import(doc.name)
 
     release.set()
-    await _wait(job_id)
+    await wait_for(job_id)
     assert await Collection("third").member_names() == [], "no membership the snapshot missed"
     assert await Collection("third").search("lancedb") == [], "and no orphaned index row"
     assert not Collection("third").index_dir.exists(), "the refused attach wrote no table"
@@ -1732,10 +1729,10 @@ async def test_index_collection_workflow_enqueues_every_member_in_pages(
 
     job_id = await dbos.start_index_collection("b")
 
-    assert await _wait(job_id) == workflows.BulkResult(done=5, skipped=0)
+    assert await wait_for(job_id) == workflows.BulkResult(done=5, skipped=0)
     queued = await _member_workflows("b")
     assert len(queued) == 5, "one index per member, and no second one for any of them"
-    assert [await _wait(i) for i in queued] == ["indexed"] * 5
+    assert [await wait_for(i) for i in queued] == ["indexed"] * 5
     assert (
         sorted(
             m.document.name
@@ -1777,7 +1774,7 @@ async def test_index_collection_workflow_is_idempotent_on_replay(
     release.set()
     await dbos.start()  # restart: same application_version, so recovery picks the workflow up
 
-    assert await _wait(job_id) == workflows.BulkResult(done=5, skipped=0)
+    assert await wait_for(job_id) == workflows.BulkResult(done=5, skipped=0)
 
     queued = await _member_workflows("b")
     assert len(queued) == 5, "the replay re-attached instead of queueing the first page again"
@@ -1802,7 +1799,7 @@ async def test_delete_collection_workflow_cancels_and_removes(
 
     bulk_id = await dbos.start_delete_collection("wipe")
 
-    assert await _wait(bulk_id) is None
+    assert await wait_for(bulk_id) is None
     assert await _statuses([in_flight]) == ["CANCELLED"]
     assert await Collection.names() == [] and not collection.root.exists()
     assert sorted(await document.names()) == ["done.md", "slow.pdf"], "documents are untouched"
@@ -1826,11 +1823,11 @@ async def test_bulk_job_reads_the_three_bulk_kinds(dbos, tmp_path: Path) -> None
     await attach_document(dbos, "kinds", doc.name)
 
     index_id = await dbos.start_index_collection("kinds")
-    await _wait(index_id)
+    await wait_for(index_id)
     delete_doc_id = await dbos.start_delete_document(doc.name)
-    await _wait(delete_doc_id)
+    await wait_for(delete_doc_id)
     delete_id = await dbos.start_delete_collection("kinds")
-    await _wait(delete_id)
+    await wait_for(delete_id)
 
     assert [
         (j.kind, j.collection)
@@ -1889,7 +1886,7 @@ async def test_list_jobs_filters_by_collection_before_it_cuts_the_window(
     await attach_document(dbos, "quiet", doc.name)  # oldest collection index of all
     await attach_document(dbos, "noisy", doc.name)
     for _ in range(2):
-        await _wait(await dbos.start_index_collection_document("noisy", doc.name))
+        await wait_for(await dbos.start_index_collection_document("noisy", doc.name))
 
     quiet = await jobs.list_jobs("quiet", page_size=2)
     (job,) = quiet.items
@@ -1999,7 +1996,7 @@ async def test_active_collection_workflows_use_the_id_prefix(
     assert await dbos._active_collection_workflows("ab", "q.pdf") == [], "another document"
 
     gate.release.set()
-    await _wait(job_id)
+    await wait_for(job_id)
     await _drain()
 
 
@@ -2041,7 +2038,7 @@ async def test_list_jobs_stays_fast_over_a_long_history(dbos, tmp_path: Path) ->
         await Collection.create(name)
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     job_id = await dbos.attach("quiet", doc.name)
-    assert await _wait(job_id) == "indexed"
+    assert await wait_for(job_id) == "indexed"
     await _seed_jobs(job_id, "noisy", 5000)
 
     started = time.perf_counter()
@@ -2076,7 +2073,7 @@ async def test_list_tasks_reports_stage_slices_still_waiting(
     (job,) = [j for j in (await jobs.list_jobs()).items if j.action == "import"]
     assert (job.tasks_total, job.tasks_done, job.tasks_running) == (3, 1, 1)
     gate.release.set()
-    assert await _wait(job_id) == "imported"
+    assert await wait_for(job_id) == "imported"
     assert {t.status for t in await jobs.list_tasks(job_id)} == {"SUCCESS"}
     assert len(await jobs.list_tasks(_embed_id(job_id, doc.name))) == 3, "the embed job's own"
 
@@ -2105,7 +2102,7 @@ async def test_list_tasks_merges_the_slices_of_a_stage(dbos, tmp_path: Path, mon
     assert (job.tasks_total, job.tasks_done, job.tasks_running) == (3, 2, 1)
     assert {t.id for t in tasks} == {f"{job_id}:convert:{i}:{i}" for i in range(3)}
     gate.release.set()
-    assert await _wait(job_id) == "imported"
+    assert await wait_for(job_id) == "imported"
     assert {t.status for t in await jobs.list_tasks(job_id)} == {"SUCCESS"}
 
 
@@ -2815,7 +2812,7 @@ async def test_audit_records_carry_the_collection_and_the_document(dbos, tmp_pat
     early = await _add(tmp_path, "b.md")
     await _add_member(collection, early.name)
     with pytest.raises(workflows.PipelineError):
-        await _wait(await dbos.start_index_collection_document("aud", early.name))
+        await wait_for(await dbos.start_index_collection_document("aud", early.name))
 
     lines = audit_lines()
 
