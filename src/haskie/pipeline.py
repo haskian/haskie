@@ -1,17 +1,25 @@
 """Convert, embed and index steps as micro-batches of `batch_pages` pages, so memory stays bounded.
 
-Each batch is an independent, idempotent step:
-- convert batch -> `<doc>.parts/NNNNNN.md` (pages [start, end) of the PDF)
-- embed batch   -> `<doc>.parts/NNNNNN.rows.json`: chunks of one part with their vectors
-                   (CPU/GPU heavy; runs in parallel)
-  The parts directory sits beside the assembled markdown, under the document's shard
-  (see `layout.shard`).
-- index batch   -> rows of `index_group_parts` consecutive parts written to LanceDB in one
-                   commit (fast; one writer per library)
-Finalize steps assemble the full markdown file / build the full-text index if the library has
-none yet, and the index stage drops the parts directory it consumed. Everything that costs
-O(library) rather than O(document) is deferred to `maintenance.py`.
-workflows.py orchestrates these with DBOS; nothing here touches the metadata DB.
+Three stages, each a set of independent, idempotent steps, and each with its own owner:
+
+- convert (once per document, at import) -> `parts/NNNNNN.md`: pages [start, end) of the PDF,
+  or the whole file for anything else. `finalize_convert` assembles them into `original.<ext>.md`.
+  The parts stay for the life of the document: chunking runs per part with the part's line and
+  char offsets, and a PDF's page-batch boundaries decide where the parts fall, so a collection that
+  chunks the document with other settings later must re-chunk from the same boundaries or its
+  offsets would not match the assembled markdown.
+- embed (once per distinct `embed_cache.Params`) -> `embeddings/<id>.tmp/NNNNNN.rows.json`:
+  chunks of one part with their vectors (CPU/GPU heavy; runs in parallel). `finalize_embed`
+  merges every part into the one parquet cache file and publishes it (`embed_cache.write`),
+  which also drops the scratch files. Skipped entirely when `embed_cache.lookup` finds the file.
+- index (once per collection the document is attached to) -> rows of `index_group_parts`
+  consecutive parts read out of the cache file and written to that collection's LanceDB table in
+  one commit (fast; one writer per collection). `prepare_index` clears the document's older rows
+  once before the first of them; `finalize_index` builds the full-text index if the collection
+  has none yet.
+
+Everything that costs O(collection) rather than O(document) is deferred to `maintenance.py`.
+`workflows.py` orchestrates these with DBOS; nothing here touches document or membership rows.
 
 Every function is `async def`: the file reads and writes await, and the CPU work (pdf parsing,
 chunking, embedding) is handed to a worker thread through `cpu.on_cpu`, which is also where one
@@ -19,17 +27,17 @@ slot of the CPU budget is held. So a step holds a slot for its CPU work only, ne
 IO or the LanceDB commit around it.
 """
 
-from collections.abc import AsyncIterator
 from pathlib import Path
 
 import anyio
 import anyio.to_thread
 import msgspec
 
-from haskie import chunk, convert, cpu, home, models
+from haskie import chunk, convert, cpu, embed_cache, home, models
+from haskie.collection import Collection
+from haskie.document import Document
 from haskie.index import Row
-from haskie.library import Library
-from haskie.settings import ConversionSettings, EmbeddingModel
+from haskie.settings import ChunkSettings, EmbeddingModel
 
 JOINER = "\n\n"  # between parts in the assembled markdown
 
@@ -45,10 +53,15 @@ class Batch(msgspec.Struct):
 # --- convert --------------------------------------------------------------------
 
 
-async def plan_convert(lib: Library, doc: str, batch_pages: int) -> list[Batch]:
-    source = lib.source_path(doc)
-    await home.remove_tree(lib.parts_dir(doc))
-    await anyio.Path(lib.parts_dir(doc)).mkdir(parents=True, exist_ok=True)
+async def plan_convert(doc: Document, batch_pages: int) -> list[Batch]:
+    """One batch per `batch_pages` pages of a PDF, one for anything else. Starts the parts and
+    the assembled markdown over: they are outputs of this conversion. The cached embeddings are
+    outputs of it too, rows included, so `workflows.import_document` drops them through
+    `embed_cache.forget` before this runs."""
+    source = doc.source_path()
+    await home.remove_tree(doc.parts_dir)
+    await anyio.Path(doc.markdown).unlink(missing_ok=True)
+    await anyio.Path(doc.parts_dir).mkdir(parents=True, exist_ok=True)
     if source.suffix.lower() != ".pdf":
         return [Batch(seq=0, start=0, end=1)]  # anydoc/plain convert whole files in one go
     total = await cpu.on_cpu("convert", convert.pdf_page_count, source)
@@ -58,63 +71,59 @@ async def plan_convert(lib: Library, doc: str, batch_pages: int) -> list[Batch]:
     ]
 
 
-async def convert_batch(lib: Library, doc: str, batch: Batch, settings: ConversionSettings) -> int:
-    """Write one part file; returns how many of its pages need OCR."""
-    source = lib.source_path(doc)
+async def convert_batch(doc: Document, batch: Batch) -> int:
+    """Write one part file; returns how many of its pages need OCR. `parser` and
+    `skip_ocr_pages` are the document's own, fixed at import."""
+    source = doc.source_path()
     if source.suffix.lower() == ".pdf":
         markdown, ocr_pages, _ = await cpu.off_interpreter(
             "convert",
             convert.pdf_pages_markdown,
             source,
             list(range(batch.start, batch.end)),
-            settings.skip_ocr_pages,
+            doc.skip_ocr_pages,
         )
     else:
-        markdown = await cpu.on_cpu("convert", convert.to_markdown, source, settings.parser)
+        markdown = await cpu.on_cpu("convert", convert.to_markdown, source, doc.parser)
         ocr_pages = []
-    await home.atomic_write(lib.part_path(doc, batch.seq), markdown)
+    await home.atomic_write(doc.part_path(batch.seq), markdown)
     return len(ocr_pages)
 
 
-async def finalize_convert(
-    lib: Library, doc: str, batches: list[Batch], ocr_total: int, settings: ConversionSettings
-) -> Path:
+async def finalize_convert(doc: Document, batches: list[Batch], ocr_total: int) -> None:
     """Apply the OCR policy over the whole document, then stream parts into one markdown file."""
-    if lib.source_path(doc).suffix.lower() == ".pdf":
+    if doc.source_path().suffix.lower() == ".pdf":
         total = sum(b.end - b.start for b in batches)
-        convert.check_ocr_policy(ocr_total, total, settings.skip_ocr_pages)
-    target = lib.markdown_path(doc)
-    await anyio.Path(target.parent).mkdir(parents=True, exist_ok=True)  # shard dir, on first use
+        convert.check_ocr_policy(ocr_total, total, doc.skip_ocr_pages)
     parts = [
-        await anyio.Path(lib.part_path(doc, batch.seq)).read_text(encoding="utf-8")
+        await anyio.Path(doc.part_path(batch.seq)).read_text(encoding="utf-8")
         for batch in sorted(batches, key=lambda b: b.seq)
     ]
     # one replace, so a reader never sees a half-assembled document (B6); the parts are already
     # in memory one at a time during convert, so holding the joined text adds no new bound
-    await home.atomic_write(target, JOINER.join(parts))
-    return target
+    await home.atomic_write(doc.markdown, JOINER.join(parts))
 
 
 # --- embed ------------------------------------------------------------------------
 
 
-async def _parts(lib: Library, doc: str) -> list[Path]:
-    parts_dir, markdown = lib.parts_dir(doc), lib.markdown_path(doc)
+async def _parts(doc: Document) -> list[Path]:
+    parts_dir, markdown = doc.parts_dir, doc.markdown
 
     def listing() -> list[Path]:
         return sorted(p for p in parts_dir.glob("*.md") if p.stem.isdigit())
 
     parts = await anyio.to_thread.run_sync(listing)  # `glob` has no async form
     if not parts or not await anyio.Path(markdown).exists():
-        raise FileNotFoundError(f"markdown parts missing, convert first: {doc}")
+        raise FileNotFoundError(f"markdown parts missing, convert first: {doc.name}")
     return parts
 
 
-async def plan_embed(lib: Library, doc: str) -> list[Batch]:
+async def plan_embed(doc: Document) -> list[Batch]:
     """One batch per part, carrying the part's offsets inside the assembled file (one pass)."""
     batches: list[Batch] = []
     line_offset = char_offset = 0
-    for i, part in enumerate(await _parts(lib, doc)):
+    for i, part in enumerate(await _parts(doc)):
         batches.append(
             Batch(seq=i, start=i, end=i + 1, line_offset=line_offset, char_offset=char_offset)
         )
@@ -125,21 +134,22 @@ async def plan_embed(lib: Library, doc: str) -> list[Batch]:
 
 
 async def embed_batch(
-    lib: Library,
-    doc: str,
+    doc: Document,
     batch: Batch,
-    settings: ConversionSettings,
+    cache_id: str,
+    chunking: ChunkSettings,
     embedding: EmbeddingModel | None,
 ) -> int:
-    """Chunk one part, embed the chunks, write `NNNNNN.rows.json`; returns the chunk count."""
-    text = await anyio.Path(lib.part_path(doc, batch.seq)).read_text(encoding="utf-8")
+    """Chunk one part, embed the chunks, write the part's scratch `rows.json` under the cache
+    id being computed; returns the chunk count."""
+    text = await anyio.Path(doc.part_path(batch.seq)).read_text(encoding="utf-8")
     if embedding is not None:
         # before the CPU work rather than between chunking and embedding, so both share one slot
         await models.require_ready("embedding", embedding.name)  # fail fast, not a stalled worker
 
     def chunk_and_embed() -> list[Row]:
         # ponytail: heading ancestry is per part; headings opened in an earlier part are not parents
-        chunks = chunk.split(text, settings, batch.line_offset, batch.char_offset)
+        chunks = chunk.split(text, chunking, batch.line_offset, batch.char_offset)
         vectors: list[list[float] | None] = [None] * len(chunks)
         if embedding is not None and chunks:
             from haskie.embed import embed_texts
@@ -148,25 +158,38 @@ async def embed_batch(
         return [Row(chunk=c, vector=v) for c, v in zip(chunks, vectors, strict=True)]
 
     rows = await cpu.on_cpu("embed", chunk_and_embed)
-    await home.atomic_write(lib.rows_path(doc, batch.seq), msgspec.json.encode(rows))
+    target = embed_cache.rows_path(doc.name, cache_id, batch.seq)
+    await anyio.Path(target.parent).mkdir(parents=True, exist_ok=True)
+    await home.atomic_write(target, msgspec.json.encode(rows))
     return len(rows)
 
 
-# --- index ----------------------------------------------------------------------
-
-
-async def plan_index(lib: Library, doc: str, group_parts: int) -> list[Batch]:
-    """One batch per group of at most `group_parts` consecutive parts. A group is one LanceDB
-    commit, so the fragment count of a library follows documents rather than pages."""
-    count = len(await _parts(lib, doc))
-    paths = [lib.rows_path(doc, part) for part in range(count)]
+async def finalize_embed(
+    doc: Document, params: embed_cache.Params, embedding: EmbeddingModel | None
+) -> str:
+    """Publish one computed embedding: every part's scratch rows, in part order, into the cache
+    file and its row. Returns the cache id. The scratch files are consumed by the write."""
+    cache_id = embed_cache.key(params)
+    count = len(await _parts(doc))
+    paths = [embed_cache.rows_path(doc.name, cache_id, part) for part in range(count)]
 
     def absent() -> list[int]:  # one thread hop for the whole check, not one per part
         return [part for part, path in enumerate(paths) if not path.exists()]
 
     missing = await anyio.to_thread.run_sync(absent)
     if missing:
-        raise FileNotFoundError(f"rows missing for parts {missing}, embed first: {doc}")
+        raise FileNotFoundError(f"rows missing for parts {missing}, embed first: {doc.name}")
+    return await embed_cache.write(params, paths, embedding.dims if embedding else None)
+
+
+# --- index ----------------------------------------------------------------------
+
+
+async def plan_index(doc: Document, cache_id: str, group_parts: int) -> list[Batch]:
+    """One batch per group of at most `group_parts` consecutive parts of the cache file. A group
+    is one LanceDB commit, so the fragment count of a collection follows documents rather than
+    pages."""
+    count = await embed_cache.row_groups(doc.name, cache_id)
     size = max(1, group_parts)
     return [
         Batch(seq=seq, start=start, end=min(start + size, count))
@@ -174,48 +197,44 @@ async def plan_index(lib: Library, doc: str, group_parts: int) -> list[Batch]:
     ]
 
 
-async def _grouped_rows(
-    lib: Library, doc: str, batch: Batch
-) -> AsyncIterator[tuple[int, list[Row]]]:
-    """The rows of parts [start, end), one decoded part at a time: a whole group of a long
-    document never sits in memory as Python objects."""
-    for part in range(batch.start, batch.end):
-        raw = await anyio.Path(lib.rows_path(doc, part)).read_bytes()
-        yield part, msgspec.json.decode(raw, type=list[Row])
+async def prepare_index(
+    collection: Collection, doc: Document, embedding: EmbeddingModel | None
+) -> None:
+    """Make the collection's table ready to take one document's rows again: recreate a table an
+    older build or another embedding left behind, then drop the rows the document already has
+    there (a previous attach, possibly under other chunk settings).
+
+    Once per document, before its first `index_batch`, so a batch only ever writes its own part
+    range and the two concerns stay apart."""
+    index = collection.index_with(embedding)
+    await index.reset_for_write()
+    await index.delete_document(doc.name)
 
 
 async def index_batch(
-    lib: Library, doc: str, batch: Batch, embedding: EmbeddingModel | None
+    collection: Collection,
+    doc: Document,
+    cache_id: str,
+    batch: Batch,
+    embedding: EmbeddingModel | None,
 ) -> int:
-    """Replace the rows of parts [start, end) in the index, in one commit; returns the row count.
-    Idempotent: the range is deleted before it is added, so a repeat after a crash between the
-    LanceDB commit and the step checkpoint rewrites exactly the same rows."""
-    index = lib.index_with(embedding)
-    if batch.seq == 0:
-        # all LanceDB writes for a library happen here, serialized: recreate a table left by an
-        # older build, then clear the document's old rows (stale parts of a longer, earlier
-        # conversion) before its first new group
-        await index.reset_for_write()
-        await index.delete_document(doc)
-    else:
-        await index.delete_parts(doc, batch.start, batch.end)
+    """Replace the rows of parts [start, end) in the collection's index, in one commit; returns
+    the row count. Idempotent: the range is deleted before it is added, so a repeat after a
+    crash between the LanceDB commit and the step checkpoint rewrites exactly the same rows.
+
+    The document's older rows are gone before the first batch runs (see `prepare_index`)."""
+    index = collection.index_with(embedding)
+    await index.delete_parts(doc.name, batch.start, batch.end)
     return await index.add_parts(
-        doc,
-        lib.relative(lib.source_path(doc)),
-        lib.relative(lib.markdown_path(doc)),
-        _grouped_rows(lib, doc, batch),
+        doc.name,
+        doc.relative(doc.source_path()),
+        doc.relative(doc.markdown),
+        embed_cache.read(doc.name, cache_id, batch.start, batch.end),
     )
 
 
-async def finalize_index(lib: Library, doc: str, embedding: EmbeddingModel | None) -> None:
-    """Build the library's full-text index if it has none. Rows written after the build are found
-    by a scan until `maintenance` folds them in, so this is O(library) once, not per document."""
-    await lib.index_with(embedding).finish()
-
-
-async def cleanup_parts(lib: Library, doc: str) -> None:
-    """Drop the micro-batch files of a finished document. Both the markdown parts and the rows
-    files are derivable, and the rows files (chunks plus vectors) dwarf everything else a document
-    stores. The assembled markdown stays: search results point into it. A re-index starts at
-    `plan_convert`, which recreates the parts directory."""
-    await home.remove_tree(lib.parts_dir(doc))
+async def finalize_index(collection: Collection, embedding: EmbeddingModel | None) -> None:
+    """Build the collection's full-text index if it has none. Rows written after the build are
+    found by a scan until `maintenance` folds them in, so this is O(collection) once, not per
+    document."""
+    await collection.index_with(embedding).finish()

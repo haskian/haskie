@@ -29,7 +29,9 @@ FILE_MODE = 0o600
 # The daily files `path` writes, and the only ones `prune` may delete.
 FILE_NAME = re.compile(r"^audit-(\d{4}-\d{2}-\d{2})\.jsonl\Z")
 # Names `attach` fills on the record itself; anything else it receives goes into `detail`.
-RECORD_FIELDS = frozenset({"library", "doc", "session_id", "workflow_id"})
+# `collection` is the one a request or a workflow acted on; a document has no collection of its
+# own, so a document-scoped action carries `doc` alone.
+RECORD_FIELDS = frozenset({"collection", "doc", "session_id", "workflow_id"})
 
 # A plain stdlib logger: structlog's BoundLogger only knows the five standard levels, and the
 # ProcessorFormatter's ExtraAdder renders `extra` into the same JSON fields anyway.
@@ -50,7 +52,7 @@ class AuditRecord(msgspec.Struct, omit_defaults=True):
     request_id: str | None = None
     session_id: str | None = None
     workflow_id: str | None = None
-    library: str | None = None
+    collection: str | None = None
     doc: str | None = None
     error: str | None = None
     detail: dict[str, str | int | bool] | None = None
@@ -166,22 +168,27 @@ async def _finish(
 def audited(
     event: str,
     *,
-    library: str | None = None,
+    collection: str | None = None,
     doc: str | None = None,
     session_id: str | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorate an async handler so every call appends one audit record, then re-raise on failure.
 
-    `library`, `doc` and `session_id` name the decorated function's parameters whose values are
-    copied into the record; `attach` adds what the handler only knows once it runs. The wrapper
-    keeps the wrapped signature because Litestar builds its dependency injection from
+    A parameter named `collection`, `doc` or `session_id` is copied into the record field of the
+    same name; the keyword arguments point one of those fields at a parameter that reads
+    differently (`session_id="session"`). `attach` adds what the handler only knows once it runs.
+    The wrapper keeps the wrapped signature because Litestar builds its dependency injection from
     `inspect.signature`, so it must take no parameter of its own.
     """
-    sources = {"library": library, "doc": doc, "session_id": session_id}
-    fields_from = {field: name for field, name in sources.items() if name is not None}
+    sources = {"collection": collection, "doc": doc, "session_id": session_id}
 
     def decorate(func: Callable[..., Any]) -> Callable[..., Any]:
         signature = inspect.signature(func)
+        fields_from = {
+            field: name or field
+            for field, name in sources.items()
+            if (name or field) in signature.parameters
+        }
 
         def fields(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, str]:
             bound = signature.bind(*args, **kwargs)
