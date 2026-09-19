@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
 #MISE description="Run Python tests in parallel with a coverage report"
 set -euo pipefail
+# Python 3.13 sys.monitoring coverage: near-zero tracing overhead. The C-tracer inflates every
+# operation, and on a slow CI runner that pushes the timing-sensitive workflow tests past the
+# gate's safety timeout (WAIT in tests/test_workflows.py), failing them under load though they
+# pass in isolation.
+export COVERAGE_CORE="${COVERAGE_CORE:-sysmon}"
 uv run pytest -q -n auto --cov=haskie --cov-report=term-missing "$@"
