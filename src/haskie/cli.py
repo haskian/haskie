@@ -1,8 +1,8 @@
 """The `haskie` command: set the home directory up, and serve the app.
 
 Thin on purpose. Everything it does is something the app already does at startup — `init` is the
-migrations and the layout move, `run` is uvicorn over `app:create_app` — so the CLI adds a way in,
-never a second way of doing the work.
+migrations, `run` is uvicorn over `app:create_app` — so the CLI adds a way in, never a second way
+of doing the work.
 """
 
 import asyncio
@@ -16,7 +16,7 @@ from haskie import APP_VERSION, home
 
 cli = typer.Typer(
     name="haskie",
-    help="Personal document library: markdown conversion, LanceDB search, web UI and MCP server.",
+    help="Your documents: markdown conversion, LanceDB search, web UI and MCP server.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -47,24 +47,29 @@ def _use_home(path: Path | None) -> None:
 
 @cli.command()
 def init(home_dir: HomeOption = None) -> None:
-    """Create the home directory and bring its database and layout up to date.
+    """Create the home directory and bring its database up to date.
 
     Safe to repeat: every step is idempotent, so this is also how an existing home is migrated
     after an upgrade. `run` does the same thing at startup; this is for doing it first.
+
+    A home written before documents became collection-independent cannot be migrated, so the
+    migration refuses it and says what to do instead (see `db.INCOMPATIBLE_HOME_MESSAGE`).
     """
-    from haskie import db, layout
+    from haskie import db
+    from haskie.errors import HaskieError
 
     _use_home(home_dir)
 
-    async def prepare() -> int:
+    async def prepare() -> None:
         await home.ensure_home()
         await db.migrate_once()
-        return await layout.migrate_layout()
 
-    moved = asyncio.run(prepare())
+    try:
+        asyncio.run(prepare())
+    except HaskieError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo(f"haskie {APP_VERSION} ready in {home.HOME}")
-    if moved:
-        typer.echo(f"moved {moved} entries into the sharded layout")
 
 
 @cli.command()
@@ -100,9 +105,9 @@ def destroy(
 ) -> None:
     """Delete the home directory and everything in it.
 
-    Every document, index, preview and job record goes. There is no undo and nothing is backed up
-    first. Stop `haskie run` before this: removing the database under a running server leaves it
-    writing into deleted files.
+    Every document, collection, index, preview and job record goes. There is no undo and nothing
+    is backed up first. Stop `haskie run` before this: removing the database under a running
+    server leaves it writing into deleted files.
     """
     from haskie import db
 
@@ -112,10 +117,14 @@ def destroy(
         typer.echo(f"nothing to destroy: {root} does not exist")
         return
 
-    # A home is a database and a library tree. Refusing anything else is what stops a mistyped
-    # `--home ~/Documents` from deleting the wrong directory.
-    if not (home.DB_FILE.exists() or home.LIBRARY_ROOT.is_dir()):
-        typer.echo(f"{root} does not look like a haskie home (no haskie.db, no library/)", err=True)
+    # A home is a database, a document tree and a collection tree. Refusing anything else is what
+    # stops a mistyped `--home ~/Documents` from deleting the wrong directory.
+    if not (home.DB_FILE.exists() or home.COLLECTION_ROOT.is_dir() or home.DOCUMENT_ROOT.is_dir()):
+        typer.echo(
+            f"{root} does not look like a haskie home (no haskie.db, no documents/, "
+            "no collections/)",
+            err=True,
+        )
         raise typer.Exit(code=1)
 
     typer.echo(f"about to delete {root}")
@@ -128,17 +137,33 @@ def destroy(
     typer.echo(f"deleted {root}")
 
 
+def _entries(root: Path) -> list[str]:
+    """The names one level below each shard (`<root>/<shard>/<name>`), sorted.
+
+    Read off the filesystem rather than the database: this runs before anything opens the home,
+    and a home too old to migrate has no readable rows to count anyway.
+    """
+    if not root.is_dir():
+        return []
+    return sorted(
+        entry.name
+        for shard in root.iterdir()
+        if shard.is_dir()
+        for entry in shard.iterdir()
+        if entry.is_dir()
+    )
+
+
 def _describe(root: Path) -> str:
     """What is about to be lost, in one line: enough to recognise the wrong directory."""
     files = [p for p in root.rglob("*") if p.is_file()]
     megabytes = sum(p.stat().st_size for p in files) / 1_048_576
-    libraries = (
-        sorted(p.name for p in home.LIBRARY_ROOT.iterdir() if p.is_dir())
-        if home.LIBRARY_ROOT.is_dir()
-        else []
+    documents = _entries(home.DOCUMENT_ROOT)
+    collections = _entries(home.COLLECTION_ROOT)
+    listed = ", ".join(collections) if collections else "none"
+    return (
+        f"{len(files)} files, {megabytes:.1f} MB, {len(documents)} documents, collections: {listed}"
     )
-    listed = ", ".join(libraries) if libraries else "none"
-    return f"{len(files)} files, {megabytes:.1f} MB, libraries: {listed}"
 
 
 @cli.command()

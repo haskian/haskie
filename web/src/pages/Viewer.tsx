@@ -6,7 +6,7 @@ import type { Route } from '../App'
 // contents links to `h-n`. Nothing here counts renders: the position in the document is fixed.
 const anchorId = (index: number) => `h-${index}`
 
-export function Viewer({ library, doc, navigate }: { library: string; doc: string; navigate: (p: Route) => void }) {
+export function Viewer({ doc, navigate }: { doc: string; navigate: (p: Route) => void }) {
   const [head, setHead] = useState<Head | null>(null)
   const [pages, setPages] = useState<string[]>([])
   const [full, setFull] = useState(false)
@@ -20,7 +20,7 @@ export function Viewer({ library, doc, navigate }: { library: string; doc: strin
       setHead(null)
       setPages([])
       setError(null)
-      for await (const frame of api.markdown(library, doc, full)) {
+      for await (const frame of api.markdown(doc, full)) {
         if (!live) return // the document changed while this one was still arriving
         if (frame.kind === 'head') setHead(frame)
         else setPages((shown) => [...shown, frame.html])
@@ -30,15 +30,15 @@ export function Viewer({ library, doc, navigate }: { library: string; doc: strin
     return () => {
       live = false
     }
-  }, [library, doc, full])
+  }, [doc, full])
 
   const preview = head?.preview
-  const previewUrl = api.previewUrl(library, doc)
+  const previewUrl = api.previewUrl(doc)
 
   return (
     <div className="viewer">
       <header>
-        <button onClick={() => navigate({ name: 'libraries', library })}>← {library}</button>
+        <button onClick={() => navigate({ name: 'documents' })}>← Documents</button>
         <strong>{doc}</strong>
         {preview?.truncated && (
           <span className="banner">preview: first {preview.pages} pages — index the document for the full text</span>
@@ -47,9 +47,9 @@ export function Viewer({ library, doc, navigate }: { library: string; doc: strin
           <span className="banner">pages needing OCR: {preview.ocr_pages.join(', ')}</span>
         )}
         <label>
-          <input type="checkbox" checked={full} onChange={(e) => setFull(e.target.checked)} /> full markdown (indexed only)
+          <input type="checkbox" checked={full} onChange={(e) => setFull(e.target.checked)} /> full markdown (imported only)
         </label>
-        <a href={api.sourceUrl(library, doc)} target="_blank" rel="noreferrer">
+        <a href={api.sourceUrl(doc)} target="_blank" rel="noreferrer">
           open original
         </a>
       </header>

@@ -67,3 +67,8 @@ th.sortable.active button { text-decoration: underline; }
   border-color: var(--line, #444);
   background: var(--bg, inherit);
 }
+
+/* The collections holding one document, under its row in the Documents table. */
+.tags { display: flex; flex-wrap: wrap; gap: 0.4rem; font-size: 0.9em; }
+.tag { border: 1px solid #ccc; border-radius: 999px; padding: 0.05rem 0.5rem; }
+.path-input { width: 28rem; max-width: 100%; }

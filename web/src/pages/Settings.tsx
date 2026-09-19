@@ -2,14 +2,14 @@ import { useEffect, useState } from 'react'
 import {
   api,
   type Accelerator,
-  type ConversionSettings,
   type Options,
   type PipelineSettings,
   type RetentionSettings,
   type UserSettings,
 } from '../api'
+import { ChunkSettingsForm } from '../components/ChunkSettingsForm'
 import { Field } from '../components/Field'
-import { ConversionSettingsForm } from '../components/ConversionSettingsForm'
+import { ImportDefaultsForm } from '../components/ImportDefaultsForm'
 import { SearchSettingsForm } from '../components/SearchSettingsForm'
 
 export function Settings() {
@@ -59,10 +59,13 @@ export function Settings() {
         </select>
       </Field>
 
-      <h3>Indexing defaults (per-library overridable)</h3>
-      <ConversionSettingsForm value={s.conversion} options={options} onChange={(next) => update({ conversion: next as ConversionSettings })} />
+      <h3>Import defaults (parser, skip OCR)</h3>
+      <ImportDefaultsForm value={s.conversion} options={options} onChange={(next) => update({ conversion: next })} />
 
-      <h3>Search (per-library overridable)</h3>
+      <h3>Chunking defaults (per-collection overridable)</h3>
+      <ChunkSettingsForm value={s.conversion} options={options} onChange={(next) => update({ conversion: next })} />
+
+      <h3>Search (per-collection overridable)</h3>
       <SearchSettingsForm value={s.search} options={options} onChange={(next) => update({ search: next as UserSettings['search'] })} />
 
       <h3>Indexing parallelism</h3>

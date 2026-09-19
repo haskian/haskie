@@ -1,4 +1,10 @@
-"""One LanceDB index per library. Full-text only by default, hybrid when an embedding is set.
+"""One LanceDB index per collection. Full-text only by default, hybrid when an embedding is set.
+
+The table holds the chunks of every document of the collection, as rows read out of the
+document's embedding cache (`embed_cache.py`): a document that sits in several collections is
+chunked and embedded once per distinct chunk settings and written into each collection's table
+from that cache. The table is therefore a per-collection view, never the only copy of anything
+— dropping it (`reset_for_write`) and refilling it from the cache is what "Index all" does.
 
 Every table access is awaited: LanceDB's async API (`lancedb.connect_async`, `AsyncTable`) runs on
 its own tokio runtime, so nothing here blocks the event loop that called it. The pure parts —
@@ -6,7 +12,7 @@ Arrow encoding, scoring, row-to-`Hit` — stay sync.
 
 Write and read paths differ on purpose (B1): only the index stage of a document may drop an
 outdated table (`reset_for_write`), every other write no-ops on one, and a read never creates a
-table at all. Deleting one document must never wipe a library.
+table at all. Deleting one document from a collection must never wipe the collection.
 """
 
 import math
@@ -60,7 +66,7 @@ PARENT_SEP = " > "
 
 
 class IndexStats(msgspec.Struct):
-    """What one library's table looks like on disk right now. Read straight from LanceDB, never
+    """What one collection's table looks like on disk right now. Read straight from LanceDB, never
     stored: maintenance decides on the table as it is, not as it was recorded."""
 
     num_rows: int
@@ -75,7 +81,7 @@ class IndexStats(msgspec.Struct):
 class Hit(msgspec.Struct):
     """One matching chunk with everything needed to cite or open it."""
 
-    library: str
+    collection: str  # the collection whose table matched; the document itself belongs to none
     doc: str
     home: str  # absolute haskie home; join with the relative paths below to open files
     source_path: str  # original upload, relative to home
@@ -94,17 +100,17 @@ class Hit(msgspec.Struct):
     location: str  # human-readable "doc p.3-4 L10-20", ready to cite
     text: str
     score: float
-    # Absolute, and filled by `Library.resolve_hit` (which every search path calls) rather than
-    # stored: the index keeps paths home-relative so a home stays portable. These are what a tool
-    # outside the app opens or greps - `line_start`/`line_end` are line numbers in `markdown_file`.
+    # Absolute, and filled by `collection.resolve_hit` (which every search path calls) rather
+    # than stored: the index keeps paths home-relative so a home stays portable. These are what a
+    # tool outside the app opens or greps - `line_start`/`line_end` are lines in `markdown_file`.
     source_file: str = ""
     markdown_file: str = ""
 
 
 # `schema_current` opens the table and reads its Arrow schema, and the read path asks for every
-# library listing, search and delete. The index stage is the only writer of a table and it runs in
-# this process, so the answer is cached per (index directory, embedding dimensions) and forgotten
-# whenever a table is created, dropped, or its library deleted.
+# collection listing, search and delete. The index stage is the only writer of a table and it runs
+# in this process, so the answer is cached per (index directory, embedding dimensions) and
+# forgotten whenever a table is created, dropped, or its collection deleted.
 #
 # A `threading.Lock` rather than an async one: both event loops (Litestar's and DBOS's) read this
 # cache, and a lock made on one of them cannot be taken from the other. Nothing is awaited while
@@ -132,14 +138,14 @@ def _fusion(settings: SearchSettings):
     return RRFReranker(K=settings.rrf_k)
 
 
-class LibraryIndex:
+class CollectionIndex:
     def __init__(
-        self, path: Path, library: str, home: Path, embedding: EmbeddingModel | None
+        self, path: Path, collection: str, home: Path, embedding: EmbeddingModel | None
     ) -> None:
         """Sync and IO-free: opening the table is what `_existing` / `_for_write` do, awaited."""
         self.path = path
-        self.library = library
-        self.home = home  # stored paths are relative to it (see Library.relative)
+        self.collection = collection
+        self.home = home  # stored paths are relative to it (see Document.relative)
         self.embedding = embedding
         self._conn: lancedb.AsyncConnection | None = None  # one connection per index instance
         self._cached: lancedb.AsyncTable | None = None  # one handle per index instance
@@ -149,8 +155,8 @@ class LibraryIndex:
 
         Caching it is safe across both event loops: the handle belongs to LanceDB's tokio runtime,
         not to the loop that made it. It is per instance rather than per process because a handle
-        keeps reading the table version it opened, and a fresh `LibraryIndex` is how a caller asks
-        for the table as it is now.
+        keeps reading the table version it opened, and a fresh `CollectionIndex` is how a caller
+        asks for the table as it is now.
         """
         if self._conn is None:
             self._conn = await lancedb.connect_async(str(self.path))
@@ -179,13 +185,14 @@ class LibraryIndex:
         return table
 
     async def reset_for_write(self) -> lancedb.AsyncTable:
-        """The only place a table is dropped: the first part of a document being indexed. A table
-        built by an older version or another embedding cannot hold new rows, and every document of
-        the library needs reindexing anyway ("Index all")."""
+        """The only place a table is dropped: the first group of a document being written. A
+        table built by an older version or another embedding cannot hold new rows, and nothing in
+        it is the only copy of anything: every document of the collection is rewritten from its
+        embedding cache by "Index all"."""
         forget_schema(self.path)  # decide on the table as it is now, not as it was cached
         table = await self._existing()
         if table is not None and not await self.schema_current(table):
-            _log.warning("index_table_outdated", library=self.library, path=str(self.path))
+            _log.warning("index_table_outdated", collection=self.collection, path=str(self.path))
             await (await self._connection()).drop_table(TABLE)
             # the connection too, not only the table handle: an AsyncConnection that dropped a
             # table and creates it again hands out a handle still carrying the dropped table's
@@ -232,14 +239,14 @@ class LibraryIndex:
 
     async def _deletable(self) -> lancedb.AsyncTable | None:
         """A delete on a missing or outdated table has nothing to remove; dropping it instead
-        would wipe every document of the library (B1)."""
+        would wipe every document of the collection (B1)."""
         table = await self._existing()
         return table if table is not None and await self.schema_current(table) else None
 
     async def delete_document(self, doc: str) -> None:
         table = await self._deletable()
         if table is not None:
-            await table.delete(f"doc = '{doc}'")  # doc names sanitized in library.py
+            await table.delete(f"doc = '{doc}'")  # doc names sanitized in document.py
 
     async def delete_parts(self, doc: str, start: int, end: int) -> None:
         """Drop the parts `[start, end)` of one document, leaving every other part alone."""
@@ -256,11 +263,11 @@ class LibraryIndex:
     ) -> int:
         """Write several micro-batches of one document in a single LanceDB commit; returns the
         number of rows written. `source_path` / `markdown_path` are home-relative (see
-        Library.relative); rows must carry a vector when the index has an embedding.
+        Document.relative); rows must carry a vector when the index has an embedding.
 
         One commit is one fragment, so a document costs a handful of fragments instead of one per
         micro-batch. `parts` is consumed lazily and each part is turned into Arrow at once, so the
-        caller can decode one `rows.json` at a time (awaiting the file read) and only the Arrow
+        caller can read one row group of the embedding cache at a time and only the Arrow
         buffers stay in memory. A group with no rows at all writes nothing and creates no table.
         """
         batches = [
@@ -354,14 +361,14 @@ class LibraryIndex:
     async def finish(self) -> None:
         """Build the full-text index once per table, after a document's parts are all written.
 
-        Rebuilding it per document costs O(rows) each time, so a library of n documents used to
-        cost O(n^2) to fill. Rows written after the build are still found (see above)."""
+        Rebuilding it per document costs O(rows) each time, so a collection of n documents used
+        to cost O(n^2) to fill. Rows written after the build are still found (see above)."""
         table = await self._existing()
         if table is None or not await table.count_rows() or await self.has_index("text"):
             return
         # the async API has no `create_fts_index`; `FTS()` is the same index through `create_index`
         await table.create_index("text", config=FTS(), replace=True)
-        _log.info("fts_index_built", library=self.library, rows=await table.count_rows())
+        _log.info("fts_index_built", collection=self.collection, rows=await table.count_rows())
 
     async def optimize(self, keep: timedelta) -> None:
         """Compact fragments, fold new rows into every index, and drop versions older than `keep`.
@@ -377,13 +384,13 @@ class LibraryIndex:
         """(Re)train the approximate vector index over `num_rows` rows.
 
         IVF-PQ rather than HNSW: it lives on disk, trains in seconds on a sample of the rows, and
-        `optimize()` folds later rows into its partitions, so a growing library does not need a
-        rebuild. HNSW would need the whole graph in memory per library and a full rebuild each
-        time. `l2` over normalized embedding vectors ranks exactly like cosine, so switching a
-        library to an approximate index does not change what `row_score` means.
+        `optimize()` folds later rows into its partitions, so a growing collection does not need
+        a rebuild. HNSW would need the whole graph in memory per collection and a full rebuild
+        each time. `l2` over normalized embedding vectors ranks exactly like cosine, so switching
+        a collection to an approximate index does not change what `row_score` means.
 
         The training itself is CPU work inside LanceDB's runtime, so it cannot be put under the
-        CPU budget (`cpu.on_cpu`); maintenance runs one library at a time instead."""
+        CPU budget (`cpu.on_cpu`); maintenance runs one collection at a time instead."""
         table = await self._existing()
         if table is None or self.embedding is None:
             return
@@ -401,13 +408,13 @@ class LibraryIndex:
         )
 
     # --- search ----------------------------------------------------------
-    # Split into three steps so a cross-library search embeds the query once, retrieves from every
-    # index in parallel and rescores the merge once (see session.search). `search` below is the
-    # single-index composition of the same steps.
+    # Split into three steps so a cross-collection search embeds the query once, retrieves from
+    # every index in parallel and rescores the merge once (see session.search). `search` below is
+    # the single-index composition of the same steps.
 
     async def accelerator(self) -> Accelerator:
         """The reranker runs where the settings say, not where the embedding model happens to:
-        a library with no embedding profile still reranks, and `models.warm_model` loaded the
+        a collection with no embedding profile still reranks, and `models.warm_model` loaded the
         cross-encoder under this same setting."""
         return (await load_user_settings()).pipeline.accelerator
 
@@ -430,7 +437,7 @@ class LibraryIndex:
         rescored by a cross-encoder.
 
         `vector` is None for a lexical query (see `query_vector`); a table without a vector column
-        falls back to full text whatever the caller passed, so one library of a session can lack
+        falls back to full text whatever the caller passed, so one collection of a session can lack
         the embedding the others have. A hybrid query always fuses over at least
         `settings.candidates` rows, because the fusion is only as good as its candidate pool.
         """
@@ -454,11 +461,11 @@ class LibraryIndex:
     async def fts_rows(self, query: str, limit: int) -> list[dict]:
         """Lexical retrieval alone: at most `limit` BM25 rows, whatever this index could answer
         with. `[]` when it cannot answer one at all — no table, no rows, or no full-text index
-        yet, which is what a library in the middle of its first index looks like.
+        yet, which is what a collection in the middle of its first index looks like.
 
-        A missing full-text index is a real answer here, not a scan: a cross-library search asks
-        every library at once (see textsearch.py), and one still building its index would make the
-        whole query wait for it. `search_rows` is the opposite trade for a single library.
+        A missing full-text index is a real answer here, not a scan: a cross-collection search
+        asks every collection at once (see textsearch.py), and one still building its index would
+        make the whole query wait for it. `search_rows` is the opposite trade for one collection.
         """
         table = await self._existing()
         if table is None or await table.count_rows() == 0 or not await self.has_index("text"):
@@ -491,7 +498,7 @@ class LibraryIndex:
             if page_end != page_start:
                 pages += f"-{page_end}"
         return Hit(
-            library=self.library,
+            collection=self.collection,
             doc=r["doc"],
             home=str(self.home),
             source_path=r.get("source_path", ""),
@@ -520,7 +527,7 @@ MAX_PARTITIONS = 4096  # above this training costs more than the queries save
 
 def _partitions(num_rows: int) -> int:
     """IVF partitions for a table of `num_rows`: the usual sqrt(n) rule, rounded to a power of two
-    and clamped, so a library that grows by a few rows keeps the partition count it was trained
+    and clamped, so a collection that grows by a few rows keeps the partition count it was trained
     with instead of qualifying for a rebuild."""
     if num_rows <= 0:
         return MIN_PARTITIONS
@@ -541,7 +548,7 @@ async def cross_encode(
     """Second stage for any mode: rescore candidate rows with a cross-encoder, best first.
 
     Module-level and told which accelerator to use, so a session rescores one merged candidate
-    list instead of running a cross-encoder per library. The cross-encoder itself is CPU work, so
+    list instead of running a cross-encoder per collection. The cross-encoder itself is CPU work, so
     it runs in a worker thread under one slot of the CPU budget.
     """
     from haskie.embed import rerank_scores
@@ -573,3 +580,15 @@ def row_score(r: dict) -> float:
     if "_distance" in r:
         return 1.0 / (1.0 + float(r["_distance"]))
     return 0.0
+
+
+# What identifies one passage, wherever it is stored. The collection is deliberately not part of
+# it: the same chunk of the same document is the same answer, whichever collection's table it came
+# out of, so `session.search` and `textsearch.merge` both count it once.
+RowKey = tuple[str, int, int]
+
+
+def row_key(row: dict) -> RowKey:
+    """(doc, part, chunk_id) of one result row. `part` defaults to 0 for a table written before
+    micro-batches, the same default `hit` reads it with."""
+    return (row["doc"], row.get("part", 0), row["chunk_id"])

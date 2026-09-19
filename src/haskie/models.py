@@ -16,8 +16,8 @@ Loading a model is CPU work, not IO, so it goes through `cpu.on_cpu`: a worker t
 slot of the CPU budget, whichever event loop asked for it.
 
 Depends on `cpu`, `embed` and `settings` only: `index` and `pipeline` import this module, so it
-must not reach back into them or into `workflows`. `library` is read through a function-local
-import for the same reason (see `_library_rerankers`).
+must not reach back into them or into `workflows`. `collection` is read through a function-local
+import for the same reason (see `_collection_rerankers`).
 """
 
 import asyncio
@@ -27,7 +27,7 @@ from collections.abc import Iterable
 from typing import Literal
 
 import msgspec
-from dbos import DBOS, SetWorkflowID
+from dbos import DBOS, SetWorkflowID, WorkflowStatus
 from dbos._error import DBOSMaxStepRetriesExceeded
 
 from haskie import cpu, embed
@@ -114,31 +114,31 @@ async def ensure_model(kind: ModelKind, name: str) -> str:
 
 
 async def _required(
-    settings: UserSettings, library_rerankers: Iterable[str] | None = None
+    settings: UserSettings, collection_rerankers: Iterable[str] | None = None
 ) -> list[tuple[ModelKind, str]]:
     """Every model this installation needs, in a stable order and without duplicates.
 
-    A library may override the reranker model, and a search of that library then loads it, so the
-    overrides count as required as much as the user-level pair does. They are read here unless the
-    caller already has them: `ensure_models` reads them once for both the enqueue and the statuses
-    it returns."""
-    if library_rerankers is None:
-        library_rerankers = await _library_rerankers()
+    A collection may override the reranker model, and a search of that collection then loads it,
+    so the overrides count as required as much as the user-level pair does. They are read here
+    unless the caller already has them: `ensure_models` reads them once for both the enqueue and
+    the statuses it returns."""
+    if collection_rerankers is None:
+        collection_rerankers = await _collection_rerankers()
     wanted: list[tuple[ModelKind, str]] = []
     if settings.embedding_model:
         wanted.append(("embedding", settings.embedding_model.name))
     if settings.search.reranker == "cross-encoder":
         wanted.append(("reranker", settings.search.reranker_model))
-    wanted.extend(("reranker", name) for name in library_rerankers)
+    wanted.extend(("reranker", name) for name in collection_rerankers)
     return list(dict.fromkeys(wanted))
 
 
-async def _library_rerankers() -> list[str]:
-    """Reranker models the libraries override. Imported here rather than at module level: the
-    dependency runs `library` -> `index` -> `models` (D1)."""
-    from haskie.library import Library
+async def _collection_rerankers() -> list[str]:
+    """Reranker models the collections override. Imported here rather than at module level: the
+    dependency runs `collection` -> `index` -> `models` (D1)."""
+    from haskie.collection import Collection
 
-    return await Library.reranker_overrides()
+    return await Collection.reranker_overrides()
 
 
 def _model_id(kind: ModelKind, name: str) -> str:
@@ -146,14 +146,31 @@ def _model_id(kind: ModelKind, name: str) -> str:
     return f"dl:{kind}:{name}"
 
 
+async def _download_records(
+    wanted: list[tuple[ModelKind, str]],
+) -> dict[str, WorkflowStatus]:
+    """The download record of every model in `wanted`, in one query, keyed by workflow id. A
+    model nobody ever asked for simply has none. The output is loaded because DBOS carries a
+    workflow's error alongside it, and `_model_status` reports that error."""
+    if not wanted:
+        return {}
+    ids = [_model_id(kind, name) for kind, name in wanted]
+    return {s.workflow_id: s for s in await DBOS.list_workflows_async(workflow_ids=ids)}
+
+
 async def ensure_models(settings: UserSettings) -> list[ModelStatus]:
     """Idempotent: a model that is downloaded is not downloaded again, a failed one is retried,
-    and one this process has not loaded yet is warmed in the background."""
-    library_rerankers = await _library_rerankers()
-    for kind, name in await _required(settings, library_rerankers):
+    and one this process has not loaded yet is warmed in the background.
+
+    One query for every record, not one per model: the same read decides what to enqueue and
+    answers the statuses this returns."""
+    collection_rerankers = await _collection_rerankers()
+    wanted = await _required(settings, collection_rerankers)
+    records = await _download_records(wanted)
+    for kind, name in wanted:
         workflow_id = _model_id(kind, name)
-        existing = await DBOS.list_workflows_async(workflow_ids=[workflow_id], load_output=False)
-        status = existing[0].status if existing else None
+        existing = records.get(workflow_id)
+        status = existing.status if existing else None
         if status == "SUCCESS":
             _warm_in_background(kind, name)  # on disk already; this process's caches may be cold
             continue
@@ -166,8 +183,9 @@ async def ensure_models(settings: UserSettings) -> list[ModelStatus]:
             await DBOS.delete_workflow_async(workflow_id)
         # the context manager wraps the await itself: it sets a contextvar the enqueue reads
         with SetWorkflowID(workflow_id):
-            await DBOS.enqueue_workflow_async(DOWNLOADS_QUEUE, ensure_model, kind, name)
-    return await model_statuses(settings, library_rerankers)
+            handle = await DBOS.enqueue_workflow_async(DOWNLOADS_QUEUE, ensure_model, kind, name)
+        records[workflow_id] = await handle.get_status()  # the record this call just wrote
+    return await model_statuses(settings, collection_rerankers, records)
 
 
 def _warm_in_background(kind: ModelKind, name: str) -> None:
@@ -234,16 +252,15 @@ def _model_status(kind: ModelKind, name: str, workflow) -> ModelStatus:
 
 
 async def model_statuses(
-    settings: UserSettings | None = None, library_rerankers: Iterable[str] | None = None
+    settings: UserSettings | None = None,
+    collection_rerankers: Iterable[str] | None = None,
+    records: dict[str, WorkflowStatus] | None = None,
 ) -> list[ModelStatus]:
+    """One status per required model. `records` is the download record of each of them, for a
+    caller that has just read them (see `ensure_models`); they are read here otherwise."""
     settings = settings or await load_user_settings()
-    wanted = await _required(settings, library_rerankers)
-    if not wanted:
-        return []
-    by_id = {
-        s.workflow_id: s
-        for s in await DBOS.list_workflows_async(workflow_ids=[_model_id(k, n) for k, n in wanted])
-    }
+    wanted = await _required(settings, collection_rerankers)
+    by_id = records if records is not None else await _download_records(wanted)
     return [_model_status(k, n, by_id.get(_model_id(k, n))) for k, n in wanted]
 
 

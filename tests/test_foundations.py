@@ -16,8 +16,9 @@ import pytest
 
 from haskie import audit, cpu, db, errors, home, settings
 from haskie.settings import (
+    ChunkSettings,
+    CollectionSettings,
     ConversionSettings,
-    LibrarySettings,
     PipelineSettings,
     RetentionSettings,
     SearchOverrides,
@@ -37,8 +38,8 @@ from haskie.settings import (
     [
         (
             "haskie home -> symbolic root",
-            "read {home}/library/a.md failed",
-            "read $HASKIE_HOME/library/a.md failed",
+            "read {home}/documents/a.md failed",
+            "read $HASKIE_HOME/documents/a.md failed",
         ),
         ("user home -> tilde", "read {user}/Downloads/a.md failed", "read ~/Downloads/a.md failed"),
         ("both in one line", "{home} and {user}", "$HASKIE_HOME and ~"),
@@ -53,7 +54,8 @@ def test_scrub_replaces_absolute_paths(name: str, template: str, expected: str) 
 def test_invalid_input_is_also_a_value_error() -> None:
     """Callers written before `errors` (and msgspec's decode-time wrapping) catch ValueError."""
     assert issubclass(errors.InvalidInput, ValueError)
-    assert issubclass(errors.LibraryNotFound, errors.NotFound)
+    assert issubclass(errors.CollectionNotFound, errors.NotFound)
+    assert issubclass(errors.DocumentNotFound, errors.NotFound)
     assert issubclass(errors.NeedsOcr, errors.PermanentError)
 
 
@@ -132,14 +134,18 @@ async def test_atomic_write_leaves_no_temp_file_on_failure(
     ],
 )
 async def test_ensure_home_creates_private_directories(name: str, already_there: bool) -> None:
+    """The four roots a home is: collections, documents, the staging area uploads wait in, and
+    the audit trail. All private to the user running the app."""
+    roots = (home.COLLECTION_ROOT, home.DOCUMENT_ROOT, home.STAGING_ROOT, home.AUDIT_DIR)
     if not already_there:
-        for directory in (home.LIBRARY_ROOT, home.AUDIT_DIR):
+        for directory in roots:
             directory.rmdir()  # made by the test home fixture, still empty
 
     assert await home.ensure_home() == home.HOME, name
 
-    for directory in (home.LIBRARY_ROOT, home.AUDIT_DIR):
+    for directory in roots:
         assert directory.is_dir(), name
+        assert directory.parent == home.HOME, name
         assert stat.S_IMODE(directory.stat().st_mode) == home.DIR_MODE, name
 
 
@@ -266,14 +272,29 @@ async def test_remove_tree_reports_a_file_it_cannot_delete(
             "unknown reranker model",
         ),
         (
-            "library overrides both set, overlap wins",
-            lambda: LibrarySettings(chunk_size=10, chunk_overlap=10),
+            "collection overrides both set, overlap wins",
+            lambda: CollectionSettings(chunk_size=10, chunk_overlap=10),
             "chunk_overlap must be <",
         ),
         (
-            "library override size alone below 1",
-            lambda: LibrarySettings(chunk_size=0),
+            "collection override size alone below 1",
+            lambda: CollectionSettings(chunk_size=0),
             "chunk_size must be >= 1",
+        ),
+        (
+            "chunk settings overlap equal to size",
+            lambda: ChunkSettings(chunk_size=10, chunk_overlap=10),
+            "chunk_overlap must be <",
+        ),
+        (
+            "chunk settings size below 1",
+            lambda: ChunkSettings(chunk_size=0),
+            "chunk_size must be >= 1",
+        ),
+        (
+            "a collection override that resolves into an invalid pair",
+            lambda: CollectionSettings(chunk_size=10).resolve(UserSettings()),
+            "chunk_overlap must be <",
         ),
         (
             "search override resolves into an invalid value",
@@ -314,10 +335,13 @@ def test_settings_reject_out_of_bounds(name: str, build, match: str) -> None:
         ("overlap just below size", lambda: ConversionSettings(chunk_size=2, chunk_overlap=1)),
         ("zero weights allowed", lambda: SearchSettings(vector_weight=0.0, bm25_weight=0.0)),
         (
-            "library override size alone keeps the user overlap",
-            lambda: LibrarySettings(chunk_size=99),
+            "collection override size alone, the user overlap still fits",
+            lambda: CollectionSettings(chunk_size=99).resolve(
+                UserSettings(conversion=ConversionSettings(chunk_overlap=0))
+            ),
         ),
-        ("library override overlap alone", lambda: LibrarySettings(chunk_overlap=0)),
+        ("collection override overlap alone", lambda: CollectionSettings(chunk_overlap=0)),
+        ("chunk settings defaults", ChunkSettings),
         ("the shortest live window", lambda: RetentionSettings(job_days=1, job_live_hours=2)),
         ("audit retention of zero keeps everything", lambda: RetentionSettings(audit_days=0)),
         ("one preview builder", lambda: PipelineSettings(preview_workers=1)),
@@ -471,8 +495,8 @@ def test_maintenance_defaults_and_docs() -> None:
         ),
         (
             "nested struct is a value, not None",
-            LibrarySettings(parser="plain"),
-            {"parser": "plain", "search": SearchOverrides()},
+            CollectionSettings(chunker="text"),
+            {"chunker": "text", "search": SearchOverrides()},
         ),
     ],
 )
@@ -678,7 +702,7 @@ async def test_connect_commits_or_rolls_back_the_whole_unit_of_work(
 ) -> None:
     async def unit() -> None:
         async with db.connect() as conn:
-            await conn.execute("insert into libraries (name, created_at) values ('notes', 1.0)")
+            await conn.execute("insert into collections (name, created_at) values ('notes', 1.0)")
             if fails:
                 raise _UnitFailed(name)
 
@@ -689,7 +713,7 @@ async def test_connect_commits_or_rolls_back_the_whole_unit_of_work(
         await unit()
 
     async with db.connect() as conn:  # a connection of its own: only committed rows are visible
-        rows = await conn.execute_fetchall("select name from libraries")
+        rows = await conn.execute_fetchall("select name from collections")
     assert list(rows) == expected, name
 
 
@@ -723,39 +747,9 @@ async def test_migrate_once_applies_every_migration_exactly_once(
     assert applied[0] != threading.get_ident(), "sqlite3 and executescript block: not on the loop"
     async with db.connect() as conn:
         version = await conn.execute_fetchall("pragma user_version")
-        libraries = await conn.execute_fetchall("select count(*) from libraries")
+        collections = await conn.execute_fetchall("select count(*) from collections")
     assert list(version) == [(len(db.MIGRATIONS),)], name
-    assert list(libraries) == [(0,)], name
-
-
-def test_migration_4_adds_the_maintenance_columns_and_marks_existing_libraries(
-    tmp_path: Path,
-) -> None:
-    """Migration 4 carries the per-library maintenance bookkeeping, applied to a database built
-    by the previous build. Its libraries hold a table nobody ever compacted, so each one starts
-    with a run pending."""
-    conn = sqlite3.connect(tmp_path / "old.db")
-    for number, script in enumerate(db.MIGRATIONS[:3], start=1):
-        conn.executescript(script)
-        conn.execute(f"pragma user_version = {number}")
-    conn.execute("insert into libraries (name, created_at) values ('old', 1.0)")
-    conn.commit()
-
-    assert db.migrate(conn) == len(db.MIGRATIONS)
-
-    columns = {
-        name: default
-        for _cid, name, _type, _notnull, default, _pk in conn.execute(
-            "pragma table_info(libraries)"
-        )
-    }
-    assert {"pending_docs", "last_write_at", "last_maintained_at", "vector_index_rows"} <= set(
-        columns
-    )
-    assert (columns["pending_docs"], columns["vector_index_rows"]) == ("0", "0")
-    assert (columns["last_write_at"], columns["last_maintained_at"]) == (None, None)
-    assert conn.execute("select pending_docs from libraries").fetchone()[0] == 1
-    conn.close()
+    assert list(collections) == [(0,)], name
 
 
 def test_migration_5_adds_the_retention_watermark(tmp_path: Path) -> None:
@@ -772,29 +766,6 @@ def test_migration_5_adds_the_retention_watermark(tmp_path: Path) -> None:
     assert conn.execute("select key, value from retention_state").fetchall() == [
         ("archive_watermark_ms", "0")
     ]
-    assert db.migrate(conn) == len(db.MIGRATIONS), "nothing left to apply"
-    conn.close()
-
-
-def test_migration_7_backfills_session_libraries_from_json(tmp_path: Path) -> None:
-    """Migration 7 turns the JSON column of every session into rows, in the order it listed them.
-    A name whose library is already gone is dropped rather than migrated into a dangling row."""
-    conn = sqlite3.connect(tmp_path / "old.db")
-    for number, script in enumerate(db.MIGRATIONS[:6], start=1):
-        conn.executescript(script)
-        conn.execute(f"pragma user_version = {number}")
-    conn.execute("insert into libraries (name, created_at) values ('known', 1.0)")
-    conn.execute("""insert into sessions (id, libraries) values ('s1', '["gone", "known"]')""")
-    conn.execute("""insert into sessions (id, libraries) values ('s2', '[]')""")
-    conn.commit()
-
-    assert db.migrate(conn) == len(db.MIGRATIONS)
-
-    rows = conn.execute("select session_id, library, position from session_libraries").fetchall()
-    assert rows == [("s1", "known", 1)], "only the library that still exists, at its place"
-    assert conn.execute("select id from sessions order by id").fetchall() == [("s1",), ("s2",)]
-    columns = [name for _cid, name, *_rest in conn.execute("pragma table_info(sessions)")]
-    assert columns == ["id"], "the JSON column is gone"
     assert db.migrate(conn) == len(db.MIGRATIONS), "nothing left to apply"
     conn.close()
 
@@ -885,14 +856,14 @@ def _lines() -> list[dict]:
 @pytest.mark.anyio
 async def test_record_writes_one_private_json_line_with_every_field() -> None:
     entry = await audit.record(
-        "library.create",
+        "collection.create",
         actor="mcp",
         outcome="ok",
         duration_ms=7,
         request_id="r1",
         session_id="s1",
         workflow_id="w1",
-        library="notes",
+        collection="notes",
         doc="a.md",
         error=None,
         detail={"size": 12, "suffix": ".md", "cached": False},
@@ -902,7 +873,7 @@ async def test_record_writes_one_private_json_line_with_every_field() -> None:
     assert line == {
         "ts": entry.ts,
         "level": "AUDIT",
-        "event": "library.create",
+        "event": "collection.create",
         "actor": "mcp",
         "outcome": "ok",
         "duration_ms": 7,
@@ -910,7 +881,7 @@ async def test_record_writes_one_private_json_line_with_every_field() -> None:
         "request_id": "r1",
         "session_id": "s1",
         "workflow_id": "w1",
-        "library": "notes",
+        "collection": "notes",
         "doc": "a.md",
         "detail": {"size": 12, "suffix": ".md", "cached": False},
     }
@@ -928,7 +899,7 @@ async def test_record_appends_rather_than_replacing() -> None:
 async def test_audited_handler_records_ok_and_reads_contextvars() -> None:
     from haskie import logs
 
-    @audit.audited("document.add", library="name", doc="doc")
+    @audit.audited("collection.document.add", collection="name", doc="doc")
     async def handler(name: str, doc: str, size: int = 0) -> str:
         return f"{name}/{doc}/{size}"
 
@@ -940,29 +911,33 @@ async def test_audited_handler_records_ok_and_reads_contextvars() -> None:
         logs.clear()
 
     (line,) = _lines()
-    assert (line["event"], line["outcome"], line["actor"]) == ("document.add", "ok", "mcp")
-    assert (line["request_id"], line["library"], line["doc"]) == ("req-1", "notes", "a.md")
+    assert (line["event"], line["outcome"], line["actor"]) == (
+        "collection.document.add",
+        "ok",
+        "mcp",
+    )
+    assert (line["request_id"], line["collection"], line["doc"]) == ("req-1", "notes", "a.md")
     assert "error" not in line
 
 
 @pytest.mark.anyio
 async def test_audited_records_error_with_a_scrubbed_message_and_re_raises() -> None:
-    @audit.audited("document.add", library="name")
+    @audit.audited("collection.document.add", collection="name")
     async def handler(name: str) -> None:
-        raise errors.InvalidInput(f"bad file {home.HOME}/library/x")
+        raise errors.InvalidInput(f"bad file {home.HOME}/documents/x")
 
     with pytest.raises(errors.InvalidInput):
         await handler("notes")
 
     (line,) = _lines()
-    assert (line["outcome"], line["actor"], line["library"]) == ("error", "web", "notes")
-    assert line["error"] == "InvalidInput: bad file $HASKIE_HOME/library/x"
+    assert (line["outcome"], line["actor"], line["collection"]) == ("error", "web", "notes")
+    assert line["error"] == "InvalidInput: bad file $HASKIE_HOME/documents/x"
     assert "request_id" not in line, "no request context outside a request"
 
 
 @pytest.mark.anyio
 async def test_audited_records_both_branches() -> None:
-    @audit.audited("library.delete", library="name")
+    @audit.audited("collection.delete", collection="name")
     async def handler(name: str) -> str:
         if name == "boom":
             raise errors.Conflict("busy")
@@ -973,7 +948,7 @@ async def test_audited_records_both_branches() -> None:
         await handler("boom")
 
     ok, failed = _lines()
-    assert (ok["outcome"], ok["library"]) == ("ok", "notes")
+    assert (ok["outcome"], ok["collection"]) == ("ok", "notes")
     assert (failed["outcome"], failed["error"]) == ("error", "Conflict: busy")
 
 
@@ -983,21 +958,21 @@ def test_audited_preserves_the_wrapped_signature_for_dependency_injection() -> N
 
     async def handler(name: str, doc: str, size: int = 0) -> None: ...
 
-    wrapped = audit.audited("document.add", library="name", doc="doc")(handler)
+    wrapped = audit.audited("collection.document.add", collection="name", doc="doc")(handler)
     assert inspect.signature(wrapped) == inspect.signature(handler)
     assert getattr(wrapped, "__name__", None) == "handler"
 
 
 @pytest.mark.anyio
 async def test_audited_skips_unset_optional_parameters() -> None:
-    @audit.audited("session.libraries.set", session_id="session", library="name")
+    @audit.audited("session.collections.set", session_id="session", collection="name")
     async def handler(session: str, name: str | None = None) -> None: ...
 
     await handler("s-1")
 
     (line,) = _lines()
     assert line["session_id"] == "s-1"
-    assert "library" not in line
+    assert "collection" not in line
 
 
 # --- audit retention --------------------------------------------------------------

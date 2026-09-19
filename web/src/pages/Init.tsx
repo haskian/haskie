@@ -33,7 +33,7 @@ export function Init({ onDone }: { onDone: () => void }) {
   return (
     <div className="init">
       <h1>Welcome to haskie</h1>
-      <p>Pick the embedding model. It applies to every library; changing it later means a full reindex.</p>
+      <p>Pick the embedding model. It applies to every collection; changing it later means a full reindex.</p>
       {options &&
         (Object.keys(options.embedding_profiles) as EmbeddingProfile[]).map((p) => (
           <label key={p} className="radio">

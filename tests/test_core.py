@@ -1,8 +1,9 @@
-"""Pure checks: chunking, conversion, settings, library and index IO, with HASKIE_HOME pointed
-at a temp dir (see conftest.py).
+"""Pure checks: chunking, conversion, settings, document and collection IO, the index and the
+pipeline, with HASKIE_HOME pointed at a temp dir (see conftest.py).
 
-Nothing here launches DBOS. Every test that needs the durable runtime lives in
-`tests/test_workflows.py`; the HTTP contract lives in `tests/test_api.py`.
+Nothing here launches DBOS: the pipeline stages are called straight through, in the order the
+workflows call them. Every test that needs the durable runtime lives in `tests/test_workflows.py`;
+the HTTP contract lives in `tests/test_api.py`.
 """
 
 import base64
@@ -22,34 +23,53 @@ import msgspec
 import pyarrow as pa
 import pytest
 import structlog
-from conftest import maintenance_state, text_pdf
+from conftest import import_row, maintenance_state, text_pdf
 
-from haskie import audit, chunk, convert, db, embed, logs, maintenance, pipeline, session, toc
+from haskie import (
+    audit,
+    chunk,
+    convert,
+    db,
+    document,
+    embed,
+    embed_cache,
+    home,
+    logs,
+    maintenance,
+    pipeline,
+    toc,
+)
+from haskie import collection as collection_module
 from haskie.chunk import Chunk
+from haskie.collection import Collection, DocumentCounts, Member
+from haskie.document import Document
 from haskie.errors import (
+    CollectionNotFound,
     Conflict,
     ConversionError,
     DocumentNotFound,
+    HaskieError,
     InvalidInput,
-    LibraryNotFound,
     NeedsOcr,
+    NotReady,
     UnsupportedFileType,
 )
 from haskie.index import (
     PLAIN_SCHEMA,
+    CollectionIndex,
     Hit,
     IndexStats,
-    LibraryIndex,
     Row,
     _fusion,
     _partitions,
     row_score,
 )
-from haskie.library import Library
+from haskie.paging import PageRequest
 from haskie.settings import (
+    ChunkSettings,
+    CollectionSettings,
     ConversionSettings,
     EmbeddingModel,
-    LibrarySettings,
     PipelineSettings,
     SearchOverrides,
     SearchSettings,
@@ -63,8 +83,7 @@ from haskie.settings import (
 
 MD = "# Title\n\nintro text\n\n## Alpha\n\nalpha body about lancedb\n\n## Beta\n\nbeta body\n"
 
-
-SMALL = ConversionSettings(chunk_size=40, chunk_overlap=0)
+SMALL = ChunkSettings(chunk_size=40, chunk_overlap=0)
 
 # A 1x1 transparent PNG: the smallest real image file, enough to exercise the preview branch.
 PNG_1X1 = base64.b64decode(
@@ -99,17 +118,44 @@ def docx_bytes() -> bytes:
     return buffer.getvalue()
 
 
+async def imported(name: str, content: bytes | str = MD, **options) -> Document:
+    """One imported document, without the pipeline: the row and the file, nothing converted."""
+    return await import_row(name, content, **options)
+
+
+async def _staging_rows() -> list[tuple[str, str, int]]:
+    """Every `staging` row as (id, filename, size): what `stage` commits beside the bytes."""
+    async with db.connect() as conn:
+        rows = await conn.execute_fetchall(
+            "select staging_id, filename, size from staging order by staging_id"
+        )
+    return [tuple(row) for row in rows]
+
+
+async def attachable(name: str, content: bytes | str = MD, **options) -> Document:
+    """`imported`, moved on to the status the pipeline ends at: `Collection.add` takes only an
+    imported document, so a test that attaches one has to get it there first."""
+    doc = await imported(name, content, **options)
+    await document.set_status(doc.name, "imported")
+    return await document.get(doc.name)
+
+
+def _events(caplog) -> list[str]:
+    """Our loggers pass structlog's event dict as the record message."""
+    return [r.msg["event"] for r in caplog.records if isinstance(r.msg, dict)]
+
+
 # --- chunking and table of contents ------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("name", "text", "settings", "expected"),
     [
-        ("no headings -> one untitled chunk", "plain text", ConversionSettings(), [("", 1, 1, [])]),
+        ("no headings -> one untitled chunk", "plain text", ChunkSettings(), [("", 1, 1, [])]),
         (
             "fits capacity -> one chunk, first heading",
             MD,
-            ConversionSettings(),
+            ChunkSettings(),
             [("Title", 1, 11, [])],
         ),
         (
@@ -121,19 +167,19 @@ def docx_bytes() -> bytes:
         (
             "oversize section -> split keeps heading",
             "# H\n\n" + "word " * 20,
-            ConversionSettings(chunk_size=30, chunk_overlap=0),
+            ChunkSettings(chunk_size=30, chunk_overlap=0),
             [("H", 1, 1, [])] + [("H", 3, 3, [])] * 4,
         ),
         (
             "text before first heading -> untitled",
             "pre\n# H\nbody",
-            ConversionSettings(chunk_size=8, chunk_overlap=0),
+            ChunkSettings(chunk_size=8, chunk_overlap=0),
             [("", 1, 1, []), ("H", 2, 3, [])],
         ),
         (
             "nested headings -> ancestry",
             "# A\n## B\n### C\nc\n## D\nd\n",
-            ConversionSettings(chunk_size=6, chunk_overlap=0),
+            ChunkSettings(chunk_size=6, chunk_overlap=0),
             [
                 ("A", 1, 1, []),
                 ("B", 2, 2, ["A"]),
@@ -145,19 +191,19 @@ def docx_bytes() -> bytes:
         (
             "text splitter ignores structure",
             MD,
-            ConversionSettings(chunker="text", chunk_size=1000, chunk_overlap=0),
+            ChunkSettings(chunker="text", chunk_size=1000, chunk_overlap=0),
             [("Title", 1, 11, [])],
         ),
-        ("empty text -> no chunks", "", ConversionSettings(), []),
+        ("empty text -> no chunks", "", ChunkSettings(), []),
         (
             "heading inside first chunk -> used",
             "<!-- page 1 -->\n\n# H\nbody",
-            ConversionSettings(),
+            ChunkSettings(),
             [("H", 1, 4, [])],
         ),
     ],
 )
-def test_chunk(name: str, text: str, settings: ConversionSettings, expected: list) -> None:
+def test_chunk(name: str, text: str, settings: ChunkSettings, expected: list) -> None:
     chunks = chunk.split(text, settings)
     got = [(c.heading, c.line_start, c.line_end, c.parents) for c in chunks]
     assert got == expected, name
@@ -168,16 +214,22 @@ def test_chunk_pages_from_markers() -> None:
     text = "<!-- page 3 -->\n\n# A\nbody a\n\n<!-- page 4 -->\n\n# B\nbody b\n"
     small = [
         (c.heading, c.page_start, c.page_end)
-        for c in chunk.split(text, ConversionSettings(chunk_size=30, chunk_overlap=0))
+        for c in chunk.split(text, ChunkSettings(chunk_size=30, chunk_overlap=0))
     ]
     assert small == [("A", 3, 3), ("B", 4, 4)]
-    (whole,) = chunk.split(text, ConversionSettings())
+    (whole,) = chunk.split(text, ChunkSettings())
     assert (whole.page_start, whole.page_end) == (3, 4), "chunk spanning pages reports the range"
+
+
+def test_chunk_version_is_part_of_the_cache_key() -> None:
+    """A change to the splitting logic has to retire the entries it would now produce
+    differently, so the version travels with the settings into `embed_cache.Params`."""
+    assert chunk.CHUNK_VERSION == embed_cache.CHUNK_VERSION
 
 
 def test_chunk_rejects_overlap_ge_size() -> None:
     """The splitter itself rejects it; settings validation stops it one layer earlier."""
-    bad = ConversionSettings(chunk_size=10, chunk_overlap=9)
+    bad = ChunkSettings(chunk_size=10, chunk_overlap=9)
     object.__setattr__(bad, "chunk_overlap", 10)  # past __post_init__, as a stored row could be
     with pytest.raises(ValueError, match="overlap"):
         chunk.split(MD, bad)
@@ -193,31 +245,50 @@ def test_toc_levels_and_offsets() -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "overrides", "expected"),
+    ("name", "overrides", "user", "expected"),
     [
-        ("no overrides -> user defaults", LibrarySettings(), ("anydoc", 1200, True)),
-        ("override parser only", LibrarySettings(parser="plain"), ("plain", 1200, True)),
-        ("override size only", LibrarySettings(chunk_size=990), ("anydoc", 990, True)),
+        ("no overrides -> user defaults", CollectionSettings(), UserSettings(), (1200, 150, "m")),
         (
-            "override skip_ocr_pages off",
-            LibrarySettings(skip_ocr_pages=False),
-            ("anydoc", 1200, False),
+            "override size only",
+            CollectionSettings(chunk_size=990),
+            UserSettings(),
+            (990, 150, "m"),
         ),
         (
-            "explicit True beats user False",
-            LibrarySettings(skip_ocr_pages=True),
-            ("anydoc", 1200, True),
+            "override chunker only",
+            CollectionSettings(chunker="text"),
+            UserSettings(),
+            (1200, 150, "t"),
+        ),
+        (
+            "override every field",
+            CollectionSettings(chunker="text", chunk_size=500, chunk_overlap=50),
+            UserSettings(),
+            (500, 50, "t"),
+        ),
+        (
+            "an unset field follows the user value",
+            CollectionSettings(chunk_overlap=0),
+            UserSettings(conversion=ConversionSettings(chunk_size=300, chunk_overlap=30)),
+            (300, 0, "m"),
         ),
     ],
 )
-def test_library_settings_resolve(
-    name: str, overrides: LibrarySettings, expected: tuple[str, int, bool]
+def test_collection_settings_resolve_into_chunk_settings(
+    name: str, overrides: CollectionSettings, user: UserSettings, expected: tuple
 ) -> None:
-    user = UserSettings()
-    if name.startswith("explicit True"):
-        user = UserSettings(conversion=ConversionSettings(skip_ocr_pages=False))
+    """A collection only overrides how the shared markdown is split: `parser`/`skip_ocr_pages`
+    belong to the document, chosen once at import."""
     effective = overrides.resolve(user)
-    assert (effective.parser, effective.chunk_size, effective.skip_ocr_pages) == expected, name
+
+    assert isinstance(effective, ChunkSettings), name
+    assert (effective.chunk_size, effective.chunk_overlap, effective.chunker[0]) == expected, name
+
+
+def test_conversion_settings_carry_the_chunking_defaults() -> None:
+    user = ConversionSettings(chunker="text", chunk_size=700, chunk_overlap=70, parser="plain")
+    assert user.chunking == ChunkSettings(chunker="text", chunk_size=700, chunk_overlap=70)
+    assert CollectionSettings().resolve(UserSettings(conversion=user)) == user.chunking
 
 
 def test_search_overrides_resolve_per_field() -> None:
@@ -245,10 +316,14 @@ def test_every_setting_has_title_and_definition() -> None:
     assert user_docs["conversion.chunk_size"].title == "Chunk size (characters)"
     assert "characters" in user_docs["conversion.chunk_size"].description
     assert all(d.title and d.description for d in user_docs.values())
-    # library overrides reuse the same definitions
-    lib_docs = docs(LibrarySettings)
-    assert lib_docs["chunk_size"] == user_docs["conversion.chunk_size"]
-    assert lib_docs["search.reranker"] == user_docs["search.reranker"]
+    # collection overrides and the chunk settings reuse the same definitions
+    collection_docs = docs(CollectionSettings)
+    chunking = {"chunker", "chunk_size", "chunk_overlap"}
+    search = {key for key in user_docs if key.startswith("search.")}
+    assert set(collection_docs) == chunking | search, "chunking and search, and nothing else"
+    assert collection_docs["chunk_size"] == user_docs["conversion.chunk_size"]
+    assert collection_docs["search.reranker"] == user_docs["search.reranker"]
+    assert docs(ChunkSettings)["chunker"] == user_docs["conversion.chunker"]
 
 
 def test_docs_rejects_a_non_struct() -> None:
@@ -397,24 +472,177 @@ def test_pdf_page_count_of_a_corrupt_file_raises_conversion_error(tmp_path: Path
         convert.pdf_page_count(bad)
 
 
-# --- library -----------------------------------------------------------------------
+# --- documents: staging and import -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "filename", "rename_to", "expected"),
+    [
+        ("the file name, cleaned", "guide.md", None, "guide.md"),
+        ("a path keeps only its last segment", "/tmp/deep/guide.md", None, "guide.md"),
+        ("unsafe characters collapse into one dash", "a b  c.md", None, "a-b-c.md"),
+        ("a rename with no suffix keeps the original's", "book.pdf", "My Book", "My-Book.pdf"),
+        ("a rename with the same suffix is taken as is", "book.pdf", "atlas.pdf", "atlas.pdf"),
+        ("a rename to another suffix keeps the original's", "book.pdf", "a.txt", "a.txt.pdf"),
+        ("the suffix decides the parser, so case is ignored", "BOOK.PDF", None, "BOOK.PDF"),
+    ],
+)
+def test_stored_name_keeps_the_suffix_the_parser_is_chosen_by(
+    name: str, filename: str, rename_to: str | None, expected: str
+) -> None:
+    assert document.stored_name(filename, rename_to) == expected, name
+
+
+@pytest.mark.parametrize(
+    ("name", "filename", "error", "match"),
+    [
+        ("a type nothing can read", "virus.exe", UnsupportedFileType, "unsupported file type"),
+        ("no suffix at all", "README", UnsupportedFileType, "unsupported file type"),
+        ("nothing left after cleaning", "***", InvalidInput, "invalid name"),
+    ],
+)
+def test_stored_name_refuses_what_could_never_be_imported(
+    name: str, filename: str, error: type[Exception], match: str
+) -> None:
+    with pytest.raises(error, match=match):
+        document.stored_name(filename)
 
 
 @pytest.mark.anyio
-async def test_library_rejects_unsupported_and_missing() -> None:
-    lib = await Library.create("misc")
+async def test_stage_writes_the_upload_and_commits_nothing() -> None:
+    """Upload is two-phase: the bytes land in `staging/` with a `staging` row beside them, and no
+    name is taken and no document row is created until the import."""
+    staged = await document.stage("My Guide.md", MD.encode())
+
+    assert staged.filename == "My Guide.md", "the name the user uploaded, for the import form"
+    assert staged.size == len(MD.encode())
+    assert document.STAGING_ID.match(staged.staging_id), "an id this module can turn into a path"
+    path = document.staging_path(staged.staging_id)
+    assert path.parent == home.STAGING_ROOT and path.read_text() == MD
+    assert await _staging_rows() == [(staged.staging_id, "My Guide.md", len(MD.encode()))]
+    assert await document.names() == [], "no document committed yet"
+
+
+@pytest.mark.anyio
+async def test_stage_refuses_what_could_never_be_imported(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(UnsupportedFileType, match="unsupported file type"):
-        await lib.save("virus.exe", b"")
-    with pytest.raises(Conflict, match="already exists"):
-        await Library.create("misc")
-    with pytest.raises(LibraryNotFound, match="library not found"):
-        await Library.get("nope")
-    with pytest.raises(DocumentNotFound, match="document file missing"):
-        lib.source_path("missing.md")
-    with pytest.raises(DocumentNotFound, match="document not found"):
-        await lib.document("missing.md")
-    with pytest.raises(InvalidInput, match="invalid name"):
-        await Library.create("***")
+        await document.stage("virus.exe", b"x")
+    monkeypatch.setattr(document, "UPLOAD_MAX_BYTES", 8)
+    with pytest.raises(InvalidInput, match="file larger than 8 bytes: 20"):
+        await document.stage("big.md", b"x" * 20)
+    assert list(home.STAGING_ROOT.iterdir()) == [], "nothing written for a rejected upload"
+
+
+@pytest.mark.anyio
+async def test_import_staged_moves_the_file_and_creates_the_row() -> None:
+    staged = await document.stage("My Guide.md", MD.encode())
+
+    doc = await document.import_staged(
+        staged.staging_id,
+        name="My Guide.md",
+        description="the guide",
+        parser="plain",
+        skip_ocr_pages=False,
+    )
+
+    assert (doc.name, doc.suffix, doc.size) == ("My-Guide.md", ".md", len(MD.encode()))
+    assert (doc.status, doc.error, doc.preview) == ("queued", None, None), "the pipeline starts it"
+    assert (doc.parser, doc.skip_ocr_pages) == ("plain", False), "conversion is fixed at import"
+    assert doc.description == "the guide"
+    assert doc.original.read_text() == MD
+    assert not document.staging_path(staged.staging_id).exists(), "moved, not copied"
+    assert await _staging_rows() == [], "the staging row goes with the bytes"
+    assert await document.names() == ["My-Guide.md"]
+
+
+@pytest.mark.anyio
+async def test_import_staged_without_a_name_keeps_the_uploaded_file_name() -> None:
+    """The staging id carries only the suffix, so the uploaded name comes off the staging row."""
+    staged = await document.stage("My Guide.md", MD.encode())
+
+    doc = await document.import_staged(staged.staging_id)
+
+    assert doc.name == "My-Guide.md"
+    assert await _staging_rows() == [], "the row is consumed with the staged file"
+
+
+@pytest.mark.anyio
+async def test_import_staged_defaults_conversion_to_the_user_settings() -> None:
+    await save_user_settings(
+        UserSettings(conversion=ConversionSettings(parser="plain", skip_ocr_pages=False))
+    )
+    staged = await document.stage("g.md", MD.encode())
+
+    doc = await document.import_staged(staged.staging_id)
+
+    assert (doc.parser, doc.skip_ocr_pages) == ("plain", False)
+
+
+@pytest.mark.anyio
+async def test_import_staged_renames_and_refuses_a_name_already_taken() -> None:
+    first = await document.stage("book.pdf", text_pdf(["one"]))
+    second = await document.stage("other.pdf", text_pdf(["two"]))
+
+    doc = await document.import_staged(first.staging_id, name="Atlas of Maps")
+
+    assert doc.name == "Atlas-of-Maps.pdf", "the rename names the document, not the parser"
+    with pytest.raises(Conflict, match="document already exists"):
+        await document.import_staged(second.staging_id, name="Atlas of Maps")
+    assert document.staging_path(second.staging_id).exists(), "the refused upload is still staged"
+    assert [row[0] for row in await _staging_rows()] == [second.staging_id], "and so is its row"
+    assert await document.names() == ["Atlas-of-Maps.pdf"]
+
+
+@pytest.mark.parametrize(
+    ("name", "staging_id", "error", "match"),
+    [
+        ("a well-formed id nothing was staged under", f"{'0' * 32}.md", DocumentNotFound, "staged"),
+        ("an id this module never issued", "../../etc/passwd", InvalidInput, "invalid staging id"),
+        ("an empty id", "", InvalidInput, "invalid staging id"),
+    ],
+)
+@pytest.mark.anyio
+async def test_import_staged_rejects_an_id_it_did_not_issue(
+    name: str, staging_id: str, error: type[Exception], match: str
+) -> None:
+    """The staging id is a trust boundary: only what `stage` produced becomes a path."""
+    with pytest.raises(error, match=match):
+        await document.import_staged(staging_id)
+    assert await document.names() == [], name
+
+
+@pytest.mark.anyio
+async def test_sweep_staging_deletes_only_the_uploads_nobody_imported() -> None:
+    """The TTL is read off the staging row; a file with no row at all is an interrupted `stage`,
+    so it goes too once it is that old."""
+    import os
+
+    old = await document.stage("old.md", MD.encode())
+    fresh = await document.stage("fresh.md", MD.encode())
+    stale = document.staging_path(old.staging_id)
+    async with db.connect() as conn:
+        await conn.execute(
+            "update staging set created_at = '1970-01-01T00:00:00+00:00' where staging_id = ?",
+            (old.staging_id,),
+        )
+    orphan = home.STAGING_ROOT / f"{'0' * 32}.md"  # bytes written, the row never landed
+    orphan.write_text("x")
+    os.utime(orphan, (0, 0))  # far older than any cutoff
+    (home.STAGING_ROOT / "not-ours.txt").write_text("x")
+
+    assert await document.sweep_staging(max_age_seconds=3600) == 2
+
+    assert not stale.exists(), "an upload nobody imported is only bytes"
+    assert not orphan.exists(), "and neither is one whose row never landed"
+    assert [row[0] for row in await _staging_rows()] == [fresh.staging_id], "the expired row goes"
+    assert document.staging_path(fresh.staging_id).exists(), "the recent one stays"
+    assert (home.STAGING_ROOT / "not-ours.txt").exists(), "a file this module never wrote"
+
+
+@pytest.mark.anyio
+async def test_sweep_staging_without_a_staging_directory_is_a_no_op() -> None:
+    home.STAGING_ROOT.rmdir()  # made by the test home fixture, still empty
+    assert await document.sweep_staging(max_age_seconds=0) == 0
 
 
 @pytest.mark.parametrize(
@@ -428,7 +656,7 @@ async def test_library_rejects_unsupported_and_missing() -> None:
     ],
 )
 @pytest.mark.anyio
-async def test_save_path_validates_the_import(
+async def test_import_path_validates_the_import(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     name: str,
@@ -436,50 +664,150 @@ async def test_save_path_validates_the_import(
     error: type[Exception],
     match: str,
 ) -> None:
-    from haskie import library as library_module
-
-    monkeypatch.setattr(library_module, "UPLOAD_MAX_BYTES", 16)
-    (tmp_path / "v.exe").write_bytes(b"x")
-    (tmp_path / "big.md").write_bytes(b"x" * 64)
-    lib = await Library.create("imports")
+    monkeypatch.setattr(document, "UPLOAD_MAX_BYTES", 16)
+    outside = tmp_path / "incoming"
+    outside.mkdir(parents=True, exist_ok=True)
+    (outside / "v.exe").write_bytes(b"x")
+    (outside / "big.md").write_bytes(b"x" * 64)
 
     with pytest.raises(error, match=match):
-        await lib.save_path(path.format(tmp=tmp_path))
-    assert await lib.document_names() == [], f"nothing stored for a rejected import: {name}"
+        await document.import_path(path.format(tmp=outside))
+    assert await document.names() == [], f"nothing stored for a rejected import: {name}"
 
 
 @pytest.mark.anyio
-async def test_save_path_copies_the_file_and_records_its_size(tmp_path: Path) -> None:
+async def test_import_path_copies_the_file_and_records_its_size() -> None:
     """An import is streamed to its place with `shutil.copyfile`, so the size on the row is the
     size the file was stated at, and the file outside the home is left where it is."""
-    source = tmp_path / "outside.md"
+    source = home.HOME / "incoming" / "outside.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(MD)
-    lib = await Library.create("imports")
 
-    document = await lib.save_path(str(source))
+    doc = await document.import_path(str(source))
 
-    assert (document.name, document.size, document.status) == ("outside.md", len(MD), "uploaded")
-    assert lib.file_path("outside.md").read_text() == MD, "copied, byte for byte"
+    assert (doc.name, doc.size, doc.status) == ("outside.md", len(MD), "queued")
+    assert doc.original.read_text() == MD, "copied, byte for byte"
     assert source.read_text() == MD, "a copy, not a move"
-    assert await lib.document_names() == ["outside.md"]
+    assert await document.names() == ["outside.md"]
 
 
 @pytest.mark.anyio
-async def test_save_rejects_content_over_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    from haskie import library as library_module
+async def test_a_failed_import_leaves_neither_a_row_nor_a_name_it_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row goes in before the file, so a file that cannot be placed has to take the row with
+    it: otherwise the name would be held by a document that does not exist."""
+    import shutil
 
-    monkeypatch.setattr(library_module, "UPLOAD_MAX_BYTES", 8)
-    lib = await Library.create("caps")
-    with pytest.raises(InvalidInput, match="file larger than 8 bytes: 20"):
-        await lib.save("big.md", b"x" * 20)
+    def refuse(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(shutil, "copyfile", refuse)
+
+    with pytest.raises(OSError, match="disk full"):
+        await imported("g.md")
+
+    assert await document.names() == [], "the name is free again"
+    assert not document.root("g.md").exists()
+
+
+# --- documents: rows, listing and preview -------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_get_and_get_many_read_the_rows() -> None:
+    await imported("a.md")
+    await imported("b.md")
+
+    found = await document.get_many(["a.md", "ghost.md", "a.md", "b.md"])
+
+    assert set(found) == {"a.md", "b.md"}, "a name with no row is absent, duplicates collapse"
+    assert found["a.md"].size == len(MD)
+    assert await document.get_many([]) == {}
+    with pytest.raises(DocumentNotFound, match="document not found"):
+        await document.get("ghost.md")
+
+
+@pytest.mark.anyio
+async def test_source_path_of_a_document_whose_file_is_gone() -> None:
+    doc = await imported("a.md")
+    doc.original.unlink()
+    with pytest.raises(DocumentNotFound, match="document file missing"):
+        doc.source_path()
+
+
+@pytest.mark.anyio
+async def test_set_status_bumps_updated_at_and_the_preview_does_not() -> None:
+    """`updated_at` is what the "recently touched" sort reads, so only a change to the document
+    may move it: a lifecycle step does, filling in the preview does not."""
+    first = await imported("a.md")
+    assert first.created_at > 0, "stamped on import"
+    assert first.updated_at == first.created_at, "an import is the document's first change"
+
+    await document.set_status("a.md", "imported")
+    done = await document.get("a.md")
+    assert done.updated_at > first.updated_at, "a lifecycle step is a change"
+    assert (done.status, done.error) == ("imported", None)
+    assert done.created_at == first.created_at, "the import moment never moves"
+
+    await document.set_status("a.md", "error", "boom")
+    failed = await document.get("a.md")
+    assert (failed.status, failed.error) == ("error", "boom"), "the reason is stored with it"
+
+    await document.ensure_preview("a.md")
+    previewed = await document.get("a.md")
+    assert previewed.preview is not None, "the preview was built"
+    assert previewed.updated_at == failed.updated_at, "filling in the preview is not a change"
+
+
+@pytest.mark.anyio
+async def test_describe_replaces_the_description_and_reads_in_batches() -> None:
+    await imported("a.md")
+    await imported("b.md")
+
+    described = await document.describe("a.md", "the alpha guide")
+
+    assert described.description == "the alpha guide"
+    assert await document.describe_of({"a.md", "b.md"}) == {"a.md": "the alpha guide"}, (
+        "a document without one is absent"
+    )
+    assert await document.describe_of(set()) == {}
+    assert (await document.describe("a.md", "")).description == "", "empty clears it"
+    with pytest.raises(DocumentNotFound):
+        await document.describe("ghost.md", "x")
+
+
+@pytest.mark.anyio
+async def test_document_page_sorts_filters_and_resumes_by_keyset() -> None:
+    sizes = {"a.md": 30, "b.md": 10, "c.md": 20}
+    for name, size in sizes.items():
+        await imported(name, "x" * size)
+    await document.set_status("a.md", "imported")
+    await document.set_status("b.md", "error", "boom")
+
+    by_name = await document.page(PageRequest(page_size=2))
+    assert [d.name for d in by_name.items] == ["a.md", "b.md"]
+    assert (by_name.total, by_name.next_cursor is None) == (3, False)
+    resumed = await document.page(PageRequest(cursor=by_name.next_cursor, page_size=2))
+    assert [d.name for d in resumed.items] == ["c.md"], "the keyset resumes past the last row"
+    assert resumed.next_cursor is None, "the last page says so"
+
+    by_size = await document.page(PageRequest(sort="size", order="desc"))
+    assert [d.name for d in by_size.items] == ["a.md", "c.md", "b.md"]
+
+    filtered = await document.page(PageRequest(), status="imported")
+    assert [d.name for d in filtered.items] == ["a.md"]
+    assert filtered.total == 1, "total counts the filtered rows, not every document"
+
+    with pytest.raises(InvalidInput, match="unknown sort"):
+        await document.page(PageRequest(sort="colour"))
 
 
 @pytest.mark.anyio
 async def test_ensure_preview_builds_once_and_then_reads_the_stored_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lib = await Library.create("prev")
-    doc = await lib.save("g.md", MD.encode())
+    doc = await imported("g.md")
     builds: list[str] = []
     real = convert.build_preview
 
@@ -489,52 +817,229 @@ async def test_ensure_preview_builds_once_and_then_reads_the_stored_row(
 
     monkeypatch.setattr(convert, "build_preview", counted)
 
-    first = await lib.ensure_preview(doc.name)
-    second = await lib.ensure_preview(doc.name)
+    first = await document.ensure_preview(doc.name)
+    second = await document.ensure_preview(doc.name)
 
-    assert builds == ["g.md"], "the second call reads the row instead of converting again"
+    assert builds == ["original.md"], "the second call reads the row instead of converting again"
     assert first.preview == second.preview and first.preview is not None
     assert first.preview.kind == "text"
+    assert (doc.preview_dir / "preview.md").exists(), "both panes sit in the document's folder"
 
 
 @pytest.mark.anyio
-async def test_library_settings_cache_invalidates_on_set_and_delete() -> None:
-    from haskie import library as library_module
+async def test_ensure_preview_builds_once_when_two_readers_arrive_together() -> None:
+    """B8: the second reader waits on the per-document stripe lock and then finds the stored row."""
+    doc = await imported("g.md")
+    real = convert.build_preview
+    # threading events, because the gate below is held in the worker thread `cpu.on_cpu` runs the
+    # build in; `reader_ready` is awaited on the loop instead, so it is an anyio one
+    building, release = threading.Event(), threading.Event()
+    reader_ready = anyio.Event()
+    builds: list[str] = []
+    results: list[object] = []
 
-    lib = await Library.create("cached")
-    assert await lib.settings() == LibrarySettings(), "no overrides yet"
+    def gated(*args, **kwargs):
+        builds.append(args[0].name)
+        building.set()
+        assert release.wait(timeout=30)
+        return real(*args, **kwargs)
 
-    await lib.set_settings(LibrarySettings(parser="plain"))
-    assert (await (await Library.get("cached")).settings()).parser == "plain", (
+    async def first_reader() -> None:
+        results.append(await document.ensure_preview(doc.name))
+
+    async def second_reader() -> None:
+        await document.get(doc.name)  # the row is readable while the first reader holds the lock
+        reader_ready.set()
+        results.append(await document.ensure_preview(doc.name))
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(convert, "build_preview", gated)
+        async with anyio.create_task_group() as readers:
+            readers.start_soon(first_reader)
+            await anyio.to_thread.run_sync(building.wait)  # the first build is under way
+            readers.start_soon(second_reader)
+            await reader_ready.wait()
+            stripe = document._preview_lock(doc.name)
+            while stripe.statistics().tasks_waiting == 0:  # the second reader is on the lock
+                await anyio.sleep(0.01)
+            release.set()
+
+    assert len(builds) == 1, "one build, whichever reader got there first"
+    assert len(results) == 2 and all(r.preview is not None for r in results)  # ty: ignore
+
+
+@pytest.mark.anyio
+async def test_preview_lock_is_striped_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    stripes = document._preview_locks
+    assert len(stripes) == 64
+
+    assert document._preview_lock("g.md") is document._preview_lock("g.md")
+    assert document._preview_lock("g.md") is not document._preview_lock("h.md"), (
+        "different documents usually take different stripes"
+    )
+
+    for i in range(10_000):
+        document._preview_lock(f"doc-{i}.md")
+
+    assert document._preview_locks is stripes and len(stripes) == 64, "nothing allocated"
+
+    fresh: list = [None] * document.PREVIEW_LOCK_STRIPES
+    monkeypatch.setattr(document, "_preview_locks", fresh)
+    lock = document._preview_lock("g.md")
+
+    assert sum(entry is not None for entry in fresh) == 1, "one lock, made on first use"
+    assert document._preview_lock("g.md") is lock, "and kept for the next reader"
+
+
+@pytest.mark.parametrize(("name", "workers"), [("one at a time", 1), ("two at a time", 2)])
+@pytest.mark.anyio
+async def test_ensure_preview_bounds_concurrent_builds(
+    monkeypatch: pytest.MonkeyPatch, name: str, workers: int
+) -> None:
+    """Four readers open four different documents at once; only `preview_workers` parses run.
+
+    The stripe lock is per document, so nothing but the semaphore holds these four apart.
+    """
+    from haskie import cpu
+
+    # a build holds a CPU slot too, so the budget must not be the ceiling under test here
+    monkeypatch.setattr(cpu, "_cpu_slots", threading.BoundedSemaphore(4))
+    names = [(await imported(f"doc-{i}.md")).name for i in range(4)]
+    entered, release, counted = threading.Semaphore(0), threading.Event(), threading.Lock()
+    live, peak, builds = 0, 0, []
+    real = convert.build_preview
+
+    def gated(*args, **kwargs):
+        nonlocal live, peak
+        with counted:
+            live += 1
+            peak = max(peak, live)
+            builds.append(args[0])
+        entered.release()
+        assert release.wait(timeout=30)
+        try:
+            return real(*args, **kwargs)
+        finally:
+            with counted:
+                live -= 1
+
+    document.configure_preview_slots(workers)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(convert, "build_preview", gated)
+            async with anyio.create_task_group() as readers:
+                for doc in names:
+                    readers.start_soon(document.ensure_preview, doc)
+                for _ in range(workers):  # every slot of the pool is now inside a build
+                    await anyio.to_thread.run_sync(entered.acquire)
+                assert document._preview_slots.value == 0, f"{name}: no slot left"
+                release.set()
+    finally:
+        document.configure_preview_slots(PipelineSettings().preview_workers)
+
+    assert len(builds) == 4, f"{name}: every document was built, once"
+    assert peak == workers, f"{name}: never more parses at once than the pool admits"
+
+
+@pytest.mark.anyio
+async def test_ensure_preview_returns_not_ready_when_the_queue_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reader that waited out `PREVIEW_WAIT_SECONDS` is told to retry (503) rather than holding
+    its request open until the burst clears."""
+    doc = await imported("g.md")
+    monkeypatch.setattr(document, "PREVIEW_WAIT_SECONDS", 0.05)
+    slots = anyio.Semaphore(1)
+    monkeypatch.setattr(document, "_preview_slots", slots)
+    await slots.acquire()  # the test holds the only slot, so every reader waits it out
+    try:
+        with pytest.raises(NotReady, match="preview queue is full"):
+            await document.ensure_preview(doc.name)
+    finally:
+        slots.release()
+
+    assert (await document.get(doc.name)).preview is None, "nothing built, nothing stored"
+
+
+# --- collections -------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_collection_create_get_and_delete() -> None:
+    made = await Collection.create("misc", description="odds and ends")
+
+    assert made.name == "misc"
+    assert made.root.is_dir(), "the folder is made with the row"
+    assert await made.description() == "odds and ends"
+    assert await Collection.names() == ["misc"]
+    with pytest.raises(Conflict, match="already exists"):
+        await Collection.create("misc")
+    with pytest.raises(CollectionNotFound, match="collection not found"):
+        await Collection.get("nope")
+    with pytest.raises(InvalidInput, match="invalid name"):
+        await Collection.create("***")
+
+    await (await Collection.get("misc")).delete()
+
+    assert await Collection.names() == [] and not made.root.exists()
+    assert await Collection("misc").description() == "", "a collection that no longer exists"
+
+
+@pytest.mark.anyio
+async def test_collection_describe_replaces_the_description() -> None:
+    collection = await Collection.create("notes")
+    await collection.describe("everything I read")
+    assert await collection.description() == "everything I read"
+    await collection.describe("")
+    assert await collection.description() == "", "empty clears it"
+
+
+@pytest.mark.anyio
+async def test_collection_settings_cache_invalidates_on_set_and_delete() -> None:
+    collection = await Collection.create("cached")
+    assert await collection.settings() == CollectionSettings(), "no overrides yet"
+
+    await collection.set_settings(CollectionSettings(chunker="text"))
+    assert (await (await Collection.get("cached")).settings()).chunker == "text", (
         "the setter refreshes"
     )
 
     async with db.connect() as conn:  # a write the setter never saw
         await conn.execute(
-            "update libraries set settings = '{\"chunk_size\": 42}' where name = ?", ("cached",)
+            "update collections set settings = '{\"chunk_size\": 42}' where name = ?", ("cached",)
         )
-    assert (await lib.settings()).chunk_size is None, "the process cache still owns the value"
-    library_module.invalidate_library_caches()
-    assert (await lib.settings()).chunk_size == 42
+    assert (await collection.settings()).chunk_size is None, "the process cache owns the value"
+    collection_module.invalidate_collection_caches()
+    assert (await collection.settings()).chunk_size == 42
 
-    await lib.delete()
-    await Library.create("cached")
-    assert await (await Library.get("cached")).settings() == LibrarySettings(), "starts clean"
+    await collection.delete()
+    await Collection.create("cached")
+    assert await (await Collection.get("cached")).settings() == CollectionSettings(), "clean"
 
 
 @pytest.mark.anyio
-async def test_load_settings_reads_every_library_it_was_asked_for_in_one_query(
+async def test_chunk_settings_of_a_collection_resolve_against_the_user_settings() -> None:
+    await save_user_settings(
+        UserSettings(conversion=ConversionSettings(chunk_size=800, chunk_overlap=80))
+    )
+    collection = await Collection.create("chunky")
+    await collection.set_settings(CollectionSettings(chunker="text"))
+
+    assert await collection.chunk_settings() == ChunkSettings("text", 800, 80)
+    assert (await collection.search_settings()).limit == SearchSettings().limit
+
+
+@pytest.mark.anyio
+async def test_load_settings_reads_every_collection_it_was_asked_for_in_one_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cross-library search resolves the settings of its whole selection at once, so the cost is
-    one SELECT rather than one per library. A name without a row stays out of the answer."""
-    from haskie import library as library_module
-
+    """A cross-collection search resolves the settings of its whole selection at once, so the cost
+    is one SELECT rather than one per collection. A name without a row stays out of the answer."""
     for name in ("alpha", "beta"):
-        await Library.create(name)
-    await Library("alpha").set_settings(LibrarySettings(parser="plain"))
-    library_module.invalidate_library_caches()
-    assert await Library.load_settings([]) == {}, "nothing asked for, nothing read"
+        await Collection.create(name)
+    await Collection("alpha").set_settings(CollectionSettings(chunker="text"))
+    collection_module.invalidate_collection_caches()
+    assert await Collection.load_settings([]) == {}, "nothing asked for, nothing read"
     statements: list[str] = []
     real_execute = aiosqlite.Connection.execute
 
@@ -544,74 +1049,274 @@ async def test_load_settings_reads_every_library_it_was_asked_for_in_one_query(
 
     monkeypatch.setattr(aiosqlite.Connection, "execute", counted)
 
-    found = await Library.load_settings(["alpha", "beta", "ghost", "alpha"])
+    found = await Collection.load_settings(["alpha", "beta", "ghost", "alpha"])
 
     assert set(found) == {"alpha", "beta"}, "a name with no row is absent from the result"
-    assert (found["alpha"].parser, found["beta"]) == ("plain", LibrarySettings())
+    assert (found["alpha"].chunker, found["beta"]) == ("text", CollectionSettings())
     selects = [sql for sql in statements if sql.lstrip().lower().startswith("select")]
     assert len(selects) == 1, "one query for every name, duplicates included"
-    assert set(library_module._settings_cache) == {"alpha", "beta"}, "filled on the way"
+    assert set(collection_module._settings_cache) == {"alpha", "beta"}, "filled on the way"
 
 
 @pytest.mark.anyio
-async def test_preview_lock_is_striped_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    from haskie import library as library_module
+async def test_reranker_overrides_lists_every_model_a_collection_chose() -> None:
+    """The model downloads have to cover the overrides too, so they are read in one query."""
+    from haskie.settings import RERANKER_MODELS
 
-    stripes = library_module._preview_locks
-    assert len(stripes) == 64
+    for name in ("a", "b", "c"):
+        await Collection.create(name)
+    await Collection("b").set_settings(
+        CollectionSettings(search=SearchOverrides(reranker_model=RERANKER_MODELS[1]))
+    )
+    await Collection("c").set_settings(
+        CollectionSettings(search=SearchOverrides(reranker_model=RERANKER_MODELS[1]))
+    )
+    collection_module.invalidate_collection_caches()
 
-    assert library_module._preview_lock("a", "g.md") is library_module._preview_lock("a", "g.md")
-    assert library_module._preview_lock("a", "g.md") is not library_module._preview_lock(
-        "a", "h.md"
-    ), "different documents usually take different stripes"
-
-    for i in range(10_000):
-        library_module._preview_lock("lib", f"doc-{i}.md")
-
-    assert library_module._preview_locks is stripes and len(stripes) == 64, "nothing allocated"
-
-    fresh: list = [None] * library_module.PREVIEW_LOCK_STRIPES
-    monkeypatch.setattr(library_module, "_preview_locks", fresh)
-    lock = library_module._preview_lock("a", "g.md")
-
-    assert sum(entry is not None for entry in fresh) == 1, "one lock, made on first use"
-    assert library_module._preview_lock("a", "g.md") is lock, "and kept for the next reader"
+    assert await Collection.reranker_overrides() == [RERANKER_MODELS[1]], "no duplicates"
+    assert set(collection_module._settings_cache) == {"a", "b", "c"}, "filled on the way"
 
 
 @pytest.mark.anyio
-async def test_delete_drops_the_library_from_every_session() -> None:
+async def test_collection_page_lists_summaries_with_their_counts() -> None:
+    for name in ("alpha", "beta", "gamma"):
+        await Collection.create(name, description=f"{name} notes")
+    await attachable("a.md")
+    await Collection("beta").add("a.md")
+    await Collection("beta").set_member_status("a.md", "indexed")
+
+    first = await Collection.page(PageRequest(page_size=2))
+
+    assert [c.name for c in first.items] == ["alpha", "beta"]
+    assert first.total == 3 and first.next_cursor is not None
+    assert first.items[0].counts == DocumentCounts(), "a collection with no members"
+    assert (first.items[1].counts.total, first.items[1].counts.indexed) == (1, 1)
+    assert first.items[1].description == "beta notes"
+    rest = await Collection.page(PageRequest(cursor=first.next_cursor, page_size=2))
+    assert [c.name for c in rest.items] == ["gamma"] and rest.next_cursor is None
+
+
+# --- collection membership ----------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_add_is_idempotent_and_member_reads_the_document_with_it() -> None:
+    collection = await Collection.create("notes")
+    doc = await attachable("a.md")
+
+    await collection.add(doc.name)
+    first = await collection.member(doc.name)
+    await collection.add(doc.name)
+    again = await collection.member(doc.name)
+
+    assert isinstance(first, Member) and first.status == "pending", "indexing moves it along"
+    assert first.document.name == doc.name and first.document.size == doc.size
+    assert (again.status, again.added_at) == (first.status, first.added_at), "a no-op re-attach"
+    assert await collection.member_names() == ["a.md"]
+
+    await collection.set_member_status(doc.name, "error", "boom")
+    failed = await collection.member(doc.name)
+    assert (failed.status, failed.error) == ("error", "boom")
+    assert failed.updated_at >= failed.added_at
+
+    with pytest.raises(DocumentNotFound, match="document not found"):
+        await collection.add("ghost.md")
+    with pytest.raises(DocumentNotFound, match="document not in collection notes"):
+        await collection.member("ghost.md")
+
+
+@pytest.mark.parametrize("status", ["queued", "converting", "embedding", "error", "deleting"])
+@pytest.mark.anyio
+async def test_add_refuses_a_document_that_is_not_imported(status: str) -> None:
+    """The invariant lives in `add`: one still importing has no markdown to chunk yet, and one
+    being deleted must not gain a membership the delete's snapshot missed."""
+    collection = await Collection.create("notes")
+    doc = await imported("a.md")
+    await document.set_status(doc.name, status)  # ty: ignore
+
+    with pytest.raises(Conflict, match=f"document is {status}; only an imported document"):
+        await collection.add(doc.name)
+
+    assert await collection.member_names() == [], "nothing attached"
+
+
+@pytest.mark.anyio
+async def test_member_names_walk_one_page_at_a_time() -> None:
+    collection = await Collection.create("notes")
+    for name in ("a.md", "b.md", "c.md"):
+        await collection.add((await attachable(name)).name)
+
+    assert await collection.member_names() == ["a.md", "b.md", "c.md"]
+    assert await collection.member_names(limit=2) == ["a.md", "b.md"]
+    assert await collection.member_names(after="b.md") == ["c.md"]
+
+
+@pytest.mark.anyio
+async def test_member_counts_group_by_status() -> None:
+    collection = await Collection.create("counts")
+    for name in ("a.md", "b.md", "c.md", "d.md"):
+        await collection.add((await attachable(name)).name)
+    await collection.set_member_status("a.md", "indexed")
+    await collection.set_member_status("b.md", "indexing")
+    await collection.set_member_status("c.md", "error", "boom")
+
+    counts = await collection.counts()
+
+    assert counts.total == 4
+    assert counts.indexed == 1
+    assert counts.active == 2, "pending and indexing are both in flight"
+    assert counts.error == 1
+    assert counts.by_status == {"indexed": 1, "indexing": 1, "error": 1, "pending": 1}
+    empty = await Collection.create("empty")
+    assert await empty.counts() == DocumentCounts(), "a collection without members"
+
+
+@pytest.mark.parametrize(
+    ("name", "sort", "order", "expected"),
+    [
+        ("by name", "name", "asc", ["a.md", "b.md", "c.md"]),
+        ("by size, largest first", "size", "desc", ["a.md", "c.md", "b.md"]),
+        ("by membership status", "status", "asc", ["c.md", "a.md", "b.md"]),
+        ("by when the membership last moved", "updated_at", "asc", ["a.md", "b.md", "c.md"]),
+    ],
+)
+@pytest.mark.anyio
+async def test_members_page_sorts_on_the_document_and_on_the_membership(
+    name: str, sort: str, order: str, expected: list[str]
+) -> None:
+    """The listing joins both tables, so `name`/`size` come from the document and
+    `status`/`updated_at` from the membership."""
+    collection = await Collection.create("notes")
+    for doc, size in (("a.md", 30), ("b.md", 10), ("c.md", 20)):
+        await collection.add((await attachable(doc, "x" * size)).name)
+    for doc, status in (("a.md", "indexed"), ("b.md", "pending"), ("c.md", "error")):
+        await collection.set_member_status(doc, status)
+
+    page = await collection.members_page(PageRequest(sort=sort, order=order))  # ty: ignore
+
+    assert [member.document.name for member in page.items] == expected, name
+    assert page.total == 3, name
+
+
+@pytest.mark.anyio
+async def test_members_page_filters_by_status_and_resumes_by_keyset() -> None:
+    collection = await Collection.create("notes")
+    for doc in ("a.md", "b.md", "c.md"):
+        await collection.add((await attachable(doc)).name)
+    await collection.set_member_status("b.md", "indexed")
+
+    first = await collection.members_page(PageRequest(page_size=2))
+    assert [m.document.name for m in first.items] == ["a.md", "b.md"]
+    resumed = await collection.members_page(PageRequest(cursor=first.next_cursor, page_size=2))
+    assert [m.document.name for m in resumed.items] == ["c.md"]
+
+    indexed = await collection.members_page(PageRequest(), status="indexed")
+    assert [m.document.name for m in indexed.items] == ["b.md"]
+    assert indexed.total == 1, "total counts the filtered rows"
+
+
+@pytest.mark.anyio
+async def test_one_document_sits_in_two_collections_and_a_detach_leaves_both_alone() -> None:
+    """Membership is many-to-many, so detaching from one collection touches neither the document
+    nor the other collection, and never the embedding cache."""
+    doc = await attachable("shared.md")
+    for name in ("alpha", "beta"):
+        await (await Collection.create(name)).add(doc.name)
+    params = embed_cache.params(doc, ChunkSettings(), None)
+    rows = home.HOME / "rows" / "000000.rows.json"
+    rows.parent.mkdir(parents=True, exist_ok=True)
+    rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0])]))
+    cache_id = await embed_cache.write(params, [rows], None)
+
+    assert await document.collections_of(doc.name) == ["alpha", "beta"]
+
+    await Collection("alpha").remove_member(doc.name)
+
+    assert await document.collections_of(doc.name) == ["beta"], "only that membership went"
+    assert (await document.get(doc.name)).name == doc.name, "the document stays"
+    assert await embed_cache.lookup(params) == cache_id, "and so does what it costs to compute"
+    assert await Collection("beta").member(doc.name) is not None
+
+
+@pytest.mark.anyio
+async def test_deleting_a_collection_leaves_its_documents() -> None:
+    doc = await attachable("kept.md")
+    for name in ("alpha", "beta"):
+        await (await Collection.create(name)).add(doc.name)
+
+    await (await Collection.get("alpha")).delete()
+
+    assert await Collection.names() == ["beta"]
+    assert await document.names() == ["kept.md"], "the document belongs to no collection"
+    assert doc.original.exists(), "and keeps its files"
+    assert await document.collections_of(doc.name) == ["beta"]
+
+
+@pytest.mark.anyio
+async def test_deleting_a_document_takes_every_membership_and_cache_row_with_it() -> None:
+    doc = await attachable("gone.md")
+    for name in ("alpha", "beta"):
+        await (await Collection.create(name)).add(doc.name)
+    params = embed_cache.params(doc, ChunkSettings(), None)
+    rows = home.HOME / "rows" / "000000.rows.json"
+    rows.parent.mkdir(parents=True, exist_ok=True)
+    rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0])]))
+    await embed_cache.write(params, [rows], None)
+
+    await document.remove_files(doc.name)
+    await document.remove_row(doc.name)
+
+    assert await document.names() == []
+    assert await document.collections_of("gone.md") == [], "both memberships cascaded"
+    assert await embed_cache.entries("gone.md") == [], "and so did the cache rows"
+    assert not doc.root.exists()
+    assert await Collection("alpha").counts() == DocumentCounts(), "the collections stay, empty"
+
+
+@pytest.mark.anyio
+async def test_an_unattached_document_is_valid_and_listable() -> None:
+    doc = await imported("lonely.md")
+
+    assert await document.collections_of(doc.name) == []
+    page = await document.page(PageRequest())
+    assert [d.name for d in page.items] == ["lonely.md"]
+
+
+@pytest.mark.anyio
+async def test_deleting_a_collection_drops_it_from_every_session() -> None:
+    """One cascade from the `collections` row: the memberships and every session that chose it."""
     for name in ("keep", "drop"):
-        await Library.create(name)
-    await session.set_libraries("s1", ["keep", "drop"])
-    await session.set_libraries("s2", ["keep"])
+        await Collection.create(name)
+    async with db.connect() as conn:
+        await conn.execute("insert into sessions (id) values ('s1')")
+        await conn.executemany(
+            "insert into session_collections (session_id, collection, position) values (?, ?, ?)",
+            [("s1", "keep", 0), ("s1", "drop", 1)],
+        )
 
-    await (await Library.get("drop")).delete()
+    await (await Collection.get("drop")).delete()
 
-    assert await session.load() == {"s1": ["keep"], "s2": ["keep"]}
-    assert await Library.names() == ["keep"]
-
-
-def _events(caplog) -> list[str]:
-    """Our loggers pass structlog's event dict as the record message."""
-    return [r.msg["event"] for r in caplog.records if isinstance(r.msg, dict)]
+    async with db.connect() as conn:
+        rows = await conn.execute_fetchall("select collection from session_collections")
+    assert list(rows) == [("keep",)]
+    assert await Collection.names() == ["keep"]
 
 
 # --- index -------------------------------------------------------------------------
-
 
 COMPACT = EmbeddingModel("BAAI/bge-small-en-v1.5", 384)
 
 
 def _table_with(path: Path, schema: pa.Schema) -> None:
-    """A table written straight to disk, bypassing `LibraryIndex`: the schema under test is one
+    """A table written straight to disk, bypassing `CollectionIndex`: the schema under test is one
     the current build would never write. The sync LanceDB API on purpose, so sync fixtures and
     sync tests can set the stage as well."""
     lancedb.connect(str(path)).create_table("chunks", schema=schema)
 
 
 async def _aparts(parts: list[tuple[int, list[Row]]]) -> AsyncIterator[tuple[int, list[Row]]]:
-    """`add_parts` takes an async iterator: the pipeline decodes one `rows.json` at a time and
-    awaits each read (see `pipeline._grouped_rows`)."""
+    """`add_parts` takes an async iterator: the index stage reads one row group of the embedding
+    cache at a time and awaits each read (see `embed_cache.read`)."""
     for part in parts:
         yield part
 
@@ -654,7 +1359,7 @@ async def test_schema_current(
     path = tmp_path / "index"
     if schema is not None:
         _table_with(path, schema)
-    index = LibraryIndex(path, "lib", tmp_path, embedding)
+    index = CollectionIndex(path, "notes", tmp_path, embedding)
     assert await index.schema_current() is expected, name
 
 
@@ -664,57 +1369,55 @@ async def test_schema_current_is_cached_until_a_write(
 ) -> None:
     """The index stage is the only writer of a table and runs in this process, so the answer is
     cached per index directory; the write path forgets it again."""
-    from haskie.index import LibraryIndex as Index
-
     path = tmp_path / "index"
     _table_with(path, pa.schema([("doc", pa.string()), ("text", pa.string())]))  # older build
     inspected: list[Path] = []
-    real = Index._existing
+    real = CollectionIndex._existing
 
-    async def counted(self: Index):
+    async def counted(self: CollectionIndex):
         inspected.append(self.path)
         return await real(self)
 
-    monkeypatch.setattr(Index, "_existing", counted)
+    monkeypatch.setattr(CollectionIndex, "_existing", counted)
 
-    assert await Index(path, "lib", tmp_path, None).schema_current() is False
+    assert await CollectionIndex(path, "notes", tmp_path, None).schema_current() is False
     assert inspected == [path], "the first answer reads the table"
     inspected.clear()
-    assert await Index(path, "lib", tmp_path, None).schema_current() is False
+    assert await CollectionIndex(path, "notes", tmp_path, None).schema_current() is False
     assert inspected == [], "a second index instance answers from the process cache"
 
-    await Index(path, "lib", tmp_path, None).reset_for_write()  # drops it, creates a current one
+    await CollectionIndex(path, "notes", tmp_path, None).reset_for_write()  # drops it
 
-    assert await Index(path, "lib", tmp_path, None).schema_current() is True, "re-read"
+    assert await CollectionIndex(path, "notes", tmp_path, None).schema_current() is True, "re-read"
 
 
 @pytest.mark.anyio
 async def test_a_missing_table_is_never_cached(tmp_path: Path) -> None:
     """Caching "nothing to reject" would hide the table the index stage creates a moment later."""
     path = tmp_path / "index"
-    assert await LibraryIndex(path, "lib", tmp_path, COMPACT).schema_current() is True
+    assert await CollectionIndex(path, "notes", tmp_path, COMPACT).schema_current() is True
 
     _table_with(path, PLAIN_SCHEMA)  # no vector column, so it cannot hold COMPACT rows
 
-    assert await LibraryIndex(path, "lib", tmp_path, COMPACT).schema_current() is False
+    assert await CollectionIndex(path, "notes", tmp_path, COMPACT).schema_current() is False
 
 
 @pytest.mark.anyio
-async def test_deleting_a_library_forgets_its_cached_schema() -> None:
-    lib = await Library.create("recycled")
-    _table_with(lib.index_dir, PLAIN_SCHEMA)
-    assert await (await lib.index()).schema_current() is True
+async def test_deleting_a_collection_forgets_its_cached_schema() -> None:
+    collection = await Collection.create("recycled")
+    _table_with(collection.index_dir, PLAIN_SCHEMA)
+    assert await (await collection.index()).schema_current() is True
 
-    await lib.delete()
-    await Library.create("recycled")  # same name, same index directory
-    _table_with(lib.index_dir, pa.schema([("doc", pa.string())]))  # written by an older build
+    await collection.delete()
+    await Collection.create("recycled")  # same name, same index directory
+    _table_with(collection.index_dir, pa.schema([("doc", pa.string())]))  # an older build
 
-    assert await (await (await Library.get("recycled")).index()).schema_current() is False
+    assert await (await (await Collection.get("recycled")).index()).schema_current() is False
 
 
 @pytest.mark.anyio
 async def test_existing_never_creates_the_index_directory(tmp_path: Path) -> None:
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, None)
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     assert await index._existing() is None
     assert not (tmp_path / "index").exists(), "a read must not create a LanceDB directory"
 
@@ -723,12 +1426,12 @@ async def test_existing_never_creates_the_index_directory(tmp_path: Path) -> Non
 async def test_existing_is_none_for_a_directory_without_the_table(tmp_path: Path) -> None:
     path = tmp_path / "index"
     lancedb.connect(str(path))  # creates the directory, no table
-    assert await LibraryIndex(path, "lib", tmp_path, None)._existing() is None
+    assert await CollectionIndex(path, "notes", tmp_path, None)._existing() is None
 
 
 @pytest.mark.anyio
-async def test_search_of_a_never_indexed_library_is_empty(tmp_path: Path) -> None:
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, None)
+async def test_search_of_a_never_indexed_collection_is_empty(tmp_path: Path) -> None:
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     assert await index.search("anything", SearchSettings()) == []
 
 
@@ -736,12 +1439,12 @@ async def test_search_of_a_never_indexed_library_is_empty(tmp_path: Path) -> Non
 async def test_delete_on_an_outdated_table_removes_nothing_instead_of_dropping_it(
     tmp_path: Path,
 ) -> None:
-    """Deleting one document must never wipe a library built by an older embedding (B1)."""
+    """Deleting one document must never wipe a collection built by an older embedding (B1)."""
     path = tmp_path / "index"
     old = lancedb.connect(str(path)).create_table(
         "chunks", data=[{"doc": "a.md", "chunk_id": 0, "heading": "H", "text": "hello"}]
     )
-    index = LibraryIndex(path, "lib", tmp_path, COMPACT)
+    index = CollectionIndex(path, "notes", tmp_path, COMPACT)
 
     await index.delete_document("a.md")
     await index.delete_parts("a.md", 0, 1)
@@ -752,7 +1455,7 @@ async def test_delete_on_an_outdated_table_removes_nothing_instead_of_dropping_i
 
 @pytest.mark.anyio
 async def test_add_parts_without_a_vector_is_rejected(tmp_path: Path) -> None:
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, COMPACT)
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, COMPACT)
     (row,) = [Row(chunk=c) for c in chunk.split(MD, SMALL)[:1]]
     with pytest.raises(ValueError, match="carries no vector"):
         await index.add_parts("g.md", "s", "m", _aparts([(0, [row])]))
@@ -760,17 +1463,17 @@ async def test_add_parts_without_a_vector_is_rejected(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_add_parts_with_nothing_to_write_creates_no_table(tmp_path: Path) -> None:
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, None)
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     await index.add_parts("g.md", "s", "m", _aparts([(0, [])]))
     assert not (tmp_path / "index").exists()
 
 
 @pytest.mark.anyio
 async def test_finish_on_an_empty_index_is_a_no_op(tmp_path: Path) -> None:
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, None)
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     await index.finish()  # no table yet
     _table_with(tmp_path / "index", PLAIN_SCHEMA)
-    await LibraryIndex(tmp_path / "index", "lib", tmp_path, None).finish()  # table, zero rows
+    await CollectionIndex(tmp_path / "index", "notes", tmp_path, None).finish()  # zero rows
 
 
 # --- index maintenance -------------------------------------------------------------
@@ -801,23 +1504,23 @@ def _vector(seed: int, dims: int = 32) -> list[float]:
 
 
 async def _fill(
-    index: LibraryIndex, doc: str, part: int, count: int, vectors: bool = False
+    index: CollectionIndex, doc: str, part: int, count: int, vectors: bool = False
 ) -> None:
     rows = [
         _row(f"{doc} part{part} row{i} lancedb", _vector(part * 1000 + i) if vectors else None)
         for i in range(count)
     ]
-    await index.add_parts(doc, f"files/{doc}", f"markdown/{doc}.md", _aparts([(part, rows)]))
+    await index.add_parts(doc, f"documents/{doc}", f"documents/{doc}.md", _aparts([(part, rows)]))
 
 
 @pytest.mark.anyio
 async def test_finish_builds_fts_once_and_later_rows_are_still_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """S1: a full-text index costs O(rows) to build, so a library of n documents must not build
+    """S1: a full-text index costs O(rows) to build, so a collection of n documents must not build
     one per document. Rows added after the build are covered by a scan until maintenance folds
     them in, so nothing is lost by building it once."""
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, None)
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     await _fill(index, "a.md", 0, 3)
     table = await index._existing()
     assert table is not None
@@ -843,7 +1546,7 @@ async def test_finish_builds_fts_once_and_later_rows_are_still_found(
 
 @pytest.mark.anyio
 async def test_stats_reports_rows_fragments_and_indices(tmp_path: Path) -> None:
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, None)
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     assert await index.stats() is None, "no table, nothing to report"
 
     await _fill(index, "a.md", 0, 3)
@@ -873,10 +1576,10 @@ async def test_stats_reports_rows_fragments_and_indices(tmp_path: Path) -> None:
     ("name", "num_rows", "expected"),
     [
         ("empty table", 0, 16),
-        ("tiny library clamps to the floor", 100, 16),
+        ("tiny collection clamps to the floor", 100, 16),
         ("50k rows -> sqrt rounded to a power of two", 50_000, 256),
         ("500k rows", 500_000, 512),
-        ("huge library clamps to the ceiling", 10**12, 4096),
+        ("huge collection clamps to the ceiling", 10**12, 4096),
     ],
 )
 def test_partitions_rule(name: str, num_rows: int, expected: int) -> None:
@@ -914,7 +1617,7 @@ def test_ann_due(
 async def test_build_vector_index_and_search_with_probes(tmp_path: Path) -> None:
     """IVF-PQ needs at least 256 rows per codebook, so this trains on 2000 synthetic 32-d rows.
     `nprobes` and `refine_factor` only reach the index; the nearest row must still come first."""
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, TINY)
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, TINY)
     for part in range(2):
         await _fill(index, "a.md", part, 1000, vectors=True)
     await index.finish()
@@ -933,7 +1636,7 @@ async def test_build_vector_index_and_search_with_probes(tmp_path: Path) -> None
 @pytest.mark.anyio
 async def test_search_applies_probes_without_a_vector_index(tmp_path: Path) -> None:
     """The knobs are set on every vector and hybrid query; LanceDB ignores them on a flat scan."""
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, TINY)
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, TINY)
     await _fill(index, "a.md", 0, 4, vectors=True)
     await index.finish()
     probed = SearchSettings(nprobes=1, refine_factor=1, candidates=4)
@@ -964,7 +1667,7 @@ async def test_hybrid_search_fuses_both_rankings(
 ) -> None:
     """Both fusions run over the async hybrid query and score the same column, so `row_score`
     reads one signal whichever one the settings chose."""
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, TINY)
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, TINY)
     await _fill(index, "a.md", 0, 6, vectors=True)
     await index.finish()
 
@@ -981,101 +1684,104 @@ async def test_hybrid_search_fuses_both_rankings(
 async def test_run_maintenance_compacts_fragments_and_settles_the_counter() -> None:
     """Twenty commits leave twenty fragments; one maintenance pass merges them and clears the
     pending counter without touching the rows."""
-    lib = await Library.create("busy")
-    index = lib.index_with(None)
+    collection = await Collection.create("busy")
+    index = collection.index_with(None)
     for part in range(20):
         await _fill(index, "a.md", part, 2)
-        await Library("busy").note_indexed()
+        await Collection("busy").note_indexed()
     before = await index.stats()
     assert before is not None and before.num_fragments == 20
     assert (await maintenance_state("busy")).pending_docs == 20
     claimed = (await maintenance_state("busy")).pending_docs
 
-    report = await maintenance.run(lib, None, PipelineSettings())
-    await Library("busy").settle_maintenance(claimed, report.ann_trained, report.num_rows)
+    report = await maintenance.run(collection, None, PipelineSettings())
+    await Collection("busy").settle_maintenance(claimed, report.ann_trained, report.num_rows)
 
     assert report.skipped is None
-    assert (report.library, report.num_rows, report.ann_trained) == ("busy", 40, False)
+    assert (report.collection, report.num_rows, report.ann_trained) == ("busy", 40, False)
     assert report.fragments_before == 20
     assert report.fragments_after < report.fragments_before
-    after = await lib.index_with(None).stats()
+    after = await collection.index_with(None).stats()
     assert after is not None and (after.num_rows, after.num_fragments) == (40, 1)
     state = await maintenance_state("busy")
     assert (state.pending_docs, state.vector_index_rows) == (0, 0)
     assert state.last_maintained_at is not None and state.last_write_at is not None
-    assert await Library.pending_names() == [], "settled, so no boot reschedules it"
+    assert await Collection.pending_names() == [], "settled, so no boot reschedules it"
 
 
 @pytest.mark.anyio
-async def test_run_maintenance_trains_the_vector_index_once_the_library_is_big_enough() -> None:
-    lib = await Library.create("vec")
-    index = lib.index_with(TINY)
+async def test_run_maintenance_trains_the_vector_index_once_it_is_big_enough() -> None:
+    collection = await Collection.create("vec")
+    index = collection.index_with(TINY)
     for part in range(2):
         await _fill(index, "a.md", part, 1000, vectors=True)
     settings = PipelineSettings(ann_min_rows=500)
 
-    report = await maintenance.run(lib, TINY, settings)
-    await Library("vec").settle_maintenance(0, report.ann_trained, report.num_rows)
+    report = await maintenance.run(collection, TINY, settings)
+    await Collection("vec").settle_maintenance(0, report.ann_trained, report.num_rows)
 
     assert report.ann_trained is True and report.num_rows == 2000
     assert (await maintenance_state("vec")).vector_index_rows == 2000
     # a fresh handle: the one above is pinned to the table version it opened
-    stats = await lib.index_with(TINY).stats()
+    stats = await collection.index_with(TINY).stats()
     assert stats is not None and stats.has_vector_index and stats.has_fts_index
     assert (stats.vector_index_rows, stats.unindexed_rows) == (2000, 0)
 
-    again = await maintenance.run(lib, TINY, settings)
+    again = await maintenance.run(collection, TINY, settings)
 
-    assert again.ann_trained is False, "the library has not doubled since it was trained"
+    assert again.ann_trained is False, "the collection has not doubled since it was trained"
 
 
 @pytest.mark.parametrize(
     ("name", "reason"),
-    [("a library nobody indexed yet", "no-table"), ("a table an older build wrote", "outdated")],
+    [("a collection nobody indexed yet", "no-table"), ("a table an older build wrote", "outdated")],
 )
 @pytest.mark.anyio
 async def test_run_maintenance_skips_what_it_must_not_touch(name: str, reason: str) -> None:
-    lib = await Library.create("skip")
+    collection = await Collection.create("skip")
     if reason == "outdated":
-        _table_with(lib.index_dir, pa.schema([("doc", pa.string()), ("text", pa.string())]))
+        _table_with(collection.index_dir, pa.schema([("doc", pa.string()), ("text", pa.string())]))
 
-    report = await maintenance.run(lib, None, PipelineSettings())
+    report = await maintenance.run(collection, None, PipelineSettings())
 
     assert report.skipped == reason, name
     assert (report.num_rows, report.fragments_after, report.ann_trained) == (0, 0, False)
 
 
 @pytest.mark.anyio
-async def test_run_maintenance_of_a_deleted_library_reports_it_instead_of_raising() -> None:
-    """A run may sit in the queue while the library is deleted, so it never asks for the row it
-    needs before it checks that the library still exists."""
-    lib = await Library.create("gone")
-    await _fill(lib.index_with(None), "a.md", 0, 2)
-    await lib.delete()
+async def test_run_maintenance_of_a_deleted_collection_reports_it_instead_of_raising() -> None:
+    """A run may sit in the queue while the collection is deleted, so it never asks for the row it
+    needs before it checks that the collection still exists."""
+    collection = await Collection.create("gone")
+    await _fill(collection.index_with(None), "a.md", 0, 2)
+    await collection.delete()
 
-    report = await maintenance.run(lib, None, PipelineSettings())
+    report = await maintenance.run(collection, None, PipelineSettings())
 
-    assert report.skipped == "no-library" and report.num_rows == 0
+    assert report.skipped == "no-collection" and report.num_rows == 0
     # settles nothing, raises nothing
-    await Library("gone").settle_maintenance(1, report.ann_trained, report.num_rows)
-    assert await Library("gone").maintenance_state() is None, "no row, not a row of zeroes"
+    await Collection("gone").settle_maintenance(1, report.ann_trained, report.num_rows)
+    assert await Collection("gone").maintenance_state() is None, "no row, not a row of zeroes"
 
 
 @pytest.mark.anyio
-async def test_note_indexed_of_an_unknown_library_counts_nothing() -> None:
-    assert await Library("ghost").note_indexed() == 0
-    assert await Library.pending_names() == []
+async def test_note_indexed_of_an_unknown_collection_counts_nothing() -> None:
+    assert await Collection("ghost").note_indexed() == 0
+    assert await Collection.pending_names() == []
 
 
 @pytest.mark.anyio
-async def test_library_info_reports_the_index_on_demand() -> None:
-    lib = await Library.create("info")
-    assert (await lib.info()).index is None, "no table yet"
+async def test_collection_info_reports_the_index_on_demand() -> None:
+    collection = await Collection.create("info")
+    info = await collection.info()
+    assert info.index is None, "no table yet"
+    assert (info.settings, info.effective) == (CollectionSettings(), ChunkSettings())
+    assert info.counts == DocumentCounts() and info.index_outdated is False
 
-    await _fill(lib.index_with(None), "a.md", 0, 3)
-    await Library("info").note_indexed()
+    await _fill(collection.index_with(None), "a.md", 0, 3)
+    await Collection("info").note_indexed()
 
-    status = (await lib.info()).index
+    status = (await collection.info()).index
     assert status is not None
     assert (status.num_rows, status.num_fragments, status.pending_docs) == (3, 1, 1)
     assert (status.has_fts_index, status.has_vector_index) == (False, False)
@@ -1090,7 +1796,7 @@ async def test_search_falls_back_to_fts_without_an_embedding_model(tmp_path: Pat
     schema = PLAIN_SCHEMA.append(pa.field("vector", pa.list_(pa.float32(), 2)))
     table = lancedb.connect(str(path)).create_table("chunks", schema=schema)
     table.add([{"doc": "a.md", "chunk_id": 0, "heading": "H", "text": "hi", "vector": [0.1, 0.2]}])
-    index = LibraryIndex(path, "lib", tmp_path, None)
+    index = CollectionIndex(path, "notes", tmp_path, None)
     await index.finish()  # build the full-text index the fallback needs
 
     hits = await index.search("hi", SearchSettings(mode="vector"))
@@ -1112,7 +1818,7 @@ def test_score_prefers_the_most_specific_signal(name: str, row: dict, expected: 
 
 
 def test_hit_tolerates_rows_written_by_an_older_build(tmp_path: Path) -> None:
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, None)
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     hit = index.hit({"doc": "a.md", "chunk_id": 3, "heading": "", "text": "body"})
     assert isinstance(hit, Hit)
     assert (hit.source_path, hit.markdown_path, hit.part) == ("", "", 0)
@@ -1120,15 +1826,17 @@ def test_hit_tolerates_rows_written_by_an_older_build(tmp_path: Path) -> None:
     assert (hit.header, hit.location) == ("", "a.md L0-0")
 
 
-def test_hit_builds_a_citable_header_and_location(tmp_path: Path) -> None:
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, None)
+def test_hit_names_the_collection_that_matched_and_builds_a_citation(tmp_path: Path) -> None:
+    """A document belongs to no collection, so the hit carries the collection whose table matched
+    it; the paths it carries are the document's own."""
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     hit = index.hit(
         {
             "doc": "book.pdf",
             "chunk_id": 1,
             "part": 2,
-            "source_path": "library/lib/files/book.pdf",
-            "markdown_path": "library/lib/markdown/book.pdf.md",
+            "source_path": "documents/1f/book.pdf/original.pdf",
+            "markdown_path": "documents/1f/book.pdf/original.pdf.md",
             "line_start": 10,
             "line_end": 20,
             "char_start": 100,
@@ -1141,6 +1849,7 @@ def test_hit_builds_a_citable_header_and_location(tmp_path: Path) -> None:
             "_score": 0.5,
         }
     )
+    assert hit.collection == "notes"
     assert hit.parents == ["Part I", "Chapter 2"]
     assert hit.header == "Part I > Chapter 2 > Results"
     assert hit.location == "book.pdf p.3-4 L10-20"
@@ -1199,11 +1908,11 @@ async def test_cross_encode_rescores_candidates_best_first(
 
 @pytest.mark.anyio
 async def test_an_index_with_an_embedding_stores_a_vector_column(tmp_path: Path) -> None:
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, EmbeddingModel("test/model", 2))
-    (chunk_,) = chunk.split("# H\n\nbody\n", ConversionSettings())
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, EmbeddingModel("test/model", 2))
+    (chunk_,) = chunk.split("# H\n\nbody\n", ChunkSettings())
 
     row = Row(chunk=chunk_, vector=[0.1, 0.2])
-    await index.add_parts("g.md", "files/g.md", "markdown/g.md.md", _aparts([(0, [row])]))
+    await index.add_parts("g.md", "documents/g.md", "documents/g.md.md", _aparts([(0, [row])]))
 
     table = await index._existing()
     assert table is not None
@@ -1215,184 +1924,651 @@ async def test_an_index_with_an_embedding_stores_a_vector_column(tmp_path: Path)
 
 
 @pytest.mark.anyio
-async def test_ensure_preview_builds_once_when_two_readers_arrive_together() -> None:
-    """B8: the second reader waits on the per-document stripe lock and then finds the stored row."""
-    from haskie import library as library_module
+async def test_add_parts_writes_one_fragment_for_many_parts(tmp_path: Path) -> None:
+    """Three parts, one commit, one fragment. An empty part inside the group writes nothing but
+    does not break the group."""
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
+    chunks = chunk.split(MD, SMALL)
+    parts = [(0, [Row(chunk=c) for c in chunks]), (1, []), (2, [Row(chunk=c) for c in chunks])]
 
-    lib = await Library.create("race")
-    doc = await lib.save("g.md", MD.encode())
-    real = convert.build_preview
-    # threading events, because the gate below is held in the worker thread `cpu.on_cpu` runs the
-    # build in; `reader_ready` is awaited on the loop instead, so it is an anyio one
-    building, release = threading.Event(), threading.Event()
-    reader_ready = anyio.Event()
-    builds: list[str] = []
-    results: list[object] = []
+    written = await index.add_parts("g.md", "documents/g.md", "documents/g.md.md", _aparts(parts))
 
-    def gated(*args, **kwargs):
-        builds.append(args[0].name)
-        building.set()
-        assert release.wait(timeout=30)
-        return real(*args, **kwargs)
+    table = await index._existing()
+    assert table is not None
+    assert written == await table.count_rows() == 2 * len(chunks)
+    assert await _fragments(index) == 1, "one commit, however many parts it carried"
+    records = (await table.to_arrow()).to_pylist()
+    assert sorted({r["part"] for r in records}) == [0, 2], "the empty part is skipped"
+    assert {r["chunk_id"] for r in records} == set(range(len(chunks))), "ids restart per part"
+    assert {r["markdown_path"] for r in records} == {"documents/g.md.md"}
 
-    async def first_reader() -> None:
-        results.append(await lib.ensure_preview(doc.name))
 
-    async def second_reader() -> None:
-        await lib.document(doc.name)  # the row is readable while the first reader holds the lock
-        reader_ready.set()
-        results.append(await lib.ensure_preview(doc.name))
+@pytest.mark.anyio
+async def test_delete_parts_removes_only_the_range(tmp_path: Path) -> None:
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
+    (chunk_,) = chunk.split("# H\n\nbody\n", ChunkSettings())
+    for doc in ("a.md", "b.md"):
+        await index.add_parts(
+            doc, "s", "m", _aparts([(part, [Row(chunk=chunk_)]) for part in range(4)])
+        )
 
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(convert, "build_preview", gated)
-        async with anyio.create_task_group() as readers:
-            readers.start_soon(first_reader)
-            await anyio.to_thread.run_sync(building.wait)  # the first build is under way
-            readers.start_soon(second_reader)
-            await reader_ready.wait()
-            stripe = library_module._preview_lock(lib.name, doc.name)
-            while stripe.statistics().tasks_waiting == 0:  # the second reader is on the lock
-                await anyio.sleep(0.01)
-            release.set()
+    await index.delete_parts("a.md", 1, 3)
 
-    assert builds == ["g.md"], "one build, whichever reader got there first"
-    assert len(results) == 2 and all(r.preview is not None for r in results)  # ty: ignore
+    table = await index._existing()
+    assert table is not None
+    kept = {(r["doc"], r["part"]) for r in (await table.to_arrow()).to_pylist()}
+    assert kept == {("a.md", 0), ("a.md", 3)} | {("b.md", part) for part in range(4)}
+
+
+@pytest.mark.anyio
+async def test_fts_rows_is_empty_without_an_fts_index(tmp_path: Path) -> None:
+    """A collection halfway through its first index has rows and no full-text index yet. A
+    cross-collection search must not wait for it, so it contributes nothing instead of a scan."""
+    missing = CollectionIndex(tmp_path / "missing", "notes", tmp_path, None)
+    assert await missing.fts_rows("lancedb", 10) == [], "never indexed, so there is no table"
+
+    _table_with(tmp_path / "empty", PLAIN_SCHEMA)
+    empty = CollectionIndex(tmp_path / "empty", "notes", tmp_path, None)
+    assert await empty.fts_rows("lancedb", 10) == [], "a table with no rows in it"
+
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
+    rows = [Row(chunk=c) for c in chunk.split("# H\n\nlancedb chapter one\n", ChunkSettings())]
+    await index.add_parts("d.md", "documents/d.md", "documents/d.md.md", _aparts([(0, rows)]))
+    assert await index.has_index("text") is False, "written, not indexed: the state under test"
+    assert await index.fts_rows("lancedb", 10) == [], "rows are there, the full-text index is not"
+
+    await index.finish()
+
+    (row,) = await index.fts_rows("lancedb", 10)
+    assert (row["doc"], row["chunk_id"]) == ("d.md", 0)
+    assert row["_score"] > 0, "raw BM25, which is what the cross-collection merge sorts on"
+
+
+@pytest.mark.anyio
+async def test_search_rows_returns_raw_rows_without_cutting(tmp_path: Path) -> None:
+    """Retrieval only: as many rows as the caller asked for, carrying the engine's own score and
+    no cross-encoder score. `search` is what cuts to `settings.limit`."""
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
+    chunks = [
+        c for i in range(6) for c in chunk.split(f"# H\n\nlancedb chapter {i}\n", ChunkSettings())
+    ]
+    assert len(chunks) == 6, "one chunk per text, or the row counts below mean nothing"
+    rows = [Row(chunk=c) for c in chunks]
+    await index.add_parts("d.md", "documents/d.md", "documents/d.md.md", _aparts([(0, rows)]))
+    await index.finish()
+    settings = SearchSettings(limit=2, candidates=4)
+
+    rows = await index.search_rows("lancedb", None, settings, 4)
+
+    assert len(rows) == 4, "the fetch size wins over settings.limit"
+    assert all("_score" in row and "_relevance_score" not in row for row in rows)
+    assert {row["doc"] for row in rows} == {"d.md"}
+    assert len(await index.search_rows("lancedb", None, settings, 100)) == 6, "no more than exist"
+    assert len(await index.search("lancedb", settings)) == 2, "the composed search cuts to limit"
+    missing = CollectionIndex(tmp_path / "missing", "notes", tmp_path, None)
+    assert await missing.search_rows("lancedb", None, settings, 4) == [], "no table, no rows"
+    assert await missing.search("lancedb", settings) == [], "and nothing to compose a search from"
+
+
+@pytest.mark.parametrize(
+    ("name", "embedding", "settings", "vector_column", "expected"),
+    [
+        ("mode fts never embeds", COMPACT, SearchSettings(mode="fts"), True, None),
+        ("no embedding profile", None, SearchSettings(mode="hybrid"), True, None),
+        ("no vector column", COMPACT, SearchSettings(mode="hybrid"), False, None),
+        ("hybrid over a vector table", COMPACT, SearchSettings(mode="hybrid"), True, [0.5] * 384),
+        (
+            "vector mode over a vector table",
+            COMPACT,
+            SearchSettings(mode="vector"),
+            True,
+            [0.5] * 384,
+        ),
+    ],
+)
+@pytest.mark.anyio
+async def test_query_vector_is_none_for_fts_and_without_embedding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    embedding: EmbeddingModel | None,
+    settings: SearchSettings,
+    vector_column: bool,
+    expected: list[float] | None,
+) -> None:
+    from haskie import models
+
+    path = tmp_path / "index"
+    vector_field = pa.field("vector", pa.list_(pa.float32(), 384))
+    _table_with(path, PLAIN_SCHEMA.append(vector_field) if vector_column else PLAIN_SCHEMA)
+    checked: list[tuple[str, str]] = []
+
+    async def require_ready(kind: str, model: str) -> None:
+        checked.append((kind, model))
+
+    monkeypatch.setattr(models, "require_ready", require_ready)
+    monkeypatch.setattr(embed, "embed_query", lambda model, text: [0.5] * model.dims)
+    index = CollectionIndex(path, "notes", tmp_path, embedding)
+
+    assert await index.query_vector("q", settings) == expected, name
+    assert checked == ([("embedding", COMPACT.name)] if expected else []), name
+
+
+@pytest.mark.anyio
+async def test_query_vector_of_a_never_indexed_collection_is_none(tmp_path: Path) -> None:
+    """No table means no search, so the model is never asked for (it may not be loaded)."""
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, COMPACT)
+    assert await index.query_vector("q", SearchSettings(mode="hybrid")) is None
+    assert await index.search("q", SearchSettings(mode="hybrid")) == []
 
 
 # --- pipeline ----------------------------------------------------------------------
+#
+# The three stages called straight through, in the order `workflows` calls them: convert once per
+# document, embed once per distinct `embed_cache.Params`, index once per collection.
+
+
+async def _fragments(index: CollectionIndex) -> int:
+    """Data fragments of the table: LanceDB writes one per commit that carries rows."""
+    table = await index._existing()
+    if table is None:
+        return 0
+    # lancedb annotates stats() as a dataclass but returns plain dicts
+    return (await table.stats())["fragment_stats"]["num_fragments"]  # ty: ignore[not-subscriptable]
+
+
+async def _indexed_rows(collection: Collection) -> int:
+    table = await (await collection.index())._existing()
+    return 0 if table is None else await table.count_rows()
+
+
+async def _convert(doc: Document, batch_pages: int = 10) -> list[pipeline.Batch]:
+    batches = await pipeline.plan_convert(doc, batch_pages)
+    ocr = sum([await pipeline.convert_batch(doc, batch) for batch in batches])
+    await pipeline.finalize_convert(doc, batches, ocr)
+    return batches
+
+
+async def _embed(
+    doc: Document, chunking: ChunkSettings, embedding: EmbeddingModel | None = None
+) -> str:
+    params = embed_cache.params(doc, chunking, embedding)
+    cache_id = embed_cache.key(params)
+    for batch in await pipeline.plan_embed(doc):
+        await pipeline.embed_batch(doc, batch, cache_id, chunking, embedding)
+    return await pipeline.finalize_embed(doc, params, embedding)
+
+
+async def _index(
+    collection: Collection,
+    doc: Document,
+    cache_id: str,
+    group_parts: int = 50,
+    embedding: EmbeddingModel | None = None,
+) -> int:
+    written = 0
+    for batch in await pipeline.plan_index(doc, cache_id, group_parts):
+        written += await pipeline.index_batch(collection, doc, cache_id, batch, embedding)
+    await pipeline.finalize_index(collection, embedding)
+    return written
 
 
 @pytest.mark.anyio
 async def test_plan_embed_requires_a_converted_document() -> None:
-    lib = await Library.create("plans")
-    doc = await lib.save("g.md", MD.encode())
+    doc = await imported("g.md")
     with pytest.raises(FileNotFoundError, match="markdown parts missing"):
-        await pipeline.plan_embed(lib, doc.name)
+        await pipeline.plan_embed(doc)
 
 
 @pytest.mark.anyio
-async def test_plan_index_requires_embedded_rows() -> None:
-    lib = await Library.create("plans")
-    doc = await lib.save("g.md", MD.encode())
-    settings = await lib.effective_settings()
-    (batch,) = await pipeline.plan_convert(lib, doc.name, 10)
-    await pipeline.convert_batch(lib, doc.name, batch, settings)
-    await pipeline.finalize_convert(lib, doc.name, [batch], 0, settings)
+async def test_finalize_embed_requires_the_rows_of_every_part() -> None:
+    doc = await imported("g.md")
+    await _convert(doc)
 
     with pytest.raises(FileNotFoundError, match=r"rows missing for parts \[0\]"):
-        await pipeline.plan_index(lib, doc.name, 50)
+        await pipeline.finalize_embed(doc, embed_cache.params(doc, ChunkSettings(), None), None)
+
+
+@pytest.mark.anyio
+async def test_plan_index_requires_the_cache_file() -> None:
+    doc = await imported("g.md")
+    with pytest.raises(FileNotFoundError, match="embedding cache missing"):
+        await pipeline.plan_index(doc, embed_cache.key(embed_cache.params(doc, SMALL, None)), 50)
 
 
 @pytest.mark.anyio
 async def test_convert_and_embed_write_atomically() -> None:
-    lib = await Library.create("atomic")
-    doc = await lib.save("g.md", MD.encode())
-    settings = await lib.effective_settings()
-    (batch,) = await pipeline.plan_convert(lib, doc.name, 10)
+    doc = await imported("g.md")
+    (batch,) = await pipeline.plan_convert(doc, 10)
 
-    assert await pipeline.convert_batch(lib, doc.name, batch, settings) == 0, (
-        "no OCR pages in markdown"
-    )
-    await pipeline.finalize_convert(lib, doc.name, [batch], 0, settings)
-    chunks = await pipeline.embed_batch(lib, doc.name, batch, settings, None)
+    assert await pipeline.convert_batch(doc, batch) == 0, "no OCR pages in markdown"
+    await pipeline.finalize_convert(doc, [batch], 0)
+    params = embed_cache.params(doc, SMALL, None)
+    chunks = await pipeline.embed_batch(doc, batch, embed_cache.key(params), SMALL, None)
 
-    assert chunks == len(chunk.split(MD, settings))
-    assert lib.markdown_path(doc.name).read_text() == MD
-    assert list(lib.parts_dir(doc.name).glob("*.tmp")) == [], "no temp file left behind"
-    assert not lib.markdown_path(doc.name).with_suffix(".md.tmp").exists()
+    assert chunks == len(chunk.split(MD, SMALL))
+    assert doc.markdown.read_text() == MD
+    assert doc.part_path(0).read_text() == MD, "the part stays: it is the re-chunking input"
+    assert list(doc.parts_dir.glob("*.tmp")) == [], "no temp file left behind"
+    assert not doc.markdown.with_name(doc.markdown.name + ".tmp").exists()
+
+
+@pytest.mark.anyio
+async def test_a_reconversion_starts_the_documents_outputs_over() -> None:
+    """The parts and the markdown are outputs of the conversion, so `plan_convert` rebuilds them.
+    The cached embeddings were chunked from that markdown, so they go too — dropped by
+    `embed_cache.forget`, which `workflows.import_document` runs before the convert stage."""
+    doc = await imported("g.md")
+    await _convert(doc)
+    cache_id = await _embed(doc, SMALL)
+    assert embed_cache.file_path(doc.name, cache_id).exists()
+
+    await embed_cache.forget(doc.name)
+    await pipeline.plan_convert(doc, 10)
+
+    assert not doc.markdown.exists(), "the assembled markdown is rebuilt"
+    assert list(doc.parts_dir.iterdir()) == [], "and so are the parts"
+    assert not doc.embeddings_dir.exists(), "no cache file survives a reconversion"
+    assert await embed_cache.entries(doc.name) == [], "and no cache row either"
 
 
 @pytest.mark.anyio
 async def test_convert_batch_of_a_pdf_reports_pages_needing_ocr() -> None:
-    lib = await Library.create("ocr")
-    doc = await lib.save("scan.pdf", text_pdf(["text page", None]))
-    settings = await lib.effective_settings()
-    batches = await pipeline.plan_convert(lib, doc.name, 10)
+    doc = await imported("scan.pdf", text_pdf(["text page", None]))
+    batches = await pipeline.plan_convert(doc, 10)
 
-    assert await pipeline.convert_batch(lib, doc.name, batches[0], settings) == 1
-    assert "needs OCR, skipped" in lib.part_path(doc.name, 0).read_text()
+    assert await pipeline.convert_batch(doc, batches[0]) == 1
+    assert "needs OCR, skipped" in doc.part_path(0).read_text()
 
 
-# --- sessions ----------------------------------------------------------------------
+@pytest.mark.anyio
+async def test_the_pipeline_indexes_a_markdown_document_into_a_collection() -> None:
+    """Convert, embed into the cache, then read the cache into the collection's table: the whole
+    path a document takes, without the durable runtime around it."""
+    collection = await Collection.create("notes")
+    doc = await imported("guide.md")
+    chunking = await collection.chunk_settings()
 
-# How long one library of a fan-out may wait for the other before the test calls it sequential.
+    await _convert(doc)
+    cache_id = await _embed(doc, chunking)
+    written = await _index(collection, doc, cache_id)
+
+    assert written == await _indexed_rows(collection) > 0
+    (entry,) = await embed_cache.entries(doc.name)
+    assert (entry.id, entry.rows) == (cache_id, written)
+    (hit,) = await collection.search("lancedb")
+    assert (hit.collection, hit.doc) == ("notes", "guide.md")
+    assert hit.source_file == str(doc.original), "the hit points at the document's own files"
+    assert hit.markdown_file == str(doc.markdown)
+    assert Path(hit.markdown_file).read_text() == MD
+
+
+@pytest.mark.anyio
+async def test_index_batch_group_is_idempotent() -> None:
+    """A replay after a crash between the LanceDB commit and the step checkpoint must rewrite the
+    group rather than append it a second time."""
+    collection = await Collection.create("groups")
+    doc = await imported("p.pdf", text_pdf(["alpha one", "beta two", "gamma three"]))
+    await _convert(doc, batch_pages=1)
+    cache_id = await _embed(doc, SMALL)
+
+    assert await embed_cache.row_groups(doc.name, cache_id) == 3, "one group per converted part"
+    assert [(b.seq, b.start, b.end) for b in await pipeline.plan_index(doc, cache_id, 2)] == [
+        (0, 0, 2),
+        (1, 2, 3),
+    ], "the last group holds the remainder"
+    (group,) = await pipeline.plan_index(doc, cache_id, 50)
+    assert (group.seq, group.start, group.end) == (0, 0, 3), "three parts in one commit"
+
+    written = await pipeline.index_batch(collection, doc, cache_id, group, None)
+    assert written == await _indexed_rows(collection) > 0
+    assert await _fragments(await collection.index()) == 1
+
+    written_again = await pipeline.index_batch(collection, doc, cache_id, group, None)
+    assert written_again == written, "the same group again"
+    assert await _indexed_rows(collection) == written, "the range was replaced, not appended"
+
+
+@pytest.mark.anyio
+async def test_two_collections_with_the_same_chunk_settings_share_one_cache_entry() -> None:
+    """The point of the cache: the second collection computes nothing, it reads the parquet file
+    the first one left and writes its own table from it."""
+    alpha = await Collection.create("alpha")
+    beta = await Collection.create("beta")
+    await beta.set_settings(CollectionSettings(chunk_size=40, chunk_overlap=0))
+    doc = await attachable("shared.md")
+    await _convert(doc)
+
+    first = await _embed(doc, await alpha.chunk_settings())
+    second = await _embed(doc, await beta.chunk_settings())
+
+    assert first != second, "different chunk settings, different entries, no collision"
+    assert {entry.id for entry in await embed_cache.entries(doc.name)} == {first, second}
+    assert await _embed(doc, await alpha.chunk_settings()) == first, "the same settings, same id"
+
+    await alpha.add(doc.name)
+    await beta.add(doc.name)
+    rows_alpha = await _index(alpha, doc, first)
+    rows_beta = await _index(beta, doc, second)
+
+    assert rows_alpha > 0 and rows_beta > rows_alpha, "beta chunks the same markdown smaller"
+    assert len(await alpha.search("lancedb")) > 0 and len(await beta.search("lancedb")) > 0
+    assert await document.collections_of(doc.name) == ["alpha", "beta"]
+
+
+# --- sessions and cross-collection search --------------------------------------------
+#
+# `CollectionIndex` splits search into retrieval (`search_rows`), the query embedding
+# (`query_vector`) and row-to-Hit (`hit`), so a session embeds once, fans out and rescores once.
+# `session.rrf_merge` fuses the per-collection rankings by rank, because two indexes do not score
+# on the same scale. `textsearch.merge` merges raw BM25 scores instead: one lexical scorer with
+# the same tokenizer answers in every collection. Both count a passage once, because one document
+# may be a member of several of the collections being searched.
+
+# How long one collection of a fan-out may wait for the other before the test calls it sequential.
 CONCURRENT_SEARCH_SECONDS = 5.0
+
+# The query one cursor below belongs to: (query, collections, page_size).
+TEXT_QUERY = ("lancedb", ["alpha", "beta"], 25)
 
 
 @pytest.mark.parametrize(
-    ("name", "session_id", "libraries", "error", "match"),
+    ("name", "session_id", "collections", "error", "match"),
     [
         ("empty id", "", ["a"], InvalidInput, "session id must be 1..128"),
         ("id too long", "x" * 129, ["a"], InvalidInput, "session id must be 1..128"),
         (
-            "more libraries than the cap",
+            "more collections than the cap",
             "s",
-            [f"l{i}" for i in range(101)],
+            [f"c{i}" for i in range(101)],
             InvalidInput,
-            "at most 100 libraries",
+            "at most 100 collections",
         ),
-        ("unknown library", "s", ["ghost"], LibraryNotFound, "library not found: ghost"),
+        ("unknown collection", "s", ["ghost"], CollectionNotFound, "collection not found: ghost"),
     ],
 )
 @pytest.mark.anyio
-async def test_set_libraries_rejects(
-    name: str, session_id: str, libraries: list[str], error: type[Exception], match: str
+async def test_set_collections_rejects(
+    name: str, session_id: str, collections: list[str], error: type[Exception], match: str
 ) -> None:
-    await Library.create("a")
+    from haskie import session
+
+    await Collection.create("a")
     with pytest.raises(error, match=match):
-        await session.set_libraries(session_id, libraries)
+        await session.set_collections(session_id, collections)
     assert await session.load() == {}, f"nothing stored for a rejected request: {name}"
 
 
 @pytest.mark.anyio
-async def test_set_libraries_deduplicates_and_keeps_order() -> None:
+async def test_set_collections_deduplicates_and_keeps_order() -> None:
+    from haskie import session
+
     for name in ("a", "b"):
-        await Library.create(name)
-    assert await session.set_libraries("s1", ["b", "a", "b"]) == ["b", "a"]
+        await Collection.create(name)
+    assert await session.set_collections("s1", ["b", "a", "b"]) == ["b", "a"]
     assert await session.load() == {"s1": ["b", "a"]}
-    assert await session.libraries_for("s1") == ["b", "a"]
-    assert await session.libraries_for("unknown") == []
+    assert await session.collections_for("s1") == ["b", "a"]
+    assert await session.collections_for("unknown") == []
 
 
 @pytest.mark.anyio
-async def test_session_search_skips_a_library_that_disappeared(caplog, monkeypatch) -> None:
-    """Deleting a library drops it from every session (one cascade), so a name without a row can
-    only come from a delete between the two reads of the search. It is skipped, not raised."""
+async def test_session_collections_keep_their_order_and_survive_reorder() -> None:
+    """The selection is rows with a position, not a JSON list: reordering it rewrites the rows,
+    and a session that selected nothing is still a session."""
+    from haskie import session
+
+    for name in ("a", "b", "c"):
+        await Collection.create(name)
+
+    await session.set_collections("s1", ["c", "a", "b"])
+    assert await session.collections_for("s1") == ["c", "a", "b"]
+
+    assert await session.set_collections("s1", ["b", "c"]) == ["b", "c"], "the selection is new"
+    assert await session.load() == {"s1": ["b", "c"]}
+    async with db.connect() as conn:
+        rows = await conn.execute_fetchall(
+            "select collection, position from session_collections where session_id = 's1' "
+            "order by position"
+        )
+    assert list(rows) == [("b", 0), ("c", 1)], "one row per collection, renumbered from zero"
+
+    await session.set_collections("s1", [])
+    assert await session.load() == {"s1": []}, "an empty selection keeps the session itself"
+
+
+@pytest.mark.anyio
+async def test_session_search_skips_a_collection_that_disappeared(caplog, monkeypatch) -> None:
+    """Deleting a collection drops it from every session (one cascade), so a name without a row
+    can only come from a delete between the two reads of the search. It is skipped, not raised."""
+    from haskie import session
 
     async def nothing_found(names: list[str]) -> dict:
         return {}
 
-    await Library.create("ghost")
-    await session.set_libraries("s1", ["ghost"])
-    monkeypatch.setattr(Library, "load_settings", staticmethod(nothing_found))
+    await Collection.create("ghost")
+    await session.set_collections("s1", ["ghost"])
+    monkeypatch.setattr(Collection, "load_settings", staticmethod(nothing_found))
 
     with caplog.at_level("WARNING"):
         assert await session.search("s1", "anything") == []
-    assert _events(caplog) == ["session_library_missing"]
+    assert _events(caplog) == ["session_collection_missing"]
 
 
 @pytest.mark.anyio
-async def test_session_search_reads_its_libraries_concurrently(monkeypatch) -> None:
-    """Two libraries, two events: each retrieval announces itself and then waits for the other, so
-    the search can only answer at all if the fan-out overlapped. A sequential fan-out would hold
-    the first retrieval until the wait times out, and the timeout fails the search."""
+async def test_session_search_reads_its_collections_concurrently(monkeypatch) -> None:
+    """Two collections, two events: each retrieval announces itself and then waits for the other,
+    so the search can only answer at all if the fan-out overlapped. A sequential fan-out would
+    hold the first retrieval until the wait times out, and the timeout fails the search."""
     import asyncio
 
+    from haskie import session
+
     for name in ("a", "b"):
-        await Library.create(name)
-    await session.set_libraries("s1", ["a", "b"])
+        await Collection.create(name)
+    await session.set_collections("s1", ["a", "b"])
     arrived = {"a": asyncio.Event(), "b": asyncio.Event()}
 
     async def paired(self, query, vector, settings_, limit) -> list[dict]:
-        arrived[self.library].set()
-        other = arrived["b" if self.library == "a" else "a"]
+        arrived[self.collection].set()
+        other = arrived["b" if self.collection == "a" else "a"]
         await asyncio.wait_for(other.wait(), CONCURRENT_SEARCH_SECONDS)
         return []
 
-    monkeypatch.setattr(LibraryIndex, "search_rows", paired)
+    monkeypatch.setattr(CollectionIndex, "search_rows", paired)
 
     assert await session.search("s1", "anything") == []
-    assert all(event.is_set() for event in arrived.values()), "both libraries were read"
+    assert all(event.is_set() for event in arrived.values()), "both collections were read"
+
+
+@pytest.mark.anyio
+async def test_session_search_counts_a_passage_once_across_collections() -> None:
+    """The same document in two chosen collections puts the same chunk in both rankings. A caller
+    wants one hit per passage, so it is credited to the first collection that returned it and the
+    copy is dropped before the ranks are counted."""
+    from haskie import session
+
+    for name in ("alpha", "beta"):
+        collection = await Collection.create(name)
+        index = collection.index_with(None)
+        await _fill(index, "shared.md", 0, 3)
+        await index.finish()
+    await session.set_collections("s1", ["alpha", "beta"])
+
+    hits = await session.search("s1", "lancedb", limit=10)
+
+    assert len(hits) == 3, "three chunks, not six: the copies are merged away"
+    passages = {(hit.doc, hit.part, hit.chunk_id) for hit in hits}
+    assert passages == {("shared.md", 0, i) for i in range(3)}
+    assert {hit.collection for hit in hits} == {"alpha"}, "the first collection that held it"
+
+
+@pytest.mark.parametrize(
+    ("name", "ranked", "expected"),
+    [
+        ("nothing to merge", [], []),
+        ("one ranking keeps its own order", [["a", "b"]], [("a", 1 / 61), ("b", 1 / 62)]),
+        ("an empty ranking contributes nothing", [["a"], []], [("a", 1 / 61)]),
+        (
+            "a hit in both rankings beats a better hit in one",
+            [["a", "b", "c"], ["b", "d"]],
+            [("b", 1 / 62 + 1 / 61), ("a", 1 / 61), ("d", 1 / 62), ("c", 1 / 63)],
+        ),
+        (
+            "a tie keeps the order of first appearance",
+            [["x"], ["y"]],
+            [("x", 1 / 61), ("y", 1 / 61)],
+        ),
+    ],
+)
+def test_rrf_merge_orders_by_rank_and_sums_duplicates(
+    name: str, ranked: list[list[str]], expected: list[tuple[str, float]]
+) -> None:
+    from haskie import session
+
+    merged = session.rrf_merge(ranked, k=60)
+
+    assert [item for item, _ in merged] == [item for item, _ in expected], name
+    assert [score for _, score in merged] == pytest.approx([s for _, s in expected]), name
+
+
+def _ranked(collection: str, doc: str, part: int, chunk_id: int, score: float | None) -> tuple:
+    """One (index, row) pair for `merge`, which only ever reads `index.collection` and the row's
+    identity columns. `score` None writes no `_score` at all, as a row of an older index has."""
+    index = CollectionIndex(Path("/nowhere") / collection, collection, Path("/nowhere"), None)
+    row: dict = {"doc": doc, "part": part, "chunk_id": chunk_id}
+    if score is not None:
+        row["_score"] = score
+    return (index, row)
+
+
+def _identity(pairs: list[tuple]) -> list[tuple[str, str, int, int]]:
+    return [(index.collection, row["doc"], row["part"], row["chunk_id"]) for index, row in pairs]
+
+
+@pytest.mark.parametrize(
+    ("name", "per_collection", "expected"),
+    [
+        ("nothing to merge", [], []),
+        (
+            "a collection that matched nothing contributes nothing",
+            [[], [("a", "d.md", 0, 0, 1.0)]],
+            [("a", "d.md", 0, 0)],
+        ),
+        (
+            "the better score wins, whichever collection it came from",
+            [[("b", "x.md", 0, 0, 9.0)], [("a", "y.md", 0, 0, 1.0)]],
+            [("b", "x.md", 0, 0), ("a", "y.md", 0, 0)],
+        ),
+        (
+            "the same passage from two collections is kept once, the better copy",
+            [[("b", "d.md", 0, 0, 1.0)], [("a", "d.md", 0, 0, 9.0)]],
+            [("a", "d.md", 0, 0)],
+        ),
+        (
+            "an equal score falls back to the collection name, and still counts once",
+            [[("b", "d.md", 0, 0, 1.0)], [("a", "d.md", 0, 0, 1.0)]],
+            [("a", "d.md", 0, 0)],
+        ),
+        (
+            "inside one collection: doc, then part, then chunk",
+            [
+                [
+                    ("a", "z.md", 0, 0, 1.0),
+                    ("a", "a.md", 1, 0, 1.0),
+                    ("a", "a.md", 0, 5, 1.0),
+                    ("a", "a.md", 0, 1, 1.0),
+                ]
+            ],
+            [("a", "a.md", 0, 1), ("a", "a.md", 0, 5), ("a", "a.md", 1, 0), ("a", "z.md", 0, 0)],
+        ),
+        (
+            "a row an older index wrote without a score sorts last",
+            [[("a", "d.md", 0, 1, None)], [("a", "d.md", 0, 0, 0.5)]],
+            [("a", "d.md", 0, 0), ("a", "d.md", 0, 1)],
+        ),
+    ],
+)
+def test_text_merge_orders_by_score_then_identity(
+    name: str, per_collection: list[list[tuple]], expected: list[tuple[str, str, int, int]]
+) -> None:
+    from haskie import textsearch
+
+    merged = textsearch.merge([[_ranked(*row) for row in rows] for rows in per_collection])
+
+    assert _identity(merged) == expected, name
+
+
+def _digest() -> str:
+    """The query identity `TEXT_QUERY` hashes to, read at collection time by the table below."""
+    from haskie import textsearch
+
+    return textsearch.query_hash(*TEXT_QUERY)
+
+
+def _wire_cursor(**overrides) -> str:
+    """A cursor built straight on the wire format, for the fields `make_cursor` never varies."""
+    from haskie import textsearch
+
+    payload: dict = {"k": [_digest(), 10], "s": textsearch.SORT, "o": textsearch.ORDER, "v": 1}
+    payload.update(overrides)
+    return base64.urlsafe_b64encode(msgspec.json.encode(payload)).decode().rstrip("=")
+
+
+@pytest.mark.parametrize(
+    ("name", "rejected", "detail"),
+    [
+        ("another query", ("other", ["alpha", "beta"], 25, 10), "another query"),
+        ("another set of collections", ("lancedb", ["alpha"], 25, 10), "another query"),
+        ("another page size", ("lancedb", ["alpha", "beta"], 50, 10), "another query"),
+        ("a listing's sort", {"s": "name"}, "does not match sort/order"),
+        ("the other direction", {"o": "asc"}, "does not match sort/order"),
+        ("a version this build does not write", {"v": 2}, "does not match sort/order"),
+        ("a keyset of another width", {"k": [_digest()]}, "does not match sort/order"),
+        ("a negative offset", {"k": [_digest(), -1]}, "invalid cursor"),
+        ("an offset that is not a number", {"k": [_digest(), "10"]}, "invalid cursor"),
+        ("an offset that is a boolean", {"k": [_digest(), True]}, "invalid cursor"),
+        ("not base64 at all", "not a cursor!!", "invalid cursor"),
+        ("base64 that decodes to no cursor", "e30", "invalid cursor"),
+    ],
+)
+def test_text_cursor_roundtrip_and_rejects_other_query(
+    name: str, rejected: tuple | dict | str, detail: str
+) -> None:
+    from haskie import textsearch
+
+    q, collections, page_size = TEXT_QUERY
+    assert textsearch.parse_cursor(None, q, collections, page_size) == 0, "no cursor, first page"
+    issued = textsearch.make_cursor(q, collections, page_size, 50)
+    assert textsearch.parse_cursor(issued, q, collections, page_size) == 50, "round trip"
+    assert textsearch.make_cursor(q, ["beta", "alpha"], page_size, 50) == issued, "order-free"
+
+    if isinstance(rejected, tuple):
+        cursor = textsearch.make_cursor(*rejected)  # a cursor this module issued, another page
+    elif isinstance(rejected, dict):
+        cursor = _wire_cursor(**rejected)
+    else:
+        cursor = rejected
+
+    with pytest.raises(InvalidInput) as raised:
+        textsearch.parse_cursor(cursor, q, collections, page_size)
+    assert detail in str(raised.value), name
+
+
+@pytest.mark.parametrize(
+    ("name", "collections", "expected"),
+    [
+        ("no filter at all", None, None),
+        ("an empty filter is not a filter", "", None),
+        ("separators alone", " , ,", None),
+        ("one name", "alpha", ["alpha"]),
+        ("several names, trimmed", " alpha , beta ", ["alpha", "beta"]),
+        ("a trailing separator", "alpha,", ["alpha"]),
+    ],
+)
+def test_text_split_collections(name: str, collections: str | None, expected) -> None:
+    from haskie import textsearch
+
+    assert textsearch.split_collections(collections) == expected, name
 
 
 # --- storage -----------------------------------------------------------------------
@@ -1412,15 +2588,100 @@ def test_migrations_apply_once_and_resume(tmp_path: Path, monkeypatch: pytest.Mo
     conn.close()
 
 
+def _at_version(path: Path, version: int) -> sqlite3.Connection:
+    """A database that ran the first `version` migrations and nothing since."""
+    conn = sqlite3.connect(str(path))
+    for number, script in enumerate(db.MIGRATIONS[:version], start=1):
+        conn.executescript(script)
+        conn.execute(f"pragma user_version = {number}")
+    conn.commit()
+    return conn
+
+
+COLLECTION_TABLES = {
+    "collections",
+    "documents",
+    "collection_documents",
+    "embeddings",
+    "session_collections",
+}
+
+
+def _tables(conn: sqlite3.Connection) -> set[str]:
+    return {name for (name,) in conn.execute("select name from sqlite_master where type='table'")}
+
+
+@pytest.mark.parametrize(
+    ("name", "version", "rows"),
+    [
+        ("a library row, from before sessions became rows", 5, ["library"]),
+        ("a document row alone", 8, ["document"]),
+        ("both tables hold data", 8, ["library", "document"]),
+    ],
+)
+def test_a_home_holding_pre_collection_data_is_refused(
+    tmp_path: Path, name: str, version: int, rows: list[str]
+) -> None:
+    """Migration 9 drops and recreates, so the guard has to fire inside the loop, right before it
+    runs: a home that started at 5 reaches 9 in the same run as one that started at 8."""
+    conn = _at_version(tmp_path / "old.db", version)
+    if "library" in rows:
+        conn.execute("insert into libraries (name, created_at) values ('notes', 1.0)")
+    if "document" in rows:
+        conn.execute("insert into documents (library, name, size) values ('notes', 'a.md', 1)")
+    conn.commit()
+
+    with pytest.raises(HaskieError) as raised:
+        db.migrate(conn)
+
+    assert str(raised.value) == db.INCOMPATIBLE_HOME_MESSAGE, name
+    assert "haskie destroy" in db.INCOMPATIBLE_HOME_MESSAGE, "the message names the way out"
+    assert conn.execute("pragma user_version").fetchone() == (8,), f"{name}: stopped before 9"
+    tables = _tables(conn)
+    assert (COLLECTION_TABLES - {"documents"}) & tables == set(), f"{name}: nothing created"
+    assert "libraries" in tables, f"{name}: and nothing dropped"
+    columns = [column for _cid, column, *_rest in conn.execute("pragma table_info(documents)")]
+    assert "library" in columns, f"{name}: the rows are still there to be looked at"
+    conn.close()
+
+
+@pytest.mark.parametrize("version", [5, 6, 7, 8])
+def test_an_empty_home_migrates_through_to_the_collection_schema(
+    tmp_path: Path, version: int
+) -> None:
+    """A home that only ever ran migrations 1-8 with nothing in it is a fresh home, whatever
+    version the loop starts at."""
+    conn = _at_version(tmp_path / f"v{version}.db", version)
+
+    assert db.migrate(conn) == len(db.MIGRATIONS) == db.INCOMPATIBLE_HOME_MIGRATION
+    assert conn.execute("pragma user_version").fetchone() == (9,)
+
+    tables = _tables(conn)
+    assert COLLECTION_TABLES <= tables, f"from {version}"
+    assert "sessions" in tables, "session_collections references it, so it has to survive"
+    assert {"libraries", "session_libraries"} & tables == set(), "the old shape is gone"
+    assert db.migrate(conn) == len(db.MIGRATIONS), "nothing left to apply"
+    conn.close()
+
+
+def test_migration_9_is_one_transaction() -> None:
+    """The script drops and recreates several tables, so a crash partway through must not leave
+    `user_version` unbumped over a half-dropped schema."""
+    script = db.MIGRATIONS[db.INCOMPATIBLE_HOME_MIGRATION - 1].strip()
+
+    assert script.startswith("begin;") and script.endswith("commit;")
+    assert script.count("begin;") == 1 and script.count("commit;") == 1
+
+
 @pytest.mark.anyio
 async def test_connect_rolls_back_a_failed_unit_of_work() -> None:
     with pytest.raises(sqlite3.IntegrityError):
         async with db.connect() as conn:
-            await conn.execute("insert into libraries (name) values ('half')")
+            await conn.execute("insert into collections (name) values ('half')")
             await conn.execute(
-                "insert into documents (library, name, size) values ('ghost', 'a', 1)"
+                "insert into collection_documents (collection, document) values ('ghost', 'a.md')"
             )
-    assert await Library.names() == [], "the first insert of the failed block is gone too"
+    assert await Collection.names() == [], "the first insert of the failed block is gone too"
 
 
 # --- embeddings and logging --------------------------------------------------------
@@ -1522,564 +2783,11 @@ def test_renderer_per_format(name: str, log_format: str, expected: type) -> None
 
 
 def test_attach_outside_an_audited_call_is_a_no_op() -> None:
-    audit.attach(library="notes")  # no record in progress
+    audit.attach(collection="notes")  # no record in progress
     assert not audit.path().exists(), "nothing written outside an audited call"
 
 
-# --- S2: grouped index writes ------------------------------------------------------
-#
-# One LanceDB commit per group of parts instead of one per micro-batch, and the parts directory
-# dropped once a document is indexed.
-
-
-async def _fragments(index: LibraryIndex) -> int:
-    """Data fragments of the table: LanceDB writes one per commit that carries rows."""
-    table = await index._existing()
-    if table is None:
-        return 0
-    # lancedb annotates stats() as a dataclass but returns plain dicts
-    return (await table.stats())["fragment_stats"]["num_fragments"]  # ty: ignore[not-subscriptable]
-
-
-async def _indexed_rows(lib: Library) -> int:
-    table = await (await lib.index())._existing()
-    return 0 if table is None else await table.count_rows()
-
-
-@pytest.mark.anyio
-async def test_add_parts_writes_one_fragment_for_many_parts(tmp_path: Path) -> None:
-    """Three parts, one commit, one fragment. An empty part inside the group writes nothing but
-    does not break the group."""
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, None)
-    chunks = chunk.split(MD, SMALL)
-    parts = [(0, [Row(chunk=c) for c in chunks]), (1, []), (2, [Row(chunk=c) for c in chunks])]
-
-    written = await index.add_parts("g.md", "files/g.md", "markdown/g.md.md", _aparts(parts))
-
-    table = await index._existing()
-    assert table is not None
-    assert written == await table.count_rows() == 2 * len(chunks)
-    assert await _fragments(index) == 1, "one commit, however many parts it carried"
-    records = (await table.to_arrow()).to_pylist()
-    assert sorted({r["part"] for r in records}) == [0, 2], "the empty part is skipped"
-    assert {r["chunk_id"] for r in records} == set(range(len(chunks))), "ids restart per part"
-    assert {r["markdown_path"] for r in records} == {"markdown/g.md.md"}
-
-
-@pytest.mark.anyio
-async def test_delete_parts_removes_only_the_range(tmp_path: Path) -> None:
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, None)
-    (chunk_,) = chunk.split("# H\n\nbody\n", ConversionSettings())
-    for doc in ("a.md", "b.md"):
-        await index.add_parts(
-            doc, "s", "m", _aparts([(part, [Row(chunk=chunk_)]) for part in range(4)])
-        )
-
-    await index.delete_parts("a.md", 1, 3)
-
-    table = await index._existing()
-    assert table is not None
-    kept = {(r["doc"], r["part"]) for r in (await table.to_arrow()).to_pylist()}
-    assert kept == {("a.md", 0), ("a.md", 3)} | {("b.md", part) for part in range(4)}
-
-
-@pytest.mark.anyio
-async def test_index_batch_group_is_idempotent() -> None:
-    """A replay after a crash between the LanceDB commit and the step checkpoint must rewrite the
-    group rather than append it a second time."""
-    lib = await Library.create("groups")
-    doc = await lib.save("p.pdf", text_pdf(["alpha one", "beta two", "gamma three"]))
-    settings = await lib.effective_settings()
-    converts = await pipeline.plan_convert(lib, doc.name, 1)
-    for batch in converts:
-        await pipeline.convert_batch(lib, doc.name, batch, settings)
-    await pipeline.finalize_convert(lib, doc.name, converts, 0, settings)
-    for batch in await pipeline.plan_embed(lib, doc.name):
-        await pipeline.embed_batch(lib, doc.name, batch, settings, None)
-
-    assert [(b.seq, b.start, b.end) for b in await pipeline.plan_index(lib, doc.name, 2)] == [
-        (0, 0, 2),
-        (1, 2, 3),
-    ], "the last group holds the remainder"
-    (group,) = await pipeline.plan_index(lib, doc.name, 50)
-    assert (group.seq, group.start, group.end) == (0, 0, 3), "three parts in one commit"
-
-    written = await pipeline.index_batch(lib, doc.name, group, None)
-    assert written == await _indexed_rows(lib) > 0
-    assert await _fragments(await lib.index()) == 1
-
-    written_again = await pipeline.index_batch(lib, doc.name, group, None)
-    assert written_again == written, "the same group again"
-    assert await _indexed_rows(lib) == written, "the range was replaced, not appended"
-
-
-@pytest.mark.anyio
-async def test_cleanup_parts_leaves_the_assembled_markdown_and_tolerates_a_missing_directory() -> (
-    None
-):
-    lib = await Library.create("tidy")
-    doc = await lib.save("g.md", MD.encode())
-    settings = await lib.effective_settings()
-    (batch,) = await pipeline.plan_convert(lib, doc.name, 10)
-    await pipeline.convert_batch(lib, doc.name, batch, settings)
-    await pipeline.finalize_convert(lib, doc.name, [batch], 0, settings)
-    await pipeline.embed_batch(lib, doc.name, batch, settings, None)
-
-    await pipeline.cleanup_parts(lib, doc.name)
-
-    assert not lib.parts_dir(doc.name).exists()
-    assert lib.markdown_path(doc.name).read_text() == MD
-    await pipeline.cleanup_parts(lib, doc.name)  # nothing left to remove, and no raise
-
-
-# --- document timestamps and counts (paged listings) -------------------------------
-
-
-@pytest.mark.anyio
-async def test_set_status_and_save_bump_updated_at() -> None:
-    """`updated_at` is what the "recently touched" sort reads, so only a change to the document
-    may move it: a lifecycle step and a re-upload do, building the preview does not."""
-    lib = await Library.create("stamps")
-
-    first = await lib.save("a.md", MD.encode())
-    assert first.created_at > 0, "stamped on upload"
-    assert first.updated_at == first.created_at, "an upload is the document's first change"
-
-    await lib.set_status("a.md", "indexed")
-    indexed = await lib.document("a.md")
-    assert indexed.updated_at > first.updated_at, "a lifecycle step is a change"
-    assert (indexed.status, indexed.error) == ("indexed", None), "and it is the status it set"
-    assert indexed.created_at == first.created_at, "the upload moment never moves"
-
-    await lib.set_status("a.md", "error", "boom")
-    failed = await lib.document("a.md")
-    assert (failed.status, failed.error) == ("error", "boom"), "the reason is stored with it"
-    assert failed.updated_at >= indexed.updated_at
-
-    await lib.ensure_preview("a.md")
-    previewed = await lib.document("a.md")
-    assert previewed.preview is not None, "the preview was built"
-    assert previewed.updated_at == failed.updated_at, "filling in the preview is not a change"
-
-    again = await lib.save("a.md", (MD + "more\n").encode())
-    assert again.updated_at > indexed.updated_at, "writing over the document is"
-    assert again.created_at == first.created_at, "the first upload still owns created_at"
-    assert (again.status, again.error, again.preview) == ("uploaded", None, None), "a fresh row"
-
-
-@pytest.mark.anyio
-async def test_document_counts_group_by_status() -> None:
-    from haskie.library import DocumentCounts
-
-    lib = await Library.create("counts")
-    for name in ("a.md", "b.md", "c.md", "d.md"):
-        await lib.save(name, MD.encode())
-    await lib.set_status("a.md", "indexed")
-    await lib.set_status("b.md", "embedding")
-    await lib.set_status("c.md", "error", "boom")
-
-    counts = await lib.counts()
-
-    assert counts.total == 4
-    assert counts.indexed == 1
-    assert counts.active == 1, "embedding is in the pipeline, uploaded is not"
-    assert counts.error == 1
-    assert counts.by_status == {"indexed": 1, "embedding": 1, "error": 1, "uploaded": 1}
-    empty = await Library.create("empty")
-    assert await empty.counts() == DocumentCounts(), "a library without documents"
-
-
-# --- S3: cross-library search ------------------------------------------------------
-#
-# `LibraryIndex` splits search into retrieval (`search_rows`), the query embedding (`query_vector`)
-# and row-to-Hit (`hit`), so a session embeds once, fans out and rescores once. `session.rrf_merge`
-# fuses the per-library rankings by rank, because two indexes do not score on the same scale.
-
-
-async def _fts_index(path: Path, texts: list[str]) -> LibraryIndex:
-    """A small full-text index: one chunk per text, written and finished like the pipeline does."""
-    index = LibraryIndex(path, "lib", path.parent, None)
-    chunks = [c for text in texts for c in chunk.split(f"# H\n\n{text}\n", ConversionSettings())]
-    assert len(chunks) == len(texts), "one chunk per text, or the row counts below mean nothing"
-    rows = [Row(chunk=c) for c in chunks]
-    await index.add_parts("d.md", "files/d.md", "markdown/d.md.md", _aparts([(0, rows)]))
-    await index.finish()
-    return index
-
-
-@pytest.mark.parametrize(
-    ("name", "ranked", "expected"),
-    [
-        ("nothing to merge", [], []),
-        ("one ranking keeps its own order", [["a", "b"]], [("a", 1 / 61), ("b", 1 / 62)]),
-        ("an empty ranking contributes nothing", [["a"], []], [("a", 1 / 61)]),
-        (
-            "a hit in both rankings beats a better hit in one",
-            [["a", "b", "c"], ["b", "d"]],
-            [("b", 1 / 62 + 1 / 61), ("a", 1 / 61), ("d", 1 / 62), ("c", 1 / 63)],
-        ),
-        (
-            "a tie keeps the order of first appearance",
-            [["x"], ["y"]],
-            [("x", 1 / 61), ("y", 1 / 61)],
-        ),
-    ],
-)
-def test_rrf_merge_orders_by_rank_and_sums_duplicates(
-    name: str, ranked: list[list[str]], expected: list[tuple[str, float]]
-) -> None:
-    merged = session.rrf_merge(ranked, k=60)
-
-    assert [item for item, _ in merged] == [item for item, _ in expected], name
-    assert [score for _, score in merged] == pytest.approx([s for _, s in expected]), name
-
-
-@pytest.mark.anyio
-async def test_search_rows_returns_raw_rows_without_cutting(tmp_path: Path) -> None:
-    """Retrieval only: as many rows as the caller asked for, carrying the engine's own score and
-    no cross-encoder score. `search` is what cuts to `settings.limit`."""
-    index = await _fts_index(tmp_path / "index", [f"lancedb chapter {i}" for i in range(6)])
-    settings = SearchSettings(limit=2, candidates=4)
-
-    rows = await index.search_rows("lancedb", None, settings, 4)
-
-    assert len(rows) == 4, "the fetch size wins over settings.limit"
-    assert all("_score" in row and "_relevance_score" not in row for row in rows)
-    assert {row["doc"] for row in rows} == {"d.md"}
-    assert len(await index.search_rows("lancedb", None, settings, 100)) == 6, "no more than exist"
-    assert len(await index.search("lancedb", settings)) == 2, "the composed search cuts to limit"
-    missing = LibraryIndex(tmp_path / "missing", "lib", tmp_path, None)
-    assert await missing.search_rows("lancedb", None, settings, 4) == [], "no table, no rows"
-    assert await missing.search("lancedb", settings) == [], "and nothing to compose a search from"
-
-    _table_with(tmp_path / "blank", PLAIN_SCHEMA)  # a table, no rows, and so no full-text index
-    blank = LibraryIndex(tmp_path / "blank", "lib", tmp_path, None)
-    assert await blank.search_rows("lancedb", None, settings, 4) == [], "a table with no rows"
-
-
-@pytest.mark.parametrize(
-    ("name", "embedding", "settings", "vector_column", "expected"),
-    [
-        ("mode fts never embeds", COMPACT, SearchSettings(mode="fts"), True, None),
-        ("no embedding profile", None, SearchSettings(mode="hybrid"), True, None),
-        ("no vector column", COMPACT, SearchSettings(mode="hybrid"), False, None),
-        ("hybrid over a vector table", COMPACT, SearchSettings(mode="hybrid"), True, [0.5] * 384),
-        (
-            "vector mode over a vector table",
-            COMPACT,
-            SearchSettings(mode="vector"),
-            True,
-            [0.5] * 384,
-        ),
-    ],
-)
-@pytest.mark.anyio
-async def test_query_vector_is_none_for_fts_and_without_embedding(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-    embedding: EmbeddingModel | None,
-    settings: SearchSettings,
-    vector_column: bool,
-    expected: list[float] | None,
-) -> None:
-    from haskie import models
-
-    path = tmp_path / "index"
-    vector_field = pa.field("vector", pa.list_(pa.float32(), 384))
-    _table_with(path, PLAIN_SCHEMA.append(vector_field) if vector_column else PLAIN_SCHEMA)
-    checked: list[tuple[str, str]] = []
-
-    async def require_ready(kind: str, model: str) -> None:
-        checked.append((kind, model))
-
-    monkeypatch.setattr(models, "require_ready", require_ready)
-    monkeypatch.setattr(embed, "embed_query", lambda model, text: [0.5] * model.dims)
-    index = LibraryIndex(path, "lib", tmp_path, embedding)
-
-    assert await index.query_vector("q", settings) == expected, name
-    assert checked == ([("embedding", COMPACT.name)] if expected else []), name
-
-
-@pytest.mark.anyio
-async def test_query_vector_of_a_never_indexed_library_is_none(tmp_path: Path) -> None:
-    """No table means no search, so the model is never asked for (it may not be loaded)."""
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, COMPACT)
-    assert await index.query_vector("q", SearchSettings(mode="hybrid")) is None
-    assert await index.search("q", SearchSettings(mode="hybrid")) == []
-
-
-# --- S4: full-text search across libraries -------------------------------------------
-#
-# `textsearch` merges raw BM25 scores, because one lexical scorer with the same tokenizer answers
-# in every library. Its cursor is an opaque offset bound to the query, so every page is a cut of a
-# ranking that was recomputed: the merge needs a total order, and the cursor needs to be rejected
-# whenever the query it was measured against is not the one being asked now.
-
-# The query one cursor below belongs to: (query, libraries, page_size).
-TEXT_QUERY = ("lancedb", ["alpha", "beta"], 25)
-
-
-def _ranked(library: str, doc: str, part: int, chunk_id: int, score: float | None) -> tuple:
-    """One (index, row) pair for `merge`, which only ever reads `index.library` and the row's
-    identity columns. `score` None writes no `_score` at all, as a row of an older index has."""
-    index = LibraryIndex(Path("/nowhere") / library, library, Path("/nowhere"), None)
-    row = {"doc": doc, "part": part, "chunk_id": chunk_id}
-    if score is not None:
-        row["_score"] = score
-    return (index, row)
-
-
-def _identity(pairs: list[tuple]) -> list[tuple[str, str, int, int]]:
-    return [(index.library, row["doc"], row["part"], row["chunk_id"]) for index, row in pairs]
-
-
-@pytest.mark.parametrize(
-    ("name", "per_library", "expected"),
-    [
-        ("nothing to merge", [], []),
-        (
-            "a library that matched nothing contributes nothing",
-            [[], [("a", "d.md", 0, 0, 1.0)]],
-            [("a", "d.md", 0, 0)],
-        ),
-        (
-            "the better score wins, whichever library it came from",
-            [[("b", "d.md", 0, 0, 9.0)], [("a", "d.md", 0, 0, 1.0)]],
-            [("b", "d.md", 0, 0), ("a", "d.md", 0, 0)],
-        ),
-        (
-            "an equal score falls back to the library name",
-            [[("b", "d.md", 0, 0, 1.0)], [("a", "d.md", 0, 0, 1.0)]],
-            [("a", "d.md", 0, 0), ("b", "d.md", 0, 0)],
-        ),
-        (
-            "inside one library: doc, then part, then chunk",
-            [
-                [
-                    ("a", "z.md", 0, 0, 1.0),
-                    ("a", "a.md", 1, 0, 1.0),
-                    ("a", "a.md", 0, 5, 1.0),
-                    ("a", "a.md", 0, 1, 1.0),
-                ]
-            ],
-            [("a", "a.md", 0, 1), ("a", "a.md", 0, 5), ("a", "a.md", 1, 0), ("a", "z.md", 0, 0)],
-        ),
-        (
-            "a row an older index wrote without a score sorts last",
-            [[("a", "d.md", 0, 1, None)], [("a", "d.md", 0, 0, 0.5)]],
-            [("a", "d.md", 0, 0), ("a", "d.md", 0, 1)],
-        ),
-    ],
-)
-def test_text_merge_orders_by_score_then_identity(
-    name: str, per_library: list[list[tuple]], expected: list[tuple[str, str, int, int]]
-) -> None:
-    from haskie import textsearch
-
-    merged = textsearch.merge([[_ranked(*row) for row in rows] for rows in per_library])
-
-    assert _identity(merged) == expected, name
-
-
-def _digest() -> str:
-    """The query identity `TEXT_QUERY` hashes to, read at collection time by the table below."""
-    from haskie import textsearch
-
-    return textsearch.query_hash(*TEXT_QUERY)
-
-
-def _wire_cursor(**overrides) -> str:
-    """A cursor built straight on the wire format, for the fields `make_cursor` never varies."""
-    from haskie import textsearch
-
-    payload: dict = {"k": [_digest(), 10], "s": textsearch.SORT, "o": textsearch.ORDER, "v": 1}
-    payload.update(overrides)
-    return base64.urlsafe_b64encode(msgspec.json.encode(payload)).decode().rstrip("=")
-
-
-@pytest.mark.parametrize(
-    ("name", "rejected", "detail"),
-    [
-        ("another query", ("other", ["alpha", "beta"], 25, 10), "another query"),
-        ("another set of libraries", ("lancedb", ["alpha"], 25, 10), "another query"),
-        ("another page size", ("lancedb", ["alpha", "beta"], 50, 10), "another query"),
-        ("a listing's sort", {"s": "name"}, "does not match sort/order"),
-        ("the other direction", {"o": "asc"}, "does not match sort/order"),
-        ("a version this build does not write", {"v": 2}, "does not match sort/order"),
-        ("a keyset of another width", {"k": [_digest()]}, "does not match sort/order"),
-        ("a negative offset", {"k": [_digest(), -1]}, "invalid cursor"),
-        ("an offset that is not a number", {"k": [_digest(), "10"]}, "invalid cursor"),
-        ("an offset that is a boolean", {"k": [_digest(), True]}, "invalid cursor"),
-        ("not base64 at all", "not a cursor!!", "invalid cursor"),
-        ("base64 that decodes to no cursor", "e30", "invalid cursor"),
-    ],
-)
-def test_text_cursor_roundtrip_and_rejects_other_query(
-    name: str, rejected: tuple | dict | str, detail: str
-) -> None:
-    from haskie import textsearch
-
-    q, libraries, page_size = TEXT_QUERY
-    assert textsearch.parse_cursor(None, q, libraries, page_size) == 0, "no cursor, first page"
-    issued = textsearch.make_cursor(q, libraries, page_size, 50)
-    assert textsearch.parse_cursor(issued, q, libraries, page_size) == 50, "round trip"
-    assert textsearch.make_cursor(q, ["beta", "alpha"], page_size, 50) == issued, "order-free"
-
-    if isinstance(rejected, tuple):
-        cursor = textsearch.make_cursor(*rejected)  # a cursor this module issued, for another page
-    elif isinstance(rejected, dict):
-        cursor = _wire_cursor(**rejected)
-    else:
-        cursor = rejected
-
-    with pytest.raises(InvalidInput) as raised:
-        textsearch.parse_cursor(cursor, q, libraries, page_size)
-    assert detail in str(raised.value), name
-
-
-@pytest.mark.parametrize(
-    ("name", "libraries", "expected"),
-    [
-        ("no filter at all", None, None),
-        ("an empty filter is not a filter", "", None),
-        ("separators alone", " , ,", None),
-        ("one name", "alpha", ["alpha"]),
-        ("several names, trimmed", " alpha , beta ", ["alpha", "beta"]),
-        ("a trailing separator", "alpha,", ["alpha"]),
-    ],
-)
-def test_text_split_libraries(name: str, libraries: str | None, expected: list[str] | None) -> None:
-    from haskie import textsearch
-
-    assert textsearch.split_libraries(libraries) == expected, name
-
-
-@pytest.mark.anyio
-async def test_fts_rows_is_empty_without_an_fts_index(tmp_path: Path) -> None:
-    """A library halfway through its first index has rows and no full-text index yet. A
-    cross-library search must not wait for it, so it contributes nothing instead of a scan."""
-    missing = LibraryIndex(tmp_path / "missing", "lib", tmp_path, None)
-    assert await missing.fts_rows("lancedb", 10) == [], "never indexed, so there is no table"
-
-    _table_with(tmp_path / "empty", PLAIN_SCHEMA)
-    empty = LibraryIndex(tmp_path / "empty", "lib", tmp_path, None)
-    assert await empty.fts_rows("lancedb", 10) == [], "a table with no rows in it"
-
-    index = LibraryIndex(tmp_path / "index", "lib", tmp_path, None)
-    chunks = chunk.split("# H\n\nlancedb chapter one\n", ConversionSettings())
-    rows = [Row(chunk=c) for c in chunks]
-    await index.add_parts("d.md", "files/d.md", "markdown/d.md.md", _aparts([(0, rows)]))
-    assert await index.has_index("text") is False, "written, not indexed: the state under test"
-    assert await index.fts_rows("lancedb", 10) == [], "rows are there, the full-text index is not"
-
-    await index.finish()
-
-    (row,) = await index.fts_rows("lancedb", 10)
-    assert (row["doc"], row["chunk_id"]) == ("d.md", 0)
-    assert row["_score"] > 0, "raw BM25, which is what the cross-library merge sorts on"
-
-
-# --- sessions and previews under load (P5) -----------------------------------------
-
-
-@pytest.mark.anyio
-async def test_session_libraries_keep_their_order_and_survive_reorder() -> None:
-    """The selection is rows with a position, not a JSON list: reordering it rewrites the rows,
-    and a session that selected nothing is still a session."""
-    for name in ("a", "b", "c"):
-        await Library.create(name)
-
-    await session.set_libraries("s1", ["c", "a", "b"])
-    assert await session.libraries_for("s1") == ["c", "a", "b"]
-
-    assert await session.set_libraries("s1", ["b", "c"]) == ["b", "c"], "the selection is replaced"
-    assert await session.libraries_for("s1") == ["b", "c"]
-    assert await session.load() == {"s1": ["b", "c"]}
-    async with db.connect() as conn:
-        cursor = await conn.execute(
-            "select library, position from session_libraries where session_id = 's1' "
-            "order by position"
-        )
-        rows = await cursor.fetchall()
-    assert rows == [("b", 0), ("c", 1)], "one row per library, positions renumbered from zero"
-
-    await session.set_libraries("s1", [])
-    assert await session.load() == {"s1": []}, "an empty selection keeps the session itself"
-
-
-@pytest.mark.parametrize(("name", "workers"), [("one at a time", 1), ("two at a time", 2)])
-@pytest.mark.anyio
-async def test_ensure_preview_bounds_concurrent_builds(
-    monkeypatch: pytest.MonkeyPatch, name: str, workers: int
-) -> None:
-    """Four readers open four different documents at once; only `preview_workers` parses run.
-
-    The stripe lock is per document, so nothing but the semaphore holds these four apart.
-    """
-    from haskie import cpu
-    from haskie import library as library_module
-
-    # a build holds a CPU slot too, so the budget must not be the ceiling under test here
-    monkeypatch.setattr(cpu, "_cpu_slots", threading.BoundedSemaphore(4))
-    lib = await Library.create("burst")
-    names = [(await lib.save(f"doc-{i}.md", MD.encode())).name for i in range(4)]
-    entered, release, counted = threading.Semaphore(0), threading.Event(), threading.Lock()
-    live, peak, builds = 0, 0, []
-    real = convert.build_preview
-
-    def gated(*args, **kwargs):
-        nonlocal live, peak
-        with counted:
-            live += 1
-            peak = max(peak, live)
-            builds.append(args[0].name)
-        entered.release()
-        assert release.wait(timeout=30)
-        try:
-            return real(*args, **kwargs)
-        finally:
-            with counted:
-                live -= 1
-
-    library_module.configure_preview_slots(workers)
-    try:
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(convert, "build_preview", gated)
-            async with anyio.create_task_group() as readers:
-                for doc in names:
-                    readers.start_soon(lib.ensure_preview, doc)
-                for _ in range(workers):  # every slot of the pool is now inside a build
-                    await anyio.to_thread.run_sync(entered.acquire)
-                assert library_module._preview_slots.value == 0, f"{name}: no slot left"
-                release.set()
-    finally:
-        library_module.configure_preview_slots(PipelineSettings().preview_workers)
-
-    assert sorted(builds) == sorted(names), f"{name}: every document was built, once"
-    assert peak == workers, f"{name}: never more parses at once than the pool admits"
-
-
-@pytest.mark.anyio
-async def test_ensure_preview_returns_not_ready_when_the_queue_is_full(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A reader that waited out `PREVIEW_WAIT_SECONDS` is told to retry (503) rather than holding
-    its request open until the burst clears."""
-    from haskie import library as library_module
-    from haskie.errors import NotReady
-
-    lib = await Library.create("queued")
-    doc = await lib.save("g.md", MD.encode())
-    monkeypatch.setattr(library_module, "PREVIEW_WAIT_SECONDS", 0.05)
-    slots = anyio.Semaphore(1)
-    monkeypatch.setattr(library_module, "_preview_slots", slots)
-    await slots.acquire()  # the test holds the only slot, so every reader waits it out
-    try:
-        with pytest.raises(NotReady, match="preview queue is full"):
-            await lib.ensure_preview(doc.name)
-    finally:
-        slots.release()
-
-    document = await lib.document(doc.name)
-    assert document.preview is None, "nothing was built and nothing was stored"
+def test_the_audit_record_names_a_collection_and_a_document() -> None:
+    """A document belongs to no collection, so a document-scoped action carries `doc` alone."""
+    assert {"collection", "doc"} <= audit.RECORD_FIELDS
+    assert "library" not in audit.RECORD_FIELDS

@@ -1,13 +1,15 @@
 """Haskie home directory (~/.haskie) layout, and the file writes every module shares.
 
-Every function here is async, because a filesystem call blocks: the writes go through
-`anyio.Path`, the calls that have no async form (`os.replace`, `shutil.rmtree`) through a worker
-thread. `atomic_write_sync` is the one exception, for code that already runs in a worker thread.
+A filesystem call blocks, so every async function here runs its work in a worker thread. The sync
+ones (`atomic_replace`, `atomic_write_sync`) are for code that already runs in one: `convert.py`
+and `embed_cache.py` are sync by nature (pyarrow, the parsers) and would otherwise hop threads
+twice for one write.
 """
 
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +17,9 @@ import anyio
 import anyio.to_thread
 
 HOME = Path(os.environ.get("HASKIE_HOME", Path.home() / ".haskie"))
-LIBRARY_ROOT = HOME / "library"
+COLLECTION_ROOT = HOME / "collections"  # one LanceDB index per collection
+DOCUMENT_ROOT = HOME / "documents"  # one folder per imported document: original, markdown, cache
+STAGING_ROOT = HOME / "staging"  # uploads not yet imported; swept by the nightly maintenance
 AUDIT_DIR = HOME / "audit"
 DB_FILE = HOME / "haskie.db"
 MODEL_CACHE = HOME / "cache" / "models"  # compiled CoreML models (see embed.py); ORT creates it
@@ -30,44 +34,51 @@ def use(root: Path) -> None:
     just set the environment variable: the derived paths would already be built from the old root.
     Nothing here re-opens what is already open, so this belongs at startup and nowhere else.
     """
-    global HOME, LIBRARY_ROOT, AUDIT_DIR, DB_FILE, MODEL_CACHE
+    global HOME, COLLECTION_ROOT, DOCUMENT_ROOT, STAGING_ROOT, AUDIT_DIR, DB_FILE, MODEL_CACHE
     HOME = root
-    LIBRARY_ROOT = HOME / "library"
+    COLLECTION_ROOT = HOME / "collections"
+    DOCUMENT_ROOT = HOME / "documents"
+    STAGING_ROOT = HOME / "staging"
     AUDIT_DIR = HOME / "audit"
     DB_FILE = HOME / "haskie.db"
     MODEL_CACHE = HOME / "cache" / "models"
 
 
 async def ensure_home() -> Path:
-    for directory in (LIBRARY_ROOT, AUDIT_DIR):
+    for directory in (COLLECTION_ROOT, DOCUMENT_ROOT, STAGING_ROOT, AUDIT_DIR):
         await anyio.Path(directory).mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
     return HOME
 
 
-async def atomic_write(path: Path, data: bytes | str, encoding: str = "utf-8") -> None:
-    """Replace `path` in one step: a reader sees either the previous file or the complete new one.
-    The temporary file shares the directory so `os.replace` stays on one filesystem."""
-    payload = data.encode(encoding) if isinstance(data, str) else data
+@contextmanager
+def atomic_replace(path: Path) -> Iterator[Path]:
+    """Yield a temporary path to fill, then put it at `path` in one step: a reader sees either the
+    previous file or the complete new one, never a partial write.
+
+    The temporary file shares the directory so `os.replace` stays on one filesystem, and it is
+    removed when the body raises, so a failure leaves nothing to mistake for a finished file.
+    """
     tmp = path.with_name(path.name + ".tmp")
     try:
-        await anyio.Path(tmp).write_bytes(payload)
-        await anyio.to_thread.run_sync(os.replace, tmp, path)
-    except BaseException:
-        await anyio.Path(tmp).unlink(missing_ok=True)
-        raise
-
-
-def atomic_write_sync(path: Path, data: bytes | str, encoding: str = "utf-8") -> None:
-    """`atomic_write` for code that already runs in a worker thread (see `convert.py`). Calling it
-    from a coroutine blocks that event loop; await `atomic_write` there instead."""
-    payload = data.encode(encoding) if isinstance(data, str) else data
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        tmp.write_bytes(payload)
+        yield tmp
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def atomic_write_sync(path: Path, data: bytes | str, encoding: str = "utf-8") -> None:
+    """One whole payload through `atomic_replace`, for code that already runs in a worker thread
+    (see `convert.py`). Calling it from a coroutine blocks that event loop; await `atomic_write`
+    there instead."""
+    payload = data.encode(encoding) if isinstance(data, str) else data
+    with atomic_replace(path) as tmp:
+        tmp.write_bytes(payload)
+
+
+async def atomic_write(path: Path, data: bytes | str, encoding: str = "utf-8") -> None:
+    """`atomic_write_sync` off the event loop."""
+    await anyio.to_thread.run_sync(atomic_write_sync, path, data, encoding)
 
 
 async def remove_tree(path: Path) -> None:

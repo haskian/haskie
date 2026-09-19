@@ -1,4 +1,8 @@
-"""Document routes: upload, import, index, delete, and the two preview panes."""
+"""Document routes: the two-phase intake, the listing, the delete, and the two preview panes.
+
+Every route here is collection-independent: a document is imported once, under a name that never
+changes, and which collections hold it is a membership the collection routes manage.
+"""
 
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -12,20 +16,23 @@ from litestar.enums import RequestEncodingType
 from litestar.params import Body
 from litestar.response import File, Stream
 
-from haskie import audit, convert, cpu, logs, render, toc, workflows
-from haskie.api.common import BulkStarted
-from haskie.errors import DocumentNotFound
-from haskie.library import Document, Library
+from haskie import audit, convert, cpu, document, embed_cache, logs, render, toc, workflows
+from haskie.api.common import BulkStarted, Describe
+from haskie.document import DocStatus, Document, Staged
+from haskie.errors import DocumentNotFound, InvalidInput
+from haskie.paging import DEFAULT_PAGE_SIZE, Order, Page, page_request
+from haskie.settings import Parser
 
 
-class ImportFile(msgspec.Struct):
-    path: str
-    rename_to: str | None = None  # store it under this name instead of the file's own
+class ImportRequest(msgspec.Struct):
+    """What to import: either a staged upload or a local file, never both."""
+
+    staging_id: str | None = None
+    path: str | None = None
+    name: str | None = None  # store it under this name instead of the file's own
     description: str = ""
-
-
-class Describe(msgspec.Struct):
-    description: str
+    parser: Parser | None = None
+    skip_ocr_pages: bool | None = None
 
 
 class Head(msgspec.Struct):
@@ -37,103 +44,138 @@ class Head(msgspec.Struct):
     pages: int
 
 
-async def _cancel_running(lib: Library, doc: str) -> None:
-    """Writing over a document whose pipeline still runs would race its steps, so cancel and
-    wait for it first. Nothing to do for a document that does not exist yet."""
-    try:
-        await lib.document(doc)
-    except DocumentNotFound:
-        return
-    await workflows.cancel_document(lib.name, doc)
-
-
-async def _save_upload(
-    name: str, filename: str, content: bytes, rename_to: str | None, description: str
-) -> Document:
-    """The storing half of `upload_document`, including the library lookup."""
-    lib = await Library.get(name)
-    # the running pipeline to stop is the one under the name this upload will land on
-    await _cancel_running(lib, lib._stored_name(filename, rename_to))
-    return await lib.save(filename, content, rename_to, description)
-
-
-@post("/api/libraries/{name:str}/documents")
-@audit.audited("document.add", library="name")
-async def upload_document(
-    name: str,
+@post("/api/documents/staging")
+@audit.audited("document.stage")
+async def stage_document(
     data: Annotated[UploadFile, Body(media_type=RequestEncodingType.MULTI_PART)],
-    rename_to: str | None = None,
-    description: str = "",
-) -> Document:
-    """Upload a file. `rename_to` stores it under a name of your choosing (the original suffix is
-    kept, because it decides how the document is parsed); `description` says what it is."""
+) -> Staged:
+    """Upload a file and keep it until it is imported. Nothing is committed here: no name, no
+    document row. Call `import_document` with the returned `staging_id` to commit it."""
     content = await data.read()
     upload = Path(data.filename)
     audit.attach(name=upload.name, size=len(content), suffix=upload.suffix.lower())
-    return await _save_upload(name, data.filename, content, rename_to, description)
+    return await document.stage(data.filename, content)
 
 
-@post("/api/libraries/{name:str}/documents/import", mcp_tool="add_document")
-@audit.audited("document.add", library="name")
-async def import_document(name: str, data: ImportFile) -> Document:
-    """Add a local file by absolute path (pdf, markdown, office, epub...) as `uploaded`.
+@post("/api/documents/import", mcp_tool="add_document")
+@audit.audited("document.import")
+async def import_document(data: ImportRequest) -> Document:
+    """Import a staged upload (`staging_id`) or a local file by absolute path (`path`).
 
-    Call `index_document` to make it searchable.
+    The name is fixed here and never changes: `name` renames the document, but the original
+    suffix is kept because it decides how the document is parsed. Returns the document at status
+    `queued`; convert and embed then run in the background, so poll `get_document` for `imported`.
     """
-    source = Path(data.path).expanduser()
-    # the audit trail records what was added, never where it came from
-    audit.attach(name=source.name, suffix=source.suffix.lower())
-    lib = await Library.get(name)
-    logs.bind(doc=source.name)
-    await _cancel_running(lib, lib._stored_name(source.name, data.rename_to))
-    document = await lib.save_path(data.path, data.rename_to, data.description)
-    audit.attach(size=document.size)
-    return document
+    if (data.staging_id is None) == (data.path is None):
+        raise InvalidInput("give either staging_id or path")
+    if data.staging_id is not None:
+        row = await document.import_staged(
+            data.staging_id, data.name, data.description, data.parser, data.skip_ocr_pages
+        )
+    else:
+        # the audit trail records what was imported, never where it came from
+        audit.attach(source=Path(data.path or "").name)
+        row = await document.import_path(
+            data.path or "", data.name, data.description, data.parser, data.skip_ocr_pages
+        )
+    audit.attach(doc=row.name, size=row.size)
+    logs.bind(doc=row.name)
+    audit.attach(job_id=await workflows.start_import(row.name))
+    return row
 
 
-@post("/api/libraries/{name:str}/documents/{doc:str}/index", mcp_tool="index_document")
-@audit.audited("document.reindex", library="name", doc="doc")
-async def index_document(name: str, doc: str) -> BulkStarted:
-    """Queue convert -> embed -> index for one document; poll `list_documents` for status."""
-    job_id = await workflows.start_index(name, doc)
+@get("/api/documents", mcp_tool="list_documents")
+async def list_documents(
+    cursor: str | None = None,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    sort: str | None = None,
+    order: Order = "asc",
+    status: DocStatus | None = None,
+) -> Page[Document]:
+    """List every imported document, one page at a time, whichever collections hold them.
+
+    Sort by name, size, status or updated_at; `status` keeps one lifecycle state only (queued,
+    converting, embedding, imported, error, cancelled, deleting). Pass the `next_cursor` of a
+    response back as `cursor` to continue; it is null on the last page.
+    """
+    return await document.page(page_request(cursor, page_size, sort, order), status)
+
+
+@get("/api/documents/{doc:str}", mcp_tool="get_document")
+async def get_document(doc: str) -> Document:
+    """One document: its import status, its size and what it is said to be."""
+    return await document.get(doc)
+
+
+@delete("/api/documents/{doc:str}", status_code=202)
+@audit.audited("document.delete")
+async def delete_document(doc: str) -> BulkStarted:
+    """Queue the deletion: the document goes from every collection that holds it, then its files,
+    its embedding cache and its row go.
+
+    Accepted, not done: each collection's index is cleaned on its own partition, which takes as
+    long as the work already queued there. Poll the job for the outcome.
+    """
+    job_id = await workflows.start_delete_document(doc)
     audit.attach(job_id=job_id)
     return BulkStarted(job_id=job_id)
 
 
-@delete("/api/libraries/{name:str}/documents/{doc:str}")
-@audit.audited("document.delete", library="name", doc="doc")
-async def delete_document(name: str, doc: str) -> None:
-    """Cancels a running pipeline, then removes index rows, files and the row."""
-    await workflows.remove_document(name, doc)
+@post("/api/documents/{doc:str}/import", status_code=202)
+@audit.audited("document.reimport")
+async def reimport_document(doc: str) -> BulkStarted:
+    """Run the import of a document that failed or was cancelled again.
+
+    Only those two: a document already imported has its markdown and its cache, and one still in
+    the pipeline is being written right now, so re-running would race it. `start_import` is what
+    refuses the rest, with a conflict.
+    """
+    job_id = await workflows.start_import(doc)
+    audit.attach(job_id=job_id)
+    return BulkStarted(job_id=job_id)
 
 
-@get("/api/libraries/{name:str}/documents/{doc:str}/source")
-async def get_source(name: str, doc: str) -> File:
-    lib = await Library.get(name)
-    return File(path=lib.source_path(doc), content_disposition_type="inline")
+@get("/api/documents/{doc:str}/collections")
+async def list_document_collections(doc: str) -> list[str]:
+    """Which collections hold this document, in name order."""
+    await document.get(doc)  # DocumentNotFound rather than an empty list for a name nobody owns
+    return await document.collections_of(doc)
+
+
+@get("/api/documents/{doc:str}/embeddings")
+async def list_document_embeddings(doc: str) -> list[embed_cache.Entry]:
+    """What the embedding cache holds for this document: one entry per distinct chunk settings
+    and embedding model, shared by every collection that indexes it with them."""
+    await document.get(doc)
+    return await embed_cache.entries(doc)
+
+
+@get("/api/documents/{doc:str}/source")
+async def get_source(doc: str) -> File:
+    row = await document.get(doc)
+    return File(path=row.source_path(), content_disposition_type="inline")
 
 
 PREVIEW_MEDIA = {"pdf": "application/pdf", "html": "text/html", "text": "text/plain"}
 
 
-@get("/api/libraries/{name:str}/documents/{doc:str}/preview")
-async def get_preview(name: str, doc: str) -> File:
+@get("/api/documents/{doc:str}/preview")
+async def get_preview(doc: str) -> File:
     """Left pane: original (pdf cut to first pages, image, text) or HTML stand-in for office."""
-    lib = await Library.get(name)
-    info = await lib.ensure_preview(doc)
+    info = await document.ensure_preview(doc)
     if info.preview is None:
         raise RuntimeError(f"preview not stored for {doc}")
     media = PREVIEW_MEDIA.get(info.preview.kind)
     return File(
-        path=lib.preview_dir(doc) / "source",
+        path=info.preview_dir / "source",
         filename=doc if media is None else None,
         media_type=media,
         content_disposition_type="inline",
     )
 
 
-@get("/api/libraries/{name:str}/documents/{doc:str}/markdown")
-async def get_markdown(name: str, doc: str, full: bool = False) -> Stream:
+@get("/api/documents/{doc:str}/markdown")
+async def get_markdown(doc: str, full: bool = False) -> Stream:
     """Right pane, as NDJSON: one `head` frame, then one `page` frame per page of HTML.
 
     Streamed because a full text is one lump otherwise - a 1200-page book renders to megabytes,
@@ -141,13 +183,12 @@ async def get_markdown(name: str, doc: str, full: bool = False) -> Stream:
     server because the browser then inserts HTML instead of parsing markdown, and because raw HTML
     has to be dropped somewhere it cannot be forgotten (see `render`).
 
-    `full=true` is the indexed text; the default is the preview, which is the first pages only.
+    `full=true` is the whole converted text; the default is the preview, the first pages only.
     """
-    lib = await Library.get(name)
-    info = await lib.ensure_preview(doc)
-    path = anyio.Path(lib.markdown_path(doc) if full else lib.preview_dir(doc) / "preview.md")
+    info = await document.ensure_preview(doc)
+    path = anyio.Path(info.markdown if full else info.preview_dir / "preview.md")
     if not await path.exists():
-        raise DocumentNotFound(f"document not indexed yet: {doc}")
+        raise DocumentNotFound(f"document not imported yet: {doc}")
     markdown = await path.read_text(encoding="utf-8")
 
     async def frames() -> AsyncIterator[bytes]:
@@ -166,12 +207,11 @@ async def get_markdown(name: str, doc: str, full: bool = False) -> Stream:
     return Stream(frames(), media_type="application/x-ndjson")
 
 
-@put("/api/libraries/{name:str}/documents/{doc:str}/description", mcp_tool="describe_document")
-@audit.audited("document.describe", library="name", doc="doc")
-async def describe_document(name: str, doc: str, data: Describe) -> Document:
+@put("/api/documents/{doc:str}/description", mcp_tool="describe_document")
+@audit.audited("document.describe")
+async def describe_document(doc: str, data: Describe) -> Document:
     """Replace what the document is said to be. Empty clears it.
 
     The description is what `search_documents` returns beside each match, so it is worth writing
     for anything an agent is expected to choose between."""
-    lib = await Library.get(name)
-    return await lib.describe_document(doc, data.description)
+    return await document.describe(doc, data.description)

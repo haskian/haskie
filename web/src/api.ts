@@ -8,15 +8,24 @@ export interface EmbeddingModel {
   dims: number
   accelerator: Accelerator
 }
-export interface ConversionSettings {
-  parser: Parser
+// How one collection splits a document's markdown into chunks. These three values key the
+// embedding cache, so two collections that agree on them share one set of embeddings.
+export interface ChunkSettings {
   chunker: Chunker
   chunk_size: number
   chunk_overlap: number
+}
+// The user-level defaults: how a document is converted when nothing is said at import (`parser`,
+// `skip_ocr_pages`), and how a collection chunks it when it overrides nothing.
+export interface ConversionSettings extends ChunkSettings {
+  parser: Parser
   skip_ocr_pages: boolean
 }
-export type ConversionOverrides = { [K in keyof ConversionSettings]: ConversionSettings[K] | null }
-export interface LibrarySettings extends ConversionOverrides {
+// A collection's chunking overrides; null means "use the user default".
+export type ChunkOverrides = { [K in keyof ChunkSettings]: ChunkSettings[K] | null }
+// Everything a collection may override. Conversion runs once per document at import, so `parser`
+// and `skip_ocr_pages` are not here: they belong to the document.
+export interface CollectionSettings extends ChunkOverrides {
   search: SearchOverrides
 }
 export type SearchMode = 'hybrid' | 'vector' | 'fts'
@@ -86,22 +95,47 @@ export interface Preview {
   pages: number | null
   ocr_pages: number[]
 }
-export type DocStatus = 'uploaded' | 'queued' | 'converting' | 'embedding' | 'indexing' | 'indexed' | 'error' | 'cancelled'
-export const DOCUMENT_STATUSES: readonly DocStatus[] = ['uploaded', 'queued', 'converting', 'embedding', 'indexing', 'indexed', 'error', 'cancelled']
-export const ACTIVE_DOCUMENT_STATUSES: readonly DocStatus[] = ['queued', 'converting', 'embedding', 'indexing']
+// A document's own lifecycle: imported once, then held by any number of collections.
+export type DocStatus = 'queued' | 'converting' | 'embedding' | 'imported' | 'error' | 'cancelled' | 'deleting'
+export const DOCUMENT_STATUSES: readonly DocStatus[] = ['queued', 'converting', 'embedding', 'imported', 'error', 'cancelled', 'deleting']
+// in the import pipeline right now: the states a poll waits on
+export const ACTIVE_DOCUMENT_STATUSES: readonly DocStatus[] = ['queued', 'converting', 'embedding']
+// How far one collection got writing one of its documents into its own table.
+export type MemberStatus = 'pending' | 'indexing' | 'indexed' | 'error' | 'cancelled'
+export const MEMBER_STATUSES: readonly MemberStatus[] = ['pending', 'indexing', 'indexed', 'error', 'cancelled']
+export const ACTIVE_MEMBER_STATUSES: readonly MemberStatus[] = ['pending', 'indexing']
 export const ACTIVE_JOB_STATUSES: ReadonlySet<string> = new Set(['ENQUEUED', 'PENDING'])
 export interface Document {
   name: string
+  suffix: string // of the original file, lower-case, with the dot: ".pdf"
   size: number
   status: DocStatus
   error: string | null
   preview: Preview | null
+  parser: Parser
+  skip_ocr_pages: boolean
   created_at: number // unix seconds
   updated_at: number
-  description: string // what the document is, in the uploader's words
+  description: string // what the document is, in the importer's words
 }
-// How a library's documents are spread over the lifecycle, counted by the backend: the document
-// listing is paged, so the rows on screen are never the whole library.
+// An upload waiting in the staging area: bytes on the server, nothing in the database yet. It
+// becomes a document only when `importStaged` names it.
+export interface Staged {
+  staging_id: string
+  filename: string
+  size: number
+}
+// One document as a member of one collection: the document row, and how far this collection got
+// writing it into its table.
+export interface Member {
+  document: Document
+  status: MemberStatus
+  error: string | null
+  added_at: number
+  updated_at: number
+}
+// How a collection's memberships are spread over the lifecycle, counted by the backend: the
+// member listing is paged, so the rows on screen are never the whole collection.
 export interface DocumentCounts {
   total: number
   indexed: number
@@ -109,14 +143,14 @@ export interface DocumentCounts {
   error: number
   by_status: Record<string, number>
 }
-export interface LibrarySummary {
+export interface CollectionSummary {
   name: string
   counts: DocumentCounts
   created_at: number
   description: string
 }
-// The library's LanceDB table as it is right now, plus how its maintenance stands. Null until
-// the library has a table (see the backend's IndexStatus).
+// The collection's LanceDB table as it is right now, plus how its maintenance stands. Null until
+// the collection has a table (see the backend's IndexStatus).
 export interface IndexStatus {
   num_rows: number
   num_fragments: number
@@ -128,45 +162,62 @@ export interface IndexStatus {
   last_maintained_at: number | null // unix seconds
   pending_docs: number
 }
-export interface LibraryInfo {
+export interface CollectionInfo {
   name: string
-  settings: LibrarySettings
-  effective: ConversionSettings
+  settings: CollectionSettings
+  effective: ChunkSettings // what the overrides above resolve to
   search: SearchSettings
   description: string
   counts: DocumentCounts
   index_outdated: boolean
   index: IndexStatus | null
 }
-// Whole-library work the backend only accepts (202) and runs in the background: "index all" and
-// the deletion of a library. `job_id` is what a poll of `jobProgress` follows.
+// One row of the embedding cache: a set of vectors on disk, keyed by the document plus every
+// setting that decided them. Two collections with the same key share this one entry.
+export interface EmbeddingEntry {
+  id: string
+  document: string
+  urn: string
+  model: string
+  chunk_size: number
+  chunk_overlap: number
+  chunker: string
+  chunk_version: number
+  parser: string
+  skip_ocr_pages: boolean
+  rows: number
+  bytes: number
+  created_at: number
+}
+// Work the backend only accepts (202) and runs in the background: "index all", the deletion of a
+// collection or a document, attaching a document. `job_id` is what a poll of `jobProgress` follows.
 export interface BulkStarted {
   job_id: string
 }
-export type BulkKind = 'index_library' | 'delete_library'
+export type BulkKind = 'index_collection' | 'delete_collection' | 'delete_document'
 export interface BulkProgress {
   done: number
   skipped: number
   total: number
-  last: string | null // last document of the page queued; null once the library is exhausted
+  last: string | null // last document of the page queued; null once the collection is exhausted
 }
 export interface BulkJob {
   id: string
   kind: BulkKind
-  library: string
+  collection: string | null // null for a document deletion, which belongs to no collection
   status: string // DBOS: ENQUEUED | PENDING | SUCCESS | ERROR | CANCELLED
   progress: BulkProgress | null // null for a deletion, which has no pages
   error: string | null
 }
 // Every kind of background work the backend runs, in the order the Jobs view shows them.
-export type JobKind = 'document' | 'library' | 'download' | 'maintenance' | 'archive'
+export type JobKind = 'document' | 'collection' | 'download' | 'maintenance' | 'archive'
 // One job of any kind: what every kind has in common, plus the numbers only that kind has in
-// `detail` (a document: tasks_done/tasks_running/tasks_total; a bulk index: done/skipped/total;
+// `detail` (a document: tasks_done/tasks_running/tasks_total; a collection job: done/skipped/total;
 // a model download: warm, which says the model is loaded in the backend process).
 export interface JobRow {
   id: string
   kind: JobKind
-  title: string // human text: "library / doc", "index library X", "download reranker Y"
+  title: string // human text: "import doc", "collection / doc", "index collection X"
   status: string // DBOS: ENQUEUED | PENDING | SUCCESS | ERROR | CANCELLED
   created_at: number
   updated_at: number
@@ -221,7 +272,7 @@ export interface Page_ {
 }
 export type Frame = Head | Page_
 export interface Hit {
-  library: string
+  collection: string // the collection whose table matched; the document itself belongs to none
   doc: string
   home: string
   source_path: string
@@ -248,7 +299,7 @@ export interface Hit {
 // One document a query matched, and the best evidence that it did: the answer to "which
 // documents should I read", as opposed to `Hit`, which answers "which passage says so".
 export interface DocumentMatch {
-  library: string
+  collection: string
   doc: string
   score: number
   chunks: number
@@ -290,6 +341,14 @@ export interface Page<T> {
   items: T[]
   next_cursor: string | null // null on the last page
   total: number | null
+}
+// What an import may say about the document it creates. Everything is optional: the file name
+// and the user's conversion defaults answer for whatever is left out.
+export interface ImportOptions {
+  name?: string
+  description?: string
+  parser?: Parser
+  skip_ocr_pages?: boolean
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -339,8 +398,11 @@ async function* ndjson<T>(path: string): AsyncGenerator<T> {
   if (rest.trim()) yield JSON.parse(rest) as T
 }
 
-const libraryPath = (name: string) => `/api/libraries/${encodeURIComponent(name)}`
-const documentPath = (name: string, doc: string) => `${libraryPath(name)}/documents/${encodeURIComponent(doc)}`
+const collectionPath = (name: string) => `/api/collections/${encodeURIComponent(name)}`
+// A document is addressed on its own: it is imported once and shared by every collection holding it.
+const documentPath = (doc: string) => `/api/documents/${encodeURIComponent(doc)}`
+// One membership: the document as this collection sees it.
+const memberPath = (name: string, doc: string) => `${collectionPath(name)}/documents/${encodeURIComponent(doc)}`
 
 let optionsOnce: Promise<Options> | undefined
 
@@ -352,58 +414,78 @@ export const api = {
   settings: () => request<UserSettings>('/api/settings'),
   saveSettings: (s: UserSettings) => request<UserSettings>('/api/settings', json('PUT', s)),
 
-  libraries: (q: PageRequest = {}) => request<Page<LibrarySummary>>(`/api/libraries${pageQuery(q)}`),
+  collections: (q: PageRequest = {}) => request<Page<CollectionSummary>>(`/api/collections${pageQuery(q)}`),
   // Names alone, for a picker: one request, and the cap is the backend's largest page.
-  libraryNames: () => api.libraries({ page_size: MAX_PAGE_SIZE }).then((p) => p.items.map((l) => l.name)),
-  createLibrary: (name: string, description = '') =>
-    request<LibraryInfo>('/api/libraries', json('POST', { name, description })),
-  describeLibrary: (name: string, description: string) =>
-    request<LibraryInfo>(`${libraryPath(name)}/description`, json('PUT', { description })),
-  library: (name: string) => request<LibraryInfo>(libraryPath(name)),
-  documents: (name: string, q: PageRequest & { status?: DocStatus } = {}) => {
+  collectionNames: () => api.collections({ page_size: MAX_PAGE_SIZE }).then((p) => p.items.map((c) => c.name)),
+  createCollection: (name: string, description = '') =>
+    request<CollectionInfo>('/api/collections', json('POST', { name, description })),
+  describeCollection: (name: string, description: string) =>
+    request<CollectionInfo>(`${collectionPath(name)}/description`, json('PUT', { description })),
+  collection: (name: string) => request<CollectionInfo>(collectionPath(name)),
+  deleteCollection: (name: string) => request<BulkStarted>(collectionPath(name), { method: 'DELETE' }),
+  searchCollection: (name: string, q: string, limit?: number) =>
+    request<Hit[]>(`${collectionPath(name)}/search?q=${encodeURIComponent(q)}${limit ? `&limit=${limit}` : ''}`),
+  saveCollectionSettings: (name: string, s: CollectionSettings) =>
+    request<CollectionInfo>(`${collectionPath(name)}/settings`, json('PUT', s)),
+  indexCollection: (name: string) => request<BulkStarted>(`${collectionPath(name)}/index`, { method: 'POST' }),
+
+  // The collection's members: one document row each, plus how far this collection indexed it.
+  collectionDocuments: (name: string, q: PageRequest & { status?: MemberStatus } = {}) => {
     const { status, ...page } = q
-    return request<Page<Document>>(`${libraryPath(name)}/documents${pageQuery(page, { status })}`)
+    return request<Page<Member>>(`${collectionPath(name)}/documents${pageQuery(page, { status })}`)
   },
-  deleteLibrary: (name: string) => request<BulkStarted>(libraryPath(name), { method: 'DELETE' }),
-  searchLibrary: (name: string, q: string, limit?: number) =>
-    request<Hit[]>(`${libraryPath(name)}/search?q=${encodeURIComponent(q)}${limit ? `&limit=${limit}` : ''}`),
-  saveLibrarySettings: (name: string, s: LibrarySettings) =>
-    request<LibraryInfo>(`${libraryPath(name)}/settings`, json('PUT', s)),
-  indexLibrary: (name: string) => request<BulkStarted>(`${libraryPath(name)}/index`, { method: 'POST' }),
+  // Adds the membership and indexes it; the document itself is already imported.
+  attachDocument: (name: string, doc: string) =>
+    request<BulkStarted>(`${collectionPath(name)}/documents`, json('POST', { document: doc })),
+  // Drops the membership and the collection's chunks of it. The document and its embeddings stay.
+  detachDocument: (name: string, doc: string) => request<void>(memberPath(name, doc), { method: 'DELETE' }),
+  reindexMember: (name: string, doc: string) => request<BulkStarted>(`${memberPath(name, doc)}/index`, { method: 'POST' }),
+
+  documents: (q: PageRequest & { status?: DocStatus } = {}) => {
+    const { status, ...page } = q
+    return request<Page<Document>>(`/api/documents${pageQuery(page, { status })}`)
+  },
+  document: (doc: string) => request<Document>(documentPath(doc)),
+  // Upload step one: the bytes land in staging under an id. Nothing is imported until `importStaged`.
+  stageUpload: (file: File) => {
+    const body = new FormData()
+    body.append('data', file)
+    return request<Staged>('/api/documents/staging', { method: 'POST', body })
+  },
+  // Upload step two: name the staged bytes and start the import pipeline.
+  importStaged: (req: ImportOptions & { staging_id: string }) => request<Document>('/api/documents/import', json('POST', req)),
+  // Import a file the server can already read, by path; the file is copied, not moved.
+  importPath: (path: string, opts: ImportOptions = {}) => request<Document>('/api/documents/import', json('POST', { path, ...opts })),
+  deleteDocument: (doc: string) => request<BulkStarted>(documentPath(doc), { method: 'DELETE' }),
+  // Re-run a failed or cancelled import; the backend refuses any other status.
+  reimportDocument: (doc: string) => request<BulkStarted>(`${documentPath(doc)}/import`, { method: 'POST' }),
+  documentCollections: (doc: string) => request<string[]>(`${documentPath(doc)}/collections`),
+  documentEmbeddings: (doc: string) => request<EmbeddingEntry[]>(`${documentPath(doc)}/embeddings`),
+  describeDocument: (doc: string, description: string) =>
+    request<Document>(`${documentPath(doc)}/description`, json('PUT', { description })),
+  previewUrl: (doc: string) => `${documentPath(doc)}/preview`,
+  sourceUrl: (doc: string) => `${documentPath(doc)}/source`,
+  // Yields each frame as it arrives, so the first page shows without waiting for the last.
+  markdown: (doc: string, full = false) => ndjson<Frame>(`${documentPath(doc)}/markdown${full ? '?full=true' : ''}`),
+
   // One section of the Jobs view. The cursor is an opaque offset rather than a keyset, because
   // the listing reads DBOS's workflow history, which has one fixed ordering (newest first) and no
   // sort of its own. A cursor belongs to the kind that issued it.
-  jobsByKind: (kind: JobKind, q: PageRequest & { library?: string } = {}) =>
-    request<Page<JobRow>>(`/api/jobs/by-kind${pageQuery({ cursor: q.cursor, page_size: q.page_size }, { kind, library: q.library })}`),
+  jobsByKind: (kind: JobKind, q: PageRequest & { collection?: string } = {}) =>
+    request<Page<JobRow>>(`/api/jobs/by-kind${pageQuery({ cursor: q.cursor, page_size: q.page_size }, { kind, collection: q.collection })}`),
   jobKinds: () => request<JobKindSummary[]>('/api/jobs/kinds'),
   activity: () => request<Activity>('/api/jobs/activity'),
   jobTasks: (jobId: string) => request<Task[]>(`/api/jobs/${jobId}/tasks`),
   jobProgress: (jobId: string) => request<BulkJob>(`/api/jobs/${jobId}/progress`),
   deleteJob: (jobId: string) => request<void>(`/api/jobs/${jobId}`, { method: 'DELETE' }),
 
-  upload: (name: string, f: File, opts: { rename_to?: string; description?: string } = {}) => {
-    const body = new FormData()
-    body.append('data', f)
-    const query = pageQuery({}, { rename_to: opts.rename_to, description: opts.description })
-    return request<Document>(`${libraryPath(name)}/documents${query}`, { method: 'POST', body })
-  },
-  describeDocument: (name: string, doc: string, description: string) =>
-    request<Document>(`${documentPath(name, doc)}/description`, json('PUT', { description })),
-  indexDocument: (name: string, doc: string) => request<BulkStarted>(`${documentPath(name, doc)}/index`, { method: 'POST' }),
-  deleteDocument: (name: string, doc: string) => request<void>(documentPath(name, doc), { method: 'DELETE' }),
-  previewUrl: (name: string, doc: string) => `${documentPath(name, doc)}/preview`,
-  sourceUrl: (name: string, doc: string) => `${documentPath(name, doc)}/source`,
-  // Yields each frame as it arrives, so the first page shows without waiting for the last.
-  markdown: (name: string, doc: string, full = false) =>
-    ndjson<Frame>(`${documentPath(name, doc)}/markdown${full ? '?full=true' : ''}`),
-
   // Which documents to read for a query, rather than which passages answer it.
-  searchDocuments: (q: string, libraries?: string[], limit?: number) =>
-    request<DocumentMatch[]>(`/api/search/documents${pageQuery({}, { q, libraries: libraries?.join(','), limit: limit?.toString() })}`),
+  searchDocuments: (q: string, collections?: string[], limit?: number) =>
+    request<DocumentMatch[]>(`/api/search/documents${pageQuery({}, { q, collections: collections?.join(','), limit: limit?.toString() })}`),
 
   sessions: () => request<Record<string, string[]>>('/api/sessions'),
-  saveSession: (id: string, libraries: string[]) =>
-    request<string[]>(`/api/sessions/${encodeURIComponent(id)}`, json('PUT', { libraries })),
+  saveSession: (id: string, collections: string[]) =>
+    request<string[]>(`/api/sessions/${encodeURIComponent(id)}`, json('PUT', { collections })),
   search: (sessionId: string, q: string, limit?: number) =>
     request<Hit[]>(`/api/search?session_id=${encodeURIComponent(sessionId)}&q=${encodeURIComponent(q)}${limit ? `&limit=${limit}` : ''}`),
 }

@@ -8,7 +8,7 @@ type Props = {
   onChange: (next: SearchSettings | SearchOverrides) => void
 }
 
-// One form for both user-level (concrete values) and library-level (nullable overrides) settings.
+// One form for both user-level (concrete values) and collection-level (nullable overrides) settings.
 export function SearchSettingsForm({ value, defaults, options, onChange }: Props) {
   const doc = (k: keyof SearchSettings) => options.docs[`search.${k}`]
   const set = <K extends keyof SearchSettings>(k: K, v: SearchSettings[K] | null) => onChange({ ...value, [k]: v })

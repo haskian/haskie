@@ -1,7 +1,14 @@
-"""User settings (global, chosen at init) and per-library overrides.
+"""User settings (global, chosen at init) and per-collection overrides.
 
 Every setting carries a `Meta(title, description)`: the single definition shown in the UI
-(`/api/options` -> `docs`) and in the JSON schema. Library overrides reuse the same Meta objects.
+(`/api/options` -> `docs`) and in the JSON schema. Collection overrides reuse the same Meta
+objects.
+
+What is settable where follows where the work happens. Conversion (`parser`, `skip_ocr_pages`)
+runs once per document, at import, so its values are chosen then and stored on the document;
+`UserSettings.conversion` only supplies the defaults an import falls back on. Chunking
+(`chunker`, `chunk_size`, `chunk_overlap`) splits the shared markdown per collection, so a
+collection may override it (`CollectionSettings`), and the embedding cache is keyed by it.
 """
 
 import os
@@ -63,7 +70,7 @@ EMBEDDING = Meta(
     title="Embedding profile",
     description=(
         "Text-embedding model that turns chunks into vectors for semantic search. Chosen at "
-        'first run; changing it later requires "Index all" in every library. none = full-text '
+        'first run; changing it later requires "Index all" in every collection. none = full-text '
         "(BM25) search only; compact = bge-small (384 dims, English); quality = bge-large "
         "(1024 dims, English); multilingual = multilingual-e5-large (1024 dims)."
     ),
@@ -71,9 +78,9 @@ EMBEDDING = Meta(
 PARSER = Meta(
     title="Parser",
     description=(
-        "Converter for non-PDF files. anydoc: Word, PowerPoint, Excel, OpenDocument, RTF, EPUB "
-        "and CSV to Markdown. plain: read the file as UTF-8 text. PDFs always use pdf-inspector "
-        "page by page, regardless of this setting."
+        "Converter for non-PDF files, chosen when a document is imported. anydoc: Word, "
+        "PowerPoint, Excel, OpenDocument, RTF, EPUB and CSV to Markdown. plain: read the file as "
+        "UTF-8 text. PDFs always use pdf-inspector page by page, regardless of this setting."
     ),
 )
 CHUNKER = Meta(
@@ -102,9 +109,10 @@ CHUNK_OVERLAP = Meta(
 SKIP_OCR_PAGES = Meta(
     title="Skip pages that need OCR",
     description=(
-        "PDF pages with no extractable text (scans, images) are dropped and replaced by a "
-        "marker comment in the Markdown instead of failing the document. A document where every "
-        "page needs OCR still fails. Off: any such page fails the document."
+        "Chosen when a document is imported. PDF pages with no extractable text (scans, images) "
+        "are dropped and replaced by a marker comment in the Markdown instead of failing the "
+        "document. A document where every page needs OCR still fails. Off: any such page fails "
+        "the document."
     ),
 )
 CPU_BUDGET = Meta(
@@ -130,7 +138,7 @@ def _weight(stage: str, note: str) -> Meta:
 
 CONVERTING_WEIGHT = _weight("Converting", "Converting costs CPU and IO per page.")
 EMBEDDING_WEIGHT = _weight("Embedding", "Every embedding task loads the embedding model.")
-INDEXING_WEIGHT = _weight("Indexing", "LanceDB takes one writer per library.")
+INDEXING_WEIGHT = _weight("Indexing", "LanceDB takes one writer per collection.")
 DOCUMENT_PARALLELISM = Meta(
     title="Parallel tasks per document",
     description=(
@@ -158,19 +166,21 @@ INDEX_GROUP_PARTS = Meta(
 MAINTENANCE_DOCS = Meta(
     title="Maintenance after documents",
     description=(
-        "Run library maintenance (compaction, index update) once this many documents were "
+        "Run collection maintenance (compaction, index update) once this many documents were "
         "indexed since the last run."
     ),
 )
 MAINTENANCE_IDLE = Meta(
     title="Maintenance when idle (seconds)",
-    description=("Also run maintenance once a library has had no document indexed for this long."),
+    description=(
+        "Also run maintenance once a collection has had no document indexed for this long."
+    ),
 )
 ANN_MIN_ROWS = Meta(
     title="Vector index from (rows)",
     description=(
-        "Build the approximate vector index (IVF-PQ) once a library holds at least this many "
-        "chunks; smaller libraries are scanned exactly. Rebuilt when the library doubled."
+        "Build the approximate vector index (IVF-PQ) once a collection holds at least this many "
+        "chunks; smaller collections are scanned exactly. Rebuilt when the collection doubled."
     ),
 )
 TASK_TIMEOUT = Meta(
@@ -310,7 +320,7 @@ def _at_least(minimum: int | float, **values: int | float) -> None:
 
 
 def _check_chunking(chunk_size: int | None, chunk_overlap: int | None) -> None:
-    """Shared by the user-level settings and the per-library overrides, where either half may
+    """Shared by the user-level settings and the per-collection overrides, where either half may
     be unset and inherit the user value."""
     if chunk_size is not None:
         _at_least(1, chunk_size=chunk_size)
@@ -325,8 +335,21 @@ def _check_chunking(chunk_size: int | None, chunk_overlap: int | None) -> None:
 # --- structs ----------------------------------------------------------------------
 
 
+class ChunkSettings(msgspec.Struct, frozen=True):
+    """How one collection splits a document's markdown into chunks: the three values the
+    embedding cache is keyed by (see `embed_cache.Params`), and nothing else."""
+
+    chunker: Annotated[Chunker, CHUNKER] = "markdown"
+    chunk_size: Annotated[int, CHUNK_SIZE] = 1200
+    chunk_overlap: Annotated[int, CHUNK_OVERLAP] = 150
+
+    def __post_init__(self) -> None:
+        _check_chunking(self.chunk_size, self.chunk_overlap)
+
+
 class ConversionSettings(msgspec.Struct):
-    """Effective settings used to convert and chunk one document."""
+    """The user-level defaults: how a document is converted when nothing else is said at import
+    (`parser`, `skip_ocr_pages`), and how a collection chunks it when it overrides nothing."""
 
     parser: Annotated[Parser, PARSER] = "anydoc"
     chunker: Annotated[Chunker, CHUNKER] = "markdown"
@@ -336,6 +359,10 @@ class ConversionSettings(msgspec.Struct):
 
     def __post_init__(self) -> None:
         _check_chunking(self.chunk_size, self.chunk_overlap)
+
+    @property
+    def chunking(self) -> ChunkSettings:
+        return ChunkSettings(self.chunker, self.chunk_size, self.chunk_overlap)
 
 
 class SearchSettings(msgspec.Struct):
@@ -366,7 +393,7 @@ class SearchSettings(msgspec.Struct):
 
 
 class SearchOverrides(msgspec.Struct):
-    """Per-library search overrides. None means "use user default"."""
+    """Per-collection search overrides. None means "use user default"."""
 
     limit: Annotated[int | None, LIMIT] = None
     candidates: Annotated[int | None, CANDIDATES] = None
@@ -396,7 +423,7 @@ class PipelineSettings(msgspec.Struct):
     converting, embedding, indexing and maintenance draw from, and it is never exceeded. The
     weights only decide who gets which share of it when every stage has work, because the stages
     cost different things: converting is CPU and IO per page, every embedding task loads the
-    model, and indexing writes to LanceDB, which takes one writer per library. Every stage keeps
+    model, and indexing writes to LanceDB, which takes one writer per collection. Every stage keeps
     at least one slot, so a budget smaller than three stages is spent by whoever asks first.
     """
 
@@ -466,22 +493,23 @@ class UserSettings(msgspec.Struct):
         return msgspec.structs.replace(model, accelerator=self.pipeline.accelerator)
 
 
-class LibrarySettings(msgspec.Struct):
-    """Per-library overrides. None means "use user default"."""
+class CollectionSettings(msgspec.Struct):
+    """Per-collection overrides. None means "use user default".
 
-    parser: Annotated[Parser | None, PARSER] = None
+    Only chunking and search: conversion happens once per document at import, so `parser` and
+    `skip_ocr_pages` live on the document (see the module docstring)."""
+
     chunker: Annotated[Chunker | None, CHUNKER] = None
     chunk_size: Annotated[int | None, CHUNK_SIZE] = None
     chunk_overlap: Annotated[int | None, CHUNK_OVERLAP] = None
-    skip_ocr_pages: Annotated[bool | None, SKIP_OCR_PAGES] = None
     search: SearchOverrides = msgspec.field(default_factory=SearchOverrides)
 
     def __post_init__(self) -> None:
         _check_chunking(self.chunk_size, self.chunk_overlap)
 
-    def resolve(self, user: UserSettings) -> ConversionSettings:
+    def resolve(self, user: UserSettings) -> ChunkSettings:
         overrides = {k: v for k, v in without_none(self).items() if k != "search"}
-        return msgspec.structs.replace(user.conversion, **overrides)
+        return msgspec.structs.replace(user.conversion.chunking, **overrides)
 
     def resolve_search(self, user: UserSettings) -> SearchSettings:
         return self.search.resolve(user.search)
@@ -497,7 +525,7 @@ class FieldDoc(msgspec.Struct):
 
 def docs(struct: type[msgspec.Struct] = UserSettings, prefix: str = "") -> dict[str, FieldDoc]:
     """Flat `{"search.limit": FieldDoc, ...}` from the Meta annotations, recursing into nested
-    structs. Library overrides use the same keys (`defaults.*`, `search.*`)."""
+    structs. Collection overrides use the same keys (`conversion.*`, `search.*`)."""
     import msgspec.inspect as inspect
 
     out: dict[str, FieldDoc] = {}

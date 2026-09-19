@@ -174,3 +174,22 @@ class Keyset:
             next_cursor=encode_cursor(key(visible[-1]), self.sort, self.order) if more else None,
             total=total,
         )
+
+
+def keyset(sort: str, expression: str, request: PageRequest) -> Keyset:
+    """The keyset of a listing whose rows are unique by `name`, so `name` breaks every tie; when
+    it is also the sort column it is the whole keyset rather than a column repeated twice."""
+    columns = [expression] if sort == "name" else [expression, "name"]
+    return Keyset(sort, columns, request.order, request)
+
+
+def key_reader(
+    sort: str, expression: str, selected: list[str], name_column: str = "name"
+) -> Callable[[tuple], list[Any]]:
+    """Reads the keyset columns out of a row of `selected`, in the order `keyset` built them.
+    `name_column` is how the name is spelled in `selected`, which a joined listing qualifies."""
+    name = selected.index(name_column)
+    if sort == "name":
+        return lambda row: [row[name]]
+    value = selected.index(expression)
+    return lambda row: [row[value], row[name]]

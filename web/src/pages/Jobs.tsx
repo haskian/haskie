@@ -7,17 +7,17 @@ import { usePoll } from '../hooks/usePoll'
 
 const PAGE_SIZE = 20 // one section per kind: each shows a first page and loads more on demand
 
-// The kinds whose jobs belong to one library; the others ignore the filter (a model download and
-// an archive round are not a library's work), so their section keeps its rows while it is set.
-const BY_LIBRARY: ReadonlySet<JobKind> = new Set<JobKind>(['document', 'library', 'maintenance'])
+// The kinds whose jobs belong to one collection; the others ignore the filter (a model download
+// and an archive round are no collection's work), so their section keeps its rows while it is set.
+const BY_COLLECTION: ReadonlySet<JobKind> = new Set<JobKind>(['document', 'collection', 'maintenance'])
 
 // One section per kind of background work, in the order the backend lists them. Each section
 // pages on its own, and one poll re-reads every one of them while anything is running: a document
-// pipeline, a whole-library job, a model download, a maintenance run or an archive round.
+// pipeline, a whole-collection job, a model download, a maintenance run or an archive round.
 export function Jobs() {
   const [kinds, setKinds] = useState<JobKindSummary[]>([])
-  const [libraries, setLibraries] = useState<string[]>([])
-  const [library, setLibrary] = useState('')
+  const [collections, setCollections] = useState<string[]>([])
+  const [collection, setCollection] = useState('')
   const [onScreen, setOnScreen] = useState<Record<string, number>>({})
   const refreshers = useRef(new Map<JobKind, () => Promise<void>>())
 
@@ -36,7 +36,7 @@ export function Jobs() {
   const reloadKinds = useCallback(() => api.jobKinds().then(setKinds), [])
   useEffect(() => {
     void reloadKinds()
-    api.libraryNames().then(setLibraries)
+    api.collectionNames().then(setCollections)
   }, [reloadKinds])
 
   // the backend's count sees jobs no section has on screen yet; the rows on screen keep the poll
@@ -48,9 +48,9 @@ export function Jobs() {
     <div>
       <h2>Jobs</h2>
       <p>
-        <select value={library} onChange={(e) => setLibrary(e.target.value)}>
-          <option value="">all libraries</option>
-          {libraries.map((l) => <option key={l}>{l}</option>)}
+        <select value={collection} onChange={(e) => setCollection(e.target.value)}>
+          <option value="">all collections</option>
+          {collections.map((c) => <option key={c}>{c}</option>)}
         </select>{' '}
         <span className="muted">{active} active</span>
       </p>
@@ -58,7 +58,7 @@ export function Jobs() {
         <JobSection
           key={summary.kind}
           summary={summary}
-          library={BY_LIBRARY.has(summary.kind) ? library : ''}
+          collection={BY_COLLECTION.has(summary.kind) ? collection : ''}
           onState={register}
         />
       ))}
@@ -67,12 +67,12 @@ export function Jobs() {
 }
 
 
-function JobSection({ summary, library, onState }: { summary: JobKindSummary; library: string; onState: (kind: JobKind, refresh: () => Promise<void>, running: number) => void }) {
+function JobSection({ summary, collection, onState }: { summary: JobKindSummary; collection: string; onState: (kind: JobKind, refresh: () => Promise<void>, running: number) => void }) {
   const { kind, label } = summary
   const [open, setOpen] = useState<string | null>(null)
   const [tasks, setTasks] = useState<Task[]>([])
 
-  const jobs = usePaged<JobRow>((q) => api.jobsByKind(kind, { ...q, library: library || undefined }), { pageSize: PAGE_SIZE, deps: [kind, library] })
+  const jobs = usePaged<JobRow>((q) => api.jobsByKind(kind, { ...q, collection: collection || undefined }), { pageSize: PAGE_SIZE, deps: [kind, collection] })
   const reload = jobs.refresh
   const running = jobs.items.filter((j) => ACTIVE.has(j.status)).length
 

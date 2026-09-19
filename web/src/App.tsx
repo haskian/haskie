@@ -2,24 +2,27 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, type Status } from './api'
 import { Activity } from './components/Activity'
 import { usePoll } from './hooks/usePoll'
+import { Collections } from './pages/Collections'
+import { Documents } from './pages/Documents'
 import { Init } from './pages/Init'
 import { Jobs } from './pages/Jobs'
-import { Libraries } from './pages/Libraries'
 import { Sessions } from './pages/Sessions'
 import { Settings } from './pages/Settings'
 import { Viewer } from './pages/Viewer'
 import './App.css'
 
+// A document is imported once and addressed by name alone, so the viewer needs no collection.
 export type Route =
-  | { name: 'libraries'; library?: string }
-  | { name: 'viewer'; library: string; doc: string }
+  | { name: 'documents' }
+  | { name: 'collections'; collection?: string }
+  | { name: 'viewer'; doc: string }
   | { name: 'sessions' }
   | { name: 'jobs' }
   | { name: 'settings' }
 
 export default function App() {
   const [status, setStatus] = useState<Status | null>(null)
-  const [page, setPage] = useState<Route>({ name: 'libraries' })
+  const [page, setPage] = useState<Route>({ name: 'documents' })
 
   const refresh = useCallback(() => api.status().then(setStatus), [])
   useEffect(() => {
@@ -35,7 +38,8 @@ export default function App() {
     <div className="app">
       <nav>
         <strong>haskie</strong>
-        <button onClick={() => setPage({ name: 'libraries' })}>Libraries</button>
+        <button onClick={() => setPage({ name: 'documents' })}>Documents</button>
+        <button onClick={() => setPage({ name: 'collections' })}>Collections</button>
         <button onClick={() => setPage({ name: 'sessions' })}>Sessions</button>
         <button onClick={() => setPage({ name: 'jobs' })}>Jobs</button>
         <button onClick={() => setPage({ name: 'settings' })}>Settings</button>
@@ -50,8 +54,9 @@ export default function App() {
         <Activity onOpen={() => setPage({ name: 'jobs' })} />
       </nav>
       <main>
-        {page.name === 'libraries' && <Libraries initial={page.library} navigate={setPage} />}
-        {page.name === 'viewer' && <Viewer library={page.library} doc={page.doc} navigate={setPage} />}
+        {page.name === 'documents' && <Documents navigate={setPage} />}
+        {page.name === 'collections' && <Collections initial={page.collection} navigate={setPage} />}
+        {page.name === 'viewer' && <Viewer doc={page.doc} navigate={setPage} />}
         {page.name === 'sessions' && <Sessions />}
         {page.name === 'jobs' && <Jobs />}
         {page.name === 'settings' && <Settings />}

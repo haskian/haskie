@@ -24,7 +24,7 @@ class NotFound(HaskieError):
     status_code = 404
 
 
-class LibraryNotFound(NotFound):
+class CollectionNotFound(NotFound):
     pass
 
 
