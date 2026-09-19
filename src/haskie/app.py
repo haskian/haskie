@@ -145,8 +145,10 @@ def create_app() -> Litestar:
         before_request=bind_request_context,
         before_send=[add_request_id],
         request_max_body_size=UPLOAD_MAX_BYTES,
-        on_startup=[home.ensure_home, workflows.start],
-        on_shutdown=[workflows.stop],
+        # `claim_home` first: everything after it migrates the database or launches DBOS, and a
+        # second haskie on the same home must refuse before any of that, not after.
+        on_startup=[home.claim_home, home.ensure_home, workflows.start],
+        on_shutdown=[workflows.stop, home.release_home],
     )
 
 

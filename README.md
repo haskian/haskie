@@ -59,8 +59,13 @@ haskie destroy              # delete ~/.haskie and everything in it
 ```
 
 Open the UI, drop files into Documents (they are converted and embedded on import), make a
-collection, add the documents that belong to it. Then point your agent at
-`POST http://127.0.0.1:8000/mcp` and ask it something only your documents know.
+collection, add the documents that belong to it. Then hand it to Claude Code:
+
+```sh
+haskie install claude       # MCP server, plus a skill that knows when to reach for it
+```
+
+and ask it something only your documents know.
 
 `init` is idempotent, so it is also how a home is brought up to date after an upgrade; `run` does
 the same work at startup, so `init` is only needed to do it first. Both take `--home` (or
@@ -71,6 +76,13 @@ authenticates a caller.
 A home written by a build older than the collections model (one with a `library/` folder) is not
 migrated: the app refuses to start against it and says so. Run `haskie destroy` and import the
 documents again.
+
+One haskie per home: the app takes an exclusive lock on the home directory as its first startup
+step, and a second one refuses, naming the process that has it. A home is one SQLite file and one
+durable job pipeline, and two executors polling the same queues take each other's work. The lock
+lives in the app rather than in `run`, so `mise run api` and any other ASGI server are held to it
+too; the port is not the guard it looks like, because the server runs its whole startup before it
+binds. `haskie ensure` is the idempotent form: it starts a server only if nothing is serving yet.
 
 `destroy` asks before it deletes and prints what would be lost first. It refuses any directory
 that is not a haskie home, so a mistyped `--home` cannot take the wrong tree with it; `--yes`
@@ -89,6 +101,32 @@ Endpoint `POST http://127.0.0.1:8000/mcp`. Tools: `list_documents`, `get_documen
 Set the session's collections first, then search with the same id — that is how an agent scopes
 itself to *this topic's* sources for the rest of the conversation. `search_text` needs no session
 and no model: one keyword query across everything, from a cold start.
+
+### Claude Code
+
+```sh
+haskie install claude       # --scope user (default) or project, --url for a different endpoint
+```
+
+Three things, because the tools alone are not enough:
+
+- **The MCP entry**, registered with `claude mcp add --transport http`. Print it instead of
+  running it if the `claude` CLI is not on PATH.
+- **A skill** at `~/.claude/skills/haskie/SKILL.md`, whose trigger names the collections this home
+  actually holds — so it fires on *coffee roasting* rather than on the word "documents". It also
+  says which search to start with, how to cite a hit, and that no hits is an answer. Re-run
+  `haskie install claude` after adding a collection to refresh it.
+- **A SessionStart hook** running `haskie ensure --no-wait`, so a session that starts while
+  nothing is serving brings the server up. It costs one loopback request when haskie is already
+  running, which is the usual case.
+
+The hook starts the server, but it does not rescue the session that ran it: Claude Code connects
+to the MCP endpoint while the hook is still working. So the first session after a cold boot has no
+haskie tools and every session after it does. Keep `haskie run` up — a launchd agent, or just the
+terminal you already left it in — if that first session matters.
+
+Transport is HTTP, not stdio. litestar-mcp serves MCP `2026-07-28`, which replaced `initialize`
+with `server/discover`; a stdio client that opens with `initialize` gets a 404 and never connects.
 
 ## Search that earns the trust you put in the collection
 

@@ -4,8 +4,12 @@ A filesystem call blocks, so every async function here runs its work in a worker
 ones (`atomic_replace`, `atomic_write_sync`) are for code that already runs in one: `convert.py`
 and `embed_cache.py` are sync by nature (pyarrow, the parsers) and would otherwise hop threads
 twice for one write.
+
+The home lock (`claim_home` and friends) is sync for a different reason: it runs before there
+is an event loop at all, as the app's first startup hook.
 """
 
+import fcntl
 import os
 import shutil
 from collections.abc import Callable, Iterator
@@ -23,6 +27,10 @@ STAGING_ROOT = HOME / "staging"  # uploads not yet imported; swept by the nightl
 AUDIT_DIR = HOME / "audit"
 DB_FILE = HOME / "haskie.db"
 MODEL_CACHE = HOME / "cache" / "models"  # compiled CoreML models (see embed.py); ORT creates it
+LOCK_FILE = HOME / "haskie.lock"  # one running haskie per home (see `claim_home`)
+# What the lock file says is running, for the next process's error message. `run` sets it; an app
+# started another way keeps the placeholder, because only the caller knows the address.
+ADDRESS = os.environ.get("HASKIE_ADDRESS", "address unknown")
 
 DIR_MODE = 0o700  # documents and the audit trail are private to the user running the app
 
@@ -34,7 +42,15 @@ def use(root: Path) -> None:
     just set the environment variable: the derived paths would already be built from the old root.
     Nothing here re-opens what is already open, so this belongs at startup and nowhere else.
     """
-    global HOME, COLLECTION_ROOT, DOCUMENT_ROOT, STAGING_ROOT, AUDIT_DIR, DB_FILE, MODEL_CACHE
+    global \
+        HOME, \
+        COLLECTION_ROOT, \
+        DOCUMENT_ROOT, \
+        STAGING_ROOT, \
+        AUDIT_DIR, \
+        DB_FILE, \
+        MODEL_CACHE, \
+        LOCK_FILE
     HOME = root
     COLLECTION_ROOT = HOME / "collections"
     DOCUMENT_ROOT = HOME / "documents"
@@ -42,6 +58,83 @@ def use(root: Path) -> None:
     AUDIT_DIR = HOME / "audit"
     DB_FILE = HOME / "haskie.db"
     MODEL_CACHE = HOME / "cache" / "models"
+    LOCK_FILE = HOME / "haskie.lock"
+
+
+_holding: int | None = None  # the file descriptor whose flock this process holds
+
+
+def claim_home() -> None:
+    """Claim this home for the calling process, or refuse: one haskie per home.
+
+    A home is one SQLite file and one durable job pipeline, and a boot is a DBOS executor that
+    recovers in-flight workflows and starts polling the queues. Two of them on the same file take
+    each other's tasks. The TCP port is not the guard it looks like: a server runs its whole
+    startup - migrations, `DBOS.launch`, re-enqueuing orphans - before it binds.
+
+    So this runs as the app's first startup hook rather than in the CLI: `haskie run`, `litestar
+    --app haskie.app:app run` and any other ASGI server all reach the same lifespan, and only the
+    lifespan is a layer every one of them passes through.
+
+    An advisory `flock`, not a pid file, because the kernel drops it when the holder dies: a
+    crashed haskie leaves nothing to clean up. POSIX only, like the `fcntl` it imports; failing at
+    import beats a guard that silently leaves the home unprotected.
+    """
+    from haskie.errors import Conflict  # local: `errors` imports this module
+
+    global _holding
+    if _holding is not None:  # `--reload` restarts run one lifespan per child, not per process
+        return
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
+    # O_RDWR rather than a mode string: append mode ignores `seek`, and the holder line is
+    # rewritten in place rather than accumulated.
+    handle = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        held = os.read(handle, 256).decode("utf-8", "replace").strip() or "unknown process"
+        os.close(handle)
+        raise Conflict(f"haskie is already running for {HOME} ({held})") from None
+    os.ftruncate(handle, 0)
+    os.write(handle, f"pid {os.getpid()}, {ADDRESS}".encode())
+    _holding = handle
+
+
+def home_holder() -> str | None:
+    """Who is running for this home, or None. Takes the lock and drops it again, so it answers
+    without claiming anything: a caller that wants a clean message before it starts a server.
+
+    Advisory only. The claim in the app's startup hook is the authority; this can go stale between
+    the answer and the claim, and then the startup hook refuses instead.
+    """
+    if not LOCK_FILE.is_file():
+        return None
+    handle = os.open(LOCK_FILE, os.O_RDONLY)
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return os.read(handle, 256).decode("utf-8", "replace").strip() or "unknown process"
+    finally:
+        os.close(handle)
+    return None
+
+
+def release_home() -> None:
+    """Give the home up. Closing the descriptor is what releases the lock."""
+    global _holding
+    if _holding is not None:
+        os.close(_holding)
+        _holding = None
+
+
+@contextmanager
+def hold_home() -> Iterator[None]:
+    """`claim_home` for a caller with a scope to bind it to, such as a test."""
+    claim_home()
+    try:
+        yield
+    finally:
+        release_home()
 
 
 async def ensure_home() -> Path:

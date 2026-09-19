@@ -10,9 +10,11 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same branch makes the older run pointless.
+# A newer push to the same branch makes the older run pointless. `github.workflow` keeps the run
+# release.yml calls apart from the branch's own run: a called workflow keeps the caller's ref, so
+# grouping on the ref alone would have the release cancel the push it was released from.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
