@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file. See [conven
 - - -
 ## 0.1.0 - 2026-09-19
 #### Features
+- collections with first-class documents and a shared embedding cache (#3) - (c94d73b) - Črtomir Majer
+- CI/CD with wheel+web release and conventional-commit versioning (#1) - (5f03a9b) - Črtomir Majer
+- haskie — document library with search, web UI and MCP server - (31d9760) - crtomir.majer
+#### Miscellaneous Chores
+- (**version**) 0.1.0 [skip ci] - (632bb38) - github-actions[bot]
+
+- - -
+
+## 0.1.0 - 2026-09-19
+#### Features
 - CI/CD with wheel+web release and conventional-commit versioning (#1) - (5f03a9b) - Črtomir Majer
 - haskie — document library with search, web UI and MCP server - (31d9760) - crtomir.majer
 
