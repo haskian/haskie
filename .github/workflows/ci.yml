@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call: # release.yml runs the full suite before publishing
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The wheel is pure-Python (`py3-none-any`), so no OS decides the artifact — but the native
+  # runtime deps (fastembed, lancedb) do differ per OS, so the suite runs on both.
+  check:
+    name: check + test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # Installs python, uv and bun from mise.toml, with caching.
+      - uses: jdx/mise-action@v2
+      - run: mise run setup
+      - run: mise run check # ruff + ty + oxlint + tsc, read-only
+      - run: mise run test

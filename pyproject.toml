@@ -25,7 +25,9 @@ dependencies = [
 haskie = "haskie.cli:cli"
 
 [project.optional-dependencies]
-gpu = ["onnxruntime-gpu>=1.17.0"]  # CUDA for embeddings; Apple Silicon (CoreML) needs nothing extra
+# CUDA for embeddings; Apple Silicon (CoreML) needs nothing extra, and onnxruntime-gpu ships
+# no macOS wheel, so the marker keeps `uv sync --all-extras` working there.
+gpu = ["onnxruntime-gpu>=1.17.0; sys_platform != 'darwin'"]
 
 [dependency-groups]
 dev = [

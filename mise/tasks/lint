@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-#MISE description="Lint, format and type-check Python (ruff, ty) and web (oxlint, tsc)"
+#MISE description="Lint, format and type-check, applying fixes (ruff, ty, oxlint, tsc)"
 set -euo pipefail
-uv run ruff check --fix src tests
-uv run ruff format src tests
-uv run ty check
-(cd web && bun run lint && bunx tsc -b)
+mise run check --fix

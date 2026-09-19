@@ -1,0 +1,3 @@
+# uv writes the new version into pyproject.toml; cog writes CHANGELOG.md and cuts the tag,
+# so the tag, the changelog and the declared version can never disagree.
+pre_bump_hooks = ["uv version {{version}}"]

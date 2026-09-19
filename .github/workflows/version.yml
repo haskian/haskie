@@ -1,0 +1,47 @@
+name: Version
+
+# On push to main: a conventional-commit SemVer bump (cog) writes CHANGELOG.md and cuts the tag,
+# then the release runs for that tag. This workflow publishes nothing itself.
+#
+# Requires main to accept pushes from github-actions[bot] — a bot bypass on the branch protection
+# rule, or an unprotected main. Requires squash-only merges too, so one commit on main equals one
+# PR title, the subject the increment is read from.
+on:
+  push:
+    branches: [main]
+
+# Never two bumps at once: the second would compute its next version from a tag the first has not
+# pushed yet, and both would claim the same one.
+concurrency:
+  group: version
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the bump commit, the changelog and the tag back to main
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.bump.outputs.released }}
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # cog reads every commit back to the last tag
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: jdx/mise-action@v2
+      - id: bump
+        run: mise run bump
+
+  # Same jobs a manually pushed `v*` tag would run. Called rather than triggered — see the note
+  # on release.yml's workflow_call.
+  release:
+    needs: bump
+    if: needs.bump.outputs.released == 'true'
+    # Inherits the workflow-level `contents: write`, which the release job's GitHub Release needs.
+    uses: ./.github/workflows/release.yml
+    # The tag, not the branch: the called workflow inherits this job's SHA, which is the commit
+    # before the bump, and would otherwise build the previous version's tree.
+    with:
+      ref: ${{ needs.bump.outputs.version }}
