@@ -31,9 +31,7 @@ jobs:
       - uses: jdx/mise-action@v2
       - run: mise run setup
       - run: mise run check # ruff + ty + oxlint + tsc, read-only
-      # Single worker: the timing-sensitive workflow tests hold a pipeline step open under a 30s
-      # safety timeout while running a second full pipeline; a parallel worker stealing CPU from
-      # that window on a slow runner times the step out. They pass locally at any worker count.
-      - run: mise run test
-        env:
-          PYTEST_WORKERS: "1"
+      # Skip the cpu_budget tests: they need a pipeline budget above what a small CI runner gives
+      # (see the marker in pyproject.toml). `-m` on the command line replaces the addopts default,
+      # so `not network` is repeated here.
+      - run: mise run test -- -m "not network and not cpu_budget"

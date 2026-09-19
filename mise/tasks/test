@@ -3,8 +3,4 @@
 set -euo pipefail
 # Python 3.13 sys.monitoring coverage: near-zero tracing overhead versus the C tracer.
 export COVERAGE_CORE="${COVERAGE_CORE:-sysmon}"
-# Worker count is a knob (default: one per core). The timing-sensitive workflow tests hold a
-# pipeline step open under a 30s safety timeout (WAIT in tests/test_workflows.py) while they drive
-# the rest of the test; oversubscribing the cores of a small CI runner starves that window and
-# times the step out. CI sets PYTEST_WORKERS below the core count to keep the window in budget.
-uv run pytest -q -n "${PYTEST_WORKERS:-auto}" --cov=haskie --cov-report=term-missing "$@"
+uv run pytest -q -n auto --cov=haskie --cov-report=term-missing "$@"

@@ -1088,6 +1088,7 @@ async def test_index_resumes_after_a_crash_without_duplicating_chunks(dbos, monk
     assert table is not None and await table.count_rows() == await _embedded_chunks(job_id) > 0
 
 
+@pytest.mark.cpu_budget
 async def test_adopt_orphans_resumes_only_stale_in_flight_workflows(dbos, monkeypatch) -> None:
     gate = Gate()
     real = pipeline.convert_batch
@@ -1302,6 +1303,7 @@ async def test_index_library_workflow_is_idempotent_on_replay(dbos, monkeypatch)
     await _drain()
 
 
+@pytest.mark.cpu_budget
 async def test_delete_library_workflow_cancels_and_removes(dbos, monkeypatch) -> None:
     """The deletion is a job too: it cancels everything the library has in flight, waits for the
     last running step, and only then drops the rows and the folder."""
