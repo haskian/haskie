@@ -1,4 +1,10 @@
-"""Chunk markdown with semantic-text-splitter (Rust); attach line range and heading ancestry."""
+"""Chunk markdown with semantic-text-splitter (Rust); attach line range and heading ancestry.
+
+`CHUNK_VERSION` is part of the embedding cache key (`embed_cache.Params`): a cached set of chunks
+is only reusable while this module splits the same text the same way. Bump it with any change
+here that alters the output for unchanged input and settings, or the cache keeps serving chunks
+the current code would no longer produce.
+"""
 
 import re
 from bisect import bisect_right
@@ -7,7 +13,9 @@ import msgspec
 from semantic_text_splitter import MarkdownSplitter, TextSplitter
 
 from haskie import toc
-from haskie.settings import ConversionSettings
+from haskie.settings import ChunkSettings
+
+CHUNK_VERSION = 1  # see the module docstring
 
 PAGE_MARKER = re.compile(r"<!-- page (\d+)")  # written by convert.pdf_pages_markdown
 NEWLINE = re.compile(r"\n")
@@ -47,7 +55,7 @@ def _heading_ancestry(text: str) -> tuple[list[int], list[tuple[str, list[str]]]
 
 
 def split(
-    text: str, settings: ConversionSettings, line_offset: int = 0, char_offset: int = 0
+    text: str, settings: ChunkSettings, line_offset: int = 0, char_offset: int = 0
 ) -> list[Chunk]:
     """`line_offset` / `char_offset` = lines / chars preceding `text` in the full document
     (batched indexing)."""

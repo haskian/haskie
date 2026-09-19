@@ -82,9 +82,9 @@ MIGRATIONS: list[str] = [
     create table if not exists retention_state (key text primary key, value text not null);
     insert or ignore into retention_state (key, value) values ('archive_watermark_ms', '0');
     """,
-    # 6: facts about the home directory itself rather than about its rows. The only one so far is
-    #    `layout_version` (see layout.py). The row is written by `layout.migrate_layout` once it
-    #    has finished moving, not here: an old home with a fresh database must still be migrated.
+    # 6: facts about the home directory itself rather than about its rows. Its only key was
+    #    `layout_version`, written by the layout migration that no longer exists, so the table has
+    #    no reader left and migration 9 drops it. Kept here so the numbering stays as it shipped.
     """
     create table if not exists meta (key text primary key, value text not null);
     """,
@@ -110,7 +110,105 @@ MIGRATIONS: list[str] = [
     alter table libraries add column description text not null default '';
     alter table documents add column description text not null default '';
     """,
+    # 9: collections replace libraries; documents become collection-independent and many-to-many
+    #    through collection_documents; embeddings become a durable, content-addressed cache, and
+    #    an upload waiting in `staging/` gets a row instead of a sidecar file. A
+    #    breaking storage-shape change: nothing is reshaped in place. A home that reaches this
+    #    migration with real libraries/documents rows is refused before it runs (see `migrate`),
+    #    so the script is free to drop and recreate. One transaction: a crash mid-script must not
+    #    leave `user_version` at 8 over a half-dropped schema.
+    """
+    begin;
+    drop table if exists session_libraries;
+    drop table if exists documents;
+    drop table if exists libraries;
+    drop table if exists meta;
+
+    create table if not exists collections (
+        name text primary key,
+        settings text not null default '{}',
+        description text not null default '',
+        created_at real not null default 0,
+        pending_docs integer not null default 0,
+        last_write_at real,
+        last_maintained_at real,
+        vector_index_rows integer not null default 0
+    );
+
+    create table if not exists documents (
+        name text primary key,
+        suffix text not null,
+        size integer not null,
+        status text not null default 'queued',
+        error text,
+        preview text,
+        parser text not null default 'anydoc',
+        skip_ocr_pages integer not null default 1,
+        created_at real not null default 0,
+        updated_at real not null default 0,
+        description text not null default ''
+    );
+    create index if not exists documents_status  on documents (status, name);
+    create index if not exists documents_updated on documents (updated_at, name);
+    create index if not exists documents_size    on documents (size, name);
+
+    create table if not exists collection_documents (
+        collection text not null references collections (name) on delete cascade,
+        document text not null references documents (name) on delete cascade,
+        status text not null default 'pending',
+        error text,
+        added_at real not null default 0,
+        updated_at real not null default 0,
+        primary key (collection, document)
+    );
+    create index if not exists collection_documents_document
+        on collection_documents (document);
+    create index if not exists collection_documents_status
+        on collection_documents (collection, status, document);
+
+    create table if not exists embeddings (
+        id text primary key,
+        document text not null references documents (name) on delete cascade,
+        urn text not null,
+        model text not null,
+        chunk_size integer not null,
+        chunk_overlap integer not null,
+        chunker text not null,
+        chunk_version integer not null,
+        parser text not null,
+        skip_ocr_pages integer not null,
+        rows integer not null default 0,
+        bytes integer not null default 0,
+        created_at real not null default 0
+    );
+    create index if not exists embeddings_document on embeddings (document);
+
+    create table if not exists session_collections (
+        session_id text not null references sessions (id) on delete cascade,
+        collection text not null references collections (name) on delete cascade,
+        position integer not null,
+        primary key (session_id, collection)
+    );
+    create index if not exists session_collections_collection
+        on session_collections (collection);
+
+    create table if not exists staging (
+        staging_id text primary key,
+        filename text not null,
+        size integer not null,
+        created_at text not null
+    );
+    commit;
+    """,
 ]
+
+# The migration that changed the storage shape (see MIGRATIONS[8]) and the message a home holding
+# data from before it gets instead of a silent drop.
+INCOMPATIBLE_HOME_MIGRATION = 9
+INCOMPATIBLE_HOME_MESSAGE = (
+    "This version of haskie changed how documents are stored; the existing home is incompatible. "
+    "Run `haskie destroy` and re-import your documents."
+)
 
 BUSY_TIMEOUT_SECONDS = 30.0  # how long a writer waits for another writer before it gives up
 
@@ -118,12 +216,33 @@ _migrated: set[Path] = set()
 _migrate_lock = threading.Lock()  # both event loops migrate through worker threads of their own
 
 
+def _holds_pre_collection_data(conn: sqlite3.Connection) -> bool:
+    """Whether the pre-refactor `libraries`/`documents` tables hold any row. A table that does not
+    exist (a home that never ran migration 1 with data, or a fresh file) holds nothing."""
+    for table in ("libraries", "documents"):
+        found = conn.execute(
+            "select 1 from sqlite_master where type = 'table' and name = ?", (table,)
+        ).fetchone()
+        if found is not None and conn.execute(f"select 1 from {table} limit 1").fetchone():
+            return True
+    return False
+
+
 def migrate(conn: sqlite3.Connection) -> int:
-    """Apply pending migrations in order; returns the resulting schema version."""
+    """Apply pending migrations in order; returns the resulting schema version.
+
+    Checked inside the loop, right before migration 9 runs, rather than on the starting version:
+    a home may start at 5, 6, 7 or 8 and reach 9 in the same run either way. A home with real
+    pre-collection rows is refused there, with `user_version` left at 8, so the user can destroy
+    it and start over instead of losing the rows silently."""
+    from haskie.errors import HaskieError  # errors imports home, which imports nothing of ours
+
     (version,) = conn.execute("pragma user_version").fetchone()
     if version == 0:
         conn.execute("pragma journal_mode = wal")  # persistent; needs an exclusive lock, so once
     for number, script in enumerate(MIGRATIONS[version:], start=version + 1):
+        if number == INCOMPATIBLE_HOME_MIGRATION and _holds_pre_collection_data(conn):
+            raise HaskieError(INCOMPATIBLE_HOME_MESSAGE)
         conn.executescript(script)
         conn.execute(f"pragma user_version = {number}")
         conn.commit()
