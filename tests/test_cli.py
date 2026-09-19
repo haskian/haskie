@@ -14,6 +14,8 @@ import re
 import sqlite3
 import stat
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,7 +27,7 @@ from haskie import cli as cli_module
 from haskie.claude import Scope
 from haskie.cli import cli
 from haskie.collection import Collection
-from haskie.errors import Conflict
+from haskie.errors import Conflict, InvalidInput
 from haskie.layout import shard
 
 runner = CliRunner()
@@ -227,53 +229,58 @@ def test_version_flag_answers_without_a_subcommand() -> None:
 # --- one haskie per home ----------------------------------------------------
 
 
-def test_claim_home_refuses_a_second_holder_and_says_who_has_it(elsewhere: Path) -> None:
-    """`flock` is per open file description, so a second claim from this process conflicts exactly
-    as a second process would - no subprocess needed to prove the guard."""
-    runner.invoke(cli, ["init", "--home", str(elsewhere)])
-    home.use(elsewhere)
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(home, "ADDRESS", "http://127.0.0.1:8000")
+@contextmanager
+def holding(address: str = "http://127.0.0.1:8000") -> Iterator[None]:
+    """Claim the home for the body, and give it back afterwards. `claim_home` takes the address
+    from the environment, the way `run` leaves it there."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("HASKIE_ADDRESS", address)
+        home.claim_home()
+    try:
+        yield
+    finally:
+        home.release_home()
 
-    with home.hold_home():
-        monkey.setattr(home, "_holding", None)  # pretend to be a second process
+
+def test_claim_home_refuses_a_second_holder_and_says_who_has_it(
+    elsewhere: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`flock` is per open file description, so a second claim from this process conflicts exactly
+    as a second process would - no subprocess needed to prove the guard. No `init` either: the
+    lock needs no database, and makes the home itself."""
+    home.use(elsewhere)
+
+    with holding():
+        monkeypatch.setattr(home, "_holding", None)  # pretend to be a second process
         with pytest.raises(Conflict) as refused:
             home.claim_home()
-        monkey.undo()
+        monkeypatch.undo()
 
     assert "already running" in str(refused.value)
     assert str(elsewhere) in str(refused.value), "names the home, not just the port"
     assert "127.0.0.1:8000" in str(refused.value), "names the holder's address"
 
 
-def test_claim_home_is_reentrant_for_one_process(elsewhere: Path) -> None:
-    """`--reload` runs one lifespan per restart in the same process; the second must not refuse."""
-    runner.invoke(cli, ["init", "--home", str(elsewhere)])
+def test_claim_home_claims_once_and_gives_the_home_back(elsewhere: Path) -> None:
+    """`--reload` runs one lifespan per restart in the same process, so a second claim must not
+    refuse; and a stopped haskie must not lock its home out of the next one."""
     home.use(elsewhere)
 
-    with home.hold_home():
+    with holding():
         home.claim_home()  # would raise if it took a second descriptor
+        assert home.LOCK_FILE.read_text().startswith("pid ")
     assert home._holding is None, "released on the way out"
 
-
-def test_release_home_lets_the_next_one_in(elsewhere: Path) -> None:
-    """A stopped haskie must not lock its home out of the next one."""
-    runner.invoke(cli, ["init", "--home", str(elsewhere)])
-    home.use(elsewhere)
-
-    with home.hold_home():
-        pass
-    with home.hold_home():
-        assert home.LOCK_FILE.read_text().startswith("pid ")
+    with holding():
+        assert home.LOCK_FILE.read_text().startswith("pid "), "the next one gets in"
 
 
 def test_run_refuses_in_one_line_when_the_home_is_taken(elsewhere: Path) -> None:
     """The app's startup hook is the authority, but its refusal is a lifespan traceback out of
     uvicorn; `run` asks first so the common case reads as one line."""
-    runner.invoke(cli, ["init", "--home", str(elsewhere)])
     home.use(elsewhere)
 
-    with home.hold_home():
+    with holding():
         refused = runner.invoke(cli, ["run", "--home", str(elsewhere)])
 
     assert refused.exit_code == 1
@@ -285,7 +292,7 @@ def test_claim_home_creates_the_home_it_locks(elsewhere: Path) -> None:
     """It is the app's first startup hook, so it runs before anything has made the directory."""
     home.use(elsewhere)
 
-    with home.hold_home():
+    with holding():
         assert home.LOCK_FILE.is_file()
     assert stat.S_IMODE(elsewhere.stat().st_mode) == home.DIR_MODE
 
@@ -350,16 +357,44 @@ def test_ensure(case: EnsureCase, elsewhere: Path, monkeypatch: pytest.MonkeyPat
     )
 
     assert result.exit_code == case.exit_code, result.output
-    assert case.expect_in_output in (result.output + result.stderr)
+    assert case.expect_in_output in _text(result)
     assert bool(spawned) is case.expect_spawn
     if case.expect_spawn:
-        assert spawned[0][1:4] == ["-m", "haskie", "run"], "spawned through this interpreter"
+        prefix = claude.own_command()
+        assert spawned[0][: len(prefix) + 1] == [*prefix, "run"], "spawned through this haskie"
         assert str(elsewhere) in spawned[0], "the child serves the same home"
     if case.exit_code:
         assert str(elsewhere / "server.log") in result.stderr, "names the log to read"
 
 
 # --- install claude ---------------------------------------------------------
+
+CLAUDE_STUB = '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$CLAUDE_ARGV"\n'
+
+
+@pytest.fixture
+def claude_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A working directory Claude Code's config can be written into, with nothing of the real
+    machine in reach: `USER_CLAUDE` is redirected even for project-scope cases, so a test that
+    reaches for `user` cannot write into the developer's own `~/.claude`.
+
+    `PATH` holds only `bin`, so `claude` is present exactly when a case puts it there. Returns
+    that directory; the recorded argv is `tmp_path/argv.log`.
+    """
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    monkeypatch.setenv("PATH", str(binaries))
+    monkeypatch.setenv("CLAUDE_ARGV", str(tmp_path / "argv.log"))
+    monkeypatch.setattr(claude, "USER_CLAUDE", tmp_path / "user" / ".claude")
+    monkeypatch.chdir(tmp_path)
+    return binaries
+
+
+def _with_claude(binaries: Path) -> None:
+    """Put the stub `claude` CLI on the PATH `claude_workspace` prepared."""
+    stub = binaries / "claude"
+    stub.write_text(CLAUDE_STUB)
+    stub.chmod(0o755)
 
 
 @dataclass
@@ -370,8 +405,6 @@ class InstallCase:
     expect_in_skill: list[str]
     expect_in_output: str
 
-
-CLAUDE_STUB = '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$CLAUDE_ARGV"\n'
 
 INSTALL_CASES = {
     "records the argv claude needs": InstallCase(
@@ -410,39 +443,31 @@ def test_install_claude(
     case: InstallCase,
     elsewhere: Path,
     tmp_path: Path,
+    claude_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner.invoke(cli, ["init", "--home", str(elsewhere)])
     home.use(elsewhere)
     for name, description in case.collections:
         asyncio.run(Collection.create(name, description))
-
-    binaries = tmp_path / "bin"
-    binaries.mkdir()
-    argv_log = tmp_path / "argv.log"
     if case.claude_on_path:
-        stub = binaries / "claude"
-        stub.write_text(CLAUDE_STUB)
-        stub.chmod(0o755)
-    monkeypatch.setenv("PATH", str(binaries))  # only what this case puts there
-    monkeypatch.setenv("CLAUDE_ARGV", str(argv_log))
-    monkeypatch.setattr(claude, "USER_CLAUDE", tmp_path / "user" / ".claude")
-    monkeypatch.chdir(tmp_path)
+        _with_claude(claude_workspace)
+    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)  # never start a real server
 
     result = runner.invoke(
-        cli,
-        ["install", "claude", "--home", str(elsewhere), "--scope", case.scope, "--no-start"],
+        cli, ["install", "claude", "--home", str(elsewhere), "--scope", case.scope]
     )
 
     assert result.exit_code == 0, result.output
-    assert case.expect_in_output in result.output
+    assert case.expect_in_output in _text(result)
     written = claude.skill_path(case.scope).read_text()
     for expected in case.expect_in_skill:
         assert expected in written
     hooks = json.loads(claude.settings_path(case.scope).read_text())["hooks"]["SessionStart"]
     hooked = hooks[0]["hooks"][0]["command"]
-    assert cli_module.HOOK_MARKER in hooked, "the hook starts haskie"
+    assert claude.HOOK_MARKER in hooked, "the hook starts haskie"
     assert hooked.endswith("--no-wait"), "a session start must not wait on a boot"
+    argv_log = tmp_path / "argv.log"
     if case.claude_on_path:
         recorded = argv_log.read_text().splitlines()
         assert recorded[0] == f"mcp remove -s {case.scope} haskie", "replaced, so re-running works"
@@ -453,16 +478,15 @@ def test_install_claude(
         assert not argv_log.exists()
 
 
-def test_install_claude_rewrites_rather_than_accumulates(
-    elsewhere: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
+    elsewhere: Path, claude_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Re-running is how the trigger is refreshed after a collection is added."""
     runner.invoke(cli, ["init", "--home", str(elsewhere)])
     home.use(elsewhere)
     asyncio.run(Collection.create("roasting", "Coffee."))
-    monkeypatch.setenv("PATH", str(tmp_path))  # no claude: the skill is what this asserts
-    monkeypatch.chdir(tmp_path)
-    arguments = ["install", "claude", "--home", str(elsewhere), "--scope", "project", "--no-start"]
+    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)
+    arguments = ["install", "claude", "--home", str(elsewhere), "--scope", "project"]
 
     runner.invoke(cli, arguments)
     asyncio.run(Collection.create("adr", "Architecture decisions."))
@@ -472,48 +496,75 @@ def test_install_claude_rewrites_rather_than_accumulates(
     written = claude.skill_path("project").read_text()
     assert written.count("name: haskie") == 1, "rewritten, not appended to"
     assert "adr: Architecture decisions" in written, "the new collection reached the trigger"
-    matchers = json.loads(claude.settings_path("project").read_text())["hooks"]["SessionStart"]
-    assert len(matchers) == 1, "the hook is replaced, not stacked"
 
 
-def test_install_claude_keeps_the_rest_of_an_existing_settings_file(
-    elsewhere: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+# `install_hook` merges into a file the user owns, so its branches are worth reaching directly
+# rather than through four more end-to-end installs.
+
+
+@dataclass
+class HookCase:
+    before: str | None
+    added: bool
+    expect_commands: int
+    keeps: str | None = None
+
+
+HOOK_CASES = {
+    "no settings file yet": HookCase(before=None, added=True, expect_commands=1),
+    "a settings file with no hooks": HookCase(
+        before='{"model": "opus"}', added=True, expect_commands=1, keeps="model"
+    ),
+    "a hook of ours already there": HookCase(
+        before=(
+            '{"hooks": {"SessionStart": [{"hooks": [{"type": "command",'
+            ' "command": "/old/haskie ensure --home /old --url u --no-wait"}]}]}}'
+        ),
+        added=False,
+        expect_commands=1,
+    ),
+    "somebody else's hook": HookCase(
+        before='{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "mine"}]}]}}',
+        added=True,
+        expect_commands=2,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", HOOK_CASES.values(), ids=list(HOOK_CASES))
+def test_install_hook(case: HookCase, claude_workspace: Path, tmp_path: Path) -> None:
+    settings_file = claude.settings_path("project")
+    if case.before is not None:
+        settings_file.parent.mkdir(parents=True)
+        settings_file.write_text(case.before)
+
+    added = claude.install_hook("project", tmp_path / "home", "http://127.0.0.1:8000/mcp")
+
+    assert added is case.added
+    settings = json.loads(settings_file.read_text())
+    commands = [
+        hook["command"]
+        for matcher in settings["hooks"]["SessionStart"]
+        for hook in matcher["hooks"]
+    ]
+    assert len(commands) == case.expect_commands, "ours is replaced, a stranger's is kept beside"
+    assert sum(claude.HOOK_MARKER in command for command in commands) == 1, "exactly one of ours"
+    if case.keeps:
+        assert settings[case.keeps] == "opus", "an unrelated setting survives"
+
+
+def test_install_hook_refuses_a_settings_file_it_cannot_parse(
+    claude_workspace: Path, tmp_path: Path
 ) -> None:
-    """It writes into a file the user owns, so everything it did not come for stays."""
-    runner.invoke(cli, ["init", "--home", str(elsewhere)])
-    monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
+    """Rewriting a file we could not read would throw the user's settings away."""
     settings_file = claude.settings_path("project")
     settings_file.parent.mkdir(parents=True)
-    settings_file.write_text(
-        json.dumps(
-            {
-                "model": "opus",
-                "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "mine"}]}]},
-            }
-        )
-    )
+    settings_file.write_text("{not json")
 
-    result = runner.invoke(
-        cli, ["install", "claude", "--home", str(elsewhere), "--scope", "project", "--no-start"]
-    )
+    with pytest.raises(InvalidInput, match="not valid JSON"):
+        claude.install_hook("project", tmp_path / "home", "http://127.0.0.1:8000/mcp")
 
-    assert result.exit_code == 0, result.output
-    kept = json.loads(settings_file.read_text())
-    assert kept["model"] == "opus", "an unrelated setting survives"
-    commands = [h["command"] for m in kept["hooks"]["SessionStart"] for h in m["hooks"]]
-    assert "mine" in commands, "the user's own hook survives"
-    assert any(cli_module.HOOK_MARKER in c for c in commands), "ours was added beside it"
-
-
-def test_install_claude_rejects_an_unknown_scope(elsewhere: Path) -> None:
-    """Rejected while the arguments are parsed, so nothing is written before it is."""
-    result = runner.invoke(
-        cli, ["install", "claude", "--home", str(elsewhere), "--scope", "global"]
-    )
-
-    assert result.exit_code == 2
-    assert "'global' is not one of" in result.stderr
+    assert settings_file.read_text() == "{not json", "left exactly as it was"
 
 
 def test_the_skill_only_names_tools_the_server_actually_serves() -> None:
@@ -528,3 +579,11 @@ def test_the_skill_only_names_tools_the_server_actually_serves() -> None:
 
     assert named, "the skill is supposed to name the tools"
     assert named <= served, f"the skill names tools that do not exist: {sorted(named - served)}"
+
+
+def test_the_default_url_matches_where_mcp_is_mounted() -> None:
+    """`cli.MCP_URL` spells the path out rather than importing the app, which would cost every
+    `haskie` invocation the whole web stack. This is what keeps the two in step."""
+    from haskie import app
+
+    assert cli_module.MCP_URL.endswith(app.MCP_PATH)

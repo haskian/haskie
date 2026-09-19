@@ -28,9 +28,6 @@ AUDIT_DIR = HOME / "audit"
 DB_FILE = HOME / "haskie.db"
 MODEL_CACHE = HOME / "cache" / "models"  # compiled CoreML models (see embed.py); ORT creates it
 LOCK_FILE = HOME / "haskie.lock"  # one running haskie per home (see `claim_home`)
-# What the lock file says is running, for the next process's error message. `run` sets it; an app
-# started another way keeps the placeholder, because only the caller knows the address.
-ADDRESS = os.environ.get("HASKIE_ADDRESS", "address unknown")
 
 DIR_MODE = 0o700  # documents and the audit trail are private to the user running the app
 
@@ -85,24 +82,35 @@ def claim_home() -> None:
     global _holding
     if _holding is not None:  # `--reload` restarts run one lifespan per child, not per process
         return
-    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
+    ensure_home_sync()
     # O_RDWR rather than a mode string: append mode ignores `seek`, and the holder line is
     # rewritten in place rather than accumulated.
     handle = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        held = os.read(handle, 256).decode("utf-8", "replace").strip() or "unknown process"
+        held = _holder_line(handle)
         os.close(handle)
-        raise Conflict(f"haskie is already running for {HOME} ({held})") from None
+        raise Conflict(held) from None
     os.ftruncate(handle, 0)
-    os.write(handle, f"pid {os.getpid()}, {ADDRESS}".encode())
+    # `run` puts the address in the environment for this; an app started another way has none to
+    # give, so the holder line says so rather than inventing one.
+    address = os.environ.get("HASKIE_ADDRESS", "address unknown")
+    os.write(handle, f"pid {os.getpid()}, {address}".encode())
     _holding = handle
 
 
+def _holder_line(handle: int) -> str:
+    """The refusal, in the words both the startup hook and `run` report it in: one sentence with
+    one owner, so the two can never disagree about what is already running."""
+    held = os.read(handle, 256).decode("utf-8", "replace").strip() or "unknown process"
+    return f"haskie is already running for {HOME} ({held})"
+
+
 def home_holder() -> str | None:
-    """Who is running for this home, or None. Takes the lock and drops it again, so it answers
-    without claiming anything: a caller that wants a clean message before it starts a server.
+    """What is running for this home, said in full, or None. Takes the lock and drops it again,
+    so it answers without claiming anything: a caller that wants a clean message before it starts
+    a server.
 
     Advisory only. The claim in the app's startup hook is the authority; this can go stale between
     the answer and the claim, and then the startup hook refuses instead.
@@ -113,7 +121,7 @@ def home_holder() -> str | None:
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        return os.read(handle, 256).decode("utf-8", "replace").strip() or "unknown process"
+        return _holder_line(handle)
     finally:
         os.close(handle)
     return None
@@ -127,14 +135,16 @@ def release_home() -> None:
         _holding = None
 
 
-@contextmanager
-def hold_home() -> Iterator[None]:
-    """`claim_home` for a caller with a scope to bind it to, such as a test."""
-    claim_home()
-    try:
-        yield
-    finally:
-        release_home()
+def ensure_home_sync() -> Path:
+    """The home tree, made. Sync because the callers that need it have no event loop: the startup
+    hook that claims the lock, the CLI, and the test fixtures.
+
+    `HOME` is made first and by name, because `parents=True` does not apply `mode` to the parents
+    it creates - so a home made only as a parent of its subdirectories would be world-readable.
+    """
+    for directory in (HOME, COLLECTION_ROOT, DOCUMENT_ROOT, STAGING_ROOT, AUDIT_DIR):
+        directory.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
+    return HOME
 
 
 async def ensure_home() -> Path:
