@@ -33,6 +33,30 @@ cli = typer.Typer(
     add_completion=False,
 )
 
+
+def _print_version(shown: bool) -> None:
+    """`--version` before anything else: eager, so it answers without a subcommand and without
+    touching the home directory."""
+    if shown:
+        typer.echo(f"haskie {APP_VERSION}")
+        raise typer.Exit()
+
+
+@cli.callback()
+def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_print_version,
+            is_eager=True,
+            help="Print the version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """Root options. `haskie version` says the same thing and also where the data lives."""
+
+
 HomeOption = Annotated[
     Path | None,
     typer.Option(

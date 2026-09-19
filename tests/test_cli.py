@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from haskie import claude, db, home
+from haskie import APP_VERSION, claude, db, home
 from haskie import cli as cli_module
 from haskie.claude import Scope
 from haskie.cli import cli
@@ -213,6 +213,15 @@ def test_version_reports_the_home_it_would_use(elsewhere: Path) -> None:
 
     assert result.exit_code == 0
     assert "haskie" in result.output and "home:" in result.output
+
+
+def test_version_flag_answers_without_a_subcommand() -> None:
+    """`--version` is eager, so it answers before Typer asks for a command and before anything
+    reads the home. The version only: where the data lives is `haskie version`'s job."""
+    result = runner.invoke(cli, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == f"haskie {APP_VERSION}"
 
 
 # --- one haskie per home ----------------------------------------------------
