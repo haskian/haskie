@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#MISE description="Bump the version from conventional commits, tag and push (CI only)"
+set -euo pipefail
+
+git config user.name  "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+# First run on a repo with no tags: anchor v0.0.0 at the root commit so the first real bump
+# measures only the commits that followed it, not the whole history.
+if [ -z "$(git tag)" ]; then
+  git tag v0.0.0 "$(git rev-list --max-parents=0 HEAD | tail -1)"
+  git push origin v0.0.0
+fi
+
+# cog owns the conventional-commit rules. --dry-run prints the next version on its last line, and
+# exits 0 even when nothing warrants a release — so the version string, not the exit code, is the
+# signal. Deciding here keeps the no-release case (roughly two pushes in five) free of a bump.
+next="$(cog bump --auto --dry-run 2>/dev/null | tail -1)"
+out="${GITHUB_OUTPUT:-/dev/stdout}"
+if [[ ! "$next" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  echo "released=false" >>"$out"
+  echo "::notice title=No release::No commit since the last tag implies a version bump."
+  exit 0
+fi
+
+# cog writes CHANGELOG.md, runs the pre_bump_hook (`uv version`) and cuts the tag; squash-only
+# merges make each commit subject the PR title pr-title.yml verified.
+cog bump --auto --skip-ci
+git push origin HEAD:main --follow-tags
+{ echo "released=true"; echo "version=v$next"; } >>"$out"

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+#MISE description="Install the built wheel in a fresh venv and check the CLI + bundled UI"
+# An artifact that cannot be installed is worse than no artifact: it fails in the adopter's
+# environment rather than here. Install into a throwaway venv, off the source tree, so nothing
+# resolves from the working directory instead of the wheel.
+set -euo pipefail
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+uv venv "$tmp/venv"
+VIRTUAL_ENV="$tmp/venv" uv pip install dist/*.whl
+"$tmp/venv/bin/haskie" --help >/dev/null
+# The UI is the whole reason for `mise run build`; a headless wheel would pass every other check.
+test -f "$tmp/venv"/lib/python*/site-packages/haskie/web/index.html \
+  || { echo "wheel is missing the built UI" >&2; exit 1; }
+echo "wheel installs, CLI runs, UI is bundled"

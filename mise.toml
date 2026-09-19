@@ -2,6 +2,7 @@
 python = "3.13"
 uv = "latest"
 bun = "latest"
+"aqua:cocogitto/cocogitto" = "7.0.0"  # cog: conventional-commit version bumps in CI
 
 [env]
 _.python.venv = { path = ".venv", create = true }

@@ -25,7 +25,9 @@ dependencies = [
 haskie = "haskie.cli:cli"
 
 [project.optional-dependencies]
-gpu = ["onnxruntime-gpu>=1.17.0"]  # CUDA for embeddings; Apple Silicon (CoreML) needs nothing extra
+# CUDA for embeddings; Apple Silicon (CoreML) needs nothing extra, and onnxruntime-gpu ships
+# no macOS wheel, so the marker keeps `uv sync --all-extras` working there.
+gpu = ["onnxruntime-gpu>=1.17.0; sys_platform != 'darwin'"]
 
 [dependency-groups]
 dev = [
@@ -57,5 +59,11 @@ include = ["src", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["network: downloads models from Hugging Face"]
+markers = [
+    "network: downloads models from Hugging Face",
+    # A gated pipeline stage holds one slot open while a second document must make progress. That
+    # needs a CPU budget above 1, which a small CI runner (cpu_budget = half its cores) does not
+    # give, so the stage cap falls to 1 and the test deadlocks. Skipped on CI, runs locally.
+    "cpu_budget: needs a pipeline CPU budget larger than a minimal CI runner provides",
+]
 addopts = "-m 'not network'"
