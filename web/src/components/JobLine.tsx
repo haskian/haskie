@@ -47,8 +47,8 @@ export function JobLine({ job: j, tasks, onToggle, onCancel }: { job: JobRow; ta
   )
 }
 
-// What one kind counts: micro-batches for a document, queued documents for a bulk index, and
-// whether the backend process has the model loaded for a download. The rest count nothing.
+// What one kind counts: micro-batches for a document, queued documents for a whole-collection
+// job, and whether the backend process has the model loaded for a download. The rest count nothing.
 function Progress({ job: j }: { job: JobRow }) {
   const count = (key: string) => (typeof j.detail[key] === 'number' ? j.detail[key] : 0)
   if (j.kind === 'document') {
@@ -64,7 +64,7 @@ function Progress({ job: j }: { job: JobRow }) {
       </>
     )
   }
-  if (j.kind === 'library' && typeof j.detail.total === 'number') {
+  if (j.kind === 'collection' && typeof j.detail.total === 'number') {
     const skipped = count('skipped')
     return <small className="muted">{count('done')} of {count('total')} queued{skipped > 0 && ` · ${skipped} gone`}</small>
   }

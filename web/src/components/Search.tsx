@@ -6,13 +6,13 @@ type Mode = 'chunks' | 'documents'
 
 export function Search({
   run,
-  libraries,
+  collections,
   placeholder = 'query',
 }: {
   run: (q: string) => Promise<Hit[]>
   // The scope the document shortlist spans. Given, the mode dropdown appears; the chunk search
-  // has its own scope already (one library, or a session), which is why it stays a callback.
-  libraries?: string[]
+  // has its own scope already (one collection, or a session), which is why it stays a callback.
+  collections?: string[]
   placeholder?: string
 }) {
   const [query, setQuery] = useState('')
@@ -25,9 +25,9 @@ export function Search({
     setHits(null)
     setDocuments(null)
     if (mode === 'documents') {
-      // an empty scope is "no libraries chosen", not "every library": the server reads a missing
-      // filter as all of them, so the request is not made at all
-      setDocuments(libraries?.length ? await api.searchDocuments(query, libraries) : [])
+      // an empty scope is "no collections chosen", not "every collection": the server reads a
+      // missing filter as all of them, so the request is not made at all
+      setDocuments(collections?.length ? await api.searchDocuments(query, collections) : [])
     } else {
       setHits(await run(query))
     }
@@ -46,7 +46,7 @@ export function Search({
         }}
       >
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={placeholder} />
-        {libraries && (
+        {collections && (
           <select value={mode} onChange={(e) => setMode(e.target.value as Mode)} title="what to return">
             <option value="chunks">chunks</option>
             <option value="documents">documents</option>
@@ -57,9 +57,9 @@ export function Search({
       {error && <p className="error">{error}</p>}
       {results && results.length === 0 && <p className="muted">no results</p>}
       {documents?.map((m) => (
-        <article key={`${m.library}/${m.doc}`} className="hit">
+        <article key={`${m.collection}/${m.doc}`} className="hit">
           <header className="muted">
-            <strong>{m.library} / {m.doc}</strong> {m.heading}
+            <strong>{m.collection} / {m.doc}</strong> {m.heading}
           </header>
           <div className="hit-meta muted">
             <span>score {m.score.toFixed(3)}</span>
@@ -70,9 +70,9 @@ export function Search({
         </article>
       ))}
       {hits?.map((h) => (
-        <article key={`${h.library}/${h.doc}/${h.chunk_id}`} className="hit">
+        <article key={`${h.collection}/${h.doc}/${h.chunk_id}`} className="hit">
           <header className="muted">
-            <strong>{h.library} / {h.location}</strong> {h.header}
+            <strong>{h.collection} / {h.location}</strong> {h.header}
           </header>
           <div className="hit-meta muted">
             {h.page_start !== null && <span>pages {h.page_start === h.page_end ? h.page_start : `${h.page_start}–${h.page_end}`}</span>}

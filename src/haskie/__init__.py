@@ -1,4 +1,4 @@
-"""Haskie: personal document library with markdown conversion, LanceDB search, web UI and MCP."""
+"""Haskie: personal document collections; markdown conversion, LanceDB search, web UI, MCP."""
 
 from importlib.metadata import version
 

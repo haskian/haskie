@@ -1,66 +1,95 @@
-"""Grouped reads of the DBOS system tables, over a real indexed document.
+"""Grouped reads of the DBOS system tables, over a document that really went through the pipeline.
 
 The rows come from DBOS, never from this test: the only way to be sure the SQL matches the schema
-DBOS writes is to run a workflow first and read what it left behind.
+DBOS writes is to import a document, attach it to a collection and read what that left behind.
 """
+
+from pathlib import Path
 
 import pytest
 from dbos import DBOS
 
-from haskie import dbos_names, sysdb, workflows
-from haskie.library import Library
+from haskie import dbos_names, jobs, sysdb, workflows
+from haskie.collection import Collection
 from haskie.settings import PipelineSettings, UserSettings, save_user_settings
 
-from conftest import text_pdf, wait_for  # isort: skip
+from conftest import attach_document, import_document, text_pdf  # isort: skip
 
 pytestmark = pytest.mark.anyio
 
 
-async def _indexed_job(dbos, library: str, pages: int) -> str:
-    """One document indexed with one page per batch and one part per index write, so every stage
-    has `pages` batches. Two workers, so convert and embed are cut into two slices each."""
+async def _imported(dbos, tmp_path: Path, pages: int) -> str:
+    """One document imported with one page per batch, so every stage has `pages` batches. The
+    budget gives convert and embed two slices each. Returns the document name."""
     indexing = PipelineSettings(cpu_budget=6, batch_pages=1, index_group_parts=1)
     await dbos.apply_settings(await save_user_settings(UserSettings(pipeline=indexing)))
-    lib = await Library.create(library)
-    doc = await lib.save("p.pdf", text_pdf([f"alpha{i}" for i in range(pages)]))
-    job_id = await dbos.start_index(library, doc.name)
-    assert await wait_for(job_id) == "indexed"
-    return job_id
-
-
-async def test_step_counts_and_child_status_counts_group_by_parent(dbos) -> None:
-    job_id = await _indexed_job(dbos, "grp", pages=2)
-    sliced = [f"{job_id}:{kind}:{i}" for kind in ("convert", "embed") for i in range(2)]
-    children = [*sliced, f"{job_id}:index"]
-
-    assert await sysdb.child_status_counts([job_id]) == {job_id: {"SUCCESS": 5, "DELAYED": 1}}, (
-        "two convert slices, two embed slices and the index child, plus the debounced "
-        "maintenance run the document asked for"
+    row = await import_document(
+        dbos, "p.pdf", text_pdf([f"alpha{i}" for i in range(pages)]), tmp_path
     )
-    assert await sysdb.step_counts(children, dbos_names.STAGE_STEP) == {
-        **dict.fromkeys(sliced, 1),  # one of the two batches per slice
-        f"{job_id}:index": 2,  # the index stage is never sliced
-    }
+    return row.name
 
-    step = workflows.try_batch.__qualname__
-    assert dbos_names.STAGE_STEP == step, "the step DBOS actually records"
-    assert await sysdb.step_counts(children, "no-such-step") == {}, "a name nothing recorded"
+
+async def _job_id(action: str, collection: str | None = None) -> str:
+    """The id of the one job with this action (and collection): the ids carry a uuid, so a test
+    that names a child workflow has to read the parent's id first."""
+    found = [
+        job
+        for job in (await jobs.list_jobs(page_size=50)).items
+        if job.action == action and job.collection == collection
+    ]
+    assert len(found) == 1, f"expected one {action} job, got {[job.id for job in found]}"
+    return found[0].id
+
+
+async def test_step_counts_and_child_status_counts_group_by_parent(dbos, tmp_path) -> None:
+    """The import is the parent of its convert slices and of the embedding it warms; the embed
+    job is the parent of its own slices. One grouped query answers for all of them."""
+    doc = await _imported(dbos, tmp_path, pages=2)
+    import_id = await _job_id("import")
+    embed_id = await _job_id("embed")
+    converts = [f"{import_id}:convert:{i}" for i in range(2)]
+    embeds = [f"{embed_id}:embed:{i}" for i in range(2)]
+
+    assert await sysdb.child_status_counts([import_id, embed_id]) == {
+        import_id: {"SUCCESS": 3},  # two convert slices and the `ensure_embedding` it asked for
+        embed_id: {"SUCCESS": 2},  # two embed slices
+    }
+    assert await sysdb.step_counts([*converts, *embeds], dbos_names.STAGE_STEP) == dict.fromkeys(
+        [*converts, *embeds], 1
+    ), "one of the two batches per slice"
+
+    await Collection.create("grp")
+    await attach_document(dbos, "grp", doc)
+    index_id = await _job_id("index", "grp")
+
+    counts = await sysdb.child_status_counts([index_id])
+    assert counts[index_id]["SUCCESS"] >= 2, (
+        "the index child and the embedding the collection asked for (a cache hit)"
+    )
+    assert await sysdb.step_counts([f"{index_id}:index"], dbos_names.STAGE_STEP) == {
+        f"{index_id}:index": 2
+    }, "the index stage is never sliced"
+    assert await sysdb.step_counts(converts, "no-such-step") == {}, "a name nothing recorded"
     assert await sysdb.step_counts([], dbos_names.STAGE_STEP) == {}, "no ids, no query"
     assert await sysdb.child_status_counts([]) == {}
     assert await sysdb.child_status_counts(["ghost"]) == {}, "a parent with no children"
 
 
-async def test_queue_activity_groups_by_queue_family_and_status(dbos) -> None:
-    """After a document is indexed, its job and task workflows are all SUCCESS and drop out.
+async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) -> None:
+    """Once a document is imported and indexed, its job and task workflows are all SUCCESS and
+    drop out.
 
-    What remains is the maintenance run the document asked for, DELAYED on `job.maintenance` until
-    its debounce expires. That is not queued work: nobody is waiting on it, and it sits there for a
-    whole `maintenance_idle_seconds`. Counting it made the indicator read "1 queued" with an idle
-    machine, while the Jobs view - which counts `ACTIVE_STATUS` - showed nothing.
+    What remains is the maintenance run the collection index asked for, DELAYED on
+    `job.maintenance` until its debounce expires. That is not queued work: nobody is waiting on
+    it, and it sits there for a whole `maintenance_idle_seconds`. Counting it made the indicator
+    read "1 queued" with an idle machine, while the Jobs view - which counts `ACTIVE_STATUS` -
+    showed nothing.
     """
     from haskie import db
 
-    await _indexed_job(dbos, "act", pages=1)
+    doc = await _imported(dbos, tmp_path, pages=1)
+    await Collection.create("act")
+    await attach_document(dbos, "act", doc)
     # set the state rather than waiting for it: `conftest._sweep_delayed` promotes an expired
     # debounce every 50 ms, so "is the maintenance run still DELAYED" is a race, not a fact
     async with db.connect() as conn:
@@ -85,26 +114,34 @@ async def test_queue_activity_groups_by_queue_family_and_status(dbos) -> None:
         await conn.execute(
             "update workflow_status set status = 'PENDING' where workflow_uuid like '%:index'"
         )
+        # the embedding of the import and the one the collection index asked for
+        await conn.execute(
+            "update workflow_status set status = 'PENDING' where queue_name = ?",
+            (workflows.EMBEDDING_QUEUE,),
+        )
     assert await sysdb.queue_activity() == {
         "task": {"ENQUEUED": 1, "PENDING": 1},
+        "job": {"PENDING": 2},
     }, "the prefix of the queue name is the family; the status is kept for the caller to fold"
 
 
-async def test_stale_active_ids_pages_over_another_versions_workflows(dbos, monkeypatch) -> None:
+async def test_stale_active_ids_pages_over_another_versions_workflows(
+    dbos, monkeypatch, tmp_path
+) -> None:
     """`adopt_orphans` reads ids of in-flight workflows of an older build, oldest first."""
     from haskie import db
 
-    job_id = await _indexed_job(dbos, "stale", pages=1)
-    async with db.connect() as conn:  # pretend the job is still running under an older build
+    await _imported(dbos, tmp_path, pages=1)
+    import_id = await _job_id("import")
+    async with db.connect() as conn:  # pretend the jobs are still running under an older build
         await conn.execute(
             "update workflow_status set status = 'ENQUEUED', application_version = 'old-build'"
         )
 
     active = await sysdb.stale_active_ids(workflows.APP_VERSION, limit=10)
 
-    assert job_id in active and len(active) == 5, (
-        "the job, its three stage children (one page, so one slice each) and the maintenance run "
-        "it requested"
+    assert import_id in active and len(active) == 4, (
+        "the import and its one convert slice, the embedding it warmed and that one's embed slice"
     )
     assert await sysdb.stale_active_ids(workflows.APP_VERSION, limit=2) == active[:2], "limit"
     assert await sysdb.stale_active_ids(workflows.APP_VERSION, limit=10, offset=2) == active[2:], (
@@ -118,7 +155,7 @@ async def test_stale_active_ids_pages_over_another_versions_workflows(dbos, monk
         resumed.extend(ids)
 
     monkeypatch.setattr(DBOS, "resume_workflows_async", resume)
-    assert await workflows.adopt_orphans(batch=3) == 5, "one page, then the remainder"
+    assert await workflows.adopt_orphans(batch=3) == 4, "one page, then the remainder"
     assert sorted(resumed) == sorted(active), "every page adopted, none twice"
 
 

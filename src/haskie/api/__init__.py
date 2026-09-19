@@ -7,33 +7,40 @@ what two of them share lives in `common.py`.
 
 from litestar.types import ControllerRouterHandler
 
-from haskie.api import documents, jobs, libraries, search, settings
+from haskie.api import collections, documents, jobs, search, settings
 
 # Order is the order the routes appear in the OpenAPI document, so it follows the UI: set up,
-# then libraries and their documents, then the work, then searching.
+# then the documents, then the collections holding them, then the work, then searching.
 ROUTE_HANDLERS: list[ControllerRouterHandler] = [
     settings.get_status,
     settings.post_init,
     settings.get_settings,
     settings.put_settings,
     settings.get_options,
-    libraries.list_libraries,
-    libraries.create_library,
-    libraries.get_library,
-    libraries.list_documents,
-    libraries.delete_library,
-    libraries.search_library,
-    libraries.put_library_settings,
-    libraries.index_library,
-    libraries.describe_library,
-    documents.upload_document,
+    documents.stage_document,
     documents.import_document,
-    documents.index_document,
+    documents.list_documents,
+    documents.get_document,
     documents.delete_document,
+    documents.reimport_document,
+    documents.list_document_collections,
+    documents.list_document_embeddings,
     documents.get_source,
     documents.get_preview,
     documents.get_markdown,
     documents.describe_document,
+    collections.list_collections,
+    collections.create_collection,
+    collections.get_collection,
+    collections.delete_collection,
+    collections.search_collection,
+    collections.put_collection_settings,
+    collections.describe_collection,
+    collections.index_collection,
+    collections.list_collection_documents,
+    collections.add_document,
+    collections.remove_document,
+    collections.index_collection_document,
     jobs.list_jobs,
     jobs.list_jobs_by_kind,
     jobs.list_job_kinds,

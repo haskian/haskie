@@ -2,19 +2,20 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Search } from '../components/Search'
 
+// A session is the set of collections an agent searches under one id.
 export function Sessions() {
-  const [libraries, setLibraries] = useState<string[]>([])
+  const [collections, setCollections] = useState<string[]>([])
   const [sessions, setSessions] = useState<Record<string, string[]>>({})
   const [current, setCurrent] = useState('')
 
   useEffect(() => {
-    api.libraryNames().then(setLibraries)
+    api.collectionNames().then(setCollections)
     api.sessions().then(setSessions)
   }, [])
 
   const chosen = sessions[current] ?? []
-  const toggle = async (lib: string) => {
-    const next = chosen.includes(lib) ? chosen.filter((l) => l !== lib) : [...chosen, lib]
+  const toggle = async (name: string) => {
+    const next = chosen.includes(name) ? chosen.filter((c) => c !== name) : [...chosen, name]
     await api.saveSession(current, next)
     setSessions({ ...sessions, [current]: next })
   }
@@ -42,21 +43,21 @@ export function Sessions() {
           <button disabled={!current.trim()}>Use</button>
         </form>
         <p className="muted">
-          Agents call <code>set_session_libraries</code> then <code>search</code> with the same id.
+          Agents call <code>set_session_collections</code> then <code>search</code> with the same id.
         </p>
       </aside>
       <section>
         {current && (
           <>
             <h2>{current}</h2>
-            <h3>Libraries searched</h3>
-            {libraries.map((lib) => (
-              <label key={lib} className="check">
-                <input type="checkbox" checked={chosen.includes(lib)} onChange={() => toggle(lib)} /> {lib}
+            <h3>Collections searched</h3>
+            {collections.map((name) => (
+              <label key={name} className="check">
+                <input type="checkbox" checked={chosen.includes(name)} onChange={() => toggle(name)} /> {name}
               </label>
             ))}
             <h3>Try a search</h3>
-            <Search run={(q) => api.search(current, q)} libraries={chosen} />
+            <Search run={(q) => api.search(current, q)} collections={chosen} />
           </>
         )}
       </section>

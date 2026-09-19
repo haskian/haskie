@@ -18,8 +18,8 @@ from litestar_mcp import LitestarMCP
 
 from haskie import APP_VERSION, errors, home, logs, workflows
 from haskie.api import ROUTE_HANDLERS
+from haskie.document import UPLOAD_MAX_BYTES
 from haskie.errors import HaskieError, NotReady
-from haskie.library import UPLOAD_MAX_BYTES
 
 # The built UI, wherever it is: inside the wheel when haskie was installed (`uv tool install`),
 # or `web/dist` when it is run from a checkout. Absent in both cases means API and MCP only.
@@ -47,19 +47,18 @@ async def bind_request_context(request: Request) -> None:
     request_id = uuid4().hex
     request.scope["state"][REQUEST_ID_KEY] = request_id
     logs.clear()
-    # `name` and `doc` are what every library and document route is keyed by, so the request
-    # context carries them for free instead of each handler binding them again.
+    path = request.scope["path"]
+    # `collection` and `doc` are what every collection and document route is keyed by, so the
+    # request context carries them for free instead of each handler binding them again. A document
+    # route has no collection at all: the document belongs to none.
     routed = request.path_params
+    scoped: dict[str, str] = {key: routed[key] for key in ("collection", "doc") if routed.get(key)}
     logs.bind(
         request_id=request_id,
-        actor="mcp" if request.scope["path"].startswith(MCP_PATH) else "web",
+        actor="mcp" if path.startswith(MCP_PATH) else "web",
         method=request.method,
-        path=request.scope["path"],
-        **{
-            field: routed[param]
-            for field, param in (("library", "name"), ("doc", "doc"))
-            if routed.get(param)
-        },
+        path=path,
+        **scoped,
     )
 
 

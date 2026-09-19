@@ -4,8 +4,8 @@
 
 The web is an average of everyone. Your bookshelf is not. haskie turns the papers, books, manuals
 and notes you own and actually trust — or simply the documents that matter for your AI flows —
-into a private, searchable library, and hands it to your AI agents over MCP, so they answer from
-your sources instead of whatever ranked first today.
+into private, searchable collections, and hands them to your AI agents over MCP, so they answer
+from your sources instead of whatever ranked first today.
 
 ```sh
 uv tool install haskie
@@ -31,14 +31,16 @@ You already know which sources are right. Your agent doesn't.
 
 ## The fix
 
-Curate a library per topic: *the three coffee-roasting books worth reading*, *our internal
-architecture decisions*, *the standards that actually apply to this hardware*. Drop in PDFs,
-markdown and office files. haskie converts, chunks and indexes them on your machine. Then any MCP
-client — Claude Code, Claude Desktop, your own agent — searches them by meaning, by keyword, or
-both.
+Import your documents once — PDFs, markdown, office files — and curate a collection per topic:
+*the three coffee-roasting books worth reading*, *our internal architecture decisions*, *the
+standards that actually apply to this hardware*. The same document can sit in as many collections
+as it belongs to. haskie converts, chunks and indexes on your machine, and computes each embedding
+once however many collections share it. Then any MCP client — Claude Code, Claude Desktop, your
+own agent — searches a collection by meaning, by keyword, or both.
 
 - **Trusted sources, not search results.** You decide what goes in. Nothing else answers.
-- **A library per topic.** Point an agent at the libraries that matter for the question at hand.
+- **A collection per topic.** Point an agent at the collections that matter for the question at
+  hand; a document is imported once and reused everywhere it belongs.
 - **Local and private.** Your files, your machine, loopback by default. No account, no upload,
   nothing redistributed.
 - **Agent-native.** MCP server and REST API from the same app, plus a web UI to curate with.
@@ -47,23 +49,28 @@ both.
 
 Taste does not scale by explaining it. It scales by indexing it.
 
-## Five minutes to a working library
+## Five minutes to a working collection
 
 ```sh
 uv tool install haskie      # or `uv tool install .` from a checkout
-haskie init                 # create ~/.haskie, migrate its database and layout
+haskie init                 # create ~/.haskie and its database
 haskie run                  # web UI, REST API and MCP server on http://127.0.0.1:8000
 haskie destroy              # delete ~/.haskie and everything in it
 ```
 
-Open the UI, make a library, drop files in, press index. Then point your agent at
+Open the UI, drop files into Documents (they are converted and embedded on import), make a
+collection, add the documents that belong to it. Then point your agent at
 `POST http://127.0.0.1:8000/mcp` and ask it something only your documents know.
 
-`init` is idempotent, so it is also how an existing home is brought up to date after an upgrade;
-`run` does the same work at startup, so `init` is only needed to do it first. Both take `--home`
-(or `HASKIE_HOME`) to keep the data somewhere else, and `run` takes `--host`, `--port` and
-`--reload`. It binds loopback by default: the home directory is one user's documents, and nothing
-in the app authenticates a caller.
+`init` is idempotent, so it is also how a home is brought up to date after an upgrade; `run` does
+the same work at startup, so `init` is only needed to do it first. Both take `--home` (or
+`HASKIE_HOME`) to keep the data somewhere else, and `run` takes `--host`, `--port` and `--reload`.
+It binds loopback by default: the home directory is one user's documents, and nothing in the app
+authenticates a caller.
+
+A home written by a build older than the collections model (one with a `library/` folder) is not
+migrated: the app refuses to start against it and says so. Run `haskie destroy` and import the
+documents again.
 
 `destroy` asks before it deletes and prints what would be lost first. It refuses any directory
 that is not a haskie home, so a mistyped `--home` cannot take the wrong tree with it; `--yes`
@@ -75,43 +82,52 @@ and MCP only.
 
 ## MCP: what your agent gets
 
-Endpoint `POST http://127.0.0.1:8000/mcp`. Tools: `list_libraries`, `list_documents`,
-`add_document`, `index_document`, `set_session_libraries`, `search`, `search_library`,
-`search_text`. Set the session's libraries first, then search with the same id — that is how an
-agent scopes itself to *this topic's* sources for the rest of the conversation. `search_text`
-needs no session and no model: one keyword query across everything, from a cold start.
+Endpoint `POST http://127.0.0.1:8000/mcp`. Tools: `list_documents`, `get_document`,
+`add_document`, `describe_document`, `list_collections`, `get_collection`,
+`list_collection_documents`, `add_document_to_collection`, `remove_document_from_collection`,
+`set_session_collections`, `search`, `search_collection`, `search_text`, `search_documents`.
+Set the session's collections first, then search with the same id — that is how an agent scopes
+itself to *this topic's* sources for the rest of the conversation. `search_text` needs no session
+and no model: one keyword query across everything, from a cold start.
 
-## Search that earns the trust you put in the library
+## Search that earns the trust you put in the collection
 
-A curated library is only as good as the retrieval over it, so the retrieval is not an afterthought.
+A curated collection is only as good as the retrieval over it, so the retrieval is not an
+afterthought.
 
-User-level defaults with per-library overrides (`limit`, `candidates`, `mode`, `fusion`, `rrf_k`,
-`vector_weight`, `bm25_weight`); `search_library` also accepts them per call. `mode`: `hybrid`
-(vector + BM25, fused), `vector`, `fts`; without an embedding profile everything is `fts`. `fusion`:
-`rrf` (reciprocal rank fusion, `rrf_k`) or `linear` (weighted sum of normalized scores; the two
-weights are normalized together). `reranker = cross-encoder` rescores the `candidates` of any mode
-(vector, fts or hybrid) with a fastembed cross-encoder (`reranker_model`).
+User-level defaults with per-collection overrides (`limit`, `candidates`, `mode`, `fusion`,
+`rrf_k`, `vector_weight`, `bm25_weight`); `search_collection` also accepts them per call. `mode`:
+`hybrid` (vector + BM25, fused), `vector`, `fts`; without an embedding profile everything is `fts`.
+`fusion`: `rrf` (reciprocal rank fusion, `rrf_k`) or `linear` (weighted sum of normalized scores;
+the two weights are normalized together). `reranker = cross-encoder` rescores the `candidates` of
+any mode (vector, fts or hybrid) with a fastembed cross-encoder (`reranker_model`).
 
 `search_text` (`GET /api/search/text`) is the session-free alternative: one BM25 query over every
-library at once, or over the comma-separated `libraries`, with no embedding model and nothing to set
-up first. Scores are raw BM25 rather than fused ranks, because one lexical scorer with the same
-tokenizer and chunk size answers everywhere, so two libraries are on one scale; normalizing per
-library would put every library's rank-1 chunk on page one. The result is paged (`page_size` up to
-200, `next_cursor` back in as `cursor`, at most 1000 results deep): the cursor is an opaque offset
-bound to the query, since a full-text query cannot be filtered by score. Every page recomputes the
-ranking, so a document indexed between two pages can move a hit across a page boundary, and a
-library created or deleted meanwhile invalidates the cursor (422). A library with no full-text index
-yet — one in the middle of its first index — contributes nothing rather than making the whole query
-wait for it.
+collection at once, or over the comma-separated `collections`, with no embedding model and nothing
+to set up first. Scores are raw BM25 rather than fused ranks, because one lexical scorer with the
+same tokenizer answers everywhere, so two collections are on one scale; normalizing per collection
+would put every collection's rank-1 chunk on page one. A document that sits in several of the
+collections searched is reported once per passage, not once per collection. The result is paged
+(`page_size` up to 200, `next_cursor` back in as `cursor`, at most 1000 results deep): the cursor
+is an opaque offset bound to the query, since a full-text query cannot be filtered by score. Every
+page recomputes the ranking, so a document indexed between two pages can move a hit across a page
+boundary, and a collection created or deleted meanwhile invalidates the cursor (422). A collection
+with no full-text index yet — one in the middle of its first index — contributes nothing rather
+than making the whole query wait for it.
 
-A session search (`search`, `GET /api/search`) asks every library of the session at once: the query
-is embedded once and each model is checked once for the whole fan-out, the libraries are read in
-parallel (up to 8 at a time), and the per-library rankings are fused by rank (reciprocal rank fusion,
-`rrf_k`), because scores from two indexes are not comparable. A session `Hit.score` is therefore an
-RRF score, or the cross-encoder's when `reranker = cross-encoder` — one rerank pass over the merged
-candidates. A session with a single library keeps that library's own scores, and `search_library` is
-unaffected either way. A library deleted since the session chose it is skipped; a library that fails
-to answer fails the search, rather than leaving a hole that reads as "no match".
+A session search (`search`, `GET /api/search`) asks every collection of the session at once: the
+query is embedded once and each model is checked once for the whole fan-out, the collections are
+read in parallel (up to 8 at a time), and the per-collection rankings are fused by rank (reciprocal
+rank fusion, `rrf_k`), because scores from two indexes are not comparable. A passage that two of
+the collections both hold counts once. A session `Hit.score` is therefore an RRF score, or the
+cross-encoder's when `reranker = cross-encoder` — one rerank pass over the merged candidates. A
+session with a single collection keeps that collection's own scores, and `search_collection` is
+unaffected either way. A collection deleted since the session chose it is skipped; a collection
+that fails to answer fails the search, rather than leaving a hole that reads as "no match".
+
+`search_documents` (`GET /api/search/documents`) answers "which documents should I read" rather
+than "which passages say so": the same BM25 scan, folded to one row per document with its best
+chunk, how many scanned chunks it matched, and its description.
 
 Every setting has a title and definition (`msgspec.Meta` on the field; served as `/api/options` →
 `docs`, shown in the UI), so tuning is done in the UI rather than by reading this file. Chunk sizes
@@ -119,15 +135,33 @@ are in characters.
 
 ## How it works
 
-Personal document library in `~/.haskie`. Add PDFs, markdown and office files to libraries; each
-file is converted to markdown (pdf-inspector page-wise for PDF, anydoc for office formats), chunked
-(semantic-text-splitter) and indexed in LanceDB (one index per library). A React web UI and an MCP
-server (litestar-mcp) share one Litestar app.
+Documents and collections are two different things, and the storage follows that.
 
-Document lifecycle: `uploaded` (preview only; first 10 PDF pages parsed on first open) → `queued` →
-`converting` → `embedding` → `indexing` → `indexed` | `error` | `cancelled`. Indexing is explicit:
-per document, per library, or via MCP `index_document`. Upload is instant and readable; the
-expensive work happens when you ask for it.
+A **document** is imported once, under a name that never changes, and belongs to no collection.
+Intake is two-phase: an upload lands in `staging/` and commits nothing; the import fixes the name
+(the original suffix is kept, because it decides the parser), creates the row, moves the file into
+the document's own folder and starts the pipeline: `queued` → `converting` → `embedding` →
+`imported` (or `error` / `cancelled`). Conversion happens once here (pdf-inspector page-wise for
+PDF, anydoc for office formats), so `parser` and `skip_ocr_pages` are chosen at import and stored
+on the document; the import also pre-warms the embedding cache under the user's default chunk
+settings. The preview (first 10 PDF pages) is built on first open.
+
+A **collection** is a set of documents with one LanceDB index and its own chunk and search
+settings. Adding an imported document to a collection is an indexing operation with a status of
+its own (`pending` → `indexing` → `indexed` / `error`), independent per collection: it makes sure
+the embedding the collection's chunk settings call for exists — computing it only when no
+collection asked for that exact combination before — and writes the rows out of that cache into
+the collection's table. Removing a document from a collection deletes its rows there and nothing
+else; deleting a collection touches no document; deleting a document takes it out of every
+collection, then drops its folder.
+
+The **embedding cache** is what makes a document cheap to share. Every computed embedding is one
+parquet file under the document (`embeddings/<id>.parquet`, one row group per convert part) plus
+one `embeddings` row, keyed by a canonical URN of everything the rows depend on —
+`document:<doc>;model:<model>;chunk_size:<n>;chunk_overlap:<n>;chunker:<c>;chunk_version:<v>;parser:<p>;skip_ocr_pages:<b>`
+— hashed with sha256 to the id. Same inputs, same id, computed once; two collections asking for the
+same missing entry at the same moment share one run (DBOS deduplication on the id). The
+accelerator is not in the key: it selects where a model runs, not what it computes.
 
 ### Where everything lives
 
@@ -136,80 +170,89 @@ Plain files in a directory you can back up, inspect or delete. No opaque store.
 ```
 ~/.haskie/
   cache/models/            compiled CoreML models (ONNX Runtime writes it; safe to delete)
-  haskie.db               SQLite (aiosqlite, WAL): settings, libraries, documents, sessions, plus
-                           DBOS workflow tables. Schema versioned via PRAGMA user_version.
-  library/<name>/
-    files/<sh>/<doc>            original upload
-    markdown/<sh>/<doc>.md      full conversion (assembled from parts when indexed)
-    markdown/<sh>/<doc>.parts/  NNNNNN.md per micro-batch of `pipeline.batch_pages` pages, plus
-                                NNNNNN.rows.json (chunks + vectors) from the embed stage
-    preview/<sh>/<doc>/         source (pdf cut to 10 pages / image / text / html) + preview.md
-    index/                      LanceDB table "chunks"
+  haskie.db               SQLite (aiosqlite, WAL): settings, documents, collections, memberships,
+                           embeddings metadata, sessions, plus DBOS workflow tables. Schema
+                           versioned via PRAGMA user_version.
+  staging/<uuid>.<ext>    uploads not yet imported; swept after a day by the nightly run
+  documents/<sh>/<doc>/
+    original.<ext>            the file as imported
+    original.<ext>.md         full conversion (assembled from the parts at import)
+    parts/NNNNNN.md           per micro-batch of `pipeline.batch_pages` pages; kept, because every
+                              collection re-chunks from the same part boundaries
+    preview/                  source (pdf cut to 10 pages / image / text / html) + preview.md
+    embeddings/<id>.parquet   one cached embedding per chunk settings x model (see above)
+  collections/<sh>/<name>/
+    index/                    LanceDB table "chunks"
 ```
 
-`<sh>` is the shard directory of the document: the first byte of the SHA-1 of its name, in hex
-(`layout.shard`). A library therefore spreads over 256 directories per base instead of putting
-ten thousand entries in one. `layout.migrate_layout` moves a home written by an older build into
-this shape once at startup, and records `meta.layout_version` when it is done.
+`<sh>` is the shard directory of the entry: the first byte of the SHA-1 of its name, in hex
+(`layout.shard`). Ten thousand documents therefore spread over 256 directories instead of filling
+one.
 
 ### Indexing that survives a crash
 
 Indexing a shelf of books takes minutes to hours. Closing the laptop mid-run should cost the
 current step, not the run — so the pipeline is durable, resumable and cancellable by design.
 
-Durable execution is [DBOS](https://docs.dbos.dev) on the same SQLite file. One `index_document`
-workflow per document plans each stage into micro-batches of `pipeline.batch_pages` pages and cuts
-convert and embed into at most `pipeline.document_parallelism` contiguous slices (0 = as many as
-that stage's share of the CPU budget). Every slice is one child `stage_parts` workflow with a
-durable step per micro-batch - so one large document spreads over the available slots, while a
-document still costs a handful of workflows rather than one per micro-batch. Lower
-`document_parallelism` to keep a single large document from occupying every slot while other
-documents wait. The whole index stage is one `stage_parts` child on the library's partition, so
-LanceDB has one writer per library and the full-text index is rebuilt once, as that child's last
-step.
+Durable execution is [DBOS](https://docs.dbos.dev) on the same SQLite file. Three pipeline-shaped
+workflows share one machinery: `import_document` (convert, then pre-warm the cache),
+`ensure_embedding` (chunk and embed one document under one set of parameters, deduplicated by the
+cache id so it runs once however many callers wait on it) and `index_collection_document` (ensure
+the embedding, then write it into one collection's table). Each plans its stage into micro-batches
+of `pipeline.batch_pages` pages and cuts convert and embed into at most
+`pipeline.document_parallelism` contiguous slices (0 = as many as that stage's share of the CPU
+budget). Every slice is one child `stage_parts` workflow with a durable step per micro-batch — so
+one large document spreads over the available slots, while a document still costs a handful of
+workflows rather than one per micro-batch. The index stage is one `stage_parts` child on the
+collection's partition, so LanceDB has one writer per collection and the full-text index is
+rebuilt once, as that child's last step.
 
 Queues are named for what they carry: a `job.*` queue holds coarse jobs, which are made of tasks
 and mostly wait on them, and a `task.*` queue holds the work itself.
 
 | queue | concurrency | runs |
 | --- | --- | --- |
-| `job.indexing` | twice `pipeline.cpu_budget`, capped at 64 | one orchestrator per document |
-| `job.library` | 2 | "index all" and library delete |
+| `job.indexing` | twice `pipeline.cpu_budget`, capped at 64 | one import or collection-index orchestrator per document |
+| `job.embedding` | same | `ensure_embedding`, one per cache id (its own queue: the orchestrators wait on it) |
+| `job.collection` | 2 | "index all", collection delete, document delete |
 | `job.downloads` | 2 | model downloads (`ensure_model`) |
 | `job.maintenance` | 4 | debounced maintenance, hourly archive, nightly housekeeping |
 | `task.converting` | `converting_weight` share of `cpu_budget` | convert slices |
 | `task.embedding` | `embedding_weight` share of `cpu_budget` | embed slices |
-| `task.indexing` | `indexing_weight` share of `cpu_budget`, 1 per library | index children, maintenance, removals |
+| `task.indexing` | `indexing_weight` share of `cpu_budget`, 1 per collection | index children, maintenance, removals |
 
 `pipeline.cpu_budget` (default: half the machine's cores) is how many tasks run at the same time,
-everywhere — so indexing a library does not take the machine you are working on. It is shared out
-over the three stage weights, largest remainder first and never below one slot per stage, because
-the stages cost different things: converting is CPU and IO per page, every embedding task loads the
-embedding model, and indexing writes to LanceDB, which takes one writer per library. A slow stage
-therefore backs up on its own queue instead of taking every slot from the others. The weights only
-decide the mix; a process-wide semaphore of `cpu_budget` slots, taken around the CPU work of every
-task and every maintenance run, is what keeps the total within the budget when the per-stage floors
-or a maintenance run would push it over. Each child runs under `pipeline.task_timeout_seconds`
-(default 600) per micro-batch it was given.
+everywhere — so indexing a collection does not take the machine you are working on. It is shared
+out over the three stage weights, largest remainder first and never below one slot per stage,
+because the stages cost different things: converting is CPU and IO per page, every embedding task
+loads the embedding model, and indexing writes to LanceDB, which takes one writer per collection.
+A slow stage therefore backs up on its own queue instead of taking every slot from the others. The
+weights only decide the mix; a process-wide semaphore of `cpu_budget` slots, taken around the CPU
+work of every task and every maintenance run, is what keeps the total within the budget when the
+per-stage floors or a maintenance run would push it over. Each child runs under
+`pipeline.task_timeout_seconds` (default 600) per micro-batch it was given.
 
 DBOS provides crash recovery (a restarted workflow resumes at its first unfinished step or child),
-deduplication (one active job per document), cancellation, and the job history shown in the Jobs
-view. Retries follow the cause: a transient failure (busy database, slow file) is retried 3 times
-with backoff, a permanent one (unsupported file type, pages that need OCR, a document the parser
-cannot read) fails the document immediately, and a model download gets 5 attempts. Deleting a
-document or a library cancels its workflows and waits for them to end, then removes index rows,
-files and the database row (in that order) from the library's own partition, so nothing writes a
-document while it is removed. The DBOS application version is pinned to the package version, so
-restarts (including `--reload` after code edits) recover in-flight work; anything recorded under
-another version is re-enqueued at startup.
+deduplication (one active import per document, one active index per membership, one embedding run
+per cache id), cancellation, and the job history shown in the Jobs view. Retries follow the cause:
+a transient failure (busy database, slow file) is retried 3 times with backoff, a permanent one
+(unsupported file type, pages that need OCR, a document the parser cannot read) fails the document
+immediately, and a model download gets 5 attempts. Removing a document from a collection cancels
+its index workflow there and waits, then deletes its rows and membership from that collection's
+own partition; deleting a document does that in every collection it is in (one child per
+collection, each on its partition) before dropping its folder and row, and sets the document
+`deleting` first so nothing attaches it meanwhile. The DBOS application version is pinned to the
+package version, so restarts (including `--reload` after code edits) recover in-flight work;
+anything recorded under another version is re-enqueued at startup.
 
-Model downloads (embedding profile, user and per-library reranker) are `ensure_model` workflows with
-one durable id per model (`dl:{kind}:{model}`): idempotent, retried, and their DBOS status is the
-model status shown in the nav bar. The record outlives the process, because the files do - a restart
-reuses both instead of downloading the model again. Being on disk is not the same as being usable,
-though: a model lives in the caches of one process, so a boot that finds a finished download warms
-it in a background task (a local read, no network) and only then reports it ready. Searches that
-need a model still downloading or still warming fail fast with a clear message naming the job.
+Model downloads (embedding profile, user and per-collection reranker) are `ensure_model` workflows
+with one durable id per model (`dl:{kind}:{model}`): idempotent, retried, and their DBOS status is
+the model status shown in the nav bar. The record outlives the process, because the files do — a
+restart reuses both instead of downloading the model again. Being on disk is not the same as being
+usable, though: a model lives in the caches of one process, so a boot that finds a finished
+download warms it in a background task (a local read, no network) and only then reports it ready.
+Searches that need a model still downloading or still warming fail fast with a clear message
+naming the job.
 
 ### Jobs you can watch
 
@@ -217,18 +260,20 @@ Long work you cannot see is work you do not trust, so every background job is vi
 cancellable.
 
 Every kind of background work is one listing with one row shape, so the Jobs view is a section per
-kind, each paged on its own: `document` (one `index_document` pipeline, with its micro-batches and
-its cancel), `library` ("index all" and library delete, with the progress the bulk index publishes),
-`download` (`ensure_model`, plus whether the model is loaded in this process), `maintenance`
-(`maintain_on_partition` runs and the nightly housekeeping) and `archive` (the hourly retention
-round). `GET /api/jobs/by-kind?kind=&library=&limit=&cursor=` serves one page of one kind and
-`GET /api/jobs/kinds` the sections themselves, with how many jobs of each kind are running right now
-(one grouped query). `GET /api/jobs/activity` is the indicator in the top-right of every view: jobs
-(`job.*` queues) and tasks (`task.*` queues) queued and running, one grouped query over the queue
-name prefix; a debounced maintenance run counts as queued until its delay expires. The library
-filter is an id prefix the database applies, for every kind whose id carries a library (`idx:`,
-`bulk-index:`, `bulk-delete:`, `maint:`). `GET /api/jobs` remains the document listing on its own,
-and it is the only kind that also reads the day partitions `archive` copied finished jobs into.
+kind, each paged on its own: `document` (an import, an embedding run or a collection index, with
+its micro-batches and its cancel), `collection` ("index all", collection delete and document
+delete, with the progress the bulk index publishes), `download` (`ensure_model`, plus whether the
+model is loaded in this process), `maintenance` (`maintain_on_partition` runs and the nightly
+housekeeping) and `archive` (the hourly retention round). `GET
+/api/jobs/by-kind?kind=&collection=&limit=&cursor=` serves one page of one kind and
+`GET /api/jobs/kinds` the sections themselves, with how many jobs of each kind are running right
+now (one grouped query). `GET /api/jobs/activity` is the indicator in the top-right of every view:
+jobs (`job.*` queues) and tasks (`task.*` queues) queued and running, one grouped query over the
+queue name prefix; a debounced maintenance run counts as queued until its delay expires. The
+collection filter is an id prefix the database applies, for every kind whose id carries a
+collection (`idx-col:`, `bulk-index:`, `bulk-delete:`, `maint:`); imports and embedding runs
+belong to no collection. `GET /api/jobs` remains the document listing on its own, and it is the
+only kind that also reads the day partitions `archive` copied finished jobs into.
 
 ### Runtime
 
@@ -243,7 +288,7 @@ Rust runtime the sync API wraps anyway. Files go through `anyio.Path` and `anyio
 `os.replace` and `shutil.rmtree` in a worker thread because they have no async form. CPU work is not
 IO and stays sync: pdf parsing, chunking, ONNX embedding and reranking, the preview page cut and
 every model load run in a worker thread through `cpu.on_cpu`, which holds one slot of the
-`indexing.cpu_budget` semaphore for the length of that work. A pipeline step therefore holds a slot
+`pipeline.cpu_budget` semaphore for the length of that work. A pipeline step therefore holds a slot
 for its CPU part only, never for the file IO or the LanceDB commit around it.
 
 One piece of CPU work still reaches the loops: ONNX Runtime holds the GIL for the whole build of a
@@ -256,10 +301,10 @@ which CPU does in milliseconds, and their CoreML build cost seconds of frozen UI
 
 Two event loops run in the process: Litestar's, which serves requests, and DBOS's background loop,
 which runs the queued async workflows and their steps. No loop-bound primitive is shared between
-them - that is why the CPU budget is a `threading` semaphore rather than an `anyio.CapacityLimiter`,
+them — that is why the CPU budget is a `threading` semaphore rather than an `anyio.CapacityLimiter`,
 why each loop gets a thread limiter of its own, and why the search fan-out builds its semaphore per
 call. Blocking file IO survives in four places, each documented as running in a worker thread and
 nowhere else: `convert.py` (the parsers take a path and read it themselves), `home.atomic_write_sync`
-and the inner function of `home.remove_tree`, `layout._migrate_home` and its helpers (one burst of
-`iterdir` and `os.replace`, once per home at boot), and `db._migrate_sync` (the migration scripts and
-the one-time WAL switch, on a stdlib connection, before anything else holds the file open).
+and the inner function of `home.remove_tree`, the parquet reads and writes of `embed_cache.py`
+(pyarrow is sync), and `db._migrate_sync` (the migration scripts and the one-time WAL switch, on a
+stdlib connection, before anything else holds the file open).
