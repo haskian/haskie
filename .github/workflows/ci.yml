@@ -31,4 +31,8 @@ jobs:
       - uses: jdx/mise-action@v2
       - run: mise run setup
       - run: mise run check # ruff + ty + oxlint + tsc, read-only
+      # Two workers, not one-per-core: the timing-sensitive workflow tests need CPU headroom
+      # inside their 30s step-hold window, which a fully subscribed runner does not leave.
       - run: mise run test
+        env:
+          PYTEST_WORKERS: "2"
