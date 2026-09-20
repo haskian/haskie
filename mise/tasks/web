@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="Run the Vite dev server on :5173 (proxies /api to :8000)"
+set -euo pipefail
+cd web && bun run dev

@@ -9,29 +9,3 @@ _.python.venv = { path = ".venv", create = true }
 
 [task_config]
 includes = ["mise/tasks"]
-
-[tasks.setup]
-description = "Install Python and web dependencies"
-run = ["uv sync", "cd web && bun install"]
-
-[tasks.api]
-description = "Run the Litestar API + MCP server on :8000 with reload"
-run = "uv run litestar --app haskie.app:app run --reload --port 8000"
-
-[tasks.web]
-description = "Run the Vite dev server on :5173 (proxies /api to :8000)"
-dir = "web"
-run = "bun run dev"
-
-[tasks.dev]
-description = "Run the API and web dev servers together"
-depends = ["api", "web"]
-
-[tasks.build]
-description = "Build the web UI into src/haskie/web, from where the wheel ships it and the app serves it"
-run = ["cd web && bun install && bun run build", "rm -rf src/haskie/web", "cp -R web/dist src/haskie/web"]
-
-[tasks.test]
-description = "Run the Python tests in parallel with a coverage report"
-# Python 3.13 sys.monitoring coverage: near-zero tracing overhead versus the C tracer.
-run = 'COVERAGE_CORE="${COVERAGE_CORE:-sysmon}" uv run pytest -q -n auto --cov=haskie --cov-report=term-missing'

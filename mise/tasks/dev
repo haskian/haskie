@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+#MISE description="Run the API and web dev servers together"
+#MISE depends=["api", "web"]
