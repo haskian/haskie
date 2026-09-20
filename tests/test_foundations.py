@@ -794,10 +794,10 @@ async def test_connect_commits_or_rolls_back_the_whole_unit_of_work(
         ("two callers race for the lock", True),
     ],
 )
-async def test_migrate_once_applies_every_migration_exactly_once(
+async def test_migrate_once_creates_the_schema_exactly_once(
     monkeypatch: pytest.MonkeyPatch, name: str, concurrently: bool
 ) -> None:
-    applied: list[int] = []  # the thread each run of the migrations happened on
+    applied: list[int] = []  # the thread each run of the schema script happened on
     real = db.migrate
 
     def counted(conn: sqlite3.Connection) -> int:

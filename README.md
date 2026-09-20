@@ -208,8 +208,8 @@ Plain files in a directory you can back up, inspect or delete. No opaque store.
 ~/.haskie/
   cache/models/            compiled CoreML models (ONNX Runtime writes it; safe to delete)
   haskie.db               SQLite (aiosqlite, WAL): settings, documents, collections, memberships,
-                           embeddings metadata, sessions, plus DBOS workflow tables. Schema
-                           versioned via PRAGMA user_version.
+                           embeddings metadata, sessions, plus DBOS workflow tables. One schema
+                           snapshot, stamped in PRAGMA user_version; no upgrade path.
   staging/<uuid>.<ext>    uploads not yet imported; swept after a day by the nightly run
   documents/<sh>/<doc>/
     original.<ext>            the file as imported
@@ -348,7 +348,7 @@ why each loop gets a thread limiter of its own, and why the search fan-out build
 call. Blocking file IO survives in four places, each documented as running in a worker thread and
 nowhere else: `convert.py` (the parsers take a path and read it themselves), `home.atomic_write_sync`
 and the inner function of `home.remove_tree`, the parquet reads and writes of `embed_cache.py`
-(pyarrow is sync), and `db._migrate_sync` (the migration scripts and the one-time WAL switch, on a
+(pyarrow is sync), and `db._migrate_sync` (the schema script and the one-time WAL switch, on a
 stdlib connection, before anything else holds the file open).
 
 ## Developing

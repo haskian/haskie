@@ -185,6 +185,16 @@ async def _statuses(workflow_ids: list[str]) -> list[str]:
     return [found[i] for i in workflow_ids]
 
 
+def _all_cancelled(workflow_ids: list[str]):
+    """A condition for `until`: every one of these workflows has been marked CANCELLED. The mark
+    is all a cancel writes, so this says nothing about the steps still running under it."""
+
+    async def cancelled() -> bool:
+        return await _statuses(workflow_ids) == ["CANCELLED"] * len(workflow_ids)
+
+    return cancelled
+
+
 async def _drain(timeout: float = WAIT) -> None:
     """Wait until no workflow is active any more. A step that outlives `DBOS.destroy()` keeps a
     non-daemon thread alive, so a test that released a blocked step waits for it here rather than
@@ -222,6 +232,13 @@ async def _fragments(collection: Collection) -> int:
         return 0
     # lancedb annotates stats() as a dataclass but returns plain dicts
     return (await table.stats())["fragment_stats"]["num_fragments"]  # ty: ignore[not-subscriptable]
+
+
+async def _rows_of(collection: Collection, doc: str) -> int:
+    """Rows one document has in a collection's table right now: what a detach or a delete has to
+    leave none of, whichever way the write in flight was ordered against it."""
+    table = await (await collection.index())._existing()
+    return 0 if table is None else await table.count_rows(f"doc = '{doc}'")
 
 
 def _batch_of(args: tuple) -> Batch | None:
@@ -1622,6 +1639,48 @@ async def test_detach_leaves_the_document_and_the_other_collection(dbos, tmp_pat
     assert doc.markdown.exists() and doc.parts_dir.exists()
 
 
+async def test_detach_waits_for_the_index_write_in_flight(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """F3: the detach cancels the member's index workflow, and that cancel rewrites the status row
+    and nothing else - the LanceDB write already running writes its rows anyway. The removal takes
+    the collection's write lock after that write, so the rows go with the membership instead of
+    outliving it."""
+    await _use(dbos, workers=4, batch_pages=1, index_group_parts=1)
+    collection = await Collection.create("part")
+    done = await import_document(dbos, "done.md", MD, tmp_path)
+    await attach_document(dbos, "part", done.name)
+    slow = await import_document(dbos, "slow.pdf", text_pdf(["alpha", "beta"]), tmp_path)
+    gate = Gate()
+    monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
+    in_flight = await dbos.attach("part", slow.name)
+    assert await wait_event(gate.entered)
+    order: list[str] = []
+
+    async def release_once_cancelled() -> None:
+        await until(_all_cancelled([in_flight]), "the detach never cancelled the index in flight")
+        order.append("released")
+        gate.release.set()
+
+    async with anyio.create_task_group() as releasing:
+        releasing.start_soon(release_once_cancelled)
+        await dbos.detach("part", slow.name)
+        order.append("detached")
+
+    assert order == ["released", "detached"], "the detach waited for the write holding the lock"
+    await await_terminal([in_flight])
+    assert gate.calls == [0], "one batch wrote past the cancel; the next stopped at its step"
+    assert await collection.member_names() == [done.name]
+    assert await _rows_of(collection, slow.name) == 0, "its rows went with the membership"
+    assert await _rows_of(collection, done.name) > 0, "and the other member kept its own"
+    assert {h.doc for h in await collection.search("alpha", SearchOverrides(limit=5))} == {
+        done.name
+    }, "both documents carry 'alpha'; only the one still attached is found"
+    with pytest.raises(NotFound, match="document not in collection part: slow.pdf"):
+        await dbos.detach("part", slow.name)
+    await _drain()
+
+
 async def test_detach_rejects_an_unknown_membership(dbos, tmp_path: Path) -> None:
     await Collection.create("rm")
     with pytest.raises(NotFound, match="document not in collection rm: ghost.md"):
@@ -1649,12 +1708,19 @@ async def test_delete_collection_cancels_every_document_in_flight(
     # it; both are active, and the delete has to reach both
     assert await wait_event(gate.entered), "no member reached its index step"
 
-    await delete_collection(dbos, "dl")
+    async def release_once_cancelled() -> None:
+        # the cancel leaves the gated write running, and it holds the collection's lock: the
+        # removal only gets it once the test lets that write finish
+        await until(_all_cancelled(ids), "the delete never cancelled the members in flight")
+        gate.release.set()
+
+    async with anyio.create_task_group() as releasing:
+        releasing.start_soon(release_once_cancelled)
+        await delete_collection(dbos, "dl")
 
     assert await _statuses(ids) == ["CANCELLED", "CANCELLED"]
     assert await Collection.names() == [] and not collection.root.exists()
     assert sorted(await document_names()) == names, "the documents outlive the collection"
-    gate.release.set()
     await await_terminal(ids)
     await _drain()
 
@@ -1751,8 +1817,10 @@ async def test_index_collection_workflow_is_idempotent_on_replay(
 async def test_delete_collection_workflow_cancels_and_removes(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:
-    """The deletion is a job too: it cancels everything the collection has in flight, waits for
-    the last running step, and only then drops the rows and the folder."""
+    """F2: the deletion is a job too. It cancels everything the collection has in flight, and the
+    cancel is final for the status row alone - the LanceDB write already running keeps going - so
+    it waits on the collection's write lock before it drops the rows and the folder. A write that
+    outlived the cancel must not recreate either."""
     await _use(dbos, workers=4, batch_pages=1, index_group_parts=1)
     collection = await Collection.create("wipe")
     done = await import_document(dbos, "done.md", MD, tmp_path)
@@ -1762,10 +1830,20 @@ async def test_delete_collection_workflow_cancels_and_removes(
     monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
     in_flight = await dbos.attach("wipe", slow.name)
     assert await wait_event(gate.entered)
+    order: list[str] = []
 
-    bulk_id = await dbos.start_delete_collection("wipe")
+    async def release_once_cancelled() -> None:
+        await until(_all_cancelled([in_flight]), "the delete never cancelled the index in flight")
+        order.append("released")
+        gate.release.set()
 
-    assert await wait_for(bulk_id) is None
+    async with anyio.create_task_group() as releasing:
+        releasing.start_soon(release_once_cancelled)
+        bulk_id = await dbos.start_delete_collection("wipe")
+        assert await wait_for(bulk_id) is None
+        order.append("removed")
+
+    assert order == ["released", "removed"], "the removal waited for the write holding the lock"
     assert await _statuses([in_flight]) == ["CANCELLED"]
     assert await Collection.names() == [] and not collection.root.exists()
     assert sorted(await document_names()) == ["done.md", "slow.pdf"], "documents are untouched"
@@ -1776,9 +1854,11 @@ async def test_delete_collection_workflow_cancels_and_removes(
         "SUCCESS",
         None,
     )
-    gate.release.set()
     await await_terminal([in_flight])
     await _drain()
+    assert await Collection.names() == [] and not collection.root.exists(), (
+        "and the cancelled child put back neither the row nor the table folder"
+    )
 
 
 async def test_bulk_job_reads_the_three_bulk_kinds(dbos, tmp_path: Path) -> None:

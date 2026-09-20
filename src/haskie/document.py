@@ -465,8 +465,8 @@ async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
         return info, info.preview
     # setdefault, with no await in between, so two readers of one document take the same lock
     lock = _preview_locks.setdefault(name, anyio.Lock())
-    try:
-        async with lock:
+    async with lock:
+        try:
             info = await get(name)  # another reader may have built it while we waited
             if info.preview is not None:
                 return info, info.preview
@@ -492,9 +492,12 @@ async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
             finally:
                 slots.release()
             return await get(name), preview
-    finally:
-        # the build is committed, so a reader arriving now reads the preview instead of the lock
-        _preview_locks.pop(name, None)
+        finally:
+            # Still holding the lock, so a queued reader keeps it: dropping it here would send
+            # that reader and a newcomer into the same failing build at once. With nobody waiting
+            # the build is committed (or failed) and the next reader needs no lock at all.
+            if lock.statistics().tasks_waiting == 0:
+                _preview_locks.pop(name, None)
 
 
 # --- removal ------------------------------------------------------------------

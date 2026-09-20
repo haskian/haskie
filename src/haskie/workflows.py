@@ -2,7 +2,9 @@
 
 DBOS gives us: crash recovery (a workflow resumes at its first unfinished step or child),
 step retries with backoff, queues with concurrency and per-partition limits, deduplication,
-and a queryable history (workflow list, children, steps). Nothing here keeps state of its own.
+and a queryable history (workflow list, children, steps). The one thing it does not give us is a
+way to stop a step that is already running, which `collection_lock` below answers for; nothing
+else here keeps state of its own.
 
 Layout:
 - `import_document` per imported document, on `job.indexing`: convert, then pre-warm the
@@ -263,6 +265,32 @@ class PipelineError(RuntimeError):
     """Carries only the flat root-cause message (survives DBOS's error (de)serialization)."""
 
 
+# --- the collection write lock ----------------------------------------------------
+
+# One lock per collection, held by whoever is writing that collection's LanceDB table or taking
+# it away. Not durable and not meant to be: it orders two things running in this process right
+# now, and a crash leaves neither of them running.
+_collection_locks: dict[str, anyio.Lock] = {}
+
+
+def collection_lock(collection: str) -> anyio.Lock:
+    """The lock a write to one collection's table and a removal of that collection take turns on.
+
+    `DBOS.cancel_workflows` rewrites the status row and nothing else: a step already inside its
+    LanceDB write keeps running, and the index partition frees its slot as soon as the row says
+    CANCELLED. So a delete or a detach that cancelled an index workflow can reach its own removal
+    while that write is still going - and the write would recreate the table folder the delete
+    just took away, or put back rows the detach just removed. A queue cannot order those two; this
+    lock does.
+
+    An `anyio.Lock` rather than a thread lock because every holder runs on DBOS's background event
+    loop: the index steps, the removal steps and the workflow bodies around them all do. The
+    HTTP-side helpers (`detach`, `start_*`) only enqueue and never take it.
+
+    `setdefault` with no await in between, so two callers arriving at once share one lock."""
+    return _collection_locks.setdefault(collection, anyio.Lock())
+
+
 # --- lifecycle --------------------------------------------------------------------
 
 
@@ -518,15 +546,32 @@ async def set_member_status(
     await Collection(collection).set_member_status(doc, status, error)
 
 
-@retried_step
-async def member_present(collection: str, doc: str) -> bool:
-    """Whether the membership still exists: a detach that landed between the enqueue and the run
-    must not leave rows in the table with no membership to remove them by."""
+async def _member_present(collection: str, doc: str) -> bool:
     try:
         await Collection(collection).member(doc)
     except NotFound:
         return False
     return True
+
+
+@retried_step
+async def member_present(collection: str, doc: str) -> bool:
+    """Whether the membership still exists: a detach that landed between the enqueue and the run
+    must not leave rows in the table with no membership to remove them by."""
+    return await _member_present(collection, doc)
+
+
+@contextlib.asynccontextmanager
+async def index_write(collection: str, doc: str) -> AsyncIterator[bool]:
+    """Hold the collection's write lock for one write of the index child, and report whether the
+    membership is still there once the lock is ours.
+
+    The lock alone only orders this write against a removal (see `collection_lock`); the re-check
+    inside it is what the loser of that race acts on. A removal that went first took the
+    membership with it - the whole collection row for a delete (memberships cascade), this one
+    row for a detach - so a write that finds none has nothing left to write into."""
+    async with collection_lock(collection):
+        yield await _member_present(collection, doc)
 
 
 @retried_step
@@ -554,6 +599,17 @@ def _value(result: BatchResult) -> int:
     return result.value or 0
 
 
+async def _index_batch(batch: Batch, ctx: Context) -> int:
+    """One index micro-batch, under the collection's write lock (see `index_write`)."""
+    assert ctx.collection is not None, "the index stage always names a collection"
+    async with index_write(ctx.collection, ctx.document.name) as present:
+        if not present:
+            raise PermanentError("document is no longer in the collection")
+        return await pipeline.index_batch(
+            Collection(ctx.collection), ctx.document, ctx.cache_id, batch, ctx.embedding
+        )
+
+
 @retried_step
 async def try_batch(stage: Stage, batch: Batch, ctx: Context) -> BatchResult:
     """The CPU work of one micro-batch. The slot of the CPU budget is taken inside `cpu.on_cpu`,
@@ -565,12 +621,7 @@ async def try_batch(stage: Stage, batch: Batch, ctx: Context) -> BatchResult:
         return await _guarded(
             pipeline.embed_batch(ctx.document, batch, ctx.cache_id, ctx.chunking, ctx.embedding)
         )
-    assert ctx.collection is not None, "the index stage always names a collection"
-    return await _guarded(
-        pipeline.index_batch(
-            Collection(ctx.collection), ctx.document, ctx.cache_id, batch, ctx.embedding
-        )
-    )
+    return await _guarded(_index_batch(batch, ctx))
 
 
 @retried_step
@@ -601,14 +652,22 @@ async def finalize_embed(params: embed_cache.Params, ctx: Context) -> str:
 @retried_step
 async def prepare_index(collection: str, ctx: Context) -> None:
     """Clear the collection's table of this document before its first index batch runs, on the
-    collection's partition like every other write to its table (see `pipeline.prepare_index`)."""
-    await pipeline.prepare_index(Collection(collection), ctx.document, ctx.embedding)
+    collection's partition like every other write to its table (see `pipeline.prepare_index`).
+
+    Recreates a missing table, so it takes the write lock like the batches do. Skipped rather than
+    failed once the membership is gone: the batch write is where that is reported."""
+    async with index_write(collection, ctx.document.name) as present:
+        if present:
+            await pipeline.prepare_index(Collection(collection), ctx.document, ctx.embedding)
 
 
 @retried_step
 async def finalize_index(collection: str, ctx: Context) -> None:
-    """Rebuild the full-text index once, on the collection's partition."""
-    await pipeline.finalize_index(Collection(collection), ctx.embedding)
+    """Rebuild the full-text index once, on the collection's partition, under the same lock and
+    the same re-check as the batches (see `prepare_index`)."""
+    async with index_write(collection, ctx.document.name) as present:
+        if present:
+            await pipeline.finalize_index(Collection(collection), ctx.embedding)
 
 
 @retried_step
@@ -955,10 +1014,15 @@ async def remove_member_row(collection: str, doc: str) -> None:
 @DBOS.workflow(name=REMOVE_FROM_INDEX_WORKFLOW)
 async def remove_from_collection_index(collection: str, doc: str) -> None:
     """Take one document out of one collection: its rows in the table, then its membership. The
-    document itself, its files and its embedding cache are untouched."""
+    document itself, its files and its embedding cache are untouched.
+
+    Both steps under the collection's write lock, not only the first: an index step still in
+    flight (its workflow was cancelled, which stops nothing already running) would otherwise take
+    the lock between them, still find the membership, and write the rows back."""
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, doc=doc):
-        await remove_index_rows(collection, doc)
-        await remove_member_row(collection, doc)
+        async with collection_lock(collection):
+            await remove_index_rows(collection, doc)
+            await remove_member_row(collection, doc)
 
 
 @retried_step
@@ -1107,7 +1171,9 @@ async def delete_collection_workflow(collection: str) -> None:
     document is touched.
 
     The sweep repeats until it finds nothing: a bulk index still queueing documents can add more
-    while the first sweep runs. Each sweep's cancel is already final when it returns.
+    while the first sweep runs. Each sweep's cancel is final for the status row and for nothing
+    else - a step already inside its LanceDB write keeps running - so the removal below waits for
+    the collection's write lock, which that step holds until it is done (see `collection_lock`).
 
     A maintenance run already debounced for this collection is left alone: it finds no row and
     reports itself skipped ("no-collection"), which costs one no-op instead of a cancellation
@@ -1116,8 +1182,10 @@ async def delete_collection_workflow(collection: str) -> None:
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection):
         while await cancel_active_batch(collection) > 0:
             pass
-        await remove_rows(collection)
-        await remove_tree(collection)
+        async with collection_lock(collection):
+            await remove_rows(collection)
+            await remove_tree(collection)
+        _collection_locks.pop(collection, None)  # nothing may write to it again
 
 
 # --- retention ----------------------------------------------------------------------------

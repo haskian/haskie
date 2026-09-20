@@ -24,9 +24,15 @@ env:
   BUILD_REF: ${{ inputs.ref || github.ref_name }}
 
 jobs:
-  # No CI job here: a `v*` tag always sits on a commit main's CI already checked.
+  # Publishing an artifact that fails its own test suite is not worth the convenience. Neither
+  # path into here is covered otherwise: version.yml pushes the bump commit with `[skip ci]`, and
+  # a hand-pushed tag starts no suite of its own.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   dist:
     name: Build wheel + sdist
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

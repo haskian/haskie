@@ -1,12 +1,12 @@
 """Metadata store: SQLite (WAL mode) at ~/.haskie/haskie.db.
 
 Reads and writes go through `aiosqlite`, one connection per unit of work, so no unit ever blocks
-the event loop it runs on. Migrations are the exception: they stay on stdlib `sqlite3` in a worker
-thread, because the one-time switch to WAL needs an exclusive lock on the file.
+the event loop it runs on. Creating the schema is the exception: it stays on stdlib `sqlite3` in a
+worker thread, because the one-time switch to WAL needs an exclusive lock on the file.
 
-Schema evolution: append a script to MIGRATIONS, never edit an applied one. `PRAGMA user_version`
-records the version reached; the missing tail is applied once per process, before the first
-connect. A home older than `SCHEMA_VERSION` is refused rather than migrated (see `migrate`).
+Schema evolution: edit `SCHEMA` and bump `SCHEMA_VERSION`. There is no upgrade path, so a home at
+any other version is refused and has to be destroyed (see `migrate`). A deliberate choice while the
+storage shape is still moving: one readable schema is worth more than a history of scripts.
 """
 
 import sqlite3
@@ -21,19 +21,22 @@ import anyio.to_thread
 import msgspec
 
 from haskie import home
+from haskie.errors import HaskieError
 
-SCHEMA_VERSION = 9
-"""`pragma user_version` of the schema script below.
+SCHEMA_VERSION = 10
+"""`pragma user_version` of the schema below.
 
-The number is where the migration history that built this schema stopped, so a home stamped with
-it already has the script's tables and runs nothing. A later change appends a script to
-MIGRATIONS and is stamped SCHEMA_VERSION + its index.
+A home stamped with it has exactly these tables and is opened as it is. Any other stamp is a
+shape this build cannot read, so the home is refused (see `migrate`). Bumped last when
+`staging.created_at` went from an ISO-8601 string to unix seconds.
 """
 
-MIGRATIONS: list[str] = [
-    # The whole schema, in one script: every statement is `if not exists`, so a crash partway
-    # through leaves `user_version` at 0 and the next boot replays it harmlessly.
-    """
+# Every statement is `if not exists`, so a crash partway through leaves `user_version` at 0 and
+# the next boot replays the script harmlessly.
+#
+# SQLite has no date type: a `timestamp` column documents what the value means, and its NUMERIC
+# affinity stores the unix seconds `time.time()` returns as the float they are.
+SCHEMA = """
     create table if not exists settings (
         id integer primary key check (id = 1),
         json text not null
@@ -47,10 +50,10 @@ MIGRATIONS: list[str] = [
         name text primary key,
         settings text not null default '{}',
         description text not null default '',
-        created_at real not null default 0,
+        created_at timestamp not null default 0,
         pending_docs integer not null default 0,
-        last_write_at real,
-        last_maintained_at real,
+        last_write_at timestamp,
+        last_maintained_at timestamp,
         vector_index_rows integer not null default 0
     );
 
@@ -65,8 +68,8 @@ MIGRATIONS: list[str] = [
         preview text,
         parser text not null default 'anydoc',
         skip_ocr_pages integer not null default 1,
-        created_at real not null default 0,
-        updated_at real not null default 0,
+        created_at timestamp not null default 0,
+        updated_at timestamp not null default 0,
         description text not null default ''
     );
     create index if not exists documents_status  on documents (status, name);
@@ -78,8 +81,8 @@ MIGRATIONS: list[str] = [
         document text not null references documents (name) on delete cascade,
         status text not null default 'pending',
         error text,
-        added_at real not null default 0,
-        updated_at real not null default 0,
+        added_at timestamp not null default 0,
+        updated_at timestamp not null default 0,
         primary key (collection, document)
     );
     create index if not exists collection_documents_document
@@ -101,7 +104,7 @@ MIGRATIONS: list[str] = [
         skip_ocr_pages integer not null,
         rows integer not null default 0,
         bytes integer not null default 0,
-        created_at real not null default 0
+        created_at timestamp not null default 0
     );
     create index if not exists embeddings_document on embeddings (document);
 
@@ -119,10 +122,10 @@ MIGRATIONS: list[str] = [
         staging_id text primary key,
         filename text not null,
         size integer not null,
-        created_at real not null default 0
+        created_at timestamp not null default 0
     );
-    """,
-]
+    """
+
 
 INCOMPATIBLE_HOME_MESSAGE = (
     "This version of haskie changed how documents are stored; the existing home is incompatible. "
@@ -132,33 +135,25 @@ INCOMPATIBLE_HOME_MESSAGE = (
 BUSY_TIMEOUT_SECONDS = 30.0  # how long a writer waits for another writer before it gives up
 
 _migrated: set[Path] = set()
-_migrate_lock = threading.Lock()  # both event loops migrate through worker threads of their own
-
-
-def latest_version() -> int:
-    """The version the scripts in MIGRATIONS add up to."""
-    return SCHEMA_VERSION + len(MIGRATIONS) - 1
+_migrate_lock = threading.Lock()  # both event loops get here through worker threads of their own
 
 
 def migrate(conn: sqlite3.Connection) -> int:
-    """Apply pending migrations in order; returns the resulting schema version.
+    """Create the schema on a fresh file; returns the version the file is at.
 
-    A home stamped below `SCHEMA_VERSION` was written by a build whose storage shape no longer
-    exists. There is no path from it, so it is refused with `user_version` untouched and the user
-    is told to destroy it, rather than losing its rows to a silent drop."""
-    from haskie.errors import HaskieError  # errors imports home, which imports nothing of ours
-
+    A home stamped with anything else was written by a build whose storage shape this one cannot
+    read, and there is no path from it. It is refused with `user_version` untouched and the user is
+    told to destroy it, rather than losing its rows to a silent drop."""
     (version,) = conn.execute("pragma user_version").fetchone()
-    if 0 < version < SCHEMA_VERSION:
+    if version == SCHEMA_VERSION:
+        return SCHEMA_VERSION
+    if version != 0:
         raise HaskieError(INCOMPATIBLE_HOME_MESSAGE)
-    if version == 0:
-        conn.execute("pragma journal_mode = wal")  # persistent; needs an exclusive lock, so once
-    applied = max(version - SCHEMA_VERSION + 1, 0)  # a fresh file has applied none
-    for number, script in enumerate(MIGRATIONS[applied:], start=SCHEMA_VERSION + applied):
-        conn.executescript(script)
-        conn.execute(f"pragma user_version = {number}")
-        conn.commit()
-    return latest_version()
+    conn.execute("pragma journal_mode = wal")  # persistent; needs an exclusive lock, so once
+    conn.executescript(SCHEMA)
+    conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
+    conn.commit()
+    return SCHEMA_VERSION
 
 
 def _migrate_sync() -> None:
@@ -177,9 +172,9 @@ def _migrate_sync() -> None:
 
 
 def invalidate_migrations() -> None:
-    """Forget which database files this process has migrated.
+    """Forget which database files this process has opened.
 
-    The set is a per-process cache of "already at the latest schema". Deleting the file behind it
+    The set is a per-process cache of "already at `SCHEMA_VERSION`". Deleting the file behind it
     (`haskie destroy`) leaves that claim false, so the next `migrate_once` has to run again.
     """
     with _migrate_lock:
@@ -187,7 +182,7 @@ def invalidate_migrations() -> None:
 
 
 async def migrate_once() -> None:
-    """Make the home and apply the pending migrations, once per process and database file.
+    """Make the home and create the schema, once per process and database file.
 
     The one-time WAL switch needs an exclusive lock, so this runs before anything else (DBOS, or
     the first `connect()`) holds the file open."""
@@ -203,7 +198,7 @@ async def connect() -> AsyncIterator[aiosqlite.Connection]:
 
     A connection is never shared between the two event loops, because it never outlives the unit
     of work that opened it. `timeout` makes concurrent writers (DBOS, requests) wait instead of
-    raising "database is locked"; WAL (set at migration time) lets readers proceed during a write.
+    raising "database is locked"; WAL (set when the schema is created) lets readers proceed.
 
     The default row factory is left alone, so every fetched row is a plain tuple; `aiosqlite`
     types it as `sqlite3.Row` anyway, which is why the reads elsewhere say `Any`.

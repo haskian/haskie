@@ -12,6 +12,7 @@ collection may override it (`CollectionSettings`), and the embedding cache is ke
 """
 
 import os
+import threading
 from typing import Annotated, Any, Literal
 
 import msgspec
@@ -535,15 +536,17 @@ class _Loaded(msgspec.Struct, frozen=True):
     not. `settings` is None before the first run has stored one, and when the stored row is
     unreadable.
 
-    Immutable and swapped whole, so the pair always moves together without a lock: both event
-    loops of this process (Litestar's and DBOS's) load settings, and rebinding a module attribute
-    is atomic."""
+    Immutable and swapped whole, so a reader always sees the pair together: it is rebound, never
+    mutated."""
 
     settings: UserSettings | None
     problem: str | None = None
 
 
 _state: _Loaded | None = None  # None until the first read; only a decoded row ends the reading
+# Both event loops of this process (Litestar's and DBOS's) load and store settings, so the guard
+# is a threading one. Held for the re-check plus the rebind, and never across an `await`.
+_cache_lock = threading.Lock()
 
 
 def settings_problem() -> str | None:
@@ -554,7 +557,8 @@ def settings_problem() -> str | None:
 def _store(settings: UserSettings) -> None:
     """Cache a struct this process just wrote: it decodes, so there is no problem to report."""
     global _state
-    _state = _Loaded(settings)
+    with _cache_lock:
+        _state = _Loaded(settings)
 
 
 # Field names stored by earlier builds. msgspec ignores a key it does not know, so without
@@ -608,10 +612,11 @@ async def load_user_settings_or_none() -> UserSettings | None:
         except (msgspec.ValidationError, msgspec.DecodeError) as exc:
             _log.error("settings_unreadable", error=str(exc))
             loaded = _Loaded(None, f"stored settings unreadable, using defaults: {exc}")
-    found = _state
-    if found is not None and found.settings is not None:
-        return found.settings  # a save committed while we read; its row is the newer one
-    _state = loaded
+    with _cache_lock:  # re-check and rebind together, so a save mid-read is not overwritten
+        found = _state
+        if found is not None and found.settings is not None:
+            return found.settings  # a save committed while we read; its row is the newer one
+        _state = loaded
     return UserSettings() if loaded.problem else loaded.settings
 
 

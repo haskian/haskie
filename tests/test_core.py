@@ -890,6 +890,59 @@ def _refuse_to_build(*args, **kwargs):
     raise PermanentError("no preview today")
 
 
+@pytest.mark.anyio
+async def test_a_failed_preview_build_is_never_retried_side_by_side() -> None:
+    """A build that raises stores nothing, so every reader behind it tries again. The lock has to
+    outlive the failure while one is queued: dropped there, that reader would hold a lock nobody
+    else can find and the next arrival would build the same document at the same time."""
+    doc = await import_row("g.md")
+    entered = threading.Semaphore(0)  # one release per build entered
+    let_first_fail, let_rest_fail = threading.Event(), threading.Event()
+    counted = threading.Lock()
+    live, peak, builds, failures = 0, 0, 0, 0
+
+    def failing(*args, **kwargs):
+        nonlocal live, peak, builds
+        with counted:
+            live += 1
+            peak = max(peak, live)
+            builds += 1
+            gate = let_first_fail if builds == 1 else let_rest_fail
+        entered.release()
+        try:
+            assert gate.wait(timeout=30)
+            raise PermanentError("no preview today")
+        finally:
+            with counted:
+                live -= 1
+
+    async def reader() -> None:
+        nonlocal failures
+        with pytest.raises(PermanentError, match="no preview today"):
+            await document.ensure_preview(doc.name)
+        failures += 1
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(convert, "build_preview", failing)
+        async with anyio.create_task_group() as readers:
+            readers.start_soon(reader)  # A: the build that will fail
+            await anyio.to_thread.run_sync(entered.acquire)
+            readers.start_soon(reader)  # B: queued on A's lock
+            lock = document._preview_locks[doc.name]
+            while lock.statistics().tasks_waiting == 0:
+                await anyio.sleep(0.01)
+            let_first_fail.set()  # A raises; B rebuilds under the same lock
+            await anyio.to_thread.run_sync(entered.acquire)
+            readers.start_soon(reader)  # C: arrives after the failure
+            while lock.statistics().tasks_waiting == 0 and builds < 3:
+                await anyio.sleep(0.01)  # C is queued behind B, or building beside it
+            let_rest_fail.set()
+
+    assert peak == 1, "the queued reader and the newcomer never build side by side"
+    assert (builds, failures) == (3, 3), "each reader tried once and was told why it failed"
+    assert document._preview_locks == {}, "the last one out drops the lock"
+
+
 @pytest.mark.parametrize(("name", "workers"), [("one at a time", 1), ("two at a time", 2)])
 @pytest.mark.anyio
 async def test_ensure_preview_bounds_concurrent_builds(
@@ -2584,40 +2637,51 @@ def test_text_split_collections(name: str, collections: str | None, expected) ->
 # --- storage -----------------------------------------------------------------------
 
 
-def test_migrations_apply_once_and_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    path = tmp_path / "m.db"
-    conn = sqlite3.connect(str(path))
-    assert db.migrate(conn) == db.SCHEMA_VERSION
-    assert conn.execute("pragma user_version").fetchone() == (db.SCHEMA_VERSION,)
-    assert db.migrate(conn) == db.SCHEMA_VERSION, "re-run is a no-op"
-
-    # a DB behind by one version only gets the tail applied
-    monkeypatch.setattr(db, "MIGRATIONS", [*db.MIGRATIONS, "create table extra (x);"])
-    assert db.migrate(conn) == db.SCHEMA_VERSION + 1
-    assert conn.execute("pragma user_version").fetchone() == (db.SCHEMA_VERSION + 1,)
-    assert conn.execute("select count(*) from extra").fetchone() == (0,)
-    conn.close()
+def _tables(conn: sqlite3.Connection) -> set[str]:
+    return {name for (name,) in conn.execute("select name from sqlite_master where type='table'")}
 
 
-def test_a_home_from_before_the_current_schema_is_refused(tmp_path: Path) -> None:
-    """The storage shape changed and nothing is reshaped in place, so an older home is refused
-    with its rows untouched: the user destroys it rather than losing them to a silent drop."""
-    path = tmp_path / "old.db"
-    conn = sqlite3.connect(str(path))
-    conn.executescript("create table libraries (name text primary key);")
-    conn.execute("insert into libraries (name) values ('notes')")
-    conn.execute(f"pragma user_version = {db.SCHEMA_VERSION - 1}")
+@pytest.mark.parametrize(
+    ("name", "stamped", "outcome"),
+    [
+        ("a fresh file gets the schema", 0, "created"),
+        ("a home this build wrote is opened as it is", db.SCHEMA_VERSION, "kept"),
+        ("a home from an older build is refused", db.SCHEMA_VERSION - 1, "refused"),
+        ("a home from a newer build is refused too", db.SCHEMA_VERSION + 1, "refused"),
+    ],
+)
+def test_migrate_creates_the_schema_once_and_refuses_every_other_home(
+    tmp_path: Path, name: str, stamped: int, outcome: str
+) -> None:
+    """One schema snapshot and no upgrade path, so a home is created, opened, or refused whole.
+
+    A refused one keeps its rows: the user destroys it rather than losing them to a silent drop.
+    """
+    conn = sqlite3.connect(str(tmp_path / "m.db"))
+    if outcome == "kept":
+        db.migrate(conn)
+        conn.executescript("drop table sessions;")  # only a second run of the script rebuilds it
+    elif stamped:
+        conn.executescript("create table libraries (name text primary key);")
+        conn.execute("insert into libraries (name) values ('notes')")
+        conn.execute(f"pragma user_version = {stamped}")
     conn.commit()
 
-    with pytest.raises(HaskieError) as raised:
-        db.migrate(conn)
-
-    assert str(raised.value) == db.INCOMPATIBLE_HOME_MESSAGE
-    assert "haskie destroy" in db.INCOMPATIBLE_HOME_MESSAGE, "the message names the way out"
-    assert conn.execute("pragma user_version").fetchone() == (db.SCHEMA_VERSION - 1,), "untouched"
-    tables = {name for (name,) in conn.execute("select name from sqlite_master where type='table'")}
-    assert tables == {"libraries"}, "nothing created and nothing dropped"
-    assert conn.execute("select count(*) from libraries").fetchone() == (1,), "the rows are there"
+    if outcome == "refused":
+        with pytest.raises(HaskieError) as raised:
+            db.migrate(conn)
+        assert str(raised.value) == db.INCOMPATIBLE_HOME_MESSAGE, name
+        assert "haskie destroy" in db.INCOMPATIBLE_HOME_MESSAGE, "the message names the way out"
+        assert conn.execute("pragma user_version").fetchone() == (stamped,), f"{name}: untouched"
+        assert _tables(conn) == {"libraries"}, f"{name}: nothing created and nothing dropped"
+        assert conn.execute("select count(*) from libraries").fetchone() == (1,), f"{name}: rows"
+    else:
+        assert db.migrate(conn) == db.SCHEMA_VERSION, name
+        assert conn.execute("pragma user_version").fetchone() == (db.SCHEMA_VERSION,), name
+        assert conn.execute("pragma journal_mode").fetchone() == ("wal",), f"{name}: WAL, for good"
+        assert ("sessions" in _tables(conn)) is (outcome == "created"), (
+            f"{name}: the script runs on a fresh file and never again"
+        )
     conn.close()
 
 
