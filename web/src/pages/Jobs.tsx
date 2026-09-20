@@ -1,48 +1,33 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { ACTIVE_JOB_STATUSES as ACTIVE, api, type JobKind, type JobKindSummary, type JobRow, type Task } from '../api'
+import { useCallback, useEffect, useState } from 'react'
+import { api, type JobKind, type JobKindSummary, type JobRow, type Task } from '../api'
 import { JobLine } from '../components/JobLine'
 import { Pager } from '../components/Pager'
+import { useOptions } from '../hooks/useOptions'
 import { usePaged } from '../hooks/usePaged'
 import { usePoll } from '../hooks/usePoll'
 
 const PAGE_SIZE = 20 // one section per kind: each shows a first page and loads more on demand
 
-// The kinds whose jobs belong to one collection; the others ignore the filter (a model download
-// and an archive round are no collection's work), so their section keeps its rows while it is set.
+// The kinds whose jobs belong to one collection; the others ignore the filter (a model download is
+// no collection's work), so their section keeps its rows while it is set.
 const BY_COLLECTION: ReadonlySet<JobKind> = new Set<JobKind>(['document', 'collection', 'maintenance'])
 
 // One section per kind of background work, in the order the backend lists them. Each section
-// pages on its own, and one poll re-reads every one of them while anything is running: a document
-// pipeline, a whole-collection job, a model download, a maintenance run or an archive round.
+// pages and polls on its own; this view only keeps the counts, which is what tells it that work
+// no section has on screen yet has started.
 export function Jobs() {
   const [kinds, setKinds] = useState<JobKindSummary[]>([])
   const [collections, setCollections] = useState<string[]>([])
   const [collection, setCollection] = useState('')
-  const [onScreen, setOnScreen] = useState<Record<string, number>>({})
-  const refreshers = useRef(new Map<JobKind, () => Promise<void>>())
 
-  // a section reports its refresh and how much of it is running; the guard keeps an unchanged
-  // count from starting another render
-  const register = useCallback((kind: JobKind, refresh: () => Promise<void>, running: number) => {
-    refreshers.current.set(kind, refresh)
-    setOnScreen((counts) => (counts[kind] === running ? counts : { ...counts, [kind]: running }))
-  }, [])
-
-  const refreshAll = useCallback(async () => {
-    await Promise.all([...refreshers.current.values()].map((refresh) => refresh()))
-    setKinds(await api.jobKinds())
-  }, [])
-
-  const reloadKinds = useCallback(() => api.jobKinds().then(setKinds), [])
+  const reloadKinds = useCallback(() => api.jobKinds().then(setKinds).then(() => undefined), [])
   useEffect(() => {
     void reloadKinds()
     api.collectionNames().then(setCollections)
   }, [reloadKinds])
 
-  // the backend's count sees jobs no section has on screen yet; the rows on screen keep the poll
-  // going while one of them finishes
-  const active = kinds.reduce((n, k) => n + k.active, 0) + Object.values(onScreen).reduce((n, c) => n + c, 0)
-  usePoll(active > 0, refreshAll)
+  const active = kinds.reduce((n, k) => n + k.active, 0)
+  usePoll(active > 0, reloadKinds)
 
   return (
     <div>
@@ -59,31 +44,30 @@ export function Jobs() {
           key={summary.kind}
           summary={summary}
           collection={BY_COLLECTION.has(summary.kind) ? collection : ''}
-          onState={register}
         />
       ))}
     </div>
   )
 }
 
-
-function JobSection({ summary, collection, onState }: { summary: JobKindSummary; collection: string; onState: (kind: JobKind, refresh: () => Promise<void>, running: number) => void }) {
+function JobSection({ summary, collection }: { summary: JobKindSummary; collection: string }) {
   const { kind, label } = summary
+  const { active_job_statuses } = useOptions()
   const [open, setOpen] = useState<string | null>(null)
   const [tasks, setTasks] = useState<Task[]>([])
 
   const jobs = usePaged<JobRow>((q) => api.jobsByKind(kind, { ...q, collection: collection || undefined }), { pageSize: PAGE_SIZE, deps: [kind, collection] })
   const reload = jobs.refresh
-  const running = jobs.items.filter((j) => ACTIVE.has(j.status)).length
+  const running = jobs.items.filter((j) => active_job_statuses.includes(j.status)).length
 
   // one refresh for both: the rows already on screen, and the batches of the open job
   const refresh = useCallback(
     () => Promise.all([reload(), open ? api.jobTasks(open).then(setTasks) : Promise.resolve()]).then(() => undefined),
     [reload, open],
   )
-  useEffect(() => {
-    onState(kind, refresh, running)
-  }, [kind, onState, refresh, running])
+  // the backend's count sees jobs this section has not listed yet; the rows on screen keep the
+  // poll going while one of them finishes
+  usePoll(running > 0 || summary.active > 0, refresh)
 
   // the batches of one job are loaded by the click that opened it, not by an effect
   const openJob = useCallback((id: string | null) => {

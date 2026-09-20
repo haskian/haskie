@@ -1,4 +1,4 @@
-"""Markdown to HTML for the viewer, one page at a time.
+"""Markdown to HTML for the viewer, one page at a time, and the table of contents beside it.
 
 The browser inserts what this returns, so the one thing that matters here is that it cannot carry
 script. `pyromark.html` passes raw HTML straight through — a `<script>` in an uploaded markdown
@@ -9,19 +9,24 @@ That also matches what the viewer did when React rendered the markdown: `react-m
 raw HTML unless asked for it, so nothing that used to appear stops appearing.
 """
 
+import itertools
 import re
+from typing import Literal
 
 import msgspec
 import pyromark
 
-from haskie import toc
+from haskie.convert import PAGE_MARKER
 
-# Written by `convert.pdf_pages_markdown` ahead of every page, and the only reason this module
-# knows about pages at all.
-PAGE_MARKER = re.compile(r"<!-- page (\d+)[^>]*-->")
 HEADING_OPEN = re.compile(r"<h([1-6])>")
 
 OPTIONS = pyromark.Options.ENABLE_TABLES | pyromark.Options.ENABLE_STRIKETHROUGH
+
+
+class Heading(msgspec.Struct):
+    level: int
+    text: str
+    offset: int  # byte offset of the heading in the markdown
 
 
 class Page(msgspec.Struct):
@@ -29,6 +34,24 @@ class Page(msgspec.Struct):
 
     number: int | None  # the PDF page; None for a document that has no pages
     html: str
+    kind: Literal["page"] = "page"  # the frame tag of the markdown stream (see `api.documents`)
+
+
+def headings(markdown: str) -> list[Heading]:
+    """The table of contents, in document order."""
+    result: list[Heading] = []
+    current: Heading | None = None
+    for event, span in pyromark.events_with_range(markdown):
+        match event:
+            case {"Start": {"Heading": {"level": level}}}:
+                current = Heading(level=int(str(level)[1]), text="", offset=span["start"])
+            case {"Text": str(text)} | {"Code": str(text)} if current is not None:
+                current.text += text
+            case {"End": {"Heading": _}} if current is not None:
+                current.text = current.text.strip()
+                result.append(current)
+                current = None
+    return result
 
 
 def _without_raw_html(markdown: str) -> str:
@@ -49,16 +72,17 @@ def _without_raw_html(markdown: str) -> str:
     return out
 
 
-def to_html(markdown: str, first_heading: int = 0) -> str:
+def to_html(markdown: str, first_heading: int = 0) -> tuple[str, int]:
     """Render one chunk of markdown, giving each heading the id its table of contents links to.
+    Returns the HTML and how many headings it numbered.
 
     `first_heading` is how many headings the document has already rendered, because a page is
     rendered on its own but its anchors have to be unique across the whole document. Raw HTML is
     gone by the time this matches `<h1>`..`<h6>`, so the nth opening tag really is the nth heading.
     """
     html = pyromark.html(_without_raw_html(markdown), options=OPTIONS)
-    counter = iter(range(first_heading, first_heading + 10_000))
-    return HEADING_OPEN.sub(lambda m: f'<h{m.group(1)} id="h-{next(counter)}">', html)
+    counter = itertools.count(first_heading)
+    return HEADING_OPEN.subn(lambda m: f'<h{m.group(1)} id="h-{next(counter)}">', html)
 
 
 def split_pages(markdown: str) -> list[tuple[int | None, str]]:
@@ -77,11 +101,17 @@ def split_pages(markdown: str) -> list[tuple[int | None, str]]:
     ]
 
 
-def pages(markdown: str) -> list[Page]:
-    """Every page of a document, rendered, with anchors numbered across the whole document."""
+def pages(markdown: str) -> tuple[list[Page], list[Heading]]:
+    """Every page of a document rendered with anchors numbered across the whole document, plus
+    that document's table of contents.
+
+    Both in one call because both are CPU work over the same text, and the caller pays for one
+    trip through the CPU budget rather than parsing the whole document again on its event loop.
+    """
     rendered: list[Page] = []
     seen = 0
     for number, body in split_pages(markdown):
-        rendered.append(Page(number=number, html=to_html(body, first_heading=seen)))
-        seen += len(toc.headings(body))
-    return rendered
+        html, numbered = to_html(body, first_heading=seen)
+        rendered.append(Page(number=number, html=html))
+        seen += numbered
+    return rendered, headings(markdown)

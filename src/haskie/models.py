@@ -1,6 +1,6 @@
 """Model lifecycle: one DBOS workflow per model the settings require.
 
-Downloaded and usable are two different things, and this module keeps them apart (A8).
+Downloaded and usable are two different things, and this module keeps them apart.
 
 *Downloaded* is durable: `ensure_model` has one fixed id per model (`dl:{kind}:{name}`), so it is
 idempotent, retried on failure, queryable, and it outlives the process — the files stay in the
@@ -21,17 +21,14 @@ import for the same reason (see `_collection_rerankers`).
 """
 
 import asyncio
-import os
 import threading
-from collections.abc import Iterable
 from typing import Literal
 
 import msgspec
 from dbos import DBOS, SetWorkflowID, WorkflowStatus
-from dbos._error import DBOSMaxStepRetriesExceeded
 
 from haskie import cpu, embed
-from haskie.dbos_names import ACTIVE_STATUS
+from haskie.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, root_cause
 from haskie.errors import HaskieError, NotReady
 from haskie.logs import get_logger
 from haskie.settings import UserSettings, load_user_settings
@@ -63,21 +60,9 @@ class ModelStatus(msgspec.Struct):
     error: str | None = None
 
 
-def root_cause(exc: BaseException) -> str:
-    """Flat "Type: message" of the failure that actually matters: DBOS wraps exhausted step
-    retries in DBOSMaxStepRetriesExceeded, whose own message names only the step.
-
-    Lives here rather than in `workflows` because the dependency runs the other way (D1)."""
-    if isinstance(exc, DBOSMaxStepRetriesExceeded) and exc.errors:
-        exc = exc.errors[-1]
-    return f"{type(exc).__name__}: {exc}"
-
-
-# A download is retried with longer waits than a local step; the suite shortens them (see
-# `workflows.RETRY_INTERVAL_SECONDS`, which does the same for the pipeline).
-DOWNLOAD_RETRY_INTERVAL_SECONDS = float(
-    os.environ.get("HASKIE_DOWNLOAD_RETRY_INTERVAL_SECONDS", "5.0")
-)
+# A download is retried with longer waits than a local step (see
+# `workflows.RETRY_INTERVAL_SECONDS`, which the same note about import time applies to).
+DOWNLOAD_RETRY_INTERVAL_SECONDS = 5.0
 
 
 async def warm_model(kind: ModelKind, name: str) -> None:
@@ -86,9 +71,11 @@ async def warm_model(kind: ModelKind, name: str) -> None:
 
     The load itself is CPU (and, on a cold cache, a download inside fastembed), so it runs in a
     worker thread under one slot of the CPU budget rather than on the caller's loop."""
+    if kind == "reranker":  # always on CPU, so it needs no accelerator (see `embed`)
+        await cpu.on_cpu(embed.warm_reranker, name)
+        return
     accelerator = (await load_user_settings()).pipeline.accelerator
-    warm = embed.warm if kind == "embedding" else embed.warm_reranker
-    await cpu.on_cpu("load_model", warm, name, accelerator)
+    await cpu.on_cpu(embed.warm, name, accelerator)
 
 
 @DBOS.step(
@@ -102,7 +89,7 @@ async def load_model(kind: ModelKind, name: str) -> None:
     await warm_model(kind, name)
 
 
-@DBOS.workflow()
+@DBOS.workflow(name=DOWNLOAD_WORKFLOW)
 async def ensure_model(kind: ModelKind, name: str) -> str:
     try:
         await load_model(kind, name)
@@ -113,29 +100,23 @@ async def ensure_model(kind: ModelKind, name: str) -> str:
     return "ready"
 
 
-async def _required(
-    settings: UserSettings, collection_rerankers: Iterable[str] | None = None
-) -> list[tuple[ModelKind, str]]:
+async def _required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
     """Every model this installation needs, in a stable order and without duplicates.
 
     A collection may override the reranker model, and a search of that collection then loads it,
-    so the overrides count as required as much as the user-level pair does. They are read here
-    unless the caller already has them: `ensure_models` reads them once for both the enqueue and
-    the statuses it returns."""
-    if collection_rerankers is None:
-        collection_rerankers = await _collection_rerankers()
+    so the overrides count as required as much as the user-level pair does."""
     wanted: list[tuple[ModelKind, str]] = []
     if settings.embedding_model:
         wanted.append(("embedding", settings.embedding_model.name))
     if settings.search.reranker == "cross-encoder":
         wanted.append(("reranker", settings.search.reranker_model))
-    wanted.extend(("reranker", name) for name in collection_rerankers)
+    wanted.extend(("reranker", name) for name in await _collection_rerankers())
     return list(dict.fromkeys(wanted))
 
 
 async def _collection_rerankers() -> list[str]:
     """Reranker models the collections override. Imported here rather than at module level: the
-    dependency runs `collection` -> `index` -> `models` (D1)."""
+    dependency runs `collection` -> `index` -> `models`."""
     from haskie.collection import Collection
 
     return await Collection.reranker_overrides()
@@ -144,6 +125,18 @@ async def _collection_rerankers() -> list[str]:
 def _model_id(kind: ModelKind, name: str) -> str:
     """One durable record per model, whatever process asks for it (see the module docstring)."""
     return f"dl:{kind}:{name}"
+
+
+def model_names(workflow_id: str) -> tuple[str, str]:
+    """The inverse of `_model_id`: `dl:{kind}:{model}` -> (kind, model); ("?", workflow_id) for
+    any other id. Here so the grammar is written and read in one place.
+
+    The model name is the rest of the id, colons and all, so a name that carries one still reads
+    back whole."""
+    parts = workflow_id.split(":", 2)
+    if len(parts) != 3 or parts[0] != "dl":
+        return "?", workflow_id
+    return parts[1], parts[2]
 
 
 async def _download_records(
@@ -164,8 +157,7 @@ async def ensure_models(settings: UserSettings) -> list[ModelStatus]:
 
     One query for every record, not one per model: the same read decides what to enqueue and
     answers the statuses this returns."""
-    collection_rerankers = await _collection_rerankers()
-    wanted = await _required(settings, collection_rerankers)
+    wanted = await _required(settings)
     records = await _download_records(wanted)
     for kind, name in wanted:
         workflow_id = _model_id(kind, name)
@@ -185,7 +177,7 @@ async def ensure_models(settings: UserSettings) -> list[ModelStatus]:
         with SetWorkflowID(workflow_id):
             handle = await DBOS.enqueue_workflow_async(DOWNLOADS_QUEUE, ensure_model, kind, name)
         records[workflow_id] = await handle.get_status()  # the record this call just wrote
-    return await model_statuses(settings, collection_rerankers, records)
+    return [_model_status(k, n, records.get(_model_id(k, n))) for k, n in wanted]
 
 
 def _warm_in_background(kind: ModelKind, name: str) -> None:
@@ -251,17 +243,12 @@ def _model_status(kind: ModelKind, name: str, workflow) -> ModelStatus:
     return ModelStatus(kind=kind, name=name, state=state, error=error)
 
 
-async def model_statuses(
-    settings: UserSettings | None = None,
-    collection_rerankers: Iterable[str] | None = None,
-    records: dict[str, WorkflowStatus] | None = None,
-) -> list[ModelStatus]:
-    """One status per required model. `records` is the download record of each of them, for a
-    caller that has just read them (see `ensure_models`); they are read here otherwise."""
-    settings = settings or await load_user_settings()
-    wanted = await _required(settings, collection_rerankers)
-    by_id = records if records is not None else await _download_records(wanted)
-    return [_model_status(k, n, by_id.get(_model_id(k, n))) for k, n in wanted]
+async def model_statuses() -> list[ModelStatus]:
+    """One status per required model. `ensure_models` builds the same list off the records it
+    just read, rather than reading them again."""
+    wanted = await _required(await load_user_settings())
+    records = await _download_records(wanted)
+    return [_model_status(k, n, records.get(_model_id(k, n))) for k, n in wanted]
 
 
 async def require_ready(kind: ModelKind, name: str) -> None:

@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react'
-import { ACTIVE_JOB_STATUSES, api, type BulkJob, type BulkStarted } from '../api'
+import { api, type BulkJob, type BulkStarted } from '../api'
+import { useOptions } from './useOptions'
 import { usePoll } from './usePoll'
 
 export interface BulkJobFollower {
@@ -17,17 +18,18 @@ export interface BulkJobFollower {
 // keeps one interval for the life of the job. Give `onDone` and `onError` a stable identity
 // (`useCallback`), or that interval is torn down and rebuilt on every tick.
 export function useBulkJob(onDone: (job: BulkJob) => void, onError: (message: string) => void): BulkJobFollower {
+  const { active_job_statuses } = useOptions()
   const [job, setJob] = useState<BulkJob | null>(null)
-  const running = job !== null && ACTIVE_JOB_STATUSES.has(job.status)
+  const running = job !== null && active_job_statuses.includes(job.status)
   const id = running ? job.id : null
 
   // one answer from the job, whoever asked for it: keep it on the page, and report the last one
   const settle = useCallback(
     (next: BulkJob) => {
       setJob(next)
-      if (!ACTIVE_JOB_STATUSES.has(next.status)) onDone(next)
+      if (!active_job_statuses.includes(next.status)) onDone(next)
     },
-    [onDone],
+    [active_job_statuses, onDone],
   )
 
   const follow = useCallback(() => {

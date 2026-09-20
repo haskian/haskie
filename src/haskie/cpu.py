@@ -9,13 +9,9 @@ The per-queue caps in `workflows.stage_caps` shape the *mix* of work; this budge
 which no queue can enforce, because no queue sees the others.
 """
 
-import asyncio
 import functools
 import multiprocessing
-import os
 import threading
-import time
-import weakref
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
@@ -24,113 +20,100 @@ from typing import Any
 import anyio
 import anyio.to_thread
 
-from haskie.logs import get_logger
 from haskie.settings import PipelineSettings
 
-_log = get_logger(__name__)
 
-CPU_WAIT_LOG_SECONDS = 5.0  # a wait longer than this is worth a line at debug level
+class ResizableSemaphore[S]:
+    """A semaphore the settings may resize while work is in flight.
+
+    A caller acquires `current` and releases that same object, so a resize under it neither
+    over-admits nor raises. Generic over the semaphore itself: the CPU budget needs a thread-safe
+    one (two event loops take from it), a preview slot an anyio one.
+    """
+
+    def __init__(self, make: Callable[[int], S], size: int) -> None:
+        self._make = make
+        self.size = size
+        self.current: S = make(size)
+
+    def resize(self, size: int) -> None:
+        if size != self.size:
+            self.size, self.current = size, self._make(size)
+
 
 # Sized from `cpu_budget` by `workflows.apply_settings`; the default is what a process that never
 # applied settings runs on.
 # ponytail: a threading primitive on purpose. Two event loops take from this budget - Litestar's
 # (previews, requests) and DBOS's background loop (tasks, maintenance) - and an asyncio or anyio
 # primitive belongs to exactly one of them. Only a thread-safe one can be the shared ceiling.
-_cpu_budget = PipelineSettings().cpu_budget
-_cpu_slots = threading.BoundedSemaphore(_cpu_budget)
+_cpu_slots = ResizableSemaphore(threading.BoundedSemaphore, PipelineSettings().cpu_budget)
 
-# One thread limiter per loop, for the same reason in reverse: an `anyio.CapacityLimiter` is bound
-# to the loop that first used it, so the two loops cannot share one. It is deliberately far wider
-# than the budget - anyio's default of 40 threads per loop would queue previews and searches behind
-# pipeline work before the budget is even reached, and `_cpu_slots` is meant to be the only limit.
-_limiters: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, anyio.CapacityLimiter] = (
-    weakref.WeakKeyDictionary()
-)
-_limiters_lock = threading.Lock()
+# anyio's default is 40 worker threads per event loop, which would queue previews and searches
+# behind pipeline work before the budget is even reached; `_cpu_slots` is meant to be the only
+# limit. anyio keeps one default limiter per loop, so widening it widens the loop we run on.
+THREAD_LIMIT = 256
 
 
 def configure_cpu_budget(budget: int) -> None:
-    """Resize the pool of CPU slots (from `apply_settings`). A task in flight releases the
-    semaphore it acquired, so it is unaffected by a resize under it."""
-    global _cpu_budget, _cpu_slots
-    if budget != _cpu_budget:
-        _cpu_budget, _cpu_slots = budget, threading.BoundedSemaphore(budget)
+    """Resize the pool of CPU slots (from `apply_settings`)."""
+    _cpu_slots.resize(budget)
 
 
 @contextmanager
-def cpu_slot(work: str) -> Iterator[None]:
+def cpu_slot() -> Iterator[None]:
     """Hold one slot of the CPU budget for the length of one piece of CPU work.
 
     Sync, and taken inside the worker thread: the calling event loop never waits on it. The wait
     is unbounded on purpose: the caller's turn comes as soon as another task finishes, and giving
     up would fail a document for finding the machine busy.
     """
-    slots = _cpu_slots  # the object to release, even if the pool is resized meanwhile
-    started = time.perf_counter()
+    slots = _cpu_slots.current  # the object to release, even if the pool is resized meanwhile
     slots.acquire()
-    waited = time.perf_counter() - started
-    if waited > CPU_WAIT_LOG_SECONDS:
-        _log.debug("cpu_budget_wait", work=work, seconds=round(waited, 1))
     try:
         yield
     finally:
         slots.release()
 
 
-def _limiter() -> anyio.CapacityLimiter:
-    """The thread limiter of the running loop, made on first use (see `_limiters`)."""
-    loop = asyncio.get_running_loop()
-    with _limiters_lock:
-        limiter = _limiters.get(loop)
-        if limiter is None:
-            limiter = _limiters[loop] = anyio.CapacityLimiter(max(64, 4 * _cpu_budget))
-        return limiter
-
-
-async def on_cpu[T](work: str, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
-    """Run one piece of CPU work in a worker thread, under one slot of the budget.
-
-    `work` names the work in the wait log; it is the only reason the slot is taken in here rather
-    than by the callers, which would have to repeat the same three lines at every site.
-    """
-    call = functools.partial(fn, *args, **kwargs)
+async def _in_thread[T](call: Callable[[], T]) -> T:
+    """Run `call` in a worker thread of the running loop, holding one slot of the budget."""
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    if limiter.total_tokens < THREAD_LIMIT:
+        limiter.total_tokens = THREAD_LIMIT
 
     def run() -> T:
-        with cpu_slot(work):
+        with cpu_slot():
             return call()
 
-    return await anyio.to_thread.run_sync(run, limiter=_limiter())
+    return await anyio.to_thread.run_sync(run)
+
+
+async def on_cpu[T](fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """Run one piece of CPU work in a worker thread, under one slot of the budget."""
+    return await _in_thread(functools.partial(fn, *args, **kwargs))
 
 
 # --- work that has to leave this interpreter ---------------------------------------
 #
-# A thread is enough for CPU work whose extension releases the GIL. Measured, against a control of
-# two pure-Python threads sharing the GIL at ~52% each:
-#
-#   pure Python (control)                 51.9%
-#   convert.pdf_pages_markdown            32.8%   <- holds the GIL, worse than pure Python
-#   convert.pdf_page_count (pypdf)        91.5%
-#   chunk.split (semantic-text-splitter)  95.2%
-#
-# So only PDF extraction needs a process; everything else stays on a thread, where it costs no
-# pickling and no interpreter. Moving it out measured 71.4% -> 97.4% for an unrelated thread, and
-# the extraction itself got faster (0.80s -> 0.48s for 12 documents) because it finally runs in
-# parallel rather than taking turns on the GIL.
+# A thread is enough for CPU work whose extension releases the GIL. Against a control of two
+# pure-Python threads sharing the GIL at 51.9% each, `convert.pdf_pages_markdown` measured 32.8%:
+# it holds the GIL. Every other extension we call stayed above 90%. So only PDF extraction needs a
+# process; everything else stays on a thread, where it costs no pickling and no interpreter.
 #
 # `0` runs it inline instead, which is what the test suite sets: a pool per xdist worker costs
 # more to start than the tests would save.
-CONVERT_WORKERS = (
-    int(os.environ.get("HASKIE_CONVERT_WORKERS") or PipelineSettings().cpu_budget) or None
-)
+CONVERT_WORKERS: int | None = None  # None sizes the pool from the CPU budget
 
 _pool: ProcessPoolExecutor | None = None
 _pool_lock = threading.Lock()
 
 
 def _convert_pool() -> ProcessPoolExecutor | None:
-    """The extraction pool, built on first use so a process that never converts never forks."""
+    """The extraction pool, built on first use so a process that never converts never forks. It
+    is sized from the CPU budget, so one setting owns how much of the machine haskie takes."""
     global _pool
-    if CONVERT_WORKERS is None:
+    workers = _cpu_slots.size if CONVERT_WORKERS is None else CONVERT_WORKERS
+    if not workers:
         return None
     with _pool_lock:
         if _pool is None:
@@ -140,7 +123,7 @@ def _convert_pool() -> ProcessPoolExecutor | None:
             # process instead, so `__main__` is never re-run and plain `fork` stays unsafe-free.
             context = multiprocessing.get_context("forkserver")
             context.set_forkserver_preload(["haskie.convert"])  # import once, not per child
-            _pool = ProcessPoolExecutor(max_workers=CONVERT_WORKERS, mp_context=context)
+            _pool = ProcessPoolExecutor(max_workers=workers, mp_context=context)
         return _pool
 
 
@@ -153,23 +136,16 @@ def shutdown_pool() -> None:
         pool.shutdown(wait=False, cancel_futures=True)
 
 
-async def off_interpreter[T](work: str, fn: Callable[..., T], /, *args: Any) -> T:
+async def off_interpreter[T](fn: Callable[..., T], /, *args: Any) -> T:
     """Run one piece of CPU work in a separate interpreter, under one slot of the budget.
 
     Same contract as `on_cpu`, and it falls back to `on_cpu` when the pool is off, so callers do
     not branch. `fn` and `args` cross a pickle boundary: module-level function, plain arguments.
-
-    The slot is held for the whole call, not just the local part, so the budget stays the one
-    ceiling across threads *and* pool processes - otherwise each would admit `cpu_budget` work.
+    The slot is held for the whole call, not just the local part, so threads and pool processes
+    draw on one budget. The waiting thread blocks on a pipe, so it holds no GIL meanwhile.
     """
     pool = _convert_pool()
     if pool is None:
-        return await on_cpu(work, fn, *args)
+        return await on_cpu(fn, *args)
     call = functools.partial(fn, *args)
-
-    def run() -> T:
-        with cpu_slot(work):
-            return pool.submit(call).result()
-
-    # the waiting thread is blocked on a pipe, so it holds no GIL while the work runs elsewhere
-    return await anyio.to_thread.run_sync(run, limiter=_limiter())
+    return await _in_thread(lambda: pool.submit(call).result())

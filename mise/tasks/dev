@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-#MISE description="Run API and web dev servers together"
-set -euo pipefail
-trap 'kill 0' EXIT
-mise run api &
-mise run web &
-wait

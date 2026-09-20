@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-#MISE description="Run Python tests in parallel with a coverage report"
-set -euo pipefail
-# Python 3.13 sys.monitoring coverage: near-zero tracing overhead versus the C tracer.
-export COVERAGE_CORE="${COVERAGE_CORE:-sysmon}"
-uv run pytest -q -n auto --cov=haskie --cov-report=term-missing "$@"

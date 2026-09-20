@@ -19,20 +19,19 @@ Layout:
   slices, one `stage_slice` child each, with a durable step per micro-batch, so one large document
   spreads over the slots instead of trickling through a single one. Each stage has a queue of its
   own, capped by its share of `pipeline.cpu_budget`: `task.converting`, `task.embedding`, and
-  `task.indexing` (one writer per collection, so it is partitioned by collection and admits one
-  workflow per partition). A slow stage backs up on its own queue instead of taking every slot.
+  `task.indexing` (partitioned by collection, see `INDEX_QUEUE`). A slow stage backs up on its
+  own queue instead of taking every slot.
 - `remove_from_collection_index` per (collection, document) leaving a collection: on that
   collection's index partition, so rows are never deleted while a step of another document writes
   them. A detach runs one; `delete_document_workflow` runs one per collection the document is in,
   then drops the document's folder and row.
 - `maintain_collection` per collection, debounced, on `job.maintenance`: compaction and index
   (re)build, handed to the collection's index partition. See `maintenance.py`; a burst of
-  documents coalesces into one run. The two schedules (hourly archive, nightly housekeeping) sit
-  there too.
+  documents coalesces into one run. The nightly housekeeping schedule sits there too.
 - `index_collection_workflow` / `delete_collection_workflow` / `delete_document_workflow` on
   `job.collection`: whole-thing work the request only starts. A collection with ten thousand
   documents costs the caller one insert instead of ten thousand, and nothing blocks an HTTP
-  request for minutes (D2).
+  request for minutes.
 - Model downloads live in `models.py` (`job.downloads`), the job/task read model in `jobs.py`, and
   the grouped reads of DBOS's own tables it needs in `sysdb.py`.
 
@@ -63,9 +62,8 @@ name (see `dbos_names`).
 
 import asyncio
 import contextlib
-import os
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from functools import partial
 from typing import Any, Literal, get_args
@@ -84,9 +82,12 @@ from dbos import (
     WorkflowHandleAsync,
 )
 
+# Retention has no public entry point in DBOS 3.0: the collector takes the instance itself.
+from dbos._dbos import _get_dbos_instance
+from dbos._workflow_commands import garbage_collect
+
 from haskie import (
     APP_VERSION,
-    archive,
     audit,
     db,
     document,
@@ -103,14 +104,20 @@ from haskie.cpu import configure_cpu_budget, shutdown_pool
 from haskie.dbos_names import (
     ACTIVE_STATUS,
     COLLECTION_DOCUMENT_WORKFLOW,
+    DAILY_MAINTENANCE_WORKFLOW,
+    DELETE_COLLECTION_WORKFLOW,
+    DELETE_DOCUMENT_WORKFLOW,
     EMBED_WORKFLOW,
     IMPORT_WORKFLOW,
+    INDEX_COLLECTION_WORKFLOW,
+    MAINTAIN_PARTITION_WORKFLOW,
+    MAINTAIN_WORKFLOW,
+    REMOVE_FROM_INDEX_WORKFLOW,
     STAGE_WORKFLOW,
-    TERMINAL_STATUS,
+    root_cause,
 )
 from haskie.document import DocStatus, Document, configure_preview_slots
-from haskie.errors import Conflict, InvalidInput, JobNotFound, NotFound, PermanentError
-from haskie.models import root_cause
+from haskie.errors import Conflict, InvalidInput, NotFound, PermanentError
 from haskie.pipeline import Batch
 from haskie.settings import (
     ChunkSettings,
@@ -128,10 +135,12 @@ INDEXING_QUEUE = "job.indexing"  # one import or collection-index orchestrator p
 EMBEDDING_QUEUE = "job.embedding"  # one `ensure_embedding` per cache id; its own queue, because
 # an orchestrator on `job.indexing` waits on it, and a queue waiting on itself can fill up and stop
 COLLECTION_QUEUE = "job.collection"  # whole-collection index/delete and document delete
-MAINTENANCE_QUEUE = "job.maintenance"  # debounced maintenance and the two schedules
+MAINTENANCE_QUEUE = "job.maintenance"  # debounced maintenance and the nightly schedule
 CONVERT_QUEUE = "task.converting"  # convert slices; cap = the stage's share of the CPU budget
 EMBED_QUEUE = "task.embedding"  # embed slices; cap = the stage's share of the CPU budget
-INDEX_QUEUE = "task.indexing"  # index children, maintenance and removals; 1 per collection
+INDEX_QUEUE = "task.indexing"  # index children, maintenance and removals. LanceDB takes one
+# writer per collection, so this queue is partitioned by collection and admits one workflow per
+# partition (see `index_partition`)
 
 MAINTENANCE_CONCURRENCY = 4  # each waits on a child, so this bounds tasks, not LanceDB writers
 MAINTENANCE_TIMEOUT_SECONDS = 3600  # compaction of a very large collection, not a per-batch budget
@@ -143,11 +152,8 @@ BULK_INDEX_PAGE = 500  # documents enqueued per durable page of a bulk index
 CANCEL_PAGE = 200  # pipelines cancelled per sweep of a bulk delete
 STAGING_TTL_SECONDS = 24 * 3600  # an upload nobody imported within a day is swept
 
-ARCHIVE_SCHEDULE = "archive_jobs"  # cron name; the runs are `sched-archive_jobs-{iso time}`
-ARCHIVE_CRON = "10 * * * *"  # hourly, past the hour: retention is the only clock in this app
-
 MAINTENANCE_SCHEDULE = "daily-maintenance"  # housekeeping that costs nothing to skip for a day
-MAINTENANCE_CRON = "17 3 * * *"  # nightly, off the hour and off the archive round
+MAINTENANCE_CRON = "17 3 * * *"  # nightly, and off the hour: the only clock in this app
 
 IMPORT_PREFIX = "imp"
 EMBED_PREFIX = "emb"
@@ -192,27 +198,8 @@ def job_names(workflow_id: str) -> tuple[JobAction, str | None, str] | None:
 # A `task.*` queue is on the critical path of a document: its interval is added at every stage
 # hand-off, so it stays short. A `job.*` queue carries work a user starts and then watches, where
 # a second before it is picked up is invisible. DBOS's own default is 1 s for both.
-JOB_POLL = float(os.environ.get("HASKIE_JOB_POLL_SECONDS", "1.0"))
-TASK_POLL = float(os.environ.get("HASKIE_TASK_POLL_SECONDS", "0.25"))
-
-CANCEL_WAIT_SECONDS = 30.0  # cancellation is cooperative: the running step decides when to stop
-
-
-async def _wait_until(
-    quiet: Callable[[], Awaitable[bool]], wait_seconds: float, **context: Any
-) -> None:
-    """Poll until `quiet()`, or give up after `wait_seconds` and say so.
-
-    Cancellation only takes effect between steps, and a step that already started still writes its
-    output, so everything that cancels waits rather than assumes.
-    """
-    deadline = time.monotonic() + wait_seconds
-    while not await quiet():
-        if time.monotonic() >= deadline:
-            _log.warning("cancel_wait_timeout", wait_seconds=wait_seconds, **context)
-            return
-        await anyio.sleep(TASK_POLL)
-
+JOB_POLL = 1.0
+TASK_POLL = 0.25
 
 Stage = Literal["convert", "embed", "index"]
 # The order a document moves through them, which is also the order the Jobs view lists its tasks.
@@ -229,21 +216,15 @@ class Context(msgspec.Struct):
 
     `document` is the row at load time: its name, suffix, parser and OCR policy are immutable,
     and they are all a pipeline step reads out of it. `chunking` is the collection's when the
-    workflow serves one, the user default otherwise. `cache_id` and `collection` are filled in
-    by the workflow that reaches the stage needing them (embed, index)."""
+    workflow serves one, the user default otherwise. `pipeline` is carried whole rather than
+    field by field, so a step that needs another knob costs no new field here. `cache_id` and
+    `collection` are filled in by the workflow that reaches the stage needing them (embed,
+    index)."""
 
     document: Document
     chunking: ChunkSettings
     embedding: EmbeddingModel | None
-    batch_pages: int
-    index_group_parts: int
-    task_timeout_seconds: int
-    maintenance_docs: int
-    maintenance_idle_seconds: int
-    # Slices a convert or embed stage may be cut into, each already resolved against that stage's
-    # share of the CPU budget.
-    convert_parallelism: int = 1
-    embed_parallelism: int = 1
+    pipeline: PipelineSettings
     collection: str | None = None  # the index stage's target; None for an import or an embed
     cache_id: str = ""  # the embedding being computed (embed) or read (index)
 
@@ -253,7 +234,7 @@ class BatchResult(msgspec.Struct):
 
     DBOS retries *every* exception raised inside a step with `retries_allowed`, so a deterministic
     failure (unsupported file, OCR policy, corrupt document) is reported as a value and raised by
-    the workflow body instead (A9)."""
+    the workflow body instead."""
 
     value: int | None = None
     permanent_error: str | None = None
@@ -338,7 +319,7 @@ async def start() -> None:
         # uses is cheap, and it is what a progress event costs before a reader sees it. It is
         # also how long `DBOS.destroy` takes to join that thread, which the tests feel most.
         "notification_listener_polling_interval_sec": TASK_POLL,
-        "log_level": os.environ.get(logs.LEVEL_VAR, logs.DEFAULT_LEVEL).upper(),
+        "log_level": logs.level(),
     }
     DBOS(config=config)
     logs.adopt_dbos_logger()  # DBOS installs its own text handler while it initializes
@@ -354,18 +335,17 @@ async def start() -> None:
         _log.error("settings_invalid_at_boot", error=str(exc))
         await apply_settings(UserSettings())
     # after apply_settings: a schedule may only name a queue the system database already carries
-    if await _ensure_schedule(ARCHIVE_SCHEDULE, archive_jobs, ARCHIVE_CRON, MAINTENANCE_QUEUE):
-        _log.info("schedule_registered", schedule=ARCHIVE_SCHEDULE, cron=ARCHIVE_CRON)
-    if await _ensure_schedule(
-        MAINTENANCE_SCHEDULE, daily_maintenance, MAINTENANCE_CRON, MAINTENANCE_QUEUE
-    ):
-        _log.info("schedule_registered", schedule=MAINTENANCE_SCHEDULE, cron=MAINTENANCE_CRON)
-    await _prune_audit_at_boot()
+    await _register_schedule()
+    # also prune once per boot: a desktop app is rarely running at 03:17, so a run that only ever
+    # happened on the schedule would never happen at all
+    await _housekeeping(
+        prune_audit(), "audit_prune_failed", partial(_log.info, "audit_files_pruned")
+    )
 
 
 async def stop() -> None:
     """Litestar calls a shutdown hook with the app when the hook takes any parameter, so this one
-    takes none (A1). In-flight steps get a grace period: a worker thread outliving DBOS blocks
+    takes none. In-flight steps get a grace period: a worker thread outliving DBOS blocks
     interpreter exit."""
     global _adoption
     if _adoption is not None:
@@ -377,33 +357,36 @@ async def stop() -> None:
     shutdown_pool()  # after DBOS, so nothing is still submitting extraction work
 
 
-async def _ensure_schedule(name: str, workflow: Callable, cron: str, queue: str) -> bool:
-    """Register a cron schedule, once. DBOS keeps schedules in the system database, so they
-    outlive the process: every boot after the first finds this one already there.
+async def _register_schedule() -> None:
+    """Put the nightly cron definition in the system database, where it outlives the process.
 
-    Returns True when this boot wrote the definition, which is the first boot and any boot whose
-    build changed the cron or the queue."""
-    found = await DBOS.get_schedule_async(name)
-    if found is not None and (found["schedule"], found.get("queue_name")) == (cron, queue):
-        return False
-    # an upsert, not `create_schedule`: that one raises on a name the database already carries
+    `apply_schedules_async` is an idempotent upsert by name that keeps the schedule's id, status
+    and last fire time, so every boot may simply declare what this build wants."""
     await DBOS.apply_schedules_async(
-        [{"schedule_name": name, "workflow_fn": workflow, "schedule": cron, "queue_name": queue}]
+        [
+            {
+                "schedule_name": MAINTENANCE_SCHEDULE,
+                "workflow_fn": daily_maintenance,
+                "schedule": MAINTENANCE_CRON,
+                "queue_name": MAINTENANCE_QUEUE,
+            }
+        ]
     )
-    return True
+    _log.debug("schedule_registered", schedule=MAINTENANCE_SCHEDULE)
 
 
-async def _prune_audit_at_boot() -> None:
-    """Also prune once per boot: a desktop app is rarely running at 03:17, so a run that only ever
-    happened on the schedule would never happen at all. Housekeeping, so a failure is logged and
-    the boot continues."""
+async def _housekeeping(
+    work: Awaitable[int], failed_event: str, done: Callable[..., None], **fields: Any
+) -> None:
+    """Run one boot-time chore. A failure is logged and the boot continues; a count is only worth
+    a line when it is not zero, and `done` is the bound event that writes it."""
     try:
-        deleted = await prune_audit()
+        count = await work
     except Exception as exc:
-        _log.error("audit_prune_failed", error=root_cause(exc))
+        _log.error(failed_event, error=root_cause(exc))
         return
-    if deleted:
-        _log.info("audit_files_pruned", deleted=deleted)
+    if count:
+        done(count=count, **fields)
 
 
 async def adopt_orphans(batch: int = ADOPT_PAGE) -> int:
@@ -423,22 +406,39 @@ async def adopt_orphans(batch: int = ADOPT_PAGE) -> int:
         adopted += len(stale)
 
 
-async def _adopt() -> None:
-    """`adopt_orphans` with the boot's logging, and nothing above it to catch what it raises."""
-    try:
-        adopted = await adopt_orphans()
-    except Exception as exc:
-        _log.error("stale_workflow_adoption_failed", error=root_cause(exc))
-        return
-    if adopted:
-        _log.warning("stale_workflows_resumed", count=adopted, app_version=APP_VERSION)
-
-
 def _start_adoption() -> None:
     """Adopting a long backlog takes as long as the backlog is deep, and nothing waits for its
     result: the boot hands it to a task on the loop it runs on and returns (see `_adoption`)."""
     global _adoption
-    _adoption = asyncio.get_running_loop().create_task(_adopt(), name="haskie-adopt")
+    adopting = _housekeeping(
+        adopt_orphans(),
+        "stale_workflow_adoption_failed",
+        partial(_log.warning, "stale_workflows_resumed"),
+        app_version=APP_VERSION,
+    )
+    _adoption = asyncio.get_running_loop().create_task(adopting, name="haskie-adopt")
+
+
+class Queue(msgspec.Struct, frozen=True):
+    """One registered DBOS queue: its name, how wide it is under the current settings, and
+    whether it admits one workflow per partition. The `job.`/`task.` prefix picks the polling
+    interval and is the family `sysdb.queue_activity` groups by."""
+
+    name: str
+    concurrency: Callable[[PipelineSettings, dict[Stage, int]], int]
+    partition_concurrency: int | None = None
+
+
+_QUEUES: tuple[Queue, ...] = (
+    Queue(INDEXING_QUEUE, lambda indexing, caps: document_concurrency(indexing)),
+    Queue(EMBEDDING_QUEUE, lambda indexing, caps: document_concurrency(indexing)),
+    Queue(COLLECTION_QUEUE, lambda indexing, caps: COLLECTION_CONCURRENCY),
+    Queue(models.DOWNLOADS_QUEUE, lambda indexing, caps: DOWNLOAD_CONCURRENCY),
+    Queue(MAINTENANCE_QUEUE, lambda indexing, caps: MAINTENANCE_CONCURRENCY),
+    Queue(CONVERT_QUEUE, lambda indexing, caps: caps["convert"]),
+    Queue(EMBED_QUEUE, lambda indexing, caps: caps["embed"]),
+    Queue(INDEX_QUEUE, lambda indexing, caps: caps["index"], partition_concurrency=1),
+)
 
 
 async def apply_settings(settings: UserSettings) -> None:
@@ -452,44 +452,23 @@ async def apply_settings(settings: UserSettings) -> None:
     caps = stage_caps(indexing)
     configure_cpu_budget(indexing.cpu_budget)
     configure_preview_slots(indexing.preview_workers)
-    for queue in (INDEXING_QUEUE, EMBEDDING_QUEUE):
+    for queue in _QUEUES:
         await DBOS.register_queue_async(
-            queue,
-            global_concurrency=document_concurrency(indexing),
-            polling_interval_sec=JOB_POLL,
+            queue.name,
+            global_concurrency=queue.concurrency(indexing, caps),
+            partition_concurrency=queue.partition_concurrency,
+            polling_interval_sec=JOB_POLL if queue.name.startswith("job.") else TASK_POLL,
         )
-    await DBOS.register_queue_async(
-        COLLECTION_QUEUE, global_concurrency=COLLECTION_CONCURRENCY, polling_interval_sec=JOB_POLL
-    )
-    await DBOS.register_queue_async(
-        models.DOWNLOADS_QUEUE,
-        global_concurrency=DOWNLOAD_CONCURRENCY,
-        polling_interval_sec=JOB_POLL,
-    )
-    await DBOS.register_queue_async(
-        MAINTENANCE_QUEUE, global_concurrency=MAINTENANCE_CONCURRENCY, polling_interval_sec=JOB_POLL
-    )
-    await DBOS.register_queue_async(
-        CONVERT_QUEUE, global_concurrency=caps["convert"], polling_interval_sec=TASK_POLL
-    )
-    await DBOS.register_queue_async(
-        EMBED_QUEUE, global_concurrency=caps["embed"], polling_interval_sec=TASK_POLL
-    )
-    await DBOS.register_queue_async(
-        INDEX_QUEUE,
-        global_concurrency=caps["index"],
-        partition_concurrency=1,  # LanceDB takes one writer per collection (see `_partition_key`)
-        polling_interval_sec=TASK_POLL,
-    )
     await models.ensure_models(settings)
-    await schedule_pending_maintenance()
+    await schedule_pending_maintenance(indexing.maintenance_idle_seconds)
 
 
 # --- steps (pure, retried) ----------------------------------------------------------
 
 # Every step here touches SQLite or the file system, so every step may hit a transient lock.
-# The wait before a retry is a real one, so the test suite shortens it through the environment.
-RETRY_INTERVAL_SECONDS = float(os.environ.get("HASKIE_RETRY_INTERVAL_SECONDS", "1.0"))
+# Read once, here: DBOS copies a step's retry settings into the decorator, so this cannot change
+# after import.
+RETRY_INTERVAL_SECONDS = 1.0
 retried_step = DBOS.step(
     retries_allowed=True,
     max_attempts=3,
@@ -512,13 +491,7 @@ async def load_context(doc: str, collection: str | None) -> Context:
         document=row,
         chunking=chunking,
         embedding=user.embedding_model,
-        batch_pages=user.pipeline.batch_pages,
-        index_group_parts=user.pipeline.index_group_parts,
-        task_timeout_seconds=user.pipeline.task_timeout_seconds,
-        maintenance_docs=user.pipeline.maintenance_docs,
-        maintenance_idle_seconds=user.pipeline.maintenance_idle_seconds,
-        convert_parallelism=resolve_parallelism(user.pipeline, "convert"),
-        embed_parallelism=resolve_parallelism(user.pipeline, "embed"),
+        pipeline=user.pipeline,
         collection=collection,
     )
 
@@ -559,10 +532,10 @@ async def member_present(collection: str, doc: str) -> bool:
 @retried_step
 async def plan(stage: Stage, ctx: Context) -> list[Batch]:
     if stage == "convert":
-        return await pipeline.plan_convert(ctx.document, ctx.batch_pages)
+        return await pipeline.plan_convert(ctx.document, ctx.pipeline.batch_pages)
     if stage == "embed":
         return await pipeline.plan_embed(ctx.document)
-    return await pipeline.plan_index(ctx.document, ctx.cache_id, ctx.index_group_parts)
+    return await pipeline.plan_index(ctx.document, ctx.cache_id, ctx.pipeline.index_group_parts)
 
 
 async def _guarded(call: Awaitable[int | None]) -> BatchResult:
@@ -592,8 +565,7 @@ async def try_batch(stage: Stage, batch: Batch, ctx: Context) -> BatchResult:
         return await _guarded(
             pipeline.embed_batch(ctx.document, batch, ctx.cache_id, ctx.chunking, ctx.embedding)
         )
-    if ctx.collection is None:
-        raise ValueError("index stage needs a collection")
+    assert ctx.collection is not None, "the index stage always names a collection"
     return await _guarded(
         pipeline.index_batch(
             Collection(ctx.collection), ctx.document, ctx.cache_id, batch, ctx.embedding
@@ -635,7 +607,7 @@ async def prepare_index(collection: str, ctx: Context) -> None:
 
 @retried_step
 async def finalize_index(collection: str, ctx: Context) -> None:
-    """Rebuild the full-text index once, on the collection's partition (A2)."""
+    """Rebuild the full-text index once, on the collection's partition."""
     await pipeline.finalize_index(Collection(collection), ctx.embedding)
 
 
@@ -662,8 +634,7 @@ async def run_maintenance(collection: str) -> maintenance.Report:
 
     No slot of the CPU budget is taken around it: compaction and the vector index build are CPU,
     but they run inside LanceDB's own runtime rather than in a worker thread of ours, so there is
-    nothing for `cpu.cpu_slot` to hold. `task.indexing` bounds them instead - one writer per
-    collection partition (see `maintenance.run`)."""
+    nothing for `cpu.cpu_slot` to hold. `task.indexing` bounds them instead."""
     user = await load_user_settings()
     return await maintenance.run(Collection(collection), user.embedding_model, user.pipeline)
 
@@ -689,11 +660,12 @@ async def stage_slice(stage: Stage, batches: list[Batch], ctx: Context) -> list[
     stage is never sliced and runs on the collection's write partition, so this is also where its
     once-per-document hooks belong: clear the document's rows before the first batch, build the
     full-text index after the last."""
-    if stage == "index" and ctx.collection is not None:
-        await prepare_index(ctx.collection, ctx)
+    indexed = ctx.collection if stage == "index" else None  # the index stage always names one
+    if indexed is not None:
+        await prepare_index(indexed, ctx)
     results = [await run_batch(stage, batch, ctx) for batch in batches]
-    if stage == "index" and ctx.collection is not None:
-        await finalize_index(ctx.collection, ctx)
+    if indexed is not None:
+        await finalize_index(indexed, ctx)
     return results
 
 
@@ -708,19 +680,14 @@ def stage_input(child) -> tuple[Stage, list[Batch]] | None:
 
 
 def index_partition(collection: str) -> str:
-    """The queue partition every write to one collection's table goes through: LanceDB takes one
-    writer at a time, so `task.indexing` admits one workflow per partition. Index children,
-    maintenance runs and removals of one collection all name it."""
+    """The queue partition every write to one collection's table goes through. Index children,
+    maintenance runs and removals of one collection all name it, so they never write at once."""
     return f"index:{collection}"
 
 
 def _partition_key(stage: Stage, collection: str | None) -> str | None:
-    """Index writes are serialized per collection: LanceDB takes one writer at a time, so every
-    index child, maintenance run and removal of one collection shares its partition, and
-    `task.indexing` admits one workflow per partition.
-
-    None for a convert or embed slice: their queues are capped globally and hold nothing a slice
-    of the same document could corrupt, so a partition would only be a second limit to keep."""
+    """`index_partition` for an index child; None for a convert or embed slice, whose queues are
+    capped globally and hold nothing a slice of the same document could corrupt."""
     return index_partition(collection) if stage == "index" and collection else None
 
 
@@ -732,16 +699,14 @@ def _child_id(stage: Stage, slice_index: int) -> str:
     return f"{DBOS.workflow_id}:{stage}:{slice_index}"
 
 
-def _run_id() -> str:
-    """The uuid tail of the current workflow id: what a deterministic child id is derived from."""
-    return (DBOS.workflow_id or uuid4().hex).rsplit(":", 1)[-1]
+def run_id(workflow_id: str) -> str:
+    """The uuid tail of a workflow id: what its deterministic child ids are derived from."""
+    return workflow_id.rsplit(":", 1)[-1]
 
 
 def _slice_count(stage: Stage, ctx: Context) -> int:
-    """Slices this stage may be cut into. The index stage is never sliced: it is one writer."""
-    if stage == "convert":
-        return ctx.convert_parallelism
-    return ctx.embed_parallelism if stage == "embed" else 1
+    """Slices this stage may be cut into. The index stage is never sliced (see `INDEX_QUEUE`)."""
+    return 1 if stage == "index" else resolve_parallelism(ctx.pipeline, stage)
 
 
 def _slices(batches: list[Batch], parts: int) -> list[list[Batch]]:
@@ -774,7 +739,7 @@ async def _stage(stage: Stage, ctx: Context) -> list[int]:
             SetWorkflowID(_child_id(stage, index)),
             # the budget is per batch, and the child runs them all: a long slice gets
             # proportionally longer rather than timing out for being long
-            SetWorkflowTimeout(ctx.task_timeout_seconds * max(1, len(batches_of_slice))),
+            SetWorkflowTimeout(ctx.pipeline.task_timeout_seconds * max(1, len(batches_of_slice))),
             SetEnqueueOptions(queue_partition_key=_partition_key(stage, ctx.collection)),
         ):
             # the context managers wrap the await itself: `enqueue_workflow_async` reads the
@@ -801,7 +766,7 @@ async def _ensure_embedding(ctx: Context) -> str:
     derived from this workflow's, so a replay re-attaches to the run it already started."""
     params = embed_cache.params(ctx.document, ctx.chunking, ctx.embedding)
     with (
-        SetWorkflowID(f"{EMBED_PREFIX}:{ctx.document.name}:{_run_id()}"),
+        SetWorkflowID(f"{EMBED_PREFIX}:{ctx.document.name}:{run_id(DBOS.workflow_id or '')}"),
         SetEnqueueOptions(
             deduplication_id=embed_cache.key(params), duplication_policy="return-existing"
         ),
@@ -812,28 +777,45 @@ async def _ensure_embedding(ctx: Context) -> str:
     return await handle.get_result(polling_interval_sec=TASK_POLL)
 
 
+@contextlib.asynccontextmanager
+async def _outcome(
+    set_state: Callable[..., Awaitable[None]],
+    done: str,
+    collection: str | None,
+    doc: str,
+    event: str,
+) -> AsyncIterator[None]:
+    """Move the status to its end state and write one audit line, whichever way the body ended.
+
+    Both document workflows report a failure the same way: a `PermanentError` carries its own
+    message, anything else is unwrapped to its root cause, and what leaves the workflow is a flat
+    `PipelineError` DBOS can store and rebuild."""
+    started = time.perf_counter()
+    try:
+        yield
+    except Exception as exc:
+        message = str(exc) if isinstance(exc, PermanentError) else root_cause(exc)
+        await set_state("error", message)
+        await _record(collection, doc, f"{event}.failed", started, message)
+        raise PipelineError(message) from exc
+    await set_state(done)
+    await _record(collection, doc, f"{event}.completed", started, None)
+
+
 @DBOS.workflow(name=IMPORT_WORKFLOW)
 async def import_document(doc: str) -> str:
     """convert, then pre-warm the embedding cache under the user's default chunk settings;
     document status mirrors the stage. Collection-independent: nothing is written to any table."""
-    started = time.perf_counter()
     with logs.bound(workflow_id=DBOS.workflow_id, doc=doc):
         # first step, so a deduplicated submit changes nothing
         await set_status(doc, "queued")
-        try:
+        async with _outcome(partial(set_status, doc), "imported", None, doc, "import"):
             ctx = await load_context(doc, None)
             await set_status(doc, "converting")
             await forget_embeddings(doc)
             await _stage("convert", ctx)
             await set_status(doc, "embedding")
             await _ensure_embedding(ctx)
-        except Exception as exc:
-            message = str(exc) if isinstance(exc, PermanentError) else root_cause(exc)
-            await set_status(doc, "error", message)
-            await _record(None, doc, "import.failed", started, message)
-            raise PipelineError(message) from exc
-        await set_status(doc, "imported")
-        await _record(None, doc, "import.completed", started, None)
         return "imported"
 
 
@@ -867,10 +849,10 @@ async def index_collection_document(collection: str, doc: str) -> str:
     """Write one document into one collection's table from its embedding cache, computing the
     embedding first when the collection's chunk settings have none yet. Membership status mirrors
     the progress; the document's own status is the import's and is never touched here."""
-    started = time.perf_counter()
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, doc=doc):
         await set_member_status(collection, doc, "indexing")
-        try:
+        set_state = partial(set_member_status, collection, doc)
+        async with _outcome(set_state, "indexed", collection, doc, "index"):
             if not await member_present(collection, doc):
                 raise PermanentError("document is no longer in the collection")
             ctx = await load_context(doc, collection)
@@ -879,16 +861,7 @@ async def index_collection_document(collection: str, doc: str) -> str:
             ctx = msgspec.structs.replace(ctx, cache_id=await _ensure_embedding(ctx))
             await _stage("index", ctx)
             pending = await note_indexed_step(collection, doc)
-            await request_maintenance(
-                collection, pending, ctx.maintenance_docs, ctx.maintenance_idle_seconds
-            )
-        except Exception as exc:
-            message = str(exc) if isinstance(exc, PermanentError) else root_cause(exc)
-            await set_member_status(collection, doc, "error", message)
-            await _record(collection, doc, "index.failed", started, message)
-            raise PipelineError(message) from exc
-        await set_member_status(collection, doc, "indexed")
-        await _record(collection, doc, "index.completed", started, None)
+            await request_maintenance(collection, pending, ctx.pipeline)
         return "indexed"
 
 
@@ -909,10 +882,10 @@ async def _record(
     )
 
 
-@DBOS.workflow(name="maintain_on_partition")
+@DBOS.workflow(name=MAINTAIN_PARTITION_WORKFLOW)
 async def maintain_on_partition(collection: str) -> maintenance.Report:
-    """The maintenance itself, on the collection's index partition: LanceDB takes one writer at a
-    time, so compaction waits for the index stage of any document in flight, and vice versa."""
+    """The maintenance itself, on the collection's index partition, so compaction waits for the
+    index stage of any document in flight, and vice versa."""
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection):
         claimed = await claim_pending(collection)
         report = await run_maintenance(collection)
@@ -920,7 +893,7 @@ async def maintain_on_partition(collection: str) -> maintenance.Report:
         return report
 
 
-@DBOS.workflow(name="maintain_collection")
+@DBOS.workflow(name=MAINTAIN_WORKFLOW)
 async def maintain_collection(collection: str) -> maintenance.Report:
     """Debounced entry point. It only hands the work to the collection's index partition and
     waits.
@@ -947,24 +920,22 @@ async def maintain_collection(collection: str) -> maintenance.Report:
 MAINTAIN = Debouncer.create_async(maintain_collection, queue=MAINTENANCE_QUEUE)
 
 
-async def request_maintenance(
-    collection: str, pending: int, after_docs: int, idle_seconds: int
-) -> None:
-    """Ask for a maintenance run: now once `after_docs` documents piled up, otherwise once the
-    collection has been idle for `idle_seconds`.
+async def request_maintenance(collection: str, pending: int, indexing: PipelineSettings) -> None:
+    """Ask for a maintenance run: now once `maintenance_docs` documents piled up, otherwise once
+    the collection has been idle for `maintenance_idle_seconds`.
 
     Must be called with no `SetEnqueueOptions` partition key in context: a debounce deduplicates,
     and DBOS rejects deduplication on a partitioned enqueue."""
-    period = 0.0 if pending >= after_docs else float(idle_seconds)
+    idle = float(indexing.maintenance_idle_seconds)
+    period = 0.0 if pending >= indexing.maintenance_docs else idle
     await MAINTAIN.debounce_async(collection, period, collection)
 
 
-async def schedule_pending_maintenance() -> None:
+async def schedule_pending_maintenance(idle_seconds: int) -> None:
     """Reschedule every collection that has documents pending. A run lost to a crash or a shutdown
     leaves `pending_docs` standing, so the next boot picks the collection up again."""
-    idle = float((await load_user_settings()).pipeline.maintenance_idle_seconds)
     for name in await Collection.pending_names():
-        await MAINTAIN.debounce_async(name, idle, name)
+        await MAINTAIN.debounce_async(name, float(idle_seconds), name)
 
 
 # --- removal ------------------------------------------------------------------------------
@@ -981,11 +952,10 @@ async def remove_member_row(collection: str, doc: str) -> None:
     await Collection(collection).remove_member(doc)
 
 
-@DBOS.workflow(name="remove_from_collection_index")
+@DBOS.workflow(name=REMOVE_FROM_INDEX_WORKFLOW)
 async def remove_from_collection_index(collection: str, doc: str) -> None:
-    """Take one document out of one collection: its rows in the table, then its membership. Runs
-    on the collection's index partition, so no index step of another document writes meanwhile.
-    The document itself, its files and its embedding cache are untouched."""
+    """Take one document out of one collection: its rows in the table, then its membership. The
+    document itself, its files and its embedding cache are untouched."""
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, doc=doc):
         await remove_index_rows(collection, doc)
         await remove_member_row(collection, doc)
@@ -993,9 +963,10 @@ async def remove_from_collection_index(collection: str, doc: str) -> None:
 
 @retried_step
 async def cancel_document_work(doc: str) -> None:
-    """Cancel every import, embedding run and collection index of the document, and wait for the
-    last running step. Retried: it is a series of DBOS writes, and cancelling again is a no-op."""
-    await _cancel_and_wait(await _active_document_workflows(doc), CANCEL_WAIT_SECONDS)
+    """Cancel every import, embedding run and collection index of the document. One call: DBOS
+    writes CANCELLED for the whole list, children included, before it returns. Retried: it is a
+    series of DBOS writes, and cancelling again is a no-op."""
+    await DBOS.cancel_workflows_async(await _active_document_workflows(doc), cancel_children=True)
 
 
 @retried_step
@@ -1017,11 +988,10 @@ async def remove_document_row(doc: str) -> None:
     await document.remove_row(doc)
 
 
-@DBOS.workflow(name="delete_document")
+@DBOS.workflow(name=DELETE_DOCUMENT_WORKFLOW)
 async def delete_document_workflow(doc: str) -> None:
     """Delete a document everywhere: out of every collection's table (one child per collection,
-    each on that collection's partition — LanceDB takes one writer per partition), then its
-    folder, then its row.
+    each on that collection's index partition), then its folder, then its row.
 
     `deleting` is set first, so an attach that lands after the membership snapshot below is
     refused instead of leaving rows in a table no membership points at."""
@@ -1085,7 +1055,7 @@ async def enqueue_page(collection: str, after: str | None, bulk_id: str) -> Bulk
     return BulkProgress(done=done, skipped=0, last=last)
 
 
-@DBOS.workflow(name="index_collection")
+@DBOS.workflow(name=INDEX_COLLECTION_WORKFLOW)
 async def index_collection_workflow(collection: str) -> BulkResult:
     """(Re)index every member of one collection, one durable page of enqueues at a time. Cheap
     for a member whose embedding is cached: the embed is skipped and only the table is written."""
@@ -1111,24 +1081,12 @@ async def cancel_active_batch(collection: str) -> int:
     documents, plus a page of collection index workflows. Returns how many were cancelled, so
     the caller sweeps again until a sweep finds nothing."""
     ids = [
-        *await _active_bulk_index(collection),
+        *await _active_ids(INDEX_COLLECTION_WORKFLOW, f"{BULK_INDEX_PREFIX}:{collection}:"),
         *await _active_collection_workflows(collection, limit=CANCEL_PAGE),
     ]
     if ids:
         await DBOS.cancel_workflows_async(ids, cancel_children=True)
     return len(ids)
-
-
-@retried_step
-async def wait_quiet(collection: str) -> None:
-    """Wait until no index workflow of the collection is active any more. A bulk delete cannot
-    name the ids it is waiting for -- more keep arriving while it sweeps -- so it asks by
-    prefix."""
-
-    async def quiet() -> bool:
-        return not await _active_collection_workflows(collection, limit=1)
-
-    await _wait_until(quiet, CANCEL_WAIT_SECONDS, collection=collection)
 
 
 @retried_step
@@ -1143,10 +1101,13 @@ async def remove_tree(collection: str) -> None:
     await Collection(collection).remove_tree()
 
 
-@DBOS.workflow(name="delete_collection")
+@DBOS.workflow(name=DELETE_COLLECTION_WORKFLOW)
 async def delete_collection_workflow(collection: str) -> None:
-    """Cancel every index workflow of the collection, wait for the last running step, then drop
-    the rows and the folder (A5). No document is touched.
+    """Cancel every index workflow of the collection, then drop the rows and the folder. No
+    document is touched.
+
+    The sweep repeats until it finds nothing: a bulk index still queueing documents can add more
+    while the first sweep runs. Each sweep's cancel is already final when it returns.
 
     A maintenance run already debounced for this collection is left alone: it finds no row and
     reports itself skipped ("no-collection"), which costs one no-op instead of a cancellation
@@ -1155,7 +1116,6 @@ async def delete_collection_workflow(collection: str) -> None:
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection):
         while await cancel_active_batch(collection) > 0:
             pass
-        await wait_quiet(collection)
         await remove_rows(collection)
         await remove_tree(collection)
 
@@ -1164,27 +1124,28 @@ async def delete_collection_workflow(collection: str) -> None:
 
 
 @retried_step
-async def archive_step() -> archive.ArchiveReport:
-    """One retention round. Retried: it is a long series of SQLite writes, any of which can lose
-    the file to another writer for a moment, and the round is idempotent."""
-    retention = (await load_user_settings()).retention
-    return await archive.archive_once(int(time.time() * 1000), retention)
+async def purge_job_history() -> int:
+    """Delete every job DBOS finished longer than `retention.job_days` ago, with the stage children
+    and step logs below it; returns the cutoff it purged before, as unix ms.
 
+    That history is the whole Jobs view, and DBOS removes none of it on its own: without this the
+    system database grows with every document, forever. Retried: it is a long series of SQLite
+    writes, any of which can lose the file to another writer for a moment, and a second round over
+    the same cutoff deletes nothing.
 
-@DBOS.workflow(name="archive_jobs")
-async def archive_jobs(scheduled_time: datetime, context: Any) -> None:
-    """Hourly: copy finished jobs into their day partition, then let DBOS drop what it no longer
-    has to keep (see `archive`). Takes the two arguments every DBOS schedule passes.
-
-    Two runs overlapping needs no coordination: the copy replaces rows it already wrote and the
-    watermark only moves forward, so a round that outlives its hour costs work, never rows."""
-    report = await archive_step()
-    _log.info(
-        "jobs_archived",
-        copied=report.copied,
-        purged_before_ms=report.purged_before_ms,
-        dropped=report.dropped,
+    DBOS's own collection is sync SQLAlchemy over the same file and has no async twin, so it runs
+    in a worker thread."""
+    days = (await load_user_settings()).retention.job_days
+    cutoff = int((time.time() - days * 86400) * 1000)
+    await anyio.to_thread.run_sync(
+        partial(
+            garbage_collect,
+            _get_dbos_instance(),
+            cutoff_epoch_timestamp_ms=cutoff,
+            rows_threshold=None,
+        )
     )
+    return cutoff
 
 
 @retried_step
@@ -1200,13 +1161,19 @@ async def sweep_staging() -> int:
     return await document.sweep_staging(STAGING_TTL_SECONDS)
 
 
-@DBOS.workflow(name="daily_maintenance")
+@DBOS.workflow(name=DAILY_MAINTENANCE_WORKFLOW)
 async def daily_maintenance(scheduled_time: datetime, context: Any) -> None:
-    """Nightly housekeeping of the home directory: the audit trail and the staging folder. Takes
-    the two arguments every DBOS schedule passes. Job history is archived hourly instead."""
+    """Nightly housekeeping: the job history, the audit trail and the staging folder. Takes the
+    two arguments every DBOS schedule passes."""
+    purged_before_ms = await purge_job_history()
     deleted = await prune_audit()
     swept = await sweep_staging()
-    _log.info("home_housekept", audit_files_pruned=deleted, staged_uploads_swept=swept)
+    _log.info(
+        "home_housekept",
+        jobs_purged_before_ms=purged_before_ms,
+        audit_files_pruned=deleted,
+        staged_uploads_swept=swept,
+    )
 
 
 # --- public API -------------------------------------------------------------------------
@@ -1218,9 +1185,7 @@ async def _start(
     """Enqueue one workflow under an explicit id and return that id.
 
     Every job here is deduplicated the same way: a second call made while the first is still on
-    its way returns the run already in flight rather than starting a second one. The context
-    managers wrap the await itself, because `enqueue_workflow_async` reads the contextvars they
-    set before it yields to the loop."""
+    its way returns the run already in flight rather than starting a second one."""
     with (
         SetWorkflowID(workflow_id),
         SetEnqueueOptions(deduplication_id=dedup_id, duplication_policy="return-existing"),
@@ -1281,17 +1246,20 @@ async def attach(collection: str, doc: str) -> str:
     imported document can be attached, which `Collection.add` enforces: one still importing has no
     markdown to chunk yet, one being deleted must not gain a membership the delete's snapshot
     missed."""
-    found = await Collection.get(collection)  # CollectionNotFound before anything is written
+    found = await Collection.get(collection)  # NotFound before anything is written
     await found.add(doc)
-    return await start_index_collection_document(collection, doc)
+    # `_enqueue_index`, not `start_index_collection_document`: `add` just wrote the membership
+    return await _enqueue_index(collection, doc)
 
 
 async def detach(collection: str, doc: str) -> None:
     """Take a document out of one collection and wait for it: cancel its index workflow there,
-    then delete its rows and membership from the collection's own partition (A3/A4). The
-    document stays, in its folder and in every other collection."""
+    then delete its rows and membership from the collection's own partition. The document stays,
+    in its folder and in every other collection."""
     await (await Collection.get(collection)).member(doc)  # NotFound before anything is cancelled
-    await _cancel_and_wait(await _active_collection_workflows(collection, doc), CANCEL_WAIT_SECONDS)
+    await DBOS.cancel_workflows_async(
+        await _active_collection_workflows(collection, doc), cancel_children=True
+    )
     with SetEnqueueOptions(queue_partition_key=index_partition(collection)):
         handle = await DBOS.enqueue_workflow_async(
             INDEX_QUEUE, remove_from_collection_index, collection, doc
@@ -1315,14 +1283,6 @@ async def _active_ids(
     return [s.workflow_id for s in found]
 
 
-async def _active_import_workflows(doc: str) -> list[str]:
-    """Ids of the import and embedding runs of one document that may still be running."""
-    return await _active_ids(
-        [IMPORT_WORKFLOW, EMBED_WORKFLOW],
-        [f"{IMPORT_PREFIX}:{doc}:", f"{EMBED_PREFIX}:{doc}:"],
-    )
-
-
 async def _active_collection_workflows(
     collection: str, doc: str | None = None, limit: int | None = None
 ) -> list[str]:
@@ -1342,40 +1302,19 @@ async def _active_document_workflows(doc: str) -> list[str]:
     A collection index id names the collection before the document, so one prefix query per
     collection the document is in filters them in the database instead of listing every active
     index workflow and splitting the ids here."""
-    ids = await _active_import_workflows(doc)
+    ids = await _active_ids(  # the import and the embedding runs
+        [IMPORT_WORKFLOW, EMBED_WORKFLOW],
+        [f"{IMPORT_PREFIX}:{doc}:", f"{EMBED_PREFIX}:{doc}:"],
+    )
     for collection in await document.collections_of(doc):
         ids.extend(await _active_collection_workflows(collection, doc))
     return ids
 
 
-async def _active_bulk_index(collection: str) -> list[str]:
-    """Ids of the bulk indexes of one collection that may still be queueing documents."""
-    return await _active_ids("index_collection", f"{BULK_INDEX_PREFIX}:{collection}:")
-
-
-async def _cancel_and_wait(workflow_ids: list[str], wait_seconds: float) -> None:
-    """Cancel, then wait until every one of those workflows is terminal."""
-    for workflow_id in workflow_ids:
-        await DBOS.cancel_workflow_async(workflow_id, cancel_children=True)
-    pending = list(workflow_ids)
-
-    async def quiet() -> bool:
-        if not pending:  # nothing left to wait for; an empty id list is not "every workflow"
-            return True
-        found = await DBOS.list_workflows_async(
-            workflow_ids=pending, load_input=False, load_output=False
-        )
-        # in place, so the list the timeout logs is the one still pending
-        pending[:] = [s.workflow_id for s in found if s.status not in TERMINAL_STATUS]
-        return not pending
-
-    await _wait_until(quiet, wait_seconds, workflows=pending)
-
-
 async def start_delete_document(doc: str) -> str:
     """Queue the deletion of a document from everywhere; returns the id of the job. A second call
     while one runs is deduplicated into it."""
-    await document.get(doc)  # DocumentNotFound before anything is queued
+    await document.get(doc)  # NotFound before anything is queued
     return await _start(
         COLLECTION_QUEUE,
         delete_document_workflow,
@@ -1390,7 +1329,7 @@ async def start_index_collection(collection: str) -> str:
 
     A second call while one runs is deduplicated into the job already running, so an impatient
     "Index all" cannot queue the collection twice."""
-    await Collection.get(collection)  # CollectionNotFound before anything is queued
+    await Collection.get(collection)  # NotFound before anything is queued
     return await _start(
         COLLECTION_QUEUE,
         index_collection_workflow,
@@ -1405,7 +1344,7 @@ async def start_delete_collection(collection: str) -> str:
 
     On the `job.collection` queue rather than the collection's index partition: there it would
     wait behind every document it is about to cancel."""
-    await Collection.get(collection)  # CollectionNotFound before anything is queued
+    await Collection.get(collection)  # NotFound before anything is queued
     return await _start(
         COLLECTION_QUEUE,
         delete_collection_workflow,
@@ -1422,10 +1361,10 @@ async def cancel_job(job_id: str) -> None:
     Here rather than in `jobs`, which is a read model: this writes, and it reads the names it
     writes by out of the id grammar this module owns (see `job_names`).
 
-    No-op on a job that already finished: its document status is final (A12)."""
+    No-op on a job that already finished: its document status is final."""
     found = await DBOS.get_workflow_status_async(job_id)
     if found is None:
-        raise JobNotFound(f"job not found: {job_id}")
+        raise NotFound(f"job not found: {job_id}")
     if found.status not in ACTIVE_STATUS:
         return
     await DBOS.cancel_workflow_async(job_id, cancel_children=True)

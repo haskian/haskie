@@ -64,7 +64,7 @@ async def plan_convert(doc: Document, batch_pages: int) -> list[Batch]:
     await anyio.Path(doc.parts_dir).mkdir(parents=True, exist_ok=True)
     if source.suffix.lower() != ".pdf":
         return [Batch(seq=0, start=0, end=1)]  # anydoc/plain convert whole files in one go
-    total = await cpu.on_cpu("convert", convert.pdf_page_count, source)
+    total = await cpu.on_cpu(convert.pdf_page_count, source)
     return [
         Batch(seq=seq, start=start, end=min(start + batch_pages, total))
         for seq, start in enumerate(range(0, total, batch_pages))
@@ -77,14 +77,13 @@ async def convert_batch(doc: Document, batch: Batch) -> int:
     source = doc.source_path()
     if source.suffix.lower() == ".pdf":
         markdown, ocr_pages, _ = await cpu.off_interpreter(
-            "convert",
             convert.pdf_pages_markdown,
             source,
             list(range(batch.start, batch.end)),
             doc.skip_ocr_pages,
         )
     else:
-        markdown = await cpu.on_cpu("convert", convert.to_markdown, source, doc.parser)
+        markdown = await cpu.on_cpu(convert.to_markdown, source, doc.parser)
         ocr_pages = []
     await home.atomic_write(doc.part_path(batch.seq), markdown)
     return len(ocr_pages)
@@ -99,7 +98,7 @@ async def finalize_convert(doc: Document, batches: list[Batch], ocr_total: int) 
         await anyio.Path(doc.part_path(batch.seq)).read_text(encoding="utf-8")
         for batch in sorted(batches, key=lambda b: b.seq)
     ]
-    # one replace, so a reader never sees a half-assembled document (B6); the parts are already
+    # one replace, so a reader never sees a half-assembled document; the parts are already
     # in memory one at a time during convert, so holding the joined text adds no new bound
     await home.atomic_write(doc.markdown, JOINER.join(parts))
 
@@ -157,7 +156,7 @@ async def embed_batch(
             vectors = list(embed_texts(embedding, [c.text for c in chunks]))
         return [Row(chunk=c, vector=v) for c, v in zip(chunks, vectors, strict=True)]
 
-    rows = await cpu.on_cpu("embed", chunk_and_embed)
+    rows = await cpu.on_cpu(chunk_and_embed)
     target = embed_cache.rows_path(doc.name, cache_id, batch.seq)
     await anyio.Path(target.parent).mkdir(parents=True, exist_ok=True)
     await home.atomic_write(target, msgspec.json.encode(rows))
@@ -167,18 +166,13 @@ async def embed_batch(
 async def finalize_embed(
     doc: Document, params: embed_cache.Params, embedding: EmbeddingModel | None
 ) -> str:
-    """Publish one computed embedding: every part's scratch rows, in part order, into the cache
-    file and its row. Returns the cache id. The scratch files are consumed by the write."""
+    """Publish one computed embedding and return its cache id.
+
+    A part whose rows were never written raises `FileNotFoundError` out of the merge, which
+    leaves no partial cache file behind (see `embed_cache._merge`)."""
     cache_id = embed_cache.key(params)
     count = len(await _parts(doc))
     paths = [embed_cache.rows_path(doc.name, cache_id, part) for part in range(count)]
-
-    def absent() -> list[int]:  # one thread hop for the whole check, not one per part
-        return [part for part, path in enumerate(paths) if not path.exists()]
-
-    missing = await anyio.to_thread.run_sync(absent)
-    if missing:
-        raise FileNotFoundError(f"rows missing for parts {missing}, embed first: {doc.name}")
     return await embed_cache.write(params, paths, embedding.dims if embedding else None)
 
 
@@ -190,10 +184,9 @@ async def plan_index(doc: Document, cache_id: str, group_parts: int) -> list[Bat
     is one LanceDB commit, so the fragment count of a collection follows documents rather than
     pages."""
     count = await embed_cache.row_groups(doc.name, cache_id)
-    size = max(1, group_parts)
     return [
-        Batch(seq=seq, start=start, end=min(start + size, count))
-        for seq, start in enumerate(range(0, count, size))
+        Batch(seq=seq, start=start, end=min(start + group_parts, count))
+        for seq, start in enumerate(range(0, count, group_parts))
     ]
 
 
@@ -202,10 +195,7 @@ async def prepare_index(
 ) -> None:
     """Make the collection's table ready to take one document's rows again: recreate a table an
     older build or another embedding left behind, then drop the rows the document already has
-    there (a previous attach, possibly under other chunk settings).
-
-    Once per document, before its first `index_batch`, so a batch only ever writes its own part
-    range and the two concerns stay apart."""
+    there (a previous attach, possibly under other chunk settings)."""
     index = collection.index_with(embedding)
     await index.reset_for_write()
     await index.delete_document(doc.name)

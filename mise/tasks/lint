@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-#MISE description="Lint, format and type-check, applying fixes (ruff, ty, oxlint, tsc)"
-set -euo pipefail
-mise run check --fix

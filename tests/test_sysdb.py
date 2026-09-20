@@ -41,19 +41,15 @@ async def _job_id(action: str, collection: str | None = None) -> str:
     return found[0].id
 
 
-async def test_step_counts_and_child_status_counts_group_by_parent(dbos, tmp_path) -> None:
-    """The import is the parent of its convert slices and of the embedding it warms; the embed
-    job is the parent of its own slices. One grouped query answers for all of them."""
+async def test_step_counts_group_by_workflow(dbos, tmp_path) -> None:
+    """The import is the parent of its convert slices and the embed job of its own. One grouped
+    query counts the batches every one of them recorded."""
     doc = await _imported(dbos, tmp_path, pages=2)
     import_id = await _job_id("import")
     embed_id = await _job_id("embed")
     converts = [f"{import_id}:convert:{i}" for i in range(2)]
     embeds = [f"{embed_id}:embed:{i}" for i in range(2)]
 
-    assert await sysdb.child_status_counts([import_id, embed_id]) == {
-        import_id: {"SUCCESS": 3},  # two convert slices and the `ensure_embedding` it asked for
-        embed_id: {"SUCCESS": 2},  # two embed slices
-    }
     assert await sysdb.step_counts([*converts, *embeds], dbos_names.STAGE_STEP) == dict.fromkeys(
         [*converts, *embeds], 1
     ), "one of the two batches per slice"
@@ -62,17 +58,11 @@ async def test_step_counts_and_child_status_counts_group_by_parent(dbos, tmp_pat
     await attach_document(dbos, "grp", doc)
     index_id = await _job_id("index", "grp")
 
-    counts = await sysdb.child_status_counts([index_id])
-    assert counts[index_id]["SUCCESS"] >= 2, (
-        "the index child and the embedding the collection asked for (a cache hit)"
-    )
     assert await sysdb.step_counts([f"{index_id}:index"], dbos_names.STAGE_STEP) == {
         f"{index_id}:index": 2
     }, "the index stage is never sliced"
     assert await sysdb.step_counts(converts, "no-such-step") == {}, "a name nothing recorded"
     assert await sysdb.step_counts([], dbos_names.STAGE_STEP) == {}, "no ids, no query"
-    assert await sysdb.child_status_counts([]) == {}
-    assert await sysdb.child_status_counts(["ghost"]) == {}, "a parent with no children"
 
 
 async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) -> None:

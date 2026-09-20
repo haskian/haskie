@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
-import { api, type EmbeddingProfile, type Options } from '../api'
+import { useState } from 'react'
+import { api, type EmbeddingProfile } from '../api'
+import { useOptions } from '../hooks/useOptions'
+import { useRun } from '../hooks/useRun'
 
 const HINTS: Record<EmbeddingProfile, string> = {
   none: 'Full-text search only. No model download.',
@@ -9,43 +11,25 @@ const HINTS: Record<EmbeddingProfile, string> = {
 }
 
 export function Init({ onDone }: { onDone: () => void }) {
-  const [options, setOptions] = useState<Options | null>(null)
+  const options = useOptions()
   const [profile, setProfile] = useState<EmbeddingProfile>('compact')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    api.options().then(setOptions)
-  }, [])
-
-  const submit = async () => {
-    setBusy(true)
-    setError(null)
-    try {
-      await api.init(profile)
-      onDone()
-    } catch (e) {
-      setError(String(e))
-      setBusy(false)
-    }
-  }
+  const { run, busy, error } = useRun(async () => onDone())
 
   return (
     <div className="init">
       <h1>Welcome to haskie</h1>
       <p>Pick the embedding model. It applies to every collection; changing it later means a full reindex.</p>
-      {options &&
-        (Object.keys(options.embedding_profiles) as EmbeddingProfile[]).map((p) => (
-          <label key={p} className="radio">
-            <input type="radio" checked={profile === p} onChange={() => setProfile(p)} disabled={busy} />
-            <span>
-              <strong>{p}</strong> {options.embedding_profiles[p]?.name ?? ''}
-              <br />
-              <small className="muted">{HINTS[p]}</small>
-            </span>
-          </label>
-        ))}
-      <button onClick={submit} disabled={busy || !options}>
+      {(Object.keys(options.embedding_profiles) as EmbeddingProfile[]).map((p) => (
+        <label key={p} className="radio">
+          <input type="radio" checked={profile === p} onChange={() => setProfile(p)} disabled={busy} />
+          <span>
+            <strong>{p}</strong> {options.embedding_profiles[p]?.name ?? ''}
+            <br />
+            <small className="muted">{HINTS[p]}</small>
+          </span>
+        </label>
+      ))}
+      <button onClick={() => run(() => api.init(profile))} disabled={busy}>
         {busy ? 'initializing…' : 'Initialize ~/.haskie'}
       </button>
       {error && <p className="error">{error}</p>}

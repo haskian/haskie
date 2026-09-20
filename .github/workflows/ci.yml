@@ -5,16 +5,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  workflow_call: # release.yml runs the full suite before publishing
 
 permissions:
   contents: read
 
-# A newer push to the same branch makes the older run pointless. `github.workflow` keeps the run
-# release.yml calls apart from the branch's own run: a called workflow keeps the caller's ref, so
-# grouping on the ref alone would have the release cancel the push it was released from.
+# A newer push to the same branch makes the older run pointless.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -33,7 +30,4 @@ jobs:
       - uses: jdx/mise-action@v2
       - run: mise run setup
       - run: mise run check # ruff + ty + oxlint + tsc, read-only
-      # Skip the cpu_budget tests: they need a pipeline budget above what a small CI runner gives
-      # (see the marker in pyproject.toml). `-m` on the command line replaces the addopts default,
-      # so `not network` is repeated here.
-      - run: mise run test -- -m "not network and not cpu_budget"
+      - run: mise run test

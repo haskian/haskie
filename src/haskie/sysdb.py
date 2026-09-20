@@ -38,25 +38,7 @@ async def step_counts(workflow_ids: list[str], function_name: str) -> dict[str, 
     return counts
 
 
-async def child_status_counts(parent_ids: list[str]) -> dict[str, dict[str, int]]:
-    """Per parent workflow, how many children sit in each DBOS status."""
-    if not parent_ids:
-        return {}
-    counts: dict[str, dict[str, int]] = {}
-    async with db.connect() as conn:
-        for chunk in batched(parent_ids, SYSDB_PAGE, strict=False):
-            rows = await conn.execute_fetchall(
-                "select parent_workflow_id, status, count(*) from workflow_status "
-                f"where parent_workflow_id in ({db.placeholders(len(chunk))}) "
-                "group by parent_workflow_id, status",
-                chunk,
-            )
-            for parent_id, status, count in rows:
-                counts.setdefault(parent_id, {})[status] = count
-    return counts
-
-
-async def active_counts_by_name(active: list[str] = ACTIVE_STATUS) -> dict[str, int]:
+async def active_counts_by_name() -> dict[str, int]:
     """How many workflows of each name are enqueued or running right now.
 
     One query for the whole app: the jobs view shows an active count per kind, and a kind is a set
@@ -64,9 +46,9 @@ async def active_counts_by_name(active: list[str] = ACTIVE_STATUS) -> dict[str, 
     async with db.connect() as conn:
         rows = await conn.execute_fetchall(
             "select name, count(*) from workflow_status "
-            f"where status in ({db.placeholders(len(active))}) and name is not null "
+            f"where status in ({db.placeholders(len(ACTIVE_STATUS))}) and name is not null "
             "group by name",
-            active,
+            ACTIVE_STATUS,
         )
     return {name: count for name, count in rows}
 
@@ -78,8 +60,8 @@ async def queue_activity() -> dict[str, dict[str, int]]:
     grouped query over the prefix answers the whole indicator; a workflow started outside a queue
     has no name and is not counted.
 
-    `ACTIVE_STATUS`, not `WAITING_STATUS`: a DELAYED workflow is a debounce waiting out its period,
-    not work waiting for a slot. Counting it made the indicator read "1 queued" for a whole
+    `ACTIVE_STATUS` only: a DELAYED workflow is a debounce waiting out its period, not work
+    waiting for a slot. Counting it made the indicator read "1 queued" for a whole
     `maintenance_idle_seconds` after the last document, with nothing queued and the Jobs view -
     which counts the same `ACTIVE_STATUS` - showing nothing."""
     async with db.connect() as conn:

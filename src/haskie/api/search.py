@@ -55,13 +55,14 @@ async def search_text(
 
 @get("/api/search/documents", mcp_tool="search_documents")
 async def search_documents(
-    q: str, collections: str | None = None, limit: int = 10
+    q: str, collections: str | None = None, limit: Limit = None
 ) -> list[textsearch.DocumentMatch]:
     """Which documents to read for a query, rather than which passages answer it.
 
     The same full-text scan as `search_text`, folded to one row per document: `score` is the
     document's best chunk and `chunks` is how many of the scanned chunks came from it, so a
     document that matches throughout outranks one that matches once as well. Use it to narrow to
-    a shortlist, then `search_text` or `search` for the passages themselves.
+    a shortlist, then `search_text` or `search` for the passages themselves. `limit` defaults to
+    the shortlist size `textsearch` keeps.
     """
     return await textsearch.search_documents(q, textsearch.split_collections(collections), limit)

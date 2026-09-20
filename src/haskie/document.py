@@ -25,10 +25,8 @@ sync.
 import re
 import shutil
 import time
-import zlib
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 from uuid import uuid4
 
 import anyio
@@ -36,15 +34,7 @@ import anyio.to_thread
 import msgspec
 
 from haskie import convert, cpu, db, home
-from haskie.errors import (
-    Conflict,
-    DocumentNotFound,
-    InvalidInput,
-    NotReady,
-    UnsupportedFileType,
-    scrub,
-)
-from haskie.layout import PART_DIGITS, shard
+from haskie.errors import Conflict, InvalidInput, NotFound, NotReady, PermanentError
 from haskie.paging import Page, PageRequest, key_reader, keyset, resolve_sort
 from haskie.settings import Parser, load_user_settings
 
@@ -56,13 +46,13 @@ STAGING_ID = re.compile(r"^[0-9a-f]{32}\.[a-z0-9]+\Z")
 DocStatus = Literal[
     "queued", "converting", "embedding", "imported", "error", "cancelled", "deleting"
 ]
+DOCUMENT_STATUSES: tuple[DocStatus, ...] = get_args(DocStatus)
+# in the import pipeline right now: the states a poll waits on
+ACTIVE_DOCUMENT_STATUSES: tuple[DocStatus, ...] = ("queued", "converting", "embedding")
 
 # Public sort name -> SQL expression. The whitelist is the only source of column identifiers a
 # listing can order by, so a request can never name a column (see paging.resolve_sort).
 DOCUMENT_SORTS = {"name": "name", "size": "size", "status": "status", "updated_at": "updated_at"}
-
-# aiosqlite annotates every fetched row as `sqlite3.Row`, but `db.connect()` leaves the default row
-# factory alone, so a row really is a tuple. The reads below say `Any` where the row is unpacked.
 
 
 class Document(msgspec.Struct):
@@ -110,12 +100,12 @@ class Document(msgspec.Struct):
         return embeddings_dir(self.name)
 
     def part_path(self, seq: int) -> Path:
-        return self.parts_dir / f"{seq:0{PART_DIGITS}d}.md"
+        return self.parts_dir / f"{home.part_name(seq)}.md"
 
     def source_path(self) -> Path:
         """`original`, for the readers that need the file to exist."""
         if not self.original.is_file():
-            raise DocumentNotFound(f"document file missing: {self.name}")
+            raise NotFound(f"document file missing: {self.name}")
         return self.original
 
     @staticmethod
@@ -140,7 +130,7 @@ class Staged(msgspec.Struct):
 
 
 def root(name: str) -> Path:
-    return home.DOCUMENT_ROOT / shard(name) / name
+    return home.DOCUMENT_ROOT / home.shard(name) / name
 
 
 def embeddings_dir(name: str) -> Path:
@@ -169,15 +159,12 @@ def stored_name(filename: str, rename_to: str | None = None) -> str:
         chosen += suffix
     name = safe_name(chosen)
     if Path(name).suffix.lower() not in convert.SUPPORTED_SUFFIXES:
-        raise UnsupportedFileType(f"unsupported file type: {name}")
+        raise PermanentError(f"unsupported file type: {name}")
     return name
 
 
 def _document(row: tuple) -> Document:
-    values = dict(zip(DOCUMENT_COLUMNS, row, strict=True))
-    values["preview"] = db.loads(values["preview"], convert.Preview)
-    values["skip_ocr_pages"] = bool(values["skip_ocr_pages"])
-    return Document(**values)
+    return db.row_to(Document, DOCUMENT_COLUMNS, row, preview=convert.Preview)
 
 
 # --- staging ------------------------------------------------------------------
@@ -189,12 +176,6 @@ def staging_path(staging_id: str) -> Path:
     if not STAGING_ID.match(staging_id):
         raise InvalidInput(f"invalid staging id: {staging_id!r}")
     return home.STAGING_ROOT / staging_id
-
-
-def _stamp(seconds: float) -> str:
-    """A `staging.created_at` value: ISO-8601 in UTC, so rows of one fixed format compare as text
-    in the order they were written."""
-    return datetime.fromtimestamp(seconds, UTC).isoformat()
 
 
 async def stage(filename: str, content: bytes) -> Staged:
@@ -214,7 +195,7 @@ async def stage(filename: str, content: bytes) -> Staged:
     async with db.connect() as conn:
         await conn.execute(
             "insert into staging (staging_id, filename, size, created_at) values (?, ?, ?, ?)",
-            (staging_id, name, len(content), _stamp(time.time())),
+            (staging_id, name, len(content), time.time()),
         )
     return Staged(staging_id=staging_id, filename=name, size=len(content))
 
@@ -231,7 +212,7 @@ async def sweep_staging(max_age_seconds: float) -> int:
         cursor = await conn.execute("select staging_id, created_at from staging")
         rows = await cursor.fetchall()
     staged = {staging_id for staging_id, _ in rows}
-    expired = [staging_id for staging_id, created_at in rows if created_at < _stamp(cutoff)]
+    expired = [staging_id for staging_id, created_at in rows if created_at < cutoff]
     for staging_id in expired:
         await anyio.Path(staging_path(staging_id)).unlink(missing_ok=True)
     if expired:
@@ -255,25 +236,30 @@ async def sweep_staging(max_age_seconds: float) -> int:
 # --- import -------------------------------------------------------------------
 
 
-async def _create(
-    name: str,
-    size: int,
-    description: str,
-    parser: Parser | None,
-    skip_ocr_pages: bool | None,
-) -> Document:
+class ImportOptions(msgspec.Struct):
+    """How an import stores the file, whichever source it came from."""
+
+    name: str | None = None  # store it under this name instead of the file's own
+    description: str = ""
+    parser: Parser | None = None
+    skip_ocr_pages: bool | None = None
+
+
+async def _create(name: str, size: int, options: ImportOptions) -> Document:
     """The row, before the file: a name already taken is refused with nothing on disk to undo.
     `parser` / `skip_ocr_pages` default to the user settings at the moment of import."""
     user = await load_user_settings()
-    parser = parser or user.conversion.parser
-    skip = user.conversion.skip_ocr_pages if skip_ocr_pages is None else skip_ocr_pages
+    parser = options.parser or user.conversion.parser
+    skip = (
+        user.conversion.skip_ocr_pages if options.skip_ocr_pages is None else options.skip_ocr_pages
+    )
     now = time.time()
     async with db.connect() as conn:
         cursor = await conn.execute(
             "insert into documents (name, suffix, size, status, parser, skip_ocr_pages, "
             "created_at, updated_at, description) values (?, ?, ?, 'queued', ?, ?, ?, ?, ?) "
             "on conflict (name) do nothing",
-            (name, Path(name).suffix.lower(), size, parser, skip, now, now, description),
+            (name, Path(name).suffix.lower(), size, parser, skip, now, now, options.description),
         )
         created = cursor.rowcount == 1  # read on the open connection, before it is closed
     if not created:
@@ -297,19 +283,14 @@ async def _place(document: Document, move: bool, source: Path) -> Document:
     return document
 
 
-async def import_staged(
-    staging_id: str,
-    name: str | None = None,
-    description: str = "",
-    parser: Parser | None = None,
-    skip_ocr_pages: bool | None = None,
-) -> Document:
+async def import_staged(staging_id: str, options: ImportOptions | None = None) -> Document:
     """Turn a staged upload into a document: the final name, the row, the file in its folder.
 
     The staging row carries the name the user uploaded, because the staging id holds only the
     suffix. The staged file is moved, not copied, and its row goes once the file is placed, so an
     import consumes the staging entry; a failed import leaves it to be retried or swept.
     """
+    options = options or ImportOptions()
     source = staging_path(staging_id)  # a trust boundary: the id is validated into a path here
     async with db.connect() as conn:
         cursor = await conn.execute(
@@ -317,50 +298,37 @@ async def import_staged(
         )
         row = await cursor.fetchone()
     if row is None or not await anyio.Path(source).is_file():
-        raise DocumentNotFound(f"staged upload not found: {staging_id}")
-    final = stored_name(row[0], name)
+        raise NotFound(f"staged upload not found: {staging_id}")
+    final = stored_name(row[0], options.name)
     size = (await anyio.Path(source).stat()).st_size
-    document = await _create(final, size, description, parser, skip_ocr_pages)
+    document = await _create(final, size, options)
     placed = await _place(document, True, source)
     async with db.connect() as conn:
         await conn.execute("delete from staging where staging_id = ?", (staging_id,))
     return placed
 
 
-async def import_path(
-    path: str,
-    name: str | None = None,
-    description: str = "",
-    parser: Parser | None = None,
-    skip_ocr_pages: bool | None = None,
-) -> Document:
+async def import_path(path: str, options: ImportOptions | None = None) -> Document:
     """Import by absolute path: a trust boundary, so the path is checked before it is read.
 
     The file is copied rather than read into memory: an import may be as large as the upload
     cap allows, and `shutil.copyfile` streams it (in a worker thread, so nothing blocks).
     """
+    options = options or ImportOptions()
     source = Path(path).expanduser()
     if not source.is_absolute():
-        raise InvalidInput(f"path must be absolute: {scrub(str(source))}")
+        raise InvalidInput(f"path must be absolute: {home.scrub(str(source))}")
     if not await anyio.Path(source).is_file():
-        raise InvalidInput(f"file not found: {scrub(str(source))}")
-    final = stored_name(source.name, name)
+        raise InvalidInput(f"file not found: {home.scrub(str(source))}")
+    final = stored_name(source.name, options.name)
     size = (await anyio.Path(source).stat()).st_size
     if size > UPLOAD_MAX_BYTES:
         raise InvalidInput(f"file larger than {UPLOAD_MAX_BYTES} bytes: {size}")
-    document = await _create(final, size, description, parser, skip_ocr_pages)
+    document = await _create(final, size, options)
     return await _place(document, False, source)
 
 
 # --- rows ---------------------------------------------------------------------
-
-
-async def names() -> list[str]:
-    """Every document name, in name order: what a caller that only iterates documents needs."""
-    async with db.connect() as conn:
-        cursor = await conn.execute("select name from documents order by name")
-        rows = await cursor.fetchall()
-    return [row[0] for row in rows]
 
 
 async def page(request: PageRequest, status: DocStatus | None = None) -> Page[Document]:
@@ -400,23 +368,8 @@ async def get(name: str) -> Document:
         )
         row: Any = await cursor.fetchone()
     if row is None:
-        raise DocumentNotFound(f"document not found: {name}")
+        raise NotFound(f"document not found: {name}")
     return _document(row)
-
-
-async def get_many(wanted: list[str]) -> dict[str, Document]:
-    """Several rows in one query, keyed by name; a name with no row is absent."""
-    names_ = list(dict.fromkeys(wanted))
-    if not names_:
-        return {}
-    async with db.connect() as conn:
-        cursor = await conn.execute(
-            f"select {DOCUMENT_SELECT} from documents "
-            f"where name in ({db.placeholders(len(names_))})",
-            names_,
-        )
-        rows: list[Any] = list(await cursor.fetchall())
-    return {row[0]: _document(row) for row in rows}
 
 
 async def set_status(name: str, status: DocStatus, error: str | None = None) -> None:
@@ -442,7 +395,7 @@ async def describe(name: str, description: str) -> Document:
         )
         row: Any = await cursor.fetchone()
     if row is None:
-        raise DocumentNotFound(f"document not found: {name}")
+        raise NotFound(f"document not found: {name}")
     return _document(row)
 
 
@@ -475,83 +428,73 @@ async def collections_of(name: str) -> list[str]:
 
 # --- preview ------------------------------------------------------------------
 
-# Fixed stripes of locks, so two readers of the same document build the preview once. Striped
-# rather than one lock per document: a process that opens a million documents still holds 64 locks.
-# Two documents may share a stripe; the second one then waits for a build it does not need, which
-# is rare and harmless.
-#
+# One lock per document being built, so two readers of the same document build the preview once.
 # An `anyio.Lock` rather than a threading one: a preview is only ever built on Litestar's event
 # loop (the handler that opens a document), so one set of loop primitives covers every builder, and
-# a waiting reader yields its loop instead of blocking it. Each stripe is made on first use rather
-# than at import, so no lock exists before there is a loop to await it on.
-PREVIEW_LOCK_STRIPES = 64
-_preview_locks: list[anyio.Lock | None] = [None] * PREVIEW_LOCK_STRIPES
-
-
-def _preview_lock(doc: str) -> anyio.Lock:
-    stripe = zlib.crc32(doc.encode()) % PREVIEW_LOCK_STRIPES
-    lock = _preview_locks[stripe]
-    if lock is None:  # no await in between, so two readers of one stripe cannot both make one
-        lock = _preview_locks[stripe] = anyio.Lock()
-    return lock
+# a waiting reader yields its loop instead of blocking it. Made on first use, because no lock may
+# exist before there is a loop to await it on.
+_preview_locks: dict[str, anyio.Lock] = {}
 
 
 # A preview build parses a whole document, so a burst of opens would otherwise start one parse per
 # request. The semaphore admits `pipeline.preview_workers` of them; the rest wait, and a reader
 # that waited this long is told to retry instead of holding its request open forever.
 PREVIEW_WAIT_SECONDS = 60
-_preview_workers = 2  # the default of `PipelineSettings.preview_workers`
-_preview_slots = anyio.Semaphore(_preview_workers)
+# 2 is the default of `PipelineSettings.preview_workers`. An anyio semaphore, unlike the CPU
+# budget's: every preview waits on Litestar's event loop, as `_preview_locks` describes.
+_preview_slots = cpu.ResizableSemaphore(anyio.Semaphore, 2)
 
 
 def configure_preview_slots(workers: int) -> None:
-    """Resize the pool of preview builders. A build in flight releases the semaphore it acquired,
-    so it is unaffected by a resize under it.
-
-    Called from `workflows.apply_settings`, which runs on Litestar's event loop (a settings
-    handler, or startup) — the same loop every preview waits on, as `_preview_lock` describes.
-    """
-    global _preview_workers, _preview_slots
-    if workers != _preview_workers:
-        _preview_workers, _preview_slots = workers, anyio.Semaphore(workers)
+    """Resize the pool of preview builders (from `workflows.apply_settings`)."""
+    _preview_slots.resize(workers)
 
 
-async def ensure_preview(name: str) -> Document:
+async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
     """Build the side-by-side preview (first pages only for PDF) once, on first open.
 
-    Two locks, always in this order: the per-document stripe (build this document once), then
-    a slot in the process-wide pool (build at most `preview_workers` documents at a time).
+    Returns the preview beside the row so a caller never has to re-check `Document.preview` for
+    a `None` this has just ruled out.
+
+    Two locks, always in this order: the document's own (build this document once), then a
+    slot in the process-wide pool (build at most `preview_workers` documents at a time).
     The parse itself is CPU work, so it runs in a worker thread under the CPU budget.
     """
     info = await get(name)
     if info.preview is not None:
-        return info
-    async with _preview_lock(name):
-        info = await get(name)  # another reader may have built it while we waited
-        if info.preview is not None:
-            return info
-        slots = _preview_slots  # the object to release, even if the pool is resized meanwhile
-        try:
-            with anyio.fail_after(PREVIEW_WAIT_SECONDS):
-                await slots.acquire()
-        except TimeoutError:
-            raise NotReady("preview queue is full; retry") from None
-        try:
-            preview = await cpu.on_cpu(
-                "preview",
-                convert.build_preview,
-                info.source_path(),
-                info.preview_dir,
-                info.parser,
-                info.skip_ocr_pages,
-            )
-            async with db.connect() as conn:
-                await conn.execute(
-                    "update documents set preview = ? where name = ?", (db.dumps(preview), name)
+        return info, info.preview
+    # setdefault, with no await in between, so two readers of one document take the same lock
+    lock = _preview_locks.setdefault(name, anyio.Lock())
+    try:
+        async with lock:
+            info = await get(name)  # another reader may have built it while we waited
+            if info.preview is not None:
+                return info, info.preview
+            slots = _preview_slots.current  # the object to release, even if the pool is resized
+            try:
+                with anyio.fail_after(PREVIEW_WAIT_SECONDS):
+                    await slots.acquire()
+            except TimeoutError:
+                raise NotReady("preview queue is full; retry") from None
+            try:
+                preview = await cpu.on_cpu(
+                    convert.build_preview,
+                    info.source_path(),
+                    info.preview_dir,
+                    info.parser,
+                    info.skip_ocr_pages,
                 )
-        finally:
-            slots.release()
-        return await get(name)
+                async with db.connect() as conn:
+                    await conn.execute(
+                        "update documents set preview = ? where name = ?",
+                        (db.dumps(preview), name),
+                    )
+            finally:
+                slots.release()
+            return await get(name), preview
+    finally:
+        # the build is committed, so a reader arriving now reads the preview instead of the lock
+        _preview_locks.pop(name, None)
 
 
 # --- removal ------------------------------------------------------------------

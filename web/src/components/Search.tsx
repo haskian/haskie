@@ -80,8 +80,8 @@ export function Search({
             <span>chars {h.char_start}–{h.char_end}</span>
             <span>chunk {h.chunk_id} · part {h.part}</span>
             <span>score {h.score.toFixed(3)}</span>
-            <span title={`${h.home}/${h.markdown_path}`}>md: {h.markdown_path}</span>
-            <span title={`${h.home}/${h.source_path}`}>src: {h.source_path}</span>
+            <span title={h.markdown_file}>md: {h.markdown_path}</span>
+            <span title={h.source_file}>src: {h.source_path}</span>
           </div>
           <pre>{h.text}</pre>
         </article>

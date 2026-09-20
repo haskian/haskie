@@ -9,12 +9,11 @@ import { Jobs } from './pages/Jobs'
 import { Sessions } from './pages/Sessions'
 import { Settings } from './pages/Settings'
 import { Viewer } from './pages/Viewer'
-import './App.css'
 
 // A document is imported once and addressed by name alone, so the viewer needs no collection.
 export type Route =
   | { name: 'documents' }
-  | { name: 'collections'; collection?: string }
+  | { name: 'collections' }
   | { name: 'viewer'; doc: string }
   | { name: 'sessions' }
   | { name: 'jobs' }
@@ -26,6 +25,7 @@ export default function App() {
 
   const refresh = useCallback(() => api.status().then(setStatus), [])
   useEffect(() => {
+    void api.options() // started here so it travels with the status request, not after it
     refresh()
   }, [refresh])
   // poll while a model is downloading
@@ -55,7 +55,7 @@ export default function App() {
       </nav>
       <main>
         {page.name === 'documents' && <Documents navigate={setPage} />}
-        {page.name === 'collections' && <Collections initial={page.collection} navigate={setPage} />}
+        {page.name === 'collections' && <Collections navigate={setPage} />}
         {page.name === 'viewer' && <Viewer doc={page.doc} navigate={setPage} />}
         {page.name === 'sessions' && <Sessions />}
         {page.name === 'jobs' && <Jobs />}

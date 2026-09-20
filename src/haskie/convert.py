@@ -7,6 +7,7 @@ a coroutine blocks that event loop.
 """
 
 import io
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -14,7 +15,7 @@ import msgspec
 import pyromark
 
 from haskie import home
-from haskie.errors import ConversionError, NeedsOcr, UnsupportedFileType, scrub
+from haskie.errors import PermanentError
 from haskie.settings import Parser
 
 PREVIEW_PAGES = 10
@@ -24,9 +25,20 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 HTML_SUFFIXES = {".html", ".htm"}
 ANYDOC_SUFFIXES = {
     ".pdf", ".doc", ".docx", ".docm", ".ppt", ".pps", ".pot", ".pptx", ".pptm", ".ppsx", ".ppsm",
-    ".xls", ".xlsx", ".xlsm", ".xlsb", ".odt", ".ods", ".odp", ".rtf", ".epub", ".csv",
+    ".xls", ".xlsx", ".xlsm", ".xlsb", ".odt", ".ods", ".odp", ".rtf", ".epub",
 }  # fmt: skip
 SUPPORTED_SUFFIXES = TEXT_SUFFIXES | HTML_SUFFIXES | IMAGE_SUFFIXES | ANYDOC_SUFFIXES
+
+# The page marker written into a PDF's markdown, and read back by `chunk` (which page a chunk is
+# on) and `render` (where to cut the document into pages). Written and parsed here so the three
+# modules share one contract.
+PAGE_MARKER = re.compile(r"<!-- page (\d+)[^>]*-->")
+
+
+def page_marker(page: int, skipped: bool = False) -> str:
+    """The marker ahead of one 1-based page; `skipped` notes a page left out for needing OCR."""
+    return f"<!-- page {page}: needs OCR, skipped -->" if skipped else f"<!-- page {page} -->"
+
 
 PreviewKind = Literal["pdf", "image", "text", "html"]
 
@@ -38,24 +50,23 @@ class Preview(msgspec.Struct):
     ocr_pages: list[int] = []  # 1-based pages with no extractable text (within the preview)
 
 
-def _conversion_error(path: Path, exc: Exception) -> ConversionError:
+def _conversion_error(path: Path, exc: Exception) -> PermanentError:
     """A parser failure is a property of the file, not of the moment: retrying cannot fix it."""
-    return ConversionError(scrub(f"{path.name}: {type(exc).__name__}: {exc}"))
+    return PermanentError(home.scrub(f"could not convert {path.name}: {type(exc).__name__}: {exc}"))
 
 
-def to_markdown(path: Path, parser: Parser, skip_ocr_pages: bool = False) -> str:
-    """Whole-file conversion. PDFs go page-wise (all pages at once here; batched in pipeline.py)."""
+def to_markdown(path: Path, parser: Parser) -> str:
+    """Whole-file conversion, for everything except PDF: a PDF is converted page-wise, in batches
+    (`pdf_pages_markdown`), and its OCR policy is applied over the whole document afterwards."""
     suffix = path.suffix.lower()
     if suffix in IMAGE_SUFFIXES:
         return ""  # no extractable text without OCR; the preview shows the image itself
     if parser == "plain" or suffix in TEXT_SUFFIXES | HTML_SUFFIXES:
         return path.read_text(encoding="utf-8", errors="replace")
     if suffix == ".pdf":
-        markdown, ocr_pages, total_pages = pdf_pages_markdown(path, skip_ocr_pages=skip_ocr_pages)
-        check_ocr_policy(len(ocr_pages), total_pages, skip_ocr_pages)
-        return markdown
+        raise ValueError(f"PDFs convert page-wise, through pdf_pages_markdown: {path.name}")
     if suffix not in ANYDOC_SUFFIXES:
-        raise UnsupportedFileType(f"unsupported file type: {suffix or path.name}")
+        raise PermanentError(f"unsupported file type: {suffix or path.name}")
     import anydoc  # OCR deliberately off; PDFs never reach here
 
     try:
@@ -76,9 +87,9 @@ def pdf_page_count(path: Path) -> int:
 def check_ocr_policy(ocr_pages: int, total_pages: int, skip_ocr_pages: bool) -> None:
     """A document with no extractable text always fails; otherwise OCR pages fail unless skipped."""
     if total_pages and ocr_pages == total_pages:
-        raise NeedsOcr(f"all {total_pages} pages need OCR")
+        raise PermanentError(f"all {total_pages} pages need OCR")
     if ocr_pages and not skip_ocr_pages:
-        raise NeedsOcr(f"{ocr_pages} of {total_pages} pages need OCR (enable skip_ocr_pages)")
+        raise PermanentError(f"{ocr_pages} of {total_pages} pages need OCR (enable skip_ocr_pages)")
 
 
 def pdf_pages_markdown(
@@ -97,12 +108,12 @@ def pdf_pages_markdown(
     except Exception as exc:
         raise _conversion_error(path, exc) from exc
     ocr_pages = [p.page + 1 for p in result.pages if p.needs_ocr]
-    parts = []
-    for p in result.pages:
-        if p.needs_ocr and skip_ocr_pages:
-            parts.append(f"<!-- page {p.page + 1}: needs OCR, skipped -->")
-        else:
-            parts.append(f"<!-- page {p.page + 1} -->\n\n{p.markdown}")
+    parts = [
+        page_marker(p.page + 1, skipped=True)
+        if p.needs_ocr and skip_ocr_pages
+        else f"{page_marker(p.page + 1)}\n\n{p.markdown}"
+        for p in result.pages
+    ]
     return "\n\n".join(parts), ocr_pages, len(result.pages)
 
 

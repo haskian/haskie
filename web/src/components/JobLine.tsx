@@ -1,11 +1,14 @@
-import { ACTIVE_JOB_STATUSES as ACTIVE, type JobRow, type Task } from '../api'
+import type { JobRow, Task } from '../api'
+import { when } from '../format'
+import { useOptions } from '../hooks/useOptions'
 
 export function JobLine({ job: j, tasks, onToggle, onCancel }: { job: JobRow; tasks: Task[] | null; onToggle: () => void; onCancel: () => void }) {
+  const { active_job_statuses } = useOptions()
   return (
     <>
       <tr>
-        {/* an archived job is days old, so the day is part of when it started */}
-        <td className="muted" title={j.id}>{new Date(j.created_at * 1000)[j.archived ? 'toLocaleString' : 'toLocaleTimeString']()}</td>
+        {/* a job stays listed for weeks, so the day is part of when it started */}
+        <td className="muted" title={j.id}>{when(j.created_at)}</td>
         <td>{j.title}</td>
         <td className={j.status === 'ERROR' ? 'error' : ''}>
           {j.status.toLowerCase()}
@@ -16,7 +19,7 @@ export function JobLine({ job: j, tasks, onToggle, onCancel }: { job: JobRow; ta
         </td>
         <td>
           {j.kind === 'document' && <button onClick={onToggle}>{tasks ? 'hide' : 'batches'}</button>}
-          {ACTIVE.has(j.status) && <button onClick={onCancel}>cancel</button>}
+          {active_job_statuses.includes(j.status) && <button onClick={onCancel}>cancel</button>}
         </td>
       </tr>
       {tasks && (
@@ -50,12 +53,13 @@ export function JobLine({ job: j, tasks, onToggle, onCancel }: { job: JobRow; ta
 // What one kind counts: micro-batches for a document, queued documents for a whole-collection
 // job, and whether the backend process has the model loaded for a download. The rest count nothing.
 function Progress({ job: j }: { job: JobRow }) {
+  const { active_job_statuses } = useOptions()
   const count = (key: string) => (typeof j.detail[key] === 'number' ? j.detail[key] : 0)
   if (j.kind === 'document') {
     const [done, running, total] = [count('tasks_done'), count('tasks_running'), count('tasks_total')]
     // no batches at all: still planning while it runs; when it finished that way, the embed
     // found its cache and had nothing to compute
-    if (total === 0) return <span className="muted">{ACTIVE.has(j.status) ? 'planning' : j.status === 'SUCCESS' ? 'already computed' : ''}</span>
+    if (total === 0) return <span className="muted">{active_job_statuses.includes(j.status) ? 'planning' : j.status === 'SUCCESS' ? 'already computed' : ''}</span>
     return (
       <>
         <Bar done={done} running={running} total={total} />

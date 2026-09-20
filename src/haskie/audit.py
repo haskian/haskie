@@ -9,8 +9,7 @@ import inspect
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -20,7 +19,7 @@ import anyio
 import msgspec
 import structlog
 
-from haskie import APP_VERSION, errors, home
+from haskie import APP_VERSION, home
 from haskie.logs import AUDIT
 
 DEFAULT_ACTOR = "web"  # no request context: a worker thread or a direct call
@@ -159,65 +158,51 @@ async def _finish(
         outcome="ok" if exc is None else "error",
         duration_ms=int((time.perf_counter() - started) * 1000),
         request_id=request_id,
-        error=None if exc is None else errors.scrub(f"{type(exc).__name__}: {exc}"),
+        error=None if exc is None else home.scrub(f"{type(exc).__name__}: {exc}"),
         detail=detail or None,
         **{**fields, **named},
     )
 
 
-def audited(
-    event: str,
-    *,
-    collection: str | None = None,
-    doc: str | None = None,
-    session_id: str | None = None,
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def audited(event: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorate an async handler so every call appends one audit record, then re-raise on failure.
 
     A parameter named `collection`, `doc` or `session_id` is copied into the record field of the
-    same name; the keyword arguments point one of those fields at a parameter that reads
-    differently (`session_id="session"`). `attach` adds what the handler only knows once it runs.
-    The wrapper keeps the wrapped signature because Litestar builds its dependency injection from
-    `inspect.signature`, so it must take no parameter of its own.
+    same name; `attach` adds what the handler only knows once it runs. The wrapper keeps the
+    wrapped signature because Litestar builds its dependency injection from `inspect.signature`,
+    so it must take no parameter of its own.
     """
-    sources = {"collection": collection, "doc": doc, "session_id": session_id}
 
     def decorate(func: Callable[..., Any]) -> Callable[..., Any]:
         signature = inspect.signature(func)
-        fields_from = {
-            field: name or field
-            for field, name in sources.items()
-            if (name or field) in signature.parameters
-        }
+        fields_from = [
+            field for field in ("collection", "doc", "session_id") if field in signature.parameters
+        ]
 
         def fields(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, str]:
             bound = signature.bind(*args, **kwargs)
             bound.apply_defaults()
             return {
-                field: str(bound.arguments[name])
-                for field, name in fields_from.items()
-                if bound.arguments.get(name) is not None
+                field: str(bound.arguments[field])
+                for field in fields_from
+                if bound.arguments.get(field) is not None
             }
 
-        @asynccontextmanager
-        async def recording(args: tuple[Any, ...], kwargs: dict[str, Any]) -> AsyncIterator[None]:
+        @functools.wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
             """Time the call, collect what it attaches, and append the record either way."""
             started = time.perf_counter()
             token = _attached.set({})
             try:
-                yield
+                result = await func(*args, **kwargs)
             except BaseException as exc:
                 await _finish(event, fields(args, kwargs), started, exc)
                 raise
             else:
                 await _finish(event, fields(args, kwargs), started, None)
+                return result
             finally:
                 _attached.reset(token)
-
-        @functools.wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            async with recording(args, kwargs):
-                return await func(*args, **kwargs)
 
         return wrapper
 

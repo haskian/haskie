@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#MISE description="Regenerate web/src/schema.d.ts from the Litestar OpenAPI document. Pass --check to fail on drift instead of writing."
+set -euo pipefail
+
+target="web/src/schema.d.ts"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# The document comes from the app object, so no server and no port are involved. It goes to a file
+# rather than to stdout, because importing the app also puts logging on stdout.
+uv run python -c '
+import json
+import sys
+
+from haskie.app import app
+
+with open(sys.argv[1], "w") as out:
+    json.dump(app.openapi_schema.to_schema(), out)
+' "$work/openapi.json"
+
+(cd web && bunx openapi-typescript "$work/openapi.json" --output "$work/schema.d.ts")
+
+if [ "${1:-}" = "--check" ]; then
+  if ! diff -u "$target" "$work/schema.d.ts"; then
+    echo "$target no longer matches the API. Run: mise run schema" >&2
+    exit 1
+  fi
+else
+  mv "$work/schema.d.ts" "$target"
+fi

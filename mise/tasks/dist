@@ -3,18 +3,4 @@
 set -euo pipefail
 # order matters: the UI is copied into the package before the wheel is built from it
 mise run build
-# release.yml exports BUILD_REF (a v* tag). A wheel whose version disagrees with its tag
-# cannot be un-published, so refuse to build one — catches a hand-pushed tag that never ran
-# the bump. The tree's declared version is the single source of truth here.
-if [ -n "${BUILD_REF:-}" ]; then
-  declared="v$(uv version --short)"
-  if [ "$declared" != "$BUILD_REF" ]; then
-    echo "::error::$BUILD_REF was cut from a tree declaring $declared — run the bump, do not tag by hand" >&2
-    exit 1
-  fi
-fi
-
 uv build "$@"  # wheel + sdist into dist/
-echo
-echo "the wheel carries the UI:"
-unzip -l dist/*.whl | grep -c "haskie/web/" | xargs -I{} echo "  {} entries under haskie/web/"

@@ -1,22 +1,28 @@
 """Init, user settings and the option catalogue the UI renders its forms from."""
 
+from typing import get_args
+
 import msgspec
 from litestar import get, post, put
 
-from haskie import audit, home, models, workflows
+from haskie import audit, home, jobs, models, workflows
+from haskie.collection import ACTIVE_MEMBER_STATUSES, MEMBER_STATUSES, MemberStatus
+from haskie.dbos_names import ACTIVE_STATUS
+from haskie.document import ACTIVE_DOCUMENT_STATUSES, DOCUMENT_STATUSES, DocStatus
+from haskie.embed import device_name
 from haskie.errors import Conflict
 from haskie.settings import (
-    ACCELERATORS,
-    CHUNKERS,
-    FUSIONS,
-    PARSERS,
     PROFILES,
     RERANKER_MODELS,
-    RERANKERS,
-    SEARCH_MODES,
+    Accelerator,
+    Chunker,
     EmbeddingModel,
     EmbeddingProfile,
     FieldDoc,
+    Fusion,
+    Parser,
+    Reranker,
+    SearchMode,
     UserSettings,
     docs,
     init_user_settings,
@@ -41,15 +47,25 @@ class Init(msgspec.Struct):
 
 
 class Options(msgspec.Struct):
-    parsers: tuple[str, ...]
-    chunkers: tuple[str, ...]
-    accelerators: tuple[str, ...]
-    search_modes: tuple[str, ...]
-    fusions: tuple[str, ...]
-    rerankers: tuple[str, ...]
+    """Every choice the UI offers, from the constants the backend already validates against, so
+    nothing is spelled a second time in the frontend."""
+
+    parsers: tuple[Parser, ...]
+    chunkers: tuple[Chunker, ...]
+    accelerators: tuple[Accelerator, ...]
+    search_modes: tuple[SearchMode, ...]
+    fusions: tuple[Fusion, ...]
+    rerankers: tuple[Reranker, ...]
     reranker_models: tuple[str, ...]
     docs: dict[str, FieldDoc]  # title + definition per setting key, e.g. "defaults.chunk_size"
-    embedding_profiles: dict[str, EmbeddingModel | None]
+    embedding_profiles: dict[EmbeddingProfile, EmbeddingModel | None]
+    document_statuses: tuple[DocStatus, ...]
+    active_document_statuses: tuple[DocStatus, ...]  # in the import pipeline: a poll waits on them
+    member_statuses: tuple[MemberStatus, ...]
+    active_member_statuses: tuple[MemberStatus, ...]
+    active_job_statuses: tuple[str, ...]  # DBOS workflow statuses that are still on their way
+    job_kinds: tuple[jobs.JobKind, ...]  # in the order the Jobs view shows its sections
+    bulk_kinds: tuple[jobs.BulkKind, ...]  # the jobs a 202 points at
 
 
 def _changed_fields(before: msgspec.Struct, after: msgspec.Struct, prefix: str = "") -> list[str]:
@@ -69,8 +85,6 @@ def _changed_fields(before: msgspec.Struct, after: msgspec.Struct, prefix: str =
 
 @get("/api/status")
 async def get_status() -> Status:
-    from haskie.embed import device_name
-
     saved = await load_user_settings_or_none()
     current = saved or UserSettings()
     return Status(
@@ -78,7 +92,7 @@ async def get_status() -> Status:
         home=str(home.HOME),
         embedding=current.embedding_model if saved else None,
         device=device_name(current.pipeline.accelerator),
-        models=(await models.model_statuses(current)) if saved else [],
+        models=(await models.model_statuses()) if saved else [],
         settings_error=settings_problem(),
     )
 
@@ -115,15 +129,22 @@ async def put_settings(data: UserSettings) -> UserSettings:
 
 
 OPTIONS = Options(
-    parsers=PARSERS,
-    chunkers=CHUNKERS,
-    accelerators=ACCELERATORS,
-    search_modes=SEARCH_MODES,
-    fusions=FUSIONS,
-    rerankers=RERANKERS,
+    parsers=get_args(Parser),
+    chunkers=get_args(Chunker),
+    accelerators=get_args(Accelerator),
+    search_modes=get_args(SearchMode),
+    fusions=get_args(Fusion),
+    rerankers=get_args(Reranker),
     reranker_models=RERANKER_MODELS,
     docs=docs(),
     embedding_profiles=PROFILES,
+    document_statuses=DOCUMENT_STATUSES,
+    active_document_statuses=ACTIVE_DOCUMENT_STATUSES,
+    member_statuses=MEMBER_STATUSES,
+    active_member_statuses=ACTIVE_MEMBER_STATUSES,
+    active_job_statuses=tuple(ACTIVE_STATUS),
+    job_kinds=jobs.KIND_ORDER,
+    bulk_kinds=jobs.BULK_KINDS,
 )
 
 

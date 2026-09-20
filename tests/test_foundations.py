@@ -1,7 +1,7 @@
 """Foundations: typed errors, atomic writes, migrations, the CPU budget, settings, audit trail."""
 
 import asyncio
-import json
+import hashlib
 import os
 import sqlite3
 import stat
@@ -14,7 +14,9 @@ import anyio
 import msgspec
 import pytest
 
-from haskie import audit, cpu, db, errors, home, settings
+from haskie import audit, cpu, db, document, embed_cache, errors, home, settings
+from haskie.collection import Collection
+from haskie.document import Document
 from haskie.settings import (
     ChunkSettings,
     CollectionSettings,
@@ -29,6 +31,8 @@ from haskie.settings import (
     settings_problem,
     without_none,
 )
+
+from conftest import audit_lines, events, forget_settings  # isort: skip
 
 # --- errors -----------------------------------------------------------------------
 
@@ -48,15 +52,87 @@ from haskie.settings import (
 )
 def test_scrub_replaces_absolute_paths(name: str, template: str, expected: str) -> None:
     text = template.format(home=home.HOME, user=Path.home())
-    assert errors.scrub(text) == expected, name
+    assert home.scrub(text) == expected, name
 
 
 def test_invalid_input_is_also_a_value_error() -> None:
     """Callers written before `errors` (and msgspec's decode-time wrapping) catch ValueError."""
     assert issubclass(errors.InvalidInput, ValueError)
-    assert issubclass(errors.CollectionNotFound, errors.NotFound)
-    assert issubclass(errors.DocumentNotFound, errors.NotFound)
-    assert issubclass(errors.NeedsOcr, errors.PermanentError)
+
+
+# --- the home layout ---------------------------------------------------------------
+
+DOC = "guide.md"
+
+
+def test_shard_hashes_the_utf8_bytes_of_the_name() -> None:
+    """A name is text, a hash is bytes: the encoding is pinned so the shard never depends on the
+    platform or the locale."""
+    name = "résumé.md"
+
+    assert home.shard(name) == hashlib.sha1(name.encode("utf-8")).hexdigest()[:2]
+    assert len(home.shard(name)) == 2
+    assert home.shard(name) == home.shard(name), "the same name always lands in one place"
+
+
+def test_shard_spreads_names_over_the_whole_byte() -> None:
+    """One directory per name would make every listing pay for every document, so the point of
+    the shard is the spread: a thousand names have to use most of the 256 directories."""
+    shards = {home.shard(f"doc-{i}.md") for i in range(1000)}
+
+    assert len(shards) > 200, "a thousand names fall into more than 200 of the 256 shards"
+    assert all(len(prefix) == 2 and int(prefix, 16) >= 0 for prefix in shards), "two hex digits"
+
+
+def test_every_document_path_sits_under_the_same_shard() -> None:
+    """A document owns one folder: the upload, the markdown, the parts, the preview and the
+    embedding cache are all inside it, so one `remove_tree` deletes everything it owns."""
+    doc = Document(name=DOC, suffix=".md", size=1, status="imported")
+    root = home.DOCUMENT_ROOT / home.shard(DOC) / DOC
+
+    assert document.root(DOC) == root
+    assert doc.root == root
+    assert doc.original == root / "original.md"
+    assert doc.markdown == root / "original.md.md"
+    assert doc.parts_dir == root / "parts"
+    assert doc.preview_dir == root / "preview"
+    assert doc.embeddings_dir == root / "embeddings"
+    assert doc.part_path(7) == doc.parts_dir / "000007.md"
+    assert embed_cache.file_path(DOC, "abc").parent == doc.embeddings_dir
+    assert {path.parent.parent for path in (doc.original, doc.markdown)} == {root.parent}
+
+
+def test_part_numbers_are_wide_enough_for_a_long_document() -> None:
+    doc = Document(name=DOC, suffix=".md", size=1, status="imported")
+
+    assert home.PART_DIGITS == 6, "four digits would cap a document at ten thousand parts"
+    assert doc.part_path(0).name == "000000.md"
+    assert doc.part_path(123456).name == "123456.md"
+
+
+def test_a_collection_is_sharded_by_its_own_name() -> None:
+    collection = Collection("notes")
+    root = home.COLLECTION_ROOT / home.shard("notes") / "notes"
+
+    assert collection.root == root
+    assert collection.index_dir == root / "index"
+
+
+@pytest.mark.anyio
+async def test_a_document_lands_in_its_shard_and_is_removed_from_it(tmp_path) -> None:
+    source = tmp_path / "incoming" / DOC
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("# A\n")
+
+    doc = await document.import_path(str(source))
+
+    assert doc.original.read_text() == "# A\n"
+    assert doc.source_path() == doc.original
+    assert [p.name for p in home.DOCUMENT_ROOT.iterdir()] == [home.shard(DOC)]
+
+    await document.remove_files(doc.name)
+
+    assert not doc.root.exists(), "the whole folder goes, not only the upload"
 
 
 # --- home.atomic_write ------------------------------------------------------------
@@ -190,8 +266,7 @@ async def test_remove_tree_reports_a_file_it_cannot_delete(
             await home.remove_tree(protected)
 
         assert protected.exists(), "the failure is reported, not silently swallowed"
-        events = [record.msg["event"] for record in caplog.records if isinstance(record.msg, dict)]
-        assert events == ["remove_failed", "remove_failed"], "file, then directory"
+        assert events(caplog) == ["remove_failed", "remove_failed"], "file, then directory"
     finally:
         protected.chmod(0o700)
 
@@ -307,11 +382,6 @@ async def test_remove_tree_reports_a_file_it_cannot_delete(
             "days must be >= 1",
         ),
         (
-            "live window too short to halve",
-            lambda: RetentionSettings(job_live_hours=1),
-            "job_live_hours must be >= 2",
-        ),
-        (
             "preview workers below 1",
             lambda: PipelineSettings(preview_workers=0),
             "preview_workers must be >= 1",
@@ -342,7 +412,7 @@ def test_settings_reject_out_of_bounds(name: str, build, match: str) -> None:
         ),
         ("collection override overlap alone", lambda: CollectionSettings(chunk_overlap=0)),
         ("chunk settings defaults", ChunkSettings),
-        ("the shortest live window", lambda: RetentionSettings(job_days=1, job_live_hours=2)),
+        ("the shortest job history", lambda: RetentionSettings(job_days=1)),
         ("audit retention of zero keeps everything", lambda: RetentionSettings(audit_days=0)),
         ("one preview builder", lambda: PipelineSettings(preview_workers=1)),
         ("one slice per document", lambda: PipelineSettings(document_parallelism=1)),
@@ -421,16 +491,16 @@ def test_settings_stored_before_the_cpu_budget_still_decode(name: str, stored: s
                 "retention": {"days": 3, "live_hours": 9},
                 "maintenance": {"audit_retention_days": 5},
             },
-            (700, 7, 3, 9, 5),
+            (700, 7, 3, 5),
         ),
         (
-            "already written by this build",
+            "already written by this build, plus a setting this one dropped",
             {
                 "conversion": {"chunk_size": 700},
                 "pipeline": {"batch_pages": 7},
                 "retention": {"job_days": 3, "job_live_hours": 9, "audit_days": 5},
             },
-            (700, 7, 3, 9, 5),
+            (700, 7, 3, 5),
         ),
         (
             "a section the old build never wrote keeps its default",
@@ -439,7 +509,6 @@ def test_settings_stored_before_the_cpu_budget_still_decode(name: str, stored: s
                 ConversionSettings().chunk_size,
                 7,
                 RetentionSettings().job_days,
-                RetentionSettings().job_live_hours,
                 RetentionSettings().audit_days,
             ),
         ),
@@ -449,26 +518,26 @@ def test_settings_stored_under_the_old_field_names_are_renamed_on_load(
     name: str, stored: dict, expected: tuple[int, ...]
 ) -> None:
     """`defaults`/`indexing`/`maintenance` became `conversion`/`pipeline`/`retention`. msgspec
-    drops a key it does not know, so without the rename a home would come back silently reset."""
+    drops a key it does not know, so without the rename a home would come back silently reset -
+    and a key this build dropped (`job_live_hours`) is dropped the same way, not an error."""
     loaded = settings._decode(msgspec.json.encode(stored).decode())
 
     assert (
         loaded.conversion.chunk_size,
         loaded.pipeline.batch_pages,
         loaded.retention.job_days,
-        loaded.retention.job_live_hours,
         loaded.retention.audit_days,
     ) == expected, name
 
 
 def test_retention_defaults_and_docs() -> None:
-    """Four weeks of visible history, two days of it still in the durable-execution tables."""
-    assert (RetentionSettings().job_days, RetentionSettings().job_live_hours) == (28, 48)
+    """Four weeks of job history, and one knob that says so."""
+    assert RetentionSettings().job_days == 28
     assert UserSettings().retention == RetentionSettings()
     docs = settings.docs()
     assert docs["retention.job_days"].title == "Job history (days)"
-    assert docs["retention.job_live_hours"].title == "Live job window (hours)"
-    assert all(docs[key].description for key in ("retention.job_days", "retention.job_live_hours"))
+    assert docs["retention.job_days"].description
+    assert "retention.job_live_hours" not in docs, "the live window is gone, not renamed"
 
 
 def test_maintenance_defaults_and_docs() -> None:
@@ -524,7 +593,7 @@ async def test_unreadable_settings_fall_back_to_defaults(name: str, stored: str)
     await save_user_settings(UserSettings(embedding="compact"))
     async with db.connect() as conn:
         await conn.execute("update settings set json = ? where id = 1", (stored,))
-    settings.invalidate()  # a direct write bypasses the process cache (see settings.invalidate)
+    forget_settings()  # a direct write bypasses the process cache
 
     loaded = await load_user_settings_or_none()
 
@@ -567,7 +636,7 @@ async def test_user_settings_are_read_once_and_refreshed_on_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await save_user_settings(UserSettings(embedding="compact"))
-    settings.invalidate()
+    forget_settings()
     connects = _count_connects(monkeypatch)
 
     first, second = await load_user_settings_or_none(), await load_user_settings_or_none()
@@ -583,7 +652,7 @@ async def test_user_settings_are_read_once_and_refreshed_on_save(
 
 
 @pytest.mark.anyio
-async def test_invalidate_forces_a_reread() -> None:
+async def test_forgetting_the_cache_forces_a_reread() -> None:
     await save_user_settings(UserSettings(embedding="compact"))
     async with db.connect() as conn:
         await conn.execute(
@@ -593,25 +662,25 @@ async def test_invalidate_forces_a_reread() -> None:
 
     assert await settings.load_user_settings() == UserSettings(embedding="compact"), "still cached"
 
-    settings.invalidate()
+    forget_settings()
 
     assert await settings.load_user_settings() == UserSettings(embedding="quality")
 
 
 @pytest.mark.anyio
 async def test_unreadable_settings_are_not_cached() -> None:
-    """A broken row must stay live: the run that repairs it is seen without an `invalidate()`."""
+    """A broken row must stay live: the run that repairs it is seen without a second step."""
     await save_user_settings(UserSettings(embedding="compact"))
     async with db.connect() as conn:
         await conn.execute("update settings set json = '{not json' where id = 1")
-    settings.invalidate()
+    forget_settings()
 
     loaded = await load_user_settings_or_none()
 
     assert loaded == UserSettings(), "defaults while the row is unreadable"
     assert settings_problem() is not None
 
-    async with db.connect() as conn:  # no invalidate: nothing was cached
+    async with db.connect() as conn:  # nothing was cached, so nothing has to be forgotten
         await conn.execute(
             "update settings set json = ? where id = 1",
             (db.dumps(UserSettings(embedding="quality")),),
@@ -658,12 +727,12 @@ async def test_connect_skips_ensure_home_after_the_first_success(
 
 @pytest.mark.anyio
 async def test_the_settings_cache_ends_on_the_saved_value_under_concurrent_loads() -> None:
-    """A load that misses reads the row outside the cache lock, so it can still be in flight when
+    """A load that misses reads the row before it publishes it, so it can still be in flight when
     a save commits. The saved row has to win: the load must not cache the row it read first."""
     await save_user_settings(UserSettings(embedding="compact"))
     saved = UserSettings(embedding="quality")
     loaders, loads = 8, 25
-    settings.invalidate()  # so the first load of every task misses and really reads the row
+    forget_settings()  # so the first load of every task misses and really reads the row
 
     async def read() -> list[str]:
         return [(await settings.load_user_settings()).embedding for _ in range(loads)]
@@ -676,9 +745,9 @@ async def test_the_settings_cache_ends_on_the_saved_value_under_concurrent_loads
     assert {one for read_back in reads for one in read_back} <= {"compact", "quality"}, (
         "every load saw a stored row, never a default"
     )
-    assert settings._cached == saved, "the cache ends on the saved row, not on one read before it"
+    assert settings._state == settings._Loaded(saved), "the cache ends on the saved row"
     assert await settings.load_user_settings() == saved
-    settings.invalidate()
+    forget_settings()
     assert await settings.load_user_settings() == saved, "and the row agrees"
 
 
@@ -748,26 +817,8 @@ async def test_migrate_once_applies_every_migration_exactly_once(
     async with db.connect() as conn:
         version = await conn.execute_fetchall("pragma user_version")
         collections = await conn.execute_fetchall("select count(*) from collections")
-    assert list(version) == [(len(db.MIGRATIONS),)], name
+    assert list(version) == [(db.SCHEMA_VERSION,)], name
     assert list(collections) == [(0,)], name
-
-
-def test_migration_5_adds_the_retention_watermark(tmp_path: Path) -> None:
-    """Migration 5 carries the archive watermark, applied to a database built by the previous
-    build. It starts at zero, so the first round purges nothing it has not copied."""
-    conn = sqlite3.connect(tmp_path / "old.db")
-    for number, script in enumerate(db.MIGRATIONS[:4], start=1):
-        conn.executescript(script)
-        conn.execute(f"pragma user_version = {number}")
-    conn.commit()
-
-    assert db.migrate(conn) == len(db.MIGRATIONS)
-
-    assert conn.execute("select key, value from retention_state").fetchall() == [
-        ("archive_watermark_ms", "0")
-    ]
-    assert db.migrate(conn) == len(db.MIGRATIONS), "nothing left to apply"
-    conn.close()
 
 
 # --- the CPU budget ---------------------------------------------------------------
@@ -788,7 +839,7 @@ async def test_on_cpu_runs_the_work_in_a_worker_thread() -> None:
     def work(value: int, *, double: bool) -> tuple[int, int]:
         return threading.get_ident(), value * 2 if double else value
 
-    ident, result = await cpu.on_cpu("test", work, 21, double=True)
+    ident, result = await cpu.on_cpu(work, 21, double=True)
 
     assert ident != threading.get_ident(), "the event loop never runs the CPU work itself"
     assert result == 42, "positional and keyword arguments reach the callable"
@@ -821,36 +872,35 @@ async def test_on_cpu_holds_one_slot_of_the_budget(
         with counter:
             running -= 1
 
-    await asyncio.gather(*(cpu.on_cpu("test", work) for _ in range(CPU_CALLERS)))
+    await asyncio.gather(*(cpu.on_cpu(work) for _ in range(CPU_CALLERS)))
 
     assert peak == budget, name
 
 
 @pytest.mark.anyio
-async def test_the_thread_limiter_is_one_per_event_loop() -> None:
-    mine = cpu._limiter()
+async def test_every_event_loop_widens_its_own_thread_limiter() -> None:
+    """The app runs two loops, Litestar's and DBOS's background one, each in a thread of its own.
+    anyio's default of 40 threads per loop would queue previews behind pipeline work before the
+    budget is reached, so each loop widens the limiter it owns and `_cpu_slots` stays the limit."""
+    await cpu.on_cpu(lambda: None)
+    mine = anyio.to_thread.current_default_thread_limiter()
 
-    assert cpu._limiter() is mine, "the running loop keeps the limiter it made"
-    assert mine.total_tokens == max(64, 4 * cpu._cpu_budget), "wide enough never to be the limit"
+    assert mine.total_tokens == cpu.THREAD_LIMIT, "wide enough never to be the limit"
 
-    # the app runs two loops, Litestar's and DBOS's background one, each in a thread of its own
-    others: list[anyio.CapacityLimiter] = []
+    others: list[float] = []
 
     async def take() -> None:
-        others.append(cpu._limiter())
+        await cpu.on_cpu(lambda: None)
+        others.append(anyio.to_thread.current_default_thread_limiter().total_tokens)
 
     thread = threading.Thread(target=lambda: asyncio.run(take()))
     thread.start()
     thread.join(timeout=CPU_WAIT_SECONDS)
 
-    assert others and others[0] is not mine, "a second loop gets a limiter of its own"
+    assert others == [cpu.THREAD_LIMIT], "a second loop widens the limiter of its own"
 
 
 # --- audit ------------------------------------------------------------------------
-
-
-def _lines() -> list[dict]:
-    return [json.loads(line) for line in audit.path().read_text().splitlines()]
 
 
 @pytest.mark.anyio
@@ -869,7 +919,7 @@ async def test_record_writes_one_private_json_line_with_every_field() -> None:
         detail={"size": 12, "suffix": ".md", "cached": False},
     )
 
-    (line,) = _lines()
+    (line,) = audit_lines()
     assert line == {
         "ts": entry.ts,
         "level": "AUDIT",
@@ -892,16 +942,16 @@ async def test_record_writes_one_private_json_line_with_every_field() -> None:
 async def test_record_appends_rather_than_replacing() -> None:
     await audit.record("a", actor="web", outcome="ok", duration_ms=0)
     await audit.record("b", actor="web", outcome="ok", duration_ms=0)
-    assert [line["event"] for line in _lines()] == ["a", "b"]
+    assert [line["event"] for line in audit_lines()] == ["a", "b"]
 
 
 @pytest.mark.anyio
 async def test_audited_handler_records_ok_and_reads_contextvars() -> None:
     from haskie import logs
 
-    @audit.audited("collection.document.add", collection="name", doc="doc")
-    async def handler(name: str, doc: str, size: int = 0) -> str:
-        return f"{name}/{doc}/{size}"
+    @audit.audited("collection.document.add")
+    async def handler(collection: str, doc: str, size: int = 0) -> str:
+        return f"{collection}/{doc}/{size}"
 
     logs.clear()
     logs.bind(actor="mcp", request_id="req-1")
@@ -910,7 +960,7 @@ async def test_audited_handler_records_ok_and_reads_contextvars() -> None:
     finally:
         logs.clear()
 
-    (line,) = _lines()
+    (line,) = audit_lines()
     assert (line["event"], line["outcome"], line["actor"]) == (
         "collection.document.add",
         "ok",
@@ -922,14 +972,14 @@ async def test_audited_handler_records_ok_and_reads_contextvars() -> None:
 
 @pytest.mark.anyio
 async def test_audited_records_error_with_a_scrubbed_message_and_re_raises() -> None:
-    @audit.audited("collection.document.add", collection="name")
-    async def handler(name: str) -> None:
+    @audit.audited("collection.document.add")
+    async def handler(collection: str) -> None:
         raise errors.InvalidInput(f"bad file {home.HOME}/documents/x")
 
     with pytest.raises(errors.InvalidInput):
         await handler("notes")
 
-    (line,) = _lines()
+    (line,) = audit_lines()
     assert (line["outcome"], line["actor"], line["collection"]) == ("error", "web", "notes")
     assert line["error"] == "InvalidInput: bad file $HASKIE_HOME/documents/x"
     assert "request_id" not in line, "no request context outside a request"
@@ -937,17 +987,17 @@ async def test_audited_records_error_with_a_scrubbed_message_and_re_raises() -> 
 
 @pytest.mark.anyio
 async def test_audited_records_both_branches() -> None:
-    @audit.audited("collection.delete", collection="name")
-    async def handler(name: str) -> str:
-        if name == "boom":
+    @audit.audited("collection.delete")
+    async def handler(collection: str) -> str:
+        if collection == "boom":
             raise errors.Conflict("busy")
-        return name
+        return collection
 
     assert await handler("notes") == "notes"
     with pytest.raises(errors.Conflict, match="busy"):
         await handler("boom")
 
-    ok, failed = _lines()
+    ok, failed = audit_lines()
     assert (ok["outcome"], ok["collection"]) == ("ok", "notes")
     assert (failed["outcome"], failed["error"]) == ("error", "Conflict: busy")
 
@@ -956,21 +1006,21 @@ def test_audited_preserves_the_wrapped_signature_for_dependency_injection() -> N
     """Litestar builds its injection from `inspect.signature`, so the wrapper must add nothing."""
     import inspect
 
-    async def handler(name: str, doc: str, size: int = 0) -> None: ...
+    async def handler(collection: str, doc: str, size: int = 0) -> None: ...
 
-    wrapped = audit.audited("collection.document.add", collection="name", doc="doc")(handler)
+    wrapped = audit.audited("collection.document.add")(handler)
     assert inspect.signature(wrapped) == inspect.signature(handler)
     assert getattr(wrapped, "__name__", None) == "handler"
 
 
 @pytest.mark.anyio
 async def test_audited_skips_unset_optional_parameters() -> None:
-    @audit.audited("session.collections.set", session_id="session", collection="name")
-    async def handler(session: str, name: str | None = None) -> None: ...
+    @audit.audited("session.collections.set")
+    async def handler(session_id: str, collection: str | None = None) -> None: ...
 
     await handler("s-1")
 
-    (line,) = _lines()
+    (line,) = audit_lines()
     assert line["session_id"] == "s-1"
     assert "collection" not in line
 
