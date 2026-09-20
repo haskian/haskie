@@ -1,7 +1,7 @@
 name: Version
 
 # On push to main: a conventional-commit SemVer bump (cog) writes CHANGELOG.md and cuts the tag,
-# then the wheel built from that tag is attached to a GitHub Release.
+# then release.yml builds the wheel from that tag and attaches it to a GitHub Release.
 #
 # Requires main to accept pushes from github-actions[bot] — a bot bypass on the branch protection
 # rule, or an unprotected main. Requires squash-only merges too, so one commit on main equals one
@@ -33,40 +33,11 @@ jobs:
       - id: bump
         run: mise run bump
 
-  dist:
-    name: Build wheel + sdist
+  # Same jobs a hand-pushed `v*` tag runs. Called, not triggered: GitHub does not start a workflow
+  # from a tag pushed with GITHUB_TOKEN. Inherits `contents: write` for the GitHub Release.
+  release:
     needs: bump
     if: needs.bump.outputs.released == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      # The tag, not this run's ref: that is the commit before the bump, and would build the
-      # previous version's tree.
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.bump.outputs.version }}
-      - uses: jdx/mise-action@v2
-      # No `mise run setup`: `dist` builds the web itself and `uv build`/`smoke` use isolated
-      # envs, so a project `uv sync` would be pure waste here.
-      - run: mise run dist
-      # An artifact that cannot be installed fails in the adopter's environment, not here.
-      - run: mise run smoke
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/*
-
-  # The wheel + sdist attached here are what `uv tool install haskie --from <release-url>` reads.
-  release:
-    name: GitHub Release
-    needs: [bump, dist]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.bump.outputs.version }}
-          files: dist/*
-          generate_release_notes: true
+    uses: ./.github/workflows/release.yml
+    with:
+      ref: ${{ needs.bump.outputs.version }}

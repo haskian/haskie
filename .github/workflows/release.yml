@@ -1,0 +1,61 @@
+name: Release
+
+# Tag-driven. Every `v*` tag builds and cuts a GitHub Release with the wheel + sdist attached,
+# so it installs with `uv tool install haskie --from <release-url>`.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  # version.yml calls this after it cuts a tag. It cannot rely on the tag push above: GitHub does
+  # not start a workflow from a ref pushed with GITHUB_TOKEN, so a bump would tag and publish nothing.
+  workflow_call:
+    inputs:
+      ref:
+        description: Tag to build, e.g. `v0.1.0`.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+# `github.ref_name` on a tag push; the input when version.yml calls this, because a called
+# workflow inherits the caller's `github` context, where the SHA is the commit before the bump.
+env:
+  BUILD_REF: ${{ inputs.ref || github.ref_name }}
+
+jobs:
+  # No CI job here: a `v*` tag always sits on a commit main's CI already checked.
+  dist:
+    name: Build wheel + sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BUILD_REF }}
+      - uses: jdx/mise-action@v2
+      # No `mise run setup`: `dist` builds the web itself and `uv build`/`smoke` use isolated
+      # envs. BUILD_REF makes `dist` refuse a tag that disagrees with the tree's declared version.
+      - run: mise run dist
+      # An artifact that cannot be installed fails in the adopter's environment, not here.
+      - run: mise run smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  release:
+    name: GitHub Release
+    needs: dist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and attach artifacts
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.BUILD_REF }}
+          files: dist/*
+          generate_release_notes: true
