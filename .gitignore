@@ -3,9 +3,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+node_modules/
 dist/
 .context/
 .coverage
 
-# built by `mise run build`, shipped inside the wheel
+# built by `mise run build`
 src/haskie/web/

@@ -28,34 +28,13 @@ from haskie.claude import Scope
 from haskie.cli import cli
 from haskie.collection import Collection
 from haskie.errors import Conflict, InvalidInput
-from haskie.layout import shard
 
 runner = CliRunner()
 
-# The paths `home.use` rebinds; a test that points the CLI elsewhere must put them all back.
-HOME_PATHS = (
-    "HOME",
-    "COLLECTION_ROOT",
-    "DOCUMENT_ROOT",
-    "STAGING_ROOT",
-    "AUDIT_DIR",
-    "DB_FILE",
-    "MODEL_CACHE",
-    "LOCK_FILE",
-)
-
 
 @pytest.fixture
-def restore_home(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Undo `home.use` after the test: the CLI rebinds module-level paths for the whole process."""
-    for attribute in HOME_PATHS:
-        monkeypatch.setattr(home, attribute, getattr(home, attribute), raising=True)
-    monkeypatch.setattr(db, "_migrated", set())
-
-
-@pytest.fixture
-def elsewhere(tmp_path: Path, restore_home: None) -> Path:
-    """A home of our own, restored afterwards."""
+def elsewhere(tmp_path: Path) -> Path:
+    """A home of our own. The autouse `haskie_home` fixture puts the process back afterwards."""
     return tmp_path / "home"
 
 
@@ -66,23 +45,18 @@ def _text(result) -> str:
 
 def _shelve(root: Path, name: str) -> None:
     """One entry in the sharded layout, as an import or a create would leave it."""
-    (root / shard(name) / name).mkdir(parents=True, exist_ok=True)
+    (root / home.shard(name) / name).mkdir(parents=True, exist_ok=True)
 
 
 def _pre_collection_home(root: Path) -> None:
-    """A home as an older build left it: migrations 1..8 applied, with a library row in it.
-
-    Built with sqlite3 rather than through `db.migrate`, because `migrate` is exactly what must
-    refuse this file: the guard fires before migration 9 runs (see `db.INCOMPATIBLE_HOME_*`).
-    """
+    """A home as an older build left it: a `libraries` table, stamped with the version before the
+    current schema. `db.migrate` is exactly what must refuse this file."""
     root.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(root / "haskie.db")
     try:
-        applied = db.MIGRATIONS[: db.INCOMPATIBLE_HOME_MIGRATION - 1]
-        for number, script in enumerate(applied, start=1):
-            conn.executescript(script)
-            conn.execute(f"pragma user_version = {number}")
+        conn.executescript("create table libraries (name text primary key);")
         conn.execute("insert into libraries (name) values ('notes')")
+        conn.execute(f"pragma user_version = {db.SCHEMA_VERSION - 1}")
         conn.commit()
     finally:
         conn.close()
@@ -112,7 +86,7 @@ def test_init_refuses_a_home_from_before_collections(elsewhere: Path) -> None:
     assert refused.stderr.strip() == db.INCOMPATIBLE_HOME_MESSAGE, "a failure goes to stderr"
     with sqlite3.connect(elsewhere / "haskie.db") as conn:
         (version,) = conn.execute("pragma user_version").fetchone()
-    assert version == db.INCOMPATIBLE_HOME_MIGRATION - 1, "the refused migration did not run"
+    assert version == db.SCHEMA_VERSION - 1, "the refused migration did not run"
 
 
 def test_destroy_after_a_refused_init_lets_it_start_over(elsewhere: Path) -> None:
@@ -163,7 +137,7 @@ def test_destroy_yes_skips_the_prompt(elsewhere: Path) -> None:
     [("the document store", "documents"), ("the collection store", "collections")],
 )
 def test_destroy_recognises_a_home_without_a_database(
-    tmp_path: Path, restore_home: None, name: str, directory: str
+    tmp_path: Path, name: str, directory: str
 ) -> None:
     """A crash between the directories and the first migration leaves a home with no haskie.db;
     it is still a home, and still destroyable."""
@@ -176,7 +150,7 @@ def test_destroy_recognises_a_home_without_a_database(
     assert not root.exists(), name
 
 
-def test_destroy_refuses_a_directory_that_is_not_a_home(tmp_path: Path, restore_home: None) -> None:
+def test_destroy_refuses_a_directory_that_is_not_a_home(tmp_path: Path) -> None:
     """The guard that stops a mistyped `--home ~/Documents` from deleting the wrong tree."""
     documents = tmp_path / "Documents"
     (documents / "keep").mkdir(parents=True)
@@ -189,7 +163,7 @@ def test_destroy_refuses_a_directory_that_is_not_a_home(tmp_path: Path, restore_
     assert (documents / "keep" / "thesis.pdf").is_file(), "untouched"
 
 
-def test_destroy_on_a_missing_home_says_so(tmp_path: Path, restore_home: None) -> None:
+def test_destroy_on_a_missing_home_says_so(tmp_path: Path) -> None:
     never = tmp_path / "never-created"
 
     response = runner.invoke(cli, ["destroy", "--home", str(never), "--yes"])
@@ -446,8 +420,7 @@ def test_install_claude(
     claude_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runner.invoke(cli, ["init", "--home", str(elsewhere)])
-    home.use(elsewhere)
+    runner.invoke(cli, ["init", "--home", str(elsewhere)])  # `init` points the process at it
     for name, description in case.collections:
         asyncio.run(Collection.create(name, description))
     if case.claude_on_path:
@@ -483,7 +456,6 @@ def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
 ) -> None:
     """Re-running is how the trigger is refreshed after a collection is added."""
     runner.invoke(cli, ["init", "--home", str(elsewhere)])
-    home.use(elsewhere)
     asyncio.run(Collection.create("roasting", "Coffee."))
     monkeypatch.setattr(cli_module, "_serving", lambda _url: True)
     arguments = ["install", "claude", "--home", str(elsewhere), "--scope", "project"]
@@ -582,7 +554,7 @@ def test_the_skill_only_names_tools_the_server_actually_serves() -> None:
 
 
 def test_the_default_url_matches_where_mcp_is_mounted() -> None:
-    """`cli.MCP_URL` spells the path out rather than importing the app, which would cost every
+    """`claude.MCP_URL` spells the path out rather than importing the app, which would cost every
     `haskie` invocation the whole web stack. This is what keeps the two in step."""
     from haskie import app
 

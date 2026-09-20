@@ -1,4 +1,10 @@
-"""Haskie home directory (~/.haskie) layout, and the file writes every module shares.
+"""Haskie home directory (~/.haskie): where everything lives, and the file writes every module
+shares.
+
+`~/.haskie/documents/` and `~/.haskie/collections/` each hold one folder per entry. Ten thousand
+documents would make ten thousand entries in one directory, which every lookup and every listing
+pays for, so both roots insert a shard directory (`shard`) between them and the entry: an entry
+lives at `<root>/<shard>/<name>/`, and a root spreads over 256 directories.
 
 A filesystem call blocks, so every async function here runs its work in a worker thread. The sync
 ones (`atomic_replace`, `atomic_write_sync`) are for code that already runs in one: `convert.py`
@@ -10,6 +16,7 @@ is an event loop at all, as the app's first startup hook.
 """
 
 import fcntl
+import hashlib
 import os
 import shutil
 from collections.abc import Callable, Iterator
@@ -20,42 +27,63 @@ from typing import Any
 import anyio
 import anyio.to_thread
 
+# `logs` imports this module back, for `scrub`. Safe either way round: each side reaches for the
+# other only when it is called, never while the module body runs.
+from haskie import logs
+from haskie.errors import Conflict
+
 HOME = Path(os.environ.get("HASKIE_HOME", Path.home() / ".haskie"))
-COLLECTION_ROOT = HOME / "collections"  # one LanceDB index per collection
-DOCUMENT_ROOT = HOME / "documents"  # one folder per imported document: original, markdown, cache
-STAGING_ROOT = HOME / "staging"  # uploads not yet imported; swept by the nightly maintenance
-AUDIT_DIR = HOME / "audit"
-DB_FILE = HOME / "haskie.db"
-MODEL_CACHE = HOME / "cache" / "models"  # compiled CoreML models (see embed.py); ORT creates it
-LOCK_FILE = HOME / "haskie.lock"  # one running haskie per home (see `claim_home`)
+
+# The layout, relative to `HOME`. Every name here is readable as a module attribute
+# (`home.DB_FILE`) and derived on access, so `use()` has one global to rebind.
+_LAYOUT: dict[str, str] = {
+    "COLLECTION_ROOT": "collections",  # one LanceDB index per collection
+    "DOCUMENT_ROOT": "documents",  # one folder per imported document: original, markdown, cache
+    "STAGING_ROOT": "staging",  # uploads not yet imported; swept by the nightly maintenance
+    "AUDIT_DIR": "audit",
+    "DB_FILE": "haskie.db",
+    "MODEL_CACHE": "cache/models",  # compiled CoreML models (see embed.py); ORT creates it
+    "LOCK_FILE": "haskie.lock",  # one running haskie per home (see `claim_home`)
+}
+_MADE = ("COLLECTION_ROOT", "DOCUMENT_ROOT", "STAGING_ROOT", "AUDIT_DIR")  # the rest are files
 
 DIR_MODE = 0o700  # documents and the audit trail are private to the user running the app
+PART_DIGITS = 6  # width of a micro-batch sequence number; four would cap a document at 10k parts
+
+
+def __getattr__(name: str) -> Path:
+    if name in _LAYOUT:
+        return HOME / _LAYOUT[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def use(root: Path) -> None:
     """Point this process at another home, before anything has read the layout.
 
-    The paths above are resolved once, at import, so `haskie --home` (and the test suite) cannot
-    just set the environment variable: the derived paths would already be built from the old root.
     Nothing here re-opens what is already open, so this belongs at startup and nowhere else.
     """
-    global \
-        HOME, \
-        COLLECTION_ROOT, \
-        DOCUMENT_ROOT, \
-        STAGING_ROOT, \
-        AUDIT_DIR, \
-        DB_FILE, \
-        MODEL_CACHE, \
-        LOCK_FILE
+    global HOME
     HOME = root
-    COLLECTION_ROOT = HOME / "collections"
-    DOCUMENT_ROOT = HOME / "documents"
-    STAGING_ROOT = HOME / "staging"
-    AUDIT_DIR = HOME / "audit"
-    DB_FILE = HOME / "haskie.db"
-    MODEL_CACHE = HOME / "cache" / "models"
-    LOCK_FILE = HOME / "haskie.lock"
+
+
+def shard(name: str) -> str:
+    """The prefix directory an entry lives in: the first byte of the SHA-1 of its name, hex.
+
+    The hash is over the UTF-8 bytes of the name, so it is stable across platforms and locales,
+    and it is a name, not a secret: SHA-1 is used for its spread, not for its strength.
+    """
+    return hashlib.sha1(name.encode("utf-8")).hexdigest()[:2]
+
+
+def part_name(seq: int) -> str:
+    """The stem of one micro-batch file, zero-padded so a listing sorts in sequence order."""
+    return f"{seq:0{PART_DIGITS}d}"
+
+
+def scrub(text: str) -> str:
+    """Replace absolute paths with their symbolic root, for log lines and error bodies.
+    The home directory is replaced first because it usually sits inside the user directory."""
+    return text.replace(str(HOME), "$HASKIE_HOME").replace(str(Path.home()), "~")
 
 
 _holding: int | None = None  # the file descriptor whose flock this process holds
@@ -77,15 +105,13 @@ def claim_home() -> None:
     crashed haskie leaves nothing to clean up. POSIX only, like the `fcntl` it imports; failing at
     import beats a guard that silently leaves the home unprotected.
     """
-    from haskie.errors import Conflict  # local: `errors` imports this module
-
     global _holding
     if _holding is not None:  # `--reload` restarts run one lifespan per child, not per process
         return
     ensure_home_sync()
     # O_RDWR rather than a mode string: append mode ignores `seek`, and the holder line is
     # rewritten in place rather than accumulated.
-    handle = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    handle = os.open(HOME / _LAYOUT["LOCK_FILE"], os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -115,9 +141,10 @@ def home_holder() -> str | None:
     Advisory only. The claim in the app's startup hook is the authority; this can go stale between
     the answer and the claim, and then the startup hook refuses instead.
     """
-    if not LOCK_FILE.is_file():
+    lock = HOME / _LAYOUT["LOCK_FILE"]
+    if not lock.is_file():
         return None
-    handle = os.open(LOCK_FILE, os.O_RDONLY)
+    handle = os.open(lock, os.O_RDONLY)
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -142,15 +169,14 @@ def ensure_home_sync() -> Path:
     `HOME` is made first and by name, because `parents=True` does not apply `mode` to the parents
     it creates - so a home made only as a parent of its subdirectories would be world-readable.
     """
-    for directory in (HOME, COLLECTION_ROOT, DOCUMENT_ROOT, STAGING_ROOT, AUDIT_DIR):
+    for directory in (HOME, *(HOME / _LAYOUT[name] for name in _MADE)):
         directory.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
     return HOME
 
 
 async def ensure_home() -> Path:
-    for directory in (COLLECTION_ROOT, DOCUMENT_ROOT, STAGING_ROOT, AUDIT_DIR):
-        await anyio.Path(directory).mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
-    return HOME
+    """`ensure_home_sync` off the event loop."""
+    return await anyio.to_thread.run_sync(ensure_home_sync)
 
 
 @contextmanager
@@ -187,11 +213,7 @@ async def atomic_write(path: Path, data: bytes | str, encoding: str = "utf-8") -
 async def remove_tree(path: Path) -> None:
     """Delete a directory and everything under it, in a worker thread. Best effort, but never
     silent: a file we cannot delete is logged, not swallowed."""
-    # imported here, not at module level: `errors` and `logs` both import this module
-    from haskie.errors import scrub
-    from haskie.logs import get_logger
-
-    log = get_logger(__name__)
+    log = logs.get_logger(__name__)
 
     def report(_function: Callable[..., Any], failed: str, error: BaseException) -> None:
         log.warning("remove_failed", path=scrub(str(failed)), error=f"{type(error).__name__}")

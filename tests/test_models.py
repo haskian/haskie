@@ -1,0 +1,439 @@
+"""Model lifecycle: one durable download record per model, and what a search may do meanwhile.
+
+Downloaded and usable are two different things (see `models`): the record outlives the process,
+the loaded model does not. Every test here takes the `dbos` fixture, because a download is a
+workflow, and replaces `models.load_model` rather than `embed.warm` where it can, so no case
+waits out the download retry schedule.
+"""
+
+import threading
+from pathlib import Path
+
+import pytest
+from conftest import (
+    MD,
+    WAIT,
+    attach_document,
+    await_terminal,
+    counted_list_workflows,
+    import_document,
+    restart_dbos,
+    until,
+    wait_event,
+    wait_for,
+)
+from dbos import DBOS
+
+from haskie import dbos_names, embed, jobs, models, settings, workflows
+from haskie.collection import Collection
+from haskie.errors import HaskieError, NotReady
+from haskie.settings import (
+    CollectionSettings,
+    SearchOverrides,
+    SearchSettings,
+    UserSettings,
+    save_user_settings,
+)
+
+pytestmark = pytest.mark.anyio
+
+
+async def test_no_model_is_required_for_full_text_only(dbos) -> None:
+    assert await models.ensure_models(UserSettings(embedding="none")) == []
+    assert await models.model_statuses() == [], "and the stored settings ask for none either"
+
+
+def _compact_model_name() -> str:
+    model = UserSettings(embedding="compact").embedding_model
+    assert model is not None
+    return model.name
+
+
+@pytest.mark.parametrize(
+    ("name", "outcome", "state", "match"),
+    [
+        ("loaded in this process", "ready", "ready", None),
+        ("download failed", "error", "error", "failed to load: RuntimeError: no such model"),
+        ("never required before", "missing", "pending", "is not loaded yet"),
+        ("still downloading", "blocked", "loading", "is downloading .job dl:embedding:"),
+        ("downloaded, caches cold", "cold", "loading", "is loading in this process"),
+    ],
+)
+async def test_model_state_decides_whether_search_may_run(
+    dbos, monkeypatch, name: str, outcome: str, state: str, match: str | None
+) -> None:
+    """A download record that says SUCCESS is not enough: the model lives in the caches of the
+    process that loaded it, so a boot that inherits the record still reports "loading" until it
+    has warmed the model itself.
+
+    `load_model` is replaced rather than `embed.warm`, so no case waits out the download retry
+    schedule (five attempts, five seconds apart)."""
+    blocked = threading.Event()
+
+    async def load_model(kind: str, name_: str) -> None:
+        if outcome == "error":
+            raise RuntimeError("no such model")
+        if outcome == "blocked":
+            assert await wait_event(blocked)
+
+    monkeypatch.setattr(models, "load_model", load_model)
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    model_name = _compact_model_name()
+
+    if outcome != "missing":
+        await models.ensure_models(user)
+        if outcome != "blocked":
+            await await_terminal([models._model_id("embedding", model_name)])
+    if outcome == "cold":
+        models._ready.clear()  # the record of a boot whose caches this process does not have
+
+    try:
+        (status,) = await models.model_statuses()
+        assert (status.kind, status.name, status.state) == ("embedding", model_name, state), name
+        if match is None:
+            await models.require_ready("embedding", model_name)  # no raise
+        else:
+            with pytest.raises(NotReady, match=match):
+                await models.require_ready("embedding", model_name)
+    finally:
+        blocked.set()
+        await await_terminal([models._model_id("embedding", model_name)])
+
+
+async def test_ensure_models_retries_a_model_that_failed(dbos, monkeypatch) -> None:
+    attempts: list[str] = []
+
+    async def load_model(kind: str, name: str) -> None:
+        attempts.append(name)
+        if len(attempts) == 1:
+            raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(models, "load_model", load_model)
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    model_name = _compact_model_name()
+
+    await models.ensure_models(user)
+    await await_terminal([models._model_id("embedding", model_name)])
+    assert (await models.model_statuses())[0].state == "error"
+
+    await models.ensure_models(user)  # retries under the same id instead of leaving it failed
+    await await_terminal([models._model_id("embedding", model_name)])
+
+    assert (await models.model_statuses())[0].state == "ready"
+    assert attempts == [model_name, model_name], "the retry really called the loader again"
+    assert len(await DBOS.list_workflows_async(name=dbos_names.DOWNLOAD_WORKFLOW)) == 1, (
+        "same workflow id"
+    )
+
+
+async def test_require_ready_answers_from_the_process_that_loaded_the_model(
+    dbos, monkeypatch
+) -> None:
+    """Every search asks whether the model is ready, and the process that loaded it knows without
+    asking the database; a failure is never remembered, because the retry must be visible."""
+    attempts: list[str] = []
+
+    async def load_model(kind: str, name: str) -> None:
+        attempts.append(name)
+        if len(attempts) == 1:
+            raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(models, "load_model", load_model)
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    model_name = _compact_model_name()
+    await models.ensure_models(user)
+    await await_terminal([models._model_id("embedding", model_name)])
+    with pytest.raises(NotReady, match="failed to load"):
+        await models.require_ready("embedding", model_name)  # a failure is never cached
+
+    await models.ensure_models(user)  # deletes the failed record and enqueues the same id again
+    await await_terminal([models._model_id("embedding", model_name)])
+    calls = counted_list_workflows(monkeypatch)
+
+    await models.require_ready("embedding", model_name)
+    await models.require_ready("embedding", model_name)
+    assert calls == [], "the load ran here, so no search has to look the record up"
+
+    await models.ensure_models(user)  # a healthy record: nothing is deleted or started again
+    queries = len(calls)
+    await models.require_ready("embedding", model_name)
+    assert len(calls) == queries, "and reapplying the settings does not make the model cold"
+    assert attempts == [model_name, model_name], "no third load"
+
+
+@pytest.mark.network
+async def test_embed_stage_precomputes_vectors_and_hybrid_search_uses_them(
+    dbos, tmp_path: Path
+) -> None:
+    user = await save_user_settings(
+        UserSettings(embedding="compact", search=SearchSettings(reranker="cross-encoder"))
+    )
+    await models.ensure_models(user)
+    for kind, name in await models._required(user):
+        await wait_for(models._model_id(kind, name))
+    assert {(m.kind, m.state) for m in await models.model_statuses()} == {
+        ("embedding", "ready"),
+        ("reranker", "ready"),
+    }
+    collection = await Collection.create("vec")
+    await collection.set_settings(CollectionSettings(chunk_size=40, chunk_overlap=0))
+    body = "# Cats\n\nCats purr and chase mice.\n\n# Finance\n\nBonds yield interest.\n"
+    doc = await import_document(dbos, "v.md", body, tmp_path)
+    await attach_document(dbos, "vec", doc.name)
+
+    table = await (await collection.index())._existing()
+    assert table is not None and "vector" in (await table.schema()).names
+    records = sorted((await table.to_arrow()).to_pylist(), key=lambda r: (r["part"], r["chunk_id"]))
+    assert [r["heading"] for r in records] == ["Cats", "Finance"]
+    assert all(len(r["vector"]) == 384 for r in records)
+    assert (await collection.search("kitten"))[0].heading == "Cats", "semantic hit"
+
+    # search options: every mode/fusion answers; fts alone cannot find "kitten"
+    assert (await collection.search("kitten", SearchOverrides(mode="vector")))[0].heading == "Cats"
+    assert await collection.search("kitten", SearchOverrides(mode="fts")) == []
+    linear = await collection.search("bonds", SearchOverrides(mode="hybrid", fusion="linear"))
+    assert linear[0].heading == "Finance"
+    lexical = await collection.search(
+        "bonds", SearchOverrides(fusion="linear", vector_weight=0.0, bm25_weight=1.0)
+    )
+    assert lexical[0].heading == "Finance"
+    assert (await collection.search("kitten", SearchOverrides(fusion="rrf", limit=1)))[
+        0
+    ].heading == "Cats"
+
+    # cross-encoder reranker works on top of any mode, including vector-only and fts
+    for mode in ("vector", "hybrid"):
+        hits = await collection.search(
+            "kitten", SearchOverrides(mode=mode, reranker="cross-encoder", candidates=10)
+        )
+        assert hits[0].heading == "Cats" and hits[0].score > hits[1].score, mode
+    lexical_reranked = await collection.search(
+        "bonds", SearchOverrides(mode="fts", reranker="cross-encoder")
+    )
+    assert lexical_reranked[0].heading == "Finance"
+
+
+@pytest.mark.network
+async def test_models_are_idempotent_and_fail_fast_when_missing(dbos, monkeypatch) -> None:
+    plain = UserSettings(embedding="none")
+    assert await models.ensure_models(plain) == [], "nothing required for full-text only"
+    with pytest.raises(NotReady, match="not loaded yet"):
+        await models.require_ready("embedding", "BAAI/bge-small-en-v1.5")
+
+    wanted = await save_user_settings(UserSettings(embedding="compact"))
+    (status,) = await models.ensure_models(wanted)
+    assert status.state in ("loading", "ready")
+    await wait_for(models._model_id("embedding", status.name))
+    assert (await models.model_statuses())[0].state == "ready"
+    before = len(await DBOS.list_workflows_async(name=dbos_names.DOWNLOAD_WORKFLOW))
+    await models.ensure_models(wanted)
+    assert len(await DBOS.list_workflows_async(name=dbos_names.DOWNLOAD_WORKFLOW)) == before, (
+        "no second load"
+    )
+
+    # SearchSettings only accepts known reranker ids, so add the missing one to the allowed set
+    monkeypatch.setattr(settings, "RERANKER_MODELS", (*settings.RERANKER_MODELS, "nope/x"))
+    broken = await save_user_settings(
+        UserSettings(
+            embedding="none",
+            search=SearchSettings(reranker="cross-encoder", reranker_model="nope/x"),
+        )
+    )
+    await models.ensure_models(broken)
+    with pytest.raises(HaskieError):  # the model does not exist
+        await wait_for(models._model_id("reranker", "nope/x"))
+    (status,) = await models.model_statuses()
+    assert (status.kind, status.state) == ("reranker", "error") and status.error
+    with pytest.raises(NotReady, match="failed to load"):
+        await models.require_ready("reranker", "nope/x")
+
+
+@pytest.mark.network
+async def test_search_rejects_a_query_while_the_embedding_model_loads(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """The index has vectors, so a hybrid query needs the model; a request must fail fast with
+    503 semantics rather than block on a download."""
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    await models.ensure_models(user)
+    await await_terminal([models._model_id("embedding", _compact_model_name())])
+    collection = await Collection.create("busy")
+    doc = await import_document(dbos, "g.md", MD, tmp_path)
+    await attach_document(dbos, "busy", doc.name)
+    assert await collection.search("lancedb"), "ready model answers"
+
+    monkeypatch.setattr(models, "_ready", set())  # as after a restart: caches are cold
+
+    with pytest.raises(NotReady, match="is loading in this process"):
+        await collection.search("lancedb")
+
+
+@pytest.mark.parametrize(
+    ("name", "user", "collection_rerankers", "expected"),
+    [
+        ("full text only", UserSettings(embedding="none"), [], []),
+        (
+            "an embedding profile",
+            UserSettings(embedding="compact"),
+            [],
+            [("embedding", "BAAI/bge-small-en-v1.5")],
+        ),
+        (
+            "an embedding profile and a cross-encoder",
+            UserSettings(embedding="compact", search=SearchSettings(reranker="cross-encoder")),
+            [],
+            [
+                ("embedding", "BAAI/bge-small-en-v1.5"),
+                ("reranker", "Xenova/ms-marco-MiniLM-L-6-v2"),
+            ],
+        ),
+        (
+            "a collection override nobody else asks for",
+            UserSettings(embedding="none"),
+            ["BAAI/bge-reranker-base"],
+            [("reranker", "BAAI/bge-reranker-base")],
+        ),
+        (
+            "the same model at both levels is wanted once",
+            UserSettings(embedding="none", search=SearchSettings(reranker="cross-encoder")),
+            ["Xenova/ms-marco-MiniLM-L-6-v2", "BAAI/bge-reranker-base"],
+            [
+                ("reranker", "Xenova/ms-marco-MiniLM-L-6-v2"),
+                ("reranker", "BAAI/bge-reranker-base"),
+            ],
+        ),
+    ],
+)
+async def test_required_models_follow_the_settings(
+    dbos,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    user: UserSettings,
+    collection_rerankers: list[str],
+    expected: list,
+) -> None:
+    async def overrides() -> list[str]:
+        return collection_rerankers
+
+    monkeypatch.setattr(models, "_collection_rerankers", overrides)
+
+    assert await models._required(user) == expected, name
+
+
+async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> None:
+    """A reranker chosen for one collection is a model the installation needs: nothing else would
+    ever fetch it, and the first search of that collection would fail with "not loaded yet"."""
+    loaded: list[str] = []
+    monkeypatch.setattr(embed, "warm_reranker", loaded.append)
+    override = "jinaai/jina-reranker-v1-turbo-en"
+    collection = await Collection.create("picky")
+    await collection.set_settings(
+        CollectionSettings(
+            search=SearchOverrides(reranker="cross-encoder", reranker_model=override)
+        )
+    )
+    user = await save_user_settings(UserSettings(embedding="none"))
+
+    assert await Collection.reranker_overrides() == [override]
+    (status,) = await models.ensure_models(user)
+
+    assert (status.kind, status.name) == ("reranker", override)
+    workflow_id = models._model_id("reranker", override)
+    assert workflow_id.startswith("dl:reranker:")
+    await await_terminal([workflow_id])
+    assert loaded == [override], "the download workflow really called the loader"
+    (download,) = (await jobs.list_kind("download")).items
+    assert download.id == workflow_id
+    assert download.title == f"download reranker {override}", "kind and model read out of the id"
+    assert (download.status, download.error) == ("SUCCESS", None)
+    await models.require_ready("reranker", override)  # no raise: the collection can be searched
+
+
+async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> None:
+    """The list is the read model of the `ensure_model` workflows, so it has one row per model
+    the settings ask for, whatever state it is in."""
+    monkeypatch.setattr(embed, "warm", lambda name, accelerator: None)
+    monkeypatch.setattr(embed, "warm_reranker", lambda name: None)
+    user = await save_user_settings(
+        UserSettings(embedding="compact", search=SearchSettings(reranker="cross-encoder"))
+    )
+
+    await models.ensure_models(user)
+    await await_terminal(
+        [models._model_id(kind, name) for kind, name in await models._required(user)]
+    )
+
+    downloads = (await jobs.list_kind("download")).items
+    assert {d.title for d in downloads} == {
+        f"download embedding {_compact_model_name()}",
+        "download reranker Xenova/ms-marco-MiniLM-L-6-v2",
+    }, "one row per required model, kind and name read out of the workflow id"
+    assert {d.status for d in downloads} == {"SUCCESS"}
+    assert all(d.detail["warm"] for d in downloads), "loaded here, so this process can search"
+    assert all(d.created_at > 0 and d.error is None for d in downloads)
+    assert [d.created_at for d in downloads] == sorted(
+        (d.created_at for d in downloads), reverse=True
+    ), "newest first"
+
+
+async def test_restart_does_not_create_a_second_download_record(dbos, monkeypatch) -> None:
+    """The files stay on disk and the record is durable, so a restart reuses both: one row per
+    model, however often the dev server reloads."""
+    monkeypatch.setattr(embed, "warm", lambda name, accelerator: None)
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    workflow_id = models._model_id("embedding", _compact_model_name())
+    await models.ensure_models(user)
+    await await_terminal([workflow_id])
+
+    models._ready.clear()  # a new process has the files, not the caches
+    await restart_dbos()
+    await workflows.apply_settings(user)  # the boot applies them once; twice must change nothing
+
+    (download,) = (await jobs.list_kind("download")).items
+    assert download.id == workflow_id, "the same record, not one per boot"
+    assert download.status == "SUCCESS", "and it is not downloaded again"
+
+    async def warmed() -> bool:
+        return (await models.model_statuses())[0].state == "ready"
+
+    await until(warmed, "the model was never warmed")
+    assert (await jobs.list_kind("download")).items[0].detail["warm"] is True
+
+
+async def test_a_downloaded_model_is_warmed_after_restart_before_search_uses_it(
+    dbos, monkeypatch
+) -> None:
+    """Warming is a local read of the disk cache, but it still takes seconds, so the boot hands it
+    to a background thread. A search that arrives first fails fast with 503 semantics."""
+    warming, release = threading.Event(), threading.Event()
+
+    def warm(name, accelerator) -> None:
+        # sync, and run in a worker thread through `cpu.on_cpu`: blocking here blocks no loop
+        warming.set()
+        assert release.wait(timeout=WAIT), "the test never released the warm-up"
+
+    async def load_model(kind, name) -> None:  # the download itself
+        return None
+
+    monkeypatch.setattr(models, "load_model", load_model)
+    monkeypatch.setattr(embed, "warm", warm)
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    model_name = _compact_model_name()
+    await models.ensure_models(user)
+    await await_terminal([models._model_id("embedding", model_name)])
+
+    models._ready.clear()  # a new process has the files, not the caches
+    await restart_dbos()
+
+    assert await wait_event(warming), "the boot warms the model it already downloaded"
+    with pytest.raises(NotReady, match="is loading in this process"):
+        await models.require_ready("embedding", model_name)
+    assert (await models.model_statuses())[0].state == "loading"
+
+    release.set()
+
+    async def loaded() -> bool:
+        return models.is_warm(models._model_id("embedding", model_name))
+
+    await until(loaded, "never warmed")
+    await models.require_ready("embedding", model_name)  # no raise: the search may run now

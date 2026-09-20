@@ -25,9 +25,9 @@ async def list_jobs_by_kind(
     page_size: int = DEFAULT_PAGE_SIZE,
     cursor: str | None = None,
 ) -> Page[jobs.JobRow]:
-    """One page of the jobs of one `kind`, newest first: document, collection, download,
-    maintenance or archive. `collection` keeps one collection's jobs only, where the kind has a
-    collection at all.
+    """One page of the jobs of one `kind`, newest first: document, collection, download or
+    maintenance. `collection` keeps one collection's jobs only, where the kind has a collection
+    at all.
 
     Pass the `next_cursor` of a response back as `cursor` to continue; a cursor belongs to the
     kind that issued it.

@@ -1,32 +1,30 @@
 """Fixtures shared by every test module: the temp home, and the DBOS runtime on top of it."""
 
-import os
+import functools
+import shutil
+import sqlite3
+import threading
+import time
+from collections.abc import AsyncIterator, Iterator
+from functools import partial
+from pathlib import Path
 
-# Before `haskie` is imported anywhere: these are read from the environment at import time, and
-# every one of them is a real wait. The two poll intervals ship at 1 s / 0.25 s, which the suite
-# would otherwise sit through at every queue hand-off. pytest imports this file before any test
-# module, and nothing else in the suite imports `haskie` earlier.
-os.environ.setdefault("HASKIE_CONVERT_WORKERS", "0")  # extract inline; see test_cpu_pool
-os.environ.setdefault("HASKIE_JOB_POLL_SECONDS", "0.02")
-os.environ.setdefault("HASKIE_TASK_POLL_SECONDS", "0.02")
-os.environ.setdefault("HASKIE_RETRY_INTERVAL_SECONDS", "0.01")
-os.environ.setdefault("HASKIE_DOWNLOAD_RETRY_INTERVAL_SECONDS", "0.01")
-
-import shutil  # noqa: E402
-import sqlite3  # noqa: E402
-import threading  # noqa: E402
-import time  # noqa: E402
-from collections.abc import Iterator  # noqa: E402
-from functools import partial  # noqa: E402
-from pathlib import Path  # noqa: E402
-
-import anyio  # noqa: E402
-import anyio.to_thread  # noqa: E402
-import pytest  # noqa: E402
+import anyio
+import anyio.to_thread
+import pytest
+from dbos import WorkflowStatusString
 
 TEARDOWN_GRACE_SECONDS = 2.0  # how long a cancelled step may still be running at teardown
 TEARDOWN_POLL_SECONDS = 0.05
 DELAY_SWEEP_SECONDS = 0.05  # how often a debounced workflow is promoted (see `_sweep_delayed`)
+
+# Still on its way, including a debounced run waiting out its period (DELAYED). Only the suite
+# waits on that: the app counts `dbos_names.ACTIVE_STATUS`, where a debounce is not yet work.
+WAITING_STATUS = [
+    WorkflowStatusString.DELAYED.value,
+    WorkflowStatusString.ENQUEUED.value,
+    WorkflowStatusString.PENDING.value,
+]
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -35,6 +33,25 @@ def logging_configured() -> None:
     from haskie import logs
 
     logs.configure()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def fast_runtime() -> None:
+    """The production settings the suite cannot afford, set once before anything boots DBOS.
+
+    The queue poll intervals ship at 1 s / 0.25 s and are paid at every queue hand-off;
+    `workflows.start` reads them when it registers the queues, so assigning here is enough.
+    `CONVERT_WORKERS = 0` extracts PDFs inline: a process pool per xdist worker costs more to
+    start than the tests would save. `test_cpu_pool` is the one module that puts that back.
+
+    The step retry intervals are not here: DBOS copies them into the decorator at import, so the
+    two retry tests pay the real wait. `-n auto` absorbs it.
+    """
+    from haskie import cpu, workflows
+
+    workflows.JOB_POLL = 0.02
+    workflows.TASK_POLL = 0.02
+    cpu.CONVERT_WORKERS = 0
 
 
 @pytest.fixture(scope="session")
@@ -46,43 +63,40 @@ def anyio_backend() -> str:
 
 def _use_home(path: Path) -> Path:
     """Point this process at `path`, the way `haskie --home` does, and make the directories a boot
-    would. `home.use` owns which paths follow from the root, so they are not restated here.
+    would. Returns the root that was in use, for the caller to restore with `home.use` afterwards.
 
-    Returns the root that was in use, for the caller to hand to `_restore_home` afterwards: one
-    call rebinds every path, so monkeypatch has no single attribute to undo.
+    Restoring is paths only, never directories: the root a test started from may be the user's
+    real home, which the suite must never create anything in.
     """
     from haskie import home
 
     previous = home.HOME
     home.use(path)
-    # what `home.ensure_home` does, without an event loop: this runs from sync fixtures
-    for directory in (home.COLLECTION_ROOT, home.DOCUMENT_ROOT, home.STAGING_ROOT, home.AUDIT_DIR):
-        directory.mkdir(parents=True, exist_ok=True, mode=home.DIR_MODE)
+    home.ensure_home_sync()
     return previous
-
-
-def _restore_home(path: Path) -> None:
-    """Point the process back at `path`. Paths only, no directories: the root a test started from
-    may be the user's real home, which the suite must never create anything in."""
-    from haskie import home
-
-    home.use(path)
 
 
 def _drop_caches(patch: pytest.MonkeyPatch) -> None:
     """Drop the process caches that would otherwise answer from another home."""
-    from haskie import collection, db, models, settings
+    from haskie import db, models, settings
 
     patch.setattr(db, "_migrated", set())
-    patch.setattr(settings, "_cached", None)
+    patch.setattr(settings, "_state", None)
     # a loaded model is process state, and the process outlives the test that loaded it
     patch.setattr(models, "_ready", set())
     patch.setattr(models, "_warming", set())
-    collection.invalidate_collection_caches()
+
+
+def forget_settings() -> None:
+    """Make the next load read the `settings` row again. For a test that wrote the row with SQL,
+    which the process cache (`settings._state`) cannot see."""
+    from haskie import settings
+
+    settings._state = None
 
 
 @pytest.fixture(scope="session")
-def template_home(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def template_home(tmp_path_factory: pytest.TempPathFactory, fast_runtime: None) -> Path:
     """A home booted once, so every test that needs DBOS copies its database instead of building
     one: the migrations, the DBOS system schema, the registered queues and the cron schedules are
     all in the file already.
@@ -99,7 +113,7 @@ def template_home(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """
     from dbos import DBOS
 
-    from haskie import workflows
+    from haskie import home, workflows
 
     path = tmp_path_factory.mktemp("template-home")
     with pytest.MonkeyPatch.context() as patch:
@@ -114,7 +128,7 @@ def template_home(tmp_path_factory: pytest.TempPathFactory) -> Path:
                 DBOS.delete_workflow(workflow.workflow_id)
             DBOS.destroy(workflow_completion_timeout_sec=0)
         finally:
-            _restore_home(previous)  # this ran inside the test that asked for it
+            home.use(previous)  # this ran inside the test that asked for it
     connection = sqlite3.connect(path / "haskie.db")
     try:
         connection.execute("pragma wal_checkpoint(truncate)")  # so one file carries everything
@@ -126,10 +140,12 @@ def template_home(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(autouse=True)
 def haskie_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """A fresh temp home, with nothing in it: no database file, no migrations."""
+    from haskie import home
+
     previous = _use_home(tmp_path)
     _drop_caches(monkeypatch)
     yield tmp_path
-    _restore_home(previous)  # the temp directory goes; leave no module pointing into it
+    home.use(previous)  # the temp directory goes; leave no module pointing into it
 
 
 @pytest.fixture
@@ -191,15 +207,13 @@ async def stop_dbos() -> None:
     from dbos import DBOS
     from dbos import _dbos as dbos_module
 
-    from haskie import dbos_names
-
     instance = dbos_module._dbos_global_instance
     if instance is None:  # the test destroyed it itself
         return
     unfinished = [
         found.workflow_id
         for found in await DBOS.list_workflows_async(
-            status=dbos_names.WAITING_STATUS, load_input=False, load_output=False
+            status=WAITING_STATUS, load_input=False, load_output=False
         )
     ]
     if unfinished:
@@ -219,6 +233,56 @@ async def wait_for(workflow_id: str):
 
     handle = await DBOS.retrieve_workflow_async(workflow_id)
     return await handle.get_result(polling_interval_sec=workflows.TASK_POLL)
+
+
+WAIT = 30.0  # generous: every wait in the suite is released by another thread, never by a timer
+
+
+async def wait_event(event: threading.Event, timeout: float = WAIT) -> bool:
+    """Wait for a `threading.Event` without blocking the caller's loop. Two loops are involved -
+    the test's and DBOS's background one - so the blocking wait goes to a worker thread."""
+    return await anyio.to_thread.run_sync(functools.partial(event.wait, timeout))
+
+
+async def await_terminal(workflow_ids: list[str]) -> None:
+    """Drain before teardown: a step outliving `DBOS.destroy()` blocks interpreter exit."""
+    for workflow_id in workflow_ids:
+        try:
+            await wait_for(workflow_id)
+        except Exception:  # the outcome is asserted where it matters; this only drains
+            pass
+
+
+async def until(condition, message: str, timeout: float = WAIT) -> None:
+    """Wait for something a background task does; polled, because no result handle carries it.
+    `condition` is a coroutine function."""
+    from haskie import workflows
+
+    deadline = time.monotonic() + timeout
+    while not await condition():
+        assert time.monotonic() < deadline, message
+        await anyio.sleep(workflows.TASK_POLL)
+
+
+async def one_part(part: int, rows) -> AsyncIterator[tuple[int, list]]:
+    """`CollectionIndex.add_parts` consumes an async iterator: the pipeline decodes one row group
+    of the cache file at a time and awaits each read (see `embed_cache.read`)."""
+    yield part, rows
+
+
+def counted_list_workflows(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """The keyword arguments of every `DBOS.list_workflows_async` call from here on."""
+    from dbos import DBOS
+
+    calls: list[dict] = []
+    real = DBOS.list_workflows_async
+
+    async def counted(**kwargs):
+        calls.append(kwargs)
+        return await real(**kwargs)
+
+    monkeypatch.setattr(DBOS, "list_workflows_async", counted)
+    return calls
 
 
 async def restart_dbos() -> None:
@@ -260,6 +324,15 @@ def text_pdf(pages: list[str | None]) -> bytes:
     return out
 
 
+async def document_names() -> list[str]:
+    """Every document name, in name order: what a test that asserts on the whole store reads."""
+    from haskie import db
+
+    async with db.connect() as conn:
+        rows = await conn.execute_fetchall("select name from documents order by name")
+    return [name for (name,) in rows]
+
+
 async def maintenance_state(collection: str):
     """The maintenance columns of a collection that is expected to exist."""
     from haskie.collection import Collection
@@ -269,7 +342,11 @@ async def maintenance_state(collection: str):
     return state
 
 
-async def import_row(name: str, content: bytes | str, into: Path | None = None, **options):
+# The sample document most tests import: three headings, one body with a searchable word.
+MD = "# Title\n\nintro text\n\n## Alpha\n\nalpha body about lancedb\n\n## Beta\n\nbeta body\n"
+
+
+async def import_row(name: str, content: bytes | str = MD, into: Path | None = None, **options):
     """The document row and its file, with no pipeline started: the source is written outside the
     document store (under the home's `incoming/` unless `into` says where) and copied in, the way
     a real import reads a file the user already has."""
@@ -278,7 +355,51 @@ async def import_row(name: str, content: bytes | str, into: Path | None = None, 
     source = (into or home.HOME / "incoming") / name
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(content.encode() if isinstance(content, str) else content)
-    return await document.import_path(str(source), **options)
+    return await document.import_path(str(source), document.ImportOptions(**options))
+
+
+async def seed_index(collection: str, doc: str, text: str, heading: str = "Alpha") -> None:
+    """One indexed chunk of an imported document in a collection's table.
+
+    The real write path with no embedding model, so what a test gets is what a full-text-only
+    collection holds — without paying for a pipeline run to put it there.
+    """
+    from haskie import document
+    from haskie.chunk import Chunk
+    from haskie.collection import Collection
+    from haskie.index import Row
+
+    row = await document.get(doc)
+    chunk = Chunk(
+        heading=heading,
+        text=text,
+        line_start=5,
+        line_end=7,
+        char_start=0,
+        char_end=len(text),
+        parents=["Title"],
+    )
+
+    async def parts() -> AsyncIterator[tuple[int, list[Row]]]:
+        yield 0, [Row(chunk=chunk)]
+
+    index = Collection(collection).index_with(None)
+    await index.add_parts(doc, row.relative(row.original), row.relative(row.markdown), parts())
+    await index.finish()  # the full-text index the search reads
+
+
+def legacy_index(path: Path, doc: str, text: str, heading: str = "H"):
+    """A `chunks` table of a schema older than `index.Row`, returned for the test to read.
+
+    What the read and delete paths have to degrade on rather than raise or drop.
+    """
+    import lancedb
+
+    table = lancedb.connect(str(path)).create_table(
+        "chunks", data=[{"doc": doc, "chunk_id": 0, "heading": heading, "text": text}]
+    )
+    table.create_fts_index("text", replace=True)
+    return table
 
 
 async def import_document(dbos, name: str, content: bytes | str, tmp_dir: Path):
@@ -311,6 +432,56 @@ async def delete_collection(dbos, collection: str) -> None:
 
 IMPORT_TIMEOUT_SECONDS = 60
 IMPORT_POLL_SECONDS = 0.02
+MAX_WALK_PAGES = 100  # a cursor that never ends is the bug to catch, not a walk to hang on
+
+
+def api_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The app with `WEB_DIST` pointed at a directory that does not exist, so its routing table is
+    the API alone whether or not `web/dist` has been built."""
+    from haskie import app as app_module
+
+    monkeypatch.setattr(app_module, "WEB_DIST", tmp_path / "no-web-build")
+    return app_module.create_app()
+
+
+@pytest.fixture
+def api_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A client for that app with no lifespan entered, so nothing here launches DBOS; a test that
+    needs it takes the `dbos` fixture too (see `test_api`)."""
+    from litestar.testing import AsyncTestClient
+
+    return AsyncTestClient(api_app(tmp_path, monkeypatch))
+
+
+async def get_page(client, path: str, **params) -> dict:
+    """One page; `cursor=None` is dropped, so the same call reads the first page too."""
+    response = await client.get(path, params={k: v for k, v in params.items() if v is not None})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def walk_pages(
+    client, path: str, **params
+) -> tuple[list[dict], list[int], list[int | None], list[str | None]]:
+    """Follow `next_cursor` to the last page; returns the items, the size of each page, the total
+    each page reported and every page's cursor."""
+    items: list[dict] = []
+    sizes: list[int] = []
+    totals: list[int | None] = []
+    cursors: list[str | None] = []
+    cursor: str | None = None
+    for _ in range(MAX_WALK_PAGES):
+        page = await get_page(client, path, cursor=cursor, **params)
+        items.extend(page["items"])
+        sizes.append(len(page["items"]))
+        totals.append(page["total"])
+        cursors.append(page["next_cursor"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            return items, sizes, totals, cursors
+    raise AssertionError(f"{path} never ran out of pages")
+
+
 # What `wait_import` stops on: every state an import can end in.
 FINISHED_STATUSES = frozenset({"imported", "error", "cancelled"})
 
@@ -362,6 +533,11 @@ async def attach_via_api(client, collection: str, doc: str) -> str:
     job_id = response.json()["job_id"]
     assert await wait_for(job_id) == "indexed"
     return job_id
+
+
+def events(caplog) -> list[str]:
+    """The events logged so far. Our loggers pass structlog's event dict as the record message."""
+    return [record.msg["event"] for record in caplog.records if isinstance(record.msg, dict)]
 
 
 def audit_lines() -> list[dict]:

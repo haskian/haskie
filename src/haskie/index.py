@@ -10,14 +10,15 @@ Every table access is awaited: LanceDB's async API (`lancedb.connect_async`, `As
 its own tokio runtime, so nothing here blocks the event loop that called it. The pure parts —
 Arrow encoding, scoring, row-to-`Hit` — stay sync.
 
-Write and read paths differ on purpose (B1): only the index stage of a document may drop an
+Write and read paths differ on purpose: only the index stage of a document may drop an
 outdated table (`reset_for_write`), every other write no-ops on one, and a read never creates a
 table at all. Deleting one document from a collection must never wipe the collection.
 """
 
+import asyncio
 import math
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -30,8 +31,9 @@ from lancedb.index import FTS, IvfPq
 
 from haskie import cpu, models
 from haskie.chunk import Chunk
+from haskie.chunk import record as chunk_record
 from haskie.logs import get_logger
-from haskie.settings import Accelerator, EmbeddingModel, SearchSettings, load_user_settings
+from haskie.settings import EmbeddingModel, SearchSettings
 
 
 class Row(msgspec.Struct):
@@ -83,7 +85,6 @@ class Hit(msgspec.Struct):
 
     collection: str  # the collection whose table matched; the document itself belongs to none
     doc: str
-    home: str  # absolute haskie home; join with the relative paths below to open files
     source_path: str  # original upload, relative to home
     markdown_path: str  # full converted markdown, relative to home
     part: int  # micro-batch that produced the chunk
@@ -100,9 +101,9 @@ class Hit(msgspec.Struct):
     location: str  # human-readable "doc p.3-4 L10-20", ready to cite
     text: str
     score: float
-    # Absolute, and filled by `collection.resolve_hit` (which every search path calls) rather
-    # than stored: the index keeps paths home-relative so a home stays portable. These are what a
-    # tool outside the app opens or greps - `line_start`/`line_end` are lines in `markdown_file`.
+    # Absolute, built by `hit` from the index's own home rather than stored: the index keeps its
+    # paths home-relative so a home stays portable. These are what a tool outside the app opens or
+    # greps - `line_start`/`line_end` are lines in `markdown_file`.
     source_file: str = ""
     markdown_file: str = ""
 
@@ -189,7 +190,6 @@ class CollectionIndex:
         table built by an older version or another embedding cannot hold new rows, and nothing in
         it is the only copy of anything: every document of the collection is rewritten from its
         embedding cache by "Index all"."""
-        forget_schema(self.path)  # decide on the table as it is now, not as it was cached
         table = await self._existing()
         if table is not None and not await self.schema_current(table):
             _log.warning("index_table_outdated", collection=self.collection, path=str(self.path))
@@ -205,10 +205,10 @@ class CollectionIndex:
 
     async def schema_current(self, table: lancedb.AsyncTable | None = None) -> bool:
         """False when the table cannot hold rows written by this build: a missing column, or a
-        vector of different dimensions than the current embedding model (B2).
+        vector of different dimensions than the current embedding model.
 
-        Cached per index directory and embedding (see `_schema_current`); a missing table is never
-        cached, so one created later is inspected.
+        A missing table is never cached (see `_schema_current`), so one created later is
+        inspected.
         """
         key = (str(self.path), self.embedding.dims if self.embedding else None)
         with _schema_lock:
@@ -239,7 +239,7 @@ class CollectionIndex:
 
     async def _deletable(self) -> lancedb.AsyncTable | None:
         """A delete on a missing or outdated table has nothing to remove; dropping it instead
-        would wipe every document of the collection (B1)."""
+        would wipe every document of the collection."""
         table = await self._existing()
         return table if table is not None and await self.schema_current(table) else None
 
@@ -285,41 +285,29 @@ class CollectionIndex:
     def _record_batch(
         self, doc: str, part: int, source_path: str, markdown_path: str, rows: list[Row]
     ) -> pa.RecordBatch | None:
-        """One part as Arrow, or None when the part is empty (nothing to write for it)."""
+        """One part as Arrow, or None when the part is empty (nothing to write for it).
+
+        The chunk's own columns come from `chunk.record`, which the embedding cache writes its
+        parquet with too; this table adds the document's identity around them and flattens the
+        heading ancestry into one breadcrumb string."""
         if not rows:
             return None
-        count = len(rows)
-        chunks = [row.chunk for row in rows]
-        columns: dict[str, Any] = {
-            "doc": pa.array([doc] * count, pa.string()),
-            "source_path": pa.array([source_path] * count, pa.string()),
-            "markdown_path": pa.array([markdown_path] * count, pa.string()),
-            "part": pa.array([part] * count, pa.int32()),
-            "chunk_id": pa.array(range(count), pa.int32()),  # unique with (doc, part)
-            "line_start": pa.array([c.line_start for c in chunks], pa.int32()),
-            "line_end": pa.array([c.line_end for c in chunks], pa.int32()),
-            "char_start": pa.array([c.char_start for c in chunks], pa.int32()),
-            "char_end": pa.array([c.char_end for c in chunks], pa.int32()),
-            "page_start": pa.array([c.page_start for c in chunks], pa.int32()),
-            "page_end": pa.array([c.page_end for c in chunks], pa.int32()),
-            "parents": pa.array([PARENT_SEP.join(c.parents) for c in chunks], pa.string()),
-            "heading": pa.array([c.heading for c in chunks], pa.string()),
-            "text": pa.array([c.text for c in chunks], pa.string()),
-        }
-        if self.embedding is not None:
-            columns["vector"] = self._vectors(rows)
-        return pa.RecordBatch.from_pydict(columns, schema=self._schema())
-
-    def _vectors(self, rows: list[Row]) -> pa.FixedSizeListArray:
-        """The precomputed vectors of one part as a fixed-size list column, flattened in one pass
-        so no intermediate list of lists is built."""
-        dims = self.embedding.dims if self.embedding else 0
-        flat: list[float] = []
-        for row in rows:
-            if row.vector is None:
-                raise ValueError("index has an embedding but the row carries no vector")
-            flat.extend(row.vector)
-        return pa.FixedSizeListArray.from_arrays(pa.array(flat, pa.float32()), dims)
+        dims = self.embedding.dims if self.embedding else None
+        records = [
+            chunk_record(
+                row.chunk,
+                row.vector,
+                dims,
+                doc=doc,
+                source_path=source_path,
+                markdown_path=markdown_path,
+                part=part,
+                chunk_id=chunk_id,  # unique with (doc, part)
+                parents=PARENT_SEP.join(row.chunk.parents),
+            )
+            for chunk_id, row in enumerate(rows)
+        ]
+        return pa.RecordBatch.from_pylist(records, schema=self._schema())
 
     # --- indexes and maintenance -----------------------------------------
     # Building an index is O(table), so the write path only ever creates a missing one: a LanceDB
@@ -412,12 +400,6 @@ class CollectionIndex:
     # every index in parallel and rescores the merge once (see session.search). `search` below is
     # the single-index composition of the same steps.
 
-    async def accelerator(self) -> Accelerator:
-        """The reranker runs where the settings say, not where the embedding model happens to:
-        a collection with no embedding profile still reranks, and `models.warm_model` loaded the
-        cross-encoder under this same setting."""
-        return (await load_user_settings()).pipeline.accelerator
-
     async def query_vector(self, query: str, settings: SearchSettings) -> list[float] | None:
         """The query embedding, or None when this index can only answer lexically: mode `fts`, no
         embedding model, or a table written without a vector column."""
@@ -428,7 +410,7 @@ class CollectionIndex:
         from haskie.embed import embed_query
 
         await models.require_ready("embedding", self.embedding.name)
-        return await cpu.on_cpu("embed_query", embed_query, self.embedding, query)
+        return await cpu.on_cpu(embed_query, self.embedding, query)
 
     async def search_rows(
         self, query: str, vector: list[float] | None, settings: SearchSettings, limit: int
@@ -444,7 +426,7 @@ class CollectionIndex:
         table = await self._existing()
         if table is None or await table.count_rows() == 0:
             return []
-        if vector is None or "vector" not in (await table.schema()).names:
+        if vector is None or not await self.has_vector_column():
             return await (await table.search(query, query_type="fts")).limit(limit).to_list()
         if settings.mode == "vector":
             found = _tuned(await table.search(vector, query_type="vector"), settings)
@@ -473,25 +455,23 @@ class CollectionIndex:
         return await (await table.search(query, query_type="fts")).limit(limit).to_list()
 
     async def search(self, query: str, settings: SearchSettings) -> list[Hit]:
-        table = await self._existing()
-        if table is None or await table.count_rows() == 0:
-            return []  # nothing indexed, so nothing to embed the question for either
         rerank = settings.reranker != "none"
         fetch = max(settings.candidates, settings.limit) if rerank else settings.limit
         vector = await self.query_vector(query, settings)
         rows = await self.search_rows(query, vector, settings, fetch)
         if rerank:
-            rows = await cross_encode(query, rows, settings, await self.accelerator())
+            rows = await cross_encode(query, rows, settings)
         return [self.hit(r) for r in rows[: settings.limit]]
 
     def hit(self, r: dict, score: float | None = None) -> Hit:
-        """Tolerates rows from older index versions (missing columns -> empty values). `score`
-        replaces the row's own signal: a merged ranking over several indexes scores its rows
-        together, because per-index scores are not comparable (see session.search)."""
-        parents = r["parents"].split(PARENT_SEP) if r.get("parents") else []
+        """One result row as a `Hit`, with the file paths resolved against this index's home.
+        `score` replaces the row's own signal: a merged ranking over several indexes scores its
+        rows together, because per-index scores are not comparable (see session.search)."""
+        parents = r["parents"].split(PARENT_SEP) if r["parents"] else []
         heading = r["heading"]
-        line_start, line_end = r.get("line_start", 0), r.get("line_end", 0)
-        page_start, page_end = r.get("page_start"), r.get("page_end")
+        line_start, line_end = r["line_start"], r["line_end"]
+        page_start, page_end = r["page_start"], r["page_end"]
+        source_path, markdown_path = r["source_path"], r["markdown_path"]
         pages = ""
         if page_start is not None:
             pages = f" p.{page_start}"
@@ -500,15 +480,14 @@ class CollectionIndex:
         return Hit(
             collection=self.collection,
             doc=r["doc"],
-            home=str(self.home),
-            source_path=r.get("source_path", ""),
-            markdown_path=r.get("markdown_path", ""),
-            part=r.get("part", 0),
+            source_path=source_path,
+            markdown_path=markdown_path,
+            part=r["part"],
             chunk_id=r["chunk_id"],
             line_start=line_start,
             line_end=line_end,
-            char_start=r.get("char_start", 0),
-            char_end=r.get("char_end", 0),
+            char_start=r["char_start"],
+            char_end=r["char_end"],
             page_start=page_start,
             page_end=page_end,
             parents=parents,
@@ -517,6 +496,8 @@ class CollectionIndex:
             location=f"{r['doc']}{pages} L{line_start}-{line_end}",
             text=r["text"],
             score=row_score(r) if score is None else score,
+            source_file=str(self.home / source_path) if source_path else "",
+            markdown_file=str(self.home / markdown_path) if markdown_path else "",
         )
 
 
@@ -542,25 +523,18 @@ def _tuned(builder: Any, settings: SearchSettings) -> Any:
     return builder.nprobes(settings.nprobes).refine_factor(settings.refine_factor)
 
 
-async def cross_encode(
-    query: str, rows: list[dict], settings: SearchSettings, accelerator: Accelerator
-) -> list[dict]:
+async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
     """Second stage for any mode: rescore candidate rows with a cross-encoder, best first.
 
-    Module-level and told which accelerator to use, so a session rescores one merged candidate
-    list instead of running a cross-encoder per collection. The cross-encoder itself is CPU work, so
-    it runs in a worker thread under one slot of the CPU budget.
+    Module-level, so a session rescores one merged candidate list instead of running a
+    cross-encoder per collection. The cross-encoder itself is CPU work, so it runs in a worker
+    thread under one slot of the CPU budget.
     """
     from haskie.embed import rerank_scores
 
     await models.require_ready("reranker", settings.reranker_model)
     scores = await cpu.on_cpu(
-        "rerank",
-        rerank_scores,
-        settings.reranker_model,
-        accelerator,
-        query,
-        [r["text"] for r in rows],
+        rerank_scores, settings.reranker_model, query, [r["text"] for r in rows]
     )
     for row, score in zip(rows, scores, strict=True):
         row["_relevance_score"] = score
@@ -589,6 +563,41 @@ RowKey = tuple[str, int, int]
 
 
 def row_key(row: dict) -> RowKey:
-    """(doc, part, chunk_id) of one result row. `part` defaults to 0 for a table written before
-    micro-batches, the same default `hit` reads it with."""
-    return (row["doc"], row.get("part", 0), row["chunk_id"])
+    """(doc, part, chunk_id) of one result row."""
+    return (row["doc"], row["part"], row["chunk_id"])
+
+
+async def gather_rows(
+    indexes: list[CollectionIndex],
+    fetch: Callable[[CollectionIndex], Awaitable[list[dict]]],
+) -> list[tuple[CollectionIndex, list[dict]]]:
+    """Read every index concurrently, at most `SEARCH_CONCURRENCY` at a time, in the order given.
+
+    One semaphore per call, never at import time: an anyio primitive belongs to the loop that
+    first used it, and both the Litestar loop and the DBOS loop run searches.
+
+    No `return_exceptions`: the first index that cannot answer fails the whole search, because a
+    silent hole in a merged ranking reads as "no match".
+    """
+    slots = anyio.Semaphore(SEARCH_CONCURRENCY)
+
+    async def read(index: CollectionIndex) -> tuple[CollectionIndex, list[dict]]:
+        async with slots:
+            return index, await fetch(index)
+
+    return list(await asyncio.gather(*(read(index) for index in indexes)))
+
+
+def first_per_key(
+    pairs: Iterable[tuple[CollectionIndex, dict]],
+) -> list[tuple[CollectionIndex, dict]]:
+    """One pair per `row_key`, keeping the first offered and the caller's order.
+
+    The same document may be a member of several collections, whose tables then hold the same
+    chunk. A search is about passages, not memberships, so the copies are dropped; which copy is
+    "first" is the caller's ranking decision (see session.search and textsearch.merge).
+    """
+    unique: dict[RowKey, tuple[CollectionIndex, dict]] = {}
+    for index, row in pairs:
+        unique.setdefault(row_key(row), (index, row))
+    return list(unique.values())

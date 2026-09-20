@@ -1,11 +1,12 @@
 """Metadata store: SQLite (WAL mode) at ~/.haskie/haskie.db.
 
 Reads and writes go through `aiosqlite`, one connection per unit of work, so no unit ever blocks
-the event loop it runs on. Migrations are the exception: they stay on stdlib `sqlite3` in a worker
-thread, because the one-time switch to WAL needs an exclusive lock on the file.
+the event loop it runs on. Creating the schema is the exception: it stays on stdlib `sqlite3` in a
+worker thread, because the one-time switch to WAL needs an exclusive lock on the file.
 
-Schema evolution: append a script to MIGRATIONS, never edit an applied one. `PRAGMA user_version`
-records how many have run; the missing tail is applied once per process, before the first connect.
+Schema evolution: edit `SCHEMA` and bump `SCHEMA_VERSION`. There is no upgrade path, so a home at
+any other version is refused and has to be destroyed (see `migrate`). A deliberate choice while the
+storage shape is still moving: one readable schema is worth more than a history of scripts.
 """
 
 import sqlite3
@@ -13,128 +14,51 @@ import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 import anyio.to_thread
 import msgspec
 
 from haskie import home
+from haskie.errors import HaskieError
 
-MIGRATIONS: list[str] = [
-    # 1: initial schema; libraries -> documents cascade on delete
-    """
+SCHEMA_VERSION = 10
+"""`pragma user_version` of the schema below.
+
+A home stamped with it has exactly these tables and is opened as it is. Any other stamp is a
+shape this build cannot read, so the home is refused (see `migrate`). Bumped last when
+`staging.created_at` went from an ISO-8601 string to unix seconds.
+"""
+
+# Every statement is `if not exists`, so a crash partway through leaves `user_version` at 0 and
+# the next boot replays the script harmlessly.
+#
+# SQLite has no date type: a `timestamp` column documents what the value means, and its NUMERIC
+# affinity stores the unix seconds `time.time()` returns as the float they are.
+SCHEMA = """
     create table if not exists settings (
         id integer primary key check (id = 1),
         json text not null
     );
-    create table if not exists libraries (
-        name text primary key,
-        settings text not null default '{}'
-    );
-    create table if not exists documents (
-        library text not null references libraries (name) on delete cascade,
-        name text not null,
-        size integer not null,
-        status text not null default 'uploaded',
-        error text,
-        preview text,
-        primary key (library, name)
-    );
+
     create table if not exists sessions (
-        id text primary key,
-        libraries text not null
+        id text primary key
     );
-    """,
-    # 2: an early build kept its own job/task queues here; DBOS owns that now (same file).
-    #    Kept so existing databases at user_version 2 stay numbered correctly; no-op when fresh.
-    """
-    drop table if exists tasks;
-    drop table if exists jobs;
-    """,
-    # 3: listing timestamps + the indexes every paged listing sorts on. Existing rows have no
-    #    history to recover, so they are stamped with the moment of the migration (unix seconds,
-    #    the same clock `time.time()` writes) instead of staying at the epoch.
-    """
-    alter table libraries add column created_at real not null default 0;
-    alter table documents add column created_at real not null default 0;
-    alter table documents add column updated_at real not null default 0;
-    update libraries set created_at = (julianday('now')-2440587.5)*86400.0 where created_at = 0;
-    update documents set created_at = (julianday('now')-2440587.5)*86400.0,
-        updated_at = (julianday('now')-2440587.5)*86400.0 where created_at = 0;
-    create index if not exists documents_library_status  on documents (library, status, name);
-    create index if not exists documents_library_updated on documents (library, updated_at, name);
-    create index if not exists documents_library_size    on documents (library, size, name);
-    """,
-    # 4: per-library index maintenance bookkeeping (compaction, full-text and vector indexes).
-    #    Existing libraries hold a table nobody ever compacted, so every one of them starts with
-    #    one document pending: the first boot after this migration schedules a run for each.
-    """
-    alter table libraries add column pending_docs integer not null default 0;
-    alter table libraries add column last_write_at real;
-    alter table libraries add column last_maintained_at real;
-    alter table libraries add column vector_index_rows integer not null default 0;
-    update libraries set pending_docs = 1;
-    """,
-    # 5: job history retention (see archive.py). Only the watermark is schema: the day partitions
-    #    `jobs_YYYYMMDD` / `tasks_YYYYMMDD` are created on demand and dropped whole, so they can
-    #    never be part of a numbered migration.
-    """
-    create table if not exists retention_state (key text primary key, value text not null);
-    insert or ignore into retention_state (key, value) values ('archive_watermark_ms', '0');
-    """,
-    # 6: facts about the home directory itself rather than about its rows. Its only key was
-    #    `layout_version`, written by the layout migration that no longer exists, so the table has
-    #    no reader left and migration 9 drops it. Kept here so the numbering stays as it shipped.
-    """
-    create table if not exists meta (key text primary key, value text not null);
-    """,
-    # 7: the libraries of a session become rows instead of a JSON column, so a deleted library
-    #    leaves every session it was chosen in through the same cascade that drops its documents
-    #    (no read-modify-write over every session row). `position` keeps the caller's order.
-    #    A name in the JSON that no longer has a library row is dropped rather than migrated.
-    """
-    create table if not exists session_libraries (
-        session_id text not null references sessions (id) on delete cascade,
-        library text not null references libraries (name) on delete cascade,
-        position integer not null,
-        primary key (session_id, library)
-    );
-    create index if not exists session_libraries_library on session_libraries (library);
-    insert or ignore into session_libraries (session_id, library, position)
-        select s.id, j.value, j.key from sessions s, json_each(s.libraries) j
-        where j.value in (select name from libraries);
-    alter table sessions drop column libraries;
-    """,
-    # 8: a human label for a library and for a document, set on create/upload and editable after
-    """
-    alter table libraries add column description text not null default '';
-    alter table documents add column description text not null default '';
-    """,
-    # 9: collections replace libraries; documents become collection-independent and many-to-many
-    #    through collection_documents; embeddings become a durable, content-addressed cache, and
-    #    an upload waiting in `staging/` gets a row instead of a sidecar file. A
-    #    breaking storage-shape change: nothing is reshaped in place. A home that reaches this
-    #    migration with real libraries/documents rows is refused before it runs (see `migrate`),
-    #    so the script is free to drop and recreate. One transaction: a crash mid-script must not
-    #    leave `user_version` at 8 over a half-dropped schema.
-    """
-    begin;
-    drop table if exists session_libraries;
-    drop table if exists documents;
-    drop table if exists libraries;
-    drop table if exists meta;
 
     create table if not exists collections (
         name text primary key,
         settings text not null default '{}',
         description text not null default '',
-        created_at real not null default 0,
+        created_at timestamp not null default 0,
         pending_docs integer not null default 0,
-        last_write_at real,
-        last_maintained_at real,
+        last_write_at timestamp,
+        last_maintained_at timestamp,
         vector_index_rows integer not null default 0
     );
 
+    -- a document belongs to no collection: `collection_documents` is the many-to-many, and each
+    -- membership carries the status of writing that document into that collection's table
     create table if not exists documents (
         name text primary key,
         suffix text not null,
@@ -144,8 +68,8 @@ MIGRATIONS: list[str] = [
         preview text,
         parser text not null default 'anydoc',
         skip_ocr_pages integer not null default 1,
-        created_at real not null default 0,
-        updated_at real not null default 0,
+        created_at timestamp not null default 0,
+        updated_at timestamp not null default 0,
         description text not null default ''
     );
     create index if not exists documents_status  on documents (status, name);
@@ -157,8 +81,8 @@ MIGRATIONS: list[str] = [
         document text not null references documents (name) on delete cascade,
         status text not null default 'pending',
         error text,
-        added_at real not null default 0,
-        updated_at real not null default 0,
+        added_at timestamp not null default 0,
+        updated_at timestamp not null default 0,
         primary key (collection, document)
     );
     create index if not exists collection_documents_document
@@ -166,6 +90,7 @@ MIGRATIONS: list[str] = [
     create index if not exists collection_documents_status
         on collection_documents (collection, status, document);
 
+    -- the durable, content-addressed embedding cache (see embed_cache.py)
     create table if not exists embeddings (
         id text primary key,
         document text not null references documents (name) on delete cascade,
@@ -179,7 +104,7 @@ MIGRATIONS: list[str] = [
         skip_ocr_pages integer not null,
         rows integer not null default 0,
         bytes integer not null default 0,
-        created_at real not null default 0
+        created_at timestamp not null default 0
     );
     create index if not exists embeddings_document on embeddings (document);
 
@@ -192,19 +117,16 @@ MIGRATIONS: list[str] = [
     create index if not exists session_collections_collection
         on session_collections (collection);
 
+    -- an upload waiting in `staging/`, before any name is taken
     create table if not exists staging (
         staging_id text primary key,
         filename text not null,
         size integer not null,
-        created_at text not null
+        created_at timestamp not null default 0
     );
-    commit;
-    """,
-]
+    """
 
-# The migration that changed the storage shape (see MIGRATIONS[8]) and the message a home holding
-# data from before it gets instead of a silent drop.
-INCOMPATIBLE_HOME_MIGRATION = 9
+
 INCOMPATIBLE_HOME_MESSAGE = (
     "This version of haskie changed how documents are stored; the existing home is incompatible. "
     "Run `haskie destroy` and re-import your documents."
@@ -213,40 +135,25 @@ INCOMPATIBLE_HOME_MESSAGE = (
 BUSY_TIMEOUT_SECONDS = 30.0  # how long a writer waits for another writer before it gives up
 
 _migrated: set[Path] = set()
-_migrate_lock = threading.Lock()  # both event loops migrate through worker threads of their own
-
-
-def _holds_pre_collection_data(conn: sqlite3.Connection) -> bool:
-    """Whether the pre-refactor `libraries`/`documents` tables hold any row. A table that does not
-    exist (a home that never ran migration 1 with data, or a fresh file) holds nothing."""
-    for table in ("libraries", "documents"):
-        found = conn.execute(
-            "select 1 from sqlite_master where type = 'table' and name = ?", (table,)
-        ).fetchone()
-        if found is not None and conn.execute(f"select 1 from {table} limit 1").fetchone():
-            return True
-    return False
+_migrate_lock = threading.Lock()  # both event loops get here through worker threads of their own
 
 
 def migrate(conn: sqlite3.Connection) -> int:
-    """Apply pending migrations in order; returns the resulting schema version.
+    """Create the schema on a fresh file; returns the version the file is at.
 
-    Checked inside the loop, right before migration 9 runs, rather than on the starting version:
-    a home may start at 5, 6, 7 or 8 and reach 9 in the same run either way. A home with real
-    pre-collection rows is refused there, with `user_version` left at 8, so the user can destroy
-    it and start over instead of losing the rows silently."""
-    from haskie.errors import HaskieError  # errors imports home, which imports nothing of ours
-
+    A home stamped with anything else was written by a build whose storage shape this one cannot
+    read, and there is no path from it. It is refused with `user_version` untouched and the user is
+    told to destroy it, rather than losing its rows to a silent drop."""
     (version,) = conn.execute("pragma user_version").fetchone()
-    if version == 0:
-        conn.execute("pragma journal_mode = wal")  # persistent; needs an exclusive lock, so once
-    for number, script in enumerate(MIGRATIONS[version:], start=version + 1):
-        if number == INCOMPATIBLE_HOME_MIGRATION and _holds_pre_collection_data(conn):
-            raise HaskieError(INCOMPATIBLE_HOME_MESSAGE)
-        conn.executescript(script)
-        conn.execute(f"pragma user_version = {number}")
-        conn.commit()
-    return len(MIGRATIONS)
+    if version == SCHEMA_VERSION:
+        return SCHEMA_VERSION
+    if version != 0:
+        raise HaskieError(INCOMPATIBLE_HOME_MESSAGE)
+    conn.execute("pragma journal_mode = wal")  # persistent; needs an exclusive lock, so once
+    conn.executescript(SCHEMA)
+    conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
+    conn.commit()
+    return SCHEMA_VERSION
 
 
 def _migrate_sync() -> None:
@@ -265,9 +172,9 @@ def _migrate_sync() -> None:
 
 
 def invalidate_migrations() -> None:
-    """Forget which database files this process has migrated.
+    """Forget which database files this process has opened.
 
-    The set is a per-process cache of "already at the latest schema". Deleting the file behind it
+    The set is a per-process cache of "already at `SCHEMA_VERSION`". Deleting the file behind it
     (`haskie destroy`) leaves that claim false, so the next `migrate_once` has to run again.
     """
     with _migrate_lock:
@@ -275,7 +182,7 @@ def invalidate_migrations() -> None:
 
 
 async def migrate_once() -> None:
-    """Make the home and apply the pending migrations, once per process and database file.
+    """Make the home and create the schema, once per process and database file.
 
     The one-time WAL switch needs an exclusive lock, so this runs before anything else (DBOS, or
     the first `connect()`) holds the file open."""
@@ -291,7 +198,10 @@ async def connect() -> AsyncIterator[aiosqlite.Connection]:
 
     A connection is never shared between the two event loops, because it never outlives the unit
     of work that opened it. `timeout` makes concurrent writers (DBOS, requests) wait instead of
-    raising "database is locked"; WAL (set at migration time) lets readers proceed during a write.
+    raising "database is locked"; WAL (set when the schema is created) lets readers proceed.
+
+    The default row factory is left alone, so every fetched row is a plain tuple; `aiosqlite`
+    types it as `sqlite3.Row` anyway, which is why the reads elsewhere say `Any`.
     """
     await migrate_once()
     async with aiosqlite.connect(home.DB_FILE, timeout=BUSY_TIMEOUT_SECONDS) as conn:
@@ -308,6 +218,19 @@ async def connect() -> AsyncIterator[aiosqlite.Connection]:
 def placeholders(count: int) -> str:
     """`?, ?, ?` for a SQL `in (...)` list or a `values (...)` row."""
     return ", ".join(["?"] * count)
+
+
+def row_to[T](struct: type[T], columns: tuple[str, ...], row: tuple, **json_columns: type) -> T:
+    """One selected row as a struct, `columns` naming what the row holds in its order.
+
+    `strict=False` so the integers sqlite stores for booleans arrive as the bools the struct
+    declares. A column named in `json_columns` holds JSON text (sqlite has no struct type) and is
+    decoded into that type first.
+    """
+    values: dict[str, Any] = dict(zip(columns, row, strict=True))
+    for name, type_ in json_columns.items():
+        values[name] = loads(values[name], type_)
+    return msgspec.convert(values, struct, strict=False)
 
 
 def dumps(value: msgspec.Struct | list | dict) -> str:

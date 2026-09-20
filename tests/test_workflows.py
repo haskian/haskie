@@ -1,4 +1,4 @@
-"""Durable execution: the DBOS runtime, the three pipelines, jobs and model lifecycle.
+"""Durable execution: the DBOS runtime, the three pipelines and the jobs read model.
 
 Every test here takes the `dbos` fixture, which launches DBOS on the test home's SQLite file and
 destroys it afterwards. Concurrency is driven by `threading.Event`, never by sleeping: a fake
@@ -7,8 +7,8 @@ pipeline step signals when it has been entered and blocks until the test release
 
 Threading events rather than anyio ones, because two event loops are involved: the test body runs
 on the loop `pytest.mark.anyio` gives it, while the steps it gates run on DBOS's background loop.
-Both sides wait on them through `_wait_event`, which hands the blocking wait to a worker thread so
-neither loop is ever blocked.
+Both sides wait on them through `conftest.wait_event`, which hands the blocking wait to a worker
+thread so neither loop is ever blocked.
 
 Three workflows carry a document: `import_document` (`imp:`) converts it once and pre-warms the
 embedding cache, `ensure_embedding` (`emb:`) computes one cached embedding per distinct
@@ -17,13 +17,10 @@ collection's table. The cache is what makes the second collection cheap, so the 
 the mechanism - how often the embed work ran, which workflow ran it - and not only the end state.
 """
 
-import functools
 import os
-import shutil
 import threading
 import time
 from collections import Counter
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -32,19 +29,30 @@ import anyio
 import anyio.to_thread
 import pytest
 from conftest import (
+    MD,
+    WAIT,
+    WAITING_STATUS,
     attach_document,
     audit_lines,
+    await_terminal,
+    counted_list_workflows,
     delete_collection,
     delete_document,
+    document_names,
+    events,
+    forget_settings,
     import_document,
     import_row,
     maintenance_state,
     restart_dbos,
     text_pdf,
+    until,
+    wait_event,
     wait_for,
 )
 from dbos import DBOS, SetWorkflowID
 from dbos._error import DBOSAwaitedWorkflowCancelledError
+from dbos._registrations import get_dbos_func_name
 
 from haskie import (
     audit,
@@ -54,7 +62,6 @@ from haskie import (
     db,
     dbos_names,
     document,
-    embed,
     embed_cache,
     home,
     jobs,
@@ -62,21 +69,15 @@ from haskie import (
     models,
     paging,
     pipeline,
-    session,
     settings,
     workflows,
 )
 from haskie.collection import Collection
 from haskie.document import Document
 from haskie.errors import (
-    CollectionNotFound,
     Conflict,
-    DocumentNotFound,
-    HaskieError,
     InvalidInput,
-    JobNotFound,
-    NeedsOcr,
-    NotReady,
+    NotFound,
     PermanentError,
 )
 from haskie.pipeline import Batch
@@ -87,7 +88,6 @@ from haskie.settings import (
     PipelineSettings,
     RetentionSettings,
     SearchOverrides,
-    SearchSettings,
     UserSettings,
     load_user_settings,
     save_user_settings,
@@ -95,29 +95,7 @@ from haskie.settings import (
 
 pytestmark = pytest.mark.anyio
 
-MD = "# Title\n\nintro text\n\n## Alpha\n\nalpha body about lancedb\n\n## Beta\n\nbeta body\n"
-WAIT = 30.0  # generous: every wait below is released by another thread, never by a timer
 BLOCKED_WAIT = 2.0  # how long a step that must not run is given to prove it by not running
-
-# Workflow names DBOS records that `dbos_names` does not export: only the three pipeline-shaped
-# ones are shared with `jobs` and `archive`, the rest are named at their registration alone.
-MAINTAIN_WORKFLOW = "maintain_collection"
-MAINTAIN_PARTITION_WORKFLOW = "maintain_on_partition"
-INDEX_COLLECTION_WORKFLOW = "index_collection"
-DELETE_COLLECTION_WORKFLOW = "delete_collection"
-DELETE_DOCUMENT_WORKFLOW = "delete_document"
-
-
-async def _wait_event(event: threading.Event, timeout: float = WAIT) -> bool:
-    """Wait for a `threading.Event` without blocking the loop of the caller (see the module
-    docstring): the blocking wait goes to a worker thread, the caller awaits it."""
-    return await anyio.to_thread.run_sync(functools.partial(event.wait, timeout))
-
-
-async def _add(tmp_path: Path, name: str, content: bytes | str = MD) -> Document:
-    """The document row and its file, with no pipeline started: what a test that drives
-    `start_import` itself, or that needs a document stuck before `imported`, starts from."""
-    return await import_row(name, content, tmp_path)
 
 
 async def _add_member(collection: Collection, doc: str) -> None:
@@ -132,14 +110,9 @@ async def _add_member(collection: Collection, doc: str) -> None:
         )
 
 
-def _run_id(workflow_id: str) -> str:
-    """The uuid tail of a workflow id: what its deterministic child ids are derived from."""
-    return workflow_id.rsplit(":", 1)[-1]
-
-
 def _embed_id(workflow_id: str, doc: str) -> str:
     """The `emb:` child one `imp:` or `idx-col:` workflow asks for (see `_ensure_embedding`)."""
-    return f"{workflows.EMBED_PREFIX}:{doc}:{_run_id(workflow_id)}"
+    return f"{workflows.EMBED_PREFIX}:{doc}:{workflows.run_id(workflow_id)}"
 
 
 async def _steps(workflow_id: str) -> list[str]:
@@ -212,18 +185,14 @@ async def _statuses(workflow_ids: list[str]) -> list[str]:
     return [found[i] for i in workflow_ids]
 
 
-async def _await_terminal(workflow_ids: list[str]) -> None:
-    """Drain before teardown: a step outliving DBOS.destroy() blocks interpreter exit."""
-    for workflow_id in workflow_ids:
-        try:
-            await wait_for(workflow_id)
-        except Exception:  # the outcome is asserted elsewhere; this call only drains
-            pass
+def _all_cancelled(workflow_ids: list[str]):
+    """A condition for `until`: every one of these workflows has been marked CANCELLED. The mark
+    is all a cancel writes, so this says nothing about the steps still running under it."""
 
+    async def cancelled() -> bool:
+        return await _statuses(workflow_ids) == ["CANCELLED"] * len(workflow_ids)
 
-def _events(caplog) -> list[str]:
-    """Our loggers pass structlog's event dict as the record message."""
-    return [r.msg["event"] for r in caplog.records if isinstance(r.msg, dict)]
+    return cancelled
 
 
 async def _drain(timeout: float = WAIT) -> None:
@@ -243,8 +212,9 @@ async def _drain_maintenance(timeout: float = WAIT) -> None:
     unfinished. Only for tests that asked for maintenance with no delay; with the default idle
     period this would wait a minute."""
     deadline = time.monotonic() + timeout
-    waiting = dbos_names.WAITING_STATUS
-    while await DBOS.list_workflows_async(status=waiting, load_input=False, load_output=False):
+    while await DBOS.list_workflows_async(
+        status=WAITING_STATUS, load_input=False, load_output=False
+    ):
         assert time.monotonic() < deadline, "maintenance still pending at the end of the test"
         await anyio.sleep(workflows.TASK_POLL)
 
@@ -255,12 +225,6 @@ async def _cached_rows(doc: str) -> int:
     return sum(entry.rows for entry in await embed_cache.entries(doc))
 
 
-async def _one_part(part: int, rows) -> AsyncIterator[tuple[int, list]]:
-    """`CollectionIndex.add_parts` consumes an async iterator: the pipeline decodes one row group
-    of the cache file at a time and awaits each read (see `embed_cache.read`)."""
-    yield part, rows
-
-
 async def _fragments(collection: Collection) -> int:
     """Data fragments of the collection's table: LanceDB writes one per commit that carries rows."""
     table = await (await collection.index())._existing()
@@ -268,6 +232,13 @@ async def _fragments(collection: Collection) -> int:
         return 0
     # lancedb annotates stats() as a dataclass but returns plain dicts
     return (await table.stats())["fragment_stats"]["num_fragments"]  # ty: ignore[not-subscriptable]
+
+
+async def _rows_of(collection: Collection, doc: str) -> int:
+    """Rows one document has in a collection's table right now: what a detach or a delete has to
+    leave none of, whichever way the write in flight was ordered against it."""
+    table = await (await collection.index())._existing()
+    return 0 if table is None else await table.count_rows(f"doc = '{doc}'")
 
 
 def _batch_of(args: tuple) -> Batch | None:
@@ -312,10 +283,10 @@ class Gate:
             self.calls.append(-1 if batch is None else batch.seq)
             if self._blocks(_doc_of(args), batch):
                 if self.holds_cpu:
-                    await cpu.on_cpu("gate", self._hold)
+                    await cpu.on_cpu(self._hold)
                 else:
                     self.entered.set()
-                    assert await _wait_event(self.release), "the test never released the step"
+                    assert await wait_event(self.release), "the test never released the step"
             return await real(*args)
 
         return blocking
@@ -386,8 +357,8 @@ async def test_attach_indexes_the_document_into_the_collection(dbos, tmp_path: P
     await collection.set_settings(CollectionSettings(chunk_size=40, chunk_overlap=0))
     assert (await (await Collection.get("Notes-Stuff")).settings()).chunk_size == 40
     doc = await import_document(dbos, "guide.md", MD, tmp_path)
-    previewed = await document.ensure_preview(doc.name)
-    assert previewed.preview is not None and previewed.preview.kind == "text"
+    previewed, preview = await document.ensure_preview(doc.name)
+    assert preview.kind == "text"
     assert previewed.status == "imported", "building a preview is not a lifecycle step"
 
     await attach_document(dbos, "Notes-Stuff", doc.name)
@@ -396,11 +367,11 @@ async def test_attach_indexes_the_document_into_the_collection(dbos, tmp_path: P
     assert (member.status, member.error) == ("indexed", None)
     assert (await document.get(doc.name)).status == "imported", "the document's status is its own"
     assert await document.collections_of(doc.name) == ["Notes-Stuff"]
-    hits = await collection.search("lancedb", limit=5)
+    hits = await collection.search("lancedb", SearchOverrides(limit=5))
     assert hits and hits[0].heading == "Alpha" and hits[0].collection == "Notes-Stuff"
     assert (hits[0].line_start, hits[0].line_end, hits[0].parents) == (5, 7, ["Title"])
     assert hits[0].markdown_path == doc.relative(doc.markdown), "home-relative"
-    assert hits[0].home == str(home.HOME)
+    assert hits[0].markdown_file == str(home.HOME / hits[0].markdown_path), "absolute"
     assert (home.HOME / hits[0].markdown_path).read_text() == MD
     assert MD[hits[0].char_start : hits[0].char_end] == hits[0].text
     assert (hits[0].page_start, hits[0].page_end) == (None, None), "no pages for markdown"
@@ -414,7 +385,9 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
     await _use(dbos, workers=2, batch_pages=10, index_group_parts=1)
     collection = await Collection.create("q")
     await collection.set_settings(CollectionSettings(chunk_size=60, chunk_overlap=0))
-    pdf = await _add(tmp_path, "book.pdf", text_pdf([f"Chapter {i} word{i}" for i in range(1, 26)]))
+    pdf = await import_row(
+        "book.pdf", text_pdf([f"Chapter {i} word{i}" for i in range(1, 26)]), tmp_path
+    )
 
     first = await dbos.start_import(pdf.name)
     assert await wait_for(first) == "imported"
@@ -436,7 +409,7 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
     assert [(t.stage, t.seq, t.status) for t in await jobs.list_tasks(indexing)] == [
         ("index", 0, "SUCCESS"), ("index", 1, "SUCCESS"), ("index", 2, "SUCCESS"),
     ]  # fmt: skip
-    hit = (await Collection("q").search("word25", limit=1))[0]
+    hit = (await Collection("q").search("word25", SearchOverrides(limit=1)))[0]
     assert (hit.page_start, hit.part) == (25, 2)
     full = pdf.markdown.read_text()
     assert full[hit.char_start : hit.char_end] == hit.text
@@ -446,16 +419,16 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
 
 async def test_start_import_and_attach_validate_before_they_enqueue(dbos, tmp_path: Path) -> None:
     await Collection.create("v")
-    with pytest.raises(DocumentNotFound, match="document not found: a.md"):
+    with pytest.raises(NotFound, match="document not found: a.md"):
         await dbos.start_import("a.md")
-    with pytest.raises(CollectionNotFound, match="collection not found: ghost"):
+    with pytest.raises(NotFound, match="collection not found: ghost"):
         await dbos.start_index_collection_document("ghost", "a.md")
-    queued = await _add(tmp_path, "a.md")
-    with pytest.raises(DocumentNotFound, match="document not in collection v: a.md"):
+    queued = await import_row("a.md", into=tmp_path)
+    with pytest.raises(NotFound, match="document not in collection v: a.md"):
         await dbos.start_index_collection_document("v", queued.name)
     with pytest.raises(Conflict, match="a.md"):  # `Collection.add` takes only an imported document
         await dbos.attach("v", queued.name)
-    with pytest.raises(CollectionNotFound, match="collection not found: ghost"):
+    with pytest.raises(NotFound, match="collection not found: ghost"):
         await dbos.attach("ghost", queued.name)
 
     assert (await jobs.list_jobs()).items == [], "a rejected request leaves no job behind"
@@ -479,14 +452,16 @@ async def test_documents_of_one_collection_index_without_conflict(dbos, tmp_path
     assert [await wait_for(i) for i in ids] == ["indexed"] * len(ids)
     counts = await Collection("serial").counts()
     assert (counts.total, counts.indexed) == (4, 4)
-    assert {h.doc for h in await Collection("serial").search("D3P5", limit=1)} == {"d3.pdf"}
+    assert {h.doc for h in await Collection("serial").search("D3P5", SearchOverrides(limit=1))} == {
+        "d3.pdf"
+    }
 
 
 async def test_workflow_ids_name_their_kind_and_their_names(dbos, tmp_path: Path) -> None:
     """Every id starts with a prefix naming the kind and the names it belongs to, so one prefix
     query finds a whole job (see the `workflows` module docstring)."""
     await Collection.create("c")
-    doc = await _add(tmp_path, "a.md")
+    doc = await import_row("a.md", into=tmp_path)
 
     import_id = await dbos.start_import(doc.name)
     assert import_id.startswith(f"{workflows.IMPORT_PREFIX}:a.md:"), import_id
@@ -640,7 +615,7 @@ class Overlap:
             self.order.append(-1 if batch is None else batch.seq)
             if self.active >= self.wait_for:
                 self.reached.set()
-        await _wait_event(self.reached)  # already set once `wait_for` callers are inside
+        await wait_event(self.reached)  # already set once `wait_for` callers are inside
         try:
             return await real(*args)
         finally:
@@ -685,7 +660,8 @@ async def test_documents_run_in_parallel_up_to_workers(
     await _use(dbos, workers=workers, batch_pages=1, document_parallelism=1)
     await Collection.create("par")
     docs = [
-        await _add(tmp_path, f"p{i}.pdf", text_pdf([f"P{i}A tokq{i}", f"P{i}B"])) for i in range(3)
+        await import_row(f"p{i}.pdf", text_pdf([f"P{i}A tokq{i}", f"P{i}B"]), tmp_path)
+        for i in range(3)
     ]
     overlap = Overlap(pipeline.convert_batch, wait_for=2)
     monkeypatch.setattr(pipeline, "convert_batch", overlap)
@@ -710,7 +686,7 @@ async def test_batches_of_one_document_run_in_parallel_up_to_workers(
     workers = 3
     await _use(dbos, workers=workers, batch_pages=1)
     await Collection.create("wide")
-    doc = await _add(tmp_path, "s.pdf", text_pdf([f"S{i} toks{i}" for i in range(6)]))
+    doc = await import_row("s.pdf", text_pdf([f"S{i} toks{i}" for i in range(6)]), tmp_path)
     overlap = Overlap(pipeline.convert_batch, wait_for=workers)
     monkeypatch.setattr(pipeline, "convert_batch", overlap)
 
@@ -739,7 +715,8 @@ async def test_stage_queues_cap_each_stage_separately(
     caps = workflows.stage_caps((await load_user_settings()).pipeline)
     assert (caps["convert"], caps["embed"]) == (2, 1), "the split this test is about"
     docs = [
-        await _add(tmp_path, f"c{i}.pdf", text_pdf([f"C{i}A tokc{i}", f"C{i}B"])) for i in range(3)
+        await import_row(f"c{i}.pdf", text_pdf([f"C{i}A tokc{i}", f"C{i}B"]), tmp_path)
+        for i in range(3)
     ]
     converting = Overlap(pipeline.convert_batch, wait_for=caps["convert"])
     embedding = Overlap(pipeline.embed_batch, wait_for=caps["embed"])
@@ -777,7 +754,8 @@ async def test_the_cpu_budget_bounds_every_stage_together(
     assert sum(caps.values()) > cpu_budget, "the queues alone would have allowed more"
     await Collection.create("budget")
     docs = [
-        await _add(tmp_path, f"b{i}.pdf", text_pdf([f"B{i}A tokb{i}", f"B{i}B"])) for i in range(3)
+        await import_row(f"b{i}.pdf", text_pdf([f"B{i}A tokb{i}", f"B{i}B"]), tmp_path)
+        for i in range(3)
     ]
     running = CpuOverlap()  # one counter for both stages
     monkeypatch.setattr(convert, "pdf_pages_markdown", running.wrap(convert.pdf_pages_markdown))
@@ -801,8 +779,8 @@ async def test_embedding_overlaps_conversion_of_other_documents(
     slice is held open, another document's embed slice runs. On one shared queue of that size the
     embed would have waited."""
     await _use(dbos, cpu_budget=2, batch_pages=1)
-    first = await _add(tmp_path, "a.pdf", text_pdf(["alpha one"]))
-    second = await _add(tmp_path, "b.pdf", text_pdf(["beta two"]))
+    first = await import_row("a.pdf", text_pdf(["alpha one"]), tmp_path)
+    second = await import_row("b.pdf", text_pdf(["beta two"]), tmp_path)
     # `holds_cpu`: both gates take a slot of the budget, which is what pays for the overlap
     embedding = Gate(doc=first.name, holds_cpu=True)  # holds one of the two slots
     converting = Gate(doc=second.name, holds_cpu=True)  # and the convert step takes the other
@@ -810,10 +788,10 @@ async def test_embedding_overlaps_conversion_of_other_documents(
     monkeypatch.setattr(pipeline, "convert_batch", converting.wrap(pipeline.convert_batch))
 
     first_job = await dbos.start_import(first.name)
-    assert await _wait_event(embedding.entered), "the first document never reached its embed step"
+    assert await wait_event(embedding.entered), "the first document never reached its embed step"
     second_job = await dbos.start_import(second.name)
 
-    assert await _wait_event(converting.entered), (
+    assert await wait_event(converting.entered), (
         "the convert step waited for the embed step of the other document"
     )
     assert embedding.calls == [0] and not embedding.release.is_set(), "the embed step is still in"
@@ -829,24 +807,24 @@ async def test_a_budget_of_one_stops_the_stages_from_overlapping(
     """The same run on a budget of one: every stage still has its slot, but there is only one slot
     to take, so the convert of the second document waits for the embed of the first to let go."""
     await _use(dbos, cpu_budget=1, batch_pages=1)
-    first = await _add(tmp_path, "a.pdf", text_pdf(["alpha one"]))
-    second = await _add(tmp_path, "b.pdf", text_pdf(["beta two"]))
+    first = await import_row("a.pdf", text_pdf(["alpha one"]), tmp_path)
+    second = await import_row("b.pdf", text_pdf(["beta two"]), tmp_path)
     embedding = Gate(doc=first.name, holds_cpu=True)  # holds the only CPU slot
     converting = Gate(doc=second.name, holds_cpu=True)
     monkeypatch.setattr(pipeline, "embed_batch", embedding.wrap(pipeline.embed_batch))
     monkeypatch.setattr(pipeline, "convert_batch", converting.wrap(pipeline.convert_batch))
 
     first_job = await dbos.start_import(first.name)
-    assert await _wait_event(embedding.entered), "the first document never reached its embed step"
+    assert await wait_event(embedding.entered), "the first document never reached its embed step"
     second_job = await dbos.start_import(second.name)
 
-    assert not await _wait_event(converting.entered, BLOCKED_WAIT), (
+    assert not await wait_event(converting.entered, BLOCKED_WAIT), (
         "the convert step took a second slot"
     )
     assert not embedding.release.is_set(), "the embed step still holds the only slot"
 
     embedding.release.set()  # the slot comes free, and the convert of the second document takes it
-    assert await _wait_event(converting.entered), "the convert step never got the freed slot"
+    assert await wait_event(converting.entered), "the convert step never got the freed slot"
     converting.release.set()
     assert [await wait_for(first_job), await wait_for(second_job)] == ["imported", "imported"]
 
@@ -857,7 +835,7 @@ async def test_document_parallelism_caps_a_single_document(
     """`document_parallelism` bounds the slices a document is cut into, so one big file cannot
     take every worker while other documents wait. At 1 the whole stage is one child again."""
     await _use(dbos, workers=3, batch_pages=1, document_parallelism=1)
-    doc = await _add(tmp_path, "s.pdf", text_pdf([f"S{i} toks{i}" for i in range(4)]))
+    doc = await import_row("s.pdf", text_pdf([f"S{i} toks{i}" for i in range(4)]), tmp_path)
     overlap = Overlap(pipeline.convert_batch, wait_for=1)
     monkeypatch.setattr(pipeline, "convert_batch", overlap)
 
@@ -879,7 +857,7 @@ async def test_one_document_creates_a_bounded_number_of_workflows(dbos, tmp_path
     workers = 3
     await _use(dbos, workers=workers, batch_pages=1, index_group_parts=1)
     await Collection.create("few")
-    doc = await _add(tmp_path, "p.pdf", text_pdf(["alpha", "beta", "gamma"]))
+    doc = await import_row("p.pdf", text_pdf(["alpha", "beta", "gamma"]), tmp_path)
 
     import_id = await dbos.start_import(doc.name)
     assert await wait_for(import_id) == "imported"
@@ -898,7 +876,7 @@ async def test_one_document_creates_a_bounded_number_of_workflows(dbos, tmp_path
     assert await named(index_id) == {
         dbos_names.COLLECTION_DOCUMENT_WORKFLOW: 1,
         dbos_names.STAGE_WORKFLOW: 1,  # the index stage is one writer, so never sliced
-        MAINTAIN_WORKFLOW: 1,
+        dbos_names.MAINTAIN_WORKFLOW: 1,
     }
     stages = {
         *(f"{import_id}:convert:{i}" for i in range(3)),
@@ -1048,7 +1026,7 @@ async def test_concurrent_attaches_converge_on_one_embedding_run(
     monkeypatch.setattr(pipeline, "embed_batch", gate.wrap(pipeline.embed_batch))
 
     first = await dbos.attach("one", doc.name)
-    assert await _wait_event(gate.entered), "the first attach never reached the embed step"
+    assert await wait_event(gate.entered), "the first attach never reached the embed step"
     second = await dbos.attach("two", doc.name)
 
     async def asked() -> bool:
@@ -1057,7 +1035,7 @@ async def test_concurrent_attaches_converge_on_one_embedding_run(
         was still held open, which is what makes this a race rather than a sequence."""
         return dbos_names.EMBED_WORKFLOW in await _steps(second)
 
-    await _until(asked, "the second attach never asked for the embedding")
+    await until(asked, "the second attach never asked for the embedding")
     gate.release.set()
 
     assert [await wait_for(first), await wait_for(second)] == ["indexed", "indexed"]
@@ -1182,11 +1160,11 @@ async def test_indexing_a_member_requests_maintenance_and_counts_pending(
     settled = await maintenance_state("kept")
     assert (settled.pending_docs, await Collection.pending_names()) == (0, [])
     assert settled.last_maintained_at is not None
-    assert await _maintenance_runs(MAINTAIN_WORKFLOW) == ["SUCCESS"], "one run"
-    status = (await collection.info()).index
-    assert status is not None and status.pending_docs == 0
-    assert status.num_rows > 0 and status.has_fts_index, "the run built the full-text index"
-    assert status.unindexed_rows == 0, "and folded every row written since into it"
+    assert await _maintenance_runs(dbos_names.MAINTAIN_WORKFLOW) == ["SUCCESS"], "one run"
+    info = await collection.info()
+    assert info.index is not None and info.maintenance.pending_docs == 0
+    assert info.index.num_rows > 0 and info.index.has_fts_index, "the run built the index"
+    assert info.index.unindexed_rows == 0, "and folded every row written since into it"
 
 
 async def test_maintenance_runs_on_the_collection_partition(
@@ -1208,15 +1186,16 @@ async def test_maintenance_runs_on_the_collection_partition(
 
     monkeypatch.setattr(maintenance, "run", noting_run)
     job_id = await dbos.attach("onewriter", doc.name)
-    assert await _wait_event(gate.entered), "the index step never started"
+    assert await wait_event(gate.entered), "the index step never started"
 
-    await workflows.request_maintenance("onewriter", 1, 1, 0)  # due now, with no delay
+    # one pending document is already `maintenance_docs`, so the run is due with no delay
+    await workflows.request_maintenance("onewriter", 1, PipelineSettings(maintenance_docs=1))
 
     async def enqueued() -> list[str]:
-        return await _maintenance_runs(MAINTAIN_PARTITION_WORKFLOW)
+        return await _maintenance_runs(dbos_names.MAINTAIN_PARTITION_WORKFLOW)
 
     async def finished() -> bool:
-        return await _maintenance_runs(MAINTAIN_PARTITION_WORKFLOW) == ["SUCCESS"]
+        return await _maintenance_runs(dbos_names.MAINTAIN_PARTITION_WORKFLOW) == ["SUCCESS"]
 
     assert await _await(enqueued, "maintenance was never enqueued") == ["ENQUEUED"], (
         "the queue has it, but the collection's partition is taken"
@@ -1286,7 +1265,7 @@ async def test_boot_schedules_pending_collections(dbos, tmp_path: Path) -> None:
 async def test_transient_step_failure_is_retried_and_recovers(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:
-    doc = await _add(tmp_path, "p.pdf", text_pdf(["alpha"]))
+    doc = await import_row("p.pdf", text_pdf(["alpha"]), tmp_path)
     real = pipeline.convert_batch
     calls: list[int] = []
 
@@ -1310,7 +1289,7 @@ async def test_transient_step_failure_gives_up_after_max_attempts(
 ) -> None:
     """One slice, so the whole stage is one step log and "the rest never ran" is a fact about it."""
     await _use(dbos, workers=4, batch_pages=1, document_parallelism=1)
-    doc = await _add(tmp_path, "p.pdf", text_pdf([f"P{i}" for i in range(4)]))
+    doc = await import_row("p.pdf", text_pdf([f"P{i}" for i in range(4)]), tmp_path)
     real = pipeline.convert_batch
     calls: list[int] = []
 
@@ -1339,30 +1318,30 @@ async def test_transient_step_failure_gives_up_after_max_attempts(
 
 async def test_permanent_step_failure_is_not_retried(dbos, tmp_path: Path, monkeypatch) -> None:
     """A document that needs OCR fails the same way on every attempt, so it is reported at once
-    instead of burning three attempts (A9)."""
-    doc = await _add(tmp_path, "p.pdf", text_pdf(["alpha"]))
+    instead of burning three attempts."""
+    doc = await import_row("p.pdf", text_pdf(["alpha"]), tmp_path)
     calls: list[int] = []
 
     async def needs_ocr(doc_, batch):
         calls.append(batch.seq)
-        raise NeedsOcr("all 1 pages need OCR")
+        raise PermanentError("all 1 pages need OCR")
 
     monkeypatch.setattr(pipeline, "convert_batch", needs_ocr)
     job_id = await dbos.start_import(doc.name)
 
-    with pytest.raises(workflows.PipelineError, match="NeedsOcr: all 1 pages need OCR"):
+    with pytest.raises(workflows.PipelineError, match="PermanentError: all 1 pages need OCR"):
         await wait_for(job_id)
 
     assert calls == [0], "a permanent failure is raised by the workflow, not retried by the step"
     row = await document.get(doc.name)
-    assert (row.status, row.error) == ("error", "NeedsOcr: all 1 pages need OCR")
+    assert (row.status, row.error) == ("error", "PermanentError: all 1 pages need OCR")
     (job,) = (await jobs.list_jobs()).items
-    assert job.status == "ERROR" and job.error == "NeedsOcr: all 1 pages need OCR"
+    assert job.status == "ERROR" and job.error == "PermanentError: all 1 pages need OCR"
     (task,) = await jobs.list_tasks(job_id)
     assert (task.stage, task.status, task.error) == (
         "convert",
         "ERROR",
-        "NeedsOcr: all 1 pages need OCR",
+        "PermanentError: all 1 pages need OCR",
     )
 
 
@@ -1372,7 +1351,7 @@ async def test_indexing_a_document_that_is_not_imported_fails_the_membership(
     """The collection index reads markdown the import produces, so a member whose document never
     finished importing fails permanently - and only the membership carries that failure."""
     collection = await Collection.create("early")
-    doc = await _add(tmp_path, "a.md")
+    doc = await import_row("a.md", into=tmp_path)
     await _add_member(collection, doc.name)
 
     job_id = await dbos.start_index_collection_document("early", doc.name)
@@ -1396,12 +1375,12 @@ async def test_import_resumes_after_a_crash_without_duplicating_chunks(
     resumes from its step log, so the document ends `imported` once, with no duplicate rows."""
     await _use(dbos, workers=2, batch_pages=1)
     await Collection.create("dur")
-    doc = await _add(tmp_path, "p.pdf", text_pdf(["alpha one", "beta two"]))
+    doc = await import_row("p.pdf", text_pdf(["alpha one", "beta two"]), tmp_path)
     gate = Gate(seq=0)
     monkeypatch.setattr(pipeline, "convert_batch", gate.wrap(pipeline.convert_batch))
 
     job_id = await dbos.start_import(doc.name)
-    assert await _wait_event(gate.entered), "the convert step never started"
+    assert await wait_event(gate.entered), "the convert step never started"
     DBOS.destroy(workflow_completion_timeout_sec=0)  # crash, mid-step
     gate.release.set()
     await dbos.start()  # restart: same application_version, so recovery picks the workflow up
@@ -1430,12 +1409,12 @@ async def test_adopt_orphans_resumes_only_stale_in_flight_workflows(
 
     monkeypatch.setattr(pipeline, "convert_batch", slow_pdf)
     # the finished one first: a cold model load on CI can outlast the gate's patience
-    quick = await _add(tmp_path, "done.md", "# d\n")
+    quick = await import_row("done.md", "# d\n", tmp_path)
     finished = await dbos.start_import(quick.name)  # done before the stale mark; left alone
     await wait_for(finished)
-    slow = await _add(tmp_path, "slow.pdf", text_pdf(["x"]))
+    slow = await import_row("slow.pdf", text_pdf(["x"]), tmp_path)
     running = await dbos.start_import(slow.name)
-    assert await _wait_event(gate.entered)
+    assert await wait_event(gate.entered)
 
     async with db.connect() as conn:  # pretend everything so far ran under an older build
         await conn.execute("update workflow_status set application_version = 'old-build'")
@@ -1465,13 +1444,13 @@ async def test_adopt_orphans_runs_in_the_background_on_start(dbos, monkeypatch) 
 
     async def slow_adopt(batch: int = 0) -> int:
         started.set()
-        assert await _wait_event(release), "the test never released the adoption"
+        assert await wait_event(release), "the test never released the adoption"
         return 3
 
     monkeypatch.setattr(workflows, "adopt_orphans", slow_adopt)
     await restart_dbos()  # boot again, with adoption blocked
 
-    assert await _wait_event(started), "adoption started"
+    assert await wait_event(started), "adoption started"
     assert not release.is_set(), "start did not wait for it"
     adopting = workflows._adoption
     assert adopting is not None and adopting.get_name() == "haskie-adopt"
@@ -1486,11 +1465,11 @@ async def test_adopt_orphans_runs_in_the_background_on_start(dbos, monkeypatch) 
 
 
 async def test_cancel_job_marks_the_document_cancelled(dbos, tmp_path: Path, monkeypatch) -> None:
-    doc = await _add(tmp_path, "p.pdf", text_pdf(["one"]))
+    doc = await import_row("p.pdf", text_pdf(["one"]), tmp_path)
     gate = Gate()
     monkeypatch.setattr(pipeline, "convert_batch", gate.wrap(pipeline.convert_batch))
     job_id = await dbos.start_import(doc.name)
-    assert await _wait_event(gate.entered)
+    assert await wait_event(gate.entered)
 
     await workflows.cancel_job(job_id)
 
@@ -1511,7 +1490,7 @@ async def test_cancel_job_marks_the_member_cancelled(dbos, tmp_path: Path, monke
     gate = Gate(seq=0)
     monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
     job_id = await dbos.attach("cx", doc.name)
-    assert await _wait_event(gate.entered)
+    assert await wait_event(gate.entered)
 
     await workflows.cancel_job(job_id)
 
@@ -1519,7 +1498,7 @@ async def test_cancel_job_marks_the_member_cancelled(dbos, tmp_path: Path, monke
     assert (await document.get(doc.name)).status == "imported", "the document is not a member"
     assert (await jobs.list_jobs("cx")).items[0].status == "CANCELLED"
     gate.release.set()
-    await _await_terminal([job_id])
+    await await_terminal([job_id])
     await _drain()
 
 
@@ -1531,9 +1510,9 @@ async def test_cancel_job_rejects_unknown_ids_and_leaves_finished_jobs_alone(
     job_id = await dbos.attach("done", doc.name)
     assert await wait_for(job_id) == "indexed"
 
-    with pytest.raises(JobNotFound, match="job not found: ghost"):
+    with pytest.raises(NotFound, match="job not found: ghost"):
         await workflows.cancel_job("ghost")
-    with pytest.raises(JobNotFound, match="job not found: ghost"):
+    with pytest.raises(NotFound, match="job not found: ghost"):
         await jobs.list_tasks("ghost")
 
     await workflows.cancel_job(job_id)  # no-op: the job is already terminal
@@ -1549,21 +1528,21 @@ async def test_delete_document_while_it_indexes_leaves_nothing_behind(
     every collection, its folder and its row."""
     await _use(dbos, workers=4, batch_pages=1)
     collection = await Collection.create("mid")
-    doc = await _add(tmp_path, "p.pdf", text_pdf(["alpha", "beta"]))
+    doc = await import_row("p.pdf", text_pdf(["alpha", "beta"]), tmp_path)
     gate = Gate()
     monkeypatch.setattr(pipeline, "convert_batch", gate.wrap(pipeline.convert_batch))
     job_id = await dbos.start_import(doc.name)
-    assert await _wait_event(gate.entered)
+    assert await wait_event(gate.entered)
 
     with anyio.fail_after(WAIT * 2):  # a delete that never returns fails the test here
         await delete_document(dbos, doc.name)
 
     assert await _statuses([job_id]) == ["CANCELLED"]
-    assert await document.names() == [], "the DB row goes last, and it is gone"
+    assert await document_names() == [], "the DB row goes last, and it is gone"
     assert not document.root(doc.name).exists()
     assert (await collection.counts()).total == 0, "the membership went with the document"
     gate.release.set()
-    await _await_terminal([job_id])
+    await await_terminal([job_id])
     await _drain()
 
 
@@ -1581,15 +1560,19 @@ async def test_delete_document_clears_every_collection_it_is_in(dbos, tmp_path: 
 
     await delete_document(dbos, doc.name)
 
-    assert await document.names() == [other.name]
+    assert await document_names() == [other.name]
     assert not document.root(doc.name).exists()
     assert await embed_cache.entries(doc.name) == [], "the cache rows cascade with the document"
     for name in ("left", "right"):
         assert await Collection(name).member_names() == ([other.name] if name == "left" else []), (
             name
         )
-        assert {h.doc for h in await Collection(name).search("lancedb", limit=5)} == set(), name
-    assert {h.doc for h in await Collection("left").search("beta", limit=5)} == {other.name}
+        assert {
+            h.doc for h in await Collection(name).search("lancedb", SearchOverrides(limit=5))
+        } == set(), name
+    assert {h.doc for h in await Collection("left").search("beta", SearchOverrides(limit=5))} == {
+        other.name
+    }
 
 
 async def test_attaching_while_a_delete_runs_is_refused(dbos, tmp_path: Path, monkeypatch) -> None:
@@ -1611,13 +1594,13 @@ async def test_attaching_while_a_delete_runs_is_refused(dbos, tmp_path: Path, mo
         reads += 1
         if reads > 1:
             entered.set()
-            assert await _wait_event(release), "the test never released the snapshot"
+            assert await wait_event(release), "the test never released the snapshot"
         return await real(name)
 
     monkeypatch.setattr(document, "collections_of", gated)
 
     job_id = await dbos.start_delete_document(doc.name)
-    assert await _wait_event(entered), "the delete never took its membership snapshot"
+    assert await wait_event(entered), "the delete never took its membership snapshot"
     assert (await document.get(doc.name)).status == "deleting"
 
     with pytest.raises(Conflict, match="a.md"):  # `Collection.add` takes only an imported document
@@ -1630,7 +1613,7 @@ async def test_attaching_while_a_delete_runs_is_refused(dbos, tmp_path: Path, mo
     assert await Collection("third").member_names() == [], "no membership the snapshot missed"
     assert await Collection("third").search("lancedb") == [], "and no orphaned index row"
     assert not Collection("third").index_dir.exists(), "the refused attach wrote no table"
-    assert await document.names() == []
+    assert await document_names() == []
 
 
 async def test_detach_leaves_the_document_and_the_other_collection(dbos, tmp_path: Path) -> None:
@@ -1656,13 +1639,55 @@ async def test_detach_leaves_the_document_and_the_other_collection(dbos, tmp_pat
     assert doc.markdown.exists() and doc.parts_dir.exists()
 
 
+async def test_detach_waits_for_the_index_write_in_flight(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """F3: the detach cancels the member's index workflow, and that cancel rewrites the status row
+    and nothing else - the LanceDB write already running writes its rows anyway. The removal takes
+    the collection's write lock after that write, so the rows go with the membership instead of
+    outliving it."""
+    await _use(dbos, workers=4, batch_pages=1, index_group_parts=1)
+    collection = await Collection.create("part")
+    done = await import_document(dbos, "done.md", MD, tmp_path)
+    await attach_document(dbos, "part", done.name)
+    slow = await import_document(dbos, "slow.pdf", text_pdf(["alpha", "beta"]), tmp_path)
+    gate = Gate()
+    monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
+    in_flight = await dbos.attach("part", slow.name)
+    assert await wait_event(gate.entered)
+    order: list[str] = []
+
+    async def release_once_cancelled() -> None:
+        await until(_all_cancelled([in_flight]), "the detach never cancelled the index in flight")
+        order.append("released")
+        gate.release.set()
+
+    async with anyio.create_task_group() as releasing:
+        releasing.start_soon(release_once_cancelled)
+        await dbos.detach("part", slow.name)
+        order.append("detached")
+
+    assert order == ["released", "detached"], "the detach waited for the write holding the lock"
+    await await_terminal([in_flight])
+    assert gate.calls == [0], "one batch wrote past the cancel; the next stopped at its step"
+    assert await collection.member_names() == [done.name]
+    assert await _rows_of(collection, slow.name) == 0, "its rows went with the membership"
+    assert await _rows_of(collection, done.name) > 0, "and the other member kept its own"
+    assert {h.doc for h in await collection.search("alpha", SearchOverrides(limit=5))} == {
+        done.name
+    }, "both documents carry 'alpha'; only the one still attached is found"
+    with pytest.raises(NotFound, match="document not in collection part: slow.pdf"):
+        await dbos.detach("part", slow.name)
+    await _drain()
+
+
 async def test_detach_rejects_an_unknown_membership(dbos, tmp_path: Path) -> None:
     await Collection.create("rm")
-    with pytest.raises(DocumentNotFound, match="document not in collection rm: ghost.md"):
+    with pytest.raises(NotFound, match="document not in collection rm: ghost.md"):
         await dbos.detach("rm", "ghost.md")
-    with pytest.raises(CollectionNotFound, match="collection not found: ghost"):
+    with pytest.raises(NotFound, match="collection not found: ghost"):
         await dbos.detach("ghost", "a.md")
-    with pytest.raises(DocumentNotFound, match="document not found: ghost.md"):
+    with pytest.raises(NotFound, match="document not found: ghost.md"):
         await dbos.start_delete_document("ghost.md")
 
 
@@ -1681,22 +1706,29 @@ async def test_delete_collection_cancels_every_document_in_flight(
     ids = [await dbos.attach("dl", name) for name in names]
     # one writer per collection, so the first member holds the partition and the second waits on
     # it; both are active, and the delete has to reach both
-    assert await _wait_event(gate.entered), "no member reached its index step"
+    assert await wait_event(gate.entered), "no member reached its index step"
 
-    await delete_collection(dbos, "dl")
+    async def release_once_cancelled() -> None:
+        # the cancel leaves the gated write running, and it holds the collection's lock: the
+        # removal only gets it once the test lets that write finish
+        await until(_all_cancelled(ids), "the delete never cancelled the members in flight")
+        gate.release.set()
+
+    async with anyio.create_task_group() as releasing:
+        releasing.start_soon(release_once_cancelled)
+        await delete_collection(dbos, "dl")
 
     assert await _statuses(ids) == ["CANCELLED", "CANCELLED"]
     assert await Collection.names() == [] and not collection.root.exists()
-    assert sorted(await document.names()) == names, "the documents outlive the collection"
-    gate.release.set()
-    await _await_terminal(ids)
+    assert sorted(await document_names()) == names, "the documents outlive the collection"
+    await await_terminal(ids)
     await _drain()
 
 
 async def test_delete_collection_rejects_an_unknown_name(dbos) -> None:
-    with pytest.raises(CollectionNotFound, match="collection not found: ghost"):
+    with pytest.raises(NotFound, match="collection not found: ghost"):
         await delete_collection(dbos, "ghost")
-    with pytest.raises(CollectionNotFound, match="collection not found: ghost"):
+    with pytest.raises(NotFound, match="collection not found: ghost"):
         await dbos.start_index_collection("ghost")
 
 
@@ -1764,12 +1796,12 @@ async def test_index_collection_workflow_is_idempotent_on_replay(
         pages.append(after)
         if len(pages) == 2:  # the first page is queued; stop the job right here
             entered.set()
-            assert await _wait_event(release), "the test never released the listing"
+            assert await wait_event(release), "the test never released the listing"
         return await real(name, after)
 
     monkeypatch.setattr(workflows, "member_page", gated)
     job_id = await dbos.start_index_collection("b")
-    assert await _wait_event(entered), "the second page never started"
+    assert await wait_event(entered), "the second page never started"
     DBOS.destroy(workflow_completion_timeout_sec=0)  # crash, between two pages
     release.set()
     await dbos.start()  # restart: same application_version, so recovery picks the workflow up
@@ -1778,15 +1810,17 @@ async def test_index_collection_workflow_is_idempotent_on_replay(
 
     queued = await _member_workflows("b")
     assert len(queued) == 5, "the replay re-attached instead of queueing the first page again"
-    await _await_terminal(queued)
+    await await_terminal(queued)
     await _drain()
 
 
 async def test_delete_collection_workflow_cancels_and_removes(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:
-    """The deletion is a job too: it cancels everything the collection has in flight, waits for
-    the last running step, and only then drops the rows and the folder."""
+    """F2: the deletion is a job too. It cancels everything the collection has in flight, and the
+    cancel is final for the status row alone - the LanceDB write already running keeps going - so
+    it waits on the collection's write lock before it drops the rows and the folder. A write that
+    outlived the cancel must not recreate either."""
     await _use(dbos, workers=4, batch_pages=1, index_group_parts=1)
     collection = await Collection.create("wipe")
     done = await import_document(dbos, "done.md", MD, tmp_path)
@@ -1795,14 +1829,24 @@ async def test_delete_collection_workflow_cancels_and_removes(
     gate = Gate()
     monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
     in_flight = await dbos.attach("wipe", slow.name)
-    assert await _wait_event(gate.entered)
+    assert await wait_event(gate.entered)
+    order: list[str] = []
 
-    bulk_id = await dbos.start_delete_collection("wipe")
+    async def release_once_cancelled() -> None:
+        await until(_all_cancelled([in_flight]), "the delete never cancelled the index in flight")
+        order.append("released")
+        gate.release.set()
 
-    assert await wait_for(bulk_id) is None
+    async with anyio.create_task_group() as releasing:
+        releasing.start_soon(release_once_cancelled)
+        bulk_id = await dbos.start_delete_collection("wipe")
+        assert await wait_for(bulk_id) is None
+        order.append("removed")
+
+    assert order == ["released", "removed"], "the removal waited for the write holding the lock"
     assert await _statuses([in_flight]) == ["CANCELLED"]
     assert await Collection.names() == [] and not collection.root.exists()
-    assert sorted(await document.names()) == ["done.md", "slow.pdf"], "documents are untouched"
+    assert sorted(await document_names()) == ["done.md", "slow.pdf"], "documents are untouched"
     job = await jobs.bulk_job(bulk_id)
     assert (job.kind, job.collection, job.status, job.progress) == (
         "delete_collection",
@@ -1810,9 +1854,11 @@ async def test_delete_collection_workflow_cancels_and_removes(
         "SUCCESS",
         None,
     )
-    gate.release.set()
-    await _await_terminal([in_flight])
+    await await_terminal([in_flight])
     await _drain()
+    assert await Collection.names() == [] and not collection.root.exists(), (
+        "and the cancelled child put back neither the row nor the table folder"
+    )
 
 
 async def test_bulk_job_reads_the_three_bulk_kinds(dbos, tmp_path: Path) -> None:
@@ -1878,7 +1924,7 @@ async def test_list_jobs_reports_the_action_collection_and_document(dbos, tmp_pa
 async def test_list_jobs_filters_by_collection_before_it_cuts_the_window(
     dbos, tmp_path: Path
 ) -> None:
-    """A busy collection must not push an older one out of the window (A11): the filter is the
+    """A busy collection must not push an older one out of the window: the filter is the
     job id's prefix, so the database applies it before it cuts the page."""
     for name in ("noisy", "quiet"):
         await Collection.create(name)
@@ -1910,7 +1956,8 @@ async def test_list_jobs_rejects_a_bad_cursor(dbos) -> None:
         await jobs.list_jobs(cursor=paging.encode_cursor(["a.md"], "name", "asc"))
     with pytest.raises(InvalidInput, match="cursor does not match"):  # the cursor of an older build
         await jobs.list_jobs(cursor=paging.encode_cursor([0], jobs.JOB_SORT, jobs.JOB_ORDER))
-    for key in ([jobs.LIVE, -1], ["jobs_99999999", 0], [7, 0]):
+    # an offset that is no offset, another listing's cursor, and an identity that is no name
+    for key in ([jobs.DOCUMENT_KIND, -1], ["collection", 0], [7, 0]):
         with pytest.raises(InvalidInput, match="invalid cursor"):
             await jobs.list_jobs(cursor=paging.encode_cursor(key, jobs.JOB_SORT, jobs.JOB_ORDER))
     for limit in (0, paging.MAX_PAGE_SIZE + 1):
@@ -1924,9 +1971,9 @@ async def test_list_kind_pages_on_a_cursor_of_its_own(dbos) -> None:
     and an unknown kind is a bad request rather than an empty page."""
     await Collection.create("pager")
     older = await dbos.start_index_collection("pager")
-    await _await_terminal([older])  # a second "index all" while one runs is the same job
+    await await_terminal([older])  # a second "index all" while one runs is the same job
     newer = await dbos.start_index_collection("pager")
-    await _await_terminal([newer])
+    await await_terminal([newer])
 
     first = await jobs.list_kind("collection", page_size=1)
 
@@ -1945,26 +1992,13 @@ async def test_list_kind_pages_on_a_cursor_of_its_own(dbos) -> None:
         await jobs.list_kind("collection", page_size=0)
 
 
-def _counted_list_workflows(monkeypatch) -> list[dict]:
-    """The keyword arguments of every `DBOS.list_workflows_async` call from here on."""
-    calls: list[dict] = []
-    real = DBOS.list_workflows_async
-
-    async def counted(**kwargs):
-        calls.append(kwargs)
-        return await real(**kwargs)
-
-    monkeypatch.setattr(DBOS, "list_workflows_async", counted)
-    return calls
-
-
 async def test_list_jobs_never_loads_inputs(dbos, tmp_path: Path, monkeypatch) -> None:
     """The collection and the document come out of the job id, so a page of jobs costs two
     queries and no input payload at all."""
     await Collection.create("lean")
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     await attach_document(dbos, "lean", doc.name)
-    calls = _counted_list_workflows(monkeypatch)
+    calls = counted_list_workflows(monkeypatch)
 
     (job,) = (await jobs.list_jobs("lean")).items
 
@@ -1986,7 +2020,7 @@ async def test_active_collection_workflows_use_the_id_prefix(
     gate = Gate()
     monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
     job_id = await dbos.attach("ab", doc.name)
-    assert await _wait_event(gate.entered)
+    assert await wait_event(gate.entered)
 
     assert await dbos._active_collection_workflows("ab") == [job_id]
     assert await dbos._active_collection_workflows("a") == [], (
@@ -2059,11 +2093,11 @@ async def test_list_tasks_reports_stage_slices_still_waiting(
     finished ones from their output, the next one running, the rest enqueued. One slice here, so
     "the rest" is the whole remainder of the stage."""
     await _use(dbos, workers=4, batch_pages=1, document_parallelism=1, index_group_parts=1)
-    doc = await _add(tmp_path, "p.pdf", text_pdf(["alpha", "beta", "gamma"]))
+    doc = await import_row("p.pdf", text_pdf(["alpha", "beta", "gamma"]), tmp_path)
     gate = Gate(seq=1)
     monkeypatch.setattr(pipeline, "convert_batch", gate.wrap(pipeline.convert_batch))
     job_id = await dbos.start_import(doc.name)
-    assert await _wait_event(gate.entered)
+    assert await wait_event(gate.entered)
 
     tasks = await jobs.list_tasks(job_id)
 
@@ -2082,11 +2116,11 @@ async def test_list_tasks_merges_the_slices_of_a_stage(dbos, tmp_path: Path, mon
     """With the default parallelism the stage is several children, so a batch held up in one slice
     no longer holds up the others: the listing merges their step logs back into plan order."""
     await _use(dbos, workers=4, batch_pages=1, index_group_parts=1)
-    doc = await _add(tmp_path, "p.pdf", text_pdf(["alpha", "beta", "gamma"]))
+    doc = await import_row("p.pdf", text_pdf(["alpha", "beta", "gamma"]), tmp_path)
     gate = Gate(seq=1)
     monkeypatch.setattr(pipeline, "convert_batch", gate.wrap(pipeline.convert_batch))
     job_id = await dbos.start_import(doc.name)
-    assert await _wait_event(gate.entered)
+    assert await wait_event(gate.entered)
 
     async def both_slices_done() -> list[jobs.Task] | None:
         found = await jobs.list_tasks(job_id)
@@ -2113,619 +2147,86 @@ async def test_step_outcome_reads_a_plain_step_output(dbos) -> None:
     assert jobs._step_outcome({"output": "text", "error": None}) == (None, None)
 
 
-# --- search over a live index ------------------------------------------------------
-
-
-async def test_search_limit_user_and_collection_level(dbos, tmp_path: Path) -> None:
-    await save_user_settings(UserSettings(search=SearchSettings(limit=2)))
-    collection = await Collection.create("lim")
-    await collection.set_settings(CollectionSettings(chunk_size=30, chunk_overlap=0))
-    body = "".join(f"# H{i}\n\ncommon token {i}\n\n" for i in range(6))
-    doc = await import_document(dbos, "m.md", body, tmp_path)
-    await attach_document(dbos, "lim", doc.name)
-
-    assert len(await collection.search("common")) == 2, "user default"
-    await collection.set_settings(
-        CollectionSettings(chunk_size=30, chunk_overlap=0, search=SearchOverrides(limit=4))
-    )
-    assert (await collection.info()).search.limit == 4
-    assert len(await collection.search("common")) == 4, "collection override"
-    assert len(await collection.search("common", limit=1)) == 1, "explicit beats both"
-    effective = (await collection.info()).effective
-    assert effective.chunk_size == 30, "a search override does not leak into the chunk settings"
-
-    await session.set_collections("s", ["lim"])
-    assert len(await session.search("s", "common")) == 2, "session cut to the user limit"
-    assert len(await session.search("s", "common", limit=3)) == 3
-
-
-async def test_search_tolerates_and_rebuilds_an_outdated_index(dbos, tmp_path: Path) -> None:
-    import lancedb
-
-    collection = await Collection.create("old")
-    doc = await import_document(dbos, "g.md", "# Hi\n\nhello world\n", tmp_path)
-    collection.index_dir.mkdir(parents=True)
-    old = lancedb.connect(str(collection.index_dir)).create_table(
-        "chunks",
-        data=[{"doc": "g.md", "chunk_id": 0, "heading": "Hi", "text": "hello world"}],
-    )
-    old.create_fts_index("text", replace=True)
-
-    assert (await collection.info()).index_outdated is True
-    (hit,) = await collection.search("hello")  # read path degrades instead of raising
-    assert (hit.heading, hit.page_start, hit.location) == ("Hi", None, "g.md L0-0")
-    assert hit.source_path == "", "the old row carries no path, and none is invented"
-
-    await attach_document(dbos, "old", doc.name)  # the write path drops the old table and rebuilds
-
-    assert (await collection.info()).index_outdated is False
-    (hit,) = await collection.search("hello")
-    assert hit.source_path == doc.relative(doc.original) and hit.line_start == 1
-
-
-async def test_home_is_portable(dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Move the whole home directory: DB, files and index keep working, paths still resolve."""
-    from haskie import collection as collection_module
-
-    await Collection.create("port")
-    doc = await import_document(dbos, "p.md", "# P\n\nportable text\n", tmp_path)
-    await attach_document(dbos, "port", doc.name)
-
-    moved = tmp_path / "elsewhere"
-    shutil.copytree(home.HOME, moved)
-    monkeypatch.setattr(home, "HOME", moved)
-    monkeypatch.setattr(home, "COLLECTION_ROOT", moved / "collections")
-    monkeypatch.setattr(home, "DOCUMENT_ROOT", moved / "documents")
-    monkeypatch.setattr(home, "DB_FILE", moved / "haskie.db")
-    monkeypatch.setattr(db, "_migrated", set())
-    collection_module.invalidate_collection_caches()
-
-    again = await Collection.get("port")
-    (hit,) = await again.search("portable")
-    assert hit.home == str(moved)
-    assert (moved / hit.source_path).read_bytes().startswith(b"# P")
-    assert (moved / hit.markdown_path).exists()
-
-
-# --- cross-collection session search -----------------------------------------------
-#
-# One query embedding and one model check for the whole fan-out, the collections read in parallel,
-# one cross-encoder pass over the merged candidates, and one hit per passage however many
-# collections hold the document.
-
-
-async def test_session_search_merges_collections(dbos, tmp_path: Path) -> None:
-    for name in ("a", "b"):
-        await Collection.create(name)
-        body = f"# {name}\n\nshared token {name}\n"
-        doc = await import_document(dbos, f"{name}.md", body, tmp_path)
-        await attach_document(dbos, name, doc.name)
-    with pytest.raises(CollectionNotFound, match="collection not found"):
-        await session.set_collections("s1", ["a", "ghost"])
-    await session.set_collections("s1", ["a", "b"])
-
-    hits = await session.search("s1", "shared", limit=10)
-
-    assert {h.collection for h in hits} == {"a", "b"}
-    assert await session.search("unknown-session", "shared") == []
-
-
-async def test_session_search_counts_a_shared_document_once(dbos, tmp_path: Path) -> None:
-    """A document in two chosen collections sits in both their tables, so the same passage comes
-    back twice. A session search is about passages, so it is merged once and credited to the
-    first collection of the session that returned it."""
-    for name in ("first", "second"):
-        await Collection.create(name)
-    shared = await import_document(dbos, "shared.md", "# S\n\nshared token here\n", tmp_path)
-    solo = await import_document(dbos, "solo.md", "# O\n\nshared token too\n", tmp_path)
-    for name in ("first", "second"):
-        await attach_document(dbos, name, shared.name)
-    await attach_document(dbos, "first", solo.name)
-    await session.set_collections("s", ["first", "second"])
-
-    hits = await session.search("s", "shared", limit=10)
-
-    keys = [(h.doc, h.part, h.chunk_id) for h in hits]
-    assert len(keys) == len(set(keys)), f"one hit per passage, got {keys}"
-    assert sorted(h.doc for h in hits) == sorted([solo.name, shared.name])
-    assert {h.collection for h in hits} == {"first"}, "credited to the first that returned it"
-    assert {h.collection for h in await Collection("second").search("shared")} == {"second"}
-
-
-async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkeypatch) -> None:
-    """Three collections, one embedding: the query used to be embedded (and the model checked)
-    once per collection."""
-    from haskie.index import Row
-    from haskie.settings import PROFILES
-
-    await save_user_settings(UserSettings(embedding="compact"))
-    compact = PROFILES["compact"]
-    assert compact is not None
-    for name in ("a", "b", "c"):
-        collection = await Collection.create(name)
-        (chunk_,) = chunk.split(f"# {name}\n\nshared token {name}\n", ChunkSettings())
-        index = collection.index_with(compact)
-        row = Row(chunk=chunk_, vector=[0.1] * compact.dims)
-        # a document name per collection: the merge keys on (doc, part, chunk_id), so one name
-        # shared by all three would be one passage and this test would see a single hit
-        await index.add_parts(
-            f"{name}.md", f"documents/{name}.md", f"documents/{name}.md.md", _one_part(0, [row])
-        )
-        await index.finish()
-    await session.set_collections("s", ["a", "b", "c"])
-    embedded: list[str] = []
-    checked: list[tuple[str, str]] = []
-
-    def fake_embed(model, text: str) -> list[float]:
-        embedded.append(text)
-        return [0.1] * model.dims
-
-    async def require_ready(kind: str, model: str) -> None:
-        checked.append((kind, model))
-
-    monkeypatch.setattr(session, "embed_query", fake_embed)
-    monkeypatch.setattr(models, "require_ready", require_ready)
-
-    hits = await session.search("s", "shared", limit=10)
-
-    assert {h.collection for h in hits} == {"a", "b", "c"}
-    assert embedded == ["shared"], "one embedding for the whole fan-out"
-    assert checked == [("embedding", compact.name)], "one check, not one per collection"
-
-
-async def test_session_search_reranks_once_over_the_merge(
-    dbos, tmp_path: Path, monkeypatch
+@pytest.mark.parametrize(
+    ("name", "job_id", "expected"),
+    [
+        ("an import", "imp:book.pdf:cafe", ("import", None, "book.pdf")),
+        ("an embedding", "emb:book.pdf:cafe", ("embed", None, "book.pdf")),
+        ("a collection index", "idx-col:law:book.pdf:cafe", ("index", "law", "book.pdf")),
+        ("a document delete", "del-doc:book.pdf:cafe", None),
+        ("a bulk index", "bulk-index:law:cafe", None),
+        ("an import without its uuid", "imp:book.pdf", None),
+        ("a collection index without its uuid", "idx-col:law:book.pdf", None),
+        ("a name that is no id at all", "book.pdf", None),
+    ],
+)
+def test_a_pipeline_job_id_names_its_action_collection_and_document(
+    name: str, job_id: str, expected: tuple | None
 ) -> None:
-    """The cross-encoder sees the merged candidates of every collection once, and its score is
-    the score of the returned hits."""
-    await save_user_settings(
-        UserSettings(search=SearchSettings(limit=2, candidates=4, reranker="cross-encoder"))
-    )
-    for name, token in (("a", "alpha"), ("b", "beta")):
-        collection = await Collection.create(name)
-        await collection.set_settings(CollectionSettings(chunk_size=30, chunk_overlap=0))
-        body = "".join(f"# H{i}\n\nshared {token} {i}\n\n" for i in range(3))
-        doc = await import_document(dbos, f"{name}.md", body, tmp_path)
-        await attach_document(dbos, name, doc.name)
-    await session.set_collections("s", ["a", "b"])
-    calls: list[list[str]] = []
-
-    async def require_ready(kind: str, model: str) -> None:
-        return None
-
-    monkeypatch.setattr(models, "require_ready", require_ready)
-
-    def fake_rerank(model: str, accelerator: str, query: str, texts: list[str]) -> list[float]:
-        calls.append(texts)
-        return [float(i) for i in range(len(texts))]
-
-    monkeypatch.setattr(session, "rerank_scores", fake_rerank)
-
-    hits = await session.search("s", "shared")
-
-    assert len(calls) == 1, "one cross-encoder pass, not one per collection"
-    (texts,) = calls
-    assert len(texts) == 4, "the merge is cut to `candidates` before it is rescored"
-    assert any("alpha" in t for t in texts), "candidates from both collections"
-    assert any("beta" in t for t in texts)
-    assert [h.text for h in hits] == [texts[-1], texts[-2]], "best cross-encoder score first"
-    assert [h.score for h in hits] == [3.0, 2.0], "the hit carries the cross-encoder score"
-
-
-async def test_session_search_propagates_a_broken_collection(
-    dbos, tmp_path: Path, monkeypatch, caplog
-) -> None:
-    """A collection that cannot answer must not be silently dropped: an empty result reads as
-    "no match", which is a different answer."""
-    from haskie.index import CollectionIndex
-
-    for name in ("a", "b"):
-        await Collection.create(name)
-        doc = await import_document(dbos, f"{name}.md", f"# {name}\n\nshared token\n", tmp_path)
-        await attach_document(dbos, name, doc.name)
-    await session.set_collections("s", ["a", "b"])
-
-    async def boom(self, query, vector, settings_, limit):
-        raise RuntimeError("index unreadable")
-
-    monkeypatch.setattr(CollectionIndex, "search_rows", boom)
-
-    with caplog.at_level("ERROR"):
-        with pytest.raises(RuntimeError, match="index unreadable"):
-            await session.search("s", "shared")
-
-    assert "session_collection_search_failed" in _events(caplog)
-
-
-# --- model lifecycle ---------------------------------------------------------------
-
-
-async def test_no_model_is_required_for_full_text_only(dbos) -> None:
-    assert await models.ensure_models(UserSettings(embedding="none")) == []
-    assert await models.model_statuses(UserSettings(embedding="none")) == []
-
-
-def _compact_model_name() -> str:
-    model = UserSettings(embedding="compact").embedding_model
-    assert model is not None
-    return model.name
+    assert workflows.job_names(job_id) == expected, name
 
 
 @pytest.mark.parametrize(
-    ("name", "outcome", "state", "match"),
+    ("name", "job_id", "collection"),
     [
-        ("loaded in this process", "ready", "ready", None),
-        ("download failed", "error", "error", "failed to load: RuntimeError: no such model"),
-        ("never required before", "missing", "pending", "is not loaded yet"),
-        ("still downloading", "blocked", "loading", "is downloading .job dl:embedding:"),
-        ("downloaded, caches cold", "cold", "loading", "is loading in this process"),
+        ("a bulk index", "bulk-index:law:cafe", "law"),
+        ("a bulk delete", "bulk-delete:law:cafe", "law"),
+        ("a maintenance run", "maint:law:cafe", "law"),
+        ("a document delete, which spans every collection", "del-doc:book.pdf:cafe", None),
+        ("an id with nothing in that place", "bulk-index", None),
     ],
 )
-async def test_model_state_decides_whether_search_may_run(
-    dbos, monkeypatch, name: str, outcome: str, state: str, match: str | None
+def test_only_a_job_of_one_collection_carries_its_name(
+    name: str, job_id: str, collection: str | None
 ) -> None:
-    """A download record that says SUCCESS is not enough: the model lives in the caches of the
-    process that loaded it, so a boot that inherits the record still reports "loading" until it
-    has warmed the model itself (A8).
-
-    `load_model` is replaced rather than `embed.warm`, so no case waits out the download retry
-    schedule (five attempts, five seconds apart)."""
-    blocked = threading.Event()
-
-    async def load_model(kind: str, name_: str) -> None:
-        if outcome == "error":
-            raise RuntimeError("no such model")
-        if outcome == "blocked":
-            assert await _wait_event(blocked)
-
-    monkeypatch.setattr(models, "load_model", load_model)
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    model_name = _compact_model_name()
-
-    if outcome != "missing":
-        await models.ensure_models(user)
-        if outcome != "blocked":
-            await _await_terminal([models._model_id("embedding", model_name)])
-    if outcome == "cold":
-        models._ready.clear()  # the record of a boot whose caches this process does not have
-
-    try:
-        (status,) = await models.model_statuses(user)
-        assert (status.kind, status.name, status.state) == ("embedding", model_name, state), name
-        if match is None:
-            await models.require_ready("embedding", model_name)  # no raise
-        else:
-            with pytest.raises(NotReady, match=match):
-                await models.require_ready("embedding", model_name)
-    finally:
-        blocked.set()
-        await _await_terminal([models._model_id("embedding", model_name)])
+    assert jobs._collection_of(job_id) == collection, name
 
 
-async def test_ensure_models_retries_a_model_that_failed(dbos, monkeypatch) -> None:
-    attempts: list[str] = []
-
-    async def load_model(kind: str, name: str) -> None:
-        attempts.append(name)
-        if len(attempts) == 1:
-            raise RuntimeError("connection reset")
-
-    monkeypatch.setattr(models, "load_model", load_model)
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    model_name = _compact_model_name()
-
-    await models.ensure_models(user)
-    await _await_terminal([models._model_id("embedding", model_name)])
-    assert (await models.model_statuses(user))[0].state == "error"
-
-    await models.ensure_models(user)  # retries under the same id instead of leaving it failed
-    await _await_terminal([models._model_id("embedding", model_name)])
-
-    assert (await models.model_statuses(user))[0].state == "ready"
-    assert attempts == [model_name, model_name], "the retry really called the loader again"
-    assert len(await DBOS.list_workflows_async(name=models.ensure_model.__qualname__)) == 1, (
-        "same workflow id"
-    )
-
-
-async def test_require_ready_answers_from_the_process_that_loaded_the_model(
-    dbos, monkeypatch
-) -> None:
-    """Every search asks whether the model is ready, and the process that loaded it knows without
-    asking the database; a failure is never remembered, because the retry must be visible."""
-    attempts: list[str] = []
-
-    async def load_model(kind: str, name: str) -> None:
-        attempts.append(name)
-        if len(attempts) == 1:
-            raise RuntimeError("connection reset")
-
-    monkeypatch.setattr(models, "load_model", load_model)
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    model_name = _compact_model_name()
-    await models.ensure_models(user)
-    await _await_terminal([models._model_id("embedding", model_name)])
-    with pytest.raises(NotReady, match="failed to load"):
-        await models.require_ready("embedding", model_name)  # a failure is never cached
-
-    await models.ensure_models(user)  # deletes the failed record and enqueues the same id again
-    await _await_terminal([models._model_id("embedding", model_name)])
-    calls = _counted_list_workflows(monkeypatch)
-
-    await models.require_ready("embedding", model_name)
-    await models.require_ready("embedding", model_name)
-    assert calls == [], "the load ran here, so no search has to look the record up"
-
-    await models.ensure_models(user)  # a healthy record: nothing is deleted or started again
-    queries = len(calls)
-    await models.require_ready("embedding", model_name)
-    assert len(calls) == queries, "and reapplying the settings does not make the model cold"
-    assert attempts == [model_name, model_name], "no third load"
-
-
-@pytest.mark.network
-async def test_embed_stage_precomputes_vectors_and_hybrid_search_uses_them(
+async def test_a_document_delete_is_listed_as_a_collection_job_with_no_collection(
     dbos, tmp_path: Path
 ) -> None:
-    user = await save_user_settings(
-        UserSettings(embedding="compact", search=SearchSettings(reranker="cross-encoder"))
+    """The three whole-collection workflows share one kind and one id shape, but a document delete
+    carries a document where the other two carry a collection."""
+    doc = await import_document(dbos, "gone.md", MD, tmp_path)
+    job_id = await dbos.start_delete_document(doc.name)
+    assert await wait_for(job_id) is None
+
+    (row,) = (await jobs.list_kind("collection", page_size=10)).items
+
+    assert (row.id, row.kind, row.title) == (job_id, "collection", f"delete document {doc.name}")
+    assert (await jobs.list_kind("collection", collection="any", page_size=10)).items == [], (
+        "a collection filter keeps the jobs of one collection, and this job has none"
     )
-    await models.ensure_models(user)
-    for kind, name in await models._required(user):
-        await wait_for(models._model_id(kind, name))
-    assert {(m.kind, m.state) for m in await models.model_statuses(user)} == {
-        ("embedding", "ready"),
-        ("reranker", "ready"),
+
+
+def test_the_workflow_names_the_jobs_view_spells_out_are_the_ones_dbos_records() -> None:
+    """Every name `jobs` selects by and groups by is pinned against the registration DBOS made:
+    a mismatch is a silent miss in a query, not an error."""
+    assert dbos_names.PIPELINE_WORKFLOWS == [
+        get_dbos_func_name(workflows.import_document),
+        get_dbos_func_name(workflows.ensure_embedding),
+        get_dbos_func_name(workflows.index_collection_document),
+    ]
+    assert dbos_names.STAGE_WORKFLOW == get_dbos_func_name(workflows.stage_slice)
+    assert dbos_names.STAGE_STEP == get_dbos_func_name(workflows.try_batch)
+    assert workflows.stage_slice.__name__ != dbos_names.STAGE_WORKFLOW, (
+        "the durable name is pinned, not derived from the function name"
+    )
+    assert jobs.KIND_NAMES == {
+        "collection": [
+            get_dbos_func_name(workflows.index_collection_workflow),
+            get_dbos_func_name(workflows.delete_collection_workflow),
+            get_dbos_func_name(workflows.delete_document_workflow),
+        ],
+        "download": [get_dbos_func_name(models.ensure_model)],
+        "maintenance": [
+            get_dbos_func_name(workflows.maintain_on_partition),
+            get_dbos_func_name(workflows.daily_maintenance),
+        ],
     }
-    collection = await Collection.create("vec")
-    await collection.set_settings(CollectionSettings(chunk_size=40, chunk_overlap=0))
-    body = "# Cats\n\nCats purr and chase mice.\n\n# Finance\n\nBonds yield interest.\n"
-    doc = await import_document(dbos, "v.md", body, tmp_path)
-    await attach_document(dbos, "vec", doc.name)
-
-    table = await (await collection.index())._existing()
-    assert table is not None and "vector" in (await table.schema()).names
-    records = sorted((await table.to_arrow()).to_pylist(), key=lambda r: (r["part"], r["chunk_id"]))
-    assert [r["heading"] for r in records] == ["Cats", "Finance"]
-    assert all(len(r["vector"]) == 384 for r in records)
-    assert (await collection.search("kitten"))[0].heading == "Cats", "semantic hit"
-
-    # search options: every mode/fusion answers; fts alone cannot find "kitten"
-    assert (await collection.search("kitten", mode="vector"))[0].heading == "Cats"
-    assert await collection.search("kitten", mode="fts") == []
-    linear = await collection.search("bonds", mode="hybrid", fusion="linear")
-    assert linear[0].heading == "Finance"
-    lexical = await collection.search("bonds", fusion="linear", vector_weight=0.0, bm25_weight=1.0)
-    assert lexical[0].heading == "Finance"
-    assert (await collection.search("kitten", fusion="rrf", limit=1))[0].heading == "Cats"
-
-    # cross-encoder reranker works on top of any mode, including vector-only and fts
-    for mode in ("vector", "hybrid"):
-        hits = await collection.search("kitten", mode=mode, reranker="cross-encoder", candidates=10)
-        assert hits[0].heading == "Cats" and hits[0].score > hits[1].score, mode
-    lexical_reranked = await collection.search("bonds", mode="fts", reranker="cross-encoder")
-    assert lexical_reranked[0].heading == "Finance"
-
-
-@pytest.mark.network
-async def test_models_are_idempotent_and_fail_fast_when_missing(dbos, monkeypatch) -> None:
-    plain = UserSettings(embedding="none")
-    assert await models.ensure_models(plain) == [], "nothing required for full-text only"
-    with pytest.raises(NotReady, match="not loaded yet"):
-        await models.require_ready("embedding", "BAAI/bge-small-en-v1.5")
-
-    wanted = UserSettings(embedding="compact")
-    (status,) = await models.ensure_models(wanted)
-    assert status.state in ("loading", "ready")
-    await wait_for(models._model_id("embedding", status.name))
-    assert (await models.model_statuses(wanted))[0].state == "ready"
-    before = len(await DBOS.list_workflows_async(name=models.ensure_model.__qualname__))
-    await models.ensure_models(wanted)
-    assert len(await DBOS.list_workflows_async(name=models.ensure_model.__qualname__)) == before, (
-        "no second load"
-    )
-
-    # SearchSettings only accepts known reranker ids, so add the missing one to the allowed set
-    monkeypatch.setattr(settings, "RERANKER_MODELS", (*settings.RERANKER_MODELS, "nope/x"))
-    broken = UserSettings(
-        embedding="none", search=SearchSettings(reranker="cross-encoder", reranker_model="nope/x")
-    )
-    await models.ensure_models(broken)
-    with pytest.raises(HaskieError):  # the model does not exist
-        await wait_for(models._model_id("reranker", "nope/x"))
-    (status,) = await models.model_statuses(broken)
-    assert (status.kind, status.state) == ("reranker", "error") and status.error
-    with pytest.raises(NotReady, match="failed to load"):
-        await models.require_ready("reranker", "nope/x")
-
-
-@pytest.mark.network
-async def test_search_rejects_a_query_while_the_embedding_model_loads(
-    dbos, tmp_path: Path, monkeypatch
-) -> None:
-    """The index has vectors, so a hybrid query needs the model; a request must fail fast with
-    503 semantics rather than block on a download."""
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    await models.ensure_models(user)
-    await _await_terminal([models._model_id("embedding", _compact_model_name())])
-    collection = await Collection.create("busy")
-    doc = await import_document(dbos, "g.md", MD, tmp_path)
-    await attach_document(dbos, "busy", doc.name)
-    assert await collection.search("lancedb"), "ready model answers"
-
-    monkeypatch.setattr(models, "_ready", set())  # as after a restart: caches are cold
-
-    with pytest.raises(NotReady, match="is loading in this process"):
-        await collection.search("lancedb")
-
-
-@pytest.mark.parametrize(
-    ("name", "user", "collection_rerankers", "expected"),
-    [
-        ("full text only", UserSettings(embedding="none"), [], []),
-        (
-            "an embedding profile",
-            UserSettings(embedding="compact"),
-            [],
-            [("embedding", "BAAI/bge-small-en-v1.5")],
-        ),
-        (
-            "an embedding profile and a cross-encoder",
-            UserSettings(embedding="compact", search=SearchSettings(reranker="cross-encoder")),
-            [],
-            [
-                ("embedding", "BAAI/bge-small-en-v1.5"),
-                ("reranker", "Xenova/ms-marco-MiniLM-L-6-v2"),
-            ],
-        ),
-        (
-            "a collection override nobody else asks for",
-            UserSettings(embedding="none"),
-            ["BAAI/bge-reranker-base"],
-            [("reranker", "BAAI/bge-reranker-base")],
-        ),
-        (
-            "the same model at both levels is wanted once",
-            UserSettings(embedding="none", search=SearchSettings(reranker="cross-encoder")),
-            ["Xenova/ms-marco-MiniLM-L-6-v2", "BAAI/bge-reranker-base"],
-            [
-                ("reranker", "Xenova/ms-marco-MiniLM-L-6-v2"),
-                ("reranker", "BAAI/bge-reranker-base"),
-            ],
-        ),
-    ],
-)
-async def test_required_models_follow_the_settings(
-    dbos, name: str, user: UserSettings, collection_rerankers: list[str], expected: list
-) -> None:
-    assert await models._required(user, collection_rerankers) == expected, name
-
-
-async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> None:
-    """A reranker chosen for one collection is a model the installation needs: nothing else would
-    ever fetch it, and the first search of that collection would fail with "not loaded yet"."""
-    loaded: list[str] = []
-    monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: loaded.append(name))
-    override = "jinaai/jina-reranker-v1-turbo-en"
-    collection = await Collection.create("picky")
-    await collection.set_settings(
-        CollectionSettings(
-            search=SearchOverrides(reranker="cross-encoder", reranker_model=override)
-        )
-    )
-    user = await save_user_settings(UserSettings(embedding="none"))
-
-    assert await Collection.reranker_overrides() == [override]
-    (status,) = await models.ensure_models(user)
-
-    assert (status.kind, status.name) == ("reranker", override)
-    workflow_id = models._model_id("reranker", override)
-    assert workflow_id.startswith("dl:reranker:")
-    await _await_terminal([workflow_id])
-    assert loaded == [override], "the download workflow really called the loader"
-    (download,) = await jobs.list_downloads()
-    assert (download.id, download.kind, download.model) == (workflow_id, "reranker", override)
-    assert (download.status, download.error) == ("SUCCESS", None)
-    await models.require_ready("reranker", override)  # no raise: the collection can be searched
-
-
-async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> None:
-    """The list is the read model of the `ensure_model` workflows, so it has one row per model
-    the settings ask for, whatever state it is in."""
-    monkeypatch.setattr(embed, "warm", lambda name, accelerator: None)
-    monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: None)
-    user = await save_user_settings(
-        UserSettings(embedding="compact", search=SearchSettings(reranker="cross-encoder"))
-    )
-
-    await models.ensure_models(user)
-    await _await_terminal(
-        [models._model_id(kind, name) for kind, name in await models._required(user)]
-    )
-
-    downloads = await jobs.list_downloads()
-    assert {(d.kind, d.model) for d in downloads} == {
-        ("embedding", _compact_model_name()),
-        ("reranker", "Xenova/ms-marco-MiniLM-L-6-v2"),
-    }, "one row per required model, kind and name read out of the workflow id"
-    assert {d.status for d in downloads} == {"SUCCESS"}
-    assert all(d.warm for d in downloads), "loaded here, so this process can search with them"
-    assert all(d.created_at > 0 and d.error is None for d in downloads)
-    assert [d.created_at for d in downloads] == sorted(
-        (d.created_at for d in downloads), reverse=True
-    ), "newest first"
-
-
-async def _until(condition, message: str, timeout: float = WAIT) -> None:
-    """Wait for something a background task does; polled, because no result handle carries it.
-    `condition` is a coroutine function."""
-    deadline = time.monotonic() + timeout
-    while not await condition():
-        assert time.monotonic() < deadline, message
-        await anyio.sleep(workflows.TASK_POLL)
-
-
-async def test_restart_does_not_create_a_second_download_record(dbos, monkeypatch) -> None:
-    """The files stay on disk and the record is durable, so a restart reuses both: one row per
-    model, however often the dev server reloads."""
-    monkeypatch.setattr(embed, "warm", lambda name, accelerator: None)
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    workflow_id = models._model_id("embedding", _compact_model_name())
-    await models.ensure_models(user)
-    await _await_terminal([workflow_id])
-
-    models._ready.clear()  # a new process has the files, not the caches
-    await restart_dbos()
-    await workflows.apply_settings(user)  # the boot applies them once; twice must change nothing
-
-    (download,) = await jobs.list_downloads()
-    assert download.id == workflow_id, "the same record, not one per boot"
-    assert download.status == "SUCCESS", "and it is not downloaded again"
-
-    async def warmed() -> bool:
-        return (await models.model_statuses(user))[0].state == "ready"
-
-    await _until(warmed, "the model was never warmed")
-    assert (await jobs.list_downloads())[0].warm is True
-
-
-async def test_a_downloaded_model_is_warmed_after_restart_before_search_uses_it(
-    dbos, monkeypatch
-) -> None:
-    """Warming is a local read of the disk cache, but it still takes seconds, so the boot hands it
-    to a background thread. A search that arrives first fails fast with 503 semantics (A8)."""
-    warming, release = threading.Event(), threading.Event()
-
-    def warm(name, accelerator) -> None:
-        # sync, and run in a worker thread through `cpu.on_cpu`: blocking here blocks no loop
-        warming.set()
-        assert release.wait(timeout=WAIT), "the test never released the warm-up"
-
-    async def load_model(kind, name) -> None:  # the download itself
-        return None
-
-    monkeypatch.setattr(models, "load_model", load_model)
-    monkeypatch.setattr(embed, "warm", warm)
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    model_name = _compact_model_name()
-    await models.ensure_models(user)
-    await _await_terminal([models._model_id("embedding", model_name)])
-
-    models._ready.clear()  # a new process has the files, not the caches
-    await restart_dbos()
-
-    assert await _wait_event(warming), "the boot warms the model it already downloaded"
-    with pytest.raises(NotReady, match="is loading in this process"):
-        await models.require_ready("embedding", model_name)
-    assert (await models.model_statuses(user))[0].state == "loading"
-
-    release.set()
-
-    async def loaded() -> bool:
-        return models.is_warm(models._model_id("embedding", model_name))
-
-    await _until(loaded, "never warmed")
-    await models.require_ready("embedding", model_name)  # no raise: the search may run now
+    assert set(jobs.KIND_BY_NAME) == set(dbos_names.PIPELINE_WORKFLOWS) | {
+        name for names in jobs.KIND_NAMES.values() for name in names
+    }, "every kind counts the workflows it lists, and nothing else"
 
 
 # --- settings applied to the runtime -----------------------------------------------
@@ -2733,13 +2234,13 @@ async def test_a_downloaded_model_is_warmed_after_restart_before_search_uses_it(
 
 async def test_an_unreadable_settings_row_does_not_stop_the_boot(dbos, monkeypatch) -> None:
     """The loader already tolerates a row another build wrote, so `start()` applies defaults and
-    `/api/status` reports the problem (A13)."""
+    `/api/status` reports the problem."""
     await save_user_settings(UserSettings(embedding="compact"))
     async with db.connect() as conn:
         await conn.execute(
             'update settings set json = \'{"pipeline": {"cpu_budget": 0}}\' where id = 1'
         )
-    settings.invalidate()  # the row was written behind the loader's back, as another build would
+    forget_settings()  # the row was written behind the loader's back, as another build would
     applied: list[UserSettings] = []
 
     async def apply_settings(value: UserSettings) -> None:
@@ -2773,31 +2274,7 @@ async def test_settings_rejected_while_applying_fall_back_to_defaults_at_boot(
         await workflows.start()
 
     assert applied == [stored, UserSettings()], "the stored settings first, then the defaults"
-    assert _events(caplog) == ["settings_invalid_at_boot"]
-
-
-async def test_cancel_wait_gives_up_instead_of_blocking_forever(
-    dbos, tmp_path: Path, monkeypatch, caplog
-) -> None:
-    """Cancellation is cooperative: a step that ignores it must not hold a request open."""
-    doc = await _add(tmp_path, "p.pdf", text_pdf(["alpha"]))
-    gate = Gate()
-    monkeypatch.setattr(pipeline, "convert_batch", gate.wrap(pipeline.convert_batch))
-    job_id = await dbos.start_import(doc.name)
-    assert await _wait_event(gate.entered)
-
-    async def cancel_workflow(*args, **kwargs) -> None:  # a cancel that never lands
-        return None
-
-    monkeypatch.setattr(DBOS, "cancel_workflow_async", cancel_workflow)
-
-    with caplog.at_level("WARNING"):
-        await workflows._cancel_and_wait([job_id], wait_seconds=0)
-
-    assert _events(caplog) == ["cancel_wait_timeout"]
-    assert await _statuses([job_id]) == ["PENDING"], "still running, and reported as such"
-    gate.release.set()
-    await _await_terminal([job_id])
+    assert events(caplog) == ["settings_invalid_at_boot"]
 
 
 # --- audit trail -------------------------------------------------------------------
@@ -2809,7 +2286,7 @@ async def test_audit_records_carry_the_collection_and_the_document(dbos, tmp_pat
     collection = await Collection.create("aud")
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     await attach_document(dbos, "aud", doc.name)
-    early = await _add(tmp_path, "b.md")
+    early = await import_row("b.md", into=tmp_path)
     await _add_member(collection, early.name)
     with pytest.raises(workflows.PipelineError):
         await wait_for(await dbos.start_index_collection_document("aud", early.name))
@@ -2831,29 +2308,24 @@ async def test_audit_records_carry_the_collection_and_the_document(dbos, tmp_pat
 # --- schedules and nightly housekeeping --------------------------------------------
 
 
-async def test_start_registers_the_two_schedules(dbos) -> None:
-    """The definitions live in the system database: a second boot finds the ones the first wrote
+async def test_start_registers_the_nightly_schedule(dbos) -> None:
+    """The definition lives in the system database: a second boot finds the one the first wrote
     instead of adding another."""
 
-    async def registered(name: str) -> list:
-        return [s for s in await DBOS.list_schedules_async() if s["schedule_name"] == name]
+    async def registered() -> list:
+        found = await DBOS.list_schedules_async()
+        return [s for s in found if s["schedule_name"] == workflows.MAINTENANCE_SCHEDULE]
 
-    (nightly,) = await registered(workflows.MAINTENANCE_SCHEDULE)
+    (nightly,) = await registered()
     assert (nightly["schedule"], nightly["queue_name"]) == (
         workflows.MAINTENANCE_CRON,
         workflows.MAINTENANCE_QUEUE,
     )
     assert "daily_maintenance" in nightly["workflow_name"]
-    (hourly,) = await registered(workflows.ARCHIVE_SCHEDULE)
-    assert (hourly["schedule"], hourly["queue_name"]) == (
-        workflows.ARCHIVE_CRON,
-        workflows.MAINTENANCE_QUEUE,
-    )
 
     await restart_dbos()
 
-    assert len(await registered(workflows.MAINTENANCE_SCHEDULE)) == 1
-    assert len(await registered(workflows.ARCHIVE_SCHEDULE)) == 1
+    assert len(await registered()) == 1
 
 
 async def test_start_prunes_the_audit_trail_once(dbos) -> None:
@@ -2886,6 +2358,45 @@ async def test_daily_maintenance_prunes_the_audit_trail(dbos) -> None:
     assert kept.exists()
 
 
+async def test_daily_maintenance_purges_the_job_history_past_the_retention(
+    dbos, tmp_path: Path
+) -> None:
+    """DBOS keeps a finished workflow forever, so the nightly run is what bounds the Jobs view:
+    a job that finished longer ago than `retention.job_days` goes, with the stage children and
+    the step logs that carry its micro-batches."""
+    await save_user_settings(UserSettings(retention=RetentionSettings(job_days=1)))
+    doc = await import_document(dbos, "old.md", MD, tmp_path)
+    listed = (await jobs.list_jobs()).items
+    assert {job.doc for job in listed} == {doc.name}, "the import and the embedding it warmed"
+    job_id = listed[0].id
+    assert await jobs.list_tasks(job_id), "the job has micro-batches while DBOS holds it"
+    two_days_ago = int((time.time() - 2 * 86400) * 1000)
+    async with db.connect() as conn:  # the only way to age a job: DBOS stamps its own clock
+        await conn.execute(
+            "update workflow_status set completed_at = ? where completed_at is not null",
+            (two_days_ago,),
+        )
+
+    await workflows.daily_maintenance(datetime.now(UTC), None)
+
+    assert (await jobs.list_jobs()).items == [], "nothing of the document's history is left"
+    with pytest.raises(NotFound, match="job not found"):
+        await jobs.list_tasks(job_id)
+
+
+async def test_daily_maintenance_keeps_a_job_inside_the_retention(dbos, tmp_path: Path) -> None:
+    """The cutoff is the only thing that decides: a job that finished within the window stays,
+    micro-batches included."""
+    await save_user_settings(UserSettings(retention=RetentionSettings(job_days=28)))
+    doc = await import_document(dbos, "fresh.md", MD, tmp_path)
+    before = [job.id for job in (await jobs.list_jobs()).items]
+
+    await workflows.daily_maintenance(datetime.now(UTC), None)
+
+    assert [job.id for job in (await jobs.list_jobs()).items] == before
+    assert {job.doc for job in (await jobs.list_jobs()).items} == {doc.name}
+
+
 async def test_daily_maintenance_sweeps_stale_staged_uploads(dbos) -> None:
     """An upload nobody imported is not a document, so the nightly run drops it once it is older
     than the staging TTL. A fresh one is still waiting to be imported and stays."""
@@ -2896,7 +2407,7 @@ async def test_daily_maintenance_sweeps_stale_staged_uploads(dbos) -> None:
     async with db.connect() as conn:  # the row carries the age; the file only does for an orphan
         await conn.execute(
             "update staging set created_at = ? where staging_id = ?",
-            (document._stamp(aged), stale.staging_id),
+            (aged, stale.staging_id),
         )
 
     await workflows.daily_maintenance(datetime.now(UTC), None)

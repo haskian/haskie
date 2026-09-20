@@ -15,15 +15,8 @@ from urllib.parse import urlsplit
 import typer
 
 from haskie import APP_VERSION, claude, home
-from haskie.claude import Scope
+from haskie.claude import DEFAULT_HOST, DEFAULT_PORT, MCP_URL, Scope
 from haskie.errors import HaskieError
-
-DEFAULT_HOST = "127.0.0.1"  # loopback: one user's documents, and nothing authenticates a caller
-DEFAULT_PORT = 8000
-# Spelled out rather than imported from `app`: importing the Litestar app here would cost every
-# `haskie` invocation the whole web stack. `test_the_default_url_matches_where_mcp_is_mounted`
-# is what keeps this in step with `app.MCP_PATH`.
-MCP_URL = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/mcp"
 
 cli = typer.Typer(
     name="haskie",
@@ -71,11 +64,8 @@ HomeOption = Annotated[
 
 
 def _use_home(path: Path | None) -> None:
-    """Point the process at `path` before anything reads the home layout.
-
-    `home` resolves its paths at import time from the environment, so a `--home` has to be put
-    back into the environment and the module's own paths refreshed.
-    """
+    """Point the process at `path` before anything reads the home layout. The environment carries
+    it too, so a `--reload` child re-reads the same root (see `home.HOME`)."""
     if path is None:
         return
     resolved = str(Path(path).expanduser().resolve())
@@ -98,13 +88,8 @@ def init(home_dir: HomeOption = None) -> None:
     from haskie import db
 
     _use_home(home_dir)
-
-    async def prepare() -> None:
-        await home.ensure_home()
-        await db.migrate_once()
-
     try:
-        asyncio.run(prepare())
+        asyncio.run(db.migrate_once())  # makes the home first (see `db.migrate_once`)
     except HaskieError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
@@ -183,20 +168,13 @@ def ensure(
 ) -> None:
     """Start haskie if nothing is serving `url`, and wait for it unless told not to.
 
-    An MCP client reaches haskie over HTTP, so the server has to be up before the client connects.
-    This is what `haskie install claude` puts in Claude Code's SessionStart hook, and it is safe to
-    run as often as you like: an already-serving haskie costs one loopback request.
-
-    The server it starts is detached and outlives this command on purpose - the next session
-    reuses it, and the web UI stays up. Racing callers are safe: the app claims the home before it
+    The server it starts is detached and outlives this command on purpose: the next session reuses
+    it, and the web UI stays up. Racing callers are safe - the app claims the home before it
     touches the database, so every loser exits early and the wait below finds the one winner.
 
-    `--no-wait` returns as soon as the server is spawned. That is what the hook uses: a client
-    connects to the MCP endpoint while the hook is still running, so waiting cannot help the
-    session that starts it, and a haskie that fails to boot would stall every session start.
-
-    ponytail: nothing stops the server it starts. A launchd agent is the upgrade path for a
-    machine that should always have haskie up.
+    Claude Code's SessionStart hook passes `--no-wait`: a client connects to the MCP endpoint
+    while the hook is still running, so waiting cannot help the session that starts it, and a
+    haskie that fails to boot would stall every session start.
     """
     _use_home(home_dir)
     if _serving(url):

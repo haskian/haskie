@@ -16,20 +16,19 @@ from litestar.static_files import create_static_files_router
 from litestar.types import ControllerRouterHandler, ExceptionHandlersMap, Message, Scope
 from litestar_mcp import LitestarMCP
 
-from haskie import APP_VERSION, errors, home, logs, workflows
+from haskie import APP_VERSION, home, logs, workflows
 from haskie.api import ROUTE_HANDLERS
 from haskie.document import UPLOAD_MAX_BYTES
-from haskie.errors import HaskieError, NotReady
+from haskie.errors import HaskieError
 
-# The built UI, wherever it is: inside the wheel when haskie was installed (`uv tool install`),
-# or `web/dist` when it is run from a checkout. Absent in both cases means API and MCP only.
+# The built UI, wherever it is: inside the package when haskie was installed, or `web/dist` in a
+# checkout. Absent in both places means API and MCP only.
 _PACKAGED_WEB = Path(__file__).resolve().parent / "web"
 _CHECKOUT_WEB = Path(__file__).resolve().parents[2] / "web" / "dist"
 WEB_DIST = _PACKAGED_WEB if _PACKAGED_WEB.is_dir() else _CHECKOUT_WEB
 REQUEST_ID_KEY = "request_id"
 REQUEST_ID_HEADER = "X-Request-Id"
 MCP_PATH = "/mcp"
-RETRY_AFTER_SECONDS = "2"
 
 _log = logs.get_logger(__name__)
 
@@ -79,7 +78,7 @@ def _client_error(
     headers: dict[str, str] | None = None,
     message: str | None = None,
 ) -> Response:
-    detail = errors.scrub(message if message is not None else str(exc))
+    detail = home.scrub(message if message is not None else str(exc))
     _log.warning(
         "request_rejected", status_code=status_code, error=type(exc).__name__, detail=detail
     )
@@ -87,9 +86,8 @@ def _client_error(
 
 
 def haskie_error(_: Request, exc: HaskieError) -> Response:
-    """Every expected failure, at the status code its class declares."""
-    retry_after = {"Retry-After": RETRY_AFTER_SECONDS} if isinstance(exc, NotReady) else None
-    return _client_error(exc, exc.status_code, retry_after)
+    """Every expected failure, at the status code and headers its class declares."""
+    return _client_error(exc, exc.status_code, exc.headers)
 
 
 def validation_error(_: Request, exc: ValidationException) -> Response:
@@ -109,7 +107,7 @@ def internal_error(request: Request, exc: Exception) -> Response:
         return create_exception_response(request, exc)
     _log.exception("unhandled_error", error=type(exc).__name__)
     # local single-user app: the UI shows the real message instead of a bare 500
-    return Response({"detail": errors.scrub(f"{type(exc).__name__}: {exc}")}, status_code=500)
+    return Response({"detail": home.scrub(f"{type(exc).__name__}: {exc}")}, status_code=500)
 
 
 EXCEPTION_HANDLERS: ExceptionHandlersMap = {
@@ -140,7 +138,7 @@ def create_app() -> Litestar:
         route_handlers=route_handlers,
         plugins=[LitestarMCP()],
         openapi_config=OpenAPIConfig(title="haskie", version=APP_VERSION),
-        logging_config=logs.logging_config,
+        logging_config=None,  # `logs.configure` above owns it (see logs.py)
         exception_handlers=EXCEPTION_HANDLERS,
         before_request=bind_request_context,
         before_send=[add_request_id],

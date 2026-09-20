@@ -21,9 +21,12 @@ from haskie.settings import Accelerator, EmbeddingModel
 Provider = str | tuple[str, dict[str, str]]
 RERANKER_ACCELERATOR: Accelerator = "cpu"
 
+# Construction (download, session setup) is serialized, using a model is not, and the lock is
+# outside the cache so the second caller of a model being built waits and then gets that one:
 # fastembed downloads into one shared cache directory and several worker threads ask for the same
-# model at once: without this, each of them starts its own download into the same files (B3).
+# model at once, so without this each of them starts its own download into the same files.
 _MODEL_LOCK = threading.Lock()
+
 
 PREFERENCE = (
     "TensorrtExecutionProvider",
@@ -73,10 +76,21 @@ def _build_model(name: str, accelerator: Accelerator):
     return TextEmbedding(model_name=name, providers=providers(accelerator))
 
 
+@cache
+def _build_cross_encoder(name: str):
+    from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+    return TextCrossEncoder(model_name=name, providers=providers(RERANKER_ACCELERATOR))
+
+
 def _model(name: str, accelerator: Accelerator):
-    """Construction (download, session setup) is serialized; using the model is not."""
     with _MODEL_LOCK:
         return _build_model(name, accelerator)
+
+
+def _cross_encoder(name: str):
+    with _MODEL_LOCK:
+        return _build_cross_encoder(name)
 
 
 def embed_texts(model: EmbeddingModel, texts: list[str]) -> list[list[float]]:
@@ -97,30 +111,12 @@ def warm(name: str, accelerator: Accelerator) -> None:
     _model(name, accelerator)
 
 
-@cache
-def _build_cross_encoder(name: str):
-    from fastembed.rerank.cross_encoder import TextCrossEncoder
-
-    return TextCrossEncoder(model_name=name, providers=providers(RERANKER_ACCELERATOR))
+def warm_reranker(name: str) -> None:
+    _cross_encoder(name)
 
 
-def _cross_encoder(name: str, accelerator: Accelerator):
-    """`accelerator` is accepted for symmetry with the embedding calls and ignored: see
-    `RERANKER_ACCELERATOR` in the module docstring."""
-    del accelerator
-    with _MODEL_LOCK:
-        return _build_cross_encoder(name)
-
-
-def warm_reranker(name: str, accelerator: Accelerator) -> None:
-    _cross_encoder(name, accelerator)
-
-
-def rerank_scores(
-    model_name: str, accelerator: Accelerator, query: str, texts: list[str]
-) -> list[float]:
+def rerank_scores(model_name: str, query: str, texts: list[str]) -> list[float]:
     """Cross-encoder relevance of each text to the query (higher = better; not normalized)."""
     if not texts:
         return []
-    encoder = _cross_encoder(model_name, accelerator)
-    return [float(s) for s in encoder.rerank(query, texts)]
+    return [float(s) for s in _cross_encoder(model_name).rerank(query, texts)]

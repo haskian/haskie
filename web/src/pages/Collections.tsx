@@ -1,17 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  ACTIVE_JOB_STATUSES,
-  ACTIVE_MEMBER_STATUSES,
   api,
   type BulkJob,
-  type BulkStarted,
   type ChunkSettings,
   type CollectionInfo,
   type CollectionSettings,
   type Document,
   type JobRow,
   MAX_PAGE_SIZE,
-  MEMBER_STATUSES,
   type MemberStatus,
   type Options,
 } from '../api'
@@ -21,16 +17,18 @@ import { JobLine } from '../components/JobLine'
 import { Pager, SortHeader } from '../components/Pager'
 import { Search } from '../components/Search'
 import { SearchSettingsForm } from '../components/SearchSettingsForm'
-import { bytes } from '../format'
+import { StatusCell, StatusFilter } from '../components/Status'
+import { bytes, when } from '../format'
 import { useBulkJob } from '../hooks/useBulkJob'
+import { useOptions } from '../hooks/useOptions'
 import { usePaged } from '../hooks/usePaged'
 import { usePoll } from '../hooks/usePoll'
 import { useRun } from '../hooks/useRun'
 
 const JOBS_PAGE_SIZE = 20 // the newest jobs of one collection, as a hint; the Jobs view pages them all
 
-export function Collections({ initial, navigate }: { initial?: string; navigate: (p: Route) => void }) {
-  const [selected, setSelected] = useState<string | undefined>(initial)
+export function Collections({ navigate }: { navigate: (p: Route) => void }) {
+  const [selected, setSelected] = useState<string | undefined>(undefined)
   const [newName, setNewName] = useState('')
   const [newDescription, setNewDescription] = useState('')
   const collections = usePaged((q) => api.collections(q), { sort: 'name' })
@@ -44,8 +42,6 @@ export function Collections({ initial, navigate }: { initial?: string; navigate:
     setSelected(info.name)
   }
 
-  // the detail view follows its bulk jobs by polling: its callbacks must keep one identity, or
-  // every tick tears the interval down and builds it again
   const onDeleted = useCallback(() => {
     setSelected(undefined)
     void refresh()
@@ -104,9 +100,9 @@ function CollectionDetail({
   navigate: (p: Route) => void
   onDeleted: () => void
 }) {
+  const options = useOptions()
   const [info, setInfo] = useState<CollectionInfo | null>(null)
   const [jobs, setJobs] = useState<JobRow[]>([])
-  const [options, setOptions] = useState<Options | null>(null)
   const [status, setStatus] = useState<MemberStatus | ''>('')
   // imported documents this collection does not hold yet, and the one picked in the dropdown
   const [candidates, setCandidates] = useState<Document[]>([])
@@ -129,7 +125,8 @@ function CollectionDetail({
 
   // The picker needs every member name, not the page on screen, so both sides are asked for in
   // one large page each; a document may be attached to a collection only once it is imported.
-  // Two full listings are too expensive to poll, so this runs on mount and after a mutation only.
+  // Two full listings are too expensive to poll, so this runs on mount and after attach or detach
+  // only — nothing else moves a document in or out of the set.
   // ponytail: the ceiling is the client-side diff of two capped listings — once a collection (or
   // the home) outgrows MAX_PAGE_SIZE, the server has to answer it with a `not_in` filter instead.
   const refreshCandidates = useCallback(
@@ -144,16 +141,13 @@ function CollectionDetail({
     [name],
   )
 
-  // what a poll re-reads: only what background work moves
+  // what a poll and a mutation re-read: only what background work moves
   const refresh = useCallback(() => Promise.all([refreshInfo(), refreshMembers()]), [refreshInfo, refreshMembers])
-  // what a mutation re-reads: the same, plus the picker the mutation may have changed
-  const refreshAll = useCallback(() => Promise.all([refresh(), refreshCandidates()]), [refresh, refreshCandidates])
-  const { run, error, setError } = useRun(refreshAll)
+  const { run, error, setError } = useRun(refresh)
 
   useEffect(() => {
     refreshInfo()
     refreshCandidates()
-    api.options().then(setOptions)
   }, [refreshInfo, refreshCandidates])
 
   // poll while anything is being written into this collection; the counts come from the database
@@ -165,16 +159,11 @@ function CollectionDetail({
   const onBulkDone = useCallback(
     (job: BulkJob) => {
       if (job.kind === 'delete_collection') onDeleted()
-      else void refreshAll()
+      else void refresh()
     },
-    [onDeleted, refreshAll],
+    [onDeleted, refresh],
   )
   const bulk = useBulkJob(onBulkDone, setError)
-
-  const startBulk = (start: () => Promise<BulkStarted>) => {
-    setError(null)
-    bulk.start(start).catch((e: unknown) => setError(String(e)))
-  }
 
   if (!info) return null
 
@@ -218,20 +207,14 @@ function CollectionDetail({
             run(async () => {
               await api.attachDocument(name, toAttach)
               setToAttach('')
+              await refreshCandidates()
             })
           }
         >
           Attach
         </button>{' '}
         <button onClick={() => navigate({ name: 'documents' })}>Import a document…</button>{' '}
-        <select value={status} onChange={(e) => setStatus(e.target.value as MemberStatus | '')}>
-          <option value="">all statuses</option>
-          {MEMBER_STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {s} ({info.counts.by_status[s] ?? 0})
-            </option>
-          ))}
-        </select>
+        <StatusFilter value={status} statuses={options.member_statuses} counts={info.counts.by_status} onChange={setStatus} />
       </p>
       {members.error && <p className="error">{members.error}</p>}
       <table>
@@ -255,19 +238,25 @@ function CollectionDetail({
               </td>
               <td className="muted">{m.document.description || '—'}</td>
               <td className="muted">{bytes.format(m.document.size)}</td>
-              <td className={m.status === 'error' ? 'error' : 'muted'}>
-                {m.status}
-                {m.error && <pre className="error-detail">{m.error}</pre>}
-              </td>
-              <td className="muted">{m.updated_at ? new Date(m.updated_at * 1000).toLocaleString() : ''}</td>
+              <StatusCell status={m.status} error={m.error} />
+              <td className="muted">{when(m.updated_at)}</td>
               <td>
                 <button
-                  disabled={ACTIVE_MEMBER_STATUSES.includes(m.status)}
+                  disabled={options.active_member_statuses.includes(m.status)}
                   onClick={() => run(() => api.reindexMember(name, m.document.name))}
                 >
                   {m.status === 'indexed' ? 'reindex' : 'index'}
                 </button>
-                <button onClick={() => run(() => api.detachDocument(name, m.document.name))}>detach</button>
+                <button
+                  onClick={() =>
+                    run(async () => {
+                      await api.detachDocument(name, m.document.name)
+                      await refreshCandidates()
+                    })
+                  }
+                >
+                  detach
+                </button>
               </td>
             </tr>
           ))}
@@ -277,7 +266,7 @@ function CollectionDetail({
 
       {jobs.length > 0 && (
         <details>
-          <summary className="muted">jobs ({jobs.filter((j) => ACTIVE_JOB_STATUSES.has(j.status)).length} active)</summary>
+          <summary className="muted">jobs ({jobs.filter((j) => options.active_job_statuses.includes(j.status)).length} active)</summary>
           <table className="jobs">
             <tbody>
               {jobs.map((j) => (
@@ -289,24 +278,22 @@ function CollectionDetail({
       )}
 
       <h3>Settings</h3>
-      {options && (
-        <CollectionSettingsForm
-          settings={info.settings}
-          effective={info.effective}
-          searchDefault={info.search}
-          options={options}
-          onSave={(s) => run(() => api.saveCollectionSettings(name, s))}
-        />
-      )}
+      <CollectionSettingsForm
+        settings={info.settings}
+        effective={info.effective}
+        searchDefault={info.search}
+        options={options}
+        onSave={(s) => run(() => api.saveCollectionSettings(name, s))}
+      />
       <p>
-        <button disabled={bulk.running} onClick={() => startBulk(() => api.indexCollection(name))}>
+        <button disabled={bulk.running} onClick={() => run(() => bulk.start(() => api.indexCollection(name)))}>
           Index all
         </button>{' '}
         <button
           disabled={bulk.running}
           onClick={() => {
             if (confirm(`Delete collection "${name}"? Its documents stay; only this index goes.`)) {
-              startBulk(() => api.deleteCollection(name))
+              run(() => bulk.start(() => api.deleteCollection(name)))
             }
           }}
         >
@@ -319,7 +306,8 @@ function CollectionDetail({
 }
 
 function BulkStatus({ job }: { job: BulkJob }) {
-  const running = ACTIVE_JOB_STATUSES.has(job.status)
+  const { active_job_statuses } = useOptions()
+  const running = active_job_statuses.includes(job.status)
   const what = job.kind === 'index_collection' ? 'queueing documents' : 'deleting'
   return (
     <span className={job.error ? 'error' : 'muted'}>
@@ -354,13 +342,13 @@ function CollectionSettingsForm({
       }}
     >
       <h4>Chunking</h4>
-      <ChunkSettingsForm nullable value={draft} defaults={effective} options={options} onChange={setDraft} />
+      <ChunkSettingsForm value={draft} defaults={effective} options={options} onChange={setDraft} />
       <h4>Search</h4>
       <SearchSettingsForm
         value={draft.search}
         defaults={searchDefault}
         options={options}
-        onChange={(next) => setDraft({ ...draft, search: next as CollectionSettings['search'] })}
+        onChange={(next) => setDraft({ ...draft, search: next })}
       />
       <button>Save</button>
     </form>

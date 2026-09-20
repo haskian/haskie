@@ -15,7 +15,6 @@ export interface Paged<T> {
   loading: boolean
   error: string | null
   loadMore: () => void
-  reset: () => Promise<void>
   refresh: () => Promise<void>
   sort: string | undefined
   order: Order
@@ -112,7 +111,6 @@ export function usePaged<T>(fetchPage: (q: PageRequest) => Promise<Page<T>>, opt
     loading,
     error,
     loadMore,
-    reset,
     refresh,
     sort,
     order,

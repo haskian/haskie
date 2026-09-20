@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-#MISE description="Build the web UI into the package, so a wheel serves it too"
+#MISE description="Build the web UI into src/haskie/web, from where the wheel ships it and the app serves it"
 set -euo pipefail
 (cd web && bun install && bun run build)
 rm -rf src/haskie/web
 cp -R web/dist src/haskie/web
-echo "web UI built into src/haskie/web"

@@ -8,7 +8,7 @@ import msgspec
 from litestar import delete, get, post, put
 
 from haskie import audit, logs, models, workflows
-from haskie.api.common import BulkStarted, Describe, Limit
+from haskie.api.common import PAGED, BulkStarted, Describe, Limit
 from haskie.collection import (
     Collection,
     CollectionInfo,
@@ -17,7 +17,7 @@ from haskie.collection import (
     MemberStatus,
 )
 from haskie.index import Hit
-from haskie.paging import DEFAULT_PAGE_SIZE, Order, Page, page_request
+from haskie.paging import Page, PageRequest
 from haskie.settings import (
     CollectionSettings,
     Fusion,
@@ -25,7 +25,6 @@ from haskie.settings import (
     SearchMode,
     SearchOverrides,
     load_user_settings,
-    without_none,
 )
 
 
@@ -40,19 +39,14 @@ class AddDocument(msgspec.Struct):
     document: str
 
 
-@get("/api/collections", mcp_tool="list_collections")
-async def list_collections(
-    cursor: str | None = None,
-    page_size: int = DEFAULT_PAGE_SIZE,
-    sort: str | None = None,
-    order: Order = "asc",
-) -> Page[CollectionSummary]:
+@get("/api/collections", mcp_tool="list_collections", dependencies=PAGED)
+async def list_collections(page: PageRequest) -> Page[CollectionSummary]:
     """List collections with their member counts, one page at a time.
 
     Sort by name or created_at, ascending or descending. Pass the `next_cursor` of a response
     back as `cursor` to continue; it is null on the last page.
     """
-    return await Collection.page(page_request(cursor, page_size, sort, order))
+    return await Collection.page(page)
 
 
 @post("/api/collections")
@@ -102,18 +96,17 @@ async def search_collection(
     """Search one collection. Options default to the collection's search settings:
     mode hybrid|vector|fts, fusion rrf|linear, vector_weight/bm25_weight for linear,
     reranker none|cross-encoder (rescoring of `candidates` for any mode)."""
-    overrides = without_none(
-        SearchOverrides(
-            mode=mode,
-            fusion=fusion,
-            vector_weight=vector_weight,
-            bm25_weight=bm25_weight,
-            reranker=reranker,
-            candidates=candidates,
-        )
+    overrides = SearchOverrides(
+        limit=limit,
+        mode=mode,
+        fusion=fusion,
+        vector_weight=vector_weight,
+        bm25_weight=bm25_weight,
+        reranker=reranker,
+        candidates=candidates,
     )
     found = await Collection.get(collection)
-    return await found.search(q, limit, **overrides)
+    return await found.search(q, overrides)
 
 
 @put("/api/collections/{collection:str}/settings")
@@ -149,14 +142,13 @@ async def index_collection(collection: str) -> BulkStarted:
     return BulkStarted(job_id=job_id)
 
 
-@get("/api/collections/{collection:str}/documents", mcp_tool="list_collection_documents")
+@get(
+    "/api/collections/{collection:str}/documents",
+    mcp_tool="list_collection_documents",
+    dependencies=PAGED,
+)
 async def list_collection_documents(
-    collection: str,
-    cursor: str | None = None,
-    page_size: int = DEFAULT_PAGE_SIZE,
-    sort: str | None = None,
-    order: Order = "asc",
-    status: MemberStatus | None = None,
+    collection: str, page: PageRequest, status: MemberStatus | None = None
 ) -> Page[Member]:
     """List the documents of one collection, one page at a time.
 
@@ -166,7 +158,7 @@ async def list_collection_documents(
     response back as `cursor` to continue; it is null on the last page.
     """
     found = await Collection.get(collection)
-    return await found.members_page(page_request(cursor, page_size, sort, order), status)
+    return await found.members_page(page, status)
 
 
 @post(

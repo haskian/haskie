@@ -32,13 +32,6 @@ SearchMode = Literal["hybrid", "vector", "fts"]
 Fusion = Literal["rrf", "linear"]
 Reranker = Literal["none", "cross-encoder"]
 
-PARSERS: tuple[str, ...] = Parser.__args__
-CHUNKERS: tuple[str, ...] = Chunker.__args__
-ACCELERATORS: tuple[str, ...] = Accelerator.__args__
-SEARCH_MODES: tuple[str, ...] = SearchMode.__args__
-FUSIONS: tuple[str, ...] = Fusion.__args__
-RERANKERS: tuple[str, ...] = Reranker.__args__
-
 # fastembed cross-encoder ids (ONNX; downloaded on first use)
 RERANKER_MODELS: tuple[str, ...] = (
     "Xenova/ms-marco-MiniLM-L-6-v2",
@@ -56,7 +49,7 @@ class EmbeddingModel(msgspec.Struct):
 
 
 # fastembed model ids. "none" = full-text search only.
-PROFILES: dict[str, EmbeddingModel | None] = {
+PROFILES: dict[EmbeddingProfile, EmbeddingModel | None] = {
     "none": None,
     "compact": EmbeddingModel("BAAI/bge-small-en-v1.5", 384),
     "quality": EmbeddingModel("BAAI/bge-large-en-v1.5", 1024),
@@ -292,15 +285,7 @@ RETENTION_DAYS = Meta(
     title="Job history (days)",
     description=(
         "How many days of finished indexing jobs and their micro-batch results stay visible "
-        "under Jobs. Each UTC day is one table; older days are dropped whole."
-    ),
-)
-RETENTION_LIVE_HOURS = Meta(
-    title="Live job window (hours)",
-    description=(
-        "How long finished jobs stay in the durable-execution tables. Halfway through the window "
-        "they are copied to the archive; at the end they are purged. Smaller keeps job queries "
-        "fast; must cover the longest job."
+        "under Jobs. The nightly maintenance run deletes everything older."
     ),
 )
 
@@ -347,18 +332,16 @@ class ChunkSettings(msgspec.Struct, frozen=True):
         _check_chunking(self.chunk_size, self.chunk_overlap)
 
 
-class ConversionSettings(msgspec.Struct):
+class ConversionSettings(ChunkSettings, frozen=True):
     """The user-level defaults: how a document is converted when nothing else is said at import
-    (`parser`, `skip_ocr_pages`), and how a collection chunks it when it overrides nothing."""
+    (`parser`, `skip_ocr_pages`), and how a collection chunks it when it overrides nothing.
+
+    The three chunk fields are inherited rather than restated, so their defaults, their `Meta` and
+    their check have one home. msgspec puts inherited fields first, which is the order they were
+    already written in, so the stored JSON is unchanged."""
 
     parser: Annotated[Parser, PARSER] = "anydoc"
-    chunker: Annotated[Chunker, CHUNKER] = "markdown"
-    chunk_size: Annotated[int, CHUNK_SIZE] = 1200
-    chunk_overlap: Annotated[int, CHUNK_OVERLAP] = 150
     skip_ocr_pages: Annotated[bool, SKIP_OCR_PAGES] = True
-
-    def __post_init__(self) -> None:
-        _check_chunking(self.chunk_size, self.chunk_overlap)
 
     @property
     def chunking(self) -> ChunkSettings:
@@ -462,19 +445,15 @@ class PipelineSettings(msgspec.Struct):
 
 
 class RetentionSettings(msgspec.Struct):
-    """How long history is kept. Job history twice: `job_live_hours` in the durable-execution
-    tables, `job_days` in the day partitions the archiver copies it into (see `archive.py`). The
-    audit trail is pruned by the nightly run rather than the hourly archiver, but it is the same
-    question, so it is answered in the same place."""
+    """How long history is kept: the job history in DBOS's own tables, and the audit trail on
+    disk. Both are swept by the nightly maintenance run (see `workflows.daily_maintenance`), so
+    they are answered in the same place."""
 
     job_days: Annotated[int, RETENTION_DAYS] = 28
-    job_live_hours: Annotated[int, RETENTION_LIVE_HOURS] = 48
     audit_days: Annotated[int, AUDIT_RETENTION] = 90
 
     def __post_init__(self) -> None:
         _at_least(1, job_days=self.job_days)
-        # halved into an archive cutoff and a purge cutoff, so an hour each is the floor
-        _at_least(2, job_live_hours=self.job_live_hours)
         _at_least(0, audit_days=self.audit_days)  # 0 = keep everything
 
 
@@ -549,46 +528,44 @@ def docs(struct: type[msgspec.Struct] = UserSettings, prefix: str = "") -> dict[
 #
 # The row changes rarely and is read on nearly every request, search and pipeline step, so the
 # decoded struct is cached for the process. This process is the only writer, and the writers here
-# refresh the cache; anything that writes the `settings` row another way must call `invalidate()`.
+# refresh the cache.
 
 
-_problem: str | None = None
-_cached: UserSettings | None = None
-# guards both globals. A threading lock rather than an asyncio one because both event loops of
-# this process (Litestar's and DBOS's) load settings; it is never held across an `await`, so no
-# loop ever waits on it.
+class _Loaded(msgspec.Struct, frozen=True):
+    """What the last reading of the `settings` row found: the struct it decoded to, or why it did
+    not. `settings` is None before the first run has stored one, and when the stored row is
+    unreadable.
+
+    Immutable and swapped whole, so a reader always sees the pair together: it is rebound, never
+    mutated."""
+
+    settings: UserSettings | None
+    problem: str | None = None
+
+
+_state: _Loaded | None = None  # None until the first read; only a decoded row ends the reading
+# Both event loops of this process (Litestar's and DBOS's) load and store settings, so the guard
+# is a threading one. Held for the re-check plus the rebind, and never across an `await`.
 _cache_lock = threading.Lock()
 
 
 def settings_problem() -> str | None:
     """Why the stored settings could not be read, or None. Set by `load_user_settings_or_none`."""
-    return _problem
-
-
-def invalidate() -> None:
-    """Forget the cached settings, so the next load reads the row again.
-
-    Contract: every write of the `settings` row that does not go through `save_user_settings` or
-    `init_user_settings` (direct SQL, another process) must call this, or readers keep the value
-    this process cached.
-    """
-    global _cached
-    with _cache_lock:
-        _cached = None
+    return _state.problem if _state else None
 
 
 def _store(settings: UserSettings) -> None:
     """Cache a struct this process just wrote: it decodes, so there is no problem to report."""
-    global _cached, _problem
+    global _state
     with _cache_lock:
-        _cached = settings
-        _problem = None
+        _state = _Loaded(settings)
 
 
 # Field names stored by earlier builds. msgspec ignores a key it does not know, so without
-# this a home written before the rename would come back silently reset to defaults.
+# this a home written before the rename would come back silently reset to defaults. A key a
+# later build dropped needs nothing: it is ignored the same way.
 _RENAMED_SECTIONS = (("defaults", "conversion"), ("indexing", "pipeline"))
-_RENAMED_RETENTION = (("days", "job_days"), ("live_hours", "job_live_hours"))
+_RENAMED_RETENTION = (("days", "job_days"),)
 
 
 def _renamed(stored: dict[str, Any]) -> dict[str, Any]:
@@ -618,41 +595,29 @@ async def load_user_settings_or_none() -> UserSettings | None:
     """None until the first run picked an embedding profile. A stored row that no longer decodes
     must not break boot, so it falls back to defaults and is reported by `settings_problem()`.
 
-    Only a decoded row is cached: the pre-init state and an unreadable row stay live, so the run
-    that fixes either one is seen without an `invalidate()`.
+    Only a decoded row ends the reading: the pre-init state and an unreadable row are read again
+    on the next call, so the run that fixes either one is seen at once.
     """
-    global _cached, _problem
-    with _cache_lock:
-        if _cached is not None:
-            return _cached
-    # The read is awaited outside the lock, because a threading lock held across an await would
-    # block every other loader, event loop included. Two loads that miss at the same time
-    # therefore both read, and both store the same row, which is harmless. A save that landed
-    # while we read has already cached its newer row, so the second check below keeps that row
-    # instead of replacing it with the one we read before the save.
+    global _state
+    found = _state
+    if found is not None and found.settings is not None:
+        return found.settings
     async with db.connect() as conn:
         cursor = await conn.execute("select json from settings where id = 1")
         row = await cursor.fetchone()
-    problem: str | None = None
-    settings: UserSettings | None = None
+    loaded = _Loaded(None)
     if row is not None:
         try:
-            settings = _decode(row[0])
+            loaded = _Loaded(_decode(row[0]))
         except (msgspec.ValidationError, msgspec.DecodeError) as exc:
-            problem = f"stored settings unreadable, using defaults: {exc}"
             _log.error("settings_unreadable", error=str(exc))
-    with _cache_lock:
-        if _cached is not None:  # a save committed while we were reading; its row is the newer one
-            return _cached
-        _problem = problem
-        if problem is not None:
-            return UserSettings()
-        _cached = settings  # None when there is no row yet: the pre-init state stays live
-        return settings
-
-
-async def initialized() -> bool:
-    return (await load_user_settings_or_none()) is not None
+            loaded = _Loaded(None, f"stored settings unreadable, using defaults: {exc}")
+    with _cache_lock:  # re-check and rebind together, so a save mid-read is not overwritten
+        found = _state
+        if found is not None and found.settings is not None:
+            return found.settings  # a save committed while we read; its row is the newer one
+        _state = loaded
+    return UserSettings() if loaded.problem else loaded.settings
 
 
 async def load_user_settings() -> UserSettings:

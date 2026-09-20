@@ -20,6 +20,7 @@ import textwrap
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from haskie import home
 from haskie.errors import Conflict, InvalidInput
 
 if TYPE_CHECKING:
@@ -33,6 +34,9 @@ HOOK_MARKER = " ensure --home "  # what identifies a hook of ours, whatever path
 HOOK_TIMEOUT_SECONDS = 90
 DEFAULT_HOST = "127.0.0.1"  # loopback: one user's documents, and nothing authenticates a caller
 DEFAULT_PORT = 8000
+# Spelled out rather than imported from `app`: importing the Litestar app would cost every
+# `haskie` invocation the whole web stack. `test_the_default_url_matches_where_mcp_is_mounted`
+# is what keeps this in step with `app.MCP_PATH`.
 MCP_URL = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/mcp"
 
 # Long enough to be recognisable, short enough that a collection with an essay for a description
@@ -139,8 +143,6 @@ def _write(destination: Path, text: str) -> Path:
     Atomic, because Claude Code reads these files while we write them and half of one is worse
     than none: a broken skill, or a settings file that takes the rest of its contents with it.
     """
-    from haskie import home  # local: `errors` and `home` both sit below this module
-
     destination.parent.mkdir(parents=True, exist_ok=True)
     home.atomic_write_sync(destination, text)
     return destination
@@ -228,11 +230,11 @@ def install_hook(scope: Scope, home_dir: Path, url: str) -> bool:
 async def read_collections() -> "list[CollectionSummary]":
     """Straight from the database, not over HTTP: installing must work with the server stopped.
 
-    Imported here rather than at module level: `collection` reaches LanceDB, and this module is
-    what the CLI reads `MCP_URL` from on every invocation.
+    `collection` is imported here rather than at module level: it reaches LanceDB, and the CLI
+    imports this module on every invocation for `MCP_URL`.
     """
     from haskie.collection import Collection
-    from haskie.paging import MAX_PAGE_SIZE, page_request
+    from haskie.paging import MAX_PAGE_SIZE, PageRequest
 
-    page = await Collection.page(page_request(page_size=MAX_PAGE_SIZE))
+    page = await Collection.page(PageRequest(page_size=MAX_PAGE_SIZE))
     return page.items

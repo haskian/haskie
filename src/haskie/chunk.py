@@ -8,16 +8,17 @@ the current code would no longer produce.
 
 import re
 from bisect import bisect_right
+from typing import Any
 
 import msgspec
 from semantic_text_splitter import MarkdownSplitter, TextSplitter
 
-from haskie import toc
+from haskie import render
+from haskie.convert import PAGE_MARKER
 from haskie.settings import ChunkSettings
 
 CHUNK_VERSION = 1  # see the module docstring
 
-PAGE_MARKER = re.compile(r"<!-- page (\d+)")  # written by convert.pdf_pages_markdown
 NEWLINE = re.compile(r"\n")
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 TRAILING_COMMENTS = re.compile(r"(\s*<!--.*?-->\s*)+$", re.DOTALL)
@@ -35,15 +36,33 @@ class Chunk(msgspec.Struct):
     page_end: int | None = None
 
 
+def record(
+    chunk: Chunk, vector: list[float] | None, dims: int | None, **columns: Any
+) -> dict[str, Any]:
+    """One Arrow record for a chunk: its own fields, plus the columns the table adds around it.
+
+    Both tables that hold chunks build their rows here - the parquet cache (`embed_cache`) and a
+    collection's LanceDB table (`index`) - so a new field on `Chunk` reaches both. `dims` is the
+    width of the table's vector column, or None for a table without one; pyarrow would write a
+    null for a missing vector, so a row without one is refused here instead.
+    """
+    values = msgspec.to_builtins(chunk) | columns
+    if dims is not None:
+        if vector is None:
+            raise ValueError("the table has a vector column but the row carries no vector")
+        values["vector"] = vector
+    return values
+
+
 def _heading_ancestry(text: str) -> tuple[list[int], list[tuple[str, list[str]]]]:
     """Char offset of every heading plus (heading, parents) for it. One incremental decode
     turns pyromark's byte offsets into char offsets."""
     data = text.encode()
     offsets: list[int] = []
     ancestry: list[tuple[str, list[str]]] = []
-    stack: list[toc.Heading] = []
+    stack: list[render.Heading] = []
     byte_pos = char_pos = 0
-    for mark in toc.headings(text):  # already in document order
+    for mark in render.headings(text):  # already in document order
         char_pos += len(data[byte_pos : mark.offset].decode(errors="ignore"))
         byte_pos = mark.offset
         while stack and stack[-1].level >= mark.level:

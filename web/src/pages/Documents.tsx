@@ -1,16 +1,11 @@
 import { useCallback, useState } from 'react'
-import {
-  ACTIVE_DOCUMENT_STATUSES,
-  api,
-  DOCUMENT_STATUSES,
-  type DocStatus,
-  type Document,
-  type EmbeddingEntry,
-} from '../api'
+import { api, type DocStatus, type Document, type EmbeddingEntry } from '../api'
 import type { Route } from '../App'
 import { Pager, SortHeader } from '../components/Pager'
-import { bytes } from '../format'
+import { StatusCell, StatusFilter } from '../components/Status'
+import { bytes, when } from '../format'
 import { useBulkJob } from '../hooks/useBulkJob'
+import { useOptions } from '../hooks/useOptions'
 import { usePaged } from '../hooks/usePaged'
 import { usePoll } from '../hooks/usePoll'
 import { useRun } from '../hooks/useRun'
@@ -27,6 +22,7 @@ interface Details {
 
 // Every document in the home, imported once and shared by the collections that hold it.
 export function Documents({ navigate }: { navigate: (p: Route) => void }) {
+  const options = useOptions()
   const [status, setStatus] = useState<DocStatus | ''>('')
   const [renameTo, setRenameTo] = useState('')
   const [description, setDescription] = useState('')
@@ -38,8 +34,9 @@ export function Documents({ navigate }: { navigate: (p: Route) => void }) {
   const refresh = docs.refresh
   const { run, busy, error, setError } = useRun(refresh)
 
-  // Anything still in the pipeline keeps the listing fresh; so does a deletion until it is gone.
-  const running = docs.items.some((d) => ACTIVE_DOCUMENT_STATUSES.includes(d.status) || d.status === 'deleting')
+  // Anything still in the import pipeline keeps the listing fresh; so does a deletion, which is
+  // not a pipeline state but still ends in the row disappearing.
+  const running = docs.items.some((d) => options.active_document_statuses.includes(d.status) || d.status === 'deleting')
   usePoll(running, refresh)
 
   // A deletion is accepted (202) and runs in the background, so the page follows the job; the
@@ -132,14 +129,7 @@ export function Documents({ navigate }: { navigate: (p: Route) => void }) {
         All documents {deletion.running && <span className="muted">· deleting…</span>}
       </h3>
       <p>
-        <select value={status} onChange={(e) => setStatus(e.target.value as DocStatus | '')}>
-          <option value="">all statuses</option>
-          {DOCUMENT_STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
+        <StatusFilter value={status} statuses={options.document_statuses} onChange={setStatus} />
       </p>
       {docs.error && <p className="error">{docs.error}</p>}
       <table>
@@ -214,11 +204,8 @@ function DocumentRow({
           />
         </td>
         <td className="muted">{bytes.format(d.size)}</td>
-        <td className={d.status === 'error' ? 'error' : 'muted'}>
-          {d.status}
-          {d.error && <pre className="error-detail">{d.error}</pre>}
-        </td>
-        <td className="muted">{d.updated_at ? new Date(d.updated_at * 1000).toLocaleString() : ''}</td>
+        <StatusCell status={d.status} error={d.error} />
+        <td className="muted">{when(d.updated_at)}</td>
         <td>
           <button onClick={onToggle}>{expanded ? 'hide' : 'collections'}</button>
           {RETRYABLE.includes(d.status) && <button onClick={onRetry}>retry import</button>}

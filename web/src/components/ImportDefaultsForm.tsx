@@ -14,12 +14,12 @@ export function ImportDefaultsForm({ value, options, onChange }: Props) {
   const set = <K extends keyof ConversionSettings>(k: K, v: ConversionSettings[K]) => onChange({ ...value, [k]: v })
   return (
     <>
-      <Field name="parser" doc={doc('parser')}>
+      <Field doc={doc('parser')}>
         <select value={value.parser} onChange={(e) => set('parser', e.target.value as Parser)}>
           {options.parsers.map((p) => <option key={p} value={p}>{p}</option>)}
         </select>
       </Field>
-      <Field name="skip_ocr_pages" doc={doc('skip_ocr_pages')}>
+      <Field doc={doc('skip_ocr_pages')}>
         <input type="checkbox" checked={value.skip_ocr_pages} onChange={(e) => set('skip_ocr_pages', e.target.checked)} />
       </Field>
     </>

@@ -21,22 +21,27 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import lancedb
 import pytest
 import structlog
 from anyio.from_thread import start_blocking_portal
 from litestar.testing import AsyncTestClient, RequestFactory
 
 from haskie import app as app_module
-from haskie import audit, document, home, logs
+from haskie import audit, document, errors, home, logs
 from haskie.collection import Collection
 
 from conftest import (  # isort: skip
+    api_app,
     attach_via_api,
     audit_lines,
+    document_names,
+    forget_settings,
+    get_page,
+    seed_index,
     stage_and_import,
     wait_for,
     wait_import,
+    walk_pages,
 )
 
 pytestmark = pytest.mark.anyio
@@ -44,27 +49,6 @@ pytestmark = pytest.mark.anyio
 MD = "# Title\n\nintro text\n\n## Alpha\n\nalpha body about lancedb\n\n## Beta\n\nbeta body\n"
 LONG_SESSION_ID = "s" * 129
 TOO_MANY_COLLECTIONS = {"collections": [f"c{i}" for i in range(101)]}
-
-
-def _indexed_row(row: document.Document) -> dict:
-    """One chunk of `row`, as the index stores it: paths relative to the home, so a hit resolves
-    to the document's own files rather than to anything the collection owns."""
-    return {
-        "doc": row.name,
-        "source_path": row.relative(row.original),
-        "markdown_path": row.relative(row.markdown),
-        "part": 0,
-        "chunk_id": 0,
-        "line_start": 5,
-        "line_end": 7,
-        "char_start": 0,
-        "char_end": 24,
-        "page_start": None,
-        "page_end": None,
-        "parents": "Title",
-        "heading": "Alpha",
-        "text": "alpha body about lancedb",
-    }
 
 
 async def _release_default_executor() -> None:
@@ -81,16 +65,13 @@ async def _release_default_executor() -> None:
 
 
 @pytest.fixture
-async def client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dbos
-) -> AsyncIterator[AsyncTestClient]:
-    """One portal for the whole test, and no lifespan (see the module docstring)."""
-    monkeypatch.setattr(app_module, "WEB_DIST", tmp_path / "no-web-build")
-    client = AsyncTestClient(app_module.create_app())
+async def client(api_client: AsyncTestClient, dbos) -> AsyncIterator[AsyncTestClient]:
+    """The shared client, plus DBOS and one portal for the whole test, and no lifespan (see the
+    module docstring)."""
     with start_blocking_portal(backend="asyncio") as portal:
-        client.blocking_portal = portal
+        api_client.blocking_portal = portal
         try:
-            yield client
+            yield api_client
         finally:
             portal.call(_release_default_executor)
 
@@ -100,8 +81,9 @@ async def ready(client: AsyncTestClient, tmp_path: Path) -> AsyncTestClient:
     """An initialized app with one collection, one imported member, one document still queued,
     one indexed chunk and one session: the state every row of the error table is asserted against.
 
-    The rows are written directly and the index table is built by hand, so the fixture costs no
-    pipeline run; what the error table needs is the shape of the data, not how it got there.
+    The rows are written directly and the index is seeded through `seed_index`, so the fixture
+    costs no pipeline run; what the error table needs is the shape of the data, not how it got
+    there.
     """
     await client.post("/api/init", json={"profile": "none"})
     await client.post("/api/collections", json={"name": "notes"})
@@ -115,11 +97,7 @@ async def ready(client: AsyncTestClient, tmp_path: Path) -> AsyncTestClient:
     notes = await Collection.get("notes")
     await notes.add(imported.name)
     await notes.set_member_status(imported.name, "indexed")
-    notes.index_dir.mkdir(parents=True)
-    table = lancedb.connect(str(notes.index_dir)).create_table(
-        "chunks", data=[_indexed_row(await document.get(imported.name))]
-    )
-    table.create_fts_index("text", replace=True)
+    await seed_index("notes", imported.name, "alpha body about lancedb")
 
     await client.put("/api/sessions/s1", json={"collections": ["notes"]})
     return client
@@ -128,11 +106,6 @@ async def ready(client: AsyncTestClient, tmp_path: Path) -> AsyncTestClient:
 def _requested(lines: list[dict]) -> list[str]:
     """The events a request produced, in order; a workflow writes its own (see `workflows`)."""
     return [line["event"] for line in lines if line["actor"] != "workflow"]
-
-
-async def _finish(job_id: str):
-    """Wait for one background job; the bulk routes answer 202 with its id."""
-    return await wait_for(job_id)
 
 
 # --- the route and error table ------------------------------------------------------
@@ -385,7 +358,7 @@ async def test_request_id_header(
 async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClient) -> None:
     response = await ready.get("/api/collections/notes/search?q=alpha&reranker=cross-encoder")
     assert response.status_code == 503
-    assert response.headers["Retry-After"] == app_module.RETRY_AFTER_SECONDS
+    assert response.headers["Retry-After"] == errors.NotReady.headers["Retry-After"]
 
 
 async def test_rejected_settings_are_never_stored(ready: AsyncTestClient) -> None:
@@ -419,7 +392,7 @@ async def test_collection_reranker_override_starts_its_download(
     from haskie import embed
 
     loaded: list[str] = []
-    monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: loaded.append(name))
+    monkeypatch.setattr(embed, "warm_reranker", loaded.append)
     override = "jinaai/jina-reranker-v1-turbo-en"
 
     saved = await ready.put(
@@ -429,7 +402,7 @@ async def test_collection_reranker_override_starts_its_download(
 
     assert saved.status_code == 200
     assert saved.json()["search"]["reranker_model"] == override
-    await _finish(f"dl:reranker:{override}")
+    await wait_for(f"dl:reranker:{override}")
     assert loaded == [override], "the PUT started the download"
     listed = (await ready.get("/api/status")).json()["models"]
     assert [(m["kind"], m["name"], m["state"]) for m in listed] == [
@@ -438,11 +411,11 @@ async def test_collection_reranker_override_starts_its_download(
 
 
 async def test_status_reports_an_unreadable_settings_row(ready: AsyncTestClient) -> None:
-    from haskie import db, settings
+    from haskie import db
 
     async with db.connect() as conn:
         await conn.execute("update settings set json = '{not json' where id = 1")
-    settings.invalidate()  # a direct write bypasses the process cache (see settings.invalidate)
+    forget_settings()  # a direct write bypasses the process cache
 
     status = (await ready.get("/api/status")).json()
 
@@ -459,6 +432,26 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     assert "anydoc" in options["parsers"] and "hybrid" in options["search_modes"]
     assert options["docs"]["conversion.chunk_size"]["title"] == "Chunk size (characters)"
     assert options["embedding_profiles"]["compact"]["dims"] == 384
+    # the vocabularies the UI renders rows with, so it never spells a status out for itself
+    assert (
+        options["document_statuses"][:3]
+        == options["active_document_statuses"]
+        == [
+            "queued",
+            "converting",
+            "embedding",
+        ]
+    )
+    assert (
+        options["member_statuses"][:2]
+        == options["active_member_statuses"]
+        == [
+            "pending",
+            "indexing",
+        ]
+    )
+    assert options["active_job_statuses"] == ["ENQUEUED", "PENDING"]
+    assert options["job_kinds"][0] == "document" and "index_collection" in options["bulk_kinds"]
 
 
 # --- the two-call intake --------------------------------------------------------------
@@ -541,7 +534,7 @@ async def test_a_failed_import_can_be_re_run(client: AsyncTestClient, tmp_path: 
     again = await client.post(f"/api/documents/{row['name']}/import")
 
     assert again.status_code == 202, again.text
-    assert await _finish(again.json()["job_id"]) == "imported"
+    assert await wait_for(again.json()["job_id"]) == "imported"
     assert (await client.get(f"/api/documents/{row['name']}")).json()["error"] is None
 
 
@@ -611,7 +604,7 @@ async def test_deleting_a_collection_keeps_its_documents(client: AsyncTestClient
 
     assert deleted.status_code == 202, "the deletion is queued, not done in the request"
     job_id = deleted.json()["job_id"]
-    await _finish(job_id)
+    await wait_for(job_id)
     progress = (await client.get(f"/api/jobs/{job_id}/progress")).json()
     assert (progress["id"], progress["kind"], progress["status"]) == (
         job_id,
@@ -638,7 +631,7 @@ async def test_deleting_a_document_removes_it_from_every_collection(
     deleted = await client.delete("/api/documents/guide.md")
 
     assert deleted.status_code == 202, deleted.text
-    await _finish(deleted.json()["job_id"])
+    await wait_for(deleted.json()["job_id"])
     assert (await client.get("/api/documents")).json()["items"] == []
     assert (await client.get("/api/documents/guide.md")).status_code == 404
     for name in ("alpha", "beta"):
@@ -723,7 +716,7 @@ async def test_session_search_survives_the_deletion_of_a_collection(
     deleted = await client.delete("/api/collections/dropped")
 
     assert deleted.status_code == 202
-    await _finish(deleted.json()["job_id"])
+    await wait_for(deleted.json()["job_id"])
 
     search = await client.get("/api/search", params={"session_id": "s1", "q": "shared"})
     assert search.status_code == 200, "one deleted collection must not break every later search"
@@ -744,14 +737,14 @@ async def test_every_audited_route_appends_one_record(client: AsyncTestClient) -
     await client.put("/api/documents/guide.md/description", json={"description": "the guide"})
     attach_job = await attach_via_api(client, "notes", "guide.md")
     reindex_job = (await client.post("/api/collections/notes/index")).json()["job_id"]
-    await _finish(reindex_job)
+    await wait_for(reindex_job)
     await client.delete(f"/api/jobs/{attach_job}")
     await client.put("/api/sessions/s1", json={"collections": ["notes"]})
     await client.delete("/api/collections/notes/documents/guide.md")
     delete_doc = (await client.delete("/api/documents/guide.md")).json()["job_id"]
-    await _finish(delete_doc)
+    await wait_for(delete_doc)
     delete_job = (await client.delete("/api/collections/notes")).json()["job_id"]
-    await _finish(delete_job)  # the trail is read once the queued work is cancelled and gone
+    await wait_for(delete_job)  # the trail is read once the queued work is cancelled and gone
 
     lines = audit_lines()
     assert _requested(lines) == [
@@ -866,22 +859,39 @@ async def test_the_audit_trail_is_written_even_when_logging_is_silenced(
 
 
 async def test_an_unexpected_failure_answers_500_with_a_scrubbed_message(
-    ready: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
+    ready: AsyncTestClient, monkeypatch: pytest.MonkeyPatch, caplog
 ) -> None:
-    """A document row without a preview cannot happen through the API, so it is the one bug shape
-    the generic handler is for: the body names it, with no absolute path in it."""
+    """A read that fails for no reason the domain has a name for is the bug shape the generic
+    handler is for: the body names it, with the home path scrubbed out of it."""
 
-    async def without_a_preview(doc: str) -> document.Document:
-        return document.Document(name=doc, suffix=".md", size=1, status="imported", preview=None)
+    async def unreadable(doc: str) -> document.Document:
+        raise RuntimeError(f"row unreadable: {home.HOME / 'documents' / doc}")
 
-    monkeypatch.setattr(document, "ensure_preview", without_a_preview)
+    monkeypatch.setattr(document, "get", unreadable)
 
-    response = await ready.get("/api/documents/guide.md/preview")
+    with caplog.at_level(logging.DEBUG):
+        response = await ready.get("/api/documents/guide.md/preview")
 
     assert response.status_code == 500
-    assert response.json()["detail"] == "RuntimeError: preview not stored for guide.md"
+    assert response.json()["detail"] == (
+        "RuntimeError: row unreadable: $HASKIE_HOME/documents/guide.md"
+    )
     assert str(home.HOME) not in response.text
     assert app_module.REQUEST_ID_HEADER in response.headers
+    (logged,) = [r for r in caplog.records if isinstance(r.msg, dict)]
+    assert logged.msg["event"] == "unhandled_error"
+    assert logged.msg["exception"].startswith("Traceback"), "a bug keeps its traceback"
+
+
+async def test_a_rejected_request_is_logged_once(client: AsyncTestClient, caplog) -> None:
+    """Litestar's exception middleware would log a 404 as an ERROR with a traceback of its own;
+    `logging_config=None` (see `logs`) leaves the one warning `_client_error` writes."""
+    with caplog.at_level(logging.DEBUG):
+        assert (await client.get("/api/collections/absent")).status_code == 404
+
+    (record,) = [r for r in caplog.records if isinstance(r.msg, dict)]
+    assert record.msg["event"] == "request_rejected"
+    assert record.levelno == logging.WARNING
 
 
 async def test_a_domain_error_without_its_own_status_answers_400(
@@ -963,9 +973,8 @@ async def test_a_body_over_the_upload_cap_is_rejected_before_the_handler(
 ) -> None:
     """Litestar enforces `request_max_body_size`, so a 512 MiB upload never has to be sent here:
     the cap is lowered and the same code path answers 413."""
-    monkeypatch.setattr(app_module, "WEB_DIST", tmp_path / "no-web-build")
-    monkeypatch.setattr(app_module, "UPLOAD_MAX_BYTES", 64)
-    client = AsyncTestClient(app_module.create_app())
+    monkeypatch.setattr(app_module, "UPLOAD_MAX_BYTES", 64)  # read by `create_app`, so first
+    client = AsyncTestClient(api_app(tmp_path, monkeypatch))
 
     response = await client.post(
         "/api/documents/staging", files={"data": ("big.md", b"x" * 500, "text/markdown")}
@@ -974,7 +983,7 @@ async def test_a_body_over_the_upload_cap_is_rejected_before_the_handler(
     assert response.status_code == 413
     assert "Request Entity Too Large" in response.text
     assert app_module.REQUEST_ID_HEADER in response.headers, "traceable like any other rejection"
-    assert await document.names() == [], "nothing was stored"
+    assert await document_names() == [], "nothing was stored"
 
 
 async def test_static_files_are_served_when_the_web_build_exists(
@@ -999,11 +1008,10 @@ async def test_lifespan_starts_and_destroys_dbos_on_every_run(
     the lifespan twice proves start and destroy are both repeatable."""
     from dbos import _dbos as dbos_module
 
-    monkeypatch.setattr(app_module, "WEB_DIST", tmp_path / "no-web-build")
     before = set(threading.enumerate())
 
     for _ in range(2):
-        async with AsyncTestClient(app_module.create_app()) as client:
+        async with AsyncTestClient(api_app(tmp_path, monkeypatch)) as client:
             assert (await client.get("/api/status")).status_code == 200
             assert dbos_module._dbos_global_instance is not None
         assert dbos_module._dbos_global_instance is None, "destroyed by the shutdown hook"
@@ -1080,7 +1088,8 @@ async def test_text_search_spans_all_collections_by_default(client: AsyncTestCli
     hit = next(h for h in page["items"] if h["doc"] == "alpha-0.md")
     assert hit["markdown_path"] == row.relative(row.markdown), "the document's own file"
     assert hit["source_path"] == row.relative(row.original)
-    assert hit["home"] == str(home.HOME) and "haskell" in hit["text"]
+    assert hit["source_file"] == str(home.HOME / row.relative(row.original)), "absolute"
+    assert "haskell" in hit["text"]
     assert not [line for line in audit_lines() if "search" in line["event"]], "never audited"
 
 
@@ -1124,24 +1133,14 @@ async def test_text_search_filters_collections_and_rejects_unknown(
 
 async def test_text_search_pages_without_overlap(client: AsyncTestClient) -> None:
     await _text_collections(client, "alpha", "beta")
-    whole = (await client.get("/api/search/text", params={"q": "haskell", "page_size": 100})).json()
+    whole = await get_page(client, "/api/search/text", q="haskell", page_size=100)
 
-    walked: list[dict] = []
-    cursor: str | None = None
-    for _ in range(2 * TEXT_DOCS + 1):  # bounded: a cursor that never ends is the bug to catch
-        params: dict = {"q": "haskell", "page_size": 1}
-        if cursor is not None:
-            params["cursor"] = cursor
-        response = await client.get("/api/search/text", params=params)
-        assert response.status_code == 200, response.text
-        page = response.json()
-        assert len(page["items"]) == 1, "a full page while there is a next cursor"
-        walked.extend(page["items"])
-        cursor = page["next_cursor"]
-        if cursor is None:
-            break
+    walked, sizes, _, cursors = await walk_pages(
+        client, "/api/search/text", q="haskell", page_size=1
+    )
 
-    assert cursor is None, "the walk ended on its own"
+    assert sizes == [1] * (2 * TEXT_DOCS), "a full page while there is a next cursor"
+    assert cursors[-1] is None, "the walk ended on its own"
     identity = _text_identity({"items": walked})
     assert len(set(identity)) == len(identity), "no passage is shown twice"
     assert identity == _text_identity(whole), "the walk is the one-page ranking, cut up"

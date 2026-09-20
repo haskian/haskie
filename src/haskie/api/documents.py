@@ -6,7 +6,7 @@ changes, and which collections hold it is a membership the collection routes man
 
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import anyio
 import msgspec
@@ -16,32 +16,27 @@ from litestar.enums import RequestEncodingType
 from litestar.params import Body
 from litestar.response import File, Stream
 
-from haskie import audit, convert, cpu, document, embed_cache, logs, render, toc, workflows
-from haskie.api.common import BulkStarted, Describe
-from haskie.document import DocStatus, Document, Staged
-from haskie.errors import DocumentNotFound, InvalidInput
-from haskie.paging import DEFAULT_PAGE_SIZE, Order, Page, page_request
-from haskie.settings import Parser
+from haskie import audit, convert, cpu, document, embed_cache, logs, render, workflows
+from haskie.api.common import PAGED, BulkStarted, Describe
+from haskie.document import DocStatus, Document, ImportOptions, Staged
+from haskie.errors import InvalidInput, NotFound
+from haskie.paging import Page, PageRequest
 
 
-class ImportRequest(msgspec.Struct):
+class ImportRequest(ImportOptions):
     """What to import: either a staged upload or a local file, never both."""
 
     staging_id: str | None = None
     path: str | None = None
-    name: str | None = None  # store it under this name instead of the file's own
-    description: str = ""
-    parser: Parser | None = None
-    skip_ocr_pages: bool | None = None
 
 
 class Head(msgspec.Struct):
     """The first frame of a rendered document: everything the pane needs before any page."""
 
-    kind: str  # "head"
-    toc: list[toc.Heading]
+    toc: list[render.Heading]
     preview: convert.Preview | None
     pages: int
+    kind: Literal["head"] = "head"
 
 
 @post("/api/documents/staging")
@@ -66,39 +61,29 @@ async def import_document(data: ImportRequest) -> Document:
     suffix is kept because it decides how the document is parsed. Returns the document at status
     `queued`; convert and embed then run in the background, so poll `get_document` for `imported`.
     """
-    if (data.staging_id is None) == (data.path is None):
-        raise InvalidInput("give either staging_id or path")
-    if data.staging_id is not None:
-        row = await document.import_staged(
-            data.staging_id, data.name, data.description, data.parser, data.skip_ocr_pages
-        )
-    else:
+    if data.staging_id is not None and data.path is None:
+        row = await document.import_staged(data.staging_id, data)
+    elif data.path is not None and data.staging_id is None:
         # the audit trail records what was imported, never where it came from
-        audit.attach(source=Path(data.path or "").name)
-        row = await document.import_path(
-            data.path or "", data.name, data.description, data.parser, data.skip_ocr_pages
-        )
+        audit.attach(source=Path(data.path).name)
+        row = await document.import_path(data.path, data)
+    else:
+        raise InvalidInput("give either staging_id or path")
     audit.attach(doc=row.name, size=row.size)
     logs.bind(doc=row.name)
     audit.attach(job_id=await workflows.start_import(row.name))
     return row
 
 
-@get("/api/documents", mcp_tool="list_documents")
-async def list_documents(
-    cursor: str | None = None,
-    page_size: int = DEFAULT_PAGE_SIZE,
-    sort: str | None = None,
-    order: Order = "asc",
-    status: DocStatus | None = None,
-) -> Page[Document]:
+@get("/api/documents", mcp_tool="list_documents", dependencies=PAGED)
+async def list_documents(page: PageRequest, status: DocStatus | None = None) -> Page[Document]:
     """List every imported document, one page at a time, whichever collections hold them.
 
     Sort by name, size, status or updated_at; `status` keeps one lifecycle state only (queued,
     converting, embedding, imported, error, cancelled, deleting). Pass the `next_cursor` of a
     response back as `cursor` to continue; it is null on the last page.
     """
-    return await document.page(page_request(cursor, page_size, sort, order), status)
+    return await document.page(page, status)
 
 
 @get("/api/documents/{doc:str}", mcp_tool="get_document")
@@ -138,7 +123,7 @@ async def reimport_document(doc: str) -> BulkStarted:
 @get("/api/documents/{doc:str}/collections")
 async def list_document_collections(doc: str) -> list[str]:
     """Which collections hold this document, in name order."""
-    await document.get(doc)  # DocumentNotFound rather than an empty list for a name nobody owns
+    await document.get(doc)  # NotFound rather than an empty list for a name nobody owns
     return await document.collections_of(doc)
 
 
@@ -162,10 +147,8 @@ PREVIEW_MEDIA = {"pdf": "application/pdf", "html": "text/html", "text": "text/pl
 @get("/api/documents/{doc:str}/preview")
 async def get_preview(doc: str) -> File:
     """Left pane: original (pdf cut to first pages, image, text) or HTML stand-in for office."""
-    info = await document.ensure_preview(doc)
-    if info.preview is None:
-        raise RuntimeError(f"preview not stored for {doc}")
-    media = PREVIEW_MEDIA.get(info.preview.kind)
+    info, preview = await document.ensure_preview(doc)
+    media = PREVIEW_MEDIA.get(preview.kind)
     return File(
         path=info.preview_dir / "source",
         filename=doc if media is None else None,
@@ -185,24 +168,19 @@ async def get_markdown(doc: str, full: bool = False) -> Stream:
 
     `full=true` is the whole converted text; the default is the preview, the first pages only.
     """
-    info = await document.ensure_preview(doc)
+    info, preview = await document.ensure_preview(doc)
     path = anyio.Path(info.markdown if full else info.preview_dir / "preview.md")
     if not await path.exists():
-        raise DocumentNotFound(f"document not imported yet: {doc}")
+        raise NotFound(f"document not imported yet: {doc}")
     markdown = await path.read_text(encoding="utf-8")
 
     async def frames() -> AsyncIterator[bytes]:
         # rendering is CPU work on a big document, so it goes through the budget like the rest
-        rendered = await cpu.on_cpu("render", render.pages, markdown)
-        head = Head(
-            kind="head",
-            toc=toc.headings(markdown),
-            preview=info.preview,
-            pages=len(rendered),
-        )
+        rendered, toc = await cpu.on_cpu(render.pages, markdown)
+        head = Head(toc=toc, preview=preview, pages=len(rendered))
         yield msgspec.json.encode(head) + b"\n"
         for page in rendered:
-            yield msgspec.json.encode({"kind": "page", **msgspec.structs.asdict(page)}) + b"\n"
+            yield msgspec.json.encode(page) + b"\n"
 
     return Stream(frames(), media_type="application/x-ndjson")
 

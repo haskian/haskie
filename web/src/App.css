@@ -1,7 +1,31 @@
+:root {
+  font: 15px/1.45 system-ui, 'Segoe UI', Roboto, sans-serif;
+  color-scheme: light dark;
+  color: #24292f;
+  background: #fff;
+  --line: #ccc; /* every border in the app */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #d0d7de;
+    background: #16171d;
+  }
+}
+
+body {
+  margin: 0;
+}
+
+code,
+pre {
+  font-family: ui-monospace, Consolas, monospace;
+}
+
 .app { display: flex; flex-direction: column; height: 100vh; }
-nav { display: flex; gap: 0.75rem; align-items: center; padding: 0.5rem 1rem; border-bottom: 1px solid #ccc; }
+nav { display: flex; gap: 0.75rem; align-items: center; padding: 0.5rem 1rem; border-bottom: 1px solid var(--line); }
 nav .muted { margin-left: auto; }
-nav .activity { font-size: 0.85em; color: #666; background: none; border: 1px solid #ccc; border-radius: 999px; padding: 0.15rem 0.6rem; white-space: nowrap; }
+nav .activity { font-size: 0.85em; color: #666; background: none; border: 1px solid var(--line); border-radius: 999px; padding: 0.15rem 0.6rem; white-space: nowrap; }
 nav .activity.busy { color: #333; border-color: #f59e0b; background: #fef3c7; }
 main { flex: 1; overflow: auto; padding: 1rem; }
 
@@ -19,12 +43,12 @@ main { flex: 1; overflow: auto; padding: 1rem; }
 .viewer { display: flex; flex-direction: column; height: calc(100vh - 5rem); }
 .viewer header { display: flex; gap: 1rem; align-items: center; margin-bottom: 0.5rem; }
 .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; flex: 1; min-height: 0; }
-.pane { border: 1px solid #ccc; overflow: auto; }
+.pane { border: 1px solid var(--line); overflow: auto; }
 .pane iframe { width: 100%; height: 100%; border: 0; }
 .pane img { max-width: 100%; }
 .pane pre, .hit pre { white-space: pre-wrap; padding: 0.5rem; margin: 0; }
 .markdown { padding: 0 1rem; }
-.toc { border-bottom: 1px solid #ccc; padding-bottom: 0.5rem; margin-bottom: 0.5rem; }
+.toc { border-bottom: 1px solid var(--line); padding-bottom: 0.5rem; margin-bottom: 0.5rem; }
 
 .radio, .check { display: flex; gap: 0.5rem; margin: 0.5rem 0; }
 .init { max-width: 520px; margin: 4rem auto; }
@@ -64,11 +88,10 @@ th.sortable.active button { text-decoration: underline; }
 }
 .description-edit:hover,
 .description-edit:focus {
-  border-color: var(--line, #444);
-  background: var(--bg, inherit);
+  border-color: var(--line);
 }
 
 /* The collections holding one document, under its row in the Documents table. */
 .tags { display: flex; flex-wrap: wrap; gap: 0.4rem; font-size: 0.9em; }
-.tag { border: 1px solid #ccc; border-radius: 999px; padding: 0.05rem 0.5rem; }
+.tag { border: 1px solid var(--line); border-radius: 999px; padding: 0.05rem 0.5rem; }
 .path-input { width: 28rem; max-width: 100%; }

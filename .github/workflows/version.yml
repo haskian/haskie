@@ -1,7 +1,7 @@
 name: Version
 
 # On push to main: a conventional-commit SemVer bump (cog) writes CHANGELOG.md and cuts the tag,
-# then the release runs for that tag. This workflow publishes nothing itself.
+# then release.yml builds the wheel from that tag and attaches it to a GitHub Release.
 #
 # Requires main to accept pushes from github-actions[bot] — a bot bypass on the branch protection
 # rule, or an unprotected main. Requires squash-only merges too, so one commit on main equals one
@@ -29,19 +29,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # cog reads every commit back to the last tag
-          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: jdx/mise-action@v2
       - id: bump
         run: mise run bump
 
-  # Same jobs a manually pushed `v*` tag would run. Called rather than triggered — see the note
-  # on release.yml's workflow_call.
+  # Same jobs a hand-pushed `v*` tag runs. Called, not triggered: GitHub does not start a workflow
+  # from a tag pushed with GITHUB_TOKEN. Inherits `contents: write` for the GitHub Release.
   release:
     needs: bump
     if: needs.bump.outputs.released == 'true'
-    # Inherits the workflow-level `contents: write`, which the release job's GitHub Release needs.
     uses: ./.github/workflows/release.yml
-    # The tag, not the branch: the called workflow inherits this job's SHA, which is the commit
-    # before the bump, and would otherwise build the previous version's tree.
     with:
       ref: ${{ needs.bump.outputs.version }}

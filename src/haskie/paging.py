@@ -23,6 +23,14 @@ MAX_PAGE_SIZE = 1000
 CURSOR_VERSION = 1
 
 
+def check_page_size(size: int, cap: int = MAX_PAGE_SIZE, field: str = "page_size") -> int:
+    """The one page-size bound check. `cap` and `field` differ where a listing pages something
+    dearer than a metadata row (see `textsearch`)."""
+    if not 1 <= size <= cap:
+        raise InvalidInput(f"{field} must be 1..{cap}, got {size}")
+    return size
+
+
 class PageRequest(msgspec.Struct, frozen=True):
     """The query arguments of one page, validated."""
 
@@ -32,8 +40,7 @@ class PageRequest(msgspec.Struct, frozen=True):
     order: Order = "asc"
 
     def __post_init__(self) -> None:
-        if not 1 <= self.page_size <= MAX_PAGE_SIZE:
-            raise InvalidInput(f"page_size must be 1..{MAX_PAGE_SIZE}, got {self.page_size}")
+        check_page_size(self.page_size)
 
 
 class Page[T](msgspec.Struct):
@@ -60,7 +67,11 @@ def page_request(
     sort: str | None = None,
     order: Order = "asc",
 ) -> PageRequest:
-    """The one place handler query arguments become a validated request."""
+    """The one place handler query arguments become a validated request.
+
+    Registered as a Litestar dependency (`api.common.PAGED`), so these four parameters are what a
+    paged listing takes on the wire; a handler asks for the `PageRequest` they produce.
+    """
     return PageRequest(cursor=cursor, page_size=page_size, sort=sort, order=order)
 
 
