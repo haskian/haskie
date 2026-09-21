@@ -1,7 +1,11 @@
 name: Version
 
-# On push to main: a conventional-commit SemVer bump (cog) writes CHANGELOG.md and cuts the tag,
-# then release.yml builds the wheel from that tag and attaches it to a GitHub Release.
+# On push to main: a SemVer bump (cog) writes CHANGELOG.md and cuts the tag, then release.yml
+# builds the wheel from that tag and attaches it to a GitHub Release.
+#
+# Every push to main gets a version, so no version is skipped: the commit subjects decide the
+# increment, and a push whose subjects imply none takes a patch. Only a `majorfeat!` subject takes
+# the major digit up — see `mise/tasks/bump` for the rules and AGENTS.md for how to write one.
 #
 # Requires main to accept pushes from github-actions[bot] — a bot bypass on the branch protection
 # rule, or an unprotected main. Requires squash-only merges too, so one commit on main equals one

@@ -61,6 +61,7 @@ Taste does not scale by explaining it. It scales by indexing it.
 uv tool install haskie      # or `uv tool install .` from a checkout
 haskie init                 # create ~/.haskie and its database
 haskie run                  # web UI, REST API and MCP server on http://127.0.0.1:8000
+haskie stop                 # stop the server running for this home
 haskie destroy              # delete ~/.haskie and everything in it
 ```
 
@@ -88,11 +89,14 @@ step, and a second one refuses, naming the process that has it. A home is one SQ
 durable job pipeline, and two executors polling the same queues take each other's work. The lock
 lives in the app rather than in `run`, so any other ASGI server is held to it too; the port is not
 the guard it looks like, because the server runs its whole startup before it binds. `haskie
-ensure` is the idempotent form: it starts a server only if nothing is serving yet.
+ensure` is the idempotent form: it starts a server only if nothing is serving yet, and `haskie
+stop` is the other end of it: it finds the holder through that same lock and asks it to shut down
+gracefully, which is what a detached `ensure` leaves no terminal to do.
 
 `destroy` asks before it deletes and prints what would be lost first. It refuses any directory
 that is not a haskie home, so a mistyped `--home` cannot take the wrong tree with it; `--yes`
-skips the prompt. Nothing is backed up, and a running `haskie run` should be stopped first.
+skips the prompt. Nothing is backed up, and a running server should be stopped first (`haskie
+stop`).
 
 An installed `haskie` serves the web UI as well as the API. Run from a checkout it needs `mise run
 build` first; without the built UI the app still runs, API and MCP only.

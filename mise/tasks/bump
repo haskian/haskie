@@ -1,24 +1,56 @@
 #!/usr/bin/env bash
-#MISE description="Bump the version from conventional commits, tag and push (CI only)"
+#MISE description="Bump the version from the commit subjects, tag and push (CI only)"
 set -euo pipefail
+
+# The increment is decided here, not by `cog bump --auto`, because cog reads every breaking
+# marker as a major and this project reserves the major digit for one commit type. The rules, in
+# order, over the subjects of the commits since the last tag:
+#
+#   majorfeat!: <subject>   or majorfeat(<scope>)!: <subject>   -> major   (1.4.2 -> 2.0.0)
+#   feat: <subject>         or feat(<scope>)!: <subject>        -> minor   (1.4.2 -> 1.5.0)
+#   anything else                                               -> patch   (1.4.2 -> 1.4.3)
+#
+# The highest rule any one commit matches wins. `!` on a `feat` still marks a breaking change for
+# the changelog and for a reader; it no longer takes the major digit up on its own. Every push
+# gets a version, so no version is skipped: a push of nothing but docs or chores is a patch.
+#
+# `majorfeat` without the `!` is refused rather than silently released as a patch: the author of
+# such a subject meant a major, and shipping 1.4.3 in its place is the one outcome nobody wants.
 
 git config user.name  "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-# cog owns the conventional-commit rules. --dry-run prints the next tag on its last line, and
-# exits 0 even when nothing warrants a release — so the tag string, not the exit code, is the
-# signal. Deciding here keeps the no-release case (roughly two pushes in five) free of a bump.
-tag="$(cog bump --auto --dry-run 2>/dev/null | tail -1)"
+last_tag="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+range="${last_tag:+$last_tag..}HEAD"
+subjects="$(git log --format='%s' "$range")"
+
+if grep -Eq '^majorfeat(\([^)]*\))?:' <<<"$subjects"; then
+  echo "::error title=Marker missing::A majorfeat subject must carry the breaking marker:" \
+    "write 'majorfeat!: ...' or 'majorfeat(<scope>)!: ...'." >&2
+  exit 1
+fi
+
+if grep -Eq '^majorfeat(\([^)]*\))?!:' <<<"$subjects"; then
+  increment="--major"
+elif grep -Eq '^feat(\([^)]*\))?!?:' <<<"$subjects"; then
+  increment="--minor"
+else
+  increment="--patch"
+fi
+
+# --dry-run prints the target version on its last line and takes no action; the tag string, not
+# the exit code, is the signal, because cog exits 0 even when it proposes nothing.
+tag="$(cog bump "$increment" --dry-run 2>/dev/null | tail -1)"
 out="${GITHUB_OUTPUT:-/dev/stdout}"
 if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
   echo "released=false" >>"$out"
-  echo "::notice title=No release::No commit since the last tag implies a version bump."
+  echo "::notice title=No release::cog proposed no version for this push."
   exit 0
 fi
 
 # cog writes CHANGELOG.md, runs the pre_bump_hook (`uv version`) and cuts the tag; squash-only
 # merges make each commit subject the PR title pr-title.yml verified.
-cog bump --auto --skip-ci
+cog bump "$increment" --skip-ci
 # By name, because cog's tags are lightweight and `--follow-tags` pushes annotated ones only.
 git push origin HEAD:main "$tag"
 { echo "released=true"; echo "version=$tag"; } >>"$out"

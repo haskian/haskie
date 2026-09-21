@@ -17,7 +17,7 @@ mise run dev     # API on :8000 and the Vite dev server on :5173, together
 mise run build   # build the web UI into src/haskie/web
 mise run dist    # build, then the wheel and sdist into dist/
 mise run smoke   # install the built wheel in a fresh venv, check the CLI and bundled UI
-mise run bump    # conventional-commit version bump
+mise run bump    # version bump from the commits, patch when none implies one
 ```
 
 Run `mise run check` and `mise run test` before treating a change as done.
@@ -42,3 +42,33 @@ depends=[...]` instead of hand-rolled process control (background jobs, traps, w
 `pytest`, `tests/` mirrors `src/haskie/`. Fixtures use real payloads, not placeholder dicts. New
 behavior needs a test in the same file as its neighbors, not a new top-level test module unless
 the area is genuinely new.
+
+## Commit subjects and the version
+
+Merges to `main` are squashed, so the pull request title becomes the one commit subject on `main`,
+and that subject decides the next version. `pr-title.yml` checks the title; `mise run bump` reads
+the subjects since the last tag and picks the increment.
+
+Write `<type>[(<scope>)][!]: <subject>`. The type is one of `majorfeat`, `feat`, `fix`, `perf`,
+`refactor`, `docs`, `test`, `build`, `ci`, `chore`, `style`, `revert`.
+
+Three rules decide the increment, over every commit subject since the last tag. The highest rule
+any one subject matches wins:
+
+| subject matches | increment | 1.4.2 becomes |
+| --- | --- | --- |
+| `majorfeat!:` or `majorfeat(<scope>)!:` | major | 2.0.0 |
+| `feat:`, `feat(<scope>):`, `feat!:` or `feat(<scope>)!:` | minor | 1.5.0 |
+| anything else, including `fix:`, `docs:` and `chore:` | patch | 1.4.3 |
+
+Two consequences, both deliberate:
+
+- **`majorfeat!` is the only way to a major version.** A `!` on any other type marks a breaking
+  change for the changelog and for whoever reads the log; it no longer takes the major digit up on
+  its own. Write `majorfeat!` when the release should be a major one, and nothing else.
+- **`majorfeat` without the `!` fails the bump.** The subject asks for a major and the `!` is what
+  grants it, so releasing that push as a patch would ship the wrong version under the right words.
+  `mise run bump` stops instead, and the fix is to correct the subject on `main`.
+
+No version is skipped: every push to `main` is released, and one whose subjects imply no increment
+is a patch.
