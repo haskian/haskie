@@ -165,6 +165,7 @@ async def test_a_document_delete_is_a_collection_job_that_belongs_to_no_collecti
     bulk = await jobs.bulk_job(job_id)
 
     assert (row.id, row.kind, row.title) == (job_id, "collection", f"delete document {doc}")
+    assert row.detail == {"bulk": "delete_document"}, "a delete has no pages to count"
     assert (bulk.kind, bulk.collection, bulk.status) == ("delete_document", None, "SUCCESS")
     assert (await jobs.list_kind("collection", collection="any", page_size=10)).items == [], (
         "a collection filter keeps the jobs of one collection, and this job has none"
@@ -514,3 +515,20 @@ def test_the_workflow_names_the_jobs_view_spells_out_are_the_ones_dbos_records()
     assert set(jobs.KIND_BY_NAME) == set(dbos_names.PIPELINE_WORKFLOWS) | {
         name for names in jobs.KIND_NAMES.values() for name in names
     }, "every kind counts the workflows it lists, and nothing else"
+
+
+async def test_indexed_chunks_are_counted_once_live_and_once_archived(dbos, tmp_path) -> None:
+    """The Insights chunk trend reads finished index jobs from DBOS until the archiver copies
+    them, then from the day partition: the same one point either side, never two, never none.
+    An import alone is no point: only an index writes chunks."""
+    doc = await _imported(dbos, tmp_path, pages=2)
+    assert await jobs.chunks_since(0) == [], "an import writes no chunks"
+    await _attached(dbos, "arch", doc)
+    (live,) = await jobs.chunks_since(0)
+    assert (live.collection, live.chunks > 0) == ("arch", True)
+    assert await jobs.chunks_since(live.ts + 1) == [], "the cutoff is inclusive of the point"
+
+    await archive.archive_once(_later(), SMALL)
+
+    assert await _live_ids() == []
+    assert await jobs.chunks_since(0) == [live], "the archived point is the live one"

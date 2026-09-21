@@ -32,18 +32,22 @@ what those reads returned and touch nothing: they stay sync.
 """
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Literal, get_args
 
 import aiosqlite
 import msgspec
 from dbos import DBOS
 
-from haskie import archive, db, models, sysdb, workflows
+from haskie import archive, db, models, session, sysdb, workflows
 from haskie.dbos_names import (
+    ACTIVE_STATUS,
+    COLLECTION_DOCUMENT_WORKFLOW,
     PENDING_STATUS,
     PIPELINE_WORKFLOWS,
     STAGE_STEP,
     STAGE_WORKFLOW,
+    TERMINAL_STATUS,
 )
 from haskie.errors import InvalidInput, JobNotFound
 from haskie.paging import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, OffsetCursor, Order, Page
@@ -130,7 +134,7 @@ class DownloadJob(msgspec.Struct):
 JobKind = Literal["document", "collection", "download", "maintenance", "archive"]
 KIND_ORDER: tuple[JobKind, ...] = get_args(JobKind)
 KIND_LABELS: dict[JobKind, str] = {
-    "document": "Documents",
+    "document": "Document ingestion",
     "collection": "Collections",
     "download": "Model downloads",
     "maintenance": "Maintenance",
@@ -138,10 +142,27 @@ KIND_LABELS: dict[JobKind, str] = {
 }
 
 
+class StageJob(msgspec.Struct):
+    """One stage of a document operation, and the workflow whose batches it is made of: the
+    convert and index stages run in the operation's own workflow, the embed stage in the
+    `ensure_embedding` child it spawns (see `fold_operations`)."""
+
+    stage: Stage
+    job_id: str  # pass it to `list_tasks` for the stage's batches
+    status: str  # DBOS: ENQUEUED | PENDING | SUCCESS | ERROR | CANCELLED | ...
+    tasks_done: int
+    tasks_running: int
+    tasks_total: int
+    seconds: float | None = None  # how long the stage ran; None while it still does
+
+
 class JobRow(msgspec.Struct):
     """One job of any kind, in the shape the Jobs view lists: what every kind has in common, plus
     the numbers only that kind has in `detail` (tasks for a document, pages for a bulk index,
-    warm for a download). Kept flat and untyped on purpose - it is a read model for a table."""
+    warm for a download). Kept flat and untyped on purpose - it is a read model for a table.
+
+    A document row is one operation (an import or an index of one document) and lists its stages:
+    the jobs it is made of, each with the batches it ran."""
 
     id: str
     kind: JobKind
@@ -151,7 +172,9 @@ class JobRow(msgspec.Struct):
     updated_at: float
     error: str | None
     archived: bool = False  # documents only: read from a day partition instead of DBOS
+    origin: str | None = None  # the session whose action started it; None for the web UI
     detail: dict[str, int | str | bool | None] = {}
+    stages: list[StageJob] = []  # documents only, in pipeline order
 
 
 class JobKindSummary(msgspec.Struct):
@@ -304,16 +327,25 @@ async def list_kind(
     checked = _checked_kind(kind)
     if checked == "document":
         page = await list_jobs(collection, page_size, cursor)
-        return Page(items=[_document_row(job) for job in page.items], next_cursor=page.next_cursor)
+        items = fold_operations(page.items)
+        return Page(items=await _with_origins(items), next_cursor=page.next_cursor)
     offset = _kind_offset(checked, cursor)
     # one row more than the page: its presence is what tells us another page exists
     found = await _kind_statuses(checked, collection, page_size + 1, offset)
     # every row costs a read of its own (see `_detail`), so the page is built in one round trip
     rows = await asyncio.gather(*(_kind_row(checked, s) for s in found[:page_size]))
     return Page(
-        items=list(rows),
+        items=await _with_origins(list(rows)),
         next_cursor=_cursor(checked, offset + page_size) if len(found) > page_size else None,
     )
+
+
+async def _with_origins(rows: list[JobRow]) -> list[JobRow]:
+    """Name the session that started each row, where one did: one query for the page."""
+    origins = await session.origins([row.id for row in rows])
+    for row in rows:
+        row.origin = origins.get(row.id)
+    return rows
 
 
 def _kind_offset(kind: JobKind, cursor: str | None) -> int:
@@ -361,7 +393,9 @@ class Activity(msgspec.Struct):
 
 
 async def activity() -> Activity:
-    by_family = await sysdb.queue_activity()
+    # an embed is a stage of the import or index that spawned it and waits for it (see
+    # `fold_operations`): counting both read "2 jobs" for one operation
+    by_family = await sysdb.queue_activity(skip=[workflows.EMBEDDING_QUEUE])
 
     def family(name: str) -> QueueActivity:
         counts = by_family.get(name, {})
@@ -379,7 +413,69 @@ def _document_title(job: Job) -> str:
     return f"{job.action} {job.doc}"
 
 
-def _document_row(job: Job) -> JobRow:
+def fold_operations(jobs: list[Job]) -> list[JobRow]:
+    """The page as operations: an import or an index of one document, with the embed job it
+    spawned folded in as its embed stage rather than listed as a job of its own.
+
+    The child is found by id: `workflows._ensure_embedding` names it `emb:{doc}:{tail}` with the
+    tail of the parent's id. An embed whose parent is not on this page (a page boundary between
+    them, or a parent that reused another operation's embed) stays a row of its own, with one
+    stage. Order is kept: a page is newest first, and the child is newer than its parent."""
+    embeds = {job.id: job for job in jobs if job.action == "embed"}
+    claimed = {_embed_id(job) for job in jobs if job.action != "embed"} & embeds.keys()
+    out: list[JobRow] = []
+    for job in jobs:
+        if job.action == "embed":
+            if job.id not in claimed:
+                out.append(_document_row(job, [_stage_job("embed", job)]))
+            continue
+        embed = embeds.get(_embed_id(job))
+        own = _stage_job("convert" if job.action == "import" else "index", job, embed)
+        embed_stage = [] if embed is None else [_stage_job("embed", embed)]
+        stages = [own, *embed_stage] if job.action == "import" else [*embed_stage, own]
+        out.append(_document_row(job, stages))
+    return out
+
+
+def _embed_id(job: Job) -> str:
+    return f"{workflows.EMBED_PREFIX}:{job.doc}:{job.id.rsplit(':', 1)[-1]}"
+
+
+def _stage_job(stage: Stage, job: Job, embed: Job | None = None) -> StageJob:
+    """One stage read from the workflow that runs it. The embed child sets the stage around it
+    straight: an import converts before it spawns the embed, so a convert stage with an embed
+    beside it is over; an index writes after the embed, so an index stage waits while the embed
+    is not done and runs once it is. Without the child, the workflow's own status stands."""
+    status = job.status
+    if embed is not None and stage == "convert":
+        status = "SUCCESS"
+    elif embed is not None and stage == "index" and status in ACTIVE_STATUS:
+        status = "PENDING" if embed.status == "SUCCESS" else "ENQUEUED"
+    return StageJob(
+        stage=stage,
+        job_id=job.id,
+        status=status,
+        tasks_done=job.tasks_done,
+        tasks_running=job.tasks_running,
+        tasks_total=job.tasks_total,
+        seconds=_stage_seconds(stage, job, embed) if status in TERMINAL_STATUS else None,
+    )
+
+
+def _stage_seconds(stage: Stage, job: Job, embed: Job | None) -> float:
+    """How long one finished stage ran, from the workflow timestamps alone. The owning workflow
+    spans more than its own stage: an import converts, then waits for the embed it spawned, and an
+    index waits for the embed before it writes. The child's timestamps cut those out."""
+    if embed is None or stage == "embed":
+        return max(0.0, job.updated_at - job.created_at)
+    if stage == "convert":
+        return max(0.0, embed.created_at - job.created_at)
+    return max(0.0, job.updated_at - embed.updated_at)
+
+
+def _document_row(job: Job, stages: list[StageJob]) -> JobRow:
+    """The operation's own status and error stand for the whole: it waits for its embed child,
+    so it is running while the child is, and fails when the child does."""
     return JobRow(
         id=job.id,
         kind="document",
@@ -390,10 +486,11 @@ def _document_row(job: Job) -> JobRow:
         error=job.error,
         archived=job.archived,
         detail={
-            "tasks_done": job.tasks_done,
-            "tasks_running": job.tasks_running,
-            "tasks_total": job.tasks_total,
+            "tasks_done": sum(s.tasks_done for s in stages),
+            "tasks_running": sum(s.tasks_running for s in stages),
+            "tasks_total": sum(s.tasks_total for s in stages),
         },
+        stages=stages,
     )
 
 
@@ -439,8 +536,11 @@ async def _detail(kind: JobKind, status) -> dict[str, int | str | bool | None]:
         progress = await DBOS.get_event_async(
             status.workflow_id, workflows.PROGRESS_EVENT, timeout_seconds=0
         )
+        # which of the three bulk jobs it is: the view names a delete differently from an index
+        detail: dict[str, int | str | bool | None] = {"bulk": _bulk_kind(status.name)}
         if isinstance(progress, workflows.BulkProgress):
-            return {"done": progress.done, "skipped": progress.skipped, "total": progress.total}
+            detail.update(done=progress.done, skipped=progress.skipped, total=progress.total)
+        return detail
     return {}
 
 
@@ -545,20 +645,24 @@ async def _live_jobs(collection: str | None, limit: int, offset: int) -> list[Jo
         offset=offset,
         load_input=False,
     )
-    ids = [s.workflow_id for s in statuses]
-    children: dict[str, list] = {i: [] for i in ids}
-    if ids:
-        found = await DBOS.list_workflows_async(
-            parent_workflow_id=ids,
-            name=STAGE_WORKFLOW,
-            load_output=False,
-        )
-        for c in found:
-            children.setdefault(c.parent_workflow_id or "", []).append(c)
+    children = await stage_children([s.workflow_id for s in statuses])
     done = await sysdb.step_counts(
         [c.workflow_id for group in children.values() for c in group], STAGE_STEP
     )
     return [_job(s, children[s.workflow_id], done) for s in statuses]
+
+
+async def stage_children(ids: list[str]) -> dict[str, list]:
+    """The stage children of each listed pipeline workflow, keyed by parent; a parent with none
+    maps to an empty list. One DBOS read for the whole page."""
+    children: dict[str, list] = {i: [] for i in ids}
+    if ids:
+        found = await DBOS.list_workflows_async(
+            parent_workflow_id=ids, name=STAGE_WORKFLOW, load_output=False
+        )
+        for c in found:
+            children.setdefault(c.parent_workflow_id or "", []).append(c)
+    return children
 
 
 async def _archived_jobs(
@@ -600,6 +704,57 @@ async def snapshot(status, children: list) -> tuple[Job, list[Task]]:
     tasks = {c.workflow_id: await _stage_tasks(c) for c in children if c.input}
     done = {c: sum(t.status in DONE_TASK_STATUS for t in group) for c, group in tasks.items()}
     return _job(status, children, done), _ordered([t for group in tasks.values() for t in group])
+
+
+class ChunksAt(msgspec.Struct):
+    """One finished index of one document into one collection, as a point on the Insights chart:
+    when it completed, where, and how many chunks it wrote."""
+
+    ts: float  # unix seconds
+    collection: str
+    chunks: int
+
+
+async def chunks_since(cutoff: float) -> list[ChunksAt]:
+    """Every successful index that completed on or after `cutoff`, oldest first: the archived
+    days first, then the jobs DBOS still holds. The archive watermark splits the two, so a job
+    that is in both (copied, not yet purged) is counted once."""
+    since_ms = int(cutoff * 1000)
+    first_day = datetime.fromtimestamp(cutoff, UTC).date()
+    out: list[ChunksAt] = []
+    async with db.connect() as conn:
+        for table in await archive.list_partitions(conn):
+            day = archive.partition_day(table)
+            if day is None or day < first_day:
+                continue
+            for completed_at, collection, chunks in await archive.indexed_chunks(
+                conn, table, since_ms
+            ):
+                out.append(ChunksAt(completed_at / 1000, collection, chunks))
+    archived_to = await archive.watermark()
+    live = {
+        s.workflow_id: s
+        for s in await DBOS.list_workflows_async(
+            name=COLLECTION_DOCUMENT_WORKFLOW, status="SUCCESS", load_input=False
+        )
+        if s.completed_at is not None and s.completed_at >= max(since_ms, archived_to + 1)
+    }
+    # only the index stage writes chunks, and its batches record how many: read those step logs
+    # alone, side by side
+    indexes = [
+        (parent, child)
+        for parent, group in (await stage_children(list(live))).items()
+        for child in group
+        if (found := workflows.stage_input(child)) and found[0] == "index"
+    ]
+    written = await asyncio.gather(*(_stage_tasks(child) for _, child in indexes))
+    chunks: dict[str, int] = dict.fromkeys(live, 0)
+    for (parent, _), tasks in zip(indexes, written, strict=True):
+        chunks[parent] += sum(t.result or 0 for t in tasks if t.status == "SUCCESS")
+    for job_id, status in live.items():
+        _, collection, _ = job_names(job_id) or ("index", None, "?")
+        out.append(ChunksAt((status.completed_at or 0) / 1000, collection or "?", chunks[job_id]))
+    return sorted(out, key=lambda point: point.ts)
 
 
 async def list_tasks(job_id: str) -> list[Task]:

@@ -123,6 +123,9 @@ async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) 
         "task": {"ENQUEUED": 1, "PENDING": 1},
         "job": {"PENDING": 2},
     }, "the prefix of the queue name is the family; the status is kept for the caller to fold"
+    assert await sysdb.queue_activity(skip=[workflows.EMBEDDING_QUEUE]) == {
+        "task": {"ENQUEUED": 1, "PENDING": 1},
+    }, "a skipped queue drops out of its family, and an empty family is absent"
 
 
 async def test_stale_active_ids_pages_over_another_versions_workflows(

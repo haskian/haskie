@@ -43,7 +43,7 @@ from dbos._dbos import _get_dbos_instance
 from dbos._workflow_commands import garbage_collect
 
 from haskie import db, logs
-from haskie.dbos_names import PIPELINE_WORKFLOWS, STAGE_WORKFLOW
+from haskie.dbos_names import PIPELINE_WORKFLOWS
 from haskie.settings import RetentionSettings
 
 _log = logs.get_logger(__name__)
@@ -231,6 +231,24 @@ async def task_rows(conn: aiosqlite.Connection, table: str, job_id: str) -> list
     )
 
 
+async def indexed_chunks(
+    conn: aiosqlite.Connection, table: str, since_ms: int
+) -> list[tuple[int, str, int]]:
+    """Per successful index job of one day that completed at or after `since_ms`: when it
+    completed, into which collection, and how many chunks its batches wrote. `table` must come
+    from `list_partitions`."""
+    return _tuples(
+        await conn.execute_fetchall(
+            "select j.completed_at, j.collection, coalesce(sum(t.result), 0) "
+            f"from {table} j join {tasks_table(table)} t "
+            "on t.job_id = j.id and t.kind = 'index' and t.status = 'SUCCESS' "
+            "where j.action = 'index' and j.status = 'SUCCESS' and j.completed_at >= ? "
+            "group by j.id order by j.completed_at",
+            (since_ms,),
+        )
+    )
+
+
 # --- the round --------------------------------------------------------------------
 
 
@@ -321,12 +339,7 @@ async def _copy_jobs(conn: aiosqlite.Connection, completed: dict[str, int]) -> N
     from haskie import jobs
 
     ids = list(completed)
-    children: dict[str, list] = {job_id: [] for job_id in ids}
-    found = await DBOS.list_workflows_async(
-        parent_workflow_id=ids, name=STAGE_WORKFLOW, load_output=False
-    )
-    for child in found:
-        children.setdefault(child.parent_workflow_id or "", []).append(child)
+    children = await jobs.stage_children(ids)
     for day in {day_suffix(ms) for ms in completed.values()}:
         await ensure_partition(conn, day)  # once per day, not once per job
     for status in await DBOS.list_workflows_async(workflow_ids=ids, load_input=False):
