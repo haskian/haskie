@@ -131,6 +131,31 @@ DOCUMENT_COLUMNS: tuple[str, ...] = tuple(f.encode_name for f in msgspec.structs
 DOCUMENT_SELECT = ", ".join(DOCUMENT_COLUMNS)
 
 
+class Listed(Document):
+    """A document as the API lists it: the row, plus how many collections hold it. A read model
+    for the gallery, not a column: `DOCUMENT_COLUMNS` reads the base class alone."""
+
+    collections: int = 0
+
+
+async def listed(docs: list[Document]) -> list[Listed]:
+    """The same documents with their collection counts, from one query."""
+    names_ = [doc.name for doc in docs]
+    counts: dict[str, int] = {}
+    if names_:
+        async with db.connect() as conn:
+            cursor = await conn.execute(
+                "select document, count(*) from collection_documents "
+                f"where document in ({db.placeholders(len(names_))}) group by document",
+                names_,
+            )
+            rows: list[Any] = list(await cursor.fetchall())
+        counts = dict(rows)
+    return [
+        Listed(**msgspec.structs.asdict(doc), collections=counts.get(doc.name, 0)) for doc in docs
+    ]
+
+
 class Staged(msgspec.Struct):
     """An upload waiting in `staging/`: bytes on disk and one row in `staging`, no document yet."""
 
