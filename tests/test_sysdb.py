@@ -4,6 +4,7 @@ The rows come from DBOS, never from this test: the only way to be sure the SQL m
 DBOS writes is to import a document, attach it to a collection and read what that left behind.
 """
 
+import time
 from pathlib import Path
 
 import pytest
@@ -90,12 +91,14 @@ async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) 
     doc = await _imported(dbos, tmp_path, pages=1)
     await Collection.create("act")
     await attach_document(dbos, "act", doc)
-    # set the state rather than waiting for it: `conftest._sweep_delayed` promotes an expired
-    # debounce every 50 ms, so "is the maintenance run still DELAYED" is a race, not a fact
+    # Set the state rather than waiting for it: `conftest._sweep_delayed` promotes an expired
+    # debounce every 50 ms, so "is the maintenance run still DELAYED" is a race, not a fact. The
+    # wake time goes with it, an hour out, because the sweep promotes on that column alone.
     async with db.connect() as conn:
         await conn.execute(
-            "update workflow_status set status = 'DELAYED' where queue_name = ?",
-            (workflows.MAINTENANCE_QUEUE,),
+            "update workflow_status set status = 'DELAYED', delay_until_epoch_ms = ? "
+            "where queue_name = ?",
+            (int((time.time() + 3600) * 1000), workflows.MAINTENANCE_QUEUE),
         )
         delayed = list(
             await conn.execute_fetchall(

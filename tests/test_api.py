@@ -727,7 +727,9 @@ async def test_session_history_holds_every_action_newest_first(
         json={"path": str(tmp_path / "later.md")},
     )
     assert imported.status_code == 201, imported.text
-    await document.set_status("later.md", "imported")
+    # the route answers at `queued` and converts in the background; only an imported document
+    # joins a collection, and forcing the status here would race the pipeline writing its own
+    assert (await wait_import(ready, "later.md"))["status"] == "imported"
     attached = await ready.post(
         "/api/collections/notes/documents",
         params={"session_id": "s2"},
