@@ -16,7 +16,18 @@ from litestar.enums import RequestEncodingType
 from litestar.params import Body
 from litestar.response import File, Stream
 
-from haskie import audit, convert, cpu, document, embed_cache, logs, render, toc, workflows
+from haskie import (
+    audit,
+    convert,
+    cpu,
+    document,
+    embed_cache,
+    logs,
+    render,
+    session,
+    toc,
+    workflows,
+)
 from haskie.api.common import BulkStarted, Describe
 from haskie.document import DocStatus, Document, Staged
 from haskie.errors import DocumentNotFound, InvalidInput
@@ -59,12 +70,15 @@ async def stage_document(
 
 @post("/api/documents/import", mcp_tool="add_document")
 @audit.audited("document.import")
-async def import_document(data: ImportRequest) -> Document:
+async def import_document(data: ImportRequest, session_id: str | None = None) -> Document:
     """Import a staged upload (`staging_id`) or a local file by absolute path (`path`).
 
     The name is fixed here and never changes: `name` renames the document, but the original
     suffix is kept because it decides how the document is parsed. Returns the document at status
     `queued`; convert and embed then run in the background, so poll `get_document` for `imported`.
+
+    Args:
+        session_id: The conversation's id; the import and its job then show in that session.
     """
     if (data.staging_id is None) == (data.path is None):
         raise InvalidInput("give either staging_id or path")
@@ -80,7 +94,9 @@ async def import_document(data: ImportRequest) -> Document:
         )
     audit.attach(doc=row.name, size=row.size)
     logs.bind(doc=row.name)
-    audit.attach(job_id=await workflows.start_import(row.name))
+    job_id = await workflows.start_import(row.name)
+    audit.attach(job_id=job_id)
+    await session.record(session_id, "import", row.name, workflow_id=job_id)
     return row
 
 
@@ -91,20 +107,25 @@ async def list_documents(
     sort: str | None = None,
     order: Order = "asc",
     status: DocStatus | None = None,
-) -> Page[Document]:
-    """List every imported document, one page at a time, whichever collections hold them.
+) -> Page[document.Listed]:
+    """List every imported document, one page at a time, with how many collections hold each.
 
     Sort by name, size, status or updated_at; `status` keeps one lifecycle state only (queued,
     converting, embedding, imported, error, cancelled, deleting). Pass the `next_cursor` of a
     response back as `cursor` to continue; it is null on the last page.
     """
-    return await document.page(page_request(cursor, page_size, sort, order), status)
+    page = await document.page(page_request(cursor, page_size, sort, order), status)
+    return Page(
+        items=await document.listed(page.items), next_cursor=page.next_cursor, total=page.total
+    )
 
 
 @get("/api/documents/{doc:str}", mcp_tool="get_document")
-async def get_document(doc: str) -> Document:
-    """One document: its import status, its size and what it is said to be."""
-    return await document.get(doc)
+async def get_document(doc: str) -> document.Listed:
+    """One document: its import status, its size, what it is said to be, and how many
+    collections hold it."""
+    (found,) = await document.listed([await document.get(doc)])
+    return found
 
 
 @delete("/api/documents/{doc:str}", status_code=202)
@@ -209,9 +230,15 @@ async def get_markdown(doc: str, full: bool = False) -> Stream:
 
 @put("/api/documents/{doc:str}/description", mcp_tool="describe_document")
 @audit.audited("document.describe")
-async def describe_document(doc: str, data: Describe) -> Document:
+async def describe_document(doc: str, data: Describe, session_id: str | None = None) -> Document:
     """Replace what the document is said to be. Empty clears it.
 
     The description is what `search_documents` returns beside each match, so it is worth writing
-    for anything an agent is expected to choose between."""
-    return await document.describe(doc, data.description)
+    for anything an agent is expected to choose between.
+
+    Args:
+        session_id: The conversation's id; the change then shows in that session's history.
+    """
+    described = await document.describe(doc, data.description)
+    await session.record(session_id, "describe", doc)
+    return described

@@ -51,6 +51,10 @@ ROUTE_HANDLERS: list[ControllerRouterHandler] = [
     search.list_sessions,
     search.put_session,
     search.search_session,
+    search.session_history,
+    search.search_trend,
+    search.chunk_trend,
     search.search_text,
     search.search_documents,
+    search.document_passages,
 ]

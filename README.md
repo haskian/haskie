@@ -97,10 +97,15 @@ and MCP only.
 Endpoint `POST http://127.0.0.1:8000/mcp`. Tools: `list_documents`, `get_document`,
 `add_document`, `describe_document`, `list_collections`, `get_collection`,
 `list_collection_documents`, `add_document_to_collection`, `remove_document_from_collection`,
-`set_session_collections`, `search`, `search_collection`, `search_text`, `search_documents`.
+`set_session_collections`, `search`, `search_collection`, `search_text`, `search_documents`,
+`document_passages`.
 Set the session's collections first, then search with the same id — that is how an agent scopes
 itself to *this topic's* sources for the rest of the conversation. `search_text` needs no session
 and no model: one keyword query across everything, from a cold start.
+
+Every tool that searches or changes something also takes an optional session id. Pass the same id
+on each call and the Sessions view replays what that conversation searched, imported and attached,
+and each job it started names the conversation as its origin.
 
 ### Claude Code
 
@@ -165,7 +170,12 @@ that fails to answer fails the search, rather than leaving a hole that reads as 
 
 `search_documents` (`GET /api/search/documents`) answers "which documents should I read" rather
 than "which passages say so": the same BM25 scan, folded to one row per document with its best
-chunk, how many scanned chunks it matched, and its description.
+chunk, how many scanned chunks it matched, and its description. The row's score is the harmonic
+mean of that best chunk and the sum of every chunk the document matched, so a document that
+answers throughout outranks one that answers once, while the mean stays under twice the best
+chunk, so many weak chunks never outrank one strong one. `document_passages`
+(`GET /api/search/documents/{doc}`) unfolds one row again: the same scan kept to that document, so
+a shortlisted document can be read for why it is there before it is opened whole.
 
 Every setting has a title and definition (`msgspec.Meta` on the field; served as `/api/options` →
 `docs`, shown in the UI), so tuning is done in the UI rather than by reading this file. Chunk sizes
@@ -272,7 +282,7 @@ per-stage floors or a maintenance run would push it over. Each child runs under
 
 DBOS provides crash recovery (a restarted workflow resumes at its first unfinished step or child),
 deduplication (one active import per document, one active index per membership, one embedding run
-per cache id), cancellation, and the job history shown in the Jobs view. Retries follow the cause:
+per cache id), cancellation, and the job history shown in the Operations view. Retries follow the cause:
 a transient failure (busy database, slow file) is retried 3 times with backoff, a permanent one
 (unsupported file type, pages that need OCR, a document the parser cannot read) fails the document
 immediately, and a model download gets 5 attempts. Removing a document from a collection cancels
@@ -292,14 +302,14 @@ download warms it in a background task (a local read, no network) and only then 
 Searches that need a model still downloading or still warming fail fast with a clear message
 naming the job.
 
-### Jobs you can watch
+### Operations you can watch
 
 Long work you cannot see is work you do not trust, so every background job is visible and
 cancellable.
 
-Every kind of background work is one listing with one row shape, so the Jobs view is a section per
-kind, each paged on its own: `document` (an import, an embedding run or a collection index, with
-its micro-batches and its cancel), `collection` ("index all", collection delete and document
+Every kind of background work is one listing with one row shape, so the Operations view is a
+section per kind, each paged on its own: `document` (an import or a collection index, with its
+stages, its micro-batches and its cancel), `collection` ("index all", collection delete and document
 delete, with the progress the bulk index publishes), `download` (`ensure_model`, plus whether the
 model is loaded in this process), `maintenance` (`maintain_on_partition` runs and the nightly
 housekeeping) and `archive` (the hourly retention round). `GET
@@ -312,6 +322,23 @@ collection filter is an id prefix the database applies, for every kind whose id 
 collection (`idx-col:`, `bulk-index:`, `bulk-delete:`, `maint:`); imports and embedding runs
 belong to no collection. `GET /api/jobs` remains the document listing on its own, and it is the
 only kind that also reads the day partitions `archive` copied finished jobs into.
+
+A document row is one *operation*, not one workflow. An import converts and then spawns an
+`ensure_embedding` child it waits for; an index waits for that same child before it writes. Two
+rows for one thing a person asked for reads as twice the work, so the listing folds the child into
+its parent as a stage and the row carries `stages` in pipeline order — convert then embed for an
+import, embed then index for an index — each with its own status, batches and elapsed seconds. The
+activity indicator leaves the embedding queue out for the same reason. A stage's status comes from
+the child where the child knows better: a parent still running an embed it spawned has already
+finished converting, and an index that has not started writing is waiting rather than running.
+
+The Sessions view replays what a conversation did, because an agent that searched and imported on
+your behalf should leave a trail. Every search, import, attach, detach, describe and collection
+choice that carried a session id is one row in `session_events` — the query, how long it took, how
+many hits, which documents, and the job it started. `GET /api/sessions/{id}/history` serves the
+last 100, newest first. The rows go with the session. Insights charts the same events: searches
+per day (`GET /api/insights/searches`) and chunks indexed per day (`GET /api/insights/chunks`),
+both as raw points, since only the reader knows where its day boundaries are.
 
 ### Runtime
 

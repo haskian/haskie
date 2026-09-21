@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -706,6 +707,83 @@ async def test_session_search_returns_each_passage_once(client: AsyncTestClient)
     assert shared["collection"] == "alpha", "the first collection of the session is credited"
 
 
+async def test_documents_are_listed_with_their_collection_counts(ready: AsyncTestClient) -> None:
+    """The gallery says how many collections hold each document; a member of none says 0."""
+    items = (await ready.get("/api/documents")).json()["items"]
+    assert {row["name"]: row["collections"] for row in items} == {"guide.md": 1, "pending.md": 0}
+    assert (await ready.get("/api/documents/guide.md")).json()["collections"] == 1
+
+
+async def test_session_history_holds_every_action_newest_first(
+    ready: AsyncTestClient, tmp_path: Path
+) -> None:
+    """Every tool call that names a `session_id` leaves one event: what it did, to what, and the
+    job it started. The first action under an id creates the session, so an import made before
+    any selection belongs to the conversation too; a call without a session leaves nothing."""
+    (tmp_path / "later.md").write_text("# Later\n\nalpha again\n")
+    imported = await ready.post(
+        "/api/documents/import",
+        params={"session_id": "s2"},
+        json={"path": str(tmp_path / "later.md")},
+    )
+    assert imported.status_code == 201, imported.text
+    await document.set_status("later.md", "imported")
+    attached = await ready.post(
+        "/api/collections/notes/documents",
+        params={"session_id": "s2"},
+        json={"document": "later.md"},
+    )
+    assert attached.status_code == 202, attached.text
+    await ready.put("/api/sessions/s2", json={"collections": ["notes"]})
+    hits = (await ready.get("/api/search", params={"session_id": "s2", "q": "alpha"})).json()
+    await ready.get("/api/search/text", params={"session_id": "s2", "q": "alpha"})
+    await ready.get("/api/search/text", params={"q": "alpha"})  # no session: no event
+    await ready.put(
+        "/api/documents/later.md/description",
+        params={"session_id": "s2"},
+        json={"description": "the later one"},
+    )
+    assert (
+        await ready.delete("/api/collections/notes/documents/later.md", params={"session_id": "s2"})
+    ).status_code == 204
+
+    history = (await ready.get("/api/sessions/s2/history")).json()
+    assert [(row["action"], row["subject"]) for row in history] == [
+        ("detach", "later.md"),
+        ("describe", "later.md"),
+        ("search", "alpha"),
+        ("search", "alpha"),
+        ("collections", "notes"),
+        ("attach", "later.md"),
+        ("import", "later.md"),
+    ], "newest first, and the unsessioned search is absent"
+    by_action = {(row["action"], row["detail"].get("scope")): row for row in history}
+    session_search = by_action[("search", "session")]
+    assert session_search["detail"]["hits"] == len(hits) > 0
+    assert session_search["detail"]["docs"] == list(dict.fromkeys(hit["doc"] for hit in hits))
+    assert by_action[("search", "text")]["detail"]["hits"] > 0
+    assert by_action[("import", None)]["workflow_id"] == history[-1]["workflow_id"] is not None
+    assert by_action[("attach", None)]["workflow_id"] == attached.json()["job_id"]
+    assert by_action[("attach", None)]["detail"] == {"collection": "notes"}
+    assert by_action[("collections", None)]["detail"] == {"collections": ["notes"]}
+    assert all(row["duration_ms"] >= 0 and row["ts"] > 0 for row in history)
+    listed = {one["id"]: one for one in (await ready.get("/api/sessions")).json()}
+    assert listed["s2"]["collections"] == ["notes"], "the import created it, the put filled it"
+    assert listed["s2"]["last_at"] == history[0]["ts"], "last seen at its newest event"
+    assert listed["s1"]["last_at"] is not None, "the fixture put its selection: an event too"
+    assert (await ready.get("/api/sessions/never-set/history")).json() == []
+
+    (tmp_path / "plain.md").write_text("# Plain\n")
+    await ready.post("/api/documents/import", json={"path": str(tmp_path / "plain.md")})
+    jobs = (await ready.get("/api/jobs/by-kind", params={"kind": "document"})).json()["items"]
+    origins = {job["id"]: job["origin"] for job in jobs}
+    assert origins[attached.json()["job_id"]] == "s2"
+    assert origins[history[-1]["workflow_id"]] == "s2"
+    assert [job["origin"] for job in jobs if "plain.md" in job["title"]] == [None], (
+        "an import from the web UI came from nobody's session"
+    )
+
+
 async def test_session_search_survives_the_deletion_of_a_collection(
     client: AsyncTestClient,
 ) -> None:
@@ -728,7 +806,9 @@ async def test_session_search_survives_the_deletion_of_a_collection(
     search = await client.get("/api/search", params={"session_id": "s1", "q": "shared"})
     assert search.status_code == 200, "one deleted collection must not break every later search"
     assert [hit["collection"] for hit in search.json()] == ["kept"]
-    assert (await client.get("/api/sessions")).json() == {"s1": ["kept"]}
+    assert [(s["id"], s["collections"]) for s in (await client.get("/api/sessions")).json()] == [
+        ("s1", ["kept"])
+    ]
 
 
 # --- audit trail ---------------------------------------------------------------------
@@ -1211,3 +1291,36 @@ async def test_text_search_validates_page_size_and_cursor(
 
     assert response.status_code == status, f"{name}: {response.text}"
     assert detail in response.json()["detail"], name
+
+
+async def test_search_trend_lists_every_recent_search_oldest_first(ready: AsyncTestClient) -> None:
+    """The points the Insights chart buckets: one per search, with its session, and nothing else
+    a session did. A search without a session is nobody's and is left out."""
+    for session_id, q in [("t1", "alpha"), ("t2", "alpha"), ("t1", "beta")]:
+        await ready.get("/api/search/text", params={"q": q, "session_id": session_id})
+    await ready.get("/api/search/text", params={"q": "alpha"})
+    await ready.put("/api/sessions/t1", json={"collections": ["notes"]})
+
+    points = (await ready.get("/api/insights/searches", params={"days": 1})).json()
+
+    mine = [p for p in points if p["session_id"] in {"t1", "t2"}]
+    assert [p["session_id"] for p in mine] == ["t1", "t2", "t1"], "one point per search, in order"
+    assert [p["ts"] for p in mine] == sorted(p["ts"] for p in mine)
+    bad = await ready.get("/api/insights/searches", params={"days": 0})
+    assert bad.status_code == 422 and "days must be 1.." in bad.text
+
+
+async def test_chunk_trend_lists_finished_indexes_and_bounds_its_window(
+    client: AsyncTestClient,
+) -> None:
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "guide.md", MD.encode())
+    await attach_via_api(client, "notes", "guide.md")
+
+    (point,) = (await client.get("/api/insights/chunks", params={"days": 1})).json()
+
+    assert (point["collection"], point["chunks"] > 0) == ("notes", True)
+    assert abs(point["ts"] - time.time()) < 60
+    bad = await client.get("/api/insights/chunks", params={"days": 367})
+    assert bad.status_code == 422 and "days must be 1.." in bad.text
