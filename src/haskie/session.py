@@ -5,22 +5,20 @@ of them. A session search is about passages, not about memberships, so a chunk i
 `search`).
 """
 
-import asyncio
 import sqlite3
 import time
 from collections.abc import Sequence
 from typing import Any, Literal, Protocol
 
-import anyio
 import msgspec
 
 from haskie import cpu, db, models
-from haskie.collection import Collection, resolve_hit
+from haskie.collection import Collection
 from haskie.embed import embed_query, rerank_scores
-from haskie.errors import CollectionNotFound, InvalidInput
-from haskie.index import SEARCH_CONCURRENCY, CollectionIndex, Hit, RowKey, row_key
+from haskie.errors import InvalidInput, NotFound
+from haskie.index import CollectionIndex, Hit, RowKey, first_per_key, gather_rows, row_key
 from haskie.logs import get_logger
-from haskie.settings import SearchSettings, load_user_settings
+from haskie.settings import SearchOverrides, load_user_settings
 
 MAX_SESSION_ID = 128
 MAX_COLLECTIONS = 100  # a session selects collections by hand; a longer list is a client mistake
@@ -44,7 +42,7 @@ async def load() -> dict[str, list[str]]:
         )
         rows = await cursor.fetchall()
     for session_id, collection in rows:
-        sessions.setdefault(session_id, []).append(collection)
+        sessions[session_id].append(collection)
     return sessions
 
 
@@ -55,10 +53,11 @@ async def set_collections(session: str, collections: list[str]) -> list[str]:
     chosen = list(dict.fromkeys(collections))  # deduplicate, keep the caller's order
     if len(chosen) > MAX_COLLECTIONS:
         raise InvalidInput(f"at most {MAX_COLLECTIONS} collections per session, got {len(chosen)}")
-    for name in chosen:
-        await Collection.get(
-            name
-        )  # fail fast on an unknown collection, with its name in the message
+    # fail fast on an unknown collection, in one query and with its name in the message
+    known = await Collection.load_settings(chosen)
+    missing = [name for name in chosen if name not in known]
+    if missing:
+        raise NotFound(f"collection not found: {missing[0]}")
     async with db.connect() as conn:
         await conn.execute(
             "insert into sessions (id) values (?) on conflict (id) do nothing", (session,)
@@ -72,9 +71,7 @@ async def set_collections(session: str, collections: list[str]) -> list[str]:
             )
         except sqlite3.IntegrityError as exc:
             # the foreign key, not a duplicate: a collection deleted since the check above
-            raise CollectionNotFound(
-                "a chosen collection was deleted meanwhile; try again"
-            ) from exc
+            raise NotFound("a chosen collection was deleted meanwhile; try again") from exc
     return chosen
 
 
@@ -109,6 +106,18 @@ async def summaries() -> list[SessionSummary]:
     return [SessionSummary(id, collections, last.get(id)) for id, collections in loaded.items()]
 
 
+class EventDetail(msgspec.Struct, omit_defaults=True):
+    """Whatever the action has to say beyond its subject. One struct rather than a free dict, so
+    the generated client knows the fields: every one is optional, and an action fills the few that
+    apply to it."""
+
+    scope: str | None = None  # search: "session", "text", "documents", "passages", or a collection
+    hits: int | None = None  # search: how many passages came back
+    docs: list[str] | None = None  # search: the distinct documents among the hits, best first
+    collection: str | None = None  # attach, detach
+    collections: list[str] | None = None  # collections: the selection that was set
+
+
 class SessionEvent(msgspec.Struct):
     """One thing a session did: what, to what, and what came of it in one line.
 
@@ -118,7 +127,7 @@ class SessionEvent(msgspec.Struct):
     ts: float  # unix seconds
     action: Action
     subject: str  # the query, the document, "document -> collection", the chosen collections
-    detail: dict[str, Any]
+    detail: EventDetail
     workflow_id: str | None
     duration_ms: int
 
@@ -134,7 +143,7 @@ async def record(
     action: Action,
     subject: str,
     *,
-    detail: dict[str, Any] | None = None,
+    detail: EventDetail | None = None,
     workflow_id: str | None = None,
     duration_ms: int = 0,
 ) -> None:
@@ -158,7 +167,7 @@ async def record(
                 time.time(),
                 action,
                 subject,
-                msgspec.json.encode(detail or {}),
+                msgspec.json.encode(detail or EventDetail()),
                 workflow_id,
                 duration_ms,
             ),
@@ -181,7 +190,7 @@ async def record_search(
         session,
         "search",
         query,
-        detail={"scope": scope, "hits": len(found), "docs": docs},
+        detail=EventDetail(scope=scope, hits=len(found), docs=docs),
         duration_ms=int((time.perf_counter() - started) * 1000),
     )
 
@@ -216,7 +225,14 @@ async def history(session: str, limit: int = MAX_HISTORY) -> list[SessionEvent]:
         )
         rows = await cursor.fetchall()
     return [
-        SessionEvent(ts, action, subject, msgspec.json.decode(detail), workflow_id, duration_ms)
+        SessionEvent(
+            ts,
+            action,
+            subject,
+            msgspec.json.decode(detail, type=EventDetail),
+            workflow_id,
+            duration_ms,
+        )
         for ts, action, subject, detail, workflow_id, duration_ms in rows
     ]
 
@@ -283,64 +299,48 @@ async def search(session: str, query: str, limit: int | None = None) -> list[Hit
     if not plans:
         return []
     if len(plans) == 1:
-        return await plans[0][0].search(query, limit)
+        return await plans[0][0].search(query, SearchOverrides(limit=limit))
 
     embedding = user.embedding_model
     vector: list[float] | None = None
     if embedding is not None and any(settings.mode != "fts" for _, settings in plans):
         await models.require_ready("embedding", embedding.name)
-        vector = await cpu.on_cpu("embed_query", embed_query, embedding, query)
+        vector = await cpu.on_cpu(embed_query, embedding, query)
     if base.reranker != "none":
         await models.require_ready("reranker", base.reranker_model)  # fail before the fan-out
     candidates = max(base.candidates, limit)
-    # One semaphore per call, never at import time: an anyio primitive belongs to the loop that
-    # first used it, and both the Litestar loop and the DBOS loop run searches (see the plan).
-    slots = anyio.Semaphore(SEARCH_CONCURRENCY)
+    chosen = {collection.name: settings for collection, settings in plans}
 
-    async def retrieve(
-        plan: tuple[Collection, SearchSettings],
-    ) -> tuple[CollectionIndex, list[dict]]:
-        collection, settings = plan
-        index = collection.index_with(embedding)
+    async def retrieve(index: CollectionIndex) -> list[dict]:
+        settings = chosen[index.collection]
         wanted = None if settings.mode == "fts" else vector
         try:
-            async with slots:
-                return index, await index.search_rows(query, wanted, settings, candidates)
+            return await index.search_rows(query, wanted, settings, candidates)
         except Exception:
             _log.exception(
-                "session_collection_search_failed", collection=collection.name, session_id=session
+                "session_collection_search_failed", collection=index.collection, session_id=session
             )
             raise
 
-    # no `return_exceptions`: the first collection that cannot answer fails the whole search
-    retrieved = await asyncio.gather(*(retrieve(plan) for plan in plans))
+    retrieved = await gather_rows(
+        [collection.index_with(embedding) for collection, _ in plans], retrieve
+    )
 
     # `retrieved` is in the order of `plans`, which is the session's own order, so the first
     # collection that holds a passage is the one it is credited to.
     rows: dict[RowKey, tuple[CollectionIndex, dict]] = {}
-    rankings: list[list[RowKey]] = []
-    for index, found_rows in retrieved:
-        keys: list[RowKey] = []
-        for row in found_rows:
-            key = row_key(row)
-            if key in rows:
-                continue  # already in the fusion from an earlier collection
-            rows[key] = (index, row)
-            keys.append(key)
-        rankings.append(keys)
-    merged = rrf_merge(rankings, base.rrf_k)[:candidates]
+    rankings: dict[str, list[RowKey]] = {index.collection: [] for index, _ in retrieved}
+    for index, row in first_per_key((i, r) for i, found in retrieved for r in found):
+        key = row_key(row)
+        rows[key] = (index, row)
+        rankings[index.collection].append(key)
+    merged = rrf_merge(list(rankings.values()), base.rrf_k)[:candidates]
     if base.reranker != "none":
         scores = await cpu.on_cpu(
-            "rerank",
-            rerank_scores,
-            base.reranker_model,
-            user.pipeline.accelerator,
-            query,
-            [rows[key][1]["text"] for key, _ in merged],
+            rerank_scores, base.reranker_model, query, [rows[key][1]["text"] for key, _ in merged]
         )
         merged = sorted(zip([key for key, _ in merged], scores, strict=True), key=_by_score)
-    # the index knows the row, `resolve_hit` knows where the document's files are today
-    return [resolve_hit(rows[key][0].hit(rows[key][1], score)) for key, score in merged[:limit]]
+    return [rows[key][0].hit(rows[key][1], score) for key, score in merged[:limit]]
 
 
 def _by_score(scored: tuple[RowKey, float]) -> float:

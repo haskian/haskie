@@ -29,7 +29,7 @@ async def put_session(session_id: str, data: SessionCollections) -> list[str]:
     chosen = await session.set_collections(session_id, data.collections)
     audit.attach(collections=len(chosen))
     await session.record(
-        session_id, "collections", ", ".join(chosen), detail={"collections": chosen}
+        session_id, "collections", ", ".join(chosen), detail=session.EventDetail(collections=chosen)
     )
     return chosen
 
@@ -101,14 +101,15 @@ async def search_text(
 
 @get("/api/search/documents", mcp_tool="search_documents")
 async def search_documents(
-    q: str, collections: str | None = None, limit: int = 10, session_id: str | None = None
+    q: str, collections: str | None = None, limit: Limit = None, session_id: str | None = None
 ) -> list[textsearch.DocumentMatch]:
     """Which documents to read for a query, rather than which passages answer it.
 
     The same full-text scan as `search_text`, folded to one row per document: `score` blends the
     document's best chunk with the sum of every chunk that matched (a harmonic mean, so many weak
     chunks never outrank one strong one) and `chunks` says how many there were. Use it to narrow
-    to a shortlist, then `search_text` or `search` for the passages themselves.
+    to a shortlist, then `search_text` or `search` for the passages themselves. `limit` defaults
+    to the shortlist size `textsearch` keeps.
 
     Args:
         session_id: The conversation's id; the search then shows in that session's history.
@@ -121,7 +122,11 @@ async def search_documents(
 
 @get("/api/search/documents/{doc:str}", mcp_tool="document_passages")
 async def document_passages(
-    doc: str, q: str, collections: str | None = None, limit: int = 10, session_id: str | None = None
+    doc: str,
+    q: str,
+    collections: str | None = None,
+    limit: Limit = None,
+    session_id: str | None = None,
 ) -> list[Hit]:
     """The passages of one document that `search_documents` counted for it, best first.
 

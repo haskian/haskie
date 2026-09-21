@@ -86,17 +86,16 @@ documents again.
 One haskie per home: the app takes an exclusive lock on the home directory as its first startup
 step, and a second one refuses, naming the process that has it. A home is one SQLite file and one
 durable job pipeline, and two executors polling the same queues take each other's work. The lock
-lives in the app rather than in `run`, so `mise run api` and any other ASGI server are held to it
-too; the port is not the guard it looks like, because the server runs its whole startup before it
-binds. `haskie ensure` is the idempotent form: it starts a server only if nothing is serving yet.
+lives in the app rather than in `run`, so any other ASGI server is held to it too; the port is not
+the guard it looks like, because the server runs its whole startup before it binds. `haskie
+ensure` is the idempotent form: it starts a server only if nothing is serving yet.
 
 `destroy` asks before it deletes and prints what would be lost first. It refuses any directory
 that is not a haskie home, so a mistyped `--home` cannot take the wrong tree with it; `--yes`
 skips the prompt. Nothing is backed up, and a running `haskie run` should be stopped first.
 
-The built web UI ships inside the wheel, so an installed `haskie` serves the interface and not
-just the API. From a checkout, `mise run build` puts it there; without it the app still runs, API
-and MCP only.
+An installed `haskie` serves the web UI as well as the API. Run from a checkout it needs `mise run
+build` first; without the built UI the app still runs, API and MCP only.
 
 ## MCP: what your agent gets
 
@@ -225,8 +224,8 @@ Plain files in a directory you can back up, inspect or delete. No opaque store.
 ~/.haskie/
   cache/models/            compiled CoreML models (ONNX Runtime writes it; safe to delete)
   haskie.db               SQLite (aiosqlite, WAL): settings, documents, collections, memberships,
-                           embeddings metadata, sessions, plus DBOS workflow tables. Schema
-                           versioned via PRAGMA user_version.
+                           embeddings metadata, sessions, plus DBOS workflow tables. One schema
+                           snapshot, stamped in PRAGMA user_version; no upgrade path.
   staging/<uuid>.<ext>    uploads not yet imported; swept after a day by the nightly run
   documents/<sh>/<doc>/
     original.<ext>            the file as imported
@@ -240,7 +239,7 @@ Plain files in a directory you can back up, inspect or delete. No opaque store.
 ```
 
 `<sh>` is the shard directory of the entry: the first byte of the SHA-1 of its name, in hex
-(`layout.shard`). Ten thousand documents therefore spread over 256 directories instead of filling
+(`home.shard`). Ten thousand documents therefore spread over 256 directories instead of filling
 one.
 
 ### Indexing that survives a crash
@@ -270,7 +269,7 @@ and mostly wait on them, and a `task.*` queue holds the work itself.
 | `job.embedding` | same | `ensure_embedding`, one per cache id (its own queue: the orchestrators wait on it) |
 | `job.collection` | 2 | "index all", collection delete, document delete |
 | `job.downloads` | 2 | model downloads (`ensure_model`) |
-| `job.maintenance` | 4 | debounced maintenance, hourly archive, nightly housekeeping |
+| `job.maintenance` | 4 | debounced maintenance, nightly housekeeping |
 | `task.converting` | `converting_weight` share of `cpu_budget` | convert slices |
 | `task.embedding` | `embedding_weight` share of `cpu_budget` | embed slices |
 | `task.indexing` | `indexing_weight` share of `cpu_budget`, 1 per collection | index children, maintenance, removals |
@@ -317,8 +316,8 @@ Every kind of background work is one listing with one row shape, so the Operatio
 section per kind, each paged on its own: `document` (an import or a collection index, with its
 stages, its micro-batches and its cancel), `collection` ("index all", collection delete and document
 delete, with the progress the bulk index publishes), `download` (`ensure_model`, plus whether the
-model is loaded in this process), `maintenance` (`maintain_on_partition` runs and the nightly
-housekeeping) and `archive` (the hourly retention round). `GET
+model is loaded in this process) and `maintenance` (`maintain_on_partition` runs and the nightly
+housekeeping). `GET
 /api/jobs/by-kind?kind=&collection=&limit=&cursor=` serves one page of one kind and
 `GET /api/jobs/kinds` the sections themselves, with how many jobs of each kind are running right
 now (one grouped query). `GET /api/jobs/activity` is the indicator in the top-right of every view:
@@ -327,7 +326,12 @@ queue name prefix; a debounced maintenance run counts as queued until its delay 
 collection filter is an id prefix the database applies, for every kind whose id carries a
 collection (`idx-col:`, `bulk-index:`, `bulk-delete:`, `maint:`); imports and embedding runs
 belong to no collection. `GET /api/jobs` remains the document listing on its own, and it is the
-only kind that also reads the day partitions `archive` copied finished jobs into.
+only kind that also carries the micro-batch counts of every job it lists.
+
+The history itself is bounded by the nightly maintenance run: it deletes every job DBOS finished
+more than `retention.job_days` ago (default 28), with the stage children and step logs below it.
+Nothing else prunes those tables, so that run is what keeps the system database from growing with
+every document.
 
 A document row is one *operation*, not one workflow. An import converts and then spawns an
 `ensure_embedding` child it waits for; an index waits for that same child before it writes. Two
@@ -377,5 +381,35 @@ why each loop gets a thread limiter of its own, and why the search fan-out build
 call. Blocking file IO survives in four places, each documented as running in a worker thread and
 nowhere else: `convert.py` (the parsers take a path and read it themselves), `home.atomic_write_sync`
 and the inner function of `home.remove_tree`, the parquet reads and writes of `embed_cache.py`
-(pyarrow is sync), and `db._migrate_sync` (the migration scripts and the one-time WAL switch, on a
+(pyarrow is sync), and `db._migrate_sync` (the schema script and the one-time WAL switch, on a
 stdlib connection, before anything else holds the file open).
+
+## Developing
+
+Everything goes through [mise](https://mise.jdx.dev); `mise tasks` lists the rest.
+
+```sh
+mise run setup      # install the Python and web dependencies
+mise run check      # lint, format and type-check both sides; --fix applies what it can
+mise run test       # the Python suite, in parallel, with coverage
+mise run schema     # regenerate web/src/schema.d.ts from the API; `check` fails when it is stale
+mise run dev        # the API on :8000 and the Vite dev server on :5173, together
+mise run build      # build the web UI into src/haskie/web, so a wheel serves it too
+mise run dist       # build, then the wheel and sdist that ship it, into dist/
+```
+
+### Environment variables
+
+`haskie` reads these; every one has a working default, so none has to be set.
+
+| variable | default | purpose |
+| --- | --- | --- |
+| `HASKIE_HOME` | `~/.haskie` | where the home directory lives; same as `--home` |
+| `HASKIE_ADDRESS` | *unset* | the URL `run` recorded in the home lock, so a second start can name what already serves. Set by `run` itself |
+| `HASKIE_LOG_LEVEL` | `INFO` | level for every logger in the process, DBOS included |
+| `HASKIE_LOG_FORMAT` | `json` | `console` for human-readable logs instead |
+
+That is the whole list. The timing knobs are module constants instead (`workflows.JOB_POLL`,
+`workflows.TASK_POLL`, `workflows.RETRY_INTERVAL_SECONDS`,
+`models.DOWNLOAD_RETRY_INTERVAL_SECONDS`); the suite shortens the two queue polls in
+`tests/conftest.py`.

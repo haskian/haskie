@@ -18,20 +18,19 @@ across a page boundary, and creating or deleting a collection changes the query 
 issued for, so the cursor is rejected rather than quietly cutting a different ranking.
 """
 
-import asyncio
 import hashlib
 
-import anyio
 import msgspec
 
 from haskie import document
-from haskie.collection import Collection, resolve_hit
-from haskie.errors import CollectionNotFound, InvalidInput
-from haskie.index import SEARCH_CONCURRENCY, CollectionIndex, Hit, RowKey, row_key, row_score
-from haskie.paging import DEFAULT_PAGE_SIZE, OffsetCursor, Order, Page
+from haskie.collection import Collection
+from haskie.errors import InvalidInput, NotFound
+from haskie.index import CollectionIndex, Hit, first_per_key, gather_rows, row_key, row_score
+from haskie.paging import DEFAULT_PAGE_SIZE, OffsetCursor, Order, Page, check_page_size
 from haskie.settings import load_user_settings
 
 MAX_TEXT_PAGE_SIZE = 200  # a page of chunks is a page of text; 200 is already a lot for an agent
+DEFAULT_DOCUMENTS = 10  # a shortlist to choose from, not a page of passages
 MAX_DOCUMENTS = 100  # a shortlist nobody reads past; `search` is there for the chunks themselves
 # Chunks scanned per document asked for. A document can hold many matching chunks, so the scan has
 # to go deeper than the answer or the tail of the shortlist would be whichever documents happened
@@ -95,7 +94,7 @@ def _rank_key(pair: tuple[CollectionIndex, dict]) -> tuple[float, str, int, int,
 
 
 def merge(
-    per_collection: list[list[tuple[CollectionIndex, dict]]],
+    retrieved: list[tuple[CollectionIndex, list[dict]]],
 ) -> list[tuple[CollectionIndex, dict]]:
     """One ranking out of the per-collection rankings, with each passage in it once.
 
@@ -104,19 +103,11 @@ def merge(
     the walk would show one twice and the other never.
 
     A document in two collections puts the same (doc, part, chunk_id) in both their rankings. The
-    sort above puts those copies next to each other, best score first, so keeping the first of each
-    identity keeps the best-scoring copy and drops the duplicates deterministically.
+    sort puts those copies next to each other, best score first, so keeping the first of each
+    identity (`first_per_key`) keeps the best-scoring copy and drops the rest deterministically.
     """
-    ranked = sorted((pair for rows in per_collection for pair in rows), key=_rank_key)
-    seen: set[RowKey] = set()
-    unique: list[tuple[CollectionIndex, dict]] = []
-    for index, row in ranked:
-        identity = row_key(row)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        unique.append((index, row))
-    return unique
+    pairs = ((index, row) for index, rows in retrieved for row in rows)
+    return first_per_key(sorted(pairs, key=_rank_key))
 
 
 async def search(
@@ -130,14 +121,13 @@ async def search(
     `total` is None: counting the whole ranking costs the same as producing it, for a number no
     caller pages to. Searches are not audited, like every other search.
     """
-    if not 1 <= page_size <= MAX_TEXT_PAGE_SIZE:
-        raise InvalidInput(f"page_size must be 1..{MAX_TEXT_PAGE_SIZE}, got {page_size}")
+    check_page_size(page_size, MAX_TEXT_PAGE_SIZE)
     known = await Collection.names()
     names = list(dict.fromkeys(collections)) if collections else known
     # an unknown name is a mistake in the request, not an empty page (as when a session picks one)
     unknown = next((name for name in names if name not in set(known)), None)
     if unknown is not None:
-        raise CollectionNotFound(f"collection not found: {unknown}")
+        raise NotFound(f"collection not found: {unknown}")
     chosen = [Collection(name) for name in names]
     offset = parse_cursor(cursor, q, names, page_size)
     depth = offset + page_size
@@ -147,25 +137,17 @@ async def search(
         return Page(items=[], next_cursor=None, total=None)
 
     embedding = (await load_user_settings()).embedding_model  # read once, not once per collection
-    # One semaphore per call, never at import time: an anyio primitive belongs to the loop that
-    # first used it, and both the Litestar loop and the DBOS loop run searches (see the plan).
-    slots = anyio.Semaphore(SEARCH_CONCURRENCY)
-
-    async def retrieve(collection: Collection) -> list[tuple[CollectionIndex, dict]]:
-        index = collection.index_with(embedding)
-        async with slots:
-            return [(index, row) for row in await index.fts_rows(q, depth)]
-
-    # no `return_exceptions`: the first collection that cannot answer fails the whole page
-    retrieved = await asyncio.gather(*(retrieve(collection) for collection in chosen))
+    retrieved = await gather_rows(
+        [collection.index_with(embedding) for collection in chosen],
+        lambda index: index.fts_rows(q, depth),
+    )
 
     merged = merge(retrieved)
     # a collection that returned exactly `depth` rows is holding back rows that may rank into the
     # next page, so it counts as "more" even when the merge alone would look exhausted
-    more = len(merged) > depth or any(len(rows) == depth for rows in retrieved)
+    more = len(merged) > depth or any(len(rows) == depth for _, rows in retrieved)
     return Page(
-        # the index knows the row, `collection.resolve_hit` knows where the files are
-        items=[resolve_hit(index.hit(row)) for index, row in merged[offset:depth]],
+        items=[index.hit(row) for index, row in merged[offset:depth]],
         next_cursor=make_cursor(q, names, page_size, depth) if more and depth < MAX_DEPTH else None,
         total=None,
     )
@@ -197,7 +179,7 @@ class DocumentMatch(msgspec.Struct):
 
 
 async def search_documents(
-    q: str, collections: list[str] | None = None, limit: int = 10
+    q: str, collections: list[str] | None = None, limit: int | None = None
 ) -> list[DocumentMatch]:
     """The distinct documents a full-text query matches, best first.
 
@@ -207,6 +189,7 @@ async def search_documents(
     chunk came from. Scores are raw BM25 and therefore comparable, for the reason in the module
     docstring.
     """
+    limit = _document_limit(limit)
     page = await search(q, collections, page_size=_scan_size(limit))
     by_doc: dict[str, list[Hit]] = {}
     for hit in page.items:
@@ -247,22 +230,25 @@ def _document_score(best: float, total: float) -> float:
     return 2 * best * total / (best + total)
 
 
+def _document_limit(limit: int | None) -> int:
+    """The shortlist size the caller asked for, defaulted and bounded."""
+    return check_page_size(DEFAULT_DOCUMENTS if limit is None else limit, MAX_DOCUMENTS, "limit")
+
+
 def _scan_size(limit: int) -> int:
     """How many chunks the shortlist of `limit` documents is folded from."""
-    if not 1 <= limit <= MAX_DOCUMENTS:
-        raise InvalidInput(f"limit must be 1..{MAX_DOCUMENTS}, got {limit}")
     return min(limit * DOCUMENT_SCAN, MAX_TEXT_PAGE_SIZE)
 
 
 async def document_passages(
-    q: str, doc: str, collections: list[str] | None = None, limit: int = 10
+    q: str, doc: str, collections: list[str] | None = None, limit: int | None = None
 ) -> list[Hit]:
     """The passages of one document behind its row in the shortlist, best first.
 
     The same scan `search_documents` folds, for the same `limit`, kept to `doc`: exactly the
     `chunks` its row counted, unfolded. A document the scan never reached is an empty list.
     """
-    page = await search(q, collections, page_size=_scan_size(limit))
+    page = await search(q, collections, page_size=_scan_size(_document_limit(limit)))
     return [hit for hit in page.items if hit.doc == doc]
 
 

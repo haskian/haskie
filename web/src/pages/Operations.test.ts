@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { JobKind, JobKindSummary, JobRow, Stage, StageJob, Task } from '../api'
+import type { JobKind, JobKindSummary, JobRow, Stage, StageJob, Task, WorkflowStatus } from '../api'
 import type { StageState } from '../ui'
 import { dayGroup, groupJobs, statusGroup, type GroupBy } from './operations/group'
 import { endsOf, jobState, stageDefs, stageInfo, stagesFor, tagOf, taskState, taskText } from './operations/stages'
@@ -16,7 +16,6 @@ const JOB: JobRow = {
   created_at: STARTED,
   updated_at: STARTED + 38,
   error: null,
-  archived: false,
   origin: null,
   detail: { tasks_done: 9, tasks_running: 2, tasks_total: 22 },
   stages: [
@@ -32,6 +31,7 @@ const job = (patch: Partial<JobRow>): JobRow => ({ ...JOB, ...patch })
 // A real row of `/api/jobs/{id}/tasks`.
 const TASK: Task = {
   id: 'import:renders/lamp.pdf:0194f2:convert:0',
+  child_id: 'import:renders/lamp.pdf:0194f2:convert',
   stage: 'convert',
   seq: 0,
   page_start: 0,
@@ -48,7 +48,6 @@ const KINDS: JobKindSummary[] = [
   { kind: 'collection', label: 'Collections', active: 0 },
   { kind: 'download', label: 'Model downloads', active: 0 },
   { kind: 'maintenance', label: 'Maintenance', active: 0 },
-  { kind: 'archive', label: 'Archive', active: 0 },
 ]
 
 interface StagesCase {
@@ -186,10 +185,10 @@ describe('stagesFor', () => {
       expected: [{ label: 'Maintenance', done: 0, total: 1, state: 'error', seconds: 38 }],
     },
     {
-      name: 'a cancelled archive round is neither done nor running',
-      job: job({ kind: 'archive', title: 'archive finished jobs', status: 'CANCELLED', detail: {} }),
+      name: 'a cancelled maintenance run is neither done nor running',
+      job: job({ kind: 'maintenance', title: 'maintain notes', status: 'CANCELLED', detail: {} }),
       tasks: null,
-      expected: [{ label: 'Archive', done: 0, total: 1, state: 'todo', seconds: undefined }],
+      expected: [{ label: 'Maintenance', done: 0, total: 1, state: 'todo', seconds: undefined }],
     },
   ]
 
@@ -201,7 +200,7 @@ describe('stagesFor', () => {
 })
 
 describe('jobState', () => {
-  const cases: { name: string; status: string; expected: StageState }[] = [
+  const cases: { name: string; status: WorkflowStatus; expected: StageState }[] = [
     { name: 'success is done', status: 'SUCCESS', expected: 'done' },
     { name: 'error is an error', status: 'ERROR', expected: 'error' },
     { name: 'enqueued is active', status: 'ENQUEUED', expected: 'active' },
@@ -229,7 +228,7 @@ describe('taskText', () => {
 })
 
 describe('taskState', () => {
-  const cases: { name: string; status: string; expected: 'done' | 'error' | 'todo' }[] = [
+  const cases: { name: string; status: WorkflowStatus; expected: 'done' | 'error' | 'todo' }[] = [
     { name: 'success is done', status: 'SUCCESS', expected: 'done' },
     { name: 'error is an error', status: 'ERROR', expected: 'error' },
     { name: 'anything unfinished is todo', status: 'PENDING', expected: 'todo' },
@@ -267,13 +266,13 @@ describe('stageInfo', () => {
 })
 
 describe('statusGroup', () => {
-  const cases: { name: string; status: string; expected: string }[] = [
+  const cases: { name: string; status: WorkflowStatus; expected: string }[] = [
     { name: 'enqueued is running', status: 'ENQUEUED', expected: 'Running' },
     { name: 'pending is running', status: 'PENDING', expected: 'Running' },
     { name: 'success is completed', status: 'SUCCESS', expected: 'Completed' },
     { name: 'error is failed', status: 'ERROR', expected: 'Failed' },
     { name: 'cancelled keeps its own word', status: 'CANCELLED', expected: 'Cancelled' },
-    { name: 'a status the page does not know keeps its raw name', status: 'RETRIES_EXCEEDED', expected: 'RETRIES_EXCEEDED' },
+    { name: 'a status the page does not know keeps its raw name', status: 'MAX_RECOVERY_ATTEMPTS_EXCEEDED', expected: 'MAX_RECOVERY_ATTEMPTS_EXCEEDED' },
   ]
   for (const testCase of cases) {
     test(testCase.name, () => {
@@ -307,11 +306,11 @@ describe('groupJobs', () => {
     },
     {
       name: 'an unknown status sorts after the ones the page knows',
-      jobs: [job({ id: 'x', status: 'RETRIES_EXCEEDED' }), finished],
+      jobs: [job({ id: 'x', status: 'MAX_RECOVERY_ATTEMPTS_EXCEEDED' }), finished],
       by: 'status',
       expected: [
         { key: 'Completed', ids: ['b'] },
-        { key: 'RETRIES_EXCEEDED', ids: ['x'] },
+        { key: 'MAX_RECOVERY_ATTEMPTS_EXCEEDED', ids: ['x'] },
       ],
     },
     {

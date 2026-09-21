@@ -19,13 +19,14 @@ permissions:
   contents: read
 
 # `github.ref_name` on a tag push; the input when version.yml calls this, because a called
-# workflow inherits the caller's `github` context — there the caller's SHA is the commit before
-# the bump commit that set the version.
+# workflow inherits the caller's `github` context, where the SHA is the commit before the bump.
 env:
   BUILD_REF: ${{ inputs.ref || github.ref_name }}
 
 jobs:
-  # Publishing an artifact that fails its own test suite is not worth the convenience.
+  # Publishing an artifact that fails its own test suite is not worth the convenience. Neither
+  # path into here is covered otherwise: version.yml pushes the bump commit with `[skip ci]`, and
+  # a hand-pushed tag starts no suite of its own.
   ci:
     uses: ./.github/workflows/ci.yml
 
@@ -39,8 +40,7 @@ jobs:
           ref: ${{ env.BUILD_REF }}
       - uses: jdx/mise-action@v2
       # No `mise run setup`: `dist` builds the web itself and `uv build`/`smoke` use isolated
-      # envs, so a project `uv sync` would be pure waste here. BUILD_REF makes `dist` refuse a
-      # tag that disagrees with the tree's declared version.
+      # envs. BUILD_REF makes `dist` refuse a tag that disagrees with the tree's declared version.
       - run: mise run dist
       # An artifact that cannot be installed fails in the adopter's environment, not here.
       - run: mise run smoke

@@ -4,12 +4,13 @@ import msgspec
 import pytest
 
 from haskie import jobs
+from haskie.dbos_names import WorkflowStatus
 
 TAIL = "c3680a02207a41f89078486d1b3a4c90"
 DOC = "principles.pdf"
 
 
-def job(action: jobs.JobAction, status: str = "SUCCESS", **patch) -> jobs.Job:
+def job(action: jobs.JobAction, status: WorkflowStatus = "SUCCESS", **patch) -> jobs.Job:
     prefix = {"import": "imp", "embed": "emb", "index": "idx-col:asd"}[action]
     base = jobs.Job(
         id=f"{prefix}:{DOC}:{TAIL}",

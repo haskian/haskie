@@ -8,37 +8,33 @@ write into this collection's table), so a membership carries its own status — 
 `indexed` in one collection and `error` in another at the same time. Deleting a collection drops
 its rows and its folder and touches no document.
 
-Settings are read on every search, listing and pipeline step, and written only through
-`set_settings`, so the decoded struct is cached per collection for this process. Anything that
-writes the `collections.settings` column another way must call `invalidate_collection_caches()`.
-
 Every row read, row write and file touch is awaited: the database goes through `db.connect()`
 (aiosqlite), the files through `anyio.Path` and `home`, the table through `CollectionIndex`. The
-pure parts (paths, row decoding, `resolve_hit`) stay sync.
+pure parts (paths, row decoding) stay sync.
 """
 
-import threading
 import time
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 import aiosqlite
 import anyio
 import msgspec
 
 from haskie import db, document, home
-from haskie.errors import CollectionNotFound, Conflict, DocumentNotFound
+from haskie.errors import Conflict, NotFound
 from haskie.index import CollectionIndex, Hit, IndexStats, forget_schema
-from haskie.layout import shard
 from haskie.paging import Page, PageRequest, key_reader, keyset, resolve_sort
 from haskie.settings import (
     ChunkSettings,
     CollectionSettings,
     EmbeddingModel,
+    SearchOverrides,
     SearchSettings,
     load_user_settings,
 )
 
 MemberStatus = Literal["pending", "indexing", "indexed", "error", "cancelled"]
+MEMBER_STATUSES: tuple[MemberStatus, ...] = get_args(MemberStatus)
 # being written into the collection right now: the states a poll waits on
 ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = ("pending", "indexing")
 
@@ -53,9 +49,6 @@ MEMBER_SORTS = {
     "status": "cd.status",
     "updated_at": "cd.updated_at",
 }
-
-# aiosqlite annotates every fetched row as `sqlite3.Row`, but `db.connect()` leaves the default row
-# factory alone, so a row really is a tuple. The reads below say `Any` where the row is unpacked.
 
 
 class DocumentCounts(msgspec.Struct):
@@ -91,21 +84,6 @@ class CollectionSummary(msgspec.Struct):
     description: str = ""
 
 
-class IndexStatus(msgspec.Struct):
-    """The collection's LanceDB table as it is right now, plus how its maintenance stands.
-    Read on demand (`Collection.info`), never stored: the table is its own source of truth."""
-
-    num_rows: int
-    num_fragments: int
-    num_small_fragments: int
-    has_fts_index: bool
-    has_vector_index: bool
-    unindexed_rows: int
-    vector_index_rows: int
-    last_maintained_at: float | None
-    pending_docs: int
-
-
 class CollectionInfo(msgspec.Struct):
     name: str
     settings: CollectionSettings
@@ -113,8 +91,10 @@ class CollectionInfo(msgspec.Struct):
     search: SearchSettings
     description: str
     counts: DocumentCounts  # the members themselves are paged, at /api/collections/{name}/documents
+    maintenance: MaintenanceState  # how the collection's own maintenance stands
     index_outdated: bool = False  # built by an older version or embedding; "Index all" fixes
-    index: IndexStatus | None = None  # None until the collection has a table
+    # the table as it is right now, read on demand and never stored; None until there is one
+    index: IndexStats | None = None
 
 
 class Member(msgspec.Struct):
@@ -141,18 +121,6 @@ def _member(row: tuple) -> Member:
         error=error,
         added_at=added_at,
         updated_at=updated_at,
-    )
-
-
-def _index_status(
-    stats: IndexStats, last_maintained_at: float | None, pending_docs: int
-) -> IndexStatus:
-    """`IndexStatus` is `IndexStats` plus the two maintenance columns, so it is built from it
-    rather than field by field: a new stat reaches the API by being added once."""
-    return IndexStatus(
-        **msgspec.structs.asdict(stats),
-        last_maintained_at=last_maintained_at,
-        pending_docs=pending_docs,
     )
 
 
@@ -185,54 +153,10 @@ async def _counts_by_collection(
     return {name: _counts(by_status) for name, by_status in by_collection.items()}
 
 
-_settings_cache: dict[str, CollectionSettings] = {}
-# A threading lock rather than an async one, because both event loops of this process (Litestar's
-# and DBOS's) read collection settings. It is never held across an `await` — a reader that misses
-# runs its query outside the lock and then keeps whatever a writer stored meanwhile.
-_settings_lock = threading.Lock()
-
-
-def invalidate_collection_caches() -> None:
-    """Forget every cached settings struct, so the next read goes to the database."""
-    with _settings_lock:
-        _settings_cache.clear()
-
-
-def _forget_settings(name: str) -> None:
-    with _settings_lock:
-        _settings_cache.pop(name, None)
-
-
-def _cache_settings(found: dict[str, CollectionSettings]) -> None:
-    """Store rows just read, without overwriting a value a writer cached while we were reading:
-    the writer's row is the newer one (see `set_settings`)."""
-    with _settings_lock:
-        for name, value in found.items():
-            _settings_cache.setdefault(name, value)
-
-
 def _decode_settings(rows: list[Any]) -> dict[str, CollectionSettings]:
-    """Decode `(name, settings)` rows into the struct every caller reads, filling the
-    per-collection cache on the way. A row with unreadable JSON falls back to the defaults, which
-    is what a collection that never set any has."""
-    found = {
-        name: (db.loads(raw, CollectionSettings) or CollectionSettings()) for name, raw in rows
-    }
-    _cache_settings(found)
-    return found
-
-
-def resolve_hit(hit: Hit) -> Hit:
-    """Fill in the absolute file paths of a hit, in place.
-
-    The index stores the document's paths home-relative so the home stays portable; they are
-    document paths (`documents/<shard>/<doc>/original...`), not collection paths, because the file
-    a hit points into belongs to the document, whichever collection matched it. Module-level for
-    the same reason: it reads the home, nothing a collection owns.
-    """
-    hit.source_file = str(home.HOME / hit.source_path) if hit.source_path else ""
-    hit.markdown_file = str(home.HOME / hit.markdown_path) if hit.markdown_path else ""
-    return hit
+    """Decode `(name, settings)` rows into the struct every caller reads. A row with unreadable
+    JSON falls back to the defaults, which is what a collection that never set any has."""
+    return {name: (db.loads(raw, CollectionSettings) or CollectionSettings()) for name, raw in rows}
 
 
 class Collection:
@@ -240,7 +164,7 @@ class Collection:
         """Sync and IO-free: a `Collection` is a name and the paths derived from it. `get` is the
         constructor that checks the collection exists."""
         self.name = name
-        self.root = home.COLLECTION_ROOT / shard(name) / name
+        self.root = home.COLLECTION_ROOT / home.shard(name) / name
         self.index_dir = self.root / "index"
 
     # --- lifecycle -------------------------------------------------------
@@ -295,7 +219,6 @@ class Collection:
             created = cursor.rowcount == 1  # read on the open connection, before it is closed
         if not created:
             raise Conflict(f"collection already exists: {collection.name}")
-        _forget_settings(collection.name)  # a read before the insert may have cached defaults
         await anyio.Path(collection.root).mkdir(parents=True, exist_ok=True)
         return collection
 
@@ -305,7 +228,7 @@ class Collection:
             cursor = await conn.execute("select 1 from collections where name = ?", (name,))
             row = await cursor.fetchone()
         if row is None:
-            raise CollectionNotFound(f"collection not found: {name}")
+            raise NotFound(f"collection not found: {name}")
         return cls(name)
 
     async def delete(self) -> None:
@@ -323,7 +246,6 @@ class Collection:
         (`session_collections`); `pragma foreign_keys = on` is set on every connection."""
         async with db.connect() as conn:
             await conn.execute("delete from collections where name = ?", (self.name,))
-        _forget_settings(self.name)  # a collection created again under this name starts clean
 
     async def remove_tree(self) -> None:
         """The index table of the collection."""
@@ -333,36 +255,21 @@ class Collection:
     # --- settings --------------------------------------------------------
 
     async def settings(self) -> CollectionSettings:
-        with _settings_lock:
-            cached = _settings_cache.get(self.name)
-        if cached is not None:
-            return cached
-        # The query runs outside the lock: a threading lock held across an `await` would block
-        # every other reader, event loop included. Two readers that miss at the same time both
-        # read the same row, which is harmless, and neither can replace a value a writer cached
-        # meanwhile (see `_cache_settings`).
-        async with db.connect() as conn:
-            cursor = await conn.execute(
-                "select settings from collections where name = ?", (self.name,)
-            )
-            row = await cursor.fetchone()
-        value = (db.loads(row[0], CollectionSettings) if row else None) or CollectionSettings()
-        with _settings_lock:
-            return _settings_cache.setdefault(self.name, value)
+        """The defaults for a collection with no row: a caller that needs the absence to be
+        visible reads `load_settings` instead."""
+        found = await Collection.load_settings([self.name])
+        return found.get(self.name, CollectionSettings())
 
     async def set_settings(self, value: CollectionSettings) -> None:
         async with db.connect() as conn:
             await conn.execute(
                 "update collections set settings = ? where name = ?", (db.dumps(value), self.name)
             )
-        with _settings_lock:  # after the commit, so a reader cannot cache the previous value
-            _settings_cache[self.name] = value
 
     @staticmethod
     async def load_settings(names: list[str]) -> dict[str, CollectionSettings]:
         """The settings of several collections in one query, keyed by name. A name with no row
-        is absent from the result, which is how a caller learns the collection is gone. Fills
-        the per-collection cache on the way."""
+        is absent from the result, which is how a caller learns the collection is gone."""
         wanted = list(dict.fromkeys(names))
         if not wanted:
             return {}
@@ -379,8 +286,7 @@ class Collection:
         """Every reranker model a collection overrides, in name order and without duplicates.
 
         One query over the `settings` column: the model downloads have to cover the overrides too,
-        and a search of that collection loads whichever model it names. Fills the per-collection
-        cache on the way, like `load_settings` does."""
+        and a search of that collection loads whichever model it names."""
         async with db.connect() as conn:
             cursor = await conn.execute("select name, settings from collections order by name")
             rows: list[Any] = list(await cursor.fetchall())
@@ -408,41 +314,22 @@ class Collection:
             )
             row: Any = await cursor.fetchone()
             if row is None:
-                raise CollectionNotFound(f"collection not found: {self.name}")
-            cursor = await conn.execute(
-                "select status, count(*) from collection_documents where collection = ? group by 1",
-                (self.name,),
-            )
-            counted = await cursor.fetchall()
+                raise NotFound(f"collection not found: {self.name}")
+            counts = (await _counts_by_collection(conn, [self.name]))[self.name]
         raw, description, *maintenance = row
         settings = _decode_settings([(self.name, raw)])[self.name]
-        state = MaintenanceState(*maintenance)
         index = self.index_with(user.embedding_model)  # one handle: each opens its own connection
-        stats = await index.stats()
         return CollectionInfo(
             name=self.name,
             settings=settings,
             effective=settings.resolve(user),
             search=settings.resolve_search(user),
             description=description,
-            counts=_counts({status: count for status, count in counted}),
+            counts=counts,
             index_outdated=not await index.schema_current(),
-            # None while the collection has no table
-            index=(
-                _index_status(stats, state.last_maintained_at, state.pending_docs)
-                if stats is not None
-                else None
-            ),
+            index=await index.stats(),
+            maintenance=MaintenanceState(*maintenance),
         )
-
-    async def description(self) -> str:
-        """Empty for a collection that has none, and for one that no longer exists."""
-        async with db.connect() as conn:
-            cursor = await conn.execute(
-                "select description from collections where name = ?", (self.name,)
-            )
-            row = await cursor.fetchone()
-        return row[0] if row else ""
 
     async def describe(self, description: str) -> None:
         """Replace the collection's description. Empty clears it."""
@@ -503,15 +390,14 @@ class Collection:
 
     # --- search ----------------------------------------------------------
 
-    async def search(self, query: str, limit: int | None = None, **overrides) -> list[Hit]:
-        """`limit` and any SearchSettings field can be overridden per call."""
+    async def search(self, query: str, overrides: SearchOverrides | None = None) -> list[Hit]:
+        """Any SearchSettings field, `limit` included, can be overridden per call; a field left
+        None keeps the collection's own setting."""
         settings = await self.search_settings()
-        if limit:
-            overrides["limit"] = limit
-        if overrides:
-            settings = msgspec.structs.replace(settings, **overrides)
+        if overrides is not None:
+            settings = overrides.resolve(settings)
         index = await self.index()
-        return [resolve_hit(hit) for hit in await index.search(query, settings)]
+        return await index.search(query, settings)
 
     async def index(self) -> CollectionIndex:
         return self.index_with((await load_user_settings()).embedding_model)
@@ -531,7 +417,7 @@ class Collection:
         the caller: one still importing has no markdown to chunk yet, and one being deleted must
         not gain a membership the delete's snapshot missed.
         """
-        row = await document.get(doc)  # DocumentNotFound before anything is written
+        row = await document.get(doc)  # NotFound before anything is written
         if row.status != "imported":
             raise Conflict(
                 f"document is {row.status}; only an imported document joins a collection: {doc}"
@@ -554,7 +440,7 @@ class Collection:
             )
             row: Any = await cursor.fetchone()
         if row is None:
-            raise DocumentNotFound(f"document not in collection {self.name}: {doc}")
+            raise NotFound(f"document not in collection {self.name}: {doc}")
         return _member(row)
 
     async def set_member_status(
@@ -599,12 +485,7 @@ class Collection:
 
     async def counts(self) -> DocumentCounts:
         async with db.connect() as conn:
-            cursor = await conn.execute(
-                "select status, count(*) from collection_documents where collection = ? group by 1",
-                (self.name,),
-            )
-            rows = await cursor.fetchall()
-        return _counts({status: count for status, count in rows})
+            return (await _counts_by_collection(conn, [self.name]))[self.name]
 
     async def members_page(
         self, request: PageRequest, status: MemberStatus | None = None

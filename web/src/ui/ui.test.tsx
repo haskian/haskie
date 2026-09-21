@@ -37,7 +37,6 @@ const noop = (): void => {}
 const HIT: Hit = {
   collection: 'A–E',
   doc: 'area.pdf',
-  home: '/home/ada/.haskie',
   source_path: 'sources/area.pdf',
   markdown_path: 'markdown/area.md',
   part: 0,

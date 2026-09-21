@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 #MISE description="Install the built wheel in a fresh venv and check the CLI + bundled UI"
-# An artifact that cannot be installed is worse than no artifact: it fails in the adopter's
-# environment rather than here. Install into a throwaway venv, off the source tree, so nothing
-# resolves from the working directory instead of the wheel.
 set -euo pipefail
+# A throwaway venv, off the source tree, so nothing resolves from the working directory instead
+# of the wheel.
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 uv venv "$tmp/venv"

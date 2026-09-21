@@ -5,26 +5,18 @@ migrations, `run` is uvicorn over `app:create_app` — so the CLI adds a way in,
 of doing the work.
 """
 
-import asyncio
-import json
 import os
-import shlex
-import shutil
 import subprocess
-import sys
 import time
-import urllib.request
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated
 from urllib.parse import urlsplit
 
 import typer
 
-from haskie import APP_VERSION, home
+from haskie import APP_VERSION, claude, home
 from haskie.claude import DEFAULT_HOST, DEFAULT_PORT, MCP_URL, Scope
-
-if TYPE_CHECKING:
-    from haskie.collection import CollectionSummary
+from haskie.errors import HaskieError
 
 cli = typer.Typer(
     name="haskie",
@@ -34,11 +26,14 @@ cli = typer.Typer(
 )
 
 
+VERSION_LINE = f"haskie {APP_VERSION}"
+
+
 def _print_version(shown: bool) -> None:
     """`--version` before anything else: eager, so it answers without a subcommand and without
     touching the home directory."""
     if shown:
-        typer.echo(f"haskie {APP_VERSION}")
+        typer.echo(VERSION_LINE)
         raise typer.Exit()
 
 
@@ -69,11 +64,8 @@ HomeOption = Annotated[
 
 
 def _use_home(path: Path | None) -> None:
-    """Point the process at `path` before anything reads the home layout.
-
-    `home` resolves its paths at import time from the environment, so a `--home` has to be put
-    back into the environment and the module's own paths refreshed.
-    """
+    """Point the process at `path` before anything reads the home layout. The environment carries
+    it too, so a `--reload` child re-reads the same root (see `home.HOME`)."""
     if path is None:
         return
     resolved = str(Path(path).expanduser().resolve())
@@ -91,17 +83,13 @@ def init(home_dir: HomeOption = None) -> None:
     A home written before documents became collection-independent cannot be migrated, so the
     migration refuses it and says what to do instead (see `db.INCOMPATIBLE_HOME_MESSAGE`).
     """
+    import asyncio
+
     from haskie import db
-    from haskie.errors import HaskieError
 
     _use_home(home_dir)
-
-    async def prepare() -> None:
-        await home.ensure_home()
-        await db.migrate_once()
-
     try:
-        asyncio.run(prepare())
+        asyncio.run(db.migrate_once())  # makes the home first (see `db.migrate_once`)
     except HaskieError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
@@ -127,10 +115,11 @@ def run(
     # refusal is one line here instead of a lifespan traceback out of uvicorn.
     held = home.home_holder()
     if held is not None:
-        typer.echo(f"haskie is already running for {home.HOME} ({held})", err=True)
+        typer.echo(held, err=True)
         raise typer.Exit(code=1)
-    # The address the startup hook records, for the next process's message.
-    home.ADDRESS = os.environ["HASKIE_ADDRESS"] = f"http://{host}:{port}"
+    # The address the startup hook records, for the next process's message. The environment is the
+    # one carrier, so a `--reload` child that re-imports `home` records the same thing.
+    os.environ["HASKIE_ADDRESS"] = f"http://{host}:{port}"
     typer.echo(f"haskie {APP_VERSION} on http://{host}:{port}  (home: {home.HOME})")
     uvicorn.run(
         "haskie.app:create_app",
@@ -149,18 +138,24 @@ START_DEADLINE = 60.0  # a cold boot runs migrations and launches DBOS before it
 START_POLL = 0.25
 
 
-def _status_url(url: str) -> str:
-    """`/api/status` of the app serving `url`: the cheapest proof that a haskie is up."""
-    parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}/api/status"
-
-
 def _serving(url: str) -> bool:
+    """`/api/status` of the app serving `url`: the cheapest proof that a haskie is up.
+
+    `http.client` rather than `urllib.request`, and imported here rather than at module scope:
+    `urlopen` builds a global opener whose `ProxyHandler` reads the system proxy configuration,
+    which costs more than the request and can never apply to loopback anyway.
+    """
+    from http.client import HTTPConnection
+
+    parts = urlsplit(url)
+    connection = HTTPConnection(parts.hostname or "", parts.port or 80, timeout=PROBE_TIMEOUT)
     try:
-        with urllib.request.urlopen(_status_url(url), timeout=PROBE_TIMEOUT) as response:
-            return response.status == 200
-    except OSError:  # URLError and TimeoutError are both OSError
+        connection.request("GET", "/api/status")
+        return connection.getresponse().status == 200
+    except OSError:  # a refused connection and a timeout are both OSError
         return False
+    finally:
+        connection.close()
 
 
 @cli.command()
@@ -173,20 +168,13 @@ def ensure(
 ) -> None:
     """Start haskie if nothing is serving `url`, and wait for it unless told not to.
 
-    An MCP client reaches haskie over HTTP, so the server has to be up before the client connects.
-    This is what `haskie install claude` puts in Claude Code's SessionStart hook, and it is safe to
-    run as often as you like: an already-serving haskie costs one loopback request.
-
-    The server it starts is detached and outlives this command on purpose - the next session
-    reuses it, and the web UI stays up. Racing callers are safe: the app claims the home before it
+    The server it starts is detached and outlives this command on purpose: the next session reuses
+    it, and the web UI stays up. Racing callers are safe - the app claims the home before it
     touches the database, so every loser exits early and the wait below finds the one winner.
 
-    `--no-wait` returns as soon as the server is spawned. That is what the hook uses: a client
-    connects to the MCP endpoint while the hook is still running, so waiting cannot help the
-    session that starts it, and a haskie that fails to boot would stall every session start.
-
-    ponytail: nothing stops the server it starts. A launchd agent is the upgrade path for a
-    machine that should always have haskie up.
+    Claude Code's SessionStart hook passes `--no-wait`: a client connects to the MCP endpoint
+    while the hook is still running, so waiting cannot help the session that starts it, and a
+    haskie that fails to boot would stall every session start.
     """
     _use_home(home_dir)
     if _serving(url):
@@ -194,14 +182,10 @@ def ensure(
         return
 
     parts = urlsplit(url)
-    home.HOME.mkdir(parents=True, exist_ok=True, mode=home.DIR_MODE)
+    home.ensure_home_sync()
     log_file = home.HOME / "server.log"
     command = [
-        # `-m haskie`, not the console script: this process's interpreter is always the right one,
-        # and a spawned client's PATH may not carry `haskie` at all.
-        sys.executable,
-        "-m",
-        "haskie",
+        *claude.own_command(),
         "run",
         "--home",
         str(home.HOME),
@@ -241,86 +225,11 @@ install = typer.Typer(
 cli.add_typer(install)
 
 
-def _register_with_claude(url: str, scope: Scope) -> str | None:
-    """Add the HTTP entry to Claude Code, replacing any entry of ours already there.
-
-    HTTP rather than stdio: litestar-mcp serves MCP `2026-07-28`, which replaced `initialize`
-    with `server/discover`, and a stdio client that opens with `initialize` never connects.
-
-    Returns the command to run by hand when the `claude` CLI is not installed, so a missing CLI
-    costs the user one copy-paste rather than the whole install.
-    """
-    arguments = ["mcp", "add", "-s", scope, "--transport", "http", "haskie", url]
-    claude_cli = shutil.which("claude")
-    if claude_cli is None:
-        return "claude " + " ".join(arguments)
-    # Remove first, so re-running updates the entry instead of failing on the name. No entry is
-    # the normal case, so that failure is the expected one.
-    subprocess.run(
-        [claude_cli, "mcp", "remove", "-s", scope, "haskie"], capture_output=True, check=False
-    )
-    done = subprocess.run([claude_cli, *arguments], capture_output=True, text=True, check=False)
-    if done.returncode != 0:
-        typer.echo((done.stderr or done.stdout).strip(), err=True)
-        raise typer.Exit(code=1)
-    return None
-
-
-HOOK_MARKER = " ensure --home "  # what identifies a hook of ours, whatever path invoked it
-
-
-def _install_hook(settings_file: Path, url: str) -> bool:
-    """Teach Claude Code to bring haskie up at the start of a session.
-
-    The MCP entry is HTTP, so a session that starts while nothing is serving gets no haskie tools
-    at all, and nothing says why. A SessionStart hook running `haskie ensure` fixes that: it costs
-    one loopback request when the server is already up, which is the usual case.
-
-    Returns whether this call added the hook. Reads and rewrites the file as a whole, so an
-    existing settings file keeps everything else in it.
-    """
-    command = (
-        f"{_own_executable()} ensure --home {shlex.quote(str(home.HOME))} --url {url} --no-wait"
-    )
-    settings: dict[str, Any] = {}
-    if settings_file.is_file():
-        try:
-            settings = json.loads(settings_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise typer.BadParameter(f"{settings_file} is not valid JSON: {exc}") from None
-    matchers = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
-    # Matched on the shape of the command, not on the path `haskie` happens to have today: an
-    # upgrade that moves the executable must still replace the hook rather than stack a copy.
-    ours = [
-        hook
-        for matcher in matchers
-        for hook in matcher.get("hooks", [])
-        if HOOK_MARKER in str(hook.get("command", ""))
-    ]
-    for hook in ours:
-        hook["command"] = command
-    if not ours:
-        matchers.append({"hooks": [{"type": "command", "command": command, "timeout": 90}]})
-    settings_file.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic: Claude Code reads this file, and a half-written settings.json is a broken client.
-    home.atomic_write_sync(settings_file, json.dumps(settings, indent=2) + "\n")
-    return not ours
-
-
-def _own_executable() -> str:
-    """An absolute `haskie`, because a hook and an MCP client both run with their own PATH."""
-    return shutil.which("haskie") or f"{sys.executable} -m haskie"
-
-
 @install.command("claude")
 def install_claude(
     home_dir: HomeOption = None,
     url: Annotated[str, typer.Option(help="MCP endpoint of this haskie.")] = MCP_URL,
     scope: Annotated[Scope, typer.Option(help="Where Claude Code records it.")] = "user",
-    hook: Annotated[
-        bool, typer.Option(help="Add a SessionStart hook that starts haskie when it is down.")
-    ] = True,
-    start: Annotated[bool, typer.Option(help="Start haskie now if it is not serving.")] = True,
 ) -> None:
     """Register the MCP server with Claude Code and write the haskie skill.
 
@@ -328,14 +237,18 @@ def install_claude(
     running at it, and a skill saying when the user's own documents beat a web search. Re-run
     after adding a collection to refresh the skill's trigger.
     """
-    from haskie import claude
+    import asyncio
 
     _use_home(home_dir)
     # `read_collections` reaches the database through `db.connect`, which migrates the home and
     # makes it first - so there is no prelude to repeat here.
-    found: list[CollectionSummary] = asyncio.run(claude.read_collections())
+    found = asyncio.run(claude.read_collections())
 
-    manual = _register_with_claude(url, scope)
+    try:
+        manual = claude.register_mcp(url, scope)
+    except HaskieError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from None
     if manual is None:
         typer.echo(f"registered the haskie MCP server at {url} ({scope} scope)")
     else:
@@ -347,12 +260,10 @@ def install_claude(
     typer.echo(f"wrote {destination}")
     typer.echo(f"  collections in the trigger: {named}")
 
-    if hook:
-        settings_file = claude.settings_path(scope)
-        added = _install_hook(settings_file, url)
-        typer.echo(f"{'added' if added else 'updated'} the SessionStart hook in {settings_file}")
-    if start:
-        ensure(home_dir=home.HOME, url=url)  # already-serving is its fast path, not ours
+    added = claude.install_hook(scope, home.HOME, url)
+    settings_file = claude.settings_path(scope)
+    typer.echo(f"{'added' if added else 'updated'} the SessionStart hook in {settings_file}")
+    ensure(home_dir=home.HOME, url=url)  # already-serving is its fast path, not ours
     typer.echo("re-run `haskie install claude` after adding a collection, to refresh the trigger")
 
 
@@ -367,6 +278,8 @@ def destroy(
     is backed up first. Stop `haskie run` before this: removing the database under a running
     server leaves it writing into deleted files.
     """
+    import asyncio
+
     from haskie import db
 
     _use_home(home_dir)
@@ -427,5 +340,5 @@ def _describe(root: Path) -> str:
 @cli.command()
 def version() -> None:
     """Print the version and where the data lives."""
-    typer.echo(f"haskie {APP_VERSION}")
+    typer.echo(VERSION_LINE)
     typer.echo(f"home: {home.HOME}")

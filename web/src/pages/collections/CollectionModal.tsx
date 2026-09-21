@@ -11,7 +11,7 @@ import {
   type Member,
   type Options,
 } from '../../api'
-import { errorText, dateTime, matchesText, needleOf } from '../../format'
+import { errorText, matchesText, needleOf } from '../../format'
 import { useBulkJob } from '../../hooks/useBulkJob'
 import { usePoll } from '../../hooks/usePoll'
 import { useRun } from '../../hooks/useRun'
@@ -126,7 +126,7 @@ function CollectionBody({ name, onClose, onChanged }: { name: string; onClose: (
     ['active', info.counts.active],
     ['errors', info.counts.error],
     ['rows', index === null ? '—' : index.num_rows],
-    ['last maintained', index?.last_maintained_at == null ? '—' : dateTime(index.last_maintained_at)],
+    ['fragments', index === null ? '—' : index.num_fragments],
   ]
 
   return (

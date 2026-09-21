@@ -212,7 +212,7 @@ async def test_results_carry_an_absolute_path_and_position(shelf: AsyncTestClien
     """A caller outside the app has to be able to open or grep the file the match came from.
 
     The index stores paths home-relative so a home stays portable, so the absolute ones are
-    derived on read (`Collection.resolve_hit`) and have to actually exist. They point into the
+    derived on read (`CollectionIndex.hit`) and have to actually exist. They point into the
     document's own folder, not into the collection that matched.
     """
     match = (await shelf.get("/api/search/documents", params={"q": "parsing"})).json()[0]
@@ -251,7 +251,7 @@ async def test_document_passages_unfold_a_shortlist_row(shelf: AsyncTestClient) 
     bad = await shelf.get(
         f"/api/search/documents/{best['doc']}", params={"q": "parsing", "limit": 0}
     )
-    assert bad.status_code == 422 and "limit must be 1.." in bad.text
+    assert bad.status_code == 422 and "Expected `int` >= 1" in bad.text
 
 
 @pytest.mark.parametrize(

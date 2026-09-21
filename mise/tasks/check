@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Lint, format and type-check Python (ruff, ty) and web (oxlint, tsc). Pass --fix to apply fixes; CI runs it read-only."
+#MISE description="Lint, format and type-check Python (ruff, ty) and web (oxlint, tsc), and prove web/src/schema.d.ts still matches the API. Pass --fix to apply fixes; CI runs it read-only."
 set -euo pipefail
 if [ "${1:-}" = "--fix" ]; then
   uv run ruff check --fix src tests
@@ -9,4 +9,7 @@ else
   uv run ruff format --check src tests
 fi
 uv run ty check
-(cd web && bun run lint && bunx tsc -b)
+# Before tsc: the frontend's types are generated from the API, so a stale file type-checks fine
+# and still lies about the wire.
+mise run schema --check
+(cd web && bun run lint && bun run typecheck)

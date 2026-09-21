@@ -1,4 +1,9 @@
-"""Installing haskie into Claude Code: the MCP entry and the skill that decides when to use it.
+"""Installing haskie into Claude Code: the MCP entry, the SessionStart hook and the skill.
+
+Everything Claude Code's own configuration looks like lives here - where its files are, the argv
+its CLI takes, the shape of a hook in its settings - so `cli` stays the way in and never a second
+way of doing the work. Failures are `HaskieError`, not Typer's: this module knows nothing about a
+terminal, and a second client (or a route) must be able to call it.
 
 The MCP tool descriptions are the handler docstrings, so they say what each tool does. What they
 cannot say is when to reach for haskie at all, which search to start with, or that these documents
@@ -6,9 +11,17 @@ are the user's own and outrank a web result. That is what a skill is for, and it
 line is generated from the collections a home actually holds rather than shipped as a fixed string.
 """
 
+import json
+import shlex
+import shutil
+import subprocess
+import sys
 import textwrap
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+from haskie import home
+from haskie.errors import Conflict, InvalidInput
 
 if TYPE_CHECKING:
     from haskie.collection import CollectionSummary
@@ -17,9 +30,13 @@ Scope = Literal["user", "project"]  # where Claude Code keeps a setting: this us
 
 SKILL_NAME = "haskie"
 USER_CLAUDE = Path.home() / ".claude"
-PROJECT_CLAUDE = Path(".claude")
+HOOK_MARKER = " ensure --home "  # what identifies a hook of ours, whatever path invoked it
+HOOK_TIMEOUT_SECONDS = 90
 DEFAULT_HOST = "127.0.0.1"  # loopback: one user's documents, and nothing authenticates a caller
 DEFAULT_PORT = 8000
+# Spelled out rather than imported from `app`: importing the Litestar app would cost every
+# `haskie` invocation the whole web stack. `test_the_default_url_matches_where_mcp_is_mounted`
+# is what keeps this in step with `app.MCP_PATH`.
 MCP_URL = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/mcp"
 
 # Long enough to be recognisable, short enough that a collection with an essay for a description
@@ -86,7 +103,7 @@ collection says".
 
 def _claude_dir(scope: Scope) -> Path:
     """Claude Code's configuration directory for `scope`: the user's, or the working directory's."""
-    return USER_CLAUDE if scope == "user" else Path.cwd() / PROJECT_CLAUDE
+    return USER_CLAUDE if scope == "user" else Path.cwd() / ".claude"
 
 
 def skill_path(scope: Scope) -> Path:
@@ -124,27 +141,104 @@ def render_skill(collections: "list[CollectionSummary]") -> str:
     return f"---\nname: {SKILL_NAME}\ndescription: >-\n  {trigger}\n---\n\n{_BODY}"
 
 
-def write_skill(scope: Scope, collections: "list[CollectionSummary]") -> Path:
-    """Put the skill where Claude Code looks for it, and say where that was.
+def _write(destination: Path, text: str) -> Path:
+    """Write into Claude Code's directory, making it first.
 
-    Atomic, because Claude Code reads this file and a half-written one is a broken skill.
+    Atomic, because Claude Code reads these files while we write them and half of one is worse
+    than none: a broken skill, or a settings file that takes the rest of its contents with it.
     """
-    from haskie import home  # local: `home` is what `cli` already imported to call this
-
-    destination = skill_path(scope)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    home.atomic_write_sync(destination, render_skill(collections))
+    home.atomic_write_sync(destination, text)
     return destination
+
+
+def write_skill(scope: Scope, collections: "list[CollectionSummary]") -> Path:
+    """Put the skill where Claude Code looks for it, and say where that was."""
+    return _write(skill_path(scope), render_skill(collections))
+
+
+def own_command() -> list[str]:
+    """How to invoke haskie from somewhere else: absolute, because a hook and an MCP client both
+    run with a PATH of their own. Falls back to this interpreter, which `__main__` makes work."""
+    found = shutil.which("haskie")
+    return [found] if found else [sys.executable, "-m", "haskie"]
+
+
+def register_mcp(url: str, scope: Scope) -> str | None:
+    """Add the HTTP entry to Claude Code, replacing any entry of ours already there.
+
+    HTTP rather than stdio: litestar-mcp serves MCP `2026-07-28`, which replaced `initialize`
+    with `server/discover`, and a stdio client that opens with `initialize` never connects.
+
+    Returns the command to run by hand when the `claude` CLI is not installed, so a missing CLI
+    costs the user one copy-paste rather than the whole install.
+    """
+    arguments = ["mcp", "add", "-s", scope, "--transport", "http", SKILL_NAME, url]
+    claude_cli = shutil.which("claude")
+    if claude_cli is None:
+        return "claude " + " ".join(arguments)
+    # Remove first, so re-running updates the entry instead of failing on the name. No entry is
+    # the normal case, so that failure is the expected one.
+    subprocess.run(
+        [claude_cli, "mcp", "remove", "-s", scope, SKILL_NAME], capture_output=True, check=False
+    )
+    done = subprocess.run([claude_cli, *arguments], capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        raise Conflict((done.stderr or done.stdout).strip() or "`claude mcp add` failed")
+    return None
+
+
+def hook_command(home_dir: Path, url: str) -> str:
+    """The SessionStart command, as one shell string: that is the shape Claude Code runs."""
+    invocation = " ".join(shlex.quote(part) for part in own_command())
+    return f"{invocation} ensure --home {shlex.quote(str(home_dir))} --url {url} --no-wait"
+
+
+def install_hook(scope: Scope, home_dir: Path, url: str) -> bool:
+    """Teach Claude Code to bring haskie up at the start of a session.
+
+    The MCP entry is HTTP, so a session that starts while nothing is serving gets no haskie tools
+    at all, and nothing says why. A SessionStart hook running `haskie ensure` fixes that: it costs
+    one loopback request when the server is already up, which is the usual case.
+
+    Returns whether this call added the hook. Reads and rewrites the file as a whole, so an
+    existing settings file keeps everything else in it.
+    """
+    settings_file = settings_path(scope)
+    command = hook_command(home_dir, url)
+    settings: dict[str, Any] = {}
+    if settings_file.is_file():
+        try:
+            settings = json.loads(settings_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise InvalidInput(f"{settings_file} is not valid JSON: {exc}") from None
+    matchers = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
+    # Matched on the shape of the command, not on the path `haskie` happens to have today: an
+    # upgrade that moves the executable must still replace the hook rather than stack a copy.
+    ours = [
+        hook
+        for matcher in matchers
+        for hook in matcher.get("hooks", [])
+        if HOOK_MARKER in str(hook.get("command", ""))
+    ]
+    for hook in ours:
+        hook["command"] = command
+    if not ours:
+        matchers.append(
+            {"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_SECONDS}]}
+        )
+    _write(settings_file, json.dumps(settings, indent=2) + "\n")
+    return not ours
 
 
 async def read_collections() -> "list[CollectionSummary]":
     """Straight from the database, not over HTTP: installing must work with the server stopped.
 
-    Imported here rather than at module level: `collection` reaches LanceDB, and this module is
-    what the CLI reads `MCP_URL` from on every invocation.
+    `collection` is imported here rather than at module level: it reaches LanceDB, and the CLI
+    imports this module on every invocation for `MCP_URL`.
     """
     from haskie.collection import Collection
-    from haskie.paging import MAX_PAGE_SIZE, page_request
+    from haskie.paging import MAX_PAGE_SIZE, PageRequest
 
-    page = await Collection.page(page_request(page_size=MAX_PAGE_SIZE))
+    page = await Collection.page(PageRequest(page_size=MAX_PAGE_SIZE))
     return page.items

@@ -9,7 +9,6 @@ const SESSIONS: Record<string, string[]> = { 'agent-1': ['A–E', 'K–O'], empt
 const HIT: Hit = {
   collection: 'A–E',
   doc: 'area-lights.pdf',
-  home: '/Users/ada/.haskie',
   source_path: 'documents/area-lights.pdf',
   markdown_path: 'markdown/area-lights.md',
   part: 0,

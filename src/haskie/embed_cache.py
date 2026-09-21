@@ -13,7 +13,7 @@ inputs hash to the same id; `accelerator` is left out because it selects an exec
 not a model, and embedding dims are left out because `settings.PROFILES` fixes them per model
 name. `chunk.CHUNK_VERSION` is in, so a change to the splitting code retires every entry it would
 have produced differently. The id is the full sha256 of the URN, not a truncated one: a collision
-here serves one document's vectors as another's, so it is a correctness key, unlike `layout.shard`
+here serves one document's vectors as another's, so it is a correctness key, unlike `home.shard`
 (spread) or `textsearch.query_hash` (cursor validation).
 
 Visibility: `lookup` answers a hit only when both the row and the file exist. `write` puts the file
@@ -23,7 +23,8 @@ Two callers wanting the same missing entry are serialized above this module, by 
 deduplication of `workflows.ensure_embedding`; this module only makes the outcome idempotent.
 
 Module owns the parquet schema and the row shape it is read back into (`index.Row`), the way
-`index.py` owns LanceDB's. File writes and reads run in a worker thread: pyarrow is sync.
+`index.py` owns LanceDB's; the chunk columns inside both come from `chunk.record`. File writes
+and reads run in a worker thread: pyarrow is sync.
 """
 
 import hashlib
@@ -38,17 +39,17 @@ import msgspec
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from haskie import db, document, home
+from haskie import chunk, db, document, home
 from haskie.chunk import CHUNK_VERSION, Chunk
 from haskie.index import Row
-from haskie.layout import PART_DIGITS
-from haskie.settings import Chunker, ChunkSettings, EmbeddingModel
+from haskie.settings import Chunker, ChunkSettings, EmbeddingModel, Parser
 
 NO_MODEL = "none"  # the `model` of a profile without an embedding model: chunks only, no vectors
 
 
-class Params(msgspec.Struct, frozen=True):
-    """Everything the cached rows of one document depend on. Field order is the URN order."""
+class Params(msgspec.Struct, frozen=True, rename={"doc": "document"}):
+    """Everything the cached rows of one document depend on. Field order is the URN order; the
+    rename is the `embeddings` column `Entry` inherits."""
 
     doc: str
     model: str  # EmbeddingModel.name, or NO_MODEL
@@ -56,30 +57,23 @@ class Params(msgspec.Struct, frozen=True):
     chunk_overlap: int
     chunker: Chunker
     chunk_version: int
-    parser: str
+    parser: Parser
     skip_ocr_pages: bool
 
 
-class Entry(msgspec.Struct):
-    """One `embeddings` row: what the cache holds for a document, for the API and the tests."""
+class Entry(Params, frozen=True):
+    """One `embeddings` row: the params it was computed under, plus what the write recorded about
+    it. What the API and the tests read the cache as."""
 
     id: str
-    document: str
     urn: str
-    model: str
-    chunk_size: int
-    chunk_overlap: int
-    chunker: Chunker
-    chunk_version: int
-    parser: str
-    skip_ocr_pages: bool
     rows: int
     bytes: int
     created_at: float
 
 
-# The struct's field order is the column order, so the SELECT and the row unpack cannot drift
-# apart (`document.py` does the same for `documents`).
+# The struct's field order is the column order, so the insert, the SELECT and the row decode
+# cannot drift apart (`document.py` does the same for `documents`).
 ENTRY_COLUMNS: tuple[str, ...] = tuple(f.encode_name for f in msgspec.structs.fields(Entry))
 ENTRY_SELECT = ", ".join(ENTRY_COLUMNS)
 
@@ -111,12 +105,8 @@ def urn(p: Params) -> str:
     )
 
 
-def cache_id(u: str) -> str:
-    return hashlib.sha256(u.encode("utf-8")).hexdigest()
-
-
 def key(p: Params) -> str:
-    return cache_id(urn(p))
+    return hashlib.sha256(urn(p).encode("utf-8")).hexdigest()
 
 
 # --- paths ---------------------------------------------------------------------
@@ -134,7 +124,7 @@ def scratch_dir(doc: str, id: str) -> Path:
 
 
 def rows_path(doc: str, id: str, seq: int) -> Path:
-    return scratch_dir(doc, id) / f"{seq:0{PART_DIGITS}d}.rows.json"
+    return scratch_dir(doc, id) / f"{home.part_name(seq)}.rows.json"
 
 
 # --- parquet -------------------------------------------------------------------
@@ -162,57 +152,21 @@ def _schema(dims: int | None) -> pa.Schema:
 
 
 def _batch(part: int, rows: list[Row], dims: int | None) -> pa.RecordBatch:
-    chunks = [row.chunk for row in rows]
-    columns: dict[str, object] = {
-        "part": pa.array([part] * len(rows), pa.int32()),
-        "heading": pa.array([c.heading for c in chunks], pa.string()),
-        "text": pa.array([c.text for c in chunks], pa.string()),
-        "line_start": pa.array([c.line_start for c in chunks], pa.int32()),
-        "line_end": pa.array([c.line_end for c in chunks], pa.int32()),
-        "char_start": pa.array([c.char_start for c in chunks], pa.int32()),
-        "char_end": pa.array([c.char_end for c in chunks], pa.int32()),
-        "parents": pa.array([c.parents for c in chunks], pa.list_(pa.string())),
-        "page_start": pa.array([c.page_start for c in chunks], pa.int32()),
-        "page_end": pa.array([c.page_end for c in chunks], pa.int32()),
-    }
-    if dims is not None:
-        flat: list[float] = []
-        for row in rows:
-            if row.vector is None:
-                raise ValueError("cache has a vector column but the row carries no vector")
-            flat.extend(row.vector)
-        columns["vector"] = pa.FixedSizeListArray.from_arrays(pa.array(flat, pa.float32()), dims)
-    return pa.RecordBatch.from_pydict(columns, schema=_schema(dims))
+    records = [chunk.record(row.chunk, row.vector, dims, part=part) for row in rows]
+    return pa.RecordBatch.from_pylist(records, schema=_schema(dims))
 
 
 def _rows(batch: pa.RecordBatch) -> list[Row]:
-    columns = batch.to_pydict()
-    vectors = columns.get("vector") or [None] * batch.num_rows
     return [
-        Row(
-            chunk=Chunk(
-                heading=columns["heading"][i],
-                text=columns["text"][i],
-                line_start=columns["line_start"][i],
-                line_end=columns["line_end"][i],
-                char_start=columns["char_start"][i],
-                char_end=columns["char_end"][i],
-                parents=list(columns["parents"][i]),
-                page_start=columns["page_start"][i],
-                page_end=columns["page_end"][i],
-            ),
-            vector=vectors[i],
-        )
-        for i in range(batch.num_rows)
+        Row(chunk=msgspec.convert(record, Chunk), vector=record.get("vector"))
+        for record in batch.to_pylist()
     ]
 
 
 def _merge(parts: list[Path], target: Path, dims: int | None) -> tuple[int, int]:
     """Stream every `rows.json` into `target` as one row group each, through a `.tmp` and one
     replace, so a reader never sees a partial file. Returns (rows, bytes). An empty part still
-    gets a row group, so group `n` is always part `n` (an empty group is skipped on read).
-
-    Sync: pyarrow has no async API, and one part at a time is all that sits in memory."""
+    gets a row group, so group `n` is always part `n` (an empty group is skipped on read)."""
     target.parent.mkdir(parents=True, exist_ok=True)
     total = 0
     with home.atomic_replace(target) as tmp, pq.ParquetWriter(tmp, _schema(dims)) as writer:
@@ -227,8 +181,7 @@ def _merge(parts: list[Path], target: Path, dims: int | None) -> tuple[int, int]
 
 
 async def lookup(p: Params) -> str | None:
-    """The cache id when both the row and the file exist, else None: either one alone is an
-    interrupted write, which is a miss to recompute, not an error."""
+    """The cache id of a hit, else None: a row or a file on its own is an interrupted write."""
     id = key(p)
     async with db.connect() as conn:
         cursor = await conn.execute("select 1 from embeddings where id = ?", (id,))
@@ -239,34 +192,25 @@ async def lookup(p: Params) -> str | None:
 
 
 async def write(p: Params, parts: list[Path], dims: int | None) -> str:
-    """Merge the scratch rows of every part into the cache file, then publish the row.
-
-    File first, row second (see the module docstring); `insert or ignore` keeps a retry after a
-    crash, or the loser of two concurrent writers, a no-op. The scratch directory goes last, so
-    a retry before the row was written still finds its input."""
+    """Merge the scratch rows of every part into the cache file, publish the row, then drop the
+    scratch directory - last, so a retry before the row was written still finds its input."""
     id = key(p)
     target = file_path(p.doc, id)
     rows, size = await anyio.to_thread.run_sync(_merge, parts, target, dims)
+    entry = Entry(
+        **msgspec.structs.asdict(p),
+        id=id,
+        urn=urn(p),
+        rows=rows,
+        bytes=size,
+        created_at=time.time(),
+    )
+    values = msgspec.to_builtins(entry)
     async with db.connect() as conn:
         await conn.execute(
-            "insert or ignore into embeddings (id, document, urn, model, chunk_size, "
-            "chunk_overlap, chunker, chunk_version, parser, skip_ocr_pages, rows, bytes, "
-            "created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                id,
-                p.doc,
-                urn(p),
-                p.model,
-                p.chunk_size,
-                p.chunk_overlap,
-                p.chunker,
-                p.chunk_version,
-                p.parser,
-                p.skip_ocr_pages,
-                rows,
-                size,
-                time.time(),
-            ),
+            f"insert or ignore into embeddings ({ENTRY_SELECT}) "
+            f"values ({db.placeholders(len(ENTRY_COLUMNS))})",
+            tuple(values[column] for column in ENTRY_COLUMNS),
         )
     await home.remove_tree(scratch_dir(p.doc, id))
     return id
@@ -284,16 +228,13 @@ def _group(file: pq.ParquetFile, part: int) -> list[Row]:
 
 
 async def row_groups(doc: str, id: str) -> int:
-    """How many parts the cache file holds: one row group each."""
-    path = file_path(doc, id)
-    if not await anyio.Path(path).is_file():
-        raise FileNotFoundError(f"embedding cache missing: {doc} {id}")
-    return await anyio.to_thread.run_sync(_num_row_groups, path)
+    """How many parts the cache file holds: one row group each. Raises `FileNotFoundError` (from
+    pyarrow) when the file is gone, which is a miss the caller recomputes from."""
+    return await anyio.to_thread.run_sync(_num_row_groups, file_path(doc, id))
 
 
 async def read(doc: str, id: str, start: int, end: int) -> AsyncIterator[tuple[int, list[Row]]]:
-    """The rows of parts `[start, end)`, one decoded row group at a time: a whole group of a long
-    document never sits in memory as Python objects.
+    """The rows of parts `[start, end)`, one decoded row group at a time.
 
     The file is opened once for the whole walk rather than once per group: a batch of parts is one
     open and one footer read, and the handle is closed when the walk ends or the caller stops.
@@ -316,12 +257,6 @@ async def forget(doc: str) -> None:
     await home.remove_tree(document.embeddings_dir(doc))
 
 
-def _entry(row: tuple) -> Entry:
-    values = dict(zip(ENTRY_COLUMNS, row, strict=True))
-    values["skip_ocr_pages"] = bool(values["skip_ocr_pages"])
-    return Entry(**values)
-
-
 async def entries(doc: str) -> list[Entry]:
     """Every cache row of one document, newest first."""
     async with db.connect() as conn:
@@ -330,4 +265,4 @@ async def entries(doc: str) -> list[Entry]:
             (doc,),
         )
         rows: list[Any] = list(await cursor.fetchall())
-    return [_entry(row) for row in rows]
+    return [db.row_to(Entry, ENTRY_COLUMNS, row) for row in rows]

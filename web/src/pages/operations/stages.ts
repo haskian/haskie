@@ -1,4 +1,4 @@
-import { ACTIVE_JOB_STATUSES, type JobKind, type JobRow, type Stage, type Task } from '../../api'
+import { ACTIVE_JOB_STATUSES, type JobKind, type JobRow, type Stage, type Task, type WorkflowStatus } from '../../api'
 import type { StageRow, StageState } from '../../ui'
 
 // A document runs the same three stages every time, and they cost different amounts of time:
@@ -18,7 +18,6 @@ const DOCUMENT_STAGES: Record<Stage, Omit<StageDef, 'stage'>> = {
 const SINGLE: Record<Exclude<JobKind, 'document' | 'collection'>, { tag: string; stage: string }> = {
   download: { tag: 'Download', stage: 'Download' },
   maintenance: { tag: 'Maintain', stage: 'Maintenance' },
-  archive: { tag: 'Archive', stage: 'Archive' },
 }
 // The collection kind is three bulk jobs: an index queues one document at a time, the deletes
 // have nothing to count. `detail.bulk` says which; a row without it is read as an index.
@@ -50,7 +49,7 @@ export function stageDefs(job: JobRow): StageDef[] {
 export const count = (job: JobRow, key: string): number => (typeof job.detail[key] === 'number' ? job.detail[key] : 0)
 
 /** How a job or one of its stage jobs stands, read from its status alone. */
-export function jobState(status: string): StageState {
+export function jobState(status: WorkflowStatus): StageState {
   if (status === 'SUCCESS') return 'done'
   if (status === 'ERROR') return 'error'
   return ACTIVE_JOB_STATUSES.has(status) ? 'active' : 'todo'

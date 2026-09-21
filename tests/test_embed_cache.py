@@ -5,6 +5,8 @@ the key has to be exact (field order, every field part of it) and the write has 
 idempotent.
 """
 
+import hashlib
+import itertools
 from pathlib import Path
 
 import msgspec
@@ -43,18 +45,6 @@ BASE_URN = (
 BASE_ID = "5b753e61445f55f1c72657b07433c4f470c359deeb6057b6286fa9d6e1f89b46"
 
 
-class _Clock:
-    """A `time` stand-in that ticks once per call, so "newest first" is not a race with the
-    resolution of the wall clock."""
-
-    def __init__(self, start: float = 1000.0) -> None:
-        self.now = start
-
-    def time(self) -> float:
-        self.now += 1.0
-        return self.now
-
-
 def _row(text: str, vector: list[float] | None = None) -> Row:
     return Row(
         chunk=Chunk(
@@ -83,11 +73,6 @@ def _parts(directory: Path, groups: list[list[Row]]) -> list[Path]:
     return paths
 
 
-async def _imported(name: str = DOC, body: str = BODY) -> Document:
-    """A real document row: `embeddings.document` is a foreign key onto it."""
-    return await import_row(name, body)
-
-
 # --- the key ----------------------------------------------------------------------
 
 
@@ -96,10 +81,9 @@ def test_urn_is_the_fields_in_one_fixed_order() -> None:
     assert embed_cache.urn(BASE) == embed_cache.urn(msgspec.structs.replace(BASE)), "deterministic"
 
 
-def test_cache_id_is_the_full_sha256_of_the_urn() -> None:
-    assert embed_cache.cache_id(BASE_URN) == BASE_ID
+def test_the_key_is_the_full_sha256_of_the_urn() -> None:
+    assert embed_cache.key(BASE) == hashlib.sha256(BASE_URN.encode()).hexdigest() == BASE_ID
     assert len(BASE_ID) == 64, "not truncated: a collision would serve another document's vectors"
-    assert embed_cache.key(BASE) == embed_cache.cache_id(embed_cache.urn(BASE)) == BASE_ID
 
 
 @pytest.mark.parametrize(
@@ -181,7 +165,7 @@ async def test_write_lookup_read_round_trip(
 ) -> None:
     """Three parts, the middle one empty: every part is a row group, so group `n` is always part
     `n`, and an empty group simply yields no rows."""
-    doc = await _imported()
+    doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, doc=doc.name)
     rows = [_row("alpha lancedb", vector), _row("beta lancedb", vector)]
     parts = _parts(tmp_path / "scratch", [rows, [], [_row("gamma lancedb", vector)]])
@@ -206,13 +190,15 @@ async def test_write_lookup_read_round_trip(
     else:
         assert first.vector == pytest.approx(vector), name
     (entry,) = await embed_cache.entries(doc.name)
-    assert (entry.id, entry.document, entry.urn) == (cache_id, doc.name, embed_cache.urn(params))
+    assert (entry.id, entry.doc, entry.urn) == (cache_id, doc.name, embed_cache.urn(params))
     assert (entry.rows, entry.chunk_size, entry.chunker) == (3, params.chunk_size, "markdown")
     assert entry.bytes == embed_cache.file_path(doc.name, cache_id).stat().st_size, name
+    wire = msgspec.json.decode(msgspec.json.encode(entry))
+    assert set(wire) == set(embed_cache.ENTRY_COLUMNS), "the row is the wire shape, `doc` renamed"
 
 
 async def test_read_of_a_range_returns_only_that_range(tmp_path: Path) -> None:
-    doc = await _imported()
+    doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, doc=doc.name)
     parts = _parts(tmp_path / "scratch", [[_row(f"part {i}")] for i in range(4)])
     cache_id = await embed_cache.write(params, parts, None)
@@ -227,7 +213,7 @@ async def test_read_of_a_range_returns_only_that_range(tmp_path: Path) -> None:
 async def test_write_consumes_the_scratch_directory_of_the_computation(tmp_path: Path) -> None:
     """The scratch rows go last, after the file and the row: a retry before the row was written
     still finds its input."""
-    doc = await _imported()
+    doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, doc=doc.name)
     cache_id = embed_cache.key(params)
     parts = _parts(embed_cache.scratch_dir(doc.name, cache_id), [[_row("alpha")]])
@@ -241,7 +227,7 @@ async def test_write_consumes_the_scratch_directory_of_the_computation(tmp_path:
 
 async def test_a_second_write_of_the_same_params_is_a_no_op_row(tmp_path: Path) -> None:
     """A retried write after a crash, or the loser of two concurrent writers, must not raise."""
-    doc = await _imported()
+    doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, doc=doc.name)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
 
@@ -258,9 +244,10 @@ async def test_a_second_write_of_the_same_params_is_a_no_op_row(tmp_path: Path) 
 async def test_entries_lists_every_cache_of_one_document_newest_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    doc = await _imported()
-    other = await _imported("other.md")
-    monkeypatch.setattr(embed_cache, "time", _Clock())
+    doc = await import_row(DOC, BODY)
+    other = await import_row("other.md", BODY)
+    # a clock that ticks once per call, so "newest first" is not a race with the wall clock
+    monkeypatch.setattr(embed_cache.time, "time", itertools.count(1000.0).__next__)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
     wanted = [
         msgspec.structs.replace(BASE, doc=doc.name, chunk_size=size) for size in (400, 800, 1200)
@@ -289,7 +276,7 @@ async def test_lookup_answers_a_hit_only_when_the_row_and_the_file_agree(
     tmp_path: Path, name: str, keep_row: bool, keep_file: bool, hit: bool
 ) -> None:
     """Either half alone is an interrupted write: a miss to recompute, never an error."""
-    doc = await _imported()
+    doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, doc=doc.name)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
     cache_id = await embed_cache.write(params, parts, None)
@@ -303,15 +290,15 @@ async def test_lookup_answers_a_hit_only_when_the_row_and_the_file_agree(
 
 
 async def test_row_groups_of_a_missing_cache_file_raises() -> None:
-    doc = await _imported()
-    with pytest.raises(FileNotFoundError, match="embedding cache missing"):
+    doc = await import_row(DOC, BODY)
+    with pytest.raises(FileNotFoundError, match=BASE_ID):
         await embed_cache.row_groups(doc.name, BASE_ID)
 
 
 async def test_a_failed_merge_leaves_no_partial_cache_file(tmp_path: Path) -> None:
     """The parquet file is written through a `.tmp` and one replace, so a reader never sees a
     half-written cache — and a failure leaves nothing to mistake for one."""
-    doc = await _imported()
+    doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, doc=doc.name)
     missing = tmp_path / "scratch" / "000000.rows.json"  # never written by any embed slice
 
@@ -326,7 +313,7 @@ async def test_a_failed_merge_leaves_no_partial_cache_file(tmp_path: Path) -> No
 
 
 async def test_writing_vectors_the_rows_do_not_carry_is_refused(tmp_path: Path) -> None:
-    doc = await _imported()
+    doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, doc=doc.name)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])  # no vector on the row
 
@@ -338,7 +325,7 @@ async def test_writing_vectors_the_rows_do_not_carry_is_refused(tmp_path: Path) 
 
 async def test_the_cache_row_goes_when_the_document_does(tmp_path: Path) -> None:
     """`embeddings.document` cascades: deleting the document takes its whole cache with it."""
-    doc = await _imported()
+    doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, doc=doc.name)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
     await embed_cache.write(params, parts, None)

@@ -65,11 +65,11 @@ def ann_due(stats: IndexStats, settings: PipelineSettings, trained_rows: int) ->
 async def run(
     collection: Collection, embedding: EmbeddingModel | None, settings: PipelineSettings
 ) -> Report:
-    """One maintenance pass over one collection's table. Runs on the collection's index partition.
+    """One maintenance pass over one collection's table.
 
     Every skip is a value, not an exception: the collection may have been deleted, may never have
     been indexed, or may hold a table an older build wrote, and none of those is a failure of the
-    run. An outdated table is left untouched on purpose: "Index all" rewrites it (B2).
+    run. An outdated table is left untouched on purpose: "Index all" rewrites it.
 
     Compaction and the index builds await LanceDB, which runs them on its own Rust runtime. The
     IVF-PQ training inside `build_vector_index` is CPU work, but it happens in that runtime rather
