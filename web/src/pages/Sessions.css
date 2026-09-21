@@ -1,0 +1,19 @@
+/* Sessions page layout only. Tokens and component styles live in design/design.css. */
+
+/* The modal panels: one stack of controls each. */
+.session-panel {
+  display: grid;
+  gap: var(--sp-3);
+  align-content: start;
+}
+.session-panel .check {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A query, a document name and an API message are whatever the agent sent: they wrap, never widen. */
+.session-query,
+.session-docs,
+.session-error {
+  overflow-wrap: anywhere;
+}

@@ -146,6 +146,11 @@ async def test_search_documents_returns_one_row_per_document_best_first(
 
     best = matches[0]
     assert best["collection"] == "lit", "where the best chunk came from"
+    passages = (
+        await shelf.get("/api/search/documents/compilers.md", params={"q": "parsing"})
+    ).json()
+    top, total = max(p["score"] for p in passages), sum(p["score"] for p in passages)
+    assert best["score"] == pytest.approx(2 * top * total / (top + total)), "best and sum blended"
     assert best["description"] == "the dragon book"
     assert best["chunks"] >= 1 and best["text"], "the evidence for the document being listed"
     assert best["heading"] == "Compilers"
@@ -224,3 +229,39 @@ async def test_results_carry_an_absolute_path_and_position(shelf: AsyncTestClien
     hit = (await shelf.get("/api/collections/lit/search", params={"q": "parsing"})).json()[0]
     assert Path(hit["markdown_file"]).is_file()
     assert hit["markdown_file"].endswith(hit["markdown_path"]), "absolute is home plus relative"
+
+
+async def test_document_passages_unfold_a_shortlist_row(shelf: AsyncTestClient) -> None:
+    """The passages behind a document's row: as many as it counted, best first, and none for a
+    document the scan never reached."""
+    matches = (await shelf.get("/api/search/documents", params={"q": "parsing"})).json()
+    best = matches[0]
+
+    passages = (
+        await shelf.get(f"/api/search/documents/{best['doc']}", params={"q": "parsing"})
+    ).json()
+
+    assert len(passages) == best["chunks"], "exactly the chunks the row counted"
+    assert {p["doc"] for p in passages} == {best["doc"]}
+    assert [p["score"] for p in passages] == sorted((p["score"] for p in passages), reverse=True)
+    assert passages[0]["text"] == best["text"], "the row's evidence is the best passage"
+
+    unmatched = await shelf.get("/api/search/documents/networks.md", params={"q": "parsing"})
+    assert unmatched.json() == [], "a document the query never matched has no passages"
+    bad = await shelf.get(
+        f"/api/search/documents/{best['doc']}", params={"q": "parsing", "limit": 0}
+    )
+    assert bad.status_code == 422 and "Expected `int` >= 1" in bad.text
+
+
+@pytest.mark.parametrize(
+    ("name", "best", "total", "expected"),
+    [
+        ("one chunk scores itself", 3.0, 3.0, 3.0),
+        ("a second chunk as strong lifts it, short of double", 3.0, 6.0, 4.0),
+        ("many weak chunks stay under twice the best", 1.0, 100.0, pytest.approx(200 / 101)),
+        ("nothing matched scores nothing", 0.0, 0.0, 0.0),
+    ],
+)
+def test_document_score(name: str, best: float, total: float, expected: float) -> None:
+    assert textsearch._document_score(best, total) == expected, name

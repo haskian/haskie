@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>haskie — insights</title>
+  <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.32/dist/uPlot.min.css" />
+  <link rel="stylesheet" href="design.css" />
+</head>
+<body>
+  <div class="page">
+
+
+    <main class="body">
+      <aside class="side">
+        <a class="logo" href="index.html" aria-label="Haskie"></a>
+        <nav class="nav">
+          <a class="nav-item" href="explore.html"><i data-lucide="compass" class="icon"></i>Explore</a>
+          <a class="nav-item" href="documents.html"><i data-lucide="file-text" class="icon"></i>Documents<span class="count">30</span></a>
+          <a class="nav-item" href="collections.html"><i data-lucide="library" class="icon"></i>Collections<span class="count">5</span></a>
+          <a class="nav-item" href="operations.html"><i data-lucide="activity" class="icon"></i>Operations</a>
+          <a class="nav-item" href="sessions.html"><i data-lucide="bot" class="icon"></i>Sessions</a>
+          <a class="nav-item" href="#" aria-current="true"><i data-lucide="chart-column" class="icon"></i>Insights</a>
+          <a class="nav-item" href="settings.html"><i data-lucide="settings" class="icon"></i>Settings</a>
+        </nav>
+      </aside>
+      <div class="insights sections">
+        <section class="chart" data-chart="searches">
+          <div class="chart-head">
+            <div class="stat stat-lg"><span class="value">0</span><span class="label label-mono"><span class="chart-label">searches · 7d</span></span></div>
+            <div class="tabs" role="tablist">
+              <button class="tab" role="tab" data-days="1">1d</button>
+              <button class="tab" role="tab" data-days="7" aria-selected="true">7d</button>
+              <button class="tab" role="tab" data-days="14">14d</button>
+              <button class="tab" role="tab" data-days="30">1m</button>
+              <button class="tab" role="tab" data-days="90">3m</button>
+            </div>
+          </div>
+          <div class="chart-plot"></div>
+          <div class="legend"></div>
+        </section>
+        <section class="chart" data-chart="chunks indexed">
+          <div class="chart-head">
+            <div class="stat stat-lg"><span class="value">0</span><span class="label label-mono"><span class="chart-label">chunks indexed · 7d</span></span></div>
+            <div class="tabs" role="tablist">
+              <button class="tab" role="tab" data-days="1">1d</button>
+              <button class="tab" role="tab" data-days="7" aria-selected="true">7d</button>
+              <button class="tab" role="tab" data-days="14">14d</button>
+              <button class="tab" role="tab" data-days="30">1m</button>
+              <button class="tab" role="tab" data-days="90">3m</button>
+            </div>
+          </div>
+          <div class="chart-plot"></div>
+          <div class="legend"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="statusbar"></div>
+
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="design.js"></script>
+  <script src="https://unpkg.com/uplot@1.6.32/dist/uPlot.iife.min.js"></script>
+  <script>
+    // two stacked charts from one builder: searches by session, chunks by collection; deterministic sample data so screenshots are stable
+    const DAY = 86400;
+    const HEIGHT = 240;
+    const now = Math.floor(Date.now() / 1000 / DAY) * DAY;
+    const GRAYS = ['#0f1317', '#333940', '#575e66', '#7b828b', '#9fa5ad', '#c0c5cb'];
+    const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const SESSIONS = [
+      { name: 'claude-code a3f9-21', share: 0.34 }, { name: 'cursor 7b21-08', share: 0.12 }, { name: 'claude-desktop c04e-77', share: 0.24 },
+      { name: 'agent 91dd-3c', share: 0.06 }, { name: 'claude-code 5e10-4a', share: 0.14 }, { name: 'cursor 02bb-19', share: 0.1 },
+    ];
+    const COLLECTIONS = [{ name: 'A–E', share: 0.5 }, { name: 'K–O', share: 0.3 }, { name: 'P–T', share: 0.2 }];
+    function build(section, series, scale) {
+      const what = section.dataset.chart;
+      const host = section.querySelector('.chart-plot'), legend = section.querySelector('.legend');
+      const value = section.querySelector('.value'), label = section.querySelector('.chart-label');
+      let raw = [], total = 0, title = '';
+      function sample(days) {
+        const step = days === 1 ? 3600 : DAY, n = days === 1 ? 24 : days;
+        const xs = [];
+        raw = series.map(() => []);
+        for (let i = n - 1; i >= 0; i--) {
+          const t = now - i * step, k = Math.floor(t / step);
+          xs.push(t);
+          const base = scale * (8 + 6 * Math.sin(k / 2.3) + 4 * Math.sin(k / 7.1) + ((k * 7919) % 5));
+          series.forEach((one, j) => raw[j].push(Math.max(0, Math.round(base * one.share + (((k + j) * 131) % 3) - 1))));
+        }
+        // stacked: series j holds the cumulative top of series j..end, drawn in order so lower stacks paint over higher ones
+        return [xs, ...series.map((_, j) => xs.map((_, i) => raw.slice(j).reduce((sum, ys) => sum + ys[i], 0)))];
+      }
+      const bars = uPlot.paths.bars({ size: [0.6, 24], gap: 2, radius: (u, i) => i === 1 ? [0.25, 0] : [0, 0] });
+      const chart = new uPlot({
+        width: host.clientWidth, height: HEIGHT,
+        legend: { show: false },
+        scales: {
+          x: { range: (u, min, max) => { const half = u.data[0].length > 1 ? (u.data[0][1] - u.data[0][0]) / 2 : DAY / 2; return [min - half, max + half]; } },
+          y: { range: (u, min, max) => [0, Math.max(1, max)] },
+        },
+        cursor: { y: false, points: { show: false } },
+        axes: [
+          { stroke: css('--text-muted'), grid: { show: false }, ticks: { show: false }, font: '11px ' + css('--font-mono'), incrs: [3600, 3600 * 3, 3600 * 6, DAY, DAY * 7, DAY * 14, DAY * 30], values: (u, splits) => splits.map((t) => new Date(t * 1000).toLocaleString('en-GB', u.data[0].length === 24 ? { hour: '2-digit', minute: '2-digit' } : { day: 'numeric', month: 'short' })) },
+          { stroke: css('--text-muted'), grid: { stroke: css('--line-soft'), width: 1 }, ticks: { show: false }, font: '11px ' + css('--font-mono'), size: (u, values) => Math.max(32, 12 + 7 * Math.max(0, ...(values || []).map((v) => v.length))), splits: (u, ax, min, max) => [0, Math.ceil(max / 2), Math.ceil(max)] },
+        ],
+        series: [{}, ...series.map((one, j) => ({ label: one.name, stroke: GRAYS[j], fill: GRAYS[j], width: 0, paths: bars, points: { show: false } }))],
+        hooks: { setCursor: [(u) => {
+          const i = u.cursor.idx;
+          value.textContent = i == null ? total : u.data[1][i];
+          label.textContent = i == null ? title : new Date(u.data[0][i] * 1000).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: u.data[0].length === 24 ? 'short' : undefined });
+          legend.querySelectorAll('b').forEach((b, j) => b.textContent = i == null ? raw[j].reduce((a, v) => a + v, 0) : raw[j][i]);
+        }] },
+      }, sample(7), host);
+      legend.innerHTML = series.map((one, j) => `<span class="legend-item"><i style="background: ${GRAYS[j]}"></i>${one.name}<b></b></span>`).join('');
+      function show(days, name) {
+        const data = sample(days);
+        total = data[1].reduce((a, b) => a + b, 0);
+        title = what + ' · ' + name;
+        chart.setData(data);
+        value.textContent = total;
+        label.textContent = title;
+        legend.querySelectorAll('b').forEach((b, j) => b.textContent = raw[j].reduce((a, v) => a + v, 0));
+      }
+      for (const tab of section.querySelectorAll('.tab')) tab.addEventListener('click', () => {
+        for (const other of tab.parentElement.children) other.setAttribute('aria-selected', String(other === tab));
+        show(Number(tab.dataset.days), tab.textContent);
+      });
+      show(7, '7d');
+      let width = host.clientWidth; // width only: the chart sets its own height
+      new ResizeObserver(() => { if (host.clientWidth === width) return; width = host.clientWidth; chart.setSize({ width, height: HEIGHT }); }).observe(host);
+    }
+    build(document.querySelector('[data-chart="searches"]'), SESSIONS, 1);
+    build(document.querySelector('[data-chart="chunks indexed"]'), COLLECTIONS, 30);
+  </script>
+</body>
+</html>

@@ -157,8 +157,9 @@ class DocumentMatch(msgspec.Struct):
     """One document the query matched, and the best evidence that it did.
 
     The answer to "which documents should I read", not "which passages answer this": `score` is
-    the document's best chunk, and `chunks` is how many of the scanned chunks came from it, so a
-    document that matches all over ranks above one that matches once as well as it does.
+    the harmonic mean of the document's best chunk and the sum of every scanned chunk that came
+    from it (see `_document_score`), and `chunks` how many there were. The evidence fields are its
+    best chunk.
     """
 
     collection: str  # the collection whose table held the best chunk; the document belongs to none
@@ -188,33 +189,67 @@ async def search_documents(
     chunk came from. Scores are raw BM25 and therefore comparable, for the reason in the module
     docstring.
     """
-    limit = check_page_size(DEFAULT_DOCUMENTS if limit is None else limit, MAX_DOCUMENTS, "limit")
-    page = await search(q, collections, page_size=min(limit * DOCUMENT_SCAN, MAX_TEXT_PAGE_SIZE))
-
-    best: dict[str, DocumentMatch] = {}
+    limit = _document_limit(limit)
+    page = await search(q, collections, page_size=_scan_size(limit))
+    by_doc: dict[str, list[Hit]] = {}
     for hit in page.items:
-        found = best.get(hit.doc)
-        if found is None:
-            best[hit.doc] = DocumentMatch(
-                collection=hit.collection,
-                doc=hit.doc,
-                score=hit.score,
-                chunks=1,
-                description="",
-                heading=hit.heading,
-                location=hit.location,
-                text=hit.text,
-                source_file=hit.source_file,
-                markdown_file=hit.markdown_file,
-                line_start=hit.line_start,
-                line_end=hit.line_end,
-            )
-        else:
-            found.chunks += 1  # the page is already ranked, so the first hit seen is the best one
-
-    ranked = sorted(best.values(), key=lambda m: (-m.score, m.doc))[:limit]
+        by_doc.setdefault(hit.doc, []).append(hit)
+    ranked = sorted(map(_document_match, by_doc.values()), key=lambda m: (-m.score, m.doc))
+    ranked = ranked[:limit]
     await _attach_descriptions(ranked)
     return ranked
+
+
+def _document_match(hits: list[Hit]) -> DocumentMatch:
+    """One document's row from its matched chunks, in the order the page ranked them: the first
+    hit is its best one, and the passage the row shows."""
+    best = hits[0]
+    return DocumentMatch(
+        collection=best.collection,
+        doc=best.doc,
+        score=_document_score(best.score, sum(hit.score for hit in hits)),
+        chunks=len(hits),
+        description="",
+        heading=best.heading,
+        location=best.location,
+        text=best.text,
+        source_file=best.source_file,
+        markdown_file=best.markdown_file,
+        line_start=best.line_start,
+        line_end=best.line_end,
+    )
+
+
+def _document_score(best: float, total: float) -> float:
+    """How strongly a document matches: the harmonic mean of its best chunk and the sum of all
+    its matched chunks. A document matched once scores its one chunk. Every further chunk lifts
+    it, but the mean stays under twice the best, so many weak chunks never outrank one strong one,
+    and a document with a few strong chunks is not held back for having few."""
+    if best <= 0 or total <= 0:
+        return 0.0
+    return 2 * best * total / (best + total)
+
+
+def _document_limit(limit: int | None) -> int:
+    """The shortlist size the caller asked for, defaulted and bounded."""
+    return check_page_size(DEFAULT_DOCUMENTS if limit is None else limit, MAX_DOCUMENTS, "limit")
+
+
+def _scan_size(limit: int) -> int:
+    """How many chunks the shortlist of `limit` documents is folded from."""
+    return min(limit * DOCUMENT_SCAN, MAX_TEXT_PAGE_SIZE)
+
+
+async def document_passages(
+    q: str, doc: str, collections: list[str] | None = None, limit: int | None = None
+) -> list[Hit]:
+    """The passages of one document behind its row in the shortlist, best first.
+
+    The same scan `search_documents` folds, for the same `limit`, kept to `doc`: exactly the
+    `chunks` its row counted, unfolded. A document the scan never reached is an empty list.
+    """
+    page = await search(q, collections, page_size=_scan_size(_document_limit(limit)))
+    return [hit for hit in page.items if hit.doc == doc]
 
 
 async def _attach_descriptions(matches: list[DocumentMatch]) -> None:

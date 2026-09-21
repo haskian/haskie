@@ -587,6 +587,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/insights/searches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** SearchTrend */
+        get: operations["ApiInsightsSearchesSearchTrend"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/insights/chunks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** ChunkTrend */
+        get: operations["ApiInsightsChunksChunkTrend"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** SessionHistory */
+        get: operations["ApiSessionsSessionIdHistorySessionHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/search/text": {
         parameters: {
             query?: never;
@@ -621,6 +672,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/search/documents/{doc}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** DocumentPassages */
+        get: operations["ApiSearchDocumentsDocumentPassages"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -640,7 +708,8 @@ export interface components {
             /** @enum {string} */
             kind: "index_collection" | "delete_collection" | "delete_document";
             collection: string | null;
-            status: string;
+            /** @enum {string} */
+            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
             progress?: components["schemas"]["BulkProgress"] | null;
             error?: string | null;
         };
@@ -677,6 +746,12 @@ export interface components {
              * @default 150
              */
             chunk_overlap: number;
+        };
+        /** ChunksAt */
+        ChunksAt: {
+            ts: number;
+            collection: string;
+            chunks: number;
         };
         /** CollectionInfo */
         CollectionInfo: {
@@ -844,6 +919,14 @@ export interface components {
             bytes: number;
             created_at: number;
         };
+        /** EventDetail */
+        EventDetail: {
+            scope?: string | null;
+            hits?: number | null;
+            docs?: string[] | null;
+            collection?: string | null;
+            collections?: string[] | null;
+        };
         /** FieldDoc */
         FieldDoc: {
             title: string;
@@ -907,7 +990,8 @@ export interface components {
             action: "import" | "embed" | "index";
             collection: string | null;
             doc: string;
-            status: string;
+            /** @enum {string} */
+            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
             created_at: number;
             updated_at: number;
             error: string | null;
@@ -931,13 +1015,41 @@ export interface components {
             /** @enum {string} */
             kind: "document" | "collection" | "download" | "maintenance";
             title: string;
-            status: string;
+            /** @enum {string} */
+            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
             created_at: number;
             updated_at: number;
             error: string | null;
+            origin?: string | null;
             detail?: {
                 [key: string]: number | string | boolean | null;
             };
+            stages?: components["schemas"]["StageJob"][];
+        };
+        /** Listed */
+        Listed: {
+            name: string;
+            suffix: string;
+            size: number;
+            /** @enum {string} */
+            status: "queued" | "converting" | "embedding" | "imported" | "error" | "cancelled" | "deleting";
+            error?: string | null;
+            preview?: components["schemas"]["Preview"] | null;
+            /**
+             * @default anydoc
+             * @enum {string}
+             */
+            parser: "anydoc" | "plain";
+            /** @default true */
+            skip_ocr_pages: boolean;
+            /** @default 0 */
+            created_at: number;
+            /** @default 0 */
+            updated_at: number;
+            /** @default  */
+            description: string;
+            /** @default 0 */
+            collections: number;
         };
         /** MaintenanceState */
         MaintenanceState: {
@@ -1001,9 +1113,9 @@ export interface components {
             next_cursor?: string | null;
             total?: number | null;
         };
-        /** Page[Document] */
-        "Page_haskie.document.Document_": {
-            items: components["schemas"]["Document"][];
+        /** Page[Listed] */
+        "Page_haskie.document.Listed_": {
+            items: components["schemas"]["Listed"][];
             next_cursor?: string | null;
             total?: number | null;
         };
@@ -1134,6 +1246,11 @@ export interface components {
              * @default 90
              */
             audit_days: number;
+        };
+        /** SearchAt */
+        SearchAt: {
+            ts: number;
+            session_id: string;
         };
         /** SearchOverrides */
         SearchOverrides: {
@@ -1272,6 +1389,34 @@ export interface components {
         SessionCollections: {
             collections: string[];
         };
+        /** SessionEvent */
+        SessionEvent: {
+            ts: number;
+            /** @enum {string} */
+            action: "search" | "import" | "attach" | "detach" | "describe" | "collections";
+            subject: string;
+            detail: components["schemas"]["EventDetail"];
+            workflow_id: string | null;
+            duration_ms: number;
+        };
+        /** SessionSummary */
+        SessionSummary: {
+            id: string;
+            collections: string[];
+            last_at: number | null;
+        };
+        /** StageJob */
+        StageJob: {
+            /** @enum {string} */
+            stage: "convert" | "embed" | "index";
+            job_id: string;
+            /** @enum {string} */
+            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
+            tasks_done: number;
+            tasks_running: number;
+            tasks_total: number;
+            seconds?: number | null;
+        };
         /** Staged */
         Staged: {
             staging_id: string;
@@ -1296,7 +1441,8 @@ export interface components {
             seq: number;
             page_start: number;
             page_end: number;
-            status: string;
+            /** @enum {string} */
+            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
             result: number | null;
             error: string | null;
         };
@@ -1505,7 +1651,9 @@ export interface operations {
     };
     ApiDocumentsImportImportDocument: {
         parameters: {
-            query?: never;
+            query?: {
+                session_id?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -1563,7 +1711,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Page_haskie.document.Document_"];
+                    "application/json": components["schemas"]["Page_haskie.document.Listed_"];
                 };
             };
             /** @description Bad request syntax or unsupported method */
@@ -1600,7 +1748,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Document"];
+                    "application/json": components["schemas"]["Listed"];
                 };
             };
             /** @description Bad request syntax or unsupported method */
@@ -1895,7 +2043,9 @@ export interface operations {
     };
     ApiDocumentsDescriptionDescribeDocument: {
         parameters: {
-            query?: never;
+            query?: {
+                session_id?: string | null;
+            };
             header?: never;
             path: {
                 doc: string;
@@ -2098,6 +2248,7 @@ export interface operations {
                 bm25_weight?: number | null;
                 reranker?: "none" | "cross-encoder" | null;
                 candidates?: number | null;
+                session_id?: string | null;
             };
             header?: never;
             path: {
@@ -2297,7 +2448,9 @@ export interface operations {
     };
     ApiCollectionsDocumentsAddDocument: {
         parameters: {
-            query?: never;
+            query?: {
+                session_id?: string | null;
+            };
             header?: never;
             path: {
                 collection: string;
@@ -2338,7 +2491,9 @@ export interface operations {
     };
     ApiCollectionsDocumentsRemoveDocument: {
         parameters: {
-            query?: never;
+            query?: {
+                session_id?: string | null;
+            };
             header?: never;
             path: {
                 collection: string;
@@ -2653,9 +2808,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string[];
-                    };
+                    "application/json": components["schemas"]["SessionSummary"][];
                 };
             };
         };
@@ -2740,6 +2893,117 @@ export interface operations {
             };
         };
     };
+    ApiInsightsSearchesSearchTrend: {
+        parameters: {
+            query?: {
+                days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchAt"][];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiInsightsChunksChunkTrend: {
+        parameters: {
+            query?: {
+                days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChunksAt"][];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiSessionsSessionIdHistorySessionHistory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionEvent"][];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
     ApiSearchTextSearchText: {
         parameters: {
             query: {
@@ -2747,6 +3011,7 @@ export interface operations {
                 collections?: string | null;
                 page_size?: number;
                 cursor?: string | null;
+                session_id?: string | null;
             };
             header?: never;
             path?: never;
@@ -2786,6 +3051,7 @@ export interface operations {
                 q: string;
                 collections?: string | null;
                 limit?: number | null;
+                session_id?: string | null;
             };
             header?: never;
             path?: never;
@@ -2800,6 +3066,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DocumentMatch"][];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiSearchDocumentsDocumentPassages: {
+        parameters: {
+            query: {
+                q: string;
+                collections?: string | null;
+                limit?: number | null;
+                session_id?: string | null;
+            };
+            header?: never;
+            path: {
+                doc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Hit"][];
                 };
             };
             /** @description Bad request syntax or unsupported method */

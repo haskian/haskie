@@ -4,6 +4,7 @@ The rows come from DBOS, never from this test: the only way to be sure the SQL m
 DBOS writes is to import a document, attach it to a collection and read what that left behind.
 """
 
+import time
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,12 @@ pytestmark = pytest.mark.anyio
 async def _imported(dbos, tmp_path: Path, pages: int) -> str:
     """One document imported with one page per batch, so every stage has `pages` batches. The
     budget gives convert and embed two slices each. Returns the document name."""
-    indexing = PipelineSettings(cpu_budget=6, batch_pages=1, index_group_parts=1)
+    # An hour of debounce, because these tests read what the pipeline left behind and the default
+    # minute expires under them on a loaded machine: the maintenance run the index asked for wakes
+    # up and enqueues its own child on `task.indexing`, which is then a row nobody asked for.
+    indexing = PipelineSettings(
+        cpu_budget=6, batch_pages=1, index_group_parts=1, maintenance_idle_seconds=3600
+    )
     await dbos.apply_settings(await save_user_settings(UserSettings(pipeline=indexing)))
     row = await import_document(
         dbos, "p.pdf", text_pdf([f"alpha{i}" for i in range(pages)]), tmp_path
@@ -80,12 +86,14 @@ async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) 
     doc = await _imported(dbos, tmp_path, pages=1)
     await Collection.create("act")
     await attach_document(dbos, "act", doc)
-    # set the state rather than waiting for it: `conftest._sweep_delayed` promotes an expired
-    # debounce every 50 ms, so "is the maintenance run still DELAYED" is a race, not a fact
+    # Set the state rather than waiting for it: `conftest._sweep_delayed` promotes an expired
+    # debounce every 50 ms, so "is the maintenance run still DELAYED" is a race, not a fact. The
+    # wake time goes with it, an hour out, because the sweep promotes on that column alone.
     async with db.connect() as conn:
         await conn.execute(
-            "update workflow_status set status = 'DELAYED' where queue_name = ?",
-            (workflows.MAINTENANCE_QUEUE,),
+            "update workflow_status set status = 'DELAYED', delay_until_epoch_ms = ? "
+            "where queue_name = ?",
+            (int((time.time() + 3600) * 1000), workflows.MAINTENANCE_QUEUE),
         )
         delayed = list(
             await conn.execute_fetchall(
@@ -96,8 +104,11 @@ async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) 
     assert await sysdb.queue_activity() == {}, "a debounce waiting out its period is not activity"
 
     async with db.connect() as conn:  # a slice still waiting for a slot, and one running
+        # The queue this slice waits on is one the app never registered, because DBOS is up: a row
+        # left ENQUEUED on a real queue with a free slot is dequeued within a poll, and the status
+        # this line is asserting on is gone before the read. The family still reads off the prefix.
         await conn.execute(
-            "update workflow_status set status = 'ENQUEUED' "
+            "update workflow_status set status = 'ENQUEUED', queue_name = 'task.parked' "
             "where name = ? and workflow_uuid like '%:convert:%'",
             (dbos_names.STAGE_WORKFLOW,),
         )
@@ -113,6 +124,9 @@ async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) 
         "task": {"ENQUEUED": 1, "PENDING": 1},
         "job": {"PENDING": 2},
     }, "the prefix of the queue name is the family; the status is kept for the caller to fold"
+    assert await sysdb.queue_activity(skip=[workflows.EMBEDDING_QUEUE]) == {
+        "task": {"ENQUEUED": 1, "PENDING": 1},
+    }, "a skipped queue drops out of its family, and an empty family is absent"
 
 
 async def test_stale_active_ids_pages_over_another_versions_workflows(

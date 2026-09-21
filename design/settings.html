@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>haskie — settings</title>
+  <link rel="stylesheet" href="design.css" />
+  <style>
+    /* page layout only; tokens live in design.css */
+    .settings { display: grid; gap: var(--sp-12); align-content: start; max-width: 520px; }
+    .settings section { display: grid; gap: var(--sp-4); }
+  </style>
+</head>
+<body>
+  <div class="page">
+
+
+    <main class="body">
+      <aside class="side">
+        <a class="logo" href="index.html" aria-label="Haskie"></a>
+        <nav class="nav">
+          <a class="nav-item" href="explore.html"><i data-lucide="compass" class="icon"></i>Explore</a>
+          <a class="nav-item" href="documents.html"><i data-lucide="file-text" class="icon"></i>Documents<span class="count">30</span></a>
+          <a class="nav-item" href="collections.html"><i data-lucide="library" class="icon"></i>Collections<span class="count">5</span></a>
+          <a class="nav-item" href="operations.html"><i data-lucide="activity" class="icon"></i>Operations</a>
+          <a class="nav-item" href="sessions.html"><i data-lucide="bot" class="icon"></i>Sessions</a>
+          <a class="nav-item" href="insights.html"><i data-lucide="chart-column" class="icon"></i>Insights</a>
+          <a class="nav-item" href="settings.html" aria-current="true"><i data-lucide="settings" class="icon"></i>Settings</a>
+        </nav>
+        <section>
+          <span class="label label-mono">Sections</span>
+          <nav class="nav">
+            <a class="nav-item" href="#general" aria-current="true">General</a>
+            <a class="nav-item" href="#embedding">Embedding</a>
+            <a class="nav-item" href="#index">Index</a>
+            <a class="nav-item" href="#appearance">Appearance</a>
+          </nav>
+        </section>
+      </aside>
+      <div class="settings">
+        <section id="general">
+          <span class="mono muted">General</span>
+          <div class="field"><span class="label">Workspace</span><input class="input" type="text" value="haskie" /></div>
+          <div class="field"><span class="label">Documents folder</span><input class="input" type="text" value="~/Documents/renders" /></div>
+          <div class="row row-loose">
+            <label class="toggle"><input type="checkbox" role="switch" checked />Watch folder</label>
+            <label class="toggle"><input type="checkbox" role="switch" />Import on start</label>
+          </div>
+        </section>
+        <section id="embedding">
+          <span class="mono muted">Embedding</span>
+          <div class="field"><span class="label">Model</span>
+            <details class="picker">
+              <summary><span class="picker-value"><span>sim-1</span><span class="sub">768 dimensions · fastest, good for short chunks</span></span><i data-lucide="chevron-down" class="icon"></i></summary>
+              <ul class="picker-list" role="listbox">
+                <li role="option" tabindex="0" aria-selected="true"><span>sim-1</span><span class="sub">768 dimensions · fastest, good for short chunks</span></li>
+                <li role="option" tabindex="0" aria-selected="false"><span>sim-1-large</span><span class="sub">1 536 dimensions · best recall, 3× slower</span></li>
+                <li role="option" tabindex="0" aria-selected="false"><span>sim-legacy</span><span class="sub">512 dimensions · kept for old collections</span></li>
+              </ul>
+            </details>
+          </div>
+          <div class="row row-loose">
+            <label class="slider"><span class="slider-head"><span class="label">Chunk size</span><span>512 <span class="faint">tokens</span></span></span><input type="range" min="128" max="2048" step="64" value="512" /></label>
+            <label class="slider"><span class="slider-head"><span class="label">Overlap</span><span>64 <span class="faint">tokens</span></span></span><input type="range" min="0" max="256" step="16" value="64" /></label>
+          </div>
+          <div class="row row-loose">
+            <label class="check"><input type="checkbox" checked />Cache embeddings</label>
+            <label class="check"><input type="checkbox" />Re-embed on model change</label>
+          </div>
+        </section>
+        <section id="index">
+          <span class="mono muted">Index</span>
+          <div class="row row-loose">
+            <label class="slider"><span class="slider-head"><span class="label">Threads</span><span>4 / <span class="faint">8</span></span></span><input type="range" min="1" max="8" value="4" /></label>
+            <label class="slider"><span class="slider-head"><span class="label">RAM</span><span>19GB / <span class="faint">60GB</span></span></span><input type="range" min="0" max="60" value="19" /></label>
+          </div>
+          <div class="row row-loose">
+            <button class="btn"><i data-lucide="refresh-cw" class="icon"></i>Re-index all</button>
+            <button class="btn btn-ghost"><i data-lucide="trash-2" class="icon"></i>Clear cache</button>
+          </div>
+        </section>
+        <section id="appearance">
+          <span class="mono muted">Appearance</span>
+          <div class="row row-loose">
+            <label class="toggle"><input type="checkbox" role="switch" id="bg-classic" />Classic background</label>
+            <label class="toggle"><input type="checkbox" role="switch" checked />Reduce motion</label>
+          </div>
+          <div class="field"><span class="label">Notes</span><textarea class="textarea" placeholder="Anything to remember about this workspace"></textarea></div>
+          <div class="row row-loose">
+            <button class="btn btn-primary">Save</button>
+            <button class="btn btn-ghost">Reset</button>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="statusbar"></div>
+
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="design.js"></script>
+</body>
+</html>

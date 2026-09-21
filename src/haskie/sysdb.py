@@ -9,6 +9,7 @@ Nothing here writes: DBOS owns every row in these tables. `db.connect()` opens t
 was configured with, so the reads see its committed state through WAL.
 """
 
+from collections.abc import Sequence
 from itertools import batched
 
 from haskie import db
@@ -53,12 +54,13 @@ async def active_counts_by_name() -> dict[str, int]:
     return {name: count for name, count in rows}
 
 
-async def queue_activity() -> dict[str, dict[str, int]]:
+async def queue_activity(skip: Sequence[str] = ()) -> dict[str, dict[str, int]]:
     """Enqueued/running workflows per queue family ("job" or "task"), by status.
 
     The queue name carries the family as its prefix (`job.indexing`, `task.embedding`), so one
     grouped query over the prefix answers the whole indicator; a workflow started outside a queue
-    has no name and is not counted.
+    has no name and is not counted. `skip` names queues left out: a child that its parent waits
+    for is the same work as the parent, not a second one.
 
     `ACTIVE_STATUS` only: a DELAYED workflow is a debounce waiting out its period, not work
     waiting for a slot. Counting it made the indicator read "1 queued" for a whole
@@ -69,8 +71,10 @@ async def queue_activity() -> dict[str, dict[str, int]]:
             "select substr(queue_name, 1, instr(queue_name, '.') - 1), status, count(*) "
             "from workflow_status "
             f"where status in ({db.placeholders(len(ACTIVE_STATUS))}) "
-            "and queue_name like '%.%' group by 1, 2",
-            ACTIVE_STATUS,
+            "and queue_name like '%.%' "
+            + (f"and queue_name not in ({db.placeholders(len(skip))}) " if skip else "")
+            + "group by 1, 2",
+            [*ACTIVE_STATUS, *skip],
         )
     activity: dict[str, dict[str, int]] = {}
     for family, status, count in rows:

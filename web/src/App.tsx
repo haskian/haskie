@@ -1,66 +1,78 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, type Status } from './api'
-import { Activity } from './components/Activity'
 import { usePoll } from './hooks/usePoll'
 import { Collections } from './pages/Collections'
 import { Documents } from './pages/Documents'
+import { Explore } from './pages/Explore'
 import { Init } from './pages/Init'
-import { Jobs } from './pages/Jobs'
+import { Insights } from './pages/Insights'
+import { Operations } from './pages/Operations'
 import { Sessions } from './pages/Sessions'
 import { Settings } from './pages/Settings'
-import { Viewer } from './pages/Viewer'
+import { applyBackground } from './pages/settings/background'
+import { useRoute, type Route } from './router'
+import { Statusbar, type NavCounts } from './ui'
 
-// A document is imported once and addressed by name alone, so the viewer needs no collection.
-export type Route =
-  | { name: 'documents' }
-  | { name: 'collections' }
-  | { name: 'viewer'; doc: string }
-  | { name: 'sessions' }
-  | { name: 'jobs' }
-  | { name: 'settings' }
+const STATUS_POLL_MS = 5000
 
 export default function App() {
+  const route = useRoute()
   const [status, setStatus] = useState<Status | null>(null)
-  const [page, setPage] = useState<Route>({ name: 'documents' })
+  const [counts, setCounts] = useState<NavCounts>({ documents: null, collections: null })
 
-  const refresh = useCallback(() => api.status().then(setStatus), [])
+  const refresh = useCallback(() => {
+    api.status().then(setStatus).catch(() => undefined)
+  }, [])
+  useEffect(refresh, [refresh])
+  // A model download is the only thing that changes the status on its own.
+  const downloading = status?.models.some((model) => model.state === 'loading' || model.state === 'pending') ?? false
+  usePoll(downloading, refresh, STATUS_POLL_MS)
+
+  // Nav counts are re-read on every route change, rather than through a refresh context: the
+  // pages that change a count are the pages you then navigate away from.
   useEffect(() => {
-    void api.options() // started here so it travels with the status request, not after it
-    refresh()
-  }, [refresh])
-  // poll while a model is downloading
-  usePoll(status?.models.some((m) => m.state === 'loading' || m.state === 'pending') ?? false, refresh)
+    Promise.all([api.documents({ page_size: 1 }), api.collections({ page_size: 1 })])
+      .then(([documents, collections]) => setCounts({ documents: documents.total, collections: collections.total }))
+      .catch(() => undefined)
+  }, [route.name])
 
-  if (!status) return <p className="muted">loading…</p>
+  // The background choice is a page-wide attribute that Settings writes as it is changed, so this
+  // only has to apply what a previous visit stored.
+  useEffect(applyBackground, [])
+
+  if (status === null) return <div className="page" />
   if (!status.initialized) return <Init onDone={refresh} />
 
   return (
-    <div className="app">
-      <nav>
-        <strong>haskie</strong>
-        <button onClick={() => setPage({ name: 'documents' })}>Documents</button>
-        <button onClick={() => setPage({ name: 'collections' })}>Collections</button>
-        <button onClick={() => setPage({ name: 'sessions' })}>Sessions</button>
-        <button onClick={() => setPage({ name: 'jobs' })}>Jobs</button>
-        <button onClick={() => setPage({ name: 'settings' })}>Settings</button>
-        <span className="muted">
-          embedding: {status.embedding ? `${status.embedding.name} on ${status.device}` : 'none (full-text)'}
-          {status.models.map((m) => (
-            <span key={`${m.kind}:${m.name}`} className={m.state === 'error' ? 'error' : m.state === 'ready' ? '' : 'banner'} title={m.error ?? m.name}>
-              {' '}· {m.kind} {m.state === 'ready' ? 'ready' : m.state === 'error' ? 'failed' : 'downloading…'}
-            </span>
-          ))}
-        </span>
-        <Activity onOpen={() => setPage({ name: 'jobs' })} />
-      </nav>
-      <main>
-        {page.name === 'documents' && <Documents navigate={setPage} />}
-        {page.name === 'collections' && <Collections navigate={setPage} />}
-        {page.name === 'viewer' && <Viewer doc={page.doc} navigate={setPage} />}
-        {page.name === 'sessions' && <Sessions />}
-        {page.name === 'jobs' && <Jobs />}
-        {page.name === 'settings' && <Settings />}
-      </main>
-    </div>
+    <>
+      <Page route={route} counts={counts} />
+      <Statusbar status={status} />
+    </>
   )
+}
+
+/** What every page gets: its route, and the nav counts it hands to `Shell`. */
+export interface PageProps<R extends Route = Route> {
+  route: R
+  counts: NavCounts
+}
+
+// Each page renders `Shell` itself, so its side sections and content share one component's state.
+function Page({ route, counts }: PageProps) {
+  switch (route.name) {
+    case 'explore':
+      return <Explore route={route} counts={counts} />
+    case 'documents':
+      return <Documents route={route} counts={counts} />
+    case 'collections':
+      return <Collections route={route} counts={counts} />
+    case 'operations':
+      return <Operations route={route} counts={counts} />
+    case 'sessions':
+      return <Sessions route={route} counts={counts} />
+    case 'insights':
+      return <Insights route={route} counts={counts} />
+    case 'settings':
+      return <Settings route={route} counts={counts} />
+  }
 }

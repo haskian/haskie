@@ -1,0 +1,3 @@
+/* Page layout only; tokens and components live in design/design.css. Copied from the <style>
+   block of design/explore.html. The match panel moved to design.css with the modal it is in. */
+.explore { display: grid; gap: var(--sp-6); align-content: start; }

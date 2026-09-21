@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>haskie — documents</title>
+  <link rel="stylesheet" href="design.css" />
+  <style>
+    /* page layout only; tokens live in design.css */
+    .staged .list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: var(--sp-3); align-items: center; }
+  </style>
+</head>
+<body>
+  <div class="page">
+
+
+    <main class="body">
+      <aside class="side">
+        <a class="logo" href="index.html" aria-label="Haskie"></a>
+        <nav class="nav">
+          <a class="nav-item" href="explore.html"><i data-lucide="compass" class="icon"></i>Explore</a>
+          <a class="nav-item" href="documents.html" aria-current="true"><i data-lucide="file-text" class="icon"></i>Documents<span class="count">30</span></a>
+          <a class="nav-item" href="collections.html"><i data-lucide="library" class="icon"></i>Collections<span class="count">5</span></a>
+          <a class="nav-item" href="operations.html"><i data-lucide="activity" class="icon"></i>Operations</a>
+          <a class="nav-item" href="sessions.html"><i data-lucide="bot" class="icon"></i>Sessions</a>
+          <a class="nav-item" href="insights.html"><i data-lucide="chart-column" class="icon"></i>Insights</a>
+          <a class="nav-item" href="settings.html"><i data-lucide="settings" class="icon"></i>Settings</a>
+        </nav>
+        <section>
+          <span class="label label-mono">Group by</span>
+          <nav class="nav" id="group-by">
+            <button class="nav-item" data-group="status" aria-current="true">Status</button>
+            <button class="nav-item" data-group="name">Name</button>
+            <button class="nav-item" data-group="day">Date</button>
+          </nav>
+        </section>
+      </aside>
+      <div class="gallery-sections sections">
+        <form class="input-group" role="search" onsubmit="return false"><input class="input" id="search" type="search" placeholder="Search documents" /><button class="btn btn-ghost" type="button" aria-label="Clear" onclick="const box = this.previousElementSibling; box.value = ''; box.dispatchEvent(new Event('input')); box.focus()"><i data-lucide="x" class="icon"></i></button></form>
+        <section class="gallery-section section" id="g-new">
+          <span class="mono muted">New</span>
+          <div class="gallery gallery-lg">
+            <button class="tile tile-add" onclick="document.getElementById('modal-add').showModal()"><i data-lucide="plus" class="icon"></i><span class="tile-text"><span class="name">Add documents</span><span class="sub">Upload or import</span></span><span class="hint" role="tooltip"><strong>Add documents</strong><span class="sub">Upload or import</span>Drop files anywhere, upload, or import a path.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-a-e">
+          <span class="mono muted">A–E</span>
+          <div class="gallery gallery-lg">
+            <button class="tile" data-status="Imported" data-day="Mon 21 Sep"><i data-lucide="grid-3x3" class="icon"></i><span class="tile-text"><span class="name">Area</span><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Area</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span>Notes on area lights and soft shadow falloff.</span></button>
+            <button class="tile" data-status="Imported" data-day="Mon 21 Sep"><i data-lucide="box" class="icon"></i><span class="tile-text"><span class="name">Box</span><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Box</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span>Primitive box reference with UV layout conventions.</span></button>
+            <button class="tile" data-status="Imported" data-day="Mon 21 Sep"><i data-lucide="camera" class="icon"></i><span class="tile-text"><span class="name">Camera</span><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Camera</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span>Lens presets and framing rules for product shots.</span></button>
+            <button class="tile" data-status="Imported" data-day="Sun 20 Sep"><i data-lucide="check" class="icon"></i><span class="tile-text"><span class="name">Check</span><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span><span class="meta">Sun 20 Sep</span></span><span class="hint" role="tooltip"><strong>Check</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span>Validation checklist run before every final render.</span></button>
+            <button class="tile" data-status="Imported" data-day="Sun 20 Sep"><i data-lucide="circle" class="icon"></i><span class="tile-text"><span class="name">Circle</span><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span><span class="meta">Sun 20 Sep</span></span><span class="hint" role="tooltip"><strong>Circle</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span>Radial layout guide for circular compositions.</span></button>
+            <button class="tile" data-status="Imported" data-day="Sat 19 Sep"><i data-lucide="clock" class="icon"></i><span class="tile-text"><span class="name">Clock</span><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span><span class="meta">Sat 19 Sep</span></span><span class="hint" role="tooltip"><strong>Clock</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span>Time budget per render pass, measured on the farm.</span></button>
+            <button class="tile" data-status="Imported" data-day="Mon 21 Sep"><i data-lucide="cone" class="icon"></i><span class="tile-text"><span class="name">Cone</span><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Cone</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span>Cone primitive with tessellation trade-offs.</span></button>
+            <button class="tile" data-status="Imported" data-day="Mon 21 Sep"><i data-lucide="cpu" class="icon"></i><span class="tile-text"><span class="name">Core</span><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Core</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span>Core engine settings and their safe ranges.</span></button>
+            <button class="tile" data-status="Imported" data-day="Mon 21 Sep"><i data-lucide="cylinder" class="icon"></i><span class="tile-text"><span class="name">Cylinder</span><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Cylinder</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span>Cylinder primitive and cap smoothing options.</span></button>
+            <button class="tile" data-status="Imported" data-day="Sun 20 Sep"><i data-lucide="droplet" class="icon"></i><span class="tile-text"><span class="name">Drop</span><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span><span class="meta">Sun 20 Sep</span></span><span class="hint" role="tooltip"><strong>Drop</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span>Liquid drop shader with refraction samples.</span></button>
+            <button class="tile" data-status="Imported" data-day="Sun 20 Sep"><i data-lucide="eye" class="icon"></i><span class="tile-text"><span class="name">Eye</span><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span><span class="meta">Sun 20 Sep</span></span><span class="hint" role="tooltip"><strong>Eye</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span>Eye shader study with layered specular.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-f-j">
+          <span class="mono muted">F–J</span>
+          <div class="gallery gallery-lg">
+            <button class="tile" data-status="Imported" data-day="Sat 19 Sep"><i data-lucide="film" class="icon"></i><span class="tile-text"><span class="name">Film</span><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span><span class="meta">Sat 19 Sep</span></span><span class="hint" role="tooltip"><strong>Film</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span>Film grain and halation post settings.</span></button>
+            <button class="tile" data-status="Imported" data-day="Mon 21 Sep"><i data-lucide="flame" class="icon"></i><span class="tile-text"><span class="name">Flame</span><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Flame</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span>Volumetric flame setup for low sample counts.</span></button>
+            <button class="tile" data-status="Imported" data-day="Mon 21 Sep"><i data-lucide="settings" class="icon"></i><span class="tile-text"><span class="name">Gear</span><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Gear</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span>Gear generator parameters and tooth profiles.</span></button>
+            <button class="tile" data-status="Imported" data-day="Mon 21 Sep"><i data-lucide="heart" class="icon"></i><span class="tile-text"><span class="name">Heart</span><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Heart</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span>Heart mesh topology cleaned for subdivision.</span></button>
+            <button class="tile" data-status="Imported" data-day="Sun 20 Sep"><i data-lucide="hexagon" class="icon"></i><span class="tile-text"><span class="name">Hex</span><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span><span class="meta">Sun 20 Sep</span></span><span class="hint" role="tooltip"><strong>Hex</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span>Hex grid tiling with seamless edge matching.</span></button>
+            <button class="tile" data-status="Imported" data-day="Sun 20 Sep"><i data-lucide="image" class="icon"></i><span class="tile-text"><span class="name">Image</span><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span><span class="meta">Sun 20 Sep</span></span><span class="hint" role="tooltip"><strong>Image</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span>Image plane workflow for reference matching.</span></button>
+            <button class="tile" data-status="Imported" data-day="Sat 19 Sep"><i data-lucide="aperture" class="icon"></i><span class="tile-text"><span class="name">Iris</span><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span><span class="meta">Sat 19 Sep</span></span><span class="hint" role="tooltip"><strong>Iris</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span>Aperture blade count and bokeh shape tests.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-k-o">
+          <span class="mono muted">K–O</span>
+          <div class="gallery gallery-lg">
+            <button class="tile" data-status="Uploaded" data-day="Mon 21 Sep"><i data-lucide="lamp" class="icon"></i><span class="tile-text"><span class="name">Lamp</span><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Lamp</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span>Desk lamp rig with IES profile comparison.</span></button>
+            <button class="tile" data-status="Uploaded" data-day="Mon 21 Sep"><i data-lucide="layers" class="icon"></i><span class="tile-text"><span class="name">Layers</span><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Layers</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span>Render layer split for compositing handoff.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-p-t">
+          <span class="mono muted">P–T</span>
+          <div class="gallery gallery-lg">
+            <button class="tile" data-status="Imported" data-day="Mon 21 Sep"><i data-lucide="mountain" class="icon"></i><span class="tile-text"><span class="name">Peak</span><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Peak</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span>Mountain terrain displacement from height maps.</span></button>
+            <button class="tile" data-status="Imported" data-day="Sun 20 Sep"><i data-lucide="pentagon" class="icon"></i><span class="tile-text"><span class="name">Penta</span><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span><span class="meta">Sun 20 Sep</span></span><span class="hint" role="tooltip"><strong>Penta</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span>Pentagon tiling study for panel layouts.</span></button>
+            <button class="tile" data-status="Uploaded" data-day="Sun 20 Sep"><i data-lucide="sparkles" class="icon"></i><span class="tile-text"><span class="name">Spark</span><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span><span class="meta">Sun 20 Sep</span></span><span class="hint" role="tooltip"><strong>Spark</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span>Particle spark emitter tuned for slow motion.</span></button>
+            <button class="tile" data-status="Imported" data-day="Sat 19 Sep"><i data-lucide="square" class="icon"></i><span class="tile-text"><span class="name">Square</span><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span><span class="meta">Sat 19 Sep</span></span><span class="hint" role="tooltip"><strong>Square</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span>Square grid baseline for UI mockups.</span></button>
+            <button class="tile" data-status="Imported" data-day="Mon 21 Sep"><i data-lucide="star" class="icon"></i><span class="tile-text"><span class="name">Star</span><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Star</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span>Star field generator with brightness curve.</span></button>
+            <button class="tile" data-status="Uploaded" data-day="Mon 21 Sep"><i data-lucide="sun" class="icon"></i><span class="tile-text"><span class="name">Sun</span><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Sun</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span>Sun position by date, time and latitude.</span></button>
+            <button class="tile" data-status="Imported" data-day="Mon 21 Sep"><i data-lucide="move-up-left" class="icon"></i><span class="tile-text"><span class="name">Target</span><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span><span class="meta">Mon 21 Sep</span></span><span class="hint" role="tooltip"><strong>Target</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 0</span>Aim constraint setup for tracking cameras.</span></button>
+            <button class="tile" data-status="Imported" data-day="Sun 20 Sep"><i data-lucide="triangle" class="icon"></i><span class="tile-text"><span class="name">Tri</span><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span><span class="meta">Sun 20 Sep</span></span><span class="hint" role="tooltip"><strong>Tri</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 3</span>Triangle strips and their draw call cost.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-u-z">
+          <span class="mono muted">U–Z</span>
+          <div class="gallery gallery-lg">
+            <button class="tile" data-status="Imported" data-day="Sun 20 Sep"><i data-lucide="wind" class="icon"></i><span class="tile-text"><span class="name">Wind</span><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span><span class="meta">Sun 20 Sep</span></span><span class="hint" role="tooltip"><strong>Wind</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 2</span>Wind force field with turbulence presets.</span></button>
+            <button class="tile" data-status="Uploaded" data-day="Sat 19 Sep"><i data-lucide="zap" class="icon"></i><span class="tile-text"><span class="name">Zap</span><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span><span class="meta">Sat 19 Sep</span></span><span class="hint" role="tooltip"><strong>Zap</strong><span class="sub"><i data-lucide="library" class="glyph"></i> 1</span>Lightning bolt path generator and glow pass.</span></button>
+          </div>
+        </section>
+      </div>
+    </main>
+
+  </div>
+
+  <dialog class="modal" id="modal-add">
+    <div class="modal-body" tabindex="-1" autofocus>
+      <div class="modal-head">
+        <h2 class="title"><span>Add documents</span><small class="muted">import</small></h2>
+        <form method="dialog"><button class="btn btn-ghost" aria-label="Close"><i data-lucide="x" class="icon"></i></button></form>
+      </div>
+      <div style="display: grid; gap: var(--sp-6); align-content: start">
+        <div class="field"><span class="label">Files</span><div class="row"><button class="btn"><i data-lucide="upload" class="icon"></i>Choose files</button><span class="muted">or drop them anywhere on the page</span></div></div>
+        <div class="field"><span class="label">Ready to import · 2</span>
+          <ul class="list staged">
+            <li class="list-item"><input class="input" value="renders/lamp.pdf" aria-label="Document name"><span class="mono muted">610 KB</span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="x" class="icon"></i></button></li>
+            <li class="list-item"><input class="input" value="renders/cube.pdf" aria-label="Document name"><span class="mono muted">1.2 MB</span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="x" class="icon"></i></button></li>
+          </ul>
+          <div class="row"><button class="btn btn-primary">Import 2 documents</button></div>
+        </div>
+        <form method="dialog" class="field"><span class="label">Path</span><input class="input" placeholder="File or folder the server can read"><div class="row"><button class="btn">Import path</button></div></form>
+      </div>
+    </div>
+  </dialog>
+  <dialog class="modal" id="modal">
+    <div class="modal-body" tabindex="-1" autofocus>
+      <div class="modal-head">
+        <h2 class="title"><span id="modal-title">Item</span><small class="muted" id="modal-author">Author</small></h2>
+        <form method="dialog"><button class="btn btn-ghost" aria-label="Close"><i data-lucide="x" class="icon"></i></button></form>
+      </div>
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" aria-selected="true" aria-controls="modal-content">Content</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="modal-collections">Collections</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="modal-import">Info</button>
+      </div>
+      <div id="modal-content" role="tabpanel" class="modal-panel">
+      <div class="split">
+        <section class="pane">
+          <div class="pane-head mono muted"><span>PDF</span><span class="crumb"></span></div>
+          <div class="pane-body">
+            <div class="skeleton" aria-hidden="true"><span class="skeleton-bar"></span><span class="skeleton-dot"></span><span class="skeleton-line"></span><span class="skeleton-line short"></span><span class="skeleton-block"></span><span class="skeleton-bar"></span></div>
+          </div>
+        </section>
+        <section class="pane">
+          <div class="pane-head mono muted"><span>Markdown</span><span class="crumb">p. 1/3 · Item › Notes</span></div>
+          <div class="pane-body"><pre class="md" id="modal-md"># Item
+
+Scene reference for the render pipeline.
+
+## Notes
+
+- 3 pages, 1 240 tokens
+- embedded with sim-1
+- last indexed 19 Jan 2019
+
+## Excerpt
+
+The cube sits at origin. Light comes from a single spot at 35 degrees, shadow density 18.</pre></div>
+        </section>
+      </div>
+      </div>
+      <div id="modal-collections" role="tabpanel" hidden>
+        <ul class="list">
+          <li class="list-item"><i data-lucide="library" class="icon"></i><span class="list-text"><a href="collections.html">A–E</a></span></li>
+          <li class="list-item"><i data-lucide="library" class="icon"></i><span class="list-text"><a href="collections.html">K–O</a></span></li>
+        </ul>
+      </div>
+      <div id="modal-import" role="tabpanel" class="modal-panel" hidden>
+        <div class="split">
+          <section class="pane">
+            <span class="pane-head mono muted">Details</span>
+            <div class="pane-body">
+              <dl class="kv">
+                <dt>Imported</dt><dd>Sat 19 January 2019, 14:32</dd>
+                <dt>Source</dt><dd>~/Documents/renders/<span id="modal-file">item</span>.pdf</dd>
+                <dt>Size</dt><dd>3 pages, 412 KB</dd>
+                <dt>Chunks</dt><dd>9 chunks, 1 240 tokens</dd>
+                <dt>Embedding</dt><dd>sim-1, 768 dimensions</dd>
+                <dt>Indexed</dt><dd>Sat 19 January 2019, 14:33</dd>
+                <dt>Imported by</dt><dd>crtomir</dd>
+              </dl>
+            </div>
+          </section>
+          <section class="pane">
+            <span class="pane-head mono muted">Description</span>
+            <div class="pane-body"><textarea class="textarea" id="modal-summary" aria-label="Description" placeholder="What this document is about"></textarea></div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <div class="drop-overlay" aria-hidden="true"><i data-lucide="upload" class="icon"></i>Drop files to upload</div>
+  <input type="file" id="upload" multiple accept=".pdf,.md,.txt" hidden />
+
+  <div id="statusbar"></div>
+
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="design.js"></script>
+  <script>
+    // whole window is a drop target; overlay shows while files hover, drop lands in the hidden input
+    let dragDepth = 0;
+    document.addEventListener('dragenter', (event) => { event.preventDefault(); if (dragDepth++ === 0) document.body.classList.add('over'); });
+    document.addEventListener('dragover', (event) => event.preventDefault());
+    document.addEventListener('dragleave', () => { if (--dragDepth === 0) document.body.classList.remove('over'); });
+    document.addEventListener('drop', (event) => { event.preventDefault(); dragDepth = 0; document.body.classList.remove('over'); document.getElementById('upload').files = event.dataTransfer.files; });
+    // group tiles by status or by name range; sections rebuilt from tile data
+    const RANGES = ['A–E', 'F–J', 'K–O', 'P–T', 'U–Z'];
+    const tiles = [...document.querySelectorAll('.gallery .tile')].map((tile) => {
+      const name = tile.querySelector('.tile-text').firstChild.textContent.trim();
+      return { tile, name, status: tile.dataset.status, day: tile.dataset.day, range: RANGES[Math.min(4, Math.floor((name.charCodeAt(0) - 65) / 5))] };
+    });
+    const list = document.querySelector('.gallery-sections');
+    function group(by) {
+      for (const section of list.querySelectorAll('.gallery-section')) section.remove();
+      const order = by === 'status' ? ['Uploaded', 'Imported'] : by === 'day' ? [...new Set(tiles.map((t) => t.day))] : RANGES;
+      for (const key of order.filter((k) => tiles.some((t) => t[by] === k))) {
+        const section = document.createElement('section');
+        section.className = 'gallery-section section';
+        section.innerHTML = '<span class="mono muted"></span><div class="gallery gallery-lg"></div>';
+        section.firstChild.textContent = key;
+        section.lastChild.append(...tiles.filter((t) => t[by] === key).map((t) => t.tile));
+        list.append(section);
+      }
+      hideEmptySections();
+    }
+    function hideEmptySections() {
+      for (const section of list.querySelectorAll('.gallery-section')) section.hidden = !section.querySelector('.tile:not([hidden])');
+    }
+    for (const button of document.querySelectorAll('#group-by .nav-item')) button.addEventListener('click', () => {
+      for (const other of button.parentElement.children) other.setAttribute('aria-current', String(other === button));
+      group(button.dataset.group === 'name' ? 'range' : button.dataset.group);
+    });
+    group('status');
+    // search: hide tiles that do not match, and sections left empty
+    document.getElementById('search').addEventListener('input', (event) => {
+      const q = event.target.value.trim().toLowerCase();
+      for (const t of tiles) t.tile.hidden = q !== '' && !t.tile.querySelector('.tile-text').textContent.toLowerCase().includes(q);
+      hideEmptySections();
+    });
+  </script>
+  <script>
+    const modal = document.getElementById('modal');
+    const md = document.getElementById('modal-md');
+    for (const tile of document.querySelectorAll('.gallery .tile')) {
+      tile.addEventListener('click', () => {
+        const name = tile.querySelector('.tile-text').firstChild.textContent.trim();
+        document.getElementById('modal-title').textContent = name;
+        document.getElementById('modal-author').textContent = tile.querySelector('.tile-text .sub').textContent;
+        md.textContent = md.textContent.replace(/^# .*$/m, '# ' + name);
+        document.getElementById('modal-summary').value = tile.querySelector('.hint').lastChild.textContent;
+        document.getElementById('modal-file').textContent = name.toLowerCase();
+        selectTab(modal.querySelector('.tab'));
+        modal.showModal();
+      });
+    }
+  </script>
+</body>
+</html>

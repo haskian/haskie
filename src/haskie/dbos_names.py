@@ -9,16 +9,28 @@ name on recovery and `jobs` selects rows by these strings.
 
 from typing import Literal, get_args
 
-from dbos import WorkflowStatusString
 from dbos._error import DBOSMaxStepRetriesExceeded
 
-# What DBOS records a workflow's progress as: ENQUEUED | PENDING | SUCCESS | ERROR | CANCELLED |
-# MAX_RECOVERY_ATTEMPTS_EXCEEDED | DELAYED. A read model carries it through as the string it is.
-WorkflowStatus = str
+# What DBOS records a workflow's progress as. Spelled out as a union rather than carried through
+# as a bare string, so a read model states the vocabulary it can hold and the generated OpenAPI
+# document gives the web client the same closed set (`test_workflows` pins it against DBOS).
+type WorkflowStatus = Literal[
+    "ENQUEUED",
+    "PENDING",
+    "SUCCESS",
+    "ERROR",
+    "CANCELLED",
+    "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
+    "DELAYED",
+]
+WORKFLOW_STATUSES: tuple[WorkflowStatus, ...] = get_args(WorkflowStatus.__value__)
 
 # Enqueued or running: the workflow is still on its way.
-PENDING_STATUS = WorkflowStatusString.PENDING.value  # dequeued and running
-ACTIVE_STATUS = [WorkflowStatusString.ENQUEUED.value, PENDING_STATUS]
+PENDING_STATUS: WorkflowStatus = "PENDING"  # dequeued and running
+ENQUEUED_STATUS: WorkflowStatus = "ENQUEUED"
+# `list[str]`, not `list[WorkflowStatus]`: DBOS takes it as a query argument, and a list of a
+# literal type is not a list of str, because a list is invariant in its item type.
+ACTIVE_STATUS: list[str] = [ENQUEUED_STATUS, PENDING_STATUS]
 
 # The three pipeline-shaped workflows: each cuts a stage into `stage_slice` children with one
 # `try_batch` step per micro-batch, which is what the Jobs view reads as a job with tasks.

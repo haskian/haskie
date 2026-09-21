@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>haskie — explore</title>
+  <link rel="stylesheet" href="design.css" />
+  <style>
+    /* page layout only; tokens live in design.css */
+    .explore { display: grid; gap: var(--sp-6); align-content: start; }
+    .match { display: grid; gap: var(--sp-6); align-content: start; padding: var(--sp-6) 0; }
+    .match-text { margin: 0; max-width: 64ch; padding-left: var(--sp-4); border-left: 2px solid var(--line); font-size: var(--fs-lg); line-height: 1.5; }
+    .match-text::before { content: open-quote; } .match-text::after { content: close-quote; }
+  </style>
+</head>
+<body>
+  <div class="page">
+
+
+    <main class="body">
+      <aside class="side">
+        <a class="logo" href="index.html" aria-label="Haskie"></a>
+        <nav class="nav">
+          <a class="nav-item" href="#" aria-current="true"><i data-lucide="compass" class="icon"></i>Explore</a>
+          <a class="nav-item" href="documents.html"><i data-lucide="file-text" class="icon"></i>Documents<span class="count">30</span></a>
+          <a class="nav-item" href="collections.html"><i data-lucide="library" class="icon"></i>Collections<span class="count">5</span></a>
+          <a class="nav-item" href="operations.html"><i data-lucide="activity" class="icon"></i>Operations</a>
+          <a class="nav-item" href="sessions.html"><i data-lucide="bot" class="icon"></i>Sessions</a>
+          <a class="nav-item" href="insights.html"><i data-lucide="chart-column" class="icon"></i>Insights</a>
+          <a class="nav-item" href="settings.html"><i data-lucide="settings" class="icon"></i>Settings</a>
+        </nav>
+      </aside>
+      <div class="explore">
+        <form class="input-group" role="search" onsubmit="return false">
+          <details class="picker">
+            <summary><span class="picker-value"><span>All collections</span><span class="sub">30 documents</span></span><i data-lucide="chevron-down" class="icon"></i></summary>
+            <ul class="picker-list" role="listbox">
+              <li role="option" tabindex="0" aria-selected="true"><span>All collections</span><span class="sub">30 documents</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span>A–E</span><span class="sub">11 documents · sim-1</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span>P–T</span><span class="sub">8 documents · sim-1</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span>Session</span><span class="sub">A–E, K–O · set_session_collections</span></li>
+            </ul>
+          </details>
+          <details class="picker">
+            <summary><span class="picker-value"><span>Hybrid</span><span class="sub">vector + BM25, rrf</span></span><i data-lucide="chevron-down" class="icon"></i></summary>
+            <ul class="picker-list" role="listbox">
+              <li role="option" tabindex="0" aria-selected="true"><span>Hybrid</span><span class="sub">vector + BM25, rrf</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span>Vector</span><span class="sub">embedding similarity only</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span>Text</span><span class="sub">BM25, no model needed</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span>Reranked</span><span class="sub">cross-encoder over candidates</span></li>
+            </ul>
+          </details>
+          <input class="input" type="search" value="shadow" placeholder="Search across collections" id="q" />
+          <button class="btn btn-ghost" type="button" aria-label="Clear" onclick="q.value = ''; q.focus()"><i data-lucide="x" class="icon"></i></button>
+        </form>
+        <p class="mono muted">6 sections · 3 documents · 31 ms</p>
+        <div class="tabs" role="tablist">
+          <button class="tab" role="tab" aria-selected="true" aria-controls="tab-sections">Sections · 6</button>
+          <button class="tab" role="tab" aria-selected="false" aria-controls="tab-literature">Literature · 6</button>
+        </div>
+        <div id="tab-sections" role="tabpanel">
+          <div class="hits">
+            <article class="hit" style="--score: 1.00" data-heading="Lighting › Soft shadows">
+              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Area</span></span><span class="mono muted">0.91</span></header>
+              <div class="hit-body">
+              <p class="hit-text">Area lights soften the <mark>shadow</mark> edge in proportion to their size. A two metre panel at one metre gives a <mark>shadow</mark> falloff of roughly 40 cm before the umbra is lost.</p>
+              <footer class="hit-foot"><span>A. Hoffmann</span><span>p. 2 · chunk 3/9</span></footer>
+              </div>
+            </article>
+            <article class="hit" style="--score: 0.66" data-heading="Geometry › Tessellation">
+              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Cone</span></span><span class="mono muted">0.84</span></header>
+              <div class="hit-body">
+              <p class="hit-text">Tessellation below 24 segments produces faceted <mark>shadow</mark> terminators on the cone body. Use 48 for hero objects.</p>
+              <footer class="hit-foot"><span>G. Petrov</span><span>p. 1 · chunk 2/6</span></footer>
+              </div>
+            </article>
+            <article class="hit" style="--score: 0.55" data-heading="Sun › Elevation tables">
+              <header class="hit-head"><span class="tag"><span class="kind">P–T</span><span>Sun</span></span><span class="mono muted">0.79</span></header>
+              <div class="hit-body">
+              <p class="hit-text">Sun position at 35° elevation casts a <mark>shadow</mark> 1.4× the object height. The table lists ratios per latitude and month.</p>
+              <footer class="hit-foot"><span>Z. Weber</span><span>p. 4 · chunk 7/12</span></footer>
+              </div>
+            </article>
+            <article class="hit" style="--score: 0.42" data-heading="Lamps › Point lamps">
+              <header class="hit-head"><span class="tag"><span class="kind">K–O</span><span>Lamp</span></span><span class="mono muted">0.73</span></header>
+              <div class="hit-body">
+              <p class="hit-text">Point lamps produce hard <mark>shadows</mark> regardless of intensity; add radius to soften. Radius above 0.3 m starts to bleed.</p>
+              <footer class="hit-foot"><span>S. Iyer</span><span>p. 1 · chunk 1/5</span></footer>
+              </div>
+            </article>
+            <article class="hit" style="--score: 0.27" data-heading="Framing › Composition rules">
+              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Camera</span></span><span class="mono muted">0.66</span></header>
+              <div class="hit-body">
+              <p class="hit-text">Framing rule: keep the primary <mark>shadow</mark> inside the lower third so the subject reads first.</p>
+              <footer class="hit-foot"><span>C. Nakamura</span><span>p. 3 · chunk 5/9</span></footer>
+              </div>
+            </article>
+            <article class="hit" style="--score: 0.10" data-heading="Animation › Foliage">
+              <header class="hit-head"><span class="tag"><span class="kind">U–Z</span><span>Wind</span></span><span class="mono muted">0.58</span></header>
+              <div class="hit-body">
+              <p class="hit-text">Animated foliage moves its <mark>shadow</mark> across the ground plane; bake at 24 fps to avoid flicker.</p>
+              <footer class="hit-foot"><span>C. Dubois</span><span>p. 2 · chunk 4/8</span></footer>
+              </div>
+            </article>
+          </div>
+        </div>
+        <div id="tab-literature" role="tabpanel" hidden>
+          <div class="hits">
+            <article class="hit" style="--score: 1.00">
+              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Area</span></span><span class="mono muted">0.91</span></header>
+              <div class="hit-body">
+              <p class="hit-text">Notes on area lights and soft shadow falloff.</p>
+              <footer class="hit-foot"><span>A. Hoffmann · A–E</span><span>7/9 chunks</span></footer>
+              </div>
+            </article>
+            <article class="hit" style="--score: 0.55">
+              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Sun</span></span><span class="mono muted">0.79</span></header>
+              <div class="hit-body">
+              <p class="hit-text">Sun position by date, time and latitude.</p>
+              <footer class="hit-foot"><span>Z. Weber · P–T</span><span>6/12 chunks</span></footer>
+              </div>
+            </article>
+            <article class="hit" style="--score: 0.66">
+              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Cone</span></span><span class="mono muted">0.84</span></header>
+              <div class="hit-body">
+              <p class="hit-text">Cone primitive with tessellation trade-offs.</p>
+              <footer class="hit-foot"><span>G. Petrov · A–E</span><span>2/6 chunks</span></footer>
+              </div>
+            </article>
+            <article class="hit" style="--score: 0.42">
+              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Lamp</span></span><span class="mono muted">0.73</span></header>
+              <div class="hit-body">
+              <p class="hit-text">Point and spot lamp presets with falloff curves.</p>
+              <footer class="hit-foot"><span>S. Iyer · K–O</span><span>2/5 chunks</span></footer>
+              </div>
+            </article>
+            <article class="hit" style="--score: 0.27">
+              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Camera</span></span><span class="mono muted">0.66</span></header>
+              <div class="hit-body">
+              <p class="hit-text">Lens presets and framing rules for product shots.</p>
+              <footer class="hit-foot"><span>C. Nakamura · A–E</span><span>1/9 chunks</span></footer>
+              </div>
+            </article>
+            <article class="hit" style="--score: 0.10">
+              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Wind</span></span><span class="mono muted">0.58</span></header>
+              <div class="hit-body">
+              <p class="hit-text">Wind field presets for animated foliage.</p>
+              <footer class="hit-foot"><span>C. Dubois · U–Z</span><span>3/8 chunks</span></footer>
+              </div>
+            </article>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <dialog class="modal" id="modal">
+    <div class="modal-body" tabindex="-1" autofocus>
+      <div class="modal-head">
+        <h2 class="title"><span id="modal-title">Item</span><small class="muted" id="modal-author">Author</small></h2>
+        <form method="dialog"><button class="btn btn-ghost" aria-label="Close"><i data-lucide="x" class="icon"></i></button></form>
+      </div>
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" aria-selected="true" aria-controls="modal-match">Match</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="modal-document">Document</button>
+      </div>
+      <div id="modal-match" role="tabpanel" class="match">
+        <dl class="kv">
+          <dt>Score</dt><dd class="mono" id="modal-score">0.00</dd>
+          <dt>Collection</dt><dd id="modal-collection">A–E</dd>
+          <dt id="modal-where">Position</dt><dd id="modal-position">p. 1 · chunk 1/1</dd>
+          <dt>Heading</dt><dd id="modal-heading">—</dd>
+          <dt>Query</dt><dd class="code" id="modal-query">shadow</dd>
+        </dl>
+        <blockquote class="match-text" id="modal-text">Match</blockquote>
+        <div class="hits" id="modal-passages" hidden>
+          <article class="hit" style="--score: 1.00">
+            <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Area</span></span><span class="mono muted">0.91</span></header>
+            <div class="hit-body">
+            <p class="hit-text">Area lights soften the <mark>shadow</mark> edge in proportion to their size. A two metre panel at one metre gives a <mark>shadow</mark> falloff of roughly 40 cm before the umbra is lost.</p>
+            <footer class="hit-foot"><span>Lighting › Soft shadows</span><span>p. 2 · chunk 3</span></footer>
+            </div>
+          </article>
+          <article class="hit" style="--score: 0.40">
+            <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Area</span></span><span class="mono muted">0.72</span></header>
+            <div class="hit-body">
+            <p class="hit-text">Contact <mark>shadows</mark> need a bias small enough to keep the foot grounded and large enough to hide acne on the slope.</p>
+            <footer class="hit-foot"><span>Lighting › Bias</span><span>p. 5 · chunk 11</span></footer>
+            </div>
+          </article>
+          <article class="hit" style="--score: 0.10">
+            <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Area</span></span><span class="mono muted">0.58</span></header>
+            <div class="hit-body">
+            <p class="hit-text">Cascades split the <mark>shadow</mark> map by distance; the near cascade takes most of the resolution.</p>
+            <footer class="hit-foot"><span>Lighting › Cascades</span><span>p. 9 · chunk 27</span></footer>
+            </div>
+          </article>
+        </div>
+      </div>
+      <div id="modal-document" role="tabpanel" hidden>
+        <div class="split">
+          <section class="pane">
+            <div class="pane-head mono muted"><span>PDF</span><span class="crumb"></span></div>
+            <div class="pane-body">
+              <div class="skeleton" aria-hidden="true"><span class="skeleton-bar"></span><span class="skeleton-dot"></span><span class="skeleton-line"></span><span class="skeleton-line short"></span><span class="skeleton-block"></span><span class="skeleton-bar"></span></div>
+            </div>
+          </section>
+          <section class="pane">
+            <div class="pane-head mono muted"><span>Markdown</span><span class="crumb">p. 1/3 · Item › Notes</span></div>
+            <div class="pane-body"><pre class="md" id="modal-md"># Item
+
+Scene reference for the render pipeline.
+
+## Notes
+
+- 3 pages, 1 240 tokens
+- embedded with sim-1
+- last indexed 19 Jan 2019
+
+## Excerpt
+
+The cube sits at origin. Light comes from a single spot at 35 degrees, shadow density 18.</pre></div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="statusbar"></div>
+
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="design.js"></script>
+  <script>
+    // hit click fills modal from tile: sections carry tag + page meta and show the one passage;
+    // literature carry title + chunk count and show every passage behind the row, best first
+    const modal = document.getElementById('modal');
+    const md = document.getElementById('modal-md');
+    for (const hit of document.querySelectorAll('.hit')) {
+      hit.addEventListener('click', () => {
+        const tag = hit.querySelector('.tag');
+        const foot = hit.querySelectorAll('.hit-foot span');
+        const name = tag.lastElementChild.textContent;
+        const [author, collection] = [foot[0].textContent, tag.firstElementChild.textContent];
+        document.getElementById('modal-title').textContent = name;
+        document.getElementById('modal-author').textContent = author;
+        document.getElementById('modal-score').textContent = hit.querySelector('.hit-head .mono').textContent;
+        document.getElementById('modal-collection').textContent = collection;
+        const literature = foot[1].textContent.endsWith('chunks');
+        document.getElementById('modal-where').textContent = literature ? 'Passages' : 'Position';
+        modal.querySelector('.tab').textContent = literature ? 'Matches' : 'Match';
+        document.getElementById('modal-position').textContent = literature ? parseInt(foot[1].textContent) : foot[1].textContent;
+        document.getElementById('modal-text').hidden = literature;
+        document.getElementById('modal-passages').hidden = !literature;
+        document.getElementById('modal-heading').textContent = hit.dataset.heading || '—';
+        document.getElementById('modal-query').textContent = document.getElementById('q').value;
+        document.getElementById('modal-text').innerHTML = hit.querySelector('.hit-text').innerHTML;
+        md.textContent = md.textContent.replace(/^# .*$/m, '# ' + name);
+        selectTab(modal.querySelector('.tab'));
+        modal.showModal();
+      });
+    }
+  </script>
+</body>
+</html>

@@ -22,24 +22,34 @@ export type FieldDoc = Wire<'FieldDoc'>
 // Every choice the UI offers, including the status and kind vocabularies, so no enumeration is
 // spelled a second time here. One fetch per page load answers it (see `api.options`).
 export type Options = Wire<'Options'>
-export type Document = Wire<'Document'>
+export type ImportedDocument = Wire<'Document'>
+export type Document = Wire<'Listed'>
 export type CollectionInfo = Wire<'CollectionInfo'>
 export type EmbeddingEntry = Wire<'Entry'> // `embed_cache.Entry`: one cached embedding of a document
 export type Hit = Wire<'Hit'>
 export type DocumentMatch = Wire<'DocumentMatch'>
 export type Status = Wire<'Status'>
+export type ModelStatus = Wire<'ModelStatus'>
 export type Task = Wire<'Task'>
 export type Activity = Wire<'Activity'>
 export type JobRow = Wire<'JobRow'>
+export type StageJob = Wire<'StageJob'>
+export type SessionSummary = Wire<'SessionSummary'>
+// Not `Wire`: `EventDetail` is the one struct whose fields really are absent on the wire
+// (`omit_defaults`), so completing them would promise fields no action fills.
+export type EventDetail = components['schemas']['EventDetail']
+export type SessionEvent = Omit<Wire<'SessionEvent'>, 'detail'> & { detail: EventDetail }
+export type SearchAt = Wire<'SearchAt'>
+export type ChunksAt = Wire<'ChunksAt'>
 export type JobKindSummary = Wire<'JobKindSummary'>
 // Work the backend only accepts (202) and runs in the background. `job_id` is what a poll of
 // `jobProgress` follows.
 export type BulkStarted = Wire<'BulkStarted'>
 export type BulkJob = Wire<'BulkJob'>
-type Preview = Wire<'Preview'>
-type Staged = Wire<'Staged'>
-type Member = Wire<'Member'>
-type CollectionSummary = Wire<'CollectionSummary'>
+export type Preview = Wire<'Preview'>
+export type Staged = Wire<'Staged'>
+export type Member = Wire<'Member'>
+export type CollectionSummary = Wire<'CollectionSummary'>
 
 // The vocabularies the UI narrows on, each read off the field that carries it, so no member is
 // spelled out. `Options` lists the same values at runtime, for the dropdowns.
@@ -49,7 +59,20 @@ export type Accelerator = PipelineSettings['accelerator']
 export type EmbeddingProfile = UserSettings['embedding']
 export type DocStatus = Document['status']
 export type MemberStatus = Member['status']
+export type SearchMode = NonNullable<SearchSettings['mode']>
+export type Fusion = NonNullable<SearchSettings['fusion']>
+export type Reranker = NonNullable<SearchSettings['reranker']>
 export type JobKind = JobRow['kind']
+export type Stage = StageJob['stage']
+export type WorkflowStatus = JobRow['status']
+// What a session can be seen doing; `collections` is the selection itself being set.
+export type SessionAction = SessionEvent['action']
+
+// In lifecycle order, which is the order the Documents page bands them in.
+export const DOCUMENT_STATUSES: readonly DocStatus[] = ['queued', 'converting', 'embedding', 'imported', 'error', 'cancelled', 'deleting']
+// Still on its way: what the UI polls for and shows a spinner against.
+export const ACTIVE_DOCUMENT_STATUSES: readonly DocStatus[] = ['queued', 'converting', 'embedding']
+export const ACTIVE_JOB_STATUSES: ReadonlySet<WorkflowStatus> = new Set<WorkflowStatus>(['ENQUEUED', 'PENDING'])
 
 // What a collection may override of the chunking defaults; null is "use the default".
 export type ChunkOverrides = Pick<CollectionSettings, keyof ChunkSettings>
@@ -58,7 +81,7 @@ export type ChunkOverrides = Pick<CollectionSettings, keyof ChunkSettings>
 // document does not carry them; they mirror `render.Head`, `render.Heading` and `render.Page` by
 // hand. One `head`, then one `page` per page of rendered HTML. The HTML comes from the server
 // with raw HTML already removed, which is why the pane can insert it; see `haskie/render.py`.
-interface Heading {
+export interface Heading {
   level: number
   text: string
   offset: number
@@ -84,7 +107,7 @@ export type PageRequest = Omit<NonNullable<operations['ApiDocumentsListDocuments
 export type Order = NonNullable<PageRequest['order']>
 // Litestar names a paged response after its item type (`Page_haskie.document.Document_`), so the
 // schema has no generic to alias. The envelope comes from one of them; the items stay open.
-export type Page<T> = Omit<Wire<'Page_haskie.document.Document_'>, 'items'> & { items: T[] }
+export type Page<T> = Omit<Wire<'Page_haskie.document.Listed_'>, 'items'> & { items: T[] }
 // What an import may say about the document it creates. Everything is optional: the file name
 // and the user's conversion defaults answer for whatever is left out.
 type ImportOptions = Partial<Omit<Wire<'ImportRequest'>, 'staging_id' | 'path'>>
@@ -183,6 +206,7 @@ export const api = {
     const { status, ...page } = q
     return request<Page<Document>>(`/api/documents${pageQuery(page, { status })}`)
   },
+  document: (doc: string) => request<Document>(documentPath(doc)),
   // Upload step one: the bytes land in staging under an id. Nothing is imported until `importStaged`.
   stageUpload: (file: File) => {
     const body = new FormData()
@@ -190,16 +214,16 @@ export const api = {
     return request<Staged>('/api/documents/staging', { method: 'POST', body })
   },
   // Upload step two: name the staged bytes and start the import pipeline.
-  importStaged: (req: ImportOptions & { staging_id: string }) => request<Document>('/api/documents/import', json('POST', req)),
+  importStaged: (req: ImportOptions & { staging_id: string }) => request<ImportedDocument>('/api/documents/import', json('POST', req)),
   // Import a file the server can already read, by path; the file is copied, not moved.
-  importPath: (path: string, opts: ImportOptions = {}) => request<Document>('/api/documents/import', json('POST', { path, ...opts })),
+  importPath: (path: string, opts: ImportOptions = {}) => request<ImportedDocument>('/api/documents/import', json('POST', { path, ...opts })),
   deleteDocument: (doc: string) => request<BulkStarted>(documentPath(doc), { method: 'DELETE' }),
   // Re-run a failed or cancelled import; the backend refuses any other status.
   reimportDocument: (doc: string) => request<BulkStarted>(`${documentPath(doc)}/import`, { method: 'POST' }),
   documentCollections: (doc: string) => request<string[]>(`${documentPath(doc)}/collections`),
   documentEmbeddings: (doc: string) => request<EmbeddingEntry[]>(`${documentPath(doc)}/embeddings`),
   describeDocument: (doc: string, description: string) =>
-    request<Document>(`${documentPath(doc)}/description`, json('PUT', { description })),
+    request<ImportedDocument>(`${documentPath(doc)}/description`, json('PUT', { description })),
   previewUrl: (doc: string) => `${documentPath(doc)}/preview`,
   sourceUrl: (doc: string) => `${documentPath(doc)}/source`,
   // Yields each frame as it arrives, so the first page shows without waiting for the last.
@@ -216,11 +240,21 @@ export const api = {
   jobProgress: (jobId: string) => request<BulkJob>(`/api/jobs/${jobId}/progress`),
   deleteJob: (jobId: string) => request<void>(`/api/jobs/${jobId}`, { method: 'DELETE' }),
 
+  // Full-text search across every collection, for Explore's "all collections" scope: there is no
+  // session and no one collection to answer the query, so the paged endpoint stands in for one.
+  // One page of passages is what Explore shows.
+  searchText: (q: string) => request<Page<Hit>>(`/api/search/text${pageQuery({ page_size: 50 }, { q })}`),
   // Which documents to read for a query, rather than which passages answer it.
-  searchDocuments: (q: string, collections?: string[]) =>
-    request<DocumentMatch[]>(`/api/search/documents${pageQuery({}, { q, collections: collections?.join(',') })}`),
+  searchDocuments: (q: string, collections?: string[], limit?: number) =>
+    request<DocumentMatch[]>(`/api/search/documents${pageQuery({}, { q, collections: collections?.join(','), limit: limit?.toString() })}`),
+  // The passages behind one row of `searchDocuments`: the same scan, kept to that document.
+  documentPassages: (doc: string, q: string, collections?: string[]) =>
+    request<Hit[]>(`/api/search/documents/${encodeURIComponent(doc)}${pageQuery({}, { q, collections: collections?.join(',') })}`),
 
-  sessions: () => request<Record<string, string[]>>('/api/sessions'),
+  sessions: () => request<SessionSummary[]>('/api/sessions'),
+  sessionHistory: (id: string) => request<SessionEvent[]>(`/api/sessions/${encodeURIComponent(id)}/history`),
+  searchTrend: (days: number) => request<SearchAt[]>(`/api/insights/searches${pageQuery({}, { days: String(days) })}`),
+  chunkTrend: (days: number) => request<ChunksAt[]>(`/api/insights/chunks${pageQuery({}, { days: String(days) })}`),
   saveSession: (id: string, collections: string[]) =>
     request<string[]>(`/api/sessions/${encodeURIComponent(id)}`, json('PUT', { collections })),
   search: (sessionId: string, q: string) =>

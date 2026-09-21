@@ -1,356 +1,105 @@
-import { useCallback, useEffect, useState } from 'react'
-import {
-  api,
-  type BulkJob,
-  type ChunkSettings,
-  type CollectionInfo,
-  type CollectionSettings,
-  type Document,
-  type JobRow,
-  MAX_PAGE_SIZE,
-  type MemberStatus,
-  type Options,
-} from '../api'
-import type { Route } from '../App'
-import { ChunkSettingsForm } from '../components/ChunkSettingsForm'
-import { JobLine } from '../components/JobLine'
-import { Pager, SortHeader } from '../components/Pager'
-import { Search } from '../components/Search'
-import { SearchSettingsForm } from '../components/SearchSettingsForm'
-import { StatusCell, StatusFilter } from '../components/Status'
-import { bytes, when } from '../format'
-import { useBulkJob } from '../hooks/useBulkJob'
-import { useOptions } from '../hooks/useOptions'
+import { Library, Plus } from 'lucide-react'
+import { useCallback, useMemo, useState, type FormEvent } from 'react'
+import { api } from '../api'
+import type { PageProps } from '../App'
 import { usePaged } from '../hooks/usePaged'
 import { usePoll } from '../hooks/usePoll'
-import { useRun } from '../hooks/useRun'
+import { navigate, type Route } from '../router'
+import { Field, GallerySection, Modal, SearchBox, Shell, Tile } from '../ui'
+import './Collections.css'
+import { CollectionModal } from './collections/CollectionModal'
+import { groupByName, tileSub } from './collections/group'
+import { errorText, matchesText, needleOf } from '../format'
 
-const JOBS_PAGE_SIZE = 20 // the newest jobs of one collection, as a hint; the Jobs view pages them all
+const PAGE_SIZE = 500
+/** Every collection in the home, as a gallery banded by name; one modal per collection. */
+export function Collections({ route, counts }: PageProps<Extract<Route, { name: 'collections' }>>) {
+  const [creating, setCreating] = useState(false)
+  const [search, setSearch] = useState('')
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [createError, setCreateError] = useState<string | null>(null)
 
-export function Collections({ navigate }: { navigate: (p: Route) => void }) {
-  const [selected, setSelected] = useState<string | undefined>(undefined)
-  const [newName, setNewName] = useState('')
-  const [newDescription, setNewDescription] = useState('')
-  const collections = usePaged((q) => api.collections(q), { sort: 'name' })
+  const collections = usePaged((query) => api.collections(query), { sort: 'name', pageSize: PAGE_SIZE })
   const refresh = collections.refresh
+  // indexing moves the counts under the page, so the listing follows it while anything is active
+  const active = collections.items.some((one) => one.counts.active > 0)
+  const poll = useCallback(() => {
+    void refresh().catch(() => undefined)
+  }, [refresh])
+  usePoll(active, poll)
 
-  const create = async () => {
-    const info = await api.createCollection(newName, newDescription)
-    setNewName('')
-    setNewDescription('')
-    await refresh()
-    setSelected(info.name)
+  // Client-side over the rows already loaded: a page of 500 is what the gallery shows anyway.
+  const needle = needleOf(search)
+  const groups = useMemo(() => groupByName(collections.items.filter((one) => matchesText(needle, one.name, one.description))), [collections.items, needle])
+
+  const startCreating = () => {
+    setName('')
+    setDescription('')
+    setCreateError(null)
+    setCreating(true)
   }
 
-  const onDeleted = useCallback(() => {
-    setSelected(undefined)
-    void refresh()
-  }, [refresh])
+  const create = async (event: FormEvent) => {
+    event.preventDefault()
+    try {
+      const info = await api.createCollection(name.trim(), description.trim())
+      setCreating(false)
+      await refresh()
+      navigate({ name: 'collections', collection: info.name })
+    } catch (cause) {
+      setCreateError(errorText(cause))
+    }
+  }
+
+  const close = useCallback(() => navigate({ name: 'collections' }), [])
 
   return (
-    <div className="split">
-      <aside>
-        <h2>Collections</h2>
-        {collections.error && <p className="error">{collections.error}</p>}
-        <ul className="list">
-          {collections.items.map((c) => (
-            <li key={c.name}>
-              <button className={c.name === selected ? 'active' : ''} onClick={() => setSelected(c.name)}>
-                {c.name} <span className="muted">{c.counts.total}</span>
-                {c.counts.active > 0 && <span className="muted"> · {c.counts.active} active</span>}
-                {c.description && <small className="muted description">{c.description}</small>}
-              </button>
-            </li>
-          ))}
-        </ul>
-        <Pager paged={collections} />
-        <form
-          onSubmit={(e) => {
-            e.preventDefault()
-            create()
-          }}
-        >
-          <input placeholder="new collection" value={newName} onChange={(e) => setNewName(e.target.value)} />
-          <input placeholder="what it holds (optional)" value={newDescription} onChange={(e) => setNewDescription(e.target.value)} />
-          <button disabled={!newName.trim()}>Create</button>
-        </form>
-      </aside>
-      <section>
-        {selected ? (
-          <CollectionDetail
-            key={selected}
-            name={selected}
-            navigate={navigate}
-            onDeleted={onDeleted}
-          />
-        ) : (
-          <p className="muted">Select or create a collection.</p>
+    <Shell current={route.name} counts={counts}>
+      <div className="gallery-sections sections">
+        <SearchBox id="search" value={search} onChange={setSearch} placeholder="Search collections" />
+        {collections.error !== null && <p className="muted">{collections.error}</p>}
+        <GallerySection label="New" large>
+          <Tile icon={Plus} name="New collection" sub="Create one" hint="Name it, say what it holds." add onClick={startCreating} />
+        </GallerySection>
+        {groups.map((group) => (
+          <GallerySection key={group.label} label={group.label} large>
+            {group.items.map((one) => (
+              <Tile
+                key={one.name}
+                icon={Library}
+                name={one.name}
+                sub={tileSub(one)}
+                hint={one.description || 'No description'}
+                onClick={() => navigate({ name: 'collections', collection: one.name })}
+              />
+            ))}
+          </GallerySection>
+        ))}
+        {collections.hasMore && (
+          <button className="btn btn-ghost" type="button" onClick={collections.loadMore}>
+            Load more
+          </button>
         )}
-      </section>
-    </div>
-  )
-}
-
-function CollectionDetail({
-  name,
-  navigate,
-  onDeleted,
-}: {
-  name: string
-  navigate: (p: Route) => void
-  onDeleted: () => void
-}) {
-  const options = useOptions()
-  const [info, setInfo] = useState<CollectionInfo | null>(null)
-  const [jobs, setJobs] = useState<JobRow[]>([])
-  const [status, setStatus] = useState<MemberStatus | ''>('')
-  // imported documents this collection does not hold yet, and the one picked in the dropdown
-  const [candidates, setCandidates] = useState<Document[]>([])
-  const [toAttach, setToAttach] = useState('')
-
-  // counts and settings for the header, jobs for the block below; the members are paged
-  const refreshInfo = useCallback(
-    () =>
-      Promise.all([api.collection(name), api.jobsByKind('document', { collection: name, page_size: JOBS_PAGE_SIZE })]).then(([i, j]) => {
-        setInfo(i)
-        setJobs(j.items)
-      }),
-    [name],
-  )
-  const members = usePaged((q) => api.collectionDocuments(name, { ...q, status: status || undefined }), {
-    sort: 'name',
-    deps: [name, status],
-  })
-  const refreshMembers = members.refresh
-
-  // The picker needs every member name, not the page on screen, so both sides are asked for in
-  // one large page each; a document may be attached to a collection only once it is imported.
-  // Two full listings are too expensive to poll, so this runs on mount and after attach or detach
-  // only — nothing else moves a document in or out of the set.
-  // ponytail: the ceiling is the client-side diff of two capped listings — once a collection (or
-  // the home) outgrows MAX_PAGE_SIZE, the server has to answer it with a `not_in` filter instead.
-  const refreshCandidates = useCallback(
-    () =>
-      Promise.all([
-        api.documents({ status: 'imported', page_size: MAX_PAGE_SIZE, sort: 'name' }),
-        api.collectionDocuments(name, { page_size: MAX_PAGE_SIZE, sort: 'name' }),
-      ]).then(([imported, held]) => {
-        const names = new Set(held.items.map((m) => m.document.name))
-        setCandidates(imported.items.filter((d) => !names.has(d.name)))
-      }),
-    [name],
-  )
-
-  // what a poll and a mutation re-read: only what background work moves
-  const refresh = useCallback(() => Promise.all([refreshInfo(), refreshMembers()]), [refreshInfo, refreshMembers])
-  const { run, error, setError } = useRun(refresh)
-
-  useEffect(() => {
-    refreshInfo()
-    refreshCandidates()
-  }, [refreshInfo, refreshCandidates])
-
-  // poll while anything is being written into this collection; the counts come from the database
-  usePoll((info?.counts.active ?? 0) > 0, refresh)
-
-  // "Index all" and "Delete collection" are accepted (202) and run in the background, so the page
-  // follows the job instead of waiting for the request. An index hands over to the member poll
-  // above; a deletion takes the collection off the page once it is really gone.
-  const onBulkDone = useCallback(
-    (job: BulkJob) => {
-      if (job.kind === 'delete_collection') onDeleted()
-      else void refresh()
-    },
-    [onDeleted, refresh],
-  )
-  const bulk = useBulkJob(onBulkDone, setError)
-
-  if (!info) return null
-
-  return (
-    <>
-      <h2>{info.name}</h2>
-      <p>
-        <input
-          className="description-edit"
-          placeholder="what this collection holds"
-          defaultValue={info.description}
-          onBlur={(e) => {
-            const next = e.target.value
-            if (next !== info.description) run(() => api.describeCollection(name, next))
-          }}
-        />
-      </p>
-      {error && <p className="error">{error}</p>}
-      {info.index_outdated && (
-        <p className="banner">index was built by an older version — use "Index all" to rebuild it</p>
-      )}
-
-      <h3>Search</h3>
-      <Search run={(q) => api.searchCollection(name, q)} collections={[name]} placeholder={`search ${name} (top ${info.search.limit})`} />
-
-      <h3>
-        Documents <span className="muted">{info.counts.total} total · {info.counts.indexed} indexed · {info.counts.active} active · {info.counts.error} failed</span>
-      </h3>
-      <p>
-        <select value={toAttach} onChange={(e) => setToAttach(e.target.value)}>
-          <option value="">attach a document…</option>
-          {candidates.map((d) => (
-            <option key={d.name} value={d.name}>
-              {d.name}
-            </option>
-          ))}
-        </select>{' '}
-        <button
-          disabled={!toAttach}
-          onClick={() =>
-            run(async () => {
-              await api.attachDocument(name, toAttach)
-              setToAttach('')
-              await refreshCandidates()
-            })
-          }
-        >
-          Attach
-        </button>{' '}
-        <button onClick={() => navigate({ name: 'documents' })}>Import a document…</button>{' '}
-        <StatusFilter value={status} statuses={options.member_statuses} counts={info.counts.by_status} onChange={setStatus} />
-      </p>
-      {members.error && <p className="error">{members.error}</p>}
-      <table>
-        <thead>
-          <tr>
-            <SortHeader field="name" label="name" paged={members} />
-            <th>description</th>
-            <SortHeader field="size" label="size" paged={members} />
-            <SortHeader field="status" label="in collection" paged={members} />
-            <SortHeader field="updated_at" label="updated" paged={members} />
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {members.items.map((m) => (
-            <tr key={m.document.name}>
-              <td>
-                <button className="link" onClick={() => navigate({ name: 'viewer', doc: m.document.name })}>
-                  {m.document.name}
-                </button>
-              </td>
-              <td className="muted">{m.document.description || '—'}</td>
-              <td className="muted">{bytes.format(m.document.size)}</td>
-              <StatusCell status={m.status} error={m.error} />
-              <td className="muted">{when(m.updated_at)}</td>
-              <td>
-                <button
-                  disabled={options.active_member_statuses.includes(m.status)}
-                  onClick={() => run(() => api.reindexMember(name, m.document.name))}
-                >
-                  {m.status === 'indexed' ? 'reindex' : 'index'}
-                </button>
-                <button
-                  onClick={() =>
-                    run(async () => {
-                      await api.detachDocument(name, m.document.name)
-                      await refreshCandidates()
-                    })
-                  }
-                >
-                  detach
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <Pager paged={members} />
-
-      {jobs.length > 0 && (
-        <details>
-          <summary className="muted">jobs ({jobs.filter((j) => options.active_job_statuses.includes(j.status)).length} active)</summary>
-          <table className="jobs">
-            <tbody>
-              {jobs.map((j) => (
-                <JobLine key={j.id} job={j} tasks={null} onToggle={() => navigate({ name: 'jobs' })} onCancel={() => run(() => api.deleteJob(j.id))} />
-              ))}
-            </tbody>
-          </table>
-        </details>
-      )}
-
-      <h3>Settings</h3>
-      <CollectionSettingsForm
-        settings={info.settings}
-        effective={info.effective}
-        searchDefault={info.search}
-        options={options}
-        onSave={(s) => run(() => api.saveCollectionSettings(name, s))}
-      />
-      <p>
-        <button disabled={bulk.running} onClick={() => run(() => bulk.start(() => api.indexCollection(name)))}>
-          Index all
-        </button>{' '}
-        <button
-          disabled={bulk.running}
-          onClick={() => {
-            if (confirm(`Delete collection "${name}"? Its documents stay; only this index goes.`)) {
-              run(() => bulk.start(() => api.deleteCollection(name)))
-            }
-          }}
-        >
-          Delete collection
-        </button>{' '}
-        {bulk.job && <BulkStatus job={bulk.job} />}
-      </p>
-    </>
-  )
-}
-
-function BulkStatus({ job }: { job: BulkJob }) {
-  const { active_job_statuses } = useOptions()
-  const running = active_job_statuses.includes(job.status)
-  const what = job.kind === 'index_collection' ? 'queueing documents' : 'deleting'
-  return (
-    <span className={job.error ? 'error' : 'muted'}>
-      {running ? `${what}…` : `${what}: ${job.status.toLowerCase()}`}
-      {job.progress && ` ${job.progress.done}/${job.progress.total}`}
-      {job.error && ` — ${job.error}`}
-    </span>
-  )
-}
-
-// Only chunking and search: conversion happened once, at import, so a collection cannot change it.
-function CollectionSettingsForm({
-  settings,
-  effective,
-  searchDefault,
-  options,
-  onSave,
-}: {
-  settings: CollectionSettings
-  effective: ChunkSettings
-  searchDefault: CollectionInfo['search']
-  options: Options
-  onSave: (s: CollectionSettings) => void
-}) {
-  const [draft, setDraft] = useState(settings)
-  return (
-    <form
-      className="settings"
-      onSubmit={(e) => {
-        e.preventDefault()
-        onSave(draft)
-      }}
-    >
-      <h4>Chunking</h4>
-      <ChunkSettingsForm value={draft} defaults={effective} options={options} onChange={setDraft} />
-      <h4>Search</h4>
-      <SearchSettingsForm
-        value={draft.search}
-        defaults={searchDefault}
-        options={options}
-        onChange={(next) => setDraft({ ...draft, search: next })}
-      />
-      <button>Save</button>
-    </form>
+      </div>
+      <CollectionModal name={route.collection} onClose={close} onChanged={refresh} />
+      <Modal open={creating} onClose={() => setCreating(false)} title="New collection" subtitle="collection">
+        {/* A form, so Enter creates the way the browser already does it. */}
+        <form className="collection-panel" onSubmit={create}>
+          <Field label="Name">
+            <input className="input" value={name} placeholder="Collection name" autoFocus onChange={(event) => setName(event.target.value)} />
+          </Field>
+          <Field label="Description">
+            <textarea className="textarea" rows={4} value={description} placeholder="What it holds" onChange={(event) => setDescription(event.target.value)} />
+          </Field>
+          <div className="row">
+            <button className="btn btn-primary" type="submit" disabled={name.trim() === ''}>
+              Create
+            </button>
+          </div>
+          {createError !== null && <p className="muted collection-error">{createError}</p>}
+        </form>
+      </Modal>
+    </Shell>
   )
 }

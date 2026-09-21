@@ -25,10 +25,11 @@ import threading
 from typing import Literal
 
 import msgspec
-from dbos import DBOS, SetWorkflowID, WorkflowStatus
+from dbos import DBOS, SetWorkflowID
+from dbos import WorkflowStatus as DbosWorkflowStatus
 
 from haskie import cpu, embed
-from haskie.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, root_cause
+from haskie.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, WorkflowStatus, root_cause
 from haskie.errors import HaskieError, NotReady
 from haskie.logs import get_logger
 from haskie.settings import UserSettings, load_user_settings
@@ -141,7 +142,7 @@ def model_names(workflow_id: str) -> tuple[str, str]:
 
 async def _download_records(
     wanted: list[tuple[ModelKind, str]],
-) -> dict[str, WorkflowStatus]:
+) -> dict[str, DbosWorkflowStatus]:
     """The download record of every model in `wanted`, in one query, keyed by workflow id. A
     model nobody ever asked for simply has none. The output is loaded because DBOS carries a
     workflow's error alongside it, and `_model_status` reports that error."""
@@ -227,7 +228,11 @@ def is_warm(workflow_id: str) -> bool:
     return workflow_id in _ready
 
 
-_STATE: dict[str, ModelState] = {"SUCCESS": "ready", "ERROR": "error", "CANCELLED": "error"}
+_STATE: dict[WorkflowStatus, ModelState] = {
+    "SUCCESS": "ready",
+    "ERROR": "error",
+    "CANCELLED": "error",
+}
 
 
 def _model_status(kind: ModelKind, name: str, workflow) -> ModelStatus:

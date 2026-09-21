@@ -323,6 +323,15 @@ def _spy_embed(monkeypatch: pytest.MonkeyPatch) -> EmbedSpy:
     return spy
 
 
+def test_workflow_status_union_holds_every_status_dbos_writes() -> None:
+    """`WorkflowStatus` is spelled out rather than aliased to `str`, so it has to be checked
+    against the source. A status DBOS adds and this union misses would be decoded as an invalid
+    enum value by any client reading the generated schema."""
+    from dbos import WorkflowStatusString
+
+    assert set(dbos_names.WORKFLOW_STATUSES) == {status.value for status in WorkflowStatusString}
+
+
 # --- import and attach -------------------------------------------------------------
 
 
@@ -1917,8 +1926,13 @@ async def test_list_jobs_reports_the_action_collection_and_document(dbos, tmp_pa
     }
     assert {j.status for j in listed} == {"SUCCESS"}
     rows = (await jobs.list_kind("document")).items
-    assert {row.title for row in rows} == {"import a.md", "embed a.md", "c / a.md"}
+    # the embed is folded into the import that spawned it: two operations, not three rows
+    assert {row.title for row in rows} == {"import a.md", "c / a.md"}
     assert {row.kind for row in rows} == {"document"}
+    assert [s.stage for row in rows if row.title == "import a.md" for s in row.stages] == [
+        "convert",
+        "embed",
+    ]
 
 
 async def test_list_jobs_filters_by_collection_before_it_cuts_the_window(

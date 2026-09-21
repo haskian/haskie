@@ -1,110 +1,369 @@
-import { useEffect, useState } from 'react'
-import { api, type Accelerator, type PipelineSettings, type RetentionSettings, type UserSettings } from '../api'
-import { ChunkSettingsForm } from '../components/ChunkSettingsForm'
-import { Field, NumberField } from '../components/Field'
-import { ImportDefaultsForm } from '../components/ImportDefaultsForm'
-import { SearchSettingsForm } from '../components/SearchSettingsForm'
-import { useOptions } from '../hooks/useOptions'
-import { useRun } from '../hooks/useRun'
+import { useCallback, useEffect, useState } from 'react'
+import {
+  api,
+  type EmbeddingProfile,
+  type FieldDoc,
+  type Options,
+  type PipelineSettings,
+  type RetentionSettings,
+  type SearchSettings,
+  type UserSettings,
+} from '../api'
+import type { PageProps } from '../App'
+import { errorText } from '../format'
+import { Field, Picker, SEARCH_BOUNDS, Shell, Toggle, visibleSearchFields, type NumericKeys, type PickerOption } from '../ui'
+import { classicBackground, setBackground as storeBackground } from './settings/background'
+import './Settings.css'
 
-// Setting key and its minimum, in the order they are shown. The definitions come from
-// /api/options.docs; only the bounds live here, and they are the backend's (see settings.py).
-type PipelineNumber = Exclude<keyof PipelineSettings, 'accelerator'>
-const PARALLELISM: readonly (readonly [PipelineNumber, number])[] = [
-  ['cpu_budget', 1],
-  ['converting_weight', 1],
-  ['embedding_weight', 1],
-  ['indexing_weight', 1],
-  ['document_parallelism', 0],
-  ['batch_pages', 1],
-  ['index_group_parts', 1],
-  ['task_timeout_seconds', 1],
-  ['preview_workers', 1],
-]
-const MAINTENANCE: readonly (readonly [PipelineNumber, number])[] = [
-  ['maintenance_docs', 1],
-  ['maintenance_idle_seconds', 1],
-  ['ann_min_rows', 1],
-]
-const RETENTION: readonly (readonly [keyof RetentionSettings, number])[] = [
-  ['job_days', 1],
-  ['audit_days', 0],
+const SECTIONS: { id: string; label: string }[] = [
+  { id: 'embedding', label: 'Embedding' },
+  { id: 'import', label: 'Import' },
+  { id: 'chunking', label: 'Chunking' },
+  { id: 'search', label: 'Search' },
+  { id: 'pipeline', label: 'Pipeline' },
+  { id: 'maintenance', label: 'Maintenance' },
+  { id: 'retention', label: 'Retention' },
+  { id: 'appearance', label: 'Appearance' },
 ]
 
-export function Settings() {
-  const options = useOptions()
+interface NumberField<T> {
+  key: NumericKeys<T>
+  min: number
+  step?: number
+}
+
+const PIPELINE_FIELDS: NumberField<PipelineSettings>[] = [
+  { key: 'cpu_budget', min: 1 },
+  { key: 'converting_weight', min: 1 },
+  { key: 'embedding_weight', min: 1 },
+  { key: 'indexing_weight', min: 1 },
+  { key: 'document_parallelism', min: 0 },
+  { key: 'batch_pages', min: 1 },
+  { key: 'index_group_parts', min: 1 },
+  { key: 'task_timeout_seconds', min: 1 },
+  { key: 'preview_workers', min: 1 },
+]
+
+const MAINTENANCE_FIELDS: NumberField<PipelineSettings>[] = [
+  { key: 'maintenance_docs', min: 1 },
+  { key: 'maintenance_idle_seconds', min: 1 },
+  { key: 'ann_min_rows', min: 1 },
+]
+
+const RETENTION_FIELDS: NumberField<RetentionSettings>[] = [
+  { key: 'job_days', min: 1 },
+  { key: 'audit_days', min: 0 },
+]
+
+const EMPTY_DOC: FieldDoc = { title: '', description: '' }
+// The backend names every setting; a key it does not know falls back to the key itself.
+const docFor = (docs: Record<string, FieldDoc>, key: string): FieldDoc => docs[key] ?? { ...EMPTY_DOC, title: key }
+
+const choices = <T extends string>(values: readonly T[]): PickerOption<T>[] => values.map((value) => ({ value, label: value }))
+
+/** A number setting: the design's `.field` with a number input in it. */
+function Num({
+  label,
+  help,
+  value,
+  min,
+  step,
+  onChange,
+}: {
+  label: string
+  help?: string
+  value: number
+  min?: number
+  step?: number
+  onChange: (value: number) => void
+}) {
+  return (
+    <Field label={label} help={help}>
+      <input className="input" type="number" value={value} min={min} step={step} onChange={(event) => onChange(Number(event.target.value))} />
+    </Field>
+  )
+}
+
+function SearchField({
+  name,
+  search,
+  options,
+  onChange,
+}: {
+  name: keyof SearchSettings
+  search: SearchSettings
+  options: Options
+  onChange: (next: SearchSettings) => void
+}) {
+  const doc = docFor(options.docs, `search.${name}`)
+  switch (name) {
+    case 'mode':
+      return (
+        <Field label={doc.title} help={doc.description}>
+          <Picker ariaLabel={doc.title} options={choices(options.search_modes)} value={search.mode} onChange={(mode) => onChange({ ...search, mode })} />
+        </Field>
+      )
+    case 'fusion':
+      return (
+        <Field label={doc.title} help={doc.description}>
+          <Picker ariaLabel={doc.title} options={choices(options.fusions)} value={search.fusion} onChange={(fusion) => onChange({ ...search, fusion })} />
+        </Field>
+      )
+    case 'reranker':
+      return (
+        <Field label={doc.title} help={doc.description}>
+          <Picker ariaLabel={doc.title} options={choices(options.rerankers)} value={search.reranker} onChange={(reranker) => onChange({ ...search, reranker })} />
+        </Field>
+      )
+    case 'reranker_model':
+      return (
+        <Field label={doc.title} help={doc.description}>
+          <Picker
+            ariaLabel={doc.title}
+            options={choices(options.reranker_models)}
+            value={search.reranker_model}
+            onChange={(reranker_model) => onChange({ ...search, reranker_model })}
+          />
+        </Field>
+      )
+    default: {
+      const bounds = SEARCH_BOUNDS[name]
+      return (
+        <Num
+          label={doc.title}
+          help={doc.description}
+          value={search[name]}
+          min={bounds.min}
+          step={bounds.step}
+          onChange={(value) => onChange({ ...search, [name]: value })}
+        />
+      )
+    }
+  }
+}
+
+/** The user settings, section by section. Every label and help text comes from `/api/options`. */
+export function Settings({ route, counts }: PageProps) {
   const [settings, setSettings] = useState<UserSettings | null>(null)
+  const [options, setOptions] = useState<Options | null>(null)
+  const [section, setSection] = useState(SECTIONS[0].id)
   const [saved, setSaved] = useState(false)
-  const { run, busy, error } = useRun(async () => setSaved(true))
+  const [error, setError] = useState<string | null>(null)
+  const [classic, setClassic] = useState(classicBackground)
+
+  const reload = useCallback(
+    () =>
+      api
+        .settings()
+        .then((loaded) => {
+          setSettings(loaded)
+          setSaved(false)
+          setError(null)
+        })
+        .catch((failure: unknown) => setError(errorText(failure))),
+    [],
+  )
 
   useEffect(() => {
-    api.settings().then(setSettings)
-  }, [])
+    void reload()
+    api.options().then(setOptions).catch(() => undefined)
+  }, [reload])
 
-  if (!settings) return null
-  const s = settings
-  const docs = options.docs
-  const update = (patch: Partial<UserSettings>) => {
-    setSaved(false)
-    setSettings({ ...s, ...patch })
+  const setBackground = (on: boolean): void => {
+    setClassic(on)
+    storeBackground(on)
   }
-  const pipeline = <K extends keyof PipelineSettings>(k: K, v: PipelineSettings[K]) =>
-    update({ pipeline: { ...s.pipeline, [k]: v } })
-  const retention = <K extends keyof RetentionSettings>(k: K, v: RetentionSettings[K]) =>
-    update({ retention: { ...s.retention, [k]: v } })
-  const numbers = (table: readonly (readonly [PipelineNumber, number])[]) =>
-    table.map(([k, min]) => (
-      <NumberField key={k} doc={docs[`pipeline.${k}`]} value={s.pipeline[k]} min={min} onChange={(v) => pipeline(k, v ?? 0)} />
-    ))
+
+  // ponytail: no scroll-spy. The nav marks what was last clicked, which is where the page went.
+  const goTo = (id: string): void => {
+    setSection(id)
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  const side = (
+    <section>
+      <span className="label label-mono">Sections</span>
+      <nav className="nav">
+        {SECTIONS.map((entry) => (
+          // A button, not an anchor: an `#embedding` href would be read as a route by the hash router.
+          <button
+            key={entry.id}
+            className="nav-item"
+            type="button"
+            aria-current={entry.id === section ? 'true' : undefined}
+            onClick={() => goTo(entry.id)}
+          >
+            {entry.label}
+          </button>
+        ))}
+      </nav>
+    </section>
+  )
+
+  if (settings === null || options === null) {
+    return (
+      <Shell current={route.name} counts={counts} side={side}>
+        <div className="settings">{error !== null && <p className="muted">{error}</p>}</div>
+      </Shell>
+    )
+  }
+
+  const docs = options.docs
+  const update = (patch: Partial<UserSettings>): void => {
+    setSaved(false)
+    setSettings({ ...settings, ...patch })
+  }
+  const pipeline = (patch: Partial<PipelineSettings>): void => update({ pipeline: { ...settings.pipeline, ...patch } })
+  const retention = (patch: Partial<RetentionSettings>): void => update({ retention: { ...settings.retention, ...patch } })
+
+  const save = (): void => {
+    api
+      .saveSettings(settings)
+      .then((stored) => {
+        setSettings(stored)
+        setSaved(true)
+        setError(null)
+      })
+      .catch((failure: unknown) => setError(errorText(failure)))
+  }
+
+  const profiles: PickerOption<EmbeddingProfile>[] = Object.entries(options.embedding_profiles).map(([profile, model]) => ({
+    value: profile as EmbeddingProfile,
+    label: profile,
+    sub: model === null ? 'full-text only' : `${model.name} · ${model.dims} dims`,
+  }))
+  const skipOcr = docFor(docs, 'conversion.skip_ocr_pages')
 
   return (
-    <form
-      className="settings"
-      onSubmit={(e) => {
-        e.preventDefault()
-        run(() => api.saveSettings(s).then(setSettings))
-      }}
-    >
-      <h2>User settings</h2>
-      {error && <p className="error">{error}</p>}
+    <Shell current={route.name} counts={counts} side={side}>
+      <div className="settings">
+        <section id="embedding">
+          <span className="mono muted">Embedding</span>
+          <Field label={docFor(docs, 'embedding').title} help={docFor(docs, 'embedding').description}>
+            <Picker ariaLabel="Embedding profile" options={profiles} value={settings.embedding} onChange={(embedding) => update({ embedding })} />
+          </Field>
+          <Field label={docFor(docs, 'pipeline.accelerator').title} help={docFor(docs, 'pipeline.accelerator').description}>
+            <Picker
+              ariaLabel="Embedding hardware"
+              options={choices(options.accelerators)}
+              value={settings.pipeline.accelerator}
+              onChange={(accelerator) => pipeline({ accelerator })}
+            />
+          </Field>
+        </section>
 
-      <h3>Embedding</h3>
-      <Field doc={docs['embedding']}>
-        <select value={s.embedding} onChange={(e) => update({ embedding: e.target.value as UserSettings['embedding'] })}>
-          {Object.entries(options.embedding_profiles).map(([p, m]) => (
-            <option key={p} value={p}>
-              {p} {m ? `(${m.name}, ${m.dims} dims)` : ''}
-            </option>
+        <section id="import">
+          <span className="mono muted">Import</span>
+          <Field label={docFor(docs, 'conversion.parser').title} help={docFor(docs, 'conversion.parser').description}>
+            <Picker
+              ariaLabel="Parser"
+              options={choices(options.parsers)}
+              value={settings.conversion.parser}
+              onChange={(parser) => update({ conversion: { ...settings.conversion, parser } })}
+            />
+          </Field>
+          <div className="field">
+            <Toggle
+              label={skipOcr.title}
+              checked={settings.conversion.skip_ocr_pages}
+              onChange={(skip_ocr_pages) => update({ conversion: { ...settings.conversion, skip_ocr_pages } })}
+            />
+            <span className="faint">{skipOcr.description}</span>
+          </div>
+        </section>
+
+        <section id="chunking">
+          <span className="mono muted">Chunking</span>
+          <Field label={docFor(docs, 'conversion.chunker').title} help={docFor(docs, 'conversion.chunker').description}>
+            <Picker
+              ariaLabel="Chunker"
+              options={choices(options.chunkers)}
+              value={settings.conversion.chunker}
+              onChange={(chunker) => update({ conversion: { ...settings.conversion, chunker } })}
+            />
+          </Field>
+          <Num
+            label={docFor(docs, 'conversion.chunk_size').title}
+            help={docFor(docs, 'conversion.chunk_size').description}
+            value={settings.conversion.chunk_size}
+            min={1}
+            onChange={(chunk_size) => update({ conversion: { ...settings.conversion, chunk_size } })}
+          />
+          <Num
+            label={docFor(docs, 'conversion.chunk_overlap').title}
+            help={docFor(docs, 'conversion.chunk_overlap').description}
+            value={settings.conversion.chunk_overlap}
+            min={0}
+            onChange={(chunk_overlap) => update({ conversion: { ...settings.conversion, chunk_overlap } })}
+          />
+        </section>
+
+        <section id="search">
+          <span className="mono muted">Search</span>
+          {visibleSearchFields(settings.search).map((name) => (
+            <SearchField key={name} name={name} search={settings.search} options={options} onChange={(search) => update({ search })} />
           ))}
-        </select>
-      </Field>
-      <Field doc={docs['pipeline.accelerator']}>
-        <select value={s.pipeline.accelerator} onChange={(e) => pipeline('accelerator', e.target.value as Accelerator)}>
-          {options.accelerators.map((a) => <option key={a} value={a}>{a}</option>)}
-        </select>
-      </Field>
+        </section>
 
-      <h3>Import defaults (parser, skip OCR)</h3>
-      <ImportDefaultsForm value={s.conversion} options={options} onChange={(next) => update({ conversion: next })} />
+        <section id="pipeline">
+          <span className="mono muted">Pipeline</span>
+          {PIPELINE_FIELDS.map((field) => (
+            <Num
+              key={field.key}
+              label={docFor(docs, `pipeline.${field.key}`).title}
+              help={docFor(docs, `pipeline.${field.key}`).description}
+              value={settings.pipeline[field.key]}
+              min={field.min}
+              onChange={(value) => pipeline({ [field.key]: value })}
+            />
+          ))}
+        </section>
 
-      <h3>Chunking defaults (per-collection overridable)</h3>
-      <ChunkSettingsForm value={s.conversion} options={options} onChange={(next) => update({ conversion: next })} />
+        <section id="maintenance">
+          <span className="mono muted">Maintenance</span>
+          {MAINTENANCE_FIELDS.map((field) => (
+            <Num
+              key={field.key}
+              label={docFor(docs, `pipeline.${field.key}`).title}
+              help={docFor(docs, `pipeline.${field.key}`).description}
+              value={settings.pipeline[field.key]}
+              min={field.min}
+              onChange={(value) => pipeline({ [field.key]: value })}
+            />
+          ))}
+        </section>
 
-      <h3>Search (per-collection overridable)</h3>
-      <SearchSettingsForm value={s.search} options={options} onChange={(next) => update({ search: next })} />
+        <section id="retention">
+          <span className="mono muted">Retention</span>
+          {RETENTION_FIELDS.map((field) => (
+            <Num
+              key={field.key}
+              label={docFor(docs, `retention.${field.key}`).title}
+              help={docFor(docs, `retention.${field.key}`).description}
+              value={settings.retention[field.key]}
+              min={field.min}
+              onChange={(value) => retention({ [field.key]: value })}
+            />
+          ))}
+        </section>
 
-      <h3>Indexing parallelism</h3>
-      {numbers(PARALLELISM)}
-
-      <h3>Index maintenance</h3>
-      {numbers(MAINTENANCE)}
-
-      <h3>Retention</h3>
-      {RETENTION.map(([k, min]) => (
-        <NumberField key={k} doc={docs[`retention.${k}`]} value={s.retention[k]} min={min} onChange={(v) => retention(k, v ?? 0)} />
-      ))}
-
-      <button disabled={busy}>Save</button> {saved && <span className="muted">saved</span>}
-    </form>
+        <section id="appearance">
+          <span className="mono muted">Appearance</span>
+          <div className="row row-loose">
+            <Toggle id="bg-classic" label="Classic background" checked={classic} onChange={setBackground} />
+          </div>
+          <div className="row row-loose">
+            <button className="btn btn-primary" type="button" onClick={save}>
+              Save
+            </button>
+            <button className="btn btn-ghost" type="button" onClick={() => void reload()}>
+              Reset
+            </button>
+            {saved && <span className="muted">saved</span>}
+          </div>
+          {error !== null && <p className="muted">{error}</p>}
+        </section>
+      </div>
+    </Shell>
   )
 }

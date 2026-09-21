@@ -1,0 +1,3 @@
+/* page layout only; tokens live in design/design.css */
+.settings { display: grid; gap: var(--sp-12); align-content: start; max-width: 520px; }
+.settings section { display: grid; gap: var(--sp-4); }

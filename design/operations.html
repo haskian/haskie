@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>haskie — operations</title>
+  <link rel="stylesheet" href="design.css" />
+  <style>
+    /* page layout only; tokens live in design.css */
+    .operation-tasks { display: flex; gap: var(--sp-8); padding: var(--sp-4) var(--sp-6); border: var(--border); border-top: 0; }
+    .operation-stage { flex: var(--weight, 1); min-width: 0; display: grid; gap: var(--sp-1); align-content: start; }
+    .operation-info { font-size: var(--fs-xs); color: var(--text-muted); }
+    .tasks { list-style: none; margin: var(--sp-2) 0 0; padding: 0; display: grid; gap: var(--sp-1); }
+    .task { display: flex; align-items: center; gap: var(--sp-2); font-family: var(--font-mono); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .task .icon { width: 12px; height: 12px; flex: none; }
+    .task.todo { opacity: 0.4; }
+    .operation-head { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-4); }
+  </style>
+</head>
+<body>
+  <div class="page">
+
+
+    <main class="body">
+      <aside class="side">
+        <a class="logo" href="index.html" aria-label="Haskie"></a>
+        <nav class="nav">
+          <a class="nav-item" href="explore.html"><i data-lucide="compass" class="icon"></i>Explore</a>
+          <a class="nav-item" href="documents.html"><i data-lucide="file-text" class="icon"></i>Documents<span class="count">30</span></a>
+          <a class="nav-item" href="collections.html"><i data-lucide="library" class="icon"></i>Collections<span class="count">5</span></a>
+          <a class="nav-item" href="#" aria-current="true"><i data-lucide="activity" class="icon"></i>Operations</a>
+          <a class="nav-item" href="sessions.html"><i data-lucide="bot" class="icon"></i>Sessions</a>
+          <a class="nav-item" href="insights.html"><i data-lucide="chart-column" class="icon"></i>Insights</a>
+          <a class="nav-item" href="settings.html"><i data-lucide="settings" class="icon"></i>Settings</a>
+        </nav>
+        <section>
+          <span class="label label-mono">Group by</span>
+          <nav class="nav" id="group-by">
+            <button class="nav-item" data-group="status" aria-current="true">Status</button>
+            <button class="nav-item" data-group="kind">Operation</button>
+            <button class="nav-item" data-group="day">Day</button>
+          </nav>
+        </section>
+      </aside>
+      <div class="operations sections">
+        <section class="operation-section section" data-status="Running">
+          <span class="mono muted">Running</span>
+            <details class="operation" data-kind="Import" data-day="Sat 19 Jan">
+              <summary>
+                <div class="operation-head"><span class="tag"><span class="kind">Import</span><span>renders/lamp.pdf</span></span><span class="mono muted">claude-code a3f9 · Sat 19 Jan · 14:32 · 38 sec</span></div>
+                <div class="stages stages-glass stages-stripes">
+                <div class="stage done" style="--progress: 1.00; --weight: 1"><span>Import</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>1/1</span><span>2 sec</span></span></div>
+                <div class="stage done" style="--progress: 1.00; --weight: 1.4"><span>Chunk</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>14/14</span><span>6 sec</span></span></div>
+                <div class="stage active" style="--progress: 0.41; --weight: 2.2"><span>Embed</span><i data-lucide="settings" class="icon spin"></i><span class="stage-bar"></span><span class="stage-meta"><span>9/22</span><span>30 sec</span></span></div>
+                <div class="stage" style="--weight: 1"><span>Index</span><i data-lucide="clock" class="icon"></i><span class="stage-bar"></span></div>
+                </div>
+              </summary>
+              <div class="operation-tasks">
+                <div class="operation-stage" style="--weight: 1"><span class="label">Import</span><span class="operation-info">pdf · 5 pages · 610 KB</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>lamp.pdf</li></ul></div>
+                <div class="operation-stage" style="--weight: 1.4"><span class="label">Chunk</span><span class="operation-info">512 tokens · 64 overlap</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+9 more</li></ul></div>
+                <div class="operation-stage" style="--weight: 2.2"><span class="label">Embed</span><span class="operation-info">sim-1 · 768 dim</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+17 more</li></ul></div>
+                <div class="operation-stage" style="--weight: 1"><span class="label">Index</span><span class="operation-info">hnsw · cosine</span><ul class="tasks"><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 01</li><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 02</li><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 03</li><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 04</li><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 05</li><li class="task muted">+17 more</li></ul></div>
+              </div>
+            </details>
+            <details class="operation" data-kind="Import" data-day="Sat 19 Jan">
+              <summary>
+                <div class="operation-head"><span class="tag"><span class="kind">Import</span><span>renders/layers.pdf</span></span><span class="mono muted">Sat 19 Jan · 14:33 · 11 sec</span></div>
+                <div class="stages stages-glass stages-stripes">
+                <div class="stage done" style="--progress: 1.00; --weight: 1"><span>Import</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>1/1</span><span>3 sec</span></span></div>
+                <div class="stage active" style="--progress: 0.30; --weight: 1.4"><span>Chunk</span><i data-lucide="settings" class="icon spin"></i><span class="stage-bar"></span><span class="stage-meta"><span>6/20</span><span>8 sec</span></span></div>
+                <div class="stage" style="--weight: 2.2"><span>Embed</span><i data-lucide="clock" class="icon"></i><span class="stage-bar"></span></div>
+                <div class="stage" style="--weight: 1"><span>Index</span><i data-lucide="clock" class="icon"></i><span class="stage-bar"></span></div>
+                </div>
+              </summary>
+              <div class="operation-tasks">
+                <div class="operation-stage" style="--weight: 1"><span class="label">Import</span><span class="operation-info">pdf · 4 pages · 530 KB</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>layers.pdf</li></ul></div>
+                <div class="operation-stage" style="--weight: 1.4"><span class="label">Chunk</span><span class="operation-info">512 tokens · 64 overlap</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+15 more</li></ul></div>
+                <div class="operation-stage" style="--weight: 2.2"><span class="label">Embed</span><span class="operation-info">sim-1 · 768 dim</span><ul class="tasks"><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 01</li><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 02</li><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 03</li><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 04</li><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 05</li><li class="task muted">+15 more</li></ul></div>
+                <div class="operation-stage" style="--weight: 1"><span class="label">Index</span><span class="operation-info">hnsw · cosine</span><ul class="tasks"><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 01</li><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 02</li><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 03</li><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 04</li><li class="task todo"><i data-lucide="circle-dashed" class="icon"></i>chunk 05</li><li class="task muted">+15 more</li></ul></div>
+              </div>
+            </details>
+            <details class="operation" data-kind="Index" data-day="Sat 19 Jan">
+              <summary>
+                <div class="operation-head"><span class="tag"><span class="kind">Index</span><span>collection A–E</span></span><span class="mono muted">Sat 19 Jan · 14:35 · 4 sec</span></div>
+                <div class="stages stages-glass stages-stripes">
+                <div class="stage done" style="--progress: 1.00; --weight: 1"><span>Import</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>11/11</span><span>1 sec</span></span></div>
+                <div class="stage done" style="--progress: 1.00; --weight: 1.4"><span>Chunk</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>11/11</span><span>1 sec</span></span></div>
+                <div class="stage done" style="--progress: 1.00; --weight: 2.2"><span>Embed</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>11/11</span><span>1 sec</span></span></div>
+                <div class="stage active" style="--progress: 0.48; --weight: 1"><span>Index</span><i data-lucide="settings" class="icon spin"></i><span class="stage-bar"></span><span class="stage-meta"><span>48/99</span><span>1 sec</span></span></div>
+                </div>
+              </summary>
+              <div class="operation-tasks">
+                <div class="operation-stage" style="--weight: 1"><span class="label">Import</span><span class="operation-info">pdf · 11 pages · 4 120 KB</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>collection A–E</li></ul></div>
+                <div class="operation-stage" style="--weight: 1.4"><span class="label">Chunk</span><span class="operation-info">512 tokens · 64 overlap</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+6 more</li></ul></div>
+                <div class="operation-stage" style="--weight: 2.2"><span class="label">Embed</span><span class="operation-info">sim-1 · 768 dim</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+6 more</li></ul></div>
+                <div class="operation-stage" style="--weight: 1"><span class="label">Index</span><span class="operation-info">hnsw · cosine</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+94 more</li></ul></div>
+              </div>
+            </details>
+        </section>
+        <section class="operation-section section" data-status="Completed">
+          <span class="mono muted">Completed</span>
+            <details class="operation" data-kind="Import" data-day="Sat 19 Jan">
+              <summary>
+                <div class="operation-head"><span class="tag"><span class="kind">Import</span><span>renders/cube.pdf</span></span><span class="mono muted">Sat 19 Jan · 14:20 · 41 sec</span></div>
+                <div class="stages stages-line">
+                <div class="stage done" style="--progress: 1.00; --weight: 1"><span>Import</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>1/1</span><span>2 sec</span></span></div>
+                <div class="stage done" style="--progress: 1.00; --weight: 1.4"><span>Chunk</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>9/9</span><span>4 sec</span></span></div>
+                <div class="stage done" style="--progress: 1.00; --weight: 2.2"><span>Embed</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>9/9</span><span>31 sec</span></span></div>
+                <div class="stage done" style="--progress: 1.00; --weight: 1"><span>Index</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>9/9</span><span>4 sec</span></span></div>
+                </div>
+              </summary>
+              <div class="operation-tasks">
+                <div class="operation-stage" style="--weight: 1"><span class="label">Import</span><span class="operation-info">pdf · 3 pages · 412 KB</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>cube.pdf</li></ul></div>
+                <div class="operation-stage" style="--weight: 1.4"><span class="label">Chunk</span><span class="operation-info">512 tokens · 64 overlap</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+4 more</li></ul></div>
+                <div class="operation-stage" style="--weight: 2.2"><span class="label">Embed</span><span class="operation-info">sim-1 · 768 dim</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+4 more</li></ul></div>
+                <div class="operation-stage" style="--weight: 1"><span class="label">Index</span><span class="operation-info">hnsw · cosine</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+4 more</li></ul></div>
+              </div>
+            </details>
+            <details class="operation" data-kind="Import" data-day="Fri 18 Jan">
+              <summary>
+                <div class="operation-head"><span class="tag"><span class="kind">Import</span><span>renders/gear.pdf</span></span><span class="mono muted">Fri 18 Jan · 14:12 · 58 sec</span></div>
+                <div class="stages stages-line">
+                <div class="stage done" style="--progress: 1.00; --weight: 1"><span>Import</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>1/1</span><span>3 sec</span></span></div>
+                <div class="stage done" style="--progress: 1.00; --weight: 1.4"><span>Chunk</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>17/17</span><span>7 sec</span></span></div>
+                <div class="stage done" style="--progress: 1.00; --weight: 2.2"><span>Embed</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>17/17</span><span>44 sec</span></span></div>
+                <div class="stage done" style="--progress: 1.00; --weight: 1"><span>Index</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>17/17</span><span>4 sec</span></span></div>
+                </div>
+              </summary>
+              <div class="operation-tasks">
+                <div class="operation-stage" style="--weight: 1"><span class="label">Import</span><span class="operation-info">pdf · 6 pages · 880 KB</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>gear.pdf</li></ul></div>
+                <div class="operation-stage" style="--weight: 1.4"><span class="label">Chunk</span><span class="operation-info">512 tokens · 64 overlap</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+12 more</li></ul></div>
+                <div class="operation-stage" style="--weight: 2.2"><span class="label">Embed</span><span class="operation-info">sim-1 · 768 dim</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+12 more</li></ul></div>
+                <div class="operation-stage" style="--weight: 1"><span class="label">Index</span><span class="operation-info">hnsw · cosine</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+12 more</li></ul></div>
+              </div>
+            </details>
+            <details class="operation" data-kind="Index" data-day="Fri 18 Jan">
+              <summary>
+                <div class="operation-head"><span class="tag"><span class="kind">Index</span><span>collection U–Z</span></span><span class="mono muted">Fri 18 Jan · 13:58 · 6 sec</span></div>
+                <div class="stages stages-line">
+                <div class="stage done" style="--progress: 1.00; --weight: 1"><span>Import</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>4/4</span><span>1 sec</span></span></div>
+                <div class="stage done" style="--progress: 1.00; --weight: 1.4"><span>Chunk</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>4/4</span><span>1 sec</span></span></div>
+                <div class="stage done" style="--progress: 1.00; --weight: 2.2"><span>Embed</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>4/4</span><span>3 sec</span></span></div>
+                <div class="stage done" style="--progress: 1.00; --weight: 1"><span>Index</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>31/31</span><span>1 sec</span></span></div>
+                </div>
+              </summary>
+              <div class="operation-tasks">
+                <div class="operation-stage" style="--weight: 1"><span class="label">Import</span><span class="operation-info">pdf · 4 pages · 1 300 KB</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>collection U–Z</li></ul></div>
+                <div class="operation-stage" style="--weight: 1.4"><span class="label">Chunk</span><span class="operation-info">512 tokens · 64 overlap</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li></ul></div>
+                <div class="operation-stage" style="--weight: 2.2"><span class="label">Embed</span><span class="operation-info">sim-1 · 768 dim</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li></ul></div>
+                <div class="operation-stage" style="--weight: 1"><span class="label">Index</span><span class="operation-info">hnsw · cosine</span><ul class="tasks"><li class="task done"><i data-lucide="check" class="icon"></i>chunk 01</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 02</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 03</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 04</li><li class="task done"><i data-lucide="check" class="icon"></i>chunk 05</li><li class="task muted">+26 more</li></ul></div>
+              </div>
+            </details>
+        </section>
+      </div>
+    </main>
+
+  </div>
+
+  <div id="statusbar"></div>
+
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="design.js"></script>
+  <script>
+    // regroup jobs by status or kind; sections rebuilt from job data attributes
+    const jobs = [...document.querySelectorAll('.operation')].map((job) => ({ job, status: job.closest('.operation-section').dataset.status, kind: job.dataset.kind, day: job.dataset.day }));
+    const list = document.querySelector('.operations');
+    function group(by) {
+      list.replaceChildren();
+      for (const key of [...new Set(jobs.map((j) => j[by]))]) {
+        const section = document.createElement('section');
+        section.className = 'operation-section section';
+        section.dataset.status = key;
+        section.innerHTML = '<span class="mono muted"></span>';
+        section.firstChild.textContent = key;
+        section.append(...jobs.filter((j) => j[by] === key).map((j) => j.job));
+        list.append(section);
+      }
+    }
+    for (const button of document.querySelectorAll('#group-by .nav-item')) button.addEventListener('click', () => {
+      for (const other of button.parentElement.children) other.setAttribute('aria-current', String(other === button));
+      group(button.dataset.group);
+    });
+  </script>
+</body>
+</html>
