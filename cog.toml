@@ -2,3 +2,9 @@
 # so the tag, the changelog and the declared version can never disagree.
 tag_prefix = "v"
 pre_bump_hooks = ["uv version --no-sync {{version}}"]
+
+# The one type this project adds: `majorfeat!` is the only subject that takes the major digit up
+# (see `mise/tasks/bump`, which decides the increment). cog needs the type declared to accept it
+# and to give it a heading of its own in CHANGELOG.md.
+[commit_types]
+majorfeat = { changelog_title = "Major features" }
