@@ -18,6 +18,7 @@ is an event loop at all, as the app's first startup hook.
 import fcntl
 import hashlib
 import os
+import re
 import shutil
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -115,9 +116,9 @@ def claim_home() -> None:
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        held = _holder_line(handle)
+        held = os.read(handle, HOLDER_BYTES).decode("utf-8", "replace")
         os.close(handle)
-        raise Conflict(held) from None
+        raise Conflict(_holder_line(held)) from None
     os.ftruncate(handle, 0)
     # `run` puts the address in the environment for this; an app started another way has none to
     # give, so the holder line says so rather than inventing one.
@@ -126,17 +127,21 @@ def claim_home() -> None:
     _holding = handle
 
 
-def _holder_line(handle: int) -> str:
+HOLDER_BYTES = 256  # the holder line is one short sentence; anything longer is not one of ours
+_HOLDER_PID = re.compile(r"pid (\d+)")  # reads back the line `claim_home` writes above
+
+
+def _holder_line(held: str) -> str:
     """The refusal, in the words both the startup hook and `run` report it in: one sentence with
     one owner, so the two can never disagree about what is already running."""
-    held = os.read(handle, 256).decode("utf-8", "replace").strip() or "unknown process"
-    return f"haskie is already running for {HOME} ({held})"
+    return f"haskie is already running for {HOME} ({held.strip() or 'unknown process'})"
 
 
-def home_holder() -> str | None:
-    """What is running for this home, said in full, or None. Takes the lock and drops it again,
-    so it answers without claiming anything: a caller that wants a clean message before it starts
-    a server.
+def _held_by() -> str | None:
+    """What the holder wrote into the lock, or None when nothing holds this home.
+
+    One probe for every caller that asks about the lock without claiming it: take the lock, and
+    the answer is that it was free; fail to take it, and the holder's own line says who has it.
 
     Advisory only. The claim in the app's startup hook is the authority; this can go stale between
     the answer and the claim, and then the startup hook refuses instead.
@@ -148,10 +153,29 @@ def home_holder() -> str | None:
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        return _holder_line(handle)
+        return os.read(handle, HOLDER_BYTES).decode("utf-8", "replace")
     finally:
         os.close(handle)
     return None
+
+
+def home_holder() -> str | None:
+    """What is running for this home, said in full, or None: for a caller that wants a clean
+    message before it starts a server."""
+    held = _held_by()
+    return None if held is None else _holder_line(held)
+
+
+def running_pid() -> int | None:
+    """The process id of the haskie holding this home, or None when nothing holds it.
+
+    The lock is what says a haskie is running, and the pid `claim_home` writes into it is how a
+    caller reaches that process: `stop` signals it. A held lock whose line is not ours (an
+    interrupted write, an older format) reads as no pid rather than as a pid to signal.
+    """
+    held = _held_by()
+    found = None if held is None else _HOLDER_PID.match(held)
+    return int(found[1]) if found else None
 
 
 def release_home() -> None:

@@ -11,7 +11,6 @@ are the user's own and outrank a web result. That is what a skill is for, and it
 line is generated from the collections a home actually holds rather than shipped as a fixed string.
 """
 
-import json
 import shlex
 import shutil
 import subprocess
@@ -50,7 +49,19 @@ _TRIGGER = (
     "answer cited to something they own."
 )
 
-_BODY = """\
+_ANNOUNCEMENT = "This conversation's haskie session id is {session_id}."
+
+
+def session_announcement(session_id: str) -> str:
+    """What the SessionStart hook prints so the conversation's id reaches the tools. The skill
+    quotes the same sentence back at the agent, so both come from here."""
+    return (
+        f"{_ANNOUNCEMENT.format(session_id=session_id)} "
+        "Pass it as `session_id` on every haskie tool call that takes one."
+    )
+
+
+_BODY = f"""\
 # haskie — the user's own sources
 
 The collections behind these tools are documents the user chose and trusts. For anything they
@@ -63,7 +74,7 @@ time.
 ## Which search
 
 - **Cold start, one question, no setup** — `search_text`. BM25 over every collection at once, with
-  no session and no embedding model.
+  no collection selection and no embedding model.
 - **"Which documents cover X?"** — `search_documents`. One row per document, to pick a shortlist
   before reading passages; `document_passages` unfolds one row into the passages it counted.
 - **A conversation scoped to a topic** — `set_session_collections` once, then `search` for the
@@ -71,14 +82,17 @@ time.
 - **One known collection, tuned options** — `search_collection`, with `mode`, `fusion`, `reranker`
   and `candidates`.
 
-`set_session_collections` takes a session id you choose: use one stable id for the whole
-conversation (the conversation's own id is a good one), pass the collections that match the topic,
-then call `search` with that same id. It is the difference between searching the user's shelf on
-this subject and searching everything they own.
+## The session id
 
-Every other tool that searches or changes something takes an optional session id argument. Pass
-that same id on each call: the user's Sessions page then shows what this conversation searched,
-imported and attached, and each job it started names the conversation as its origin.
+haskie's SessionStart hook prints this conversation's id into your context, as
+"{_ANNOUNCEMENT.format(session_id="…")}" — use that id, unchanged, on every haskie tool call that
+takes one. The argument is optional in the schema, but a call without it belongs to no session, so
+the user's Sessions page never shows what this conversation searched, imported or started. If that
+line is not in your context, use one short stable string for the whole conversation instead.
+
+`set_session_collections` takes that id too: pass the collections that match the topic, then call
+`search` with the same id. It is the difference between searching the user's shelf on this subject
+and searching everything they own.
 
 Start with `search_text` when in doubt. It needs nothing set up and it answers from a cold start.
 
@@ -204,13 +218,15 @@ def install_hook(scope: Scope, home_dir: Path, url: str) -> bool:
     Returns whether this call added the hook. Reads and rewrites the file as a whole, so an
     existing settings file keeps everything else in it.
     """
+    import msgspec  # only this writes a settings file; `cli` imports this module on every run
+
     settings_file = settings_path(scope)
     command = hook_command(home_dir, url)
     settings: dict[str, Any] = {}
     if settings_file.is_file():
         try:
-            settings = json.loads(settings_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
+            settings = msgspec.json.decode(settings_file.read_bytes(), type=dict[str, Any])
+        except msgspec.DecodeError as exc:
             raise InvalidInput(f"{settings_file} is not valid JSON: {exc}") from None
     matchers = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
     # Matched on the shape of the command, not on the path `haskie` happens to have today: an
@@ -227,7 +243,7 @@ def install_hook(scope: Scope, home_dir: Path, url: str) -> bool:
         matchers.append(
             {"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_SECONDS}]}
         )
-    _write(settings_file, json.dumps(settings, indent=2) + "\n")
+    _write(settings_file, msgspec.json.format(msgspec.json.encode(settings)).decode() + "\n")
     return not ours
 
 

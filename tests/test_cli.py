@@ -10,7 +10,9 @@ configuration, the other is what keeps a second haskie off a home a first one is
 
 import asyncio
 import json
+import os
 import re
+import signal
 import sqlite3
 import stat
 import subprocess
@@ -339,6 +341,162 @@ def test_ensure(case: EnsureCase, elsewhere: Path, monkeypatch: pytest.MonkeyPat
         assert str(elsewhere) in spawned[0], "the child serves the same home"
     if case.exit_code:
         assert str(elsewhere / "server.log") in result.stderr, "names the log to read"
+
+
+HELD_PID = 4242
+
+
+@dataclass
+class StopCase:
+    running: bool  # whether the home is held when `stop` looks
+    dies_on: int | None  # the signal the server exits on; None for one that ignores both
+    kill: type[OSError] | None  # what signalling it raises, if anything
+    exit_code: int
+    expect_in_output: str
+    expect_signals: list[int]
+
+
+STOP_CASES = {
+    "nothing running says so and signals nothing": StopCase(
+        running=False,
+        dies_on=None,
+        kill=None,
+        exit_code=0,
+        expect_in_output="no haskie is running",
+        expect_signals=[],
+    ),
+    "a server that shuts down gracefully is not forced": StopCase(
+        running=True,
+        dies_on=signal.SIGTERM,
+        kill=None,
+        exit_code=0,
+        expect_in_output=f"stopped haskie (pid {HELD_PID})",
+        expect_signals=[signal.SIGTERM],
+    ),
+    "a server held open by a connection is forced": StopCase(
+        running=True,
+        dies_on=signal.SIGINT,
+        kill=None,
+        exit_code=0,
+        expect_in_output="forcing it",
+        expect_signals=[signal.SIGTERM, signal.SIGINT],
+    ),
+    "a server that ignores both signals fails": StopCase(
+        running=True,
+        dies_on=None,
+        kill=None,
+        exit_code=1,
+        expect_in_output="did not stop; kill it by hand",
+        expect_signals=[signal.SIGTERM, signal.SIGINT],
+    ),
+    "a server that died first is not an error": StopCase(
+        running=True,
+        dies_on=None,
+        kill=ProcessLookupError,
+        exit_code=0,
+        expect_in_output="no haskie is running",
+        expect_signals=[signal.SIGTERM],
+    ),
+    "another user's process is refused": StopCase(
+        running=True,
+        dies_on=None,
+        kill=PermissionError,
+        exit_code=1,
+        expect_in_output=f"cannot stop pid {HELD_PID}",
+        expect_signals=[signal.SIGTERM],
+    ),
+}
+
+
+@pytest.mark.parametrize("case", STOP_CASES.values(), ids=list(STOP_CASES))
+def test_stop(case: StopCase, elsewhere: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`stop` reaches the server through the home lock and reads the lock back for the exit, so
+    every case is a lock answer: no holder, one that goes on the graceful signal, one that only
+    goes on the forced one, one that never goes, one already gone, one this user may not signal.
+
+    The lock answers off the signals sent rather than off a clock, so no case turns on timing.
+    """
+    signalled: list[tuple[int, int]] = []
+
+    def fake_kill(pid: int, number: int) -> None:
+        signalled.append((pid, number))
+        if case.kill is not None:
+            raise case.kill
+
+    def fake_running_pid() -> int | None:
+        if not case.running:
+            return None
+        died = case.dies_on is not None and any(number == case.dies_on for _, number in signalled)
+        return None if died else HELD_PID
+
+    monkeypatch.setattr(home, "running_pid", fake_running_pid)
+    monkeypatch.setattr(os, "kill", fake_kill)
+    monkeypatch.setattr(cli_module, "POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(cli_module, "STOP_DEADLINE", 0.05)
+    monkeypatch.setattr(cli_module, "FORCE_DEADLINE", 0.05)
+
+    result = runner.invoke(cli, ["stop", "--home", str(elsewhere)])
+
+    assert result.exit_code == case.exit_code, result.output
+    assert case.expect_in_output in _text(result)
+    assert [number for _, number in signalled] == case.expect_signals
+    assert all(pid == HELD_PID for pid, _ in signalled), "only the holder is signalled"
+
+
+def test_stop_finds_the_process_holding_the_home(elsewhere: Path) -> None:
+    """The pid `stop` signals is the one `claim_home` wrote, read back off a held lock; an
+    unheld home has none to read."""
+    home.use(elsewhere)
+
+    with holding():
+        assert home.running_pid() == os.getpid()
+    assert home.running_pid() is None, "a released home holds no pid"
+
+
+@dataclass
+class HookInputCase:
+    stdin: str
+    expect_announced: str | None
+
+
+HOOK_INPUT_CASES = {
+    "a SessionStart payload announces its id": HookInputCase(
+        stdin=json.dumps({"session_id": "abc-123", "source": "startup", "cwd": "/tmp"}),
+        expect_announced="abc-123",
+    ),
+    "a payload with no usable id announces nothing": HookInputCase(
+        stdin=json.dumps({"session_id": "", "source": "startup"}), expect_announced=None
+    ),
+    "a session id of the wrong type is not an id": HookInputCase(
+        stdin=json.dumps({"session_id": 7}), expect_announced=None
+    ),
+    "stdin that is not a payload announces nothing": HookInputCase(
+        stdin="not a hook payload", expect_announced=None
+    ),
+}
+
+
+@pytest.mark.parametrize("case", HOOK_INPUT_CASES.values(), ids=list(HOOK_INPUT_CASES))
+def test_ensure_announces_the_hook_session_id(
+    case: HookInputCase, elsewhere: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing in an MCP call carries the conversation's id, so the SessionStart hook's own output
+    is what puts it in the agent's context. Anything on stdin that is not a payload is ignored:
+    `ensure` is also run by hand and by `install claude`."""
+    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)  # fast path, spawns nothing
+
+    result = runner.invoke(
+        cli, ["ensure", "--home", str(elsewhere), "--url", DEAD_URL], input=case.stdin
+    )
+
+    assert result.exit_code == 0, result.output
+    output = _text(result)
+    assert "already serving" in output, "the announcement does not replace the usual output"
+    if case.expect_announced is None:
+        assert "session id is" not in output
+    else:
+        assert f"session id is {case.expect_announced}" in output
+        assert "`session_id`" in output, "says what to do with it"
 
 
 # --- install claude ---------------------------------------------------------
