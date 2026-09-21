@@ -22,7 +22,12 @@ pytestmark = pytest.mark.anyio
 async def _imported(dbos, tmp_path: Path, pages: int) -> str:
     """One document imported with one page per batch, so every stage has `pages` batches. The
     budget gives convert and embed two slices each. Returns the document name."""
-    indexing = PipelineSettings(cpu_budget=6, batch_pages=1, index_group_parts=1)
+    # An hour of debounce, because these tests read what the pipeline left behind and the default
+    # minute expires under them on a loaded machine: the maintenance run the index asked for wakes
+    # up and enqueues its own child on `task.indexing`, which is then a row nobody asked for.
+    indexing = PipelineSettings(
+        cpu_budget=6, batch_pages=1, index_group_parts=1, maintenance_idle_seconds=3600
+    )
     await dbos.apply_settings(await save_user_settings(UserSettings(pipeline=indexing)))
     row = await import_document(
         dbos, "p.pdf", text_pdf([f"alpha{i}" for i in range(pages)]), tmp_path
@@ -109,8 +114,11 @@ async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) 
     assert await sysdb.queue_activity() == {}, "a debounce waiting out its period is not activity"
 
     async with db.connect() as conn:  # a slice still waiting for a slot, and one running
+        # The queue this slice waits on is one the app never registered, because DBOS is up: a row
+        # left ENQUEUED on a real queue with a free slot is dequeued within a poll, and the status
+        # this line is asserting on is gone before the read. The family still reads off the prefix.
         await conn.execute(
-            "update workflow_status set status = 'ENQUEUED' "
+            "update workflow_status set status = 'ENQUEUED', queue_name = 'task.parked' "
             "where name = ? and workflow_uuid like '%:convert:%'",
             (dbos_names.STAGE_WORKFLOW,),
         )
