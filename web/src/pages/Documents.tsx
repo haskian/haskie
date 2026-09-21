@@ -1,263 +1,507 @@
-import { useCallback, useState } from 'react'
+import { ExternalLink, Library, Plus, Trash2, Upload, X } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import {
   ACTIVE_DOCUMENT_STATUSES,
   api,
-  DOCUMENT_STATUSES,
   type DocStatus,
   type Document,
   type EmbeddingEntry,
-} from '../api'
-import type { Route } from '../App'
-import { Pager, SortHeader } from '../components/Pager'
-import { bytes } from '../format'
-import { useBulkJob } from '../hooks/useBulkJob'
-import { usePaged } from '../hooks/usePaged'
-import { usePoll } from '../hooks/usePoll'
-import { useRun } from '../hooks/useRun'
+  type Staged,
+} from "../api";
+import type { PageProps } from "../App";
+import { errorText, bytes, dateTime, day, matchesText, needleOf } from "../format";
+import { useBulkJob } from "../hooks/useBulkJob";
+import { usePaged } from "../hooks/usePaged";
+import { usePoll } from "../hooks/usePoll";
+import { useRun } from "../hooks/useRun";
+import { href, navigate, type Route } from "../router";
+import {
+  documentIcon,
+  DescriptionBox,
+  DocumentPanes,
+  DropOverlay,
+  GallerySection,
+  groupByRange,
+  Kv,
+  Modal,
+  Shell,
+  SearchBox,
+  Tabs,
+  Tile,
+  type TabDef,
+} from "../ui";
+import "./Documents.css";
+import { groupByDay, groupByStatus } from "./documents/group";
 
-// An import can be re-run only from a state it stopped in; every other status is the pipeline's.
-const RETRYABLE: readonly DocStatus[] = ['error', 'cancelled']
+type GroupBy = "status" | "name" | "day";
+const GROUPS: { id: GroupBy; label: string }[] = [
+  { id: "status", label: "Status" },
+  { id: "name", label: "Name" },
+  { id: "day", label: "Date" },
+];
+type StagedFile = Staged & { name: string }; // the name the document will get; the filename until edited
 
-// What one document's expanded row shows: the collections holding it, and the embeddings it has
-// on disk. Both are one request each, so a row asks for them only when it is opened.
-interface Details {
-  collections: string[]
-  embeddings: EmbeddingEntry[]
-}
+/** Every document in the home, imported once and shared by the collections that hold it. */
+export function Documents({
+  route,
+  counts,
+}: PageProps<Extract<Route, { name: "documents" }>>) {
+  const [groupBy, setGroupBy] = useState<GroupBy>("status");
+  const [search, setSearch] = useState("");
+  const [path, setPath] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [staged, setStaged] = useState<StagedFile[]>([]); // uploaded, named, not yet imported
+  const fileInput = useRef<HTMLInputElement>(null);
 
-// Every document in the home, imported once and shared by the collections that hold it.
-export function Documents({ navigate }: { navigate: (p: Route) => void }) {
-  const [status, setStatus] = useState<DocStatus | ''>('')
-  const [renameTo, setRenameTo] = useState('')
-  const [description, setDescription] = useState('')
-  const [path, setPath] = useState('')
-  const [open, setOpen] = useState<string | null>(null)
-  const [details, setDetails] = useState<Details | null>(null)
-
-  const docs = usePaged((q) => api.documents({ ...q, status: status || undefined }), { sort: 'name', deps: [status] })
-  const refresh = docs.refresh
-  const { run, busy, error, setError } = useRun(refresh)
+  const docs = usePaged(api.documents, { sort: "name", pageSize: 500 });
+  const refresh = docs.refresh;
+  const { run, busy, error } = useRun(refresh);
 
   // Anything still in the pipeline keeps the listing fresh; so does a deletion until it is gone.
-  const running = docs.items.some((d) => ACTIVE_DOCUMENT_STATUSES.includes(d.status) || d.status === 'deleting')
-  usePoll(running, refresh)
+  const active = docs.items.some(
+    (doc) =>
+      ACTIVE_DOCUMENT_STATUSES.includes(doc.status) ||
+      doc.status === "deleting",
+  );
+  usePoll(active, refresh);
 
-  // A deletion is accepted (202) and runs in the background, so the page follows the job; the
-  // listing is re-read once it is really gone.
-  const onDeleted = useCallback(() => {
-    void refresh()
-  }, [refresh])
-  const deletion = useBulkJob(onDeleted, setError)
+  // Upload is two steps per file: the bytes are staged, then named and imported. Staging happens
+  // on drop, one file at a time so a batch of large files does not open a request each; the
+  // import waits for the names to be confirmed in the modal.
+  const upload = useCallback(
+    (files: File[]) =>
+      run(async () => {
+        setAdding(true);
+        for (const file of files) {
+          const one = await api.stageUpload(file);
+          setStaged((rows) => [...rows, { ...one, name: one.filename }]);
+        }
+      }),
+    [run],
+  );
 
-  // Upload is two steps: the bytes are staged first, then named and imported. One name would be
-  // taken repeatedly by a batch, so only a single file may be renamed.
-  const upload = (files: File[]) =>
+  const importStaged = () =>
     run(async () => {
-      const rename = files.length === 1 ? renameTo.trim() : ''
       await Promise.all(
-        files.map(async (file) => {
-          const staged = await api.stageUpload(file)
-          await api.importStaged({
-            staging_id: staged.staging_id,
-            name: rename || undefined,
-            description: description.trim() || undefined,
-          })
-        }),
-      )
-      setRenameTo('')
-      setDescription('')
-    })
+        staged.map((one) =>
+          api.importStaged({ staging_id: one.staging_id, name: one.name.trim() }),
+        ),
+      );
+      setStaged([]);
+      setAdding(false);
+    });
 
-  const toggle = (doc: string) => {
-    if (open === doc) {
-      setOpen(null)
-      setDetails(null)
-      return
-    }
-    setOpen(doc)
-    setDetails(null)
-    Promise.all([api.documentCollections(doc), api.documentEmbeddings(doc)])
-      .then(([collections, embeddings]) => setDetails({ collections, embeddings }))
-      .catch((e) => setError(String(e)))
-  }
+  const rename = (id: string, name: string) =>
+    setStaged((rows) =>
+      rows.map((one) => (one.staging_id === id ? { ...one, name } : one)),
+    );
+  // ponytail: dropping a row only forgets it here; the staged bytes age out on the server.
+  const forget = (id: string) =>
+    setStaged((rows) => rows.filter((one) => one.staging_id !== id));
+  const namesOk =
+    staged.length > 0 && staged.every((one) => one.name.trim() !== "");
 
-  const remove = (doc: string) => run(() => deletion.start(() => api.deleteDocument(doc)))
+  const importPath = (event: FormEvent) => {
+    event.preventDefault();
+    void run(async () => {
+      await api.importPath(path.trim());
+      setPath("");
+      setAdding(false);
+    });
+  };
+
+  const closeModal = useCallback(() => navigate({ name: "documents" }), []);
+
+  // The filter is client-side over the rows already loaded: the backend has no name search, and a
+  // page of 500 is what the gallery shows anyway.
+  const needle = needleOf(search);
+  const groups = useMemo(() => {
+    const visible = docs.items.filter((doc) =>
+      matchesText(needle, doc.name, doc.description),
+    );
+    if (groupBy === "status") return groupByStatus(visible);
+    if (groupBy === "day") return groupByDay(visible);
+    return groupByRange(visible, (doc) => doc.name);
+  }, [docs.items, needle, groupBy]);
+
+  const side = (
+      <section>
+        <span className="label label-mono">Group by</span>
+        <nav className="nav" id="group-by">
+          {GROUPS.map((group) => (
+            <button
+              key={group.id}
+              className="nav-item"
+              type="button"
+              data-group={group.id}
+              aria-current={groupBy === group.id ? "true" : undefined}
+              onClick={() => setGroupBy(group.id)}
+            >
+              {group.label}
+            </button>
+          ))}
+        </nav>
+      </section>
+  );
 
   return (
-    <div>
-      <h2>Documents</h2>
-      <p className="muted">
-        A document is imported once. Attach it to as many collections as you like; they share its
-        conversion, and its embeddings whenever they chunk it the same way.
-      </p>
-      {error && <p className="error">{error}</p>}
-
-      <h3>Import</h3>
-      <p>
-        <input
-          type="file"
-          multiple
-          disabled={busy}
-          onChange={(e) => {
-            const files = Array.from(e.target.files ?? [])
-            if (files.length > 0) upload(files)
-            e.target.value = ''
-          }}
-        />{' '}
-        <input placeholder="rename to (one file)" value={renameTo} onChange={(e) => setRenameTo(e.target.value)} />{' '}
-        <input placeholder="description (optional)" value={description} onChange={(e) => setDescription(e.target.value)} />
-      </p>
-      <p>
-        <input
-          className="path-input"
-          placeholder="or import a path the server can read"
-          value={path}
-          onChange={(e) => setPath(e.target.value)}
-        />{' '}
-        <button
-          disabled={busy || !path.trim()}
-          onClick={() =>
-            run(async () => {
-              await api.importPath(path.trim(), { description: description.trim() || undefined })
-              setPath('')
-              setDescription('')
-            })
-          }
-        >
-          Import path
-        </button>
-      </p>
-
-      <h3>
-        All documents {deletion.running && <span className="muted">· deleting…</span>}
-      </h3>
-      <p>
-        <select value={status} onChange={(e) => setStatus(e.target.value as DocStatus | '')}>
-          <option value="">all statuses</option>
-          {DOCUMENT_STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-      </p>
-      {docs.error && <p className="error">{docs.error}</p>}
-      <table>
-        <thead>
-          <tr>
-            <SortHeader field="name" label="name" paged={docs} />
-            <th>description</th>
-            <SortHeader field="size" label="size" paged={docs} />
-            <SortHeader field="status" label="status" paged={docs} />
-            <SortHeader field="updated_at" label="updated" paged={docs} />
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {docs.items.map((d) => (
-            <DocumentRow
-              key={d.name}
-              doc={d}
-              details={open === d.name ? details : null}
-              expanded={open === d.name}
-              onToggle={() => toggle(d.name)}
-              onOpen={() => navigate({ name: 'viewer', doc: d.name })}
-              onDescribe={(text) => run(() => api.describeDocument(d.name, text))}
-              onRetry={() => run(() => api.reimportDocument(d.name))}
-              onDelete={() => {
-                if (confirm(`Delete "${d.name}" and remove it from every collection?`)) remove(d.name)
-              }}
-            />
-          ))}
-        </tbody>
-      </table>
-      <Pager paged={docs} />
-    </div>
-  )
-}
-
-function DocumentRow({
-  doc: d,
-  details,
-  expanded,
-  onToggle,
-  onOpen,
-  onDescribe,
-  onRetry,
-  onDelete,
-}: {
-  doc: Document
-  details: Details | null
-  expanded: boolean
-  onToggle: () => void
-  onOpen: () => void
-  onDescribe: (text: string) => void
-  onRetry: () => void
-  onDelete: () => void
-}) {
-  return (
-    <>
-      <tr>
-        <td>
-          <button className="link" onClick={onOpen}>
-            {d.name}
+    <Shell current={route.name} counts={counts} side={side}>
+      <div className="gallery-sections sections">
+        <SearchBox id="search" value={search} onChange={setSearch} placeholder="Search documents" />
+        {error !== null && <p className="muted">{error}</p>}
+        {docs.error !== null && <p className="muted">{docs.error}</p>}
+        <GallerySection label="New" large>
+          <Tile
+            icon={Plus}
+            name="Add documents"
+            sub="Upload or import"
+            hint="Drop files anywhere, upload, or import a path."
+            add
+            onClick={() => setAdding(true)}
+          />
+        </GallerySection>
+        {groups.map((group) => (
+          <GallerySection key={group.label} label={group.label} large>
+            {group.items.map((doc) => (
+              <Tile
+                key={doc.name}
+                icon={documentIcon(doc.suffix)}
+                name={doc.name}
+                sub={
+                  <>
+                    <Library className="glyph" /> {doc.collections}
+                    {doc.status !== "imported" && ` · ${doc.status}`}
+                  </>
+                }
+                meta={day(doc.created_at)}
+                hint={doc.description || "No description"}
+                onClick={() => navigate({ name: "documents", doc: doc.name })}
+              />
+            ))}
+          </GallerySection>
+        ))}
+        {docs.hasMore && (
+          <button
+            className="btn btn-ghost"
+            type="button"
+            disabled={docs.loading}
+            onClick={docs.loadMore}
+          >
+            Load more
           </button>
-        </td>
-        <td>
+        )}
+      </div>
+      <DropOverlay onFiles={upload} />
+      <Modal
+        open={adding}
+        onClose={() => setAdding(false)}
+        title="Add documents"
+        subtitle="import"
+      >
+        <div className="add-documents">
           <input
-            className="description-edit"
-            placeholder="—"
-            defaultValue={d.description}
-            onBlur={(e) => {
-              if (e.target.value !== d.description) onDescribe(e.target.value)
+            type="file"
+            multiple
+            hidden
+            ref={fileInput}
+            onChange={(event) => {
+              const files = [...(event.target.files ?? [])];
+              if (files.length > 0) void upload(files);
+              event.target.value = ""; // the same file twice in a row is still a change
             }}
           />
-        </td>
-        <td className="muted">{bytes.format(d.size)}</td>
-        <td className={d.status === 'error' ? 'error' : 'muted'}>
-          {d.status}
-          {d.error && <pre className="error-detail">{d.error}</pre>}
-        </td>
-        <td className="muted">{d.updated_at ? new Date(d.updated_at * 1000).toLocaleString() : ''}</td>
-        <td>
-          <button onClick={onToggle}>{expanded ? 'hide' : 'collections'}</button>
-          {RETRYABLE.includes(d.status) && <button onClick={onRetry}>retry import</button>}
-          <button disabled={d.status === 'deleting'} onClick={onDelete}>
-            delete
-          </button>
-        </td>
-      </tr>
-      {expanded && (
-        <tr>
-          <td></td>
-          <td colSpan={5}>
-            {details === null ? (
-              <span className="muted">loading…</span>
-            ) : (
-              <>
-                <div className="tags">
-                  {details.collections.length === 0 ? (
-                    <span className="muted">in no collection yet</span>
-                  ) : (
-                    details.collections.map((c) => <span key={c} className="tag">{c}</span>)
-                  )}
-                </div>
-                <div className="hit-meta muted">
-                  {details.embeddings.length === 0 ? (
-                    <span>no embeddings cached</span>
-                  ) : (
-                    details.embeddings.map((e) => (
-                      <span key={e.id} title={e.urn}>
-                        {e.model} · {e.chunker} {e.chunk_size}/{e.chunk_overlap} · {e.rows} rows
-                      </span>
-                    ))
-                  )}
-                </div>
-              </>
+          <div className="field">
+            <span className="label">Files</span>
+            <div className="row">
+              <button
+                className="btn"
+                type="button"
+                disabled={busy}
+                onClick={() => fileInput.current?.click()}
+              >
+                <Upload className="icon" />
+                Choose files
+              </button>
+              <span className="muted">or drop them anywhere on the page</span>
+            </div>
+          </div>
+          {staged.length > 0 && (
+            <div className="field">
+              <span className="label">Ready to import · {staged.length}</span>
+              {/* Nothing is converted or embedded until the names below are confirmed. */}
+              <ul className="list staged">
+                {staged.map((one) => (
+                  <li key={one.staging_id} className="list-item">
+                    <input
+                      className="input"
+                      value={one.name}
+                      aria-label="Document name"
+                      onChange={(event) =>
+                        rename(one.staging_id, event.target.value)
+                      }
+                    />
+                    <span className="mono muted">{bytes.format(one.size)}</span>
+                    <button
+                      className="btn btn-ghost"
+                      type="button"
+                      aria-label="Remove"
+                      onClick={() => forget(one.staging_id)}
+                    >
+                      <X className="icon" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <div className="row">
+                <button
+                  className="btn btn-primary"
+                  type="button"
+                  disabled={busy || !namesOk}
+                  onClick={importStaged}
+                >
+                  Import {staged.length}{" "}
+                  {staged.length === 1 ? "document" : "documents"}
+                </button>
+              </div>
+            </div>
+          )}
+          {/* A form, so Enter imports the way the browser already does it. */}
+          <form className="field" onSubmit={importPath}>
+            <span className="label">Path</span>
+            <input
+              className="input"
+              placeholder="File or folder the server can read"
+              value={path}
+              onChange={(event) => setPath(event.target.value)}
+            />
+            <div className="row">
+              <button
+                className="btn"
+                type="submit"
+                disabled={busy || path.trim() === ""}
+              >
+                Import path
+              </button>
+            </div>
+          </form>
+          {error !== null && <p className="muted">{error}</p>}
+        </div>
+      </Modal>
+      {/* Keyed by name: another document starts its panels and its reads over. */}
+      <DocumentModal
+        key={route.doc}
+        doc={route.doc ?? null}
+        onClose={closeModal}
+        onChanged={refresh}
+      />
+    </Shell>
+  );
+}
+
+// An import can only be re-run from a state it stopped in; the backend refuses every other status.
+const RETRYABLE: readonly DocStatus[] = ["error", "cancelled"];
+
+const CONTENT_TAB = "modal-content";
+const COLLECTIONS_TAB = "modal-collections";
+const IMPORT_TAB = "modal-import";
+const MODAL_TABS: TabDef[] = [
+  { id: CONTENT_TAB, label: "Content" },
+  { id: COLLECTIONS_TAB, label: "Collections" },
+  { id: IMPORT_TAB, label: "Info" },
+];
+
+/** One document, opened from the gallery: what it says, and how it was imported. */
+function DocumentModal({
+  doc,
+  onClose,
+  onChanged,
+}: {
+  doc: string | null;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [tab, setTab] = useState(CONTENT_TAB);
+  const [row, setRow] = useState<Document | null>(null);
+  const [collections, setCollections] = useState<string[]>([]);
+  const [embeddings, setEmbeddings] = useState<EmbeddingEntry[]>([]);
+
+  // The three reads the modal needs, in one round: the row itself, who holds it, what is cached.
+  const load = useCallback((): Promise<void> => {
+    if (doc === null) return Promise.resolve();
+    return Promise.all([
+      api.document(doc),
+      api.documentCollections(doc),
+      api.documentEmbeddings(doc),
+    ]).then(([fetched, names, cached]) => {
+      setRow(fetched);
+      setCollections(names);
+      setEmbeddings(cached);
+    });
+  }, [doc]);
+
+  const { run, busy, error, setError } = useRun(load);
+
+  useEffect(() => {
+    load().catch((cause: unknown) => setError(errorText(cause)));
+  }, [load, setError]);
+
+  // A deletion is accepted (202) and runs in the background: the modal follows the job, then
+  // closes and lets the listing re-read itself.
+  const onDeleted = useCallback(() => {
+    onClose();
+    onChanged();
+  }, [onClose, onChanged]);
+  const deletion = useBulkJob(onDeleted, setError);
+
+  const remove = () => {
+    if (doc === null) return;
+    if (!window.confirm(`Delete "${doc}" and remove it from every collection?`))
+      return;
+    deletion
+      .start(() => api.deleteDocument(doc))
+      .catch((cause: unknown) => setError(errorText(cause)));
+  };
+
+  const rows: [string, ReactNode][] =
+    row === null
+      ? []
+      : [
+          ["Imported", dateTime(row.created_at)],
+          ["Updated", dateTime(row.updated_at)],
+          [
+            "Status",
+            <>
+              {row.status}
+              {row.error !== null && (
+                <>
+                  {" "}
+                  · <span className="code">{row.error}</span>
+                </>
+              )}
+            </>,
+          ],
+          ["Source", `${row.suffix} · ${bytes.format(row.size)}`],
+          ["Parser", row.parser],
+          ["Skip OCR pages", row.skip_ocr_pages ? "yes" : "no"],
+          [
+            "Embeddings",
+            embeddings.length === 0
+              ? "none cached"
+              : embeddings.map((entry) => (
+                  <div key={entry.id}>
+                    {entry.model} · {entry.chunker} {entry.chunk_size}/
+                    {entry.chunk_overlap} · {entry.rows} rows
+                  </div>
+                )),
+          ],
+        ];
+
+  return (
+    <Modal
+      open={doc !== null}
+      onClose={onClose}
+      title={doc ?? ""}
+      subtitle={
+        row === null ? undefined : `${bytes.format(row.size)} · ${row.suffix}`
+      }
+    >
+      <Tabs tabs={MODAL_TABS} selected={tab} onSelect={setTab} />
+      <div
+        id={CONTENT_TAB}
+        role="tabpanel"
+        className="modal-panel"
+        hidden={tab !== CONTENT_TAB}
+      >
+        {row !== null && <DocumentPanes doc={row.name} preview={row.preview} />}
+      </div>
+      <div
+        id={COLLECTIONS_TAB}
+        role="tabpanel"
+        hidden={tab !== COLLECTIONS_TAB}
+      >
+        {collections.length === 0 ? (
+          <p className="muted">In no collection yet.</p>
+        ) : (
+          <ul className="list">
+            {collections.map((name) => (
+              <li className="list-item" key={name}>
+                <Library className="icon" />
+                <span className="list-text">
+                  <a href={href({ name: "collections", collection: name })}>
+                    {name}
+                  </a>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div id={IMPORT_TAB} role="tabpanel" hidden={tab !== IMPORT_TAB}>
+        <div className="split">
+          <section className="pane">
+            <span className="pane-head mono muted">Details</span>
+            <div className="pane-body">
+              <Kv rows={rows} />
+            </div>
+          </section>
+          <section className="pane">
+            <span className="pane-head mono muted">Description</span>
+            <div className="pane-body">
+              {row !== null && (
+                <DescriptionBox
+                  value={row.description}
+                  placeholder="What this document is about"
+                  onSave={(next) =>
+                    void run(() => api.describeDocument(row.name, next))
+                  }
+                />
+              )}
+            </div>
+          </section>
+        </div>
+        {row !== null && (
+          <div className="row row-loose">
+            <a
+              className="btn"
+              href={api.sourceUrl(row.name)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <ExternalLink className="icon" />
+              Open original
+            </a>
+            {RETRYABLE.includes(row.status) && (
+              <button
+                className="btn"
+                type="button"
+                disabled={busy}
+                onClick={() => run(() => api.reimportDocument(row.name))}
+              >
+                Retry import
+              </button>
             )}
-          </td>
-        </tr>
-      )}
-    </>
-  )
+            <button
+              className="btn btn-ghost"
+              type="button"
+              disabled={busy || deletion.running}
+              onClick={remove}
+            >
+              <Trash2 className="icon" />
+              Delete
+            </button>
+            {deletion.running && <span className="muted">deleting…</span>}
+          </div>
+        )}
+        {error !== null && <p className="muted">{error}</p>}
+      </div>
+    </Modal>
+  );
 }

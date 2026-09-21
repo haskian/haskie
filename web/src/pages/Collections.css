@@ -1,0 +1,27 @@
+/* Collections page layout only. Tokens and component styles live in design/design.css. */
+
+/* The modal panels the design page does not have: search and settings stack their controls. */
+.collection-panel {
+  display: grid;
+  gap: var(--sp-3);
+  align-content: start;
+}
+
+/* Settings is a form of small fields; how many fit a row is page layout, not a component. */
+.collection-settings {
+  display: grid;
+  gap: var(--sp-6);
+  align-content: start;
+}
+.collection-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--sp-4) var(--sp-6);
+  align-items: start;
+}
+
+/* An import error and an API message are one unbroken string: they wrap, never widen. */
+.collection-panel .list-text .sub,
+.collection-error {
+  overflow-wrap: anywhere;
+}

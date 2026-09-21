@@ -1,0 +1,16 @@
+/* page layout only; tokens live in design/design.css */
+.operation-tasks { display: flex; gap: var(--sp-8); padding: var(--sp-4) var(--sp-6); border: var(--border); border-top: 0; }
+.operation-stage { flex: var(--weight, 1); min-width: 0; display: grid; gap: var(--sp-1); align-content: start; }
+.operation-info { font-size: var(--fs-xs); color: var(--text-muted); }
+.tasks { list-style: none; margin: var(--sp-2) 0 0; padding: 0; display: grid; gap: var(--sp-1); }
+.task { display: flex; align-items: center; gap: var(--sp-2); font-family: var(--font-mono); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task .icon { width: 12px; height: 12px; flex: none; }
+.task.todo { opacity: 0.4; }
+.task.error { color: var(--accent); }
+.operation-head { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-4); }
+
+/* the date beside a job title stays on one line; design.css shortens the title itself */
+.operation-head > .mono { white-space: nowrap; }
+
+/* a backend error is one long line, often with no spaces in it */
+.operation-stage .md { overflow-wrap: anywhere; }

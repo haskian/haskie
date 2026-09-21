@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react'
+import { errorText } from '../format'
 
 export interface Run {
   run: (fn: () => Promise<unknown>) => Promise<void>
@@ -22,7 +23,7 @@ export function useRun(refresh: () => Promise<unknown>): Run {
         await fn()
         await refresh()
       } catch (e) {
-        setError(String(e))
+        setError(errorText(e))
       } finally {
         setBusy(false)
       }

@@ -1,125 +1,370 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   api,
-  type Accelerator,
+  type EmbeddingProfile,
+  type FieldDoc,
   type Options,
   type PipelineSettings,
   type RetentionSettings,
+  type SearchSettings,
   type UserSettings,
 } from '../api'
-import { ChunkSettingsForm } from '../components/ChunkSettingsForm'
-import { Field } from '../components/Field'
-import { ImportDefaultsForm } from '../components/ImportDefaultsForm'
-import { SearchSettingsForm } from '../components/SearchSettingsForm'
+import type { PageProps } from '../App'
+import { errorText } from '../format'
+import { Field, Picker, SEARCH_BOUNDS, Shell, Toggle, visibleSearchFields, type NumericKeys, type PickerOption } from '../ui'
+import { classicBackground, setBackground as storeBackground } from './settings/background'
+import './Settings.css'
 
-export function Settings() {
+const SECTIONS: { id: string; label: string }[] = [
+  { id: 'embedding', label: 'Embedding' },
+  { id: 'import', label: 'Import' },
+  { id: 'chunking', label: 'Chunking' },
+  { id: 'search', label: 'Search' },
+  { id: 'pipeline', label: 'Pipeline' },
+  { id: 'maintenance', label: 'Maintenance' },
+  { id: 'retention', label: 'Retention' },
+  { id: 'appearance', label: 'Appearance' },
+]
+
+interface NumberField<T> {
+  key: NumericKeys<T>
+  min: number
+  step?: number
+}
+
+const PIPELINE_FIELDS: NumberField<PipelineSettings>[] = [
+  { key: 'cpu_budget', min: 1 },
+  { key: 'converting_weight', min: 1 },
+  { key: 'embedding_weight', min: 1 },
+  { key: 'indexing_weight', min: 1 },
+  { key: 'document_parallelism', min: 0 },
+  { key: 'batch_pages', min: 1 },
+  { key: 'index_group_parts', min: 1 },
+  { key: 'task_timeout_seconds', min: 1 },
+  { key: 'preview_workers', min: 1 },
+]
+
+const MAINTENANCE_FIELDS: NumberField<PipelineSettings>[] = [
+  { key: 'maintenance_docs', min: 1 },
+  { key: 'maintenance_idle_seconds', min: 1 },
+  { key: 'ann_min_rows', min: 1 },
+]
+
+const RETENTION_FIELDS: NumberField<RetentionSettings>[] = [
+  { key: 'job_days', min: 1 },
+  { key: 'job_live_hours', min: 2 },
+  { key: 'audit_days', min: 0 },
+]
+
+const EMPTY_DOC: FieldDoc = { title: '', description: '' }
+// The backend names every setting; a key it does not know falls back to the key itself.
+const docFor = (docs: Record<string, FieldDoc>, key: string): FieldDoc => docs[key] ?? { ...EMPTY_DOC, title: key }
+
+const choices = <T extends string>(values: readonly T[]): PickerOption<T>[] => values.map((value) => ({ value, label: value }))
+
+/** A number setting: the design's `.field` with a number input in it. */
+function Num({
+  label,
+  help,
+  value,
+  min,
+  step,
+  onChange,
+}: {
+  label: string
+  help?: string
+  value: number
+  min?: number
+  step?: number
+  onChange: (value: number) => void
+}) {
+  return (
+    <Field label={label} help={help}>
+      <input className="input" type="number" value={value} min={min} step={step} onChange={(event) => onChange(Number(event.target.value))} />
+    </Field>
+  )
+}
+
+function SearchField({
+  name,
+  search,
+  options,
+  onChange,
+}: {
+  name: keyof SearchSettings
+  search: SearchSettings
+  options: Options
+  onChange: (next: SearchSettings) => void
+}) {
+  const doc = docFor(options.docs, `search.${name}`)
+  switch (name) {
+    case 'mode':
+      return (
+        <Field label={doc.title} help={doc.description}>
+          <Picker ariaLabel={doc.title} options={choices(options.search_modes)} value={search.mode} onChange={(mode) => onChange({ ...search, mode })} />
+        </Field>
+      )
+    case 'fusion':
+      return (
+        <Field label={doc.title} help={doc.description}>
+          <Picker ariaLabel={doc.title} options={choices(options.fusions)} value={search.fusion} onChange={(fusion) => onChange({ ...search, fusion })} />
+        </Field>
+      )
+    case 'reranker':
+      return (
+        <Field label={doc.title} help={doc.description}>
+          <Picker ariaLabel={doc.title} options={choices(options.rerankers)} value={search.reranker} onChange={(reranker) => onChange({ ...search, reranker })} />
+        </Field>
+      )
+    case 'reranker_model':
+      return (
+        <Field label={doc.title} help={doc.description}>
+          <Picker
+            ariaLabel={doc.title}
+            options={choices(options.reranker_models)}
+            value={search.reranker_model}
+            onChange={(reranker_model) => onChange({ ...search, reranker_model })}
+          />
+        </Field>
+      )
+    default: {
+      const bounds = SEARCH_BOUNDS[name]
+      return (
+        <Num
+          label={doc.title}
+          help={doc.description}
+          value={search[name]}
+          min={bounds.min}
+          step={bounds.step}
+          onChange={(value) => onChange({ ...search, [name]: value })}
+        />
+      )
+    }
+  }
+}
+
+/** The user settings, section by section. Every label and help text comes from `/api/options`. */
+export function Settings({ route, counts }: PageProps) {
   const [settings, setSettings] = useState<UserSettings | null>(null)
   const [options, setOptions] = useState<Options | null>(null)
+  const [section, setSection] = useState(SECTIONS[0].id)
   const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [classic, setClassic] = useState(classicBackground)
+
+  const reload = useCallback(
+    () =>
+      api
+        .settings()
+        .then((loaded) => {
+          setSettings(loaded)
+          setSaved(false)
+          setError(null)
+        })
+        .catch((failure: unknown) => setError(errorText(failure))),
+    [],
+  )
 
   useEffect(() => {
-    api.settings().then(setSettings)
-    api.options().then(setOptions)
-  }, [])
+    void reload()
+    api.options().then(setOptions).catch(() => undefined)
+  }, [reload])
 
-  if (!settings || !options) return null
-  const s = settings
-  const docs = options.docs
-  const update = (patch: Partial<UserSettings>) => {
-    setSaved(false)
-    setSettings({ ...s, ...patch })
+  const setBackground = (on: boolean): void => {
+    setClassic(on)
+    storeBackground(on)
   }
-  const pipeline = (patch: Partial<PipelineSettings>) => update({ pipeline: { ...s.pipeline, ...patch } })
-  const retention = (patch: Partial<RetentionSettings>) => update({ retention: { ...s.retention, ...patch } })
+
+  // ponytail: no scroll-spy. The nav marks what was last clicked, which is where the page went.
+  const goTo = (id: string): void => {
+    setSection(id)
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  const side = (
+    <section>
+      <span className="label label-mono">Sections</span>
+      <nav className="nav">
+        {SECTIONS.map((entry) => (
+          // A button, not an anchor: an `#embedding` href would be read as a route by the hash router.
+          <button
+            key={entry.id}
+            className="nav-item"
+            type="button"
+            aria-current={entry.id === section ? 'true' : undefined}
+            onClick={() => goTo(entry.id)}
+          >
+            {entry.label}
+          </button>
+        ))}
+      </nav>
+    </section>
+  )
+
+  if (settings === null || options === null) {
+    return (
+      <Shell current={route.name} counts={counts} side={side}>
+        <div className="settings">{error !== null && <p className="muted">{error}</p>}</div>
+      </Shell>
+    )
+  }
+
+  const docs = options.docs
+  const update = (patch: Partial<UserSettings>): void => {
+    setSaved(false)
+    setSettings({ ...settings, ...patch })
+  }
+  const pipeline = (patch: Partial<PipelineSettings>): void => update({ pipeline: { ...settings.pipeline, ...patch } })
+  const retention = (patch: Partial<RetentionSettings>): void => update({ retention: { ...settings.retention, ...patch } })
+
+  const save = (): void => {
+    api
+      .saveSettings(settings)
+      .then((stored) => {
+        setSettings(stored)
+        setSaved(true)
+        setError(null)
+      })
+      .catch((failure: unknown) => setError(errorText(failure)))
+  }
+
+  const profiles: PickerOption<EmbeddingProfile>[] = Object.entries(options.embedding_profiles).map(([profile, model]) => ({
+    value: profile as EmbeddingProfile,
+    label: profile,
+    sub: model === null ? 'full-text only' : `${model.name} · ${model.dims} dims`,
+  }))
+  const skipOcr = docFor(docs, 'conversion.skip_ocr_pages')
 
   return (
-    <form
-      className="settings"
-      onSubmit={async (e) => {
-        e.preventDefault()
-        setSettings(await api.saveSettings(s))
-        setSaved(true)
-      }}
-    >
-      <h2>User settings</h2>
+    <Shell current={route.name} counts={counts} side={side}>
+      <div className="settings">
+        <section id="embedding">
+          <span className="mono muted">Embedding</span>
+          <Field label={docFor(docs, 'embedding').title} help={docFor(docs, 'embedding').description}>
+            <Picker ariaLabel="Embedding profile" options={profiles} value={settings.embedding} onChange={(embedding) => update({ embedding })} />
+          </Field>
+          <Field label={docFor(docs, 'pipeline.accelerator').title} help={docFor(docs, 'pipeline.accelerator').description}>
+            <Picker
+              ariaLabel="Embedding hardware"
+              options={choices(options.accelerators)}
+              value={settings.pipeline.accelerator}
+              onChange={(accelerator) => pipeline({ accelerator })}
+            />
+          </Field>
+        </section>
 
-      <h3>Embedding</h3>
-      <Field name="embedding" doc={docs['embedding']}>
-        <select value={s.embedding} onChange={(e) => update({ embedding: e.target.value as UserSettings['embedding'] })}>
-          {Object.entries(options.embedding_profiles).map(([p, m]) => (
-            <option key={p} value={p}>
-              {p} {m ? `(${m.name}, ${m.dims} dims)` : ''}
-            </option>
+        <section id="import">
+          <span className="mono muted">Import</span>
+          <Field label={docFor(docs, 'conversion.parser').title} help={docFor(docs, 'conversion.parser').description}>
+            <Picker
+              ariaLabel="Parser"
+              options={choices(options.parsers)}
+              value={settings.conversion.parser}
+              onChange={(parser) => update({ conversion: { ...settings.conversion, parser } })}
+            />
+          </Field>
+          <div className="field">
+            <Toggle
+              label={skipOcr.title}
+              checked={settings.conversion.skip_ocr_pages}
+              onChange={(skip_ocr_pages) => update({ conversion: { ...settings.conversion, skip_ocr_pages } })}
+            />
+            <span className="faint">{skipOcr.description}</span>
+          </div>
+        </section>
+
+        <section id="chunking">
+          <span className="mono muted">Chunking</span>
+          <Field label={docFor(docs, 'conversion.chunker').title} help={docFor(docs, 'conversion.chunker').description}>
+            <Picker
+              ariaLabel="Chunker"
+              options={choices(options.chunkers)}
+              value={settings.conversion.chunker}
+              onChange={(chunker) => update({ conversion: { ...settings.conversion, chunker } })}
+            />
+          </Field>
+          <Num
+            label={docFor(docs, 'conversion.chunk_size').title}
+            help={docFor(docs, 'conversion.chunk_size').description}
+            value={settings.conversion.chunk_size}
+            min={1}
+            onChange={(chunk_size) => update({ conversion: { ...settings.conversion, chunk_size } })}
+          />
+          <Num
+            label={docFor(docs, 'conversion.chunk_overlap').title}
+            help={docFor(docs, 'conversion.chunk_overlap').description}
+            value={settings.conversion.chunk_overlap}
+            min={0}
+            onChange={(chunk_overlap) => update({ conversion: { ...settings.conversion, chunk_overlap } })}
+          />
+        </section>
+
+        <section id="search">
+          <span className="mono muted">Search</span>
+          {visibleSearchFields(settings.search).map((name) => (
+            <SearchField key={name} name={name} search={settings.search} options={options} onChange={(search) => update({ search })} />
           ))}
-        </select>
-      </Field>
-      <Field name="accelerator" doc={docs['pipeline.accelerator']}>
-        <select value={s.pipeline.accelerator} onChange={(e) => pipeline({ accelerator: e.target.value as Accelerator })}>
-          {options.accelerators.map((a) => <option key={a} value={a}>{a}</option>)}
-        </select>
-      </Field>
+        </section>
 
-      <h3>Import defaults (parser, skip OCR)</h3>
-      <ImportDefaultsForm value={s.conversion} options={options} onChange={(next) => update({ conversion: next })} />
+        <section id="pipeline">
+          <span className="mono muted">Pipeline</span>
+          {PIPELINE_FIELDS.map((field) => (
+            <Num
+              key={field.key}
+              label={docFor(docs, `pipeline.${field.key}`).title}
+              help={docFor(docs, `pipeline.${field.key}`).description}
+              value={settings.pipeline[field.key]}
+              min={field.min}
+              onChange={(value) => pipeline({ [field.key]: value })}
+            />
+          ))}
+        </section>
 
-      <h3>Chunking defaults (per-collection overridable)</h3>
-      <ChunkSettingsForm value={s.conversion} options={options} onChange={(next) => update({ conversion: next })} />
+        <section id="maintenance">
+          <span className="mono muted">Maintenance</span>
+          {MAINTENANCE_FIELDS.map((field) => (
+            <Num
+              key={field.key}
+              label={docFor(docs, `pipeline.${field.key}`).title}
+              help={docFor(docs, `pipeline.${field.key}`).description}
+              value={settings.pipeline[field.key]}
+              min={field.min}
+              onChange={(value) => pipeline({ [field.key]: value })}
+            />
+          ))}
+        </section>
 
-      <h3>Search (per-collection overridable)</h3>
-      <SearchSettingsForm value={s.search} options={options} onChange={(next) => update({ search: next as UserSettings['search'] })} />
+        <section id="retention">
+          <span className="mono muted">Retention</span>
+          {RETENTION_FIELDS.map((field) => (
+            <Num
+              key={field.key}
+              label={docFor(docs, `retention.${field.key}`).title}
+              help={docFor(docs, `retention.${field.key}`).description}
+              value={settings.retention[field.key]}
+              min={field.min}
+              onChange={(value) => retention({ [field.key]: value })}
+            />
+          ))}
+        </section>
 
-      <h3>Indexing parallelism</h3>
-      <Field name="cpu_budget" doc={docs['pipeline.cpu_budget']}>
-        <input type="number" min={1} value={s.pipeline.cpu_budget} onChange={(e) => pipeline({ cpu_budget: Number(e.target.value) })} />
-      </Field>
-      <Field name="converting_weight" doc={docs['pipeline.converting_weight']}>
-        <input type="number" min={1} value={s.pipeline.converting_weight} onChange={(e) => pipeline({ converting_weight: Number(e.target.value) })} />
-      </Field>
-      <Field name="embedding_weight" doc={docs['pipeline.embedding_weight']}>
-        <input type="number" min={1} value={s.pipeline.embedding_weight} onChange={(e) => pipeline({ embedding_weight: Number(e.target.value) })} />
-      </Field>
-      <Field name="indexing_weight" doc={docs['pipeline.indexing_weight']}>
-        <input type="number" min={1} value={s.pipeline.indexing_weight} onChange={(e) => pipeline({ indexing_weight: Number(e.target.value) })} />
-      </Field>
-      <Field name="document_parallelism" doc={docs['pipeline.document_parallelism']}>
-        <input type="number" min={0} value={s.pipeline.document_parallelism} onChange={(e) => pipeline({ document_parallelism: Number(e.target.value) })} />
-      </Field>
-      <Field name="batch_pages" doc={docs['pipeline.batch_pages']}>
-        <input type="number" min={1} value={s.pipeline.batch_pages} onChange={(e) => pipeline({ batch_pages: Number(e.target.value) })} />
-      </Field>
-      <Field name="index_group_parts" doc={docs['pipeline.index_group_parts']}>
-        <input type="number" min={1} value={s.pipeline.index_group_parts} onChange={(e) => pipeline({ index_group_parts: Number(e.target.value) })} />
-      </Field>
-      <Field name="task_timeout_seconds" doc={docs['pipeline.task_timeout_seconds']}>
-        <input type="number" min={1} value={s.pipeline.task_timeout_seconds} onChange={(e) => pipeline({ task_timeout_seconds: Number(e.target.value) })} />
-      </Field>
-      <Field name="preview_workers" doc={docs['pipeline.preview_workers']}>
-        <input type="number" min={1} value={s.pipeline.preview_workers} onChange={(e) => pipeline({ preview_workers: Number(e.target.value) })} />
-      </Field>
-
-      <h3>Index maintenance</h3>
-      <Field name="maintenance_docs" doc={docs['pipeline.maintenance_docs']}>
-        <input type="number" min={1} value={s.pipeline.maintenance_docs} onChange={(e) => pipeline({ maintenance_docs: Number(e.target.value) })} />
-      </Field>
-      <Field name="maintenance_idle_seconds" doc={docs['pipeline.maintenance_idle_seconds']}>
-        <input type="number" min={1} value={s.pipeline.maintenance_idle_seconds} onChange={(e) => pipeline({ maintenance_idle_seconds: Number(e.target.value) })} />
-      </Field>
-      <Field name="ann_min_rows" doc={docs['pipeline.ann_min_rows']}>
-        <input type="number" min={1} value={s.pipeline.ann_min_rows} onChange={(e) => pipeline({ ann_min_rows: Number(e.target.value) })} />
-      </Field>
-
-      <h3>Retention</h3>
-      <Field name="job_days" doc={docs['retention.job_days']}>
-        <input type="number" min={1} value={s.retention.job_days} onChange={(e) => retention({ job_days: Number(e.target.value) })} />
-      </Field>
-      <Field name="job_live_hours" doc={docs['retention.job_live_hours']}>
-        <input type="number" min={2} value={s.retention.job_live_hours} onChange={(e) => retention({ job_live_hours: Number(e.target.value) })} />
-      </Field>
-      <Field name="audit_days" doc={docs['retention.audit_days']}>
-        <input type="number" min={0} value={s.retention.audit_days} onChange={(e) => retention({ audit_days: Number(e.target.value) })} />
-      </Field>
-
-      <button>Save</button> {saved && <span className="muted">saved</span>}
-    </form>
+        <section id="appearance">
+          <span className="mono muted">Appearance</span>
+          <div className="row row-loose">
+            <Toggle id="bg-classic" label="Classic background" checked={classic} onChange={setBackground} />
+          </div>
+          <div className="row row-loose">
+            <button className="btn btn-primary" type="button" onClick={save}>
+              Save
+            </button>
+            <button className="btn btn-ghost" type="button" onClick={() => void reload()}>
+              Reset
+            </button>
+            {saved && <span className="muted">saved</span>}
+          </div>
+          {error !== null && <p className="muted">{error}</p>}
+        </section>
+      </div>
+    </Shell>
   )
 }

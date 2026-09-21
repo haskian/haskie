@@ -1,0 +1,9 @@
+/* Page layout only; tokens and components live in design/design.css. The design page's <style>
+   block holds nothing, so these are the rules real data needs. */
+
+/* The info panel: details beside the description, then the actions; the design page shows no actions. */
+#modal-import { display: grid; grid-template-rows: minmax(0, 1fr); grid-auto-rows: auto; gap: var(--sp-4); }
+
+/* The add modal: two ways in, stacked; staged files are a name to edit, a size and a remove. */
+.add-documents { display: grid; gap: var(--sp-6); align-content: start; }
+.staged .list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: var(--sp-3); align-items: center; }

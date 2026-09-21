@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>haskie — collections</title>
+  <link rel="stylesheet" href="design.css" />
+  <style>
+    /* page layout only; tokens live in design.css */
+  </style>
+</head>
+<body>
+  <div class="page">
+
+
+    <main class="body">
+      <aside class="side">
+        <a class="logo" href="index.html" aria-label="Haskie"></a>
+        <nav class="nav">
+          <a class="nav-item" href="explore.html"><i data-lucide="compass" class="icon"></i>Explore</a>
+          <a class="nav-item" href="documents.html"><i data-lucide="file-text" class="icon"></i>Documents<span class="count">30</span></a>
+          <a class="nav-item" href="#" aria-current="true"><i data-lucide="library" class="icon"></i>Collections<span class="count">5</span></a>
+          <a class="nav-item" href="operations.html"><i data-lucide="activity" class="icon"></i>Operations</a>
+          <a class="nav-item" href="sessions.html"><i data-lucide="bot" class="icon"></i>Sessions</a>
+          <a class="nav-item" href="insights.html"><i data-lucide="chart-column" class="icon"></i>Insights</a>
+          <a class="nav-item" href="settings.html"><i data-lucide="settings" class="icon"></i>Settings</a>
+        </nav>
+        <section>
+          <span class="label label-mono">Sections</span>
+          <nav class="nav">
+            <a class="nav-item" href="#g-a-e" aria-current="true">A–E</a>
+            <a class="nav-item" href="#g-f-j">F–J</a>
+            <a class="nav-item" href="#g-k-o">K–O</a>
+            <a class="nav-item" href="#g-p-t">P–T</a>
+            <a class="nav-item" href="#g-u-z">U–Z</a>
+          </nav>
+        </section>
+      </aside>
+      <div class="gallery-sections sections">
+        <form class="input-group" role="search" onsubmit="return false"><input class="input" id="search" type="search" placeholder="Search collections" /><button class="btn btn-ghost" type="button" aria-label="Clear" onclick="const box = this.previousElementSibling; box.value = ''; box.dispatchEvent(new Event('input')); box.focus()"><i data-lucide="x" class="icon"></i></button></form>
+        <section class="gallery-section section" id="g-new">
+          <span class="mono muted">New</span>
+          <div class="gallery gallery-lg">
+            <button class="tile tile-add" onclick="document.getElementById('modal-new').showModal()"><i data-lucide="plus" class="icon"></i><span class="tile-text"><span class="name">New collection</span><span class="sub">Create one</span></span><span class="hint" role="tooltip"><strong>New collection</strong><span class="sub">Create one</span>Name it, say what it holds.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-a-e">
+          <span class="mono muted">A–E</span>
+          <div class="gallery gallery-lg">
+            <button class="tile"><i data-lucide="grid-3x3" class="icon"></i><span class="tile-text"><span class="name">Area</span><span class="sub">A. Hoffmann</span></span><span class="hint" role="tooltip"><strong>Area</strong><span class="sub">A. Hoffmann</span>Notes on area lights and soft shadow falloff.</span></button>
+            <button class="tile"><i data-lucide="box" class="icon"></i><span class="tile-text"><span class="name">Box</span><span class="sub">B. Ortega</span></span><span class="hint" role="tooltip"><strong>Box</strong><span class="sub">B. Ortega</span>Primitive box reference with UV layout conventions.</span></button>
+            <button class="tile"><i data-lucide="camera" class="icon"></i><span class="tile-text"><span class="name">Camera</span><span class="sub">C. Nakamura</span></span><span class="hint" role="tooltip"><strong>Camera</strong><span class="sub">C. Nakamura</span>Lens presets and framing rules for product shots.</span></button>
+            <button class="tile"><i data-lucide="check" class="icon"></i><span class="tile-text"><span class="name">Check</span><span class="sub">D. Lindqvist</span></span><span class="hint" role="tooltip"><strong>Check</strong><span class="sub">D. Lindqvist</span>Validation checklist run before every final render.</span></button>
+            <button class="tile"><i data-lucide="circle" class="icon"></i><span class="tile-text"><span class="name">Circle</span><span class="sub">E. Moreau</span></span><span class="hint" role="tooltip"><strong>Circle</strong><span class="sub">E. Moreau</span>Radial layout guide for circular compositions.</span></button>
+            <button class="tile"><i data-lucide="clock" class="icon"></i><span class="tile-text"><span class="name">Clock</span><span class="sub">F. Adeyemi</span></span><span class="hint" role="tooltip"><strong>Clock</strong><span class="sub">F. Adeyemi</span>Time budget per render pass, measured on the farm.</span></button>
+            <button class="tile"><i data-lucide="cone" class="icon"></i><span class="tile-text"><span class="name">Cone</span><span class="sub">G. Petrov</span></span><span class="hint" role="tooltip"><strong>Cone</strong><span class="sub">G. Petrov</span>Cone primitive with tessellation trade-offs.</span></button>
+            <button class="tile"><i data-lucide="cpu" class="icon"></i><span class="tile-text"><span class="name">Core</span><span class="sub">H. Salazar</span></span><span class="hint" role="tooltip"><strong>Core</strong><span class="sub">H. Salazar</span>Core engine settings and their safe ranges.</span></button>
+            <button class="tile"><i data-lucide="cylinder" class="icon"></i><span class="tile-text"><span class="name">Cylinder</span><span class="sub">I. Bergström</span></span><span class="hint" role="tooltip"><strong>Cylinder</strong><span class="sub">I. Bergström</span>Cylinder primitive and cap smoothing options.</span></button>
+            <button class="tile"><i data-lucide="droplet" class="icon"></i><span class="tile-text"><span class="name">Drop</span><span class="sub">J. Okafor</span></span><span class="hint" role="tooltip"><strong>Drop</strong><span class="sub">J. Okafor</span>Liquid drop shader with refraction samples.</span></button>
+            <button class="tile"><i data-lucide="eye" class="icon"></i><span class="tile-text"><span class="name">Eye</span><span class="sub">K. Tanaka</span></span><span class="hint" role="tooltip"><strong>Eye</strong><span class="sub">K. Tanaka</span>Eye shader study with layered specular.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-f-j">
+          <span class="mono muted">F–J</span>
+          <div class="gallery gallery-lg">
+            <button class="tile"><i data-lucide="film" class="icon"></i><span class="tile-text"><span class="name">Film</span><span class="sub">L. Ferreira</span></span><span class="hint" role="tooltip"><strong>Film</strong><span class="sub">L. Ferreira</span>Film grain and halation post settings.</span></button>
+            <button class="tile"><i data-lucide="flame" class="icon"></i><span class="tile-text"><span class="name">Flame</span><span class="sub">M. Novak</span></span><span class="hint" role="tooltip"><strong>Flame</strong><span class="sub">M. Novak</span>Volumetric flame setup for low sample counts.</span></button>
+            <button class="tile"><i data-lucide="settings" class="icon"></i><span class="tile-text"><span class="name">Gear</span><span class="sub">N. Haddad</span></span><span class="hint" role="tooltip"><strong>Gear</strong><span class="sub">N. Haddad</span>Gear generator parameters and tooth profiles.</span></button>
+            <button class="tile"><i data-lucide="heart" class="icon"></i><span class="tile-text"><span class="name">Heart</span><span class="sub">O. Kowalski</span></span><span class="hint" role="tooltip"><strong>Heart</strong><span class="sub">O. Kowalski</span>Heart mesh topology cleaned for subdivision.</span></button>
+            <button class="tile"><i data-lucide="hexagon" class="icon"></i><span class="tile-text"><span class="name">Hex</span><span class="sub">P. Andersen</span></span><span class="hint" role="tooltip"><strong>Hex</strong><span class="sub">P. Andersen</span>Hex grid tiling with seamless edge matching.</span></button>
+            <button class="tile"><i data-lucide="image" class="icon"></i><span class="tile-text"><span class="name">Image</span><span class="sub">Q. Delgado</span></span><span class="hint" role="tooltip"><strong>Image</strong><span class="sub">Q. Delgado</span>Image plane workflow for reference matching.</span></button>
+            <button class="tile"><i data-lucide="aperture" class="icon"></i><span class="tile-text"><span class="name">Iris</span><span class="sub">R. Fischer</span></span><span class="hint" role="tooltip"><strong>Iris</strong><span class="sub">R. Fischer</span>Aperture blade count and bokeh shape tests.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-k-o">
+          <span class="mono muted">K–O</span>
+          <div class="gallery gallery-lg">
+            <button class="tile"><i data-lucide="lamp" class="icon"></i><span class="tile-text"><span class="name">Lamp</span><span class="sub">S. Iyer</span></span><span class="hint" role="tooltip"><strong>Lamp</strong><span class="sub">S. Iyer</span>Desk lamp rig with IES profile comparison.</span></button>
+            <button class="tile"><i data-lucide="layers" class="icon"></i><span class="tile-text"><span class="name">Layers</span><span class="sub">T. Brennan</span></span><span class="hint" role="tooltip"><strong>Layers</strong><span class="sub">T. Brennan</span>Render layer split for compositing handoff.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-p-t">
+          <span class="mono muted">P–T</span>
+          <div class="gallery gallery-lg">
+            <button class="tile"><i data-lucide="mountain" class="icon"></i><span class="tile-text"><span class="name">Peak</span><span class="sub">U. Sato</span></span><span class="hint" role="tooltip"><strong>Peak</strong><span class="sub">U. Sato</span>Mountain terrain displacement from height maps.</span></button>
+            <button class="tile"><i data-lucide="pentagon" class="icon"></i><span class="tile-text"><span class="name">Penta</span><span class="sub">V. Rossi</span></span><span class="hint" role="tooltip"><strong>Penta</strong><span class="sub">V. Rossi</span>Pentagon tiling study for panel layouts.</span></button>
+            <button class="tile"><i data-lucide="sparkles" class="icon"></i><span class="tile-text"><span class="name">Spark</span><span class="sub">W. Lam</span></span><span class="hint" role="tooltip"><strong>Spark</strong><span class="sub">W. Lam</span>Particle spark emitter tuned for slow motion.</span></button>
+            <button class="tile"><i data-lucide="square" class="icon"></i><span class="tile-text"><span class="name">Square</span><span class="sub">X. Duarte</span></span><span class="hint" role="tooltip"><strong>Square</strong><span class="sub">X. Duarte</span>Square grid baseline for UI mockups.</span></button>
+            <button class="tile"><i data-lucide="star" class="icon"></i><span class="tile-text"><span class="name">Star</span><span class="sub">Y. Kim</span></span><span class="hint" role="tooltip"><strong>Star</strong><span class="sub">Y. Kim</span>Star field generator with brightness curve.</span></button>
+            <button class="tile"><i data-lucide="sun" class="icon"></i><span class="tile-text"><span class="name">Sun</span><span class="sub">Z. Weber</span></span><span class="hint" role="tooltip"><strong>Sun</strong><span class="sub">Z. Weber</span>Sun position by date, time and latitude.</span></button>
+            <button class="tile"><i data-lucide="move-up-left" class="icon"></i><span class="tile-text"><span class="name">Target</span><span class="sub">A. Costa</span></span><span class="hint" role="tooltip"><strong>Target</strong><span class="sub">A. Costa</span>Aim constraint setup for tracking cameras.</span></button>
+            <button class="tile"><i data-lucide="triangle" class="icon"></i><span class="tile-text"><span class="name">Tri</span><span class="sub">B. Yilmaz</span></span><span class="hint" role="tooltip"><strong>Tri</strong><span class="sub">B. Yilmaz</span>Triangle strips and their draw call cost.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-u-z">
+          <span class="mono muted">U–Z</span>
+          <div class="gallery gallery-lg">
+            <button class="tile"><i data-lucide="wind" class="icon"></i><span class="tile-text"><span class="name">Wind</span><span class="sub">C. Dubois</span></span><span class="hint" role="tooltip"><strong>Wind</strong><span class="sub">C. Dubois</span>Wind force field with turbulence presets.</span></button>
+            <button class="tile"><i data-lucide="zap" class="icon"></i><span class="tile-text"><span class="name">Zap</span><span class="sub">D. Mensah</span></span><span class="hint" role="tooltip"><strong>Zap</strong><span class="sub">D. Mensah</span>Lightning bolt path generator and glow pass.</span></button>
+          </div>
+        </section>
+      </div>
+    </main>
+
+  </div>
+
+  <dialog class="modal" id="modal-new">
+    <div class="modal-body" tabindex="-1" autofocus>
+      <div class="modal-head">
+        <h2 class="title"><span>New collection</span><small class="muted">collection</small></h2>
+        <form method="dialog"><button class="btn btn-ghost" aria-label="Close"><i data-lucide="x" class="icon"></i></button></form>
+      </div>
+      <form method="dialog" style="display: grid; gap: var(--sp-3); align-content: start">
+        <div class="field"><span class="label">Name</span><input class="input" placeholder="Collection name" autofocus></div>
+        <div class="field"><span class="label">Description</span><textarea class="textarea" rows="4" placeholder="What it holds"></textarea></div>
+        <div class="row"><button class="btn btn-primary">Create</button></div>
+      </form>
+    </div>
+  </dialog>
+  <dialog class="modal" id="modal">
+    <div class="modal-body" tabindex="-1" autofocus style="grid-template-rows: auto auto minmax(0, 1fr)">
+      <div class="modal-head">
+        <h2 class="title"><span id="modal-title">Collection</span><small class="muted" id="modal-author">Author</small></h2>
+        <form method="dialog"><button class="btn btn-ghost" aria-label="Close"><i data-lucide="x" class="icon"></i></button></form>
+      </div>
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" aria-selected="true" aria-controls="modal-documents">Documents</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="modal-search-panel">Search</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="modal-settings">Settings</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="modal-info">Info</button>
+      </div>
+      <div id="modal-documents" role="tabpanel" class="modal-panel">
+      <form class="input-group" role="search" onsubmit="return false"><input class="input" id="modal-search" type="search" placeholder="Search documents" /><button class="btn btn-ghost" type="button" aria-label="Clear" onclick="const box = this.previousElementSibling; box.value = ''; box.dispatchEvent(new Event('input')); box.focus()"><i data-lucide="x" class="icon"></i></button></form>
+      <div class="split">
+        <section class="pane">
+          <span class="pane-head mono muted">In collection · <span id="count-in">12</span></span>
+          <div class="pane-body"><ul class="list" id="list-in">
+            <li class="list-item"><i data-lucide="grid-3x3" class="icon"></i><span class="list-text">Area<span class="sub">A. Hoffmann</span></span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="minus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="box" class="icon"></i><span class="list-text">Box<span class="sub">B. Ortega</span></span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="minus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="camera" class="icon"></i><span class="list-text">Camera<span class="sub">C. Nakamura</span></span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="minus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="check" class="icon"></i><span class="list-text">Check<span class="sub">D. Lindqvist</span></span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="minus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="circle" class="icon"></i><span class="list-text">Circle<span class="sub">E. Moreau</span></span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="minus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="clock" class="icon"></i><span class="list-text">Clock<span class="sub">F. Adeyemi</span></span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="minus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="cone" class="icon"></i><span class="list-text">Cone<span class="sub">G. Petrov</span></span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="minus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="cpu" class="icon"></i><span class="list-text">Core<span class="sub">H. Salazar</span></span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="minus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="cylinder" class="icon"></i><span class="list-text">Cylinder<span class="sub">I. Bergström</span></span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="minus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="droplet" class="icon"></i><span class="list-text">Drop<span class="sub">J. Okafor</span></span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="minus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="eye" class="icon"></i><span class="list-text">Eye<span class="sub">K. Tanaka</span></span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="minus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="film" class="icon"></i><span class="list-text">Film<span class="sub">L. Ferreira</span></span><button class="btn btn-ghost" aria-label="Remove"><i data-lucide="minus" class="icon"></i></button></li>
+          </ul></div>
+        </section>
+        <section class="pane">
+          <span class="pane-head mono muted">Available · <span id="count-out">18</span></span>
+          <div class="pane-body"><ul class="list" id="list-out">
+            <li class="list-item"><i data-lucide="flame" class="icon"></i><span class="list-text">Flame<span class="sub">M. Novak</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="settings" class="icon"></i><span class="list-text">Gear<span class="sub">N. Haddad</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="heart" class="icon"></i><span class="list-text">Heart<span class="sub">O. Kowalski</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="hexagon" class="icon"></i><span class="list-text">Hex<span class="sub">P. Andersen</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="image" class="icon"></i><span class="list-text">Image<span class="sub">Q. Delgado</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="aperture" class="icon"></i><span class="list-text">Iris<span class="sub">R. Fischer</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="lamp" class="icon"></i><span class="list-text">Lamp<span class="sub">S. Iyer</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="layers" class="icon"></i><span class="list-text">Layers<span class="sub">T. Brennan</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="mountain" class="icon"></i><span class="list-text">Peak<span class="sub">U. Sato</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="pentagon" class="icon"></i><span class="list-text">Penta<span class="sub">V. Rossi</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="sparkles" class="icon"></i><span class="list-text">Spark<span class="sub">W. Lam</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="square" class="icon"></i><span class="list-text">Square<span class="sub">X. Duarte</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="star" class="icon"></i><span class="list-text">Star<span class="sub">Y. Kim</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="sun" class="icon"></i><span class="list-text">Sun<span class="sub">Z. Weber</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="move-up-left" class="icon"></i><span class="list-text">Target<span class="sub">A. Costa</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="triangle" class="icon"></i><span class="list-text">Tri<span class="sub">B. Yilmaz</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="wind" class="icon"></i><span class="list-text">Wind<span class="sub">C. Dubois</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+            <li class="list-item"><i data-lucide="zap" class="icon"></i><span class="list-text">Zap<span class="sub">D. Mensah</span></span><button class="btn btn-ghost" aria-label="Add"><i data-lucide="plus" class="icon"></i></button></li>
+          </ul></div>
+        </section>
+      </div>
+      </div>
+      <div id="modal-search-panel" role="tabpanel" class="modal-panel" hidden>
+        <form class="input-group" role="search" onsubmit="return false"><input class="input" type="search" placeholder="Search this collection" /><button class="btn btn-ghost" type="button" aria-label="Clear" onclick="const box = this.previousElementSibling; box.value = ''; box.dispatchEvent(new Event('input')); box.focus()"><i data-lucide="x" class="icon"></i></button></form>
+        <p class="mono muted">&nbsp;</p>
+      </div>
+      <div id="modal-settings" role="tabpanel" class="modal-panel" hidden><p class="muted">Chunking and search options for this collection.</p></div>
+      <div id="modal-info" role="tabpanel" class="modal-panel" hidden>
+        <div class="split">
+          <section class="pane">
+            <span class="pane-head mono muted">Details</span>
+            <div class="pane-body">
+              <dl class="kv">
+                <dt>documents</dt><dd id="stat-docs">12</dd>
+                <dt>indexed</dt><dd>12</dd>
+                <dt>active</dt><dd>0</dd>
+                <dt>errors</dt><dd>0</dd>
+                <dt>rows</dt><dd>1785</dd>
+                <dt>last maintained</dt><dd>Mon 21 Sept · 16:53</dd>
+              </dl>
+            </div>
+          </section>
+          <section class="pane">
+            <span class="pane-head mono muted">Description</span>
+            <div class="pane-body"><textarea class="textarea" id="modal-summary" aria-label="Description" placeholder="What this collection holds"></textarea></div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="statusbar"></div>
+
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="design.js"></script>
+  <script>
+    const modal = document.getElementById('modal');
+    for (const tile of document.querySelectorAll('.gallery .tile')) {
+      tile.addEventListener('click', () => {
+        document.getElementById('modal-title').textContent = tile.querySelector('.tile-text').firstChild.textContent.trim();
+        document.getElementById('modal-author').textContent = tile.querySelector('.tile-text .sub').textContent;
+        document.getElementById('modal-summary').value = tile.querySelector('.hint').lastChild.textContent;
+        modal.showModal();
+      });
+    }
+    // membership: the action button moves a row to the other pane and flips its icon
+    const lists = { in: document.getElementById('list-in'), out: document.getElementById('list-out') };
+    function recount() {
+      document.getElementById('count-in').textContent = document.getElementById('stat-docs').textContent = lists.in.children.length;
+      document.getElementById('count-out').textContent = lists.out.children.length;
+    }
+    modal.addEventListener('click', (event) => {
+      const button = event.target.closest('.list-item .btn');
+      if (!button) return;
+      const item = button.closest('.list-item');
+      const toIn = item.parentElement === lists.out;
+      button.setAttribute('aria-label', toIn ? 'Remove' : 'Add');
+      button.innerHTML = `<i data-lucide="${toIn ? 'minus' : 'plus'}" class="icon"></i>`;
+      (toIn ? lists.in : lists.out).append(item);
+      lucide.createIcons({ root: button });
+      recount();
+    });
+    // search: hide rows in both panes that do not match
+    document.getElementById('modal-search').addEventListener('input', (event) => {
+      const q = event.target.value.trim().toLowerCase();
+      for (const item of modal.querySelectorAll('.list-item')) item.hidden = q !== '' && !item.textContent.toLowerCase().includes(q);
+    });
+  </script>
+</body>
+</html>

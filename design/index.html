@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>haskie — design</title>
+  <link rel="stylesheet" href="design.css" />
+  <style>
+    /* page layout only; tokens live in design.css */
+    .page { position: relative; grid-template-rows: auto 1fr; }
+    .header { display: flex; justify-content: flex-end; }
+    .header .year { font-weight: 500; font-size: var(--fs-lg); }
+    .body { display: grid; grid-template-columns: 300px minmax(0, 1fr) 180px; gap: var(--sp-12); padding: 180px 0 0; }
+    .side { position: static; align-self: stretch; display: flex; flex-direction: column; gap: var(--sp-8); padding-left: 60px; }
+    .center { display: flex; flex-direction: column; gap: var(--sp-6); align-items: center; padding-top: 24px; }
+    .center > * { width: 100%; max-width: 520px; }
+    .right { display: flex; flex-direction: column; gap: var(--sp-8); padding-top: 60px; }
+    .right .window { align-self: flex-end; display: flex; gap: var(--sp-4); margin-bottom: 20px; }
+    .right .label { margin-bottom: var(--sp-2); display: block; }
+    .gallery-block { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: var(--sp-12); padding: 80px 0 60px; }
+    .gallery-menu { padding-left: 60px; align-self: start; position: sticky; top: 72px; }
+    .gallery-menu .label { display: block; margin-bottom: var(--sp-4); }
+    .glass-strip { display: flex; align-items: center; gap: var(--sp-4); padding: var(--sp-4) var(--sp-6); background: var(--glass-dark); color: var(--paper); }
+    .glass-strip .rule { flex: 1; height: 1px; background: rgba(255,255,255,.6); }
+    .glass-strip .dot { width: 12px; height: 12px; background: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="page">
+
+    <header class="header">
+      <label class="toggle"><input id="bg-classic" type="checkbox" role="switch" />Classic</label>
+    </header>
+
+    <main class="body">
+      <aside class="side">
+        <a class="logo" href="index.html" aria-label="Haskie"></a>
+        <section>
+          <span class="label label-mono">Forms</span>
+          <div class="icon-row">
+            <i data-lucide="box" class="icon"></i>
+            <i data-lucide="circle" class="icon"></i>
+            <i data-lucide="cone" class="icon"></i>
+            <i data-lucide="cylinder" class="icon"></i>
+            <i data-lucide="ellipsis" class="icon"></i>
+          </div>
+        </section>
+        <section>
+          <span class="label label-mono">Tools</span>
+          <nav class="nav">
+            <button class="nav-item"><i data-lucide="box" class="icon"></i>Render</button>
+            <button class="nav-item" aria-current="true"><i data-lucide="rotate-3d" class="icon"></i>Rotation</button>
+            <button class="nav-item"><i data-lucide="box" class="icon"></i>Texture</button>
+            <button class="nav-item"><i data-lucide="pentagon" class="icon"></i>Polygons</button>
+            <button class="nav-item"><i data-lucide="scatter-chart" class="icon"></i>Points</button>
+            <button class="nav-item"><i data-lucide="box" class="icon"></i>Intrude</button>
+          </nav>
+        </section>
+      </aside>
+
+      <section class="center">
+        <div class="spec">
+          <span class="label">Palette</span>
+          <div class="swatches">
+            <div class="swatch" style="background: var(--ink)" title="--ink"></div>
+            <div class="swatch" style="background: var(--ink-2)" title="--ink-2"></div>
+            <div class="swatch" style="background: var(--text-muted)" title="--text-muted"></div>
+            <div class="swatch" style="background: var(--text-faint)" title="--text-faint"></div>
+            <div class="swatch" style="background: var(--fog-2)" title="--fog-2"></div>
+            <div class="swatch" style="background: var(--fog-0)" title="--fog-0"></div>
+            <div class="swatch" style="background: var(--fog-1)" title="--fog-1"></div>
+            <div class="swatch" style="background: var(--paper)" title="--paper"></div>
+            <div class="swatch" style="background: var(--orange)" title="--orange"></div>
+            <div class="swatch" style="background: var(--green)" title="--green"></div>
+            <div class="swatch" style="background: var(--violet)" title="--violet"></div>
+            <div class="swatch" style="background: var(--arctic)" title="--arctic"></div>
+          </div>
+        </div>
+
+        <div class="spec">
+          <span class="label">Type</span>
+          <h1 class="display">Obsidian</h1>
+          <h2 class="title">Introducing Sim-1<br /><span class="muted">Our smartest models capable of</span> simulating how code runs</h2>
+          <p class="mono muted">Works &nbsp; About &nbsp; Contact</p>
+          <p class="muted">A new category of models built to understand and predict how large codebases behave.</p>
+        </div>
+
+        <div class="spec">
+          <span class="label">Buttons</span>
+          <div class="row">
+            <button class="btn btn-primary"><i data-lucide="grip" class="icon"></i>Read more</button>
+            <button class="btn">Default</button>
+            <button class="btn btn-ghost">Ghost</button>
+            <button class="btn btn-mono">Info &amp; credits</button>
+            <button class="btn" disabled>Disabled</button>
+          </div>
+          <div class="glass-strip mono">
+            <span class="dot"></span><span>Pause</span><span class="rule"></span><span>00:54</span><span>Sound <span class="ok">On</span></span>
+          </div>
+        </div>
+
+        <div class="spec">
+          <span class="label">Tabs</span>
+          <div class="tabs" role="tablist">
+            <button class="tab" role="tab" aria-selected="true" aria-controls="tab-overview">Overview</button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="tab-content">Content</button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="tab-import">Info</button>
+          </div>
+          <p class="muted" id="tab-overview" role="tabpanel">Summary of the document and where it is used.</p>
+          <p class="muted" id="tab-content" role="tabpanel" hidden>Source preview next to the extracted text.</p>
+          <p class="muted" id="tab-import" role="tabpanel" hidden>When and how the document entered the library.</p>
+        </div>
+
+        <div class="spec">
+          <span class="label">Stages</span>
+          <div class="stages stages-line">
+            <div class="stage done" style="--progress: 1; --weight: 1"><span>Checkout</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>12/12</span><span>4 sec</span></span></div>
+            <div class="stage done" style="--progress: 1; --weight: 2.2"><span>Shipping</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>8/8</span><span>21 sec</span></span></div>
+            <div class="stage active" style="--progress: 0.4; --weight: 1.3"><span>Payment</span><i data-lucide="settings" class="icon spin"></i><span class="stage-bar"></span><span class="stage-meta"><span>2/5</span><span>9 sec</span></span></div>
+            <div class="stage" style="--weight: 0.8"><span>Confirm</span><i data-lucide="clock" class="icon"></i><span class="stage-bar"></span></div>
+          </div>
+          <div class="stages stages-glass">
+            <div class="stage done" style="--progress: 1; --weight: 1"><span>Checkout</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>12/12</span><span>4 sec</span></span></div>
+            <div class="stage done" style="--progress: 1; --weight: 2.2"><span>Shipping</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>8/8</span><span>21 sec</span></span></div>
+            <div class="stage active" style="--progress: 0.4; --weight: 1.3"><span>Payment</span><i data-lucide="settings" class="icon spin"></i><span class="stage-bar"></span><span class="stage-meta"><span>2/5</span><span>9 sec</span></span></div>
+            <div class="stage" style="--weight: 0.8"><span>Confirm</span><i data-lucide="clock" class="icon"></i><span class="stage-bar"></span></div>
+          </div>
+          <div class="stages stages-glass stages-stripes">
+            <div class="stage done" style="--progress: 1; --weight: 1"><span>Checkout</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>12/12</span><span>4 sec</span></span></div>
+            <div class="stage done" style="--progress: 1; --weight: 2.2"><span>Shipping</span><i data-lucide="check" class="icon"></i><span class="stage-bar"></span><span class="stage-meta"><span>8/8</span><span>21 sec</span></span></div>
+            <div class="stage active" style="--progress: 0.4; --weight: 1.3"><span>Payment</span><i data-lucide="settings" class="icon spin"></i><span class="stage-bar"></span><span class="stage-meta"><span>2/5</span><span>9 sec</span></span></div>
+            <div class="stage" style="--weight: 0.8"><span>Confirm</span><i data-lucide="clock" class="icon"></i><span class="stage-bar"></span></div>
+          </div>
+        </div>
+
+        <div class="spec">
+          <span class="label">Inputs</span>
+          <div class="field"><span class="label">Name</span><input class="input" type="text" placeholder="Scene name" value="Cube 013" /></div>
+          <div class="field"><span class="label">Notes</span><textarea class="textarea" placeholder="Describe the scene"></textarea></div>
+          <div class="field"><span class="label">Model</span>
+            <details class="picker">
+              <summary><span class="picker-value"><span>sim-1</span><span class="sub">768 dimensions · fastest, good for short chunks</span></span><i data-lucide="chevron-down" class="icon"></i></summary>
+              <ul class="picker-list" role="listbox">
+                <li role="option" tabindex="0" aria-selected="true"><span>sim-1</span><span class="sub">768 dimensions · fastest, good for short chunks</span></li>
+                <li role="option" tabindex="0" aria-selected="false"><span>sim-1-large</span><span class="sub">1 536 dimensions · best recall, 3× slower</span></li>
+                <li role="option" tabindex="0" aria-selected="false"><span>sim-legacy</span><span class="sub">512 dimensions · kept for old collections</span></li>
+              </ul>
+            </details>
+          </div>
+          <div class="row">
+            <label class="check"><input type="checkbox" checked />Wireframe</label>
+            <label class="check"><input type="checkbox" />Shadows</label>
+            <label class="check"><input type="checkbox" disabled />Locked</label>
+          </div>
+          <div class="row">
+            <label class="toggle"><input type="checkbox" role="switch" checked />Auto rotate</label>
+            <label class="toggle"><input type="checkbox" role="switch" />Snap to grid</label>
+            <label class="toggle"><input type="checkbox" role="switch" disabled />Offline</label>
+          </div>
+        </div>
+
+        <div class="spec">
+          <span class="label">Rotation</span>
+          <span class="value">35°</span>
+        </div>
+      </section>
+
+      <aside class="right">
+        <div class="window">
+          <button aria-label="Minimize"><i data-lucide="minus" class="icon"></i></button>
+          <button aria-label="Close"><i data-lucide="x" class="icon"></i></button>
+        </div>
+        <section>
+          <span class="label">Lightning</span>
+          <div class="tiles">
+            <button class="tile" aria-pressed="true"><i data-lucide="sun" class="icon"></i>Spot</button>
+            <button class="tile"><i data-lucide="grid-3x3" class="icon"></i>Area</button>
+            <button class="tile"><i data-lucide="move-up-left" class="icon"></i>Target</button>
+            <button class="tile"><i data-lucide="circle" class="icon"></i>Sun</button>
+          </div>
+        </section>
+        <label class="slider"><span class="label">Brightness</span><input type="range" min="0" max="100" value="66" /></label>
+        <label class="slider"><span class="label">Shadow Density</span><input type="range" min="0" max="100" value="18" /></label>
+        <label class="slider"><span class="slider-head"><span class="label">RAM</span><span>19GB / <span class="faint">60GB</span></span></span><input type="range" min="0" max="60" value="19" /></label>
+      </aside>
+    </main>
+
+    <section class="gallery-block">
+      <aside class="gallery-menu">
+        <span class="label label-mono">Gallery</span>
+        <nav class="nav">
+          <a class="nav-item" href="#g-a-e" aria-current="true">A–E</a>
+          <a class="nav-item" href="#g-f-j">F–J</a>
+          <a class="nav-item" href="#g-k-o">K–O</a>
+          <a class="nav-item" href="#g-p-t">P–T</a>
+          <a class="nav-item" href="#g-u-z">U–Z</a>
+        </nav>
+      </aside>
+      <div class="gallery-sections sections">
+        <section class="gallery-section section" id="g-a-e">
+          <span class="mono muted">A–E</span>
+          <div class="gallery">
+            <button class="tile"><i data-lucide="grid-3x3" class="icon"></i><span class="tile-text"><span class="name">Area</span><span class="sub">A. Hoffmann</span></span><span class="hint" role="tooltip"><strong>Area</strong><span class="sub">A. Hoffmann</span>Notes on area lights and soft shadow falloff.</span></button>
+            <button class="tile"><i data-lucide="box" class="icon"></i><span class="tile-text"><span class="name">Box</span><span class="sub">B. Ortega</span></span><span class="hint" role="tooltip"><strong>Box</strong><span class="sub">B. Ortega</span>Primitive box reference with UV layout conventions.</span></button>
+            <button class="tile"><i data-lucide="camera" class="icon"></i><span class="tile-text"><span class="name">Camera</span><span class="sub">C. Nakamura</span></span><span class="hint" role="tooltip"><strong>Camera</strong><span class="sub">C. Nakamura</span>Lens presets and framing rules for product shots.</span></button>
+            <button class="tile"><i data-lucide="check" class="icon"></i><span class="tile-text"><span class="name">Check</span><span class="sub">D. Lindqvist</span></span><span class="hint" role="tooltip"><strong>Check</strong><span class="sub">D. Lindqvist</span>Validation checklist run before every final render.</span></button>
+            <button class="tile"><i data-lucide="circle" class="icon"></i><span class="tile-text"><span class="name">Circle</span><span class="sub">E. Moreau</span></span><span class="hint" role="tooltip"><strong>Circle</strong><span class="sub">E. Moreau</span>Radial layout guide for circular compositions.</span></button>
+            <button class="tile"><i data-lucide="clock" class="icon"></i><span class="tile-text"><span class="name">Clock</span><span class="sub">F. Adeyemi</span></span><span class="hint" role="tooltip"><strong>Clock</strong><span class="sub">F. Adeyemi</span>Time budget per render pass, measured on the farm.</span></button>
+            <button class="tile"><i data-lucide="cone" class="icon"></i><span class="tile-text"><span class="name">Cone</span><span class="sub">G. Petrov</span></span><span class="hint" role="tooltip"><strong>Cone</strong><span class="sub">G. Petrov</span>Cone primitive with tessellation trade-offs.</span></button>
+            <button class="tile"><i data-lucide="cpu" class="icon"></i><span class="tile-text"><span class="name">Core</span><span class="sub">H. Salazar</span></span><span class="hint" role="tooltip"><strong>Core</strong><span class="sub">H. Salazar</span>Core engine settings and their safe ranges.</span></button>
+            <button class="tile"><i data-lucide="cylinder" class="icon"></i><span class="tile-text"><span class="name">Cylinder</span><span class="sub">I. Bergström</span></span><span class="hint" role="tooltip"><strong>Cylinder</strong><span class="sub">I. Bergström</span>Cylinder primitive and cap smoothing options.</span></button>
+            <button class="tile"><i data-lucide="droplet" class="icon"></i><span class="tile-text"><span class="name">Drop</span><span class="sub">J. Okafor</span></span><span class="hint" role="tooltip"><strong>Drop</strong><span class="sub">J. Okafor</span>Liquid drop shader with refraction samples.</span></button>
+            <button class="tile"><i data-lucide="eye" class="icon"></i><span class="tile-text"><span class="name">Eye</span><span class="sub">K. Tanaka</span></span><span class="hint" role="tooltip"><strong>Eye</strong><span class="sub">K. Tanaka</span>Eye shader study with layered specular.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-f-j">
+          <span class="mono muted">F–J</span>
+          <div class="gallery">
+            <button class="tile"><i data-lucide="film" class="icon"></i><span class="tile-text"><span class="name">Film</span><span class="sub">L. Ferreira</span></span><span class="hint" role="tooltip"><strong>Film</strong><span class="sub">L. Ferreira</span>Film grain and halation post settings.</span></button>
+            <button class="tile"><i data-lucide="flame" class="icon"></i><span class="tile-text"><span class="name">Flame</span><span class="sub">M. Novak</span></span><span class="hint" role="tooltip"><strong>Flame</strong><span class="sub">M. Novak</span>Volumetric flame setup for low sample counts.</span></button>
+            <button class="tile"><i data-lucide="settings" class="icon"></i><span class="tile-text"><span class="name">Gear</span><span class="sub">N. Haddad</span></span><span class="hint" role="tooltip"><strong>Gear</strong><span class="sub">N. Haddad</span>Gear generator parameters and tooth profiles.</span></button>
+            <button class="tile"><i data-lucide="heart" class="icon"></i><span class="tile-text"><span class="name">Heart</span><span class="sub">O. Kowalski</span></span><span class="hint" role="tooltip"><strong>Heart</strong><span class="sub">O. Kowalski</span>Heart mesh topology cleaned for subdivision.</span></button>
+            <button class="tile"><i data-lucide="hexagon" class="icon"></i><span class="tile-text"><span class="name">Hex</span><span class="sub">P. Andersen</span></span><span class="hint" role="tooltip"><strong>Hex</strong><span class="sub">P. Andersen</span>Hex grid tiling with seamless edge matching.</span></button>
+            <button class="tile"><i data-lucide="image" class="icon"></i><span class="tile-text"><span class="name">Image</span><span class="sub">Q. Delgado</span></span><span class="hint" role="tooltip"><strong>Image</strong><span class="sub">Q. Delgado</span>Image plane workflow for reference matching.</span></button>
+            <button class="tile"><i data-lucide="aperture" class="icon"></i><span class="tile-text"><span class="name">Iris</span><span class="sub">R. Fischer</span></span><span class="hint" role="tooltip"><strong>Iris</strong><span class="sub">R. Fischer</span>Aperture blade count and bokeh shape tests.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-k-o">
+          <span class="mono muted">K–O</span>
+          <div class="gallery">
+            <button class="tile"><i data-lucide="lamp" class="icon"></i><span class="tile-text"><span class="name">Lamp</span><span class="sub">S. Iyer</span></span><span class="hint" role="tooltip"><strong>Lamp</strong><span class="sub">S. Iyer</span>Desk lamp rig with IES profile comparison.</span></button>
+            <button class="tile"><i data-lucide="layers" class="icon"></i><span class="tile-text"><span class="name">Layers</span><span class="sub">T. Brennan</span></span><span class="hint" role="tooltip"><strong>Layers</strong><span class="sub">T. Brennan</span>Render layer split for compositing handoff.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-p-t">
+          <span class="mono muted">P–T</span>
+          <div class="gallery">
+            <button class="tile"><i data-lucide="mountain" class="icon"></i><span class="tile-text"><span class="name">Peak</span><span class="sub">U. Sato</span></span><span class="hint" role="tooltip"><strong>Peak</strong><span class="sub">U. Sato</span>Mountain terrain displacement from height maps.</span></button>
+            <button class="tile"><i data-lucide="pentagon" class="icon"></i><span class="tile-text"><span class="name">Penta</span><span class="sub">V. Rossi</span></span><span class="hint" role="tooltip"><strong>Penta</strong><span class="sub">V. Rossi</span>Pentagon tiling study for panel layouts.</span></button>
+            <button class="tile"><i data-lucide="sparkles" class="icon"></i><span class="tile-text"><span class="name">Spark</span><span class="sub">W. Lam</span></span><span class="hint" role="tooltip"><strong>Spark</strong><span class="sub">W. Lam</span>Particle spark emitter tuned for slow motion.</span></button>
+            <button class="tile"><i data-lucide="square" class="icon"></i><span class="tile-text"><span class="name">Square</span><span class="sub">X. Duarte</span></span><span class="hint" role="tooltip"><strong>Square</strong><span class="sub">X. Duarte</span>Square grid baseline for UI mockups.</span></button>
+            <button class="tile"><i data-lucide="star" class="icon"></i><span class="tile-text"><span class="name">Star</span><span class="sub">Y. Kim</span></span><span class="hint" role="tooltip"><strong>Star</strong><span class="sub">Y. Kim</span>Star field generator with brightness curve.</span></button>
+            <button class="tile"><i data-lucide="sun" class="icon"></i><span class="tile-text"><span class="name">Sun</span><span class="sub">Z. Weber</span></span><span class="hint" role="tooltip"><strong>Sun</strong><span class="sub">Z. Weber</span>Sun position by date, time and latitude.</span></button>
+            <button class="tile"><i data-lucide="move-up-left" class="icon"></i><span class="tile-text"><span class="name">Target</span><span class="sub">A. Costa</span></span><span class="hint" role="tooltip"><strong>Target</strong><span class="sub">A. Costa</span>Aim constraint setup for tracking cameras.</span></button>
+            <button class="tile"><i data-lucide="triangle" class="icon"></i><span class="tile-text"><span class="name">Tri</span><span class="sub">B. Yilmaz</span></span><span class="hint" role="tooltip"><strong>Tri</strong><span class="sub">B. Yilmaz</span>Triangle strips and their draw call cost.</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-u-z">
+          <span class="mono muted">U–Z</span>
+          <div class="gallery">
+            <button class="tile"><i data-lucide="wind" class="icon"></i><span class="tile-text"><span class="name">Wind</span><span class="sub">C. Dubois</span></span><span class="hint" role="tooltip"><strong>Wind</strong><span class="sub">C. Dubois</span>Wind force field with turbulence presets.</span></button>
+            <button class="tile"><i data-lucide="zap" class="icon"></i><span class="tile-text"><span class="name">Zap</span><span class="sub">D. Mensah</span></span><span class="hint" role="tooltip"><strong>Zap</strong><span class="sub">D. Mensah</span>Lightning bolt path generator and glow pass.</span></button>
+          </div>
+        </section>
+      </div>
+    </section>
+
+  </div>
+
+  <dialog class="modal" id="modal">
+    <div class="modal-body" tabindex="-1" autofocus>
+      <div class="modal-head">
+        <h2 class="title"><span id="modal-title">Item</span><small class="muted" id="modal-author">Author</small></h2>
+        <form method="dialog"><button class="btn btn-ghost" aria-label="Close"><i data-lucide="x" class="icon"></i></button></form>
+      </div>
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" aria-selected="true" aria-controls="modal-content">Content</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="modal-import">Info</button>
+      </div>
+      <div id="modal-content" role="tabpanel" class="modal-panel">
+      <p class="muted" id="modal-summary">Summary</p>
+      <div class="split">
+        <section class="pane">
+          <div class="pane-head mono muted"><span>PDF</span><span class="crumb"></span></div>
+          <div class="pane-body">
+            <div class="skeleton" aria-hidden="true"><span class="skeleton-bar"></span><span class="skeleton-dot"></span><span class="skeleton-line"></span><span class="skeleton-line short"></span><span class="skeleton-block"></span><span class="skeleton-bar"></span></div>
+          </div>
+        </section>
+        <section class="pane">
+          <div class="pane-head mono muted"><span>Markdown</span><span class="crumb">p. 1/3 · Item › Notes</span></div>
+          <div class="pane-body"><pre class="md" id="modal-md"># Item
+
+Scene reference for the render pipeline.
+
+## Notes
+
+- 3 pages, 1 240 tokens
+- embedded with sim-1
+- last indexed 19 Jan 2019
+
+## Excerpt
+
+The cube sits at origin. Light comes from a single spot at 35 degrees, shadow density 18.</pre></div>
+        </section>
+      </div>
+      </div>
+      <div id="modal-import" role="tabpanel" hidden>
+        <dl class="kv">
+          <dt>Imported</dt><dd>Sat 19 January 2019, 14:32</dd>
+          <dt>Source</dt><dd>~/Documents/renders/<span id="modal-file">item</span>.pdf</dd>
+          <dt>Size</dt><dd>3 pages, 412 KB</dd>
+          <dt>Chunks</dt><dd>9 chunks, 1 240 tokens</dd>
+          <dt>Embedding</dt><dd>sim-1, 768 dimensions</dd>
+          <dt>Indexed</dt><dd>Sat 19 January 2019, 14:33</dd>
+          <dt>Imported by</dt><dd>crtomir</dd>
+        </dl>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="statusbar"></div>
+
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="design.js"></script>
+  <script>
+    const modal = document.getElementById('modal');
+    const md = document.getElementById('modal-md');
+    for (const tile of document.querySelectorAll('.gallery .tile')) {
+      tile.addEventListener('click', () => {
+        const name = tile.querySelector('.tile-text').firstChild.textContent.trim();
+        document.getElementById('modal-title').textContent = name;
+        document.getElementById('modal-author').textContent = tile.querySelector('.tile-text .sub').textContent;
+        md.textContent = md.textContent.replace(/^# .*$/m, '# ' + name);
+        document.getElementById('modal-summary').textContent = tile.querySelector('.hint').lastChild.textContent;
+        document.getElementById('modal-file').textContent = name.toLowerCase();
+        selectTab(modal.querySelector('.tab'));
+        modal.showModal();
+      });
+    }
+  </script>
+</body>
+</html>

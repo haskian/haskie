@@ -1,3 +1,38 @@
+/** One session as the listing shows it: its selection, and when it last did anything. */
+export interface SessionSummary {
+  id: string
+  collections: string[]
+  last_at: number | null // unix seconds of its newest event; null for one that did nothing yet
+}
+/** What a session can be seen doing; `collections` is the selection itself being set. */
+export type SessionAction = 'search' | 'import' | 'attach' | 'detach' | 'describe' | 'collections'
+// One search as a point on the Insights trend: when, and which session ran it.
+export interface SearchAt {
+  ts: number // unix seconds
+  session_id: string
+}
+// One finished index as a point on the Insights trend: when, into which collection, how many chunks.
+export interface ChunksAt {
+  ts: number // unix seconds
+  collection: string
+  chunks: number
+}
+/** One thing a session did: what, to what, and what came of it. */
+export interface SessionEvent {
+  ts: number // unix seconds
+  action: SessionAction
+  subject: string // the query, the document, the chosen collections
+  detail: {
+    scope?: string // search: session | text | documents | passages | a collection's name
+    hits?: number
+    docs?: string[] // search: the distinct documents among the hits, best first
+    collection?: string // attach, detach
+    collections?: string[] // collections
+  }
+  workflow_id: string | null // the operation the action started
+  duration_ms: number
+}
+
 export type Parser = 'anydoc' | 'plain'
 export type Chunker = 'markdown' | 'text'
 export type EmbeddingProfile = 'none' | 'compact' | 'quality' | 'multilingual'
@@ -117,6 +152,7 @@ export interface Document {
   created_at: number // unix seconds
   updated_at: number
   description: string // what the document is, in the importer's words
+  collections: number // how many collections hold it
 }
 // An upload waiting in the staging area: bytes on the server, nothing in the database yet. It
 // becomes a document only when `importStaged` names it.
@@ -211,8 +247,19 @@ export interface BulkJob {
 }
 // Every kind of background work the backend runs, in the order the Jobs view shows them.
 export type JobKind = 'document' | 'collection' | 'download' | 'maintenance' | 'archive'
+// One stage of a document operation, and the workflow whose batches it is made of: convert and
+// index run in the operation's own workflow, embed in the child it spawns.
+export interface StageJob {
+  stage: Stage
+  job_id: string // what `jobTasks` takes for this stage's batches
+  status: string // DBOS: ENQUEUED | PENDING | SUCCESS | ERROR | CANCELLED
+  tasks_done: number
+  tasks_running: number
+  tasks_total: number
+  seconds: number | null // how long the stage ran; null while it still does
+}
 // One job of any kind: what every kind has in common, plus the numbers only that kind has in
-// `detail` (a document: tasks_done/tasks_running/tasks_total; a collection job: done/skipped/total;
+// `detail` (a document: tasks_done/tasks_running/tasks_total summed over its stages; a collection job: done/skipped/total;
 // a model download: warm, which says the model is loaded in the backend process).
 export interface JobRow {
   id: string
@@ -223,7 +270,9 @@ export interface JobRow {
   updated_at: number
   error: string | null
   archived: boolean // documents only: read from a day partition instead of the DBOS tables
+  origin: string | null // the session whose action started it; null for the web UI
   detail: Record<string, number | string | boolean | null>
+  stages: StageJob[] // documents only: the jobs the operation is made of, in pipeline order
 }
 // One section of the Jobs view, with how many of its jobs are running right now.
 export interface JobKindSummary {
@@ -479,11 +528,22 @@ export const api = {
   jobProgress: (jobId: string) => request<BulkJob>(`/api/jobs/${jobId}/progress`),
   deleteJob: (jobId: string) => request<void>(`/api/jobs/${jobId}`, { method: 'DELETE' }),
 
+  // Full-text search across every collection, for the "all collections" scope: no session and no
+  // collection to answer for the query, so the paged endpoint stands in for one.
+  // one page of passages is what Explore shows across every collection
+  searchText: (q: string) => request<Page<Hit>>(`/api/search/text${pageQuery({ page_size: 50 }, { q })}`),
+
   // Which documents to read for a query, rather than which passages answer it.
   searchDocuments: (q: string, collections?: string[], limit?: number) =>
     request<DocumentMatch[]>(`/api/search/documents${pageQuery({}, { q, collections: collections?.join(','), limit: limit?.toString() })}`),
+  // The passages behind one row of `searchDocuments`: the same scan, kept to that document.
+  documentPassages: (doc: string, q: string, collections?: string[]) =>
+    request<Hit[]>(`/api/search/documents/${encodeURIComponent(doc)}${pageQuery({}, { q, collections: collections?.join(',') })}`),
 
-  sessions: () => request<Record<string, string[]>>('/api/sessions'),
+  sessions: () => request<SessionSummary[]>('/api/sessions'),
+  searchTrend: (days: number) => request<SearchAt[]>(`/api/insights/searches${pageQuery({}, { days: String(days) })}`),
+  chunkTrend: (days: number) => request<ChunksAt[]>(`/api/insights/chunks${pageQuery({}, { days: String(days) })}`),
+  sessionHistory: (id: string) => request<SessionEvent[]>(`/api/sessions/${encodeURIComponent(id)}/history`),
   saveSession: (id: string, collections: string[]) =>
     request<string[]>(`/api/sessions/${encodeURIComponent(id)}`, json('PUT', { collections })),
   search: (sessionId: string, q: string, limit?: number) =>
