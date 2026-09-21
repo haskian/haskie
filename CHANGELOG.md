@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.2.0 - 2026-09-21
+#### Features
+- (**cli**) announce the conversation id, and stop a running server (#7) - (d830c93) - Črtomir Majer
+
+- - -
+
 ## v0.1.0 - 2026-09-21
 #### Features
 - sessions that remember, operations with stages, and a web UI on a design system (#6) - (5f7d292) - Črtomir Majer
