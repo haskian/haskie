@@ -48,7 +48,7 @@ time.
 - **Cold start, one question, no setup** — `search_text`. BM25 over every collection at once, with
   no session and no embedding model.
 - **"Which documents cover X?"** — `search_documents`. One row per document, to pick a shortlist
-  before reading passages.
+  before reading passages; `document_passages` unfolds one row into the passages it counted.
 - **A conversation scoped to a topic** — `set_session_collections` once, then `search` for the
   rest of it.
 - **One known collection, tuned options** — `search_collection`, with `mode`, `fusion`, `reranker`
@@ -58,6 +58,10 @@ time.
 conversation (the conversation's own id is a good one), pass the collections that match the topic,
 then call `search` with that same id. It is the difference between searching the user's shelf on
 this subject and searching everything they own.
+
+Every other tool that searches or changes something takes an optional session id argument. Pass
+that same id on each call: the user's Sessions page then shows what this conversation searched,
+imported and attached, and each job it started names the conversation as its origin.
 
 Start with `search_text` when in doubt. It needs nothing set up and it answers from a cold start.
 

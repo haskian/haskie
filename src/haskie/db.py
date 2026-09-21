@@ -200,6 +200,22 @@ MIGRATIONS: list[str] = [
     );
     commit;
     """,
+    # 10: what a session did, so its history can be shown and an operation can name the session
+    #     that started it; the rows go with the session
+    """
+    create table if not exists session_events (
+        id integer primary key,
+        session_id text not null references sessions (id) on delete cascade,
+        ts real not null,
+        action text not null,
+        subject text not null,
+        detail text not null default '{}',
+        workflow_id text,
+        duration_ms integer not null default 0
+    );
+    create index if not exists session_events_session on session_events (session_id, ts);
+    create index if not exists session_events_workflow on session_events (workflow_id);
+    """,
 ]
 
 # The migration that changed the storage shape (see MIGRATIONS[8]) and the message a home holding

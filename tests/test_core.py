@@ -2653,8 +2653,8 @@ def test_an_empty_home_migrates_through_to_the_collection_schema(
     version the loop starts at."""
     conn = _at_version(tmp_path / f"v{version}.db", version)
 
-    assert db.migrate(conn) == len(db.MIGRATIONS) == db.INCOMPATIBLE_HOME_MIGRATION
-    assert conn.execute("pragma user_version").fetchone() == (9,)
+    assert db.migrate(conn) == len(db.MIGRATIONS) >= db.INCOMPATIBLE_HOME_MIGRATION
+    assert conn.execute("pragma user_version").fetchone() == (len(db.MIGRATIONS),)
 
     tables = _tables(conn)
     assert COLLECTION_TABLES <= tables, f"from {version}"
