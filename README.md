@@ -1,6 +1,12 @@
-# haskie
+<p align="center">
+  <img src="web/public/favicon.svg" alt="" width="96">
+</p>
 
-**Your taste, as a knowledge base your AI agents can read.**
+<h1 align="center">haskie</h1>
+
+<p align="center">
+  <strong>Haskie "has a key" to your private bookshelf, giving your AI agents your exact taste.</strong>
+</p>
 
 The web is an average of everyone. Your bookshelf is not. haskie turns the papers, books, manuals
 and notes you own and actually trust — or simply the documents that matter for your AI flows —
