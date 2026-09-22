@@ -1,14 +1,14 @@
 import { describe, expect, test } from 'bun:test'
-import type { JobKind, JobKindSummary, JobRow, Stage, StageJob, Task, WorkflowStatus } from '../api'
-import type { StageState } from '../ui'
-import { dayGroup, groupJobs, statusGroup, type GroupBy } from './operations/group'
-import { endsOf, jobState, stageDefs, stageInfo, stagesFor, tagOf, taskState, taskText } from './operations/stages'
+import type { Job, Operation, OperationKind, OperationKindSummary, RunStatus, Stage, Task } from '../api'
+import type { JobState } from '../ui'
+import { dayGroup, groupOperations, statusGroup, type GroupBy } from './operations/group'
+import { endsOf, jobDefs, jobsFor, runState, stageInfo, tagOf, taskState, taskText } from './operations/jobs'
 
 // 2019-01-19 14:32 local time: the instant the design page is drawn at.
 const STARTED = new Date(2019, 0, 19, 14, 32).getTime() / 1000
 
-// A real row of `/api/jobs/by-kind`: every field the backend sends, for a running import.
-const JOB: JobRow = {
+// A real row of `/api/operations?kind=document`: every field the backend sends, running import.
+const OPERATION: Operation = {
   id: 'import:renders/lamp.pdf:0194f2',
   kind: 'document',
   title: 'import renders/lamp.pdf',
@@ -18,17 +18,28 @@ const JOB: JobRow = {
   error: null,
   origin: null,
   detail: { tasks_done: 9, tasks_running: 2, tasks_total: 22 },
-  stages: [
-    { stage: 'convert', job_id: 'import:renders/lamp.pdf:0194f2', status: 'SUCCESS', tasks_done: 3, tasks_running: 0, tasks_total: 3, seconds: 4 },
-    { stage: 'embed', job_id: 'emb:renders/lamp.pdf:0194f2', status: 'PENDING', tasks_done: 6, tasks_running: 2, tasks_total: 19, seconds: null },
+  jobs: [
+    { id: 'import:renders/lamp.pdf:0194f2', stage: 'convert', status: 'SUCCESS', created_at: STARTED, updated_at: STARTED + 4, error: null, tasks_done: 3, tasks_running: 0, tasks_total: 3, seconds: 4 },
+    { id: 'emb:renders/lamp.pdf:0194f2', stage: 'embed', status: 'PENDING', created_at: STARTED + 4, updated_at: STARTED + 38, error: null, tasks_done: 6, tasks_running: 2, tasks_total: 19, seconds: null },
   ],
 }
-type StageJobPatch = Partial<StageJob> & { stage: Stage }
-const stageJob = (patch: StageJobPatch): StageJob => ({ job_id: `${patch.stage}:renders/lamp.pdf:0194f2`, status: 'SUCCESS', tasks_done: 0, tasks_running: 0, tasks_total: 0, seconds: null, ...patch })
+type JobPatch = Partial<Job> & { stage: Stage }
+const stageJob = (patch: JobPatch): Job => ({
+  id: `${patch.stage}:renders/lamp.pdf:0194f2`,
+  status: 'SUCCESS',
+  created_at: STARTED,
+  updated_at: STARTED,
+  error: null,
+  tasks_done: 0,
+  tasks_running: 0,
+  tasks_total: 0,
+  seconds: null,
+  ...patch,
+})
 
-const job = (patch: Partial<JobRow>): JobRow => ({ ...JOB, ...patch })
+const job = (patch: Partial<Operation>): Operation => ({ ...OPERATION, ...patch })
 
-// A real row of `/api/jobs/{id}/tasks`.
+// A real row of `/api/jobs/{job_id}/tasks`.
 const TASK: Task = {
   id: 'import:renders/lamp.pdf:0194f2:convert:0',
   child_id: 'import:renders/lamp.pdf:0194f2:convert',
@@ -43,25 +54,25 @@ const TASK: Task = {
 
 const task = (patch: Partial<Task> & { stage: Stage }): Task => ({ ...TASK, ...patch, id: `${TASK.id}:${patch.stage}:${patch.seq ?? 0}` })
 
-const KINDS: JobKindSummary[] = [
+const KINDS: OperationKindSummary[] = [
   { kind: 'document', label: 'Document ingestion', active: 1 },
   { kind: 'collection', label: 'Collections', active: 0 },
   { kind: 'download', label: 'Model downloads', active: 0 },
   { kind: 'maintenance', label: 'Maintenance', active: 0 },
 ]
 
-interface StagesCase {
+interface JobsCase {
   name: string
-  job: JobRow
+  job: Operation
   tasks: Task[] | null
-  expected: { label: string; done: number; total: number; state: StageState; note?: string; weight?: number; seconds?: number }[]
+  expected: { label: string; done: number; total: number; state: JobState; note?: string; weight?: number; seconds?: number }[]
 }
 
-describe('stagesFor', () => {
-  const cases: StagesCase[] = [
+describe('jobsFor', () => {
+  const cases: JobsCase[] = [
     {
       name: 'before its batches are read, each stage shows its own job: convert done, embed running',
-      job: JOB,
+      job: OPERATION,
       tasks: null,
       expected: [
         { label: 'Convert', done: 3, total: 3, state: 'done', weight: 1, note: undefined, seconds: 4 },
@@ -74,7 +85,7 @@ describe('stagesFor', () => {
         id: 'idx-col:notes:renders/lamp.pdf:0194f2',
         title: 'notes / renders/lamp.pdf',
         status: 'SUCCESS',
-        stages: [stageJob({ stage: 'embed' }), stageJob({ stage: 'index', tasks_done: 2, tasks_total: 2 })],
+        jobs: [stageJob({ stage: 'embed' }), stageJob({ stage: 'index', tasks_done: 2, tasks_total: 2 })],
       }),
       tasks: null,
       expected: [
@@ -84,7 +95,7 @@ describe('stagesFor', () => {
     },
     {
       name: 'an embed with no parent on the page is one stage',
-      job: job({ id: 'emb:renders/lamp.pdf:0194f2', title: 'embed renders/lamp.pdf', status: 'SUCCESS', stages: [stageJob({ stage: 'embed', tasks_done: 27, tasks_total: 27 })] }),
+      job: job({ id: 'emb:renders/lamp.pdf:0194f2', title: 'embed renders/lamp.pdf', status: 'SUCCESS', jobs: [stageJob({ stage: 'embed', tasks_done: 27, tasks_total: 27 })] }),
       tasks: null,
       expected: [{ label: 'Embed', done: 27, total: 27, state: 'done', weight: 2.2, note: undefined }],
     },
@@ -93,7 +104,7 @@ describe('stagesFor', () => {
       job: job({
         status: 'ERROR',
         error: 'model gone',
-        stages: [stageJob({ stage: 'convert', tasks_done: 3, tasks_total: 3 }), stageJob({ stage: 'embed', status: 'ERROR', tasks_done: 4, tasks_total: 19 })],
+        jobs: [stageJob({ stage: 'convert', tasks_done: 3, tasks_total: 3 }), stageJob({ stage: 'embed', status: 'ERROR', tasks_done: 4, tasks_total: 19 })],
       }),
       tasks: null,
       expected: [
@@ -103,7 +114,7 @@ describe('stagesFor', () => {
     },
     {
       name: 'a stage waiting for the one before it is todo',
-      job: job({ stages: [stageJob({ stage: 'embed', status: 'PENDING', tasks_total: 19 }), stageJob({ stage: 'index', status: 'ENQUEUED' })] }),
+      job: job({ jobs: [stageJob({ stage: 'embed', status: 'PENDING', tasks_total: 19 }), stageJob({ stage: 'index', status: 'ENQUEUED' })] }),
       tasks: null,
       expected: [
         { label: 'Embed', done: 0, total: 19, state: 'active', weight: 2.2, note: undefined },
@@ -112,13 +123,13 @@ describe('stagesFor', () => {
     },
     {
       name: 'a cancelled stage job is neither done nor running',
-      job: job({ status: 'CANCELLED', stages: [stageJob({ stage: 'convert', status: 'CANCELLED', tasks_done: 1, tasks_total: 3 })] }),
+      job: job({ status: 'CANCELLED', jobs: [stageJob({ stage: 'convert', status: 'CANCELLED', tasks_done: 1, tasks_total: 3 })] }),
       tasks: null,
       expected: [{ label: 'Convert', done: 1, total: 3, state: 'todo', weight: 1, note: undefined }],
     },
     {
       name: 'fetched batches decide each stage on their own',
-      job: JOB,
+      job: OPERATION,
       tasks: [
         task({ stage: 'convert', seq: 0 }),
         task({ stage: 'convert', seq: 1, page_start: 10, page_end: 14, result: 0 }),
@@ -141,7 +152,7 @@ describe('stagesFor', () => {
     },
     {
       name: 'batches read for one stage leave the other on its job',
-      job: job({ status: 'SUCCESS', stages: [stageJob({ stage: 'convert', tasks_done: 3, tasks_total: 3 }), stageJob({ stage: 'embed', tasks_done: 1, tasks_total: 1 })] }),
+      job: job({ status: 'SUCCESS', jobs: [stageJob({ stage: 'convert', tasks_done: 3, tasks_total: 3 }), stageJob({ stage: 'embed', tasks_done: 1, tasks_total: 1 })] }),
       tasks: [task({ stage: 'embed', seq: 0, page_start: 0, page_end: 1, status: 'SUCCESS', result: 14 })],
       expected: [
         { label: 'Convert', done: 3, total: 3, state: 'done', weight: 1, note: undefined },
@@ -194,13 +205,13 @@ describe('stagesFor', () => {
 
   for (const testCase of cases) {
     test(testCase.name, () => {
-      expect(stagesFor(testCase.job, testCase.tasks)).toEqual(testCase.expected)
+      expect(jobsFor(testCase.job, testCase.tasks)).toEqual(testCase.expected)
     })
   }
 })
 
-describe('jobState', () => {
-  const cases: { name: string; status: WorkflowStatus; expected: StageState }[] = [
+describe('runState', () => {
+  const cases: { name: string; status: RunStatus; expected: JobState }[] = [
     { name: 'success is done', status: 'SUCCESS', expected: 'done' },
     { name: 'error is an error', status: 'ERROR', expected: 'error' },
     { name: 'enqueued is active', status: 'ENQUEUED', expected: 'active' },
@@ -209,7 +220,7 @@ describe('jobState', () => {
   ]
   for (const testCase of cases) {
     test(testCase.name, () => {
-      expect(jobState(testCase.status)).toBe(testCase.expected)
+      expect(runState(testCase.status)).toBe(testCase.expected)
     })
   }
 })
@@ -228,7 +239,7 @@ describe('taskText', () => {
 })
 
 describe('taskState', () => {
-  const cases: { name: string; status: WorkflowStatus; expected: 'done' | 'error' | 'todo' }[] = [
+  const cases: { name: string; status: RunStatus; expected: 'done' | 'error' | 'todo' }[] = [
     { name: 'success is done', status: 'SUCCESS', expected: 'done' },
     { name: 'error is an error', status: 'ERROR', expected: 'error' },
     { name: 'anything unfinished is todo', status: 'PENDING', expected: 'todo' },
@@ -266,7 +277,7 @@ describe('stageInfo', () => {
 })
 
 describe('statusGroup', () => {
-  const cases: { name: string; status: WorkflowStatus; expected: string }[] = [
+  const cases: { name: string; status: RunStatus; expected: string }[] = [
     { name: 'enqueued is running', status: 'ENQUEUED', expected: 'Running' },
     { name: 'pending is running', status: 'PENDING', expected: 'Running' },
     { name: 'success is completed', status: 'SUCCESS', expected: 'Completed' },
@@ -282,21 +293,21 @@ describe('statusGroup', () => {
 })
 
 test('dayGroup is the date without the time', () => {
-  expect(dayGroup(JOB)).toBe('Sat 19 Jan')
+  expect(dayGroup(OPERATION)).toBe('Sat 19 Jan')
 })
 
-describe('groupJobs', () => {
+describe('groupOperations', () => {
   const running = job({ id: 'a', status: 'PENDING', created_at: STARTED })
   const finished = job({ id: 'b', status: 'SUCCESS', created_at: STARTED - 600 })
   const failed = job({ id: 'c', status: 'ERROR', created_at: STARTED - 1200 })
-  const yesterday = job({ id: 'd', kind: 'collection' as JobKind, status: 'SUCCESS', created_at: STARTED - 24 * 3600 })
+  const yesterday = job({ id: 'd', kind: 'collection' as OperationKind, status: 'SUCCESS', created_at: STARTED - 24 * 3600 })
   const newest = [running, finished, failed, yesterday]
 
-  const cases: { name: string; jobs: JobRow[]; by: GroupBy; expected: { key: string; ids: string[] }[] }[] = [
-    { name: 'no jobs, no sections', jobs: [], by: 'status', expected: [] },
+  const cases: { name: string; rows: Operation[]; by: GroupBy; expected: { key: string; ids: string[] }[] }[] = [
+    { name: 'no operations, no sections', rows: [], by: 'status', expected: [] },
     {
       name: 'by status, running first and failed after completed',
-      jobs: newest,
+      rows: newest,
       by: 'status',
       expected: [
         { key: 'Running', ids: ['a'] },
@@ -306,7 +317,7 @@ describe('groupJobs', () => {
     },
     {
       name: 'an unknown status sorts after the ones the page knows',
-      jobs: [job({ id: 'x', status: 'MAX_RECOVERY_ATTEMPTS_EXCEEDED' }), finished],
+      rows: [job({ id: 'x', status: 'MAX_RECOVERY_ATTEMPTS_EXCEEDED' }), finished],
       by: 'status',
       expected: [
         { key: 'Completed', ids: ['b'] },
@@ -315,7 +326,7 @@ describe('groupJobs', () => {
     },
     {
       name: 'by kind, in the order the backend lists the kinds, empty kinds dropped',
-      jobs: newest,
+      rows: newest,
       by: 'kind',
       expected: [
         { key: 'Document ingestion', ids: ['a', 'b', 'c'] },
@@ -324,7 +335,7 @@ describe('groupJobs', () => {
     },
     {
       name: 'by day, newest day first',
-      jobs: newest,
+      rows: newest,
       by: 'day',
       expected: [
         { key: 'Sat 19 Jan', ids: ['a', 'b', 'c'] },
@@ -335,35 +346,35 @@ describe('groupJobs', () => {
 
   for (const testCase of cases) {
     test(testCase.name, () => {
-      const groups = groupJobs(testCase.jobs, testCase.by, KINDS)
-      expect(groups.map((group) => ({ key: group.key, ids: group.jobs.map((row) => row.id) }))).toEqual(testCase.expected)
+      const groups = groupOperations(testCase.rows, testCase.by, KINDS)
+      expect(groups.map((group) => ({ key: group.key, ids: group.operations.map((row) => row.id) }))).toEqual(testCase.expected)
     })
   }
 })
 
-describe('stageDefs', () => {
+describe('jobDefs', () => {
   const cases: { name: string; stages: Stage[]; expected: Stage[] }[] = [
     { name: 'an import: convert, then embed', stages: ['convert', 'embed'], expected: ['convert', 'embed'] },
     { name: 'an index: embed, then index', stages: ['embed', 'index'], expected: ['embed', 'index'] },
     { name: 'an embed on its own', stages: ['embed'], expected: ['embed'] },
-    { name: 'no stages, no bars', stages: [], expected: [] },
+    { name: 'no jobs, no bars', stages: [], expected: [] },
   ]
   for (const one of cases) {
     test(one.name, () => {
-      expect(stageDefs(job({ stages: one.stages.map((stage) => stageJob({ stage })) })).map((def) => def.stage)).toEqual(one.expected)
+      expect(jobDefs(job({ jobs: one.stages.map((stage) => stageJob({ stage })) })).map((def) => def.stage)).toEqual(one.expected)
     })
   }
 })
 
 describe('tagOf', () => {
-  const cases: { name: string; row: JobRow; expected: string }[] = [
-    { name: 'an operation that converts is an import', row: JOB, expected: 'Import' },
-    { name: 'one that writes a collection is an index', row: job({ stages: [stageJob({ stage: 'embed' }), stageJob({ stage: 'index' })] }), expected: 'Index' },
-    { name: 'an embed on its own', row: job({ stages: [stageJob({ stage: 'embed' })] }), expected: 'Embed' },
-    { name: 'another kind keeps its word', row: job({ kind: 'maintenance', stages: [] }), expected: 'Maintain' },
-    { name: 'a collection index', row: job({ kind: 'collection', stages: [], detail: { bulk: 'index_collection' } }), expected: 'Index' },
-    { name: 'a collection delete', row: job({ kind: 'collection', stages: [], detail: { bulk: 'delete_collection' } }), expected: 'Delete' },
-    { name: 'a collection row that does not say is an index', row: job({ kind: 'collection', stages: [], detail: {} }), expected: 'Index' },
+  const cases: { name: string; row: Operation; expected: string }[] = [
+    { name: 'an operation that converts is an import', row: OPERATION, expected: 'Import' },
+    { name: 'one that writes a collection is an index', row: job({ jobs: [stageJob({ stage: 'embed' }), stageJob({ stage: 'index' })] }), expected: 'Index' },
+    { name: 'an embed on its own', row: job({ jobs: [stageJob({ stage: 'embed' })] }), expected: 'Embed' },
+    { name: 'another kind keeps its word', row: job({ kind: 'maintenance', jobs: [] }), expected: 'Maintain' },
+    { name: 'a collection index', row: job({ kind: 'collection', jobs: [], detail: { bulk: 'index_collection' } }), expected: 'Index' },
+    { name: 'a collection delete', row: job({ kind: 'collection', jobs: [], detail: { bulk: 'delete_collection' } }), expected: 'Delete' },
+    { name: 'a collection row that does not say is an index', row: job({ kind: 'collection', jobs: [], detail: {} }), expected: 'Index' },
   ]
   for (const one of cases) {
     test(one.name, () => {

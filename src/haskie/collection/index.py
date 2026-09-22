@@ -1,10 +1,11 @@
 """One LanceDB index per collection. Full-text only by default, hybrid when an embedding is set.
 
 The table holds the chunks of every document of the collection, as rows read out of the
-document's embedding cache (`embed_cache.py`): a document that sits in several collections is
-chunked and embedded once per distinct chunk settings and written into each collection's table
-from that cache. The table is therefore a per-collection view, never the only copy of anything
-— dropping it (`reset_for_write`) and refilling it from the cache is what "Index all" does.
+document's embedding cache (`indexing/embed_cache.py`): a document that sits in several
+collections is chunked and embedded once per distinct chunk settings and written into each
+collection's table from that cache. The table is therefore a per-collection view, never the only
+copy of anything — dropping it (`reset_for_write`) and refilling it from the cache is what
+"Index all" does.
 
 Every table access is awaited: LanceDB's async API (`lancedb.connect_async`, `AsyncTable`) runs on
 its own tokio runtime, so nothing here blocks the event loop that called it. The pure parts —
@@ -29,9 +30,10 @@ import msgspec
 import pyarrow as pa
 from lancedb.index import FTS, IvfPq
 
-from haskie import cpu, models
-from haskie.chunk import Chunk
-from haskie.chunk import record as chunk_record
+from haskie import cpu
+from haskie.indexing import models
+from haskie.indexing.chunk import Chunk
+from haskie.indexing.chunk import record as chunk_record
 from haskie.logs import get_logger
 from haskie.settings import EmbeddingModel, SearchSettings
 
@@ -41,6 +43,9 @@ class Row(msgspec.Struct):
 
     chunk: Chunk
     vector: list[float] | None = None
+    # 1-based position among the document's chunks, numbered by `embed_cache._merge`: the parts
+    # are chunked independently, so nothing before the merge sees the whole document in order.
+    seq: int = 0
 
 
 TABLE = "chunks"
@@ -53,6 +58,7 @@ PLAIN_SCHEMA = pa.schema(
         ("markdown_path", pa.string()),
         ("part", pa.int32()),
         ("chunk_id", pa.int32()),
+        ("seq", pa.int32()),
         ("line_start", pa.int32()),
         ("line_end", pa.int32()),
         ("char_start", pa.int32()),
@@ -89,6 +95,7 @@ class Hit(msgspec.Struct):
     markdown_path: str  # full converted markdown, relative to home
     part: int  # micro-batch that produced the chunk
     chunk_id: int
+    seq: int  # 1-based position among the document's chunks
     line_start: int  # 1-based, in markdown_path
     line_end: int
     char_start: int  # 0-based, in markdown_path
@@ -106,6 +113,22 @@ class Hit(msgspec.Struct):
     # greps - `line_start`/`line_end` are lines in `markdown_file`.
     source_file: str = ""
     markdown_file: str = ""
+
+
+def location(
+    doc: str, page_start: int | None, page_end: int | None, line_start: int, line_end: int
+) -> str:
+    """The citation of one span of a document: "doc p.3-4 L10-20", pages only for a PDF.
+
+    Shared so a passage stitched out of several chunks (`passage.expand`) cites in exactly the
+    format a chunk does.
+    """
+    pages = ""
+    if page_start is not None:
+        pages = f" p.{page_start}"
+        if page_end != page_start:
+            pages += f"-{page_end}"
+    return f"{doc}{pages} L{line_start}-{line_end}"
 
 
 # `schema_current` opens the table and reads its Arrow schema, and the read path asks for every
@@ -246,7 +269,7 @@ class CollectionIndex:
     async def delete_document(self, doc: str) -> None:
         table = await self._deletable()
         if table is not None:
-            await table.delete(f"doc = '{doc}'")  # doc names sanitized in document.py
+            await table.delete(f"doc = '{doc}'")  # doc names sanitized in document/document.py
 
     async def delete_parts(self, doc: str, start: int, end: int) -> None:
         """Drop the parts `[start, end)` of one document, leaving every other part alone."""
@@ -303,6 +326,7 @@ class CollectionIndex:
                 markdown_path=markdown_path,
                 part=part,
                 chunk_id=chunk_id,  # unique with (doc, part)
+                seq=row.seq,
                 parents=PARENT_SEP.join(row.chunk.parents),
             )
             for chunk_id, row in enumerate(rows)
@@ -397,8 +421,8 @@ class CollectionIndex:
 
     # --- search ----------------------------------------------------------
     # Split into three steps so a cross-collection search embeds the query once, retrieves from
-    # every index in parallel and rescores the merge once (see session.search). `search` below is
-    # the single-index composition of the same steps.
+    # every index in parallel and rescores the merge once (see retrieval.chunks). `search` below
+    # is the single-index composition of the same steps.
 
     async def query_vector(self, query: str, settings: SearchSettings) -> list[float] | None:
         """The query embedding, or None when this index can only answer lexically: mode `fts`, no
@@ -407,7 +431,7 @@ class CollectionIndex:
             return None
         if not await self.has_vector_column():
             return None
-        from haskie.embed import embed_query
+        from haskie.indexing.embed import embed_query
 
         await models.require_ready("embedding", self.embedding.name)
         return await cpu.on_cpu(embed_query, self.embedding, query)
@@ -446,7 +470,7 @@ class CollectionIndex:
         yet, which is what a collection in the middle of its first index looks like.
 
         A missing full-text index is a real answer here, not a scan: a cross-collection search
-        asks every collection at once (see textsearch.py), and one still building its index would
+        asks every collection at once (see search/text.py), and one still building its index would
         make the whole query wait for it. `search_rows` is the opposite trade for one collection.
         """
         table = await self._existing()
@@ -466,17 +490,12 @@ class CollectionIndex:
     def hit(self, r: dict, score: float | None = None) -> Hit:
         """One result row as a `Hit`, with the file paths resolved against this index's home.
         `score` replaces the row's own signal: a merged ranking over several indexes scores its
-        rows together, because per-index scores are not comparable (see session.search)."""
+        rows together, because per-index scores are not comparable (see retrieval.chunks)."""
         parents = r["parents"].split(PARENT_SEP) if r["parents"] else []
         heading = r["heading"]
         line_start, line_end = r["line_start"], r["line_end"]
         page_start, page_end = r["page_start"], r["page_end"]
         source_path, markdown_path = r["source_path"], r["markdown_path"]
-        pages = ""
-        if page_start is not None:
-            pages = f" p.{page_start}"
-            if page_end != page_start:
-                pages += f"-{page_end}"
         return Hit(
             collection=self.collection,
             doc=r["doc"],
@@ -484,6 +503,7 @@ class CollectionIndex:
             markdown_path=markdown_path,
             part=r["part"],
             chunk_id=r["chunk_id"],
+            seq=r["seq"],
             line_start=line_start,
             line_end=line_end,
             char_start=r["char_start"],
@@ -493,7 +513,7 @@ class CollectionIndex:
             parents=parents,
             heading=heading,
             header=PARENT_SEP.join([*parents, heading] if heading else parents),
-            location=f"{r['doc']}{pages} L{line_start}-{line_end}",
+            location=location(r["doc"], page_start, page_end, line_start, line_end),
             text=r["text"],
             score=row_score(r) if score is None else score,
             source_file=str(self.home / source_path) if source_path else "",
@@ -530,7 +550,7 @@ async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -
     cross-encoder per collection. The cross-encoder itself is CPU work, so it runs in a worker
     thread under one slot of the CPU budget.
     """
-    from haskie.embed import rerank_scores
+    from haskie.indexing.embed import rerank_scores
 
     await models.require_ready("reranker", settings.reranker_model)
     scores = await cpu.on_cpu(
@@ -558,7 +578,7 @@ def row_score(r: dict) -> float:
 
 # What identifies one passage, wherever it is stored. The collection is deliberately not part of
 # it: the same chunk of the same document is the same answer, whichever collection's table it came
-# out of, so `session.search` and `textsearch.merge` both count it once.
+# out of, so `search.retrieval.chunks` and `search.text.merge` both count it once.
 RowKey = tuple[str, int, int]
 
 
@@ -595,7 +615,7 @@ def first_per_key(
 
     The same document may be a member of several collections, whose tables then hold the same
     chunk. A search is about passages, not memberships, so the copies are dropped; which copy is
-    "first" is the caller's ranking decision (see session.search and textsearch.merge).
+    "first" is the caller's ranking decision (see search.retrieval.chunks and search.text.merge).
     """
     unique: dict[RowKey, tuple[CollectionIndex, dict]] = {}
     for index, row in pairs:

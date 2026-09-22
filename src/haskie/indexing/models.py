@@ -28,15 +28,16 @@ import msgspec
 from dbos import DBOS, SetWorkflowID
 from dbos import WorkflowStatus as DbosWorkflowStatus
 
-from haskie import cpu, embed
-from haskie.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, WorkflowStatus, root_cause
+from haskie import cpu
 from haskie.errors import HaskieError, NotReady
+from haskie.indexing import embed
+from haskie.indexing.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, RunStatus, root_cause
 from haskie.logs import get_logger
 from haskie.settings import UserSettings, load_user_settings
 
 _log = get_logger(__name__)
 
-DOWNLOADS_QUEUE = "job.downloads"
+DOWNLOADS_QUEUE = "operation.downloads"
 
 # Ids of the `ensure_model` workflows whose model is loaded in *this* process, and the ids a warm
 # task is loading right now. `_warm_lock` guards the pair, so no model is warmed twice at once. A
@@ -118,7 +119,7 @@ async def _required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
 async def _collection_rerankers() -> list[str]:
     """Reranker models the collections override. Imported here rather than at module level: the
     dependency runs `collection` -> `index` -> `models`."""
-    from haskie.collection import Collection
+    from haskie.collection.collection import Collection
 
     return await Collection.reranker_overrides()
 
@@ -228,7 +229,7 @@ def is_warm(workflow_id: str) -> bool:
     return workflow_id in _ready
 
 
-_STATE: dict[WorkflowStatus, ModelState] = {
+_STATE: dict[RunStatus, ModelState] = {
     "SUCCESS": "ready",
     "ERROR": "error",
     "CANCELLED": "error",
@@ -273,5 +274,6 @@ async def require_ready(kind: ModelKind, name: str) -> None:
     if found and found[0].status == "SUCCESS":  # downloaded, warming up (see `_model_status`)
         raise NotReady(f"{kind} model {name} is loading in this process; retry in a moment")
     raise NotReady(
-        f"{kind} model {name} is downloading (job {workflow_id}); check /api/jobs/by-kind"
+        f"{kind} model {name} is downloading (operation {workflow_id}); "
+        "check /api/operations?kind=download"
     )

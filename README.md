@@ -51,7 +51,7 @@ own agent — searches a collection by meaning, by keyword, or both.
   nothing redistributed.
 - **Agent-native.** MCP server and REST API from the same app, plus a web UI to curate with.
 - **Nothing to assemble.** Conversion, chunking, embeddings, hybrid search, reranking and a durable
-  job pipeline ship in one command.
+  indexing pipeline ship in one command.
 
 Taste does not scale by explaining it. It scales by indexing it.
 
@@ -80,13 +80,14 @@ the same work at startup, so `init` is only needed to do it first. Both take `--
 It binds loopback by default: the home directory is one user's documents, and nothing in the app
 authenticates a caller.
 
-A home written by a build older than the collections model (one with a `library/` folder) is not
-migrated: the app refuses to start against it and says so. Run `haskie destroy` and import the
-documents again.
+A home written by a build with a different storage shape is not migrated: the app refuses to start
+against it and says so. Run `haskie destroy` and import the documents again. This release changes
+the shape — every chunk now carries its `seq` — so an existing home is refused, whichever build
+wrote it.
 
 One haskie per home: the app takes an exclusive lock on the home directory as its first startup
 step, and a second one refuses, naming the process that has it. A home is one SQLite file and one
-durable job pipeline, and two executors polling the same queues take each other's work. The lock
+durable indexing pipeline, and two executors polling the same queues take each other's work. The lock
 lives in the app rather than in `run`, so any other ASGI server is held to it too; the port is not
 the guard it looks like, because the server runs its whole startup before it binds. `haskie
 ensure` is the idempotent form: it starts a server only if nothing is serving yet, and `haskie
@@ -106,15 +107,14 @@ build` first; without the built UI the app still runs, API and MCP only.
 Endpoint `POST http://127.0.0.1:8000/mcp`. Tools: `list_documents`, `get_document`,
 `add_document`, `describe_document`, `list_collections`, `get_collection`,
 `list_collection_documents`, `add_document_to_collection`, `remove_document_from_collection`,
-`set_session_collections`, `search`, `search_collection`, `search_text`, `search_documents`,
-`document_passages`.
-Set the session's collections first, then search with the same id — that is how an agent scopes
-itself to *this topic's* sources for the rest of the conversation. `search_text` needs no session
-and no model: one keyword query across everything, from a cold start.
+`set_session_collections`, `search_excerpts`, `search_sources`.
+`search_sources` answers which documents — and which collections — cover a topic; hand the
+collections it names to `set_session_collections`, then use `search_excerpts` with the same id for
+the rest of the conversation. That is how an agent scopes itself to *this topic's* sources.
 
 Every tool that searches or changes something also takes an optional session id. Pass the same id
 on each call and the Sessions view replays what that conversation searched, imported and attached,
-and each job it started names the conversation as its origin.
+and each operation it started names the conversation as its origin.
 
 ### Claude Code
 
@@ -148,43 +148,60 @@ A curated collection is only as good as the retrieval over it, so the retrieval 
 afterthought.
 
 User-level defaults with per-collection overrides (`limit`, `candidates`, `mode`, `fusion`,
-`rrf_k`, `vector_weight`, `bm25_weight`); `search_collection` also accepts them per call. `mode`:
-`hybrid` (vector + BM25, fused), `vector`, `fts`; without an embedding profile everything is `fts`.
-`fusion`: `rrf` (reciprocal rank fusion, `rrf_k`) or `linear` (weighted sum of normalized scores;
-the two weights are normalized together). `reranker = cross-encoder` rescores the `candidates` of
-any mode (vector, fts or hybrid) with a fastembed cross-encoder (`reranker_model`).
+`rrf_k`, `vector_weight`, `bm25_weight`); a single-collection search
+(`GET /api/collections/{c}/search`) also accepts them per call. `mode`: `hybrid` (vector + BM25,
+fused), `vector`, `fts`; without an embedding profile everything is `fts`. `fusion`: `rrf`
+(reciprocal rank fusion, `rrf_k`) or `linear` (weighted sum of normalized scores; the two weights
+are normalized together). `reranker = cross-encoder` rescores the `candidates` of any mode (vector,
+fts or hybrid) with a fastembed cross-encoder (`reranker_model`).
 
-`search_text` (`GET /api/search/text`) is the session-free alternative: one BM25 query over every
-collection at once, or over the comma-separated `collections`, with no embedding model and nothing
-to set up first. Scores are raw BM25 rather than fused ranks, because one lexical scorer with the
-same tokenizer answers everywhere, so two collections are on one scale; normalizing per collection
-would put every collection's rank-1 chunk on page one. A document that sits in several of the
-collections searched is reported once per passage, not once per collection. The result is paged
-(`page_size` up to 200, `next_cursor` back in as `cursor`, at most 1000 results deep): the cursor
-is an opaque offset bound to the query, since a full-text query cannot be filtered by score. Every
-page recomputes the ranking, so a document indexed between two pages can move a hit across a page
-boundary, and a collection created or deleted meanwhile invalidates the cursor (422). A collection
-with no full-text index yet — one in the middle of its first index — contributes nothing rather
-than making the whole query wait for it.
+Full-text search (`GET /api/search/text`, REST only — it is what the UI's full-text scope calls)
+is the session-free alternative: one BM25 query over every collection at once, or over the
+comma-separated `collections`, with no embedding model and nothing to set up first. Scores are raw
+BM25 rather than fused ranks, because one lexical scorer with the same tokenizer answers
+everywhere, so two collections are on one scale; normalizing per collection would put every
+collection's rank-1 chunk on page one. A document that sits in several of the collections searched
+is reported once per passage, not once per collection. The result is paged (`page_size` up to 200,
+`next_cursor` back in as `cursor`, at most 1000 results deep): the cursor is an opaque offset bound
+to the query, since a full-text query cannot be filtered by score. Every page recomputes the
+ranking, so a document indexed between two pages can move a hit across a page boundary, and a
+collection created or deleted meanwhile invalidates the cursor (422). A collection with no
+full-text index yet — one in the middle of its first index — contributes nothing rather than making
+the whole query wait for it.
 
-A session search (`search`, `GET /api/search`) asks every collection of the session at once: the
-query is embedded once and each model is checked once for the whole fan-out, the collections are
-read in parallel (up to 8 at a time), and the per-collection rankings are fused by rank (reciprocal
-rank fusion, `rrf_k`), because scores from two indexes are not comparable. A passage that two of
-the collections both hold counts once. A session `Hit.score` is therefore an RRF score, or the
-cross-encoder's when `reranker = cross-encoder` — one rerank pass over the merged candidates. A
-session with a single collection keeps that collection's own scores, and `search_collection` is
-unaffected either way. A collection deleted since the session chose it is skipped; a collection
-that fails to answer fails the search, rather than leaving a hole that reads as "no match".
+`search_excerpts` (`GET /api/search/excerpts`) is what an agent answers from. It asks every
+collection in scope at once — the comma-separated `collections` if the call carries them, else the
+session's collections, else every collection in the home: the query is embedded once and each model
+is checked once for the whole fan-out, the collections are read in parallel (up to 8 at a time),
+and the per-collection rankings are fused by rank (reciprocal rank fusion, `rrf_k`), because scores
+from two indexes are not comparable. A chunk that two of the collections both hold counts once. A
+score is therefore an RRF score, or the cross-encoder's when `reranker = cross-encoder` — one
+rerank pass over the merged candidates. A single collection in scope keeps its own scores. A
+collection deleted since the session chose it is skipped; a collection that fails to answer fails
+the search, rather than leaving a hole that reads as "no match".
 
-`search_documents` (`GET /api/search/documents`) answers "which documents should I read" rather
-than "which passages say so": the same BM25 scan, folded to one row per document with its best
-chunk, how many scanned chunks it matched, and its description. The row's score is the harmonic
-mean of that best chunk and the sum of every chunk the document matched, so a document that
-answers throughout outranks one that answers once, while the mean stays under twice the best
-chunk, so many weak chunks never outrank one strong one. `document_passages`
-(`GET /api/search/documents/{doc}`) unfolds one row again: the same scan kept to that document, so
-a shortlisted document can be read for why it is there before it is opened whole.
+What comes back is excerpts, not chunks. Every chunk carries `seq`, its 1-based position among its
+document's chunks, so hits that landed on consecutive chunks are one run rather than several
+overlapping quotes of the same paragraph. The run's text is read back out of the source markdown
+and widened both ways to whole sentences — it stops at a sentence end, a blank line, a heading or
+300 characters — and that is a passage. An excerpt is a passage with the irrelevant parts removed;
+today it is the passage unchanged, and the type is where that trimming will go. So an excerpt
+begins and ends on a sentence boundary, never repeats the overlap two chunks share, and carries the
+`header` breadcrumb and the `location` (`doc p.3-4 L10-20`) to cite it by.
+
+`search_sources` (`GET /api/search/sources`) answers the question that comes first: which documents
+cover this, and which collections hold them. One row per distinct document, scored as the harmonic
+mean of its best chunk and the sum of every chunk it matched, so a document that answers throughout
+outranks one that answers once, while the mean stays under twice the best chunk, so many weak
+chunks never outrank one strong one. Inside each row are its top `sections` hot sections — the
+heading breadcrumbs the matching chunks sit under, weighted the same way. Beside the documents
+comes `collections`: the smallest set of collections that covers every document returned, meant to
+be handed to `set_session_collections`, so the rest of the conversation searches the user's shelf
+on that subject rather than everything they own. The scope rule is the one above.
+
+`GET /api/search/explore` is the same retrieval with a `granularity` switch — `chunk`, `passage` or
+`excerpt` — for seeing what each stage produced. It is REST only; the UI's session scope calls it
+with `granularity=chunk`.
 
 Every setting has a title and definition (`msgspec.Meta` on the field; served as `/api/options` →
 `docs`, shown in the UI), so tuning is done in the UI rather than by reading this file. Chunk sizes
@@ -264,16 +281,22 @@ workflows rather than one per micro-batch. The index stage is one `stage_parts` 
 collection's partition, so LanceDB has one writer per collection and the full-text index is
 rebuilt once, as that child's last step.
 
-Queues are named for what they carry: a `job.*` queue holds coarse jobs, which are made of tasks
-and mostly wait on them, and a `task.*` queue holds the work itself.
+**The words this app counts work in.** An *operation* is what the user asked for — import a
+document, index one into a collection, index or delete a whole collection, delete a document,
+maintain a collection, download a model. A *job* is one stage of an operation: convert, embed or
+index. A *task* is one micro-batch below a job, and one durable step. "Workflow" is DBOS's word
+for whatever runs any of the three; the API, the UI and this document never use it.
+
+Queues are named for what they carry: an `operation.*` queue holds operations, which are made of
+jobs and tasks and mostly wait on them, and a `task.*` queue holds the work itself.
 
 | queue | concurrency | runs |
 | --- | --- | --- |
-| `job.indexing` | twice `pipeline.cpu_budget`, capped at 64 | one import or collection-index orchestrator per document |
-| `job.embedding` | same | `ensure_embedding`, one per cache id (its own queue: the orchestrators wait on it) |
-| `job.collection` | 2 | "index all", collection delete, document delete |
-| `job.downloads` | 2 | model downloads (`ensure_model`) |
-| `job.maintenance` | 4 | debounced maintenance, nightly housekeeping |
+| `operation.indexing` | twice `pipeline.cpu_budget`, capped at 64 | one import or collection-index orchestrator per document |
+| `operation.embedding` | same | `ensure_embedding`, one per cache id (its own queue: the orchestrators wait on it) |
+| `operation.collection` | 2 | "index all", collection delete, document delete |
+| `operation.downloads` | 2 | model downloads (`ensure_model`) |
+| `operation.maintenance` | 4 | debounced maintenance, nightly housekeeping |
 | `task.converting` | `converting_weight` share of `cpu_budget` | convert slices |
 | `task.embedding` | `embedding_weight` share of `cpu_budget` | embed slices |
 | `task.indexing` | `indexing_weight` share of `cpu_budget`, 1 per collection | index children, maintenance, removals |
@@ -291,11 +314,11 @@ per-stage floors or a maintenance run would push it over. Each child runs under
 
 DBOS provides crash recovery (a restarted workflow resumes at its first unfinished step or child),
 deduplication (one active import per document, one active index per membership, one embedding run
-per cache id), cancellation, and the job history shown in the Operations view. Retries follow the cause:
+per cache id), cancellation, and the history shown in the Operations view. Retries follow the cause:
 a transient failure (busy database, slow file) is retried 3 times with backoff, a permanent one
 (unsupported file type, pages that need OCR, a document the parser cannot read) fails the document
 immediately, and a model download gets 5 attempts. Removing a document from a collection cancels
-its index workflow there and waits, then deletes its rows and membership from that collection's
+its index operation there and waits, then deletes its rows and membership from that collection's
 own partition; deleting a document does that in every collection it is in (one child per
 collection, each on its partition) before dropping its folder and row, and sets the document
 `deleting` first so nothing attaches it meanwhile. The DBOS application version is pinned to the
@@ -309,47 +332,47 @@ restart reuses both instead of downloading the model again. Being on disk is not
 usable, though: a model lives in the caches of one process, so a boot that finds a finished
 download warms it in a background task (a local read, no network) and only then reports it ready.
 Searches that need a model still downloading or still warming fail fast with a clear message
-naming the job.
+naming the operation.
 
 ### Operations you can watch
 
-Long work you cannot see is work you do not trust, so every background job is visible and
+Long work you cannot see is work you do not trust, so every background operation is visible and
 cancellable.
 
 Every kind of background work is one listing with one row shape, so the Operations view is a
 section per kind, each paged on its own: `document` (an import or a collection index, with its
-stages, its micro-batches and its cancel), `collection` ("index all", collection delete and document
+jobs, its tasks and its cancel), `collection` ("index all", collection delete and document
 delete, with the progress the bulk index publishes), `download` (`ensure_model`, plus whether the
 model is loaded in this process) and `maintenance` (`maintain_on_partition` runs and the nightly
-housekeeping). `GET
-/api/jobs/by-kind?kind=&collection=&limit=&cursor=` serves one page of one kind and
-`GET /api/jobs/kinds` the sections themselves, with how many jobs of each kind are running right
-now (one grouped query). `GET /api/jobs/activity` is the indicator in the top-right of every view:
-jobs (`job.*` queues) and tasks (`task.*` queues) queued and running, one grouped query over the
-queue name prefix; a debounced maintenance run counts as queued until its delay expires. The
-collection filter is an id prefix the database applies, for every kind whose id carries a
-collection (`idx-col:`, `bulk-index:`, `bulk-delete:`, `maint:`); imports and embedding runs
-belong to no collection. `GET /api/jobs` remains the document listing on its own, and it is the
-only kind that also carries the micro-batch counts of every job it lists.
+housekeeping). `GET /api/operations?kind=&collection=&page_size=&cursor=` serves one page of one
+kind and `GET /api/operations/kinds` the sections themselves, with how many operations of each kind
+are running right now (one grouped query). `GET /api/operations/activity` is the indicator in the
+top-right of every view: operations (`operation.*` queues) and tasks (`task.*` queues) queued and
+running, one grouped query over the queue name prefix; a debounced maintenance run counts as queued
+until its delay expires. The collection filter is an id prefix the database applies, for every kind
+whose id carries a collection (`idx-col:`, `bulk-index:`, `bulk-delete:`, `maint:`); imports and
+embedding runs belong to no collection. `GET /api/operations/{id}/progress` follows a whole-thing
+operation, `DELETE /api/operations/{id}` cancels one, and `GET /api/jobs/{id}/tasks` lists the
+micro-batches of one job — the document kind is the only one whose rows carry jobs at all.
 
-The history itself is bounded by the nightly maintenance run: it deletes every job DBOS finished
-more than `retention.job_days` ago (default 28), with the stage children and step logs below it.
+The history itself is bounded by the nightly maintenance run: it deletes every operation DBOS
+finished more than `retention.operation_days` ago (default 28), with the children and step logs below it.
 Nothing else prunes those tables, so that run is what keeps the system database from growing with
 every document.
 
-A document row is one *operation*, not one workflow. An import converts and then spawns an
+A document row is one operation, not one DBOS workflow. An import converts and then spawns an
 `ensure_embedding` child it waits for; an index waits for that same child before it writes. Two
 rows for one thing a person asked for reads as twice the work, so the listing folds the child into
-its parent as a stage and the row carries `stages` in pipeline order — convert then embed for an
-import, embed then index for an index — each with its own status, batches and elapsed seconds. The
-activity indicator leaves the embedding queue out for the same reason. A stage's status comes from
+its parent as the embed job and the row carries `jobs` in pipeline order — convert then embed for
+an import, embed then index for an index — each with its own status, tasks and elapsed seconds. The
+activity indicator leaves the embedding queue out for the same reason. A job's status comes from
 the child where the child knows better: a parent still running an embed it spawned has already
 finished converting, and an index that has not started writing is waiting rather than running.
 
 The Sessions view replays what a conversation did, because an agent that searched and imported on
 your behalf should leave a trail. Every search, import, attach, detach, describe and collection
 choice that carried a session id is one row in `session_events` — the query, how long it took, how
-many hits, which documents, and the job it started. `GET /api/sessions/{id}/history` serves the
+many hits, which documents, and the operation it started. `GET /api/sessions/{id}/history` serves the
 last 100, newest first. The rows go with the session. Insights charts the same events: searches
 per day (`GET /api/insights/searches`) and chunks indexed per day (`GET /api/insights/chunks`),
 both as raw points, since only the reader knows where its day boundaries are.
@@ -383,8 +406,8 @@ which runs the queued async workflows and their steps. No loop-bound primitive i
 them — that is why the CPU budget is a `threading` semaphore rather than an `anyio.CapacityLimiter`,
 why each loop gets a thread limiter of its own, and why the search fan-out builds its semaphore per
 call. Blocking file IO survives in four places, each documented as running in a worker thread and
-nowhere else: `convert.py` (the parsers take a path and read it themselves), `home.atomic_write_sync`
-and the inner function of `home.remove_tree`, the parquet reads and writes of `embed_cache.py`
+nowhere else: `document/convert.py` (the parsers take a path and read it themselves), `home.atomic_write_sync`
+and the inner function of `home.remove_tree`, the parquet reads and writes of `indexing/embed_cache.py`
 (pyarrow is sync), and `db._migrate_sync` (the schema script and the one-time WAL switch, on a
 stdlib connection, before anything else holds the file open).
 
@@ -413,7 +436,7 @@ mise run dist       # build, then the wheel and sdist that ship it, into dist/
 | `HASKIE_LOG_LEVEL` | `INFO` | level for every logger in the process, DBOS included |
 | `HASKIE_LOG_FORMAT` | `json` | `console` for human-readable logs instead |
 
-That is the whole list. The timing knobs are module constants instead (`workflows.JOB_POLL`,
+That is the whole list. The timing knobs are module constants instead (`workflows.OPERATION_POLL`,
 `workflows.TASK_POLL`, `workflows.RETRY_INTERVAL_SECONDS`,
 `models.DOWNLOAD_RETRY_INTERVAL_SECONDS`); the suite shortens the two queue polls in
 `tests/conftest.py`.

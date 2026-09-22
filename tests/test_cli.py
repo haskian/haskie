@@ -28,7 +28,7 @@ from haskie import APP_VERSION, claude, db, home
 from haskie import cli as cli_module
 from haskie.claude import Scope
 from haskie.cli import cli
-from haskie.collection import Collection
+from haskie.collection.collection import Collection
 from haskie.errors import Conflict, InvalidInput
 
 runner = CliRunner()

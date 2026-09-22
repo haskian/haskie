@@ -1,4 +1,4 @@
-import { api, type Hit } from '../../api'
+import type { SearchScope } from '../../api'
 
 /** The picker's value for "every collection", and the prefix that marks a session. */
 export const ALL_SCOPE = '*'
@@ -15,26 +15,15 @@ export function parseScope(value: string): Scope {
   return { kind: 'collection', name: value }
 }
 
-/** Which collections a scope covers, for the literature search. `undefined` means every one. */
-export function scopeCollections(scope: Scope, sessions: Record<string, string[]>): string[] | undefined {
+/** The scope as the search endpoints take it. A session is sent by id: the backend resolves its
+ *  selection, and one that selected nothing searches everything, as it would over MCP. */
+export function scopeParams(scope: Scope): SearchScope {
   switch (scope.kind) {
     case 'all':
-      return undefined
+      return {}
     case 'collection':
-      return [scope.name]
+      return { collections: [scope.name] }
     case 'session':
-      return sessions[scope.id] ?? []
-  }
-}
-
-/** The passage search each scope answers with: one endpoint per scope, all returning hits. */
-export function searchSections(scope: Scope, query: string): Promise<Hit[]> {
-  switch (scope.kind) {
-    case 'all':
-      return api.searchText(query).then((page) => page.items)
-    case 'collection':
-      return api.searchCollection(scope.name, query)
-    case 'session':
-      return api.search(scope.id, query)
+      return { session_id: scope.id }
   }
 }

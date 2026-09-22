@@ -30,7 +30,7 @@ export function day(unixSeconds: number): string {
   return `${parts.get('weekday')} ${parts.get('day')} ${parts.get('month')}`
 }
 
-/** A job or import timestamp, in the reader's own time zone: "Sat 19 Jan · 14:32". */
+/** An operation or import timestamp, in the reader's own time zone: "Sat 19 Jan · 14:32". */
 export function dateTime(unixSeconds: number): string {
   const parts = partsOf(unixSeconds)
   return `${day(unixSeconds)} · ${parts.get('hour')}:${parts.get('minute')}`

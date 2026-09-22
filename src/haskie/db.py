@@ -23,12 +23,14 @@ import msgspec
 from haskie import home
 from haskie.errors import HaskieError
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 """`pragma user_version` of the schema below.
 
 A home stamped with it has exactly these tables and is opened as it is. Any other stamp is a
-shape this build cannot read, so the home is refused (see `migrate`). Bumped last when
-`staging.created_at` went from an ISO-8601 string to unix seconds.
+shape this build cannot read, so the home is refused (see `migrate`). Bumped last when chunks
+gained a document-wide `seq` and `session_events.workflow_id` became `operation_id`: an embedding
+cache and a LanceDB table written without that column, or a history column under the old name,
+must never be read by this build.
 """
 
 # Every statement is `if not exists`, so a crash partway through leaves `user_version` at 0 and
@@ -90,7 +92,7 @@ SCHEMA = """
     create index if not exists collection_documents_status
         on collection_documents (collection, status, document);
 
-    -- the durable, content-addressed embedding cache (see embed_cache.py)
+    -- the durable, content-addressed embedding cache (see indexing/embed_cache.py)
     create table if not exists embeddings (
         id text primary key,
         document text not null references documents (name) on delete cascade,
@@ -126,11 +128,11 @@ SCHEMA = """
         action text not null,
         subject text not null,
         detail text not null default '{}',
-        workflow_id text,
+        operation_id text,
         duration_ms integer not null default 0
     );
     create index if not exists session_events_session on session_events (session_id, ts);
-    create index if not exists session_events_workflow on session_events (workflow_id);
+    create index if not exists session_events_operation on session_events (operation_id);
 
     -- an upload waiting in `staging/`, before any name is taken
     create table if not exists staging (

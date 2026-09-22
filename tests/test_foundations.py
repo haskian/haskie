@@ -14,9 +14,11 @@ import anyio
 import msgspec
 import pytest
 
-from haskie import audit, cpu, db, document, embed_cache, errors, home, settings
-from haskie.collection import Collection
-from haskie.document import Document
+from haskie import audit, cpu, db, errors, home, settings
+from haskie.collection.collection import Collection
+from haskie.document import document
+from haskie.document.document import Document
+from haskie.indexing import embed_cache
 from haskie.settings import (
     ChunkSettings,
     CollectionSettings,
@@ -378,7 +380,7 @@ async def test_remove_tree_reports_a_file_it_cannot_delete(
         ),
         (
             "retention days below 1",
-            lambda: RetentionSettings(job_days=0),
+            lambda: RetentionSettings(operation_days=0),
             "days must be >= 1",
         ),
         (
@@ -412,7 +414,7 @@ def test_settings_reject_out_of_bounds(name: str, build, match: str) -> None:
         ),
         ("collection override overlap alone", lambda: CollectionSettings(chunk_overlap=0)),
         ("chunk settings defaults", ChunkSettings),
-        ("the shortest job history", lambda: RetentionSettings(job_days=1)),
+        ("the shortest operation history", lambda: RetentionSettings(operation_days=1)),
         ("audit retention of zero keeps everything", lambda: RetentionSettings(audit_days=0)),
         ("one preview builder", lambda: PipelineSettings(preview_workers=1)),
         ("one slice per document", lambda: PipelineSettings(document_parallelism=1)),
@@ -480,64 +482,13 @@ def test_settings_stored_before_the_cpu_budget_still_decode(name: str, stored: s
     assert loaded.pipeline.cpu_budget == PipelineSettings().cpu_budget, "the new field defaults"
 
 
-@pytest.mark.parametrize(
-    ("name", "stored", "expected"),
-    [
-        (
-            "every renamed section at once",
-            {
-                "defaults": {"chunk_size": 700},
-                "indexing": {"batch_pages": 7},
-                "retention": {"days": 3, "live_hours": 9},
-                "maintenance": {"audit_retention_days": 5},
-            },
-            (700, 7, 3, 5),
-        ),
-        (
-            "already written by this build, plus a setting this one dropped",
-            {
-                "conversion": {"chunk_size": 700},
-                "pipeline": {"batch_pages": 7},
-                "retention": {"job_days": 3, "job_live_hours": 9, "audit_days": 5},
-            },
-            (700, 7, 3, 5),
-        ),
-        (
-            "a section the old build never wrote keeps its default",
-            {"indexing": {"batch_pages": 7}},
-            (
-                ConversionSettings().chunk_size,
-                7,
-                RetentionSettings().job_days,
-                RetentionSettings().audit_days,
-            ),
-        ),
-    ],
-)
-def test_settings_stored_under_the_old_field_names_are_renamed_on_load(
-    name: str, stored: dict, expected: tuple[int, ...]
-) -> None:
-    """`defaults`/`indexing`/`maintenance` became `conversion`/`pipeline`/`retention`. msgspec
-    drops a key it does not know, so without the rename a home would come back silently reset -
-    and a key this build dropped (`job_live_hours`) is dropped the same way, not an error."""
-    loaded = settings._decode(msgspec.json.encode(stored).decode())
-
-    assert (
-        loaded.conversion.chunk_size,
-        loaded.pipeline.batch_pages,
-        loaded.retention.job_days,
-        loaded.retention.audit_days,
-    ) == expected, name
-
-
 def test_retention_defaults_and_docs() -> None:
-    """Four weeks of job history, and one knob that says so."""
-    assert RetentionSettings().job_days == 28
+    """Four weeks of operation history, and one knob that says so."""
+    assert RetentionSettings().operation_days == 28
     assert UserSettings().retention == RetentionSettings()
     docs = settings.docs()
-    assert docs["retention.job_days"].title == "Job history (days)"
-    assert docs["retention.job_days"].description
-    assert "retention.job_live_hours" not in docs, "the live window is gone, not renamed"
+    assert docs["retention.operation_days"].title == "Operation history (days)"
+    assert docs["retention.operation_days"].description
 
 
 def test_maintenance_defaults_and_docs() -> None:
@@ -912,7 +863,7 @@ async def test_record_writes_one_private_json_line_with_every_field() -> None:
         duration_ms=7,
         request_id="r1",
         session_id="s1",
-        workflow_id="w1",
+        operation_id="w1",
         collection="notes",
         doc="a.md",
         error=None,
@@ -930,7 +881,7 @@ async def test_record_writes_one_private_json_line_with_every_field() -> None:
         "app_version": audit.APP_VERSION,
         "request_id": "r1",
         "session_id": "s1",
-        "workflow_id": "w1",
+        "operation_id": "w1",
         "collection": "notes",
         "doc": "a.md",
         "detail": {"size": 12, "suffix": ".md", "cached": False},

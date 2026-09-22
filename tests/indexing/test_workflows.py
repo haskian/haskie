@@ -1,4 +1,4 @@
-"""Durable execution: the DBOS runtime, the three pipelines and the jobs read model.
+"""Durable execution: the DBOS runtime, the three pipelines and the operations read model.
 
 Every test here takes the `dbos` fixture, which launches DBOS on the test home's SQLite file and
 destroys it afterwards. Concurrency is driven by `threading.Event`, never by sleeping: a fake
@@ -54,33 +54,19 @@ from dbos import DBOS, SetWorkflowID
 from dbos._error import DBOSAwaitedWorkflowCancelledError
 from dbos._registrations import get_dbos_func_name
 
-from haskie import (
-    audit,
-    chunk,
-    convert,
-    cpu,
-    db,
-    dbos_names,
-    document,
-    embed_cache,
-    home,
-    jobs,
-    maintenance,
-    models,
-    paging,
-    pipeline,
-    settings,
-    workflows,
-)
-from haskie.collection import Collection
-from haskie.document import Document
+from haskie import audit, cpu, db, home, paging, settings
+from haskie.collection import maintenance
+from haskie.collection.collection import Collection
+from haskie.document import convert, document
+from haskie.document.document import Document
 from haskie.errors import (
     Conflict,
     InvalidInput,
     NotFound,
     PermanentError,
 )
-from haskie.pipeline import Batch
+from haskie.indexing import chunk, dbos_names, embed_cache, models, operations, pipeline, workflows
+from haskie.indexing.pipeline import Batch
 from haskie.settings import (
     ChunkSettings,
     CollectionSettings,
@@ -324,12 +310,12 @@ def _spy_embed(monkeypatch: pytest.MonkeyPatch) -> EmbedSpy:
 
 
 def test_workflow_status_union_holds_every_status_dbos_writes() -> None:
-    """`WorkflowStatus` is spelled out rather than aliased to `str`, so it has to be checked
-    against the source. A status DBOS adds and this union misses would be decoded as an invalid
-    enum value by any client reading the generated schema."""
+    """`RunStatus` is spelled out rather than aliased to `str`, so it has to be checked against
+    the source. A status DBOS adds and this union misses would be decoded as an invalid enum
+    value by any client reading the generated schema."""
     from dbos import WorkflowStatusString
 
-    assert set(dbos_names.WORKFLOW_STATUSES) == {status.value for status in WorkflowStatusString}
+    assert set(dbos_names.RUN_STATUSES) == {status.value for status in WorkflowStatusString}
 
 
 # --- import and attach -------------------------------------------------------------
@@ -388,8 +374,8 @@ async def test_attach_indexes_the_document_into_the_collection(dbos, tmp_path: P
 
 
 async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> None:
-    """One import job per document, one embedding job per cache id, one index job per collection,
-    each with a task per micro-batch. The index is deduplicated while it runs; a second import is
+    """One import per document, one embedding run per cache id, one index per collection, each
+    with a task per micro-batch. The index is deduplicated while it runs; a second import is
     refused instead, because the document's status has left `queued` by then."""
     await _use(dbos, workers=2, batch_pages=10, index_group_parts=1)
     collection = await Collection.create("q")
@@ -406,16 +392,16 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
     assert await dbos.start_index_collection_document("q", pdf.name) == indexing, "deduplicated"
     assert await wait_for(indexing) == "indexed"
 
-    converting = await jobs.list_tasks(first)
+    converting = await operations.list_tasks(first)
     assert [(t.stage, t.seq, t.page_start, t.page_end, t.status) for t in converting] == [
         ("convert", 0, 0, 10, "SUCCESS"), ("convert", 1, 10, 20, "SUCCESS"),
         ("convert", 2, 20, 25, "SUCCESS"),
     ]  # fmt: skip
     embedding = _embed_id(first, pdf.name)
-    assert [(t.stage, t.seq, t.status) for t in await jobs.list_tasks(embedding)] == [
+    assert [(t.stage, t.seq, t.status) for t in await operations.list_tasks(embedding)] == [
         ("embed", 0, "SUCCESS"), ("embed", 1, "SUCCESS"), ("embed", 2, "SUCCESS"),
     ]  # fmt: skip
-    assert [(t.stage, t.seq, t.status) for t in await jobs.list_tasks(indexing)] == [
+    assert [(t.stage, t.seq, t.status) for t in await operations.list_tasks(indexing)] == [
         ("index", 0, "SUCCESS"), ("index", 1, "SUCCESS"), ("index", 2, "SUCCESS"),
     ]  # fmt: skip
     hit = (await Collection("q").search("word25", SearchOverrides(limit=1)))[0]
@@ -440,7 +426,9 @@ async def test_start_import_and_attach_validate_before_they_enqueue(dbos, tmp_pa
     with pytest.raises(NotFound, match="collection not found: ghost"):
         await dbos.attach("ghost", queued.name)
 
-    assert (await jobs.list_jobs()).items == [], "a rejected request leaves no job behind"
+    assert (await operations._pipeline_page()).items == [], (
+        "a rejected request leaves no operation behind"
+    )
 
 
 async def test_documents_of_one_collection_index_without_conflict(dbos, tmp_path: Path) -> None:
@@ -468,7 +456,7 @@ async def test_documents_of_one_collection_index_without_conflict(dbos, tmp_path
 
 async def test_workflow_ids_name_their_kind_and_their_names(dbos, tmp_path: Path) -> None:
     """Every id starts with a prefix naming the kind and the names it belongs to, so one prefix
-    query finds a whole job (see the `workflows` module docstring)."""
+    query finds a whole operation (see the `workflows` module docstring)."""
     await Collection.create("c")
     doc = await import_row("a.md", into=tmp_path)
 
@@ -708,7 +696,7 @@ async def test_batches_of_one_document_run_in_parallel_up_to_workers(
         workflow_id_prefix=f"{job_id}:convert", load_input=False
     )
     assert {c.workflow_id for c in listed} == {f"{job_id}:convert:{i}" for i in range(workers)}
-    tasks = await jobs.list_tasks(job_id)
+    tasks = await operations.list_tasks(job_id)
     assert [t.seq for t in tasks if t.stage == "convert"] == [0, 1, 2, 3, 4, 5]
     await attach_document(dbos, "wide", doc.name)
     assert (await Collection("wide").search("toks5"))[0].page_start == 6, "one document"
@@ -896,9 +884,9 @@ async def test_one_document_creates_a_bounded_number_of_workflows(dbos, tmp_path
         name=dbos_names.STAGE_WORKFLOW, load_input=False, load_output=False
     )
     assert {s.workflow_id for s in listed} == stages
-    assert len(await jobs.list_tasks(import_id)) == 3
-    assert len(await jobs.list_tasks(embedding)) == 3
-    assert len(await jobs.list_tasks(index_id)) == 3
+    assert len(await operations.list_tasks(import_id)) == 3
+    assert len(await operations.list_tasks(embedding)) == 3
+    assert len(await operations.list_tasks(index_id)) == 3
 
 
 async def test_index_groups_parts_into_one_write(dbos, tmp_path: Path) -> None:
@@ -916,7 +904,7 @@ async def test_index_groups_parts_into_one_write(dbos, tmp_path: Path) -> None:
     job_id = await dbos.attach("grouped", doc.name)
     assert await wait_for(job_id) == "indexed"
 
-    tasks = await jobs.list_tasks(job_id)
+    tasks = await operations.list_tasks(job_id)
     assert [(t.stage, t.seq, t.page_start, t.page_end) for t in tasks] == [("index", 0, 0, 3)]
     assert {t.status for t in tasks} == {"SUCCESS"}
     assert await _fragments(collection) == before + 1, "one commit for the document"
@@ -1023,7 +1011,7 @@ async def test_concurrent_attaches_converge_on_one_embedding_run(
 ) -> None:
     """Two collections asking for the same missing embedding at once share one run: the second
     enqueue is deduplicated by the cache id and returns the workflow already in flight, so both
-    index jobs name the same `emb:` child."""
+    index operations name the same `emb:` child."""
     await _use(dbos, workers=4, batch_pages=1)
     for name in ("one", "two"):
         # the same non-default chunk size in both, so neither can read the import's pre-warm
@@ -1063,7 +1051,7 @@ async def test_concurrent_attaches_converge_on_one_embedding_run(
 
 
 async def _import_id(doc: str) -> str:
-    """The import job of one document: the only `imp:` workflow it has in these tests."""
+    """The import of one document: the only `imp:` workflow it has in these tests."""
     (found,) = await DBOS.list_workflows_async(
         name=dbos_names.IMPORT_WORKFLOW,
         workflow_id_prefix=f"{workflows.IMPORT_PREFIX}:{doc}:",
@@ -1290,7 +1278,7 @@ async def test_transient_step_failure_is_retried_and_recovers(
 
     assert calls == [0, 0, 0], "two failures, then the third attempt succeeds"
     assert (await document.get(doc.name)).status == "imported"
-    assert (await jobs.list_jobs()).items[0].status == "SUCCESS"
+    assert (await operations._pipeline_page()).items[0].status == "SUCCESS"
 
 
 async def test_transient_step_failure_gives_up_after_max_attempts(
@@ -1317,9 +1305,10 @@ async def test_transient_step_failure_gives_up_after_max_attempts(
     assert calls.count(2) == 3, "step retried max_attempts times"
     row = await document.get(doc.name)
     assert row.status == "error" and "boom" in (row.error or "")
-    (job,) = (await jobs.list_jobs()).items
-    assert job.status == "ERROR" and job.error and "boom" in job.error
-    statuses = {t.seq: t.status for t in await jobs.list_tasks(job_id) if t.stage == "convert"}
+    (run,) = (await operations._pipeline_page()).items
+    assert run.status == "ERROR" and run.error and "boom" in run.error
+    found = await operations.list_tasks(job_id)
+    statuses = {t.seq: t.status for t in found if t.stage == "convert"}
     assert statuses == {0: "SUCCESS", 1: "SUCCESS", 2: "ERROR", 3: "ENQUEUED"}, (
         "the stage stops at the failed batch; the rest never ran"
     )
@@ -1344,9 +1333,9 @@ async def test_permanent_step_failure_is_not_retried(dbos, tmp_path: Path, monke
     assert calls == [0], "a permanent failure is raised by the workflow, not retried by the step"
     row = await document.get(doc.name)
     assert (row.status, row.error) == ("error", "PermanentError: all 1 pages need OCR")
-    (job,) = (await jobs.list_jobs()).items
-    assert job.status == "ERROR" and job.error == "PermanentError: all 1 pages need OCR"
-    (task,) = await jobs.list_tasks(job_id)
+    (run,) = (await operations._pipeline_page()).items
+    assert run.status == "ERROR" and run.error == "PermanentError: all 1 pages need OCR"
+    (task,) = await operations.list_tasks(job_id)
     assert (task.stage, task.status, task.error) == (
         "convert",
         "ERROR",
@@ -1398,8 +1387,8 @@ async def test_import_resumes_after_a_crash_without_duplicating_chunks(
 
     assert (await document.get(doc.name)).status == "imported"
     assert gate.calls.count(0) == 2, "the interrupted batch ran again after recovery"
-    (job,) = [j for j in (await jobs.list_jobs()).items if j.action == "import"]
-    assert (job.id, job.status) == (job_id, "SUCCESS"), "recovery resumes, it does not re-enqueue"
+    (run,) = [r for r in (await operations._pipeline_page()).items if r.action == "import"]
+    assert (run.id, run.status) == (job_id, "SUCCESS"), "recovery resumes, it does not re-enqueue"
     await attach_document(dbos, "dur", doc.name)
     table = await (await Collection("dur").index())._existing()
     assert table is not None and await table.count_rows() == await _cached_rows(doc.name) > 0
@@ -1473,26 +1462,30 @@ async def test_adopt_orphans_runs_in_the_background_on_start(dbos, monkeypatch) 
 # --- cancel, detach and delete while a pipeline runs -------------------------------
 
 
-async def test_cancel_job_marks_the_document_cancelled(dbos, tmp_path: Path, monkeypatch) -> None:
+async def test_cancel_operation_marks_the_document_cancelled(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
     doc = await import_row("p.pdf", text_pdf(["one"]), tmp_path)
     gate = Gate()
     monkeypatch.setattr(pipeline, "convert_batch", gate.wrap(pipeline.convert_batch))
     job_id = await dbos.start_import(doc.name)
     assert await wait_event(gate.entered)
 
-    await workflows.cancel_job(job_id)
+    await workflows.cancel_operation(job_id)
 
     row = await document.get(doc.name)
     assert (row.status, row.error) == ("cancelled", None)
-    assert (await jobs.list_jobs()).items[0].status == "CANCELLED"
+    assert (await operations._pipeline_page()).items[0].status == "CANCELLED"
     gate.release.set()
     with pytest.raises(DBOSAwaitedWorkflowCancelledError):
         await wait_for(job_id)  # let its worker thread observe the cancellation before teardown
 
 
-async def test_cancel_job_marks_the_member_cancelled(dbos, tmp_path: Path, monkeypatch) -> None:
-    """An `idx-col:` job belongs to one membership, so cancelling it moves that membership and
-    leaves the document (and every other collection holding it) alone."""
+async def test_cancel_operation_marks_the_member_cancelled(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """An `idx-col:` operation belongs to one membership, so cancelling it moves that membership
+    and leaves the document (and every other collection holding it) alone."""
     await _use(dbos, workers=2, batch_pages=1, index_group_parts=1)
     collection = await Collection.create("cx")
     doc = await import_document(dbos, "p.pdf", text_pdf(["one", "two"]), tmp_path)
@@ -1501,17 +1494,17 @@ async def test_cancel_job_marks_the_member_cancelled(dbos, tmp_path: Path, monke
     job_id = await dbos.attach("cx", doc.name)
     assert await wait_event(gate.entered)
 
-    await workflows.cancel_job(job_id)
+    await workflows.cancel_operation(job_id)
 
     assert (await collection.member(doc.name)).status == "cancelled"
     assert (await document.get(doc.name)).status == "imported", "the document is not a member"
-    assert (await jobs.list_jobs("cx")).items[0].status == "CANCELLED"
+    assert (await operations._pipeline_page("cx")).items[0].status == "CANCELLED"
     gate.release.set()
     await await_terminal([job_id])
     await _drain()
 
 
-async def test_cancel_job_rejects_unknown_ids_and_leaves_finished_jobs_alone(
+async def test_cancel_operation_rejects_unknown_ids_and_leaves_finished_ones_alone(
     dbos, tmp_path: Path
 ) -> None:
     await Collection.create("done")
@@ -1519,15 +1512,15 @@ async def test_cancel_job_rejects_unknown_ids_and_leaves_finished_jobs_alone(
     job_id = await dbos.attach("done", doc.name)
     assert await wait_for(job_id) == "indexed"
 
+    with pytest.raises(NotFound, match="operation not found: ghost"):
+        await workflows.cancel_operation("ghost")
     with pytest.raises(NotFound, match="job not found: ghost"):
-        await workflows.cancel_job("ghost")
-    with pytest.raises(NotFound, match="job not found: ghost"):
-        await jobs.list_tasks("ghost")
+        await operations.list_tasks("ghost")
 
-    await workflows.cancel_job(job_id)  # no-op: the job is already terminal
+    await workflows.cancel_operation(job_id)  # no-op: the operation is already terminal
 
     assert (await Collection("done").member(doc.name)).status == "indexed"
-    assert (await jobs.list_jobs("done")).items[0].status == "SUCCESS"
+    assert (await operations._pipeline_page("done")).items[0].status == "SUCCESS"
 
 
 async def test_delete_document_while_it_indexes_leaves_nothing_behind(
@@ -1597,7 +1590,7 @@ async def test_attaching_while_a_delete_runs_is_refused(dbos, tmp_path: Path, mo
     reads = 0
 
     async def gated(name: str) -> list[str]:
-        # the delete reads the collections twice: first to cancel their index jobs, then for the
+        # the delete reads the collections twice: first to cancel their index runs, then for the
         # membership snapshot, which is the one this test has to land behind
         nonlocal reads
         reads += 1
@@ -1741,7 +1734,7 @@ async def test_delete_collection_rejects_an_unknown_name(dbos) -> None:
         await dbos.start_index_collection("ghost")
 
 
-# --- whole-collection jobs ---------------------------------------------------------
+# --- whole-collection operations ---------------------------------------------------
 
 
 async def _member_workflows(collection: str) -> list[str]:
@@ -1758,8 +1751,8 @@ async def _member_workflows(collection: str) -> list[str]:
 async def test_index_collection_workflow_enqueues_every_member_in_pages(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:
-    """D2: "Index all" is a background job that walks the collection one page of enqueues at a
-    time, so the request costs the same whether it holds five documents or ten thousand."""
+    """D2: "Index all" is a background operation that walks the collection one page of enqueues at
+    a time, so the request costs the same whether it holds five documents or ten thousand."""
     monkeypatch.setattr(workflows, "BULK_INDEX_PAGE", 2)  # three pages for five documents
     collection = await Collection.create("b")
     names = []
@@ -1790,7 +1783,7 @@ async def test_index_collection_workflow_enqueues_every_member_in_pages(
 async def test_index_collection_workflow_is_idempotent_on_replay(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:
-    """The page listing is a step and every child id is derived from the bulk job, so a crash
+    """The page listing is a step and every child id is derived from the bulk operation, so a crash
     between two pages re-attaches to the documents already queued instead of queueing them twice."""
     monkeypatch.setattr(workflows, "BULK_INDEX_PAGE", 2)
     collection = await Collection.create("b")
@@ -1803,7 +1796,7 @@ async def test_index_collection_workflow_is_idempotent_on_replay(
 
     async def gated(name: str, after: str | None) -> list[str]:
         pages.append(after)
-        if len(pages) == 2:  # the first page is queued; stop the job right here
+        if len(pages) == 2:  # the first page is queued; stop the operation right here
             entered.set()
             assert await wait_event(release), "the test never released the listing"
         return await real(name, after)
@@ -1826,7 +1819,7 @@ async def test_index_collection_workflow_is_idempotent_on_replay(
 async def test_delete_collection_workflow_cancels_and_removes(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:
-    """F2: the deletion is a job too. It cancels everything the collection has in flight, and the
+    """F2: the deletion is an operation too. It cancels everything the collection has in flight, and
     cancel is final for the status row alone - the LanceDB write already running keeps going - so
     it waits on the collection's write lock before it drops the rows and the folder. A write that
     outlived the cancel must not recreate either."""
@@ -1856,8 +1849,8 @@ async def test_delete_collection_workflow_cancels_and_removes(
     assert await _statuses([in_flight]) == ["CANCELLED"]
     assert await Collection.names() == [] and not collection.root.exists()
     assert sorted(await document_names()) == ["done.md", "slow.pdf"], "documents are untouched"
-    job = await jobs.bulk_job(bulk_id)
-    assert (job.kind, job.collection, job.status, job.progress) == (
+    found = await operations.progress(bulk_id)
+    assert (found.kind, found.collection, found.status, found.progress) == (
         "delete_collection",
         "wipe",
         "SUCCESS",
@@ -1870,9 +1863,9 @@ async def test_delete_collection_workflow_cancels_and_removes(
     )
 
 
-async def test_bulk_job_reads_the_three_bulk_kinds(dbos, tmp_path: Path) -> None:
-    """The three whole-thing jobs share one read model; only `del-doc:` names a document rather
-    than a collection in its second segment, so its `collection` is None."""
+async def test_progress_reads_the_three_bulk_kinds(dbos, tmp_path: Path) -> None:
+    """The three whole-thing operations share one read model; only `del-doc:` names a document
+    rather than a collection in its second segment, so its `collection` is None."""
     await Collection.create("kinds")
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     await attach_document(dbos, "kinds", doc.name)
@@ -1885,8 +1878,8 @@ async def test_bulk_job_reads_the_three_bulk_kinds(dbos, tmp_path: Path) -> None
     await wait_for(delete_id)
 
     assert [
-        (j.kind, j.collection)
-        for j in [await jobs.bulk_job(i) for i in (index_id, delete_doc_id, delete_id)]
+        (o.kind, o.collection)
+        for o in [await operations.progress(i) for i in (index_id, delete_doc_id, delete_id)]
     ] == [
         ("index_collection", "kinds"),
         ("delete_document", None),
@@ -1895,51 +1888,53 @@ async def test_bulk_job_reads_the_three_bulk_kinds(dbos, tmp_path: Path) -> None
     await _drain()
 
 
-# --- jobs read model ---------------------------------------------------------------
+# --- operations read model ---------------------------------------------------------
 
 
-async def _walk_jobs(collection: str | None = None, limit: int = 2) -> list[jobs.Job]:
-    """Every job of the listing, one page at a time, exactly as the UI's "Load more" reads it."""
-    walked: list[jobs.Job] = []
+async def _walk_runs(collection: str | None = None, limit: int = 2) -> list:
+    """Every pipeline run of the listing, one page at a time, as the UI's "Load more" reads it."""
+    walked: list = []
     cursor: str | None = None
     while True:
-        page = await jobs.list_jobs(collection, limit, cursor)
+        page = await operations._pipeline_page(collection, limit, cursor)
         walked.extend(page.items)
         cursor = page.next_cursor
         if cursor is None:
             return walked
 
 
-async def test_list_jobs_reports_the_action_collection_and_document(dbos, tmp_path: Path) -> None:
-    """One document costs three jobs of three actions. Only the collection index belongs to a
-    collection; an import and an embedding run belong to the document alone."""
+async def test_the_pipeline_page_reports_the_action_collection_and_document(
+    dbos, tmp_path: Path
+) -> None:
+    """One document costs three pipeline runs of three actions. Only the collection index belongs
+    to a collection; an import and an embedding run belong to the document alone."""
     await Collection.create("c")
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     await attach_document(dbos, "c", doc.name)
 
-    listed = (await jobs.list_jobs()).items
+    listed = (await operations._pipeline_page()).items
 
-    assert {(j.action, j.collection, j.doc) for j in listed} == {
+    assert {(r.action, r.collection, r.doc) for r in listed} == {
         ("import", None, "a.md"),
         ("embed", None, "a.md"),
         ("index", "c", "a.md"),
     }
-    assert {j.status for j in listed} == {"SUCCESS"}
-    rows = (await jobs.list_kind("document")).items
+    assert {r.status for r in listed} == {"SUCCESS"}
+    rows = (await operations.list_operations("document")).items
     # the embed is folded into the import that spawned it: two operations, not three rows
     assert {row.title for row in rows} == {"import a.md", "c / a.md"}
     assert {row.kind for row in rows} == {"document"}
-    assert [s.stage for row in rows if row.title == "import a.md" for s in row.stages] == [
+    assert [j.stage for row in rows if row.title == "import a.md" for j in row.jobs] == [
         "convert",
         "embed",
     ]
 
 
-async def test_list_jobs_filters_by_collection_before_it_cuts_the_window(
+async def test_the_pipeline_page_filters_by_collection_before_it_cuts_the_window(
     dbos, tmp_path: Path
 ) -> None:
     """A busy collection must not push an older one out of the window: the filter is the
-    job id's prefix, so the database applies it before it cuts the page."""
+    operation id's prefix, so the database applies it before it cuts the page."""
     for name in ("noisy", "quiet"):
         await Collection.create(name)
     doc = await import_document(dbos, "a.md", MD, tmp_path)
@@ -1948,80 +1943,81 @@ async def test_list_jobs_filters_by_collection_before_it_cuts_the_window(
     for _ in range(2):
         await wait_for(await dbos.start_index_collection_document("noisy", doc.name))
 
-    quiet = await jobs.list_jobs("quiet", page_size=2)
-    (job,) = quiet.items
-    assert (job.action, job.collection, job.doc) == ("index", "quiet", "a.md")
-    assert job.status == "SUCCESS"
+    quiet = await operations._pipeline_page("quiet", page_size=2)
+    (run,) = quiet.items
+    assert (run.action, run.collection, run.doc) == ("index", "quiet", "a.md")
+    assert run.status == "SUCCESS"
     assert quiet.next_cursor is None, "the filtered listing has one page"
 
-    noisy = await jobs.list_jobs("noisy", page_size=2)
-    assert [j.collection for j in noisy.items] == ["noisy", "noisy"], "newest first"
+    noisy = await operations._pipeline_page("noisy", page_size=2)
+    assert [r.collection for r in noisy.items] == ["noisy", "noisy"], "newest first"
     assert noisy.next_cursor is not None, "one more behind this page"
-    assert [j.collection for j in await _walk_jobs("noisy")] == ["noisy"] * 3
-    assert {j.action for j in await _walk_jobs()} == {"import", "embed", "index"}, "unfiltered"
+    assert [r.collection for r in await _walk_runs("noisy")] == ["noisy"] * 3
+    assert {r.action for r in await _walk_runs()} == {"import", "embed", "index"}, "unfiltered"
 
 
-async def test_list_jobs_rejects_a_bad_cursor(dbos) -> None:
+async def test_the_pipeline_page_rejects_a_bad_cursor(dbos) -> None:
     """The cursor is an opaque source and offset into one fixed ordering: anything else is a bad
     request, not an empty page."""
+    encode, sort, order = paging.encode_cursor, operations.SORT, operations.ORDER
     with pytest.raises(InvalidInput, match="invalid cursor"):
-        await jobs.list_jobs(cursor="not-a-cursor")
+        await operations._pipeline_page(cursor="not-a-cursor")
     with pytest.raises(InvalidInput, match="cursor does not match"):
-        await jobs.list_jobs(cursor=paging.encode_cursor(["a.md"], "name", "asc"))
-    with pytest.raises(InvalidInput, match="cursor does not match"):  # the cursor of an older build
-        await jobs.list_jobs(cursor=paging.encode_cursor([0], jobs.JOB_SORT, jobs.JOB_ORDER))
+        await operations._pipeline_page(cursor=encode(["a.md"], "name", "asc"))
+    with pytest.raises(InvalidInput, match="cursor does not match"):  # an older build's cursor
+        await operations._pipeline_page(cursor=encode([0], sort, order))
     # an offset that is no offset, another listing's cursor, and an identity that is no name
-    for key in ([jobs.DOCUMENT_KIND, -1], ["collection", 0], [7, 0]):
+    for key in ([operations.DOCUMENT_KIND, -1], ["collection", 0], [7, 0]):
         with pytest.raises(InvalidInput, match="invalid cursor"):
-            await jobs.list_jobs(cursor=paging.encode_cursor(key, jobs.JOB_SORT, jobs.JOB_ORDER))
+            await operations._pipeline_page(cursor=encode(key, sort, order))
     for limit in (0, paging.MAX_PAGE_SIZE + 1):
         with pytest.raises(InvalidInput, match=r"page_size must be 1\.\.1000"):
-            await jobs.list_jobs(page_size=limit)
+            await operations._pipeline_page(page_size=limit)
 
 
-async def test_list_kind_pages_on_a_cursor_of_its_own(dbos) -> None:
-    """Each section of the jobs view pages through one kind of workflow, newest first, on an
-    opaque offset cursor bound to that kind: one from another section would page another history,
+async def test_list_operations_pages_on_a_cursor_of_its_own(dbos) -> None:
+    """Each section of the Operations view pages through one kind, newest first, on an opaque
+    offset cursor bound to that kind: one from another section would page another history,
     and an unknown kind is a bad request rather than an empty page."""
     await Collection.create("pager")
     older = await dbos.start_index_collection("pager")
-    await await_terminal([older])  # a second "index all" while one runs is the same job
+    await await_terminal([older])  # a second "index all" while one runs is the same operation
     newer = await dbos.start_index_collection("pager")
     await await_terminal([newer])
 
-    first = await jobs.list_kind("collection", page_size=1)
+    first = await operations.list_operations("collection", page_size=1)
 
     assert [row.id for row in first.items] == [newer], "newest first"
     assert first.items[0].title == "index collection pager"
     assert first.next_cursor is not None
-    second = await jobs.list_kind("collection", page_size=1, cursor=first.next_cursor)
+    second = await operations.list_operations("collection", page_size=1, cursor=first.next_cursor)
     assert [row.id for row in second.items] == [older]
     assert second.next_cursor is None, "the last page ends the walk"
 
     with pytest.raises(InvalidInput, match="invalid cursor"):
-        await jobs.list_kind("download", page_size=1, cursor=first.next_cursor)
-    with pytest.raises(InvalidInput, match="unknown job kind 'bogus'"):
-        await jobs.list_kind("bogus")
+        await operations.list_operations("download", page_size=1, cursor=first.next_cursor)
+    with pytest.raises(InvalidInput, match="unknown operation kind 'bogus'"):
+        await operations.list_operations("bogus")
     with pytest.raises(InvalidInput, match=r"page_size must be 1\.\.1000"):
-        await jobs.list_kind("collection", page_size=0)
+        await operations.list_operations("collection", page_size=0)
 
 
-async def test_list_jobs_never_loads_inputs(dbos, tmp_path: Path, monkeypatch) -> None:
-    """The collection and the document come out of the job id, so a page of jobs costs two
+async def test_the_pipeline_page_never_loads_inputs(dbos, tmp_path: Path, monkeypatch) -> None:
+    """The collection and the document come out of the id, so a page of operations costs two
     queries and no input payload at all."""
     await Collection.create("lean")
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     await attach_document(dbos, "lean", doc.name)
     calls = counted_list_workflows(monkeypatch)
 
-    (job,) = (await jobs.list_jobs("lean")).items
+    (run,) = (await operations._pipeline_page("lean")).items
 
-    assert (job.collection, job.doc) == ("lean", "a.md"), "read from the id"
+    assert (run.collection, run.doc) == ("lean", "a.md"), "read from the id"
     parent, children = calls
     assert parent["load_input"] is False, "the parent listing never reads inputs"
     assert parent["workflow_id_prefix"] == "idx-col:lean:" and parent["sort_desc"] is True
     assert children["load_output"] is False, "one query for the children of the whole page"
-    assert len(calls) == 2, "no query per job"
+    assert len(calls) == 2, "no query per operation"
 
 
 async def test_active_collection_workflows_use_the_id_prefix(
@@ -2048,12 +2044,12 @@ async def test_active_collection_workflows_use_the_id_prefix(
     await _drain()
 
 
-async def _seed_jobs(job_id: str, collection: str, count: int) -> None:
+async def _seed_operations(operation_id: str, collection: str, count: int) -> None:
     """`count` more collection-index rows in the DBOS history, copied from a real one: only the id
     and the timestamp differ, so every column holds what DBOS itself writes."""
     async with db.connect() as conn:
         cursor = await conn.execute(
-            "select * from workflow_status where workflow_uuid = ?", (job_id,)
+            "select * from workflow_status where workflow_uuid = ?", (operation_id,)
         )
         columns = [description[0] for description in cursor.description]
         seed = await cursor.fetchone()
@@ -2079,25 +2075,25 @@ async def _seed_jobs(job_id: str, collection: str, count: int) -> None:
         )
 
 
-async def test_list_jobs_stays_fast_over_a_long_history(dbos, tmp_path: Path) -> None:
+async def test_the_pipeline_page_stays_fast_over_a_long_history(dbos, tmp_path: Path) -> None:
     """The point of the id prefix: one quiet collection's page costs the same with five thousand
-    jobs of a busy one behind it as with none."""
+    operations of a busy one behind it as with none."""
     for name in ("noisy", "quiet"):
         await Collection.create(name)
     doc = await import_document(dbos, "a.md", MD, tmp_path)
-    job_id = await dbos.attach("quiet", doc.name)
-    assert await wait_for(job_id) == "indexed"
-    await _seed_jobs(job_id, "noisy", 5000)
+    operation_id = await dbos.attach("quiet", doc.name)
+    assert await wait_for(operation_id) == "indexed"
+    await _seed_operations(operation_id, "noisy", 5000)
 
     started = time.perf_counter()
-    page = await jobs.list_jobs("quiet", page_size=100)
+    page = await operations._pipeline_page("quiet", page_size=100)
     elapsed = time.perf_counter() - started
 
-    assert [(j.collection, j.doc) for j in page.items] == [("quiet", "a.md")]
+    assert [(r.collection, r.doc) for r in page.items] == [("quiet", "a.md")]
     assert page.next_cursor is None
-    busy = (await jobs.list_jobs("noisy", page_size=100)).items
+    busy = (await operations._pipeline_page("noisy", page_size=100)).items
     assert len(busy) == 100, "the busy collection really is in the history"
-    assert elapsed < 0.2, f"one page of a quiet collection took {elapsed:.3f}s over 5000 jobs"
+    assert elapsed < 0.2, f"one page of a quiet collection took {elapsed:.3f}s over 5000 rows"
 
 
 async def test_list_tasks_reports_stage_slices_still_waiting(
@@ -2113,17 +2109,17 @@ async def test_list_tasks_reports_stage_slices_still_waiting(
     job_id = await dbos.start_import(doc.name)
     assert await wait_event(gate.entered)
 
-    tasks = await jobs.list_tasks(job_id)
+    tasks = await operations.list_tasks(job_id)
 
     assert [(t.stage, t.seq) for t in tasks] == [("convert", 0), ("convert", 1), ("convert", 2)]
     assert tasks[0].status == "SUCCESS" and tasks[0].result is not None
     assert [t.status for t in tasks[1:]] == ["PENDING", "ENQUEUED"]
-    (job,) = [j for j in (await jobs.list_jobs()).items if j.action == "import"]
-    assert (job.tasks_total, job.tasks_done, job.tasks_running) == (3, 1, 1)
+    (run,) = [r for r in (await operations._pipeline_page()).items if r.action == "import"]
+    assert (run.tasks_total, run.tasks_done, run.tasks_running) == (3, 1, 1)
     gate.release.set()
     assert await wait_for(job_id) == "imported"
-    assert {t.status for t in await jobs.list_tasks(job_id)} == {"SUCCESS"}
-    assert len(await jobs.list_tasks(_embed_id(job_id, doc.name))) == 3, "the embed job's own"
+    assert {t.status for t in await operations.list_tasks(job_id)} == {"SUCCESS"}
+    assert len(await operations.list_tasks(_embed_id(job_id, doc.name))) == 3, "the embed job's own"
 
 
 async def test_list_tasks_merges_the_slices_of_a_stage(dbos, tmp_path: Path, monkeypatch) -> None:
@@ -2136,8 +2132,8 @@ async def test_list_tasks_merges_the_slices_of_a_stage(dbos, tmp_path: Path, mon
     job_id = await dbos.start_import(doc.name)
     assert await wait_event(gate.entered)
 
-    async def both_slices_done() -> list[jobs.Task] | None:
-        found = await jobs.list_tasks(job_id)
+    async def both_slices_done() -> list[operations.Task] | None:
+        found = await operations.list_tasks(job_id)
         return found if sum(t.status == "SUCCESS" for t in found) == 2 else None
 
     tasks = await _await(both_slices_done, "the un-gated slices never finished")
@@ -2146,23 +2142,26 @@ async def test_list_tasks_merges_the_slices_of_a_stage(dbos, tmp_path: Path, mon
     assert [t.status for t in tasks] == ["SUCCESS", "PENDING", "SUCCESS"], (
         "seq 1 is gated in its own slice; the other two ran without it"
     )
-    (job,) = [j for j in (await jobs.list_jobs()).items if j.action == "import"]
-    assert (job.tasks_total, job.tasks_done, job.tasks_running) == (3, 2, 1)
+    (run,) = [r for r in (await operations._pipeline_page()).items if r.action == "import"]
+    assert (run.tasks_total, run.tasks_done, run.tasks_running) == (3, 2, 1)
     assert {t.id for t in tasks} == {f"{job_id}:convert:{i}:{i}" for i in range(3)}
     gate.release.set()
     assert await wait_for(job_id) == "imported"
-    assert {t.status for t in await jobs.list_tasks(job_id)} == {"SUCCESS"}
+    assert {t.status for t in await operations.list_tasks(job_id)} == {"SUCCESS"}
 
 
 async def test_step_outcome_reads_a_plain_step_output(dbos) -> None:
     """Steps that predate `BatchResult` (and every non-batch step) return their value directly."""
-    assert jobs._step_outcome({"output": 5, "error": None}) == (5, None)
-    assert jobs._step_outcome({"output": None, "error": RuntimeError("boom")}) == (None, "boom")
-    assert jobs._step_outcome({"output": "text", "error": None}) == (None, None)
+    assert operations._step_outcome({"output": 5, "error": None}) == (5, None)
+    assert operations._step_outcome({"output": None, "error": RuntimeError("boom")}) == (
+        None,
+        "boom",
+    )
+    assert operations._step_outcome({"output": "text", "error": None}) == (None, None)
 
 
 @pytest.mark.parametrize(
-    ("name", "job_id", "expected"),
+    ("name", "operation_id", "expected"),
     [
         ("an import", "imp:book.pdf:cafe", ("import", None, "book.pdf")),
         ("an embedding", "emb:book.pdf:cafe", ("embed", None, "book.pdf")),
@@ -2174,14 +2173,14 @@ async def test_step_outcome_reads_a_plain_step_output(dbos) -> None:
         ("a name that is no id at all", "book.pdf", None),
     ],
 )
-def test_a_pipeline_job_id_names_its_action_collection_and_document(
-    name: str, job_id: str, expected: tuple | None
+def test_a_pipeline_id_names_its_action_collection_and_document(
+    name: str, operation_id: str, expected: tuple | None
 ) -> None:
-    assert workflows.job_names(job_id) == expected, name
+    assert workflows.pipeline_names(operation_id) == expected, name
 
 
 @pytest.mark.parametrize(
-    ("name", "job_id", "collection"),
+    ("name", "operation_id", "collection"),
     [
         ("a bulk index", "bulk-index:law:cafe", "law"),
         ("a bulk delete", "bulk-delete:law:cafe", "law"),
@@ -2190,32 +2189,37 @@ def test_a_pipeline_job_id_names_its_action_collection_and_document(
         ("an id with nothing in that place", "bulk-index", None),
     ],
 )
-def test_only_a_job_of_one_collection_carries_its_name(
-    name: str, job_id: str, collection: str | None
+def test_only_an_operation_of_one_collection_carries_its_name(
+    name: str, operation_id: str, collection: str | None
 ) -> None:
-    assert jobs._collection_of(job_id) == collection, name
+    assert operations._collection_of(operation_id) == collection, name
 
 
-async def test_a_document_delete_is_listed_as_a_collection_job_with_no_collection(
+async def test_a_document_delete_is_listed_as_a_collection_operation_with_no_collection(
     dbos, tmp_path: Path
 ) -> None:
     """The three whole-collection workflows share one kind and one id shape, but a document delete
     carries a document where the other two carry a collection."""
     doc = await import_document(dbos, "gone.md", MD, tmp_path)
-    job_id = await dbos.start_delete_document(doc.name)
-    assert await wait_for(job_id) is None
+    operation_id = await dbos.start_delete_document(doc.name)
+    assert await wait_for(operation_id) is None
 
-    (row,) = (await jobs.list_kind("collection", page_size=10)).items
+    (row,) = (await operations.list_operations("collection", page_size=10)).items
 
-    assert (row.id, row.kind, row.title) == (job_id, "collection", f"delete document {doc.name}")
-    assert (await jobs.list_kind("collection", collection="any", page_size=10)).items == [], (
-        "a collection filter keeps the jobs of one collection, and this job has none"
+    assert (row.id, row.kind, row.title) == (
+        operation_id,
+        "collection",
+        f"delete document {doc.name}",
+    )
+    filtered = await operations.list_operations("collection", collection="any", page_size=10)
+    assert filtered.items == [], (
+        "a collection filter keeps one collection's operations, and this one has none"
     )
 
 
-def test_the_workflow_names_the_jobs_view_spells_out_are_the_ones_dbos_records() -> None:
-    """Every name `jobs` selects by and groups by is pinned against the registration DBOS made:
-    a mismatch is a silent miss in a query, not an error."""
+def test_the_names_the_operations_view_spells_out_are_the_ones_dbos_records() -> None:
+    """Every name `operations` selects by and groups by is pinned against the registration DBOS
+    made: a mismatch is a silent miss in a query, not an error."""
     assert dbos_names.PIPELINE_WORKFLOWS == [
         get_dbos_func_name(workflows.import_document),
         get_dbos_func_name(workflows.ensure_embedding),
@@ -2226,7 +2230,7 @@ def test_the_workflow_names_the_jobs_view_spells_out_are_the_ones_dbos_records()
     assert workflows.stage_slice.__name__ != dbos_names.STAGE_WORKFLOW, (
         "the durable name is pinned, not derived from the function name"
     )
-    assert jobs.KIND_NAMES == {
+    assert operations.KIND_NAMES == {
         "collection": [
             get_dbos_func_name(workflows.index_collection_workflow),
             get_dbos_func_name(workflows.delete_collection_workflow),
@@ -2238,8 +2242,8 @@ def test_the_workflow_names_the_jobs_view_spells_out_are_the_ones_dbos_records()
             get_dbos_func_name(workflows.daily_maintenance),
         ],
     }
-    assert set(jobs.KIND_BY_NAME) == set(dbos_names.PIPELINE_WORKFLOWS) | {
-        name for names in jobs.KIND_NAMES.values() for name in names
+    assert set(operations.KIND_BY_NAME) == set(dbos_names.PIPELINE_WORKFLOWS) | {
+        name for names in operations.KIND_NAMES.values() for name in names
     }, "every kind counts the workflows it lists, and nothing else"
 
 
@@ -2312,10 +2316,10 @@ async def test_audit_records_carry_the_collection_and_the_document(dbos, tmp_pat
         ("index.completed", "aud", "a.md"),
         ("index.failed", "aud", "b.md"),
     }
-    assert {r["actor"] for r in lines} == {"workflow"}
+    assert {r["actor"] for r in lines} == {"operation"}
     (failed,) = [r for r in lines if r["event"] == "index.failed"]
     assert failed["outcome"] == "error" and "not imported" in failed["error"]
-    assert failed["workflow_id"].startswith("idx-col:aud:b.md:")
+    assert failed["operation_id"].startswith("idx-col:aud:b.md:")
     assert all(r["duration_ms"] >= 0 and r["app_version"] == audit.APP_VERSION for r in lines)
 
 
@@ -2372,20 +2376,20 @@ async def test_daily_maintenance_prunes_the_audit_trail(dbos) -> None:
     assert kept.exists()
 
 
-async def test_daily_maintenance_purges_the_job_history_past_the_retention(
+async def test_daily_maintenance_purges_the_history_past_the_retention(
     dbos, tmp_path: Path
 ) -> None:
-    """DBOS keeps a finished workflow forever, so the nightly run is what bounds the Jobs view:
-    a job that finished longer ago than `retention.job_days` goes, with the stage children and
-    the step logs that carry its micro-batches."""
-    await save_user_settings(UserSettings(retention=RetentionSettings(job_days=1)))
+    """DBOS keeps a finished run forever, so the nightly round is what bounds the Operations view:
+    an operation that finished longer ago than `retention.operation_days` goes, with the stage
+    children and the step logs that carry its micro-batches."""
+    await save_user_settings(UserSettings(retention=RetentionSettings(operation_days=1)))
     doc = await import_document(dbos, "old.md", MD, tmp_path)
-    listed = (await jobs.list_jobs()).items
-    assert {job.doc for job in listed} == {doc.name}, "the import and the embedding it warmed"
+    listed = (await operations._pipeline_page()).items
+    assert {run.doc for run in listed} == {doc.name}, "the import and the embedding it warmed"
     job_id = listed[0].id
-    assert await jobs.list_tasks(job_id), "the job has micro-batches while DBOS holds it"
+    assert await operations.list_tasks(job_id), "the job has micro-batches while DBOS holds it"
     two_days_ago = int((time.time() - 2 * 86400) * 1000)
-    async with db.connect() as conn:  # the only way to age a job: DBOS stamps its own clock
+    async with db.connect() as conn:  # the only way to age a row: DBOS stamps its own clock
         await conn.execute(
             "update workflow_status set completed_at = ? where completed_at is not null",
             (two_days_ago,),
@@ -2393,22 +2397,26 @@ async def test_daily_maintenance_purges_the_job_history_past_the_retention(
 
     await workflows.daily_maintenance(datetime.now(UTC), None)
 
-    assert (await jobs.list_jobs()).items == [], "nothing of the document's history is left"
+    assert (await operations._pipeline_page()).items == [], (
+        "nothing of the document's history is left"
+    )
     with pytest.raises(NotFound, match="job not found"):
-        await jobs.list_tasks(job_id)
+        await operations.list_tasks(job_id)
 
 
-async def test_daily_maintenance_keeps_a_job_inside_the_retention(dbos, tmp_path: Path) -> None:
-    """The cutoff is the only thing that decides: a job that finished within the window stays,
-    micro-batches included."""
-    await save_user_settings(UserSettings(retention=RetentionSettings(job_days=28)))
+async def test_daily_maintenance_keeps_an_operation_inside_the_retention(
+    dbos, tmp_path: Path
+) -> None:
+    """The cutoff is the only thing that decides: an operation that finished within the window
+    stays, micro-batches included."""
+    await save_user_settings(UserSettings(retention=RetentionSettings(operation_days=28)))
     doc = await import_document(dbos, "fresh.md", MD, tmp_path)
-    before = [job.id for job in (await jobs.list_jobs()).items]
+    before = [run.id for run in (await operations._pipeline_page()).items]
 
     await workflows.daily_maintenance(datetime.now(UTC), None)
 
-    assert [job.id for job in (await jobs.list_jobs()).items] == before
-    assert {job.doc for job in (await jobs.list_jobs()).items} == {doc.name}
+    assert [run.id for run in (await operations._pipeline_page()).items] == before
+    assert {run.doc for run in (await operations._pipeline_page()).items} == {doc.name}
 
 
 async def test_daily_maintenance_sweeps_stale_staged_uploads(dbos) -> None:

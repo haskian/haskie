@@ -24,9 +24,10 @@ from conftest import (
 )
 from dbos import DBOS
 
-from haskie import dbos_names, embed, jobs, models, settings, workflows
-from haskie.collection import Collection
+from haskie import settings
+from haskie.collection.collection import Collection
 from haskie.errors import HaskieError, NotReady
+from haskie.indexing import dbos_names, embed, models, operations, workflows
 from haskie.settings import (
     CollectionSettings,
     SearchOverrides,
@@ -55,7 +56,7 @@ def _compact_model_name() -> str:
         ("loaded in this process", "ready", "ready", None),
         ("download failed", "error", "error", "failed to load: RuntimeError: no such model"),
         ("never required before", "missing", "pending", "is not loaded yet"),
-        ("still downloading", "blocked", "loading", "is downloading .job dl:embedding:"),
+        ("still downloading", "blocked", "loading", "is downloading .operation dl:embedding:"),
         ("downloaded, caches cold", "cold", "loading", "is loading in this process"),
     ],
 )
@@ -342,7 +343,7 @@ async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> 
     assert workflow_id.startswith("dl:reranker:")
     await await_terminal([workflow_id])
     assert loaded == [override], "the download workflow really called the loader"
-    (download,) = (await jobs.list_kind("download")).items
+    (download,) = (await operations.list_operations("download")).items
     assert download.id == workflow_id
     assert download.title == f"download reranker {override}", "kind and model read out of the id"
     assert (download.status, download.error) == ("SUCCESS", None)
@@ -363,7 +364,7 @@ async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> N
         [models._model_id(kind, name) for kind, name in await models._required(user)]
     )
 
-    downloads = (await jobs.list_kind("download")).items
+    downloads = (await operations.list_operations("download")).items
     assert {d.title for d in downloads} == {
         f"download embedding {_compact_model_name()}",
         "download reranker Xenova/ms-marco-MiniLM-L-6-v2",
@@ -389,7 +390,7 @@ async def test_restart_does_not_create_a_second_download_record(dbos, monkeypatc
     await restart_dbos()
     await workflows.apply_settings(user)  # the boot applies them once; twice must change nothing
 
-    (download,) = (await jobs.list_kind("download")).items
+    (download,) = (await operations.list_operations("download")).items
     assert download.id == workflow_id, "the same record, not one per boot"
     assert download.status == "SUCCESS", "and it is not downloaded again"
 
@@ -397,7 +398,7 @@ async def test_restart_does_not_create_a_second_download_record(dbos, monkeypatc
         return (await models.model_statuses())[0].state == "ready"
 
     await until(warmed, "the model was never warmed")
-    assert (await jobs.list_kind("download")).items[0].detail["warm"] is True
+    assert (await operations.list_operations("download")).items[0].detail["warm"] is True
 
 
 async def test_a_downloaded_model_is_warmed_after_restart_before_search_uses_it(

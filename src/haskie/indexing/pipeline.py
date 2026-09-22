@@ -18,8 +18,9 @@ Three stages, each a set of independent, idempotent steps, and each with its own
   once before the first of them; `finalize_index` builds the full-text index if the collection
   has none yet.
 
-Everything that costs O(collection) rather than O(document) is deferred to `maintenance.py`.
-`workflows.py` orchestrates these with DBOS; nothing here touches document or membership rows.
+Everything that costs O(collection) rather than O(document) is deferred to
+`collection/maintenance.py`. `workflows.py` orchestrates these with DBOS; nothing here touches
+document or membership rows.
 
 Every function is `async def`: the file reads and writes await, and the CPU work (pdf parsing,
 chunking, embedding) is handed to a worker thread through `cpu.on_cpu`, which is also where one
@@ -33,10 +34,12 @@ import anyio
 import anyio.to_thread
 import msgspec
 
-from haskie import chunk, convert, cpu, embed_cache, home, models
-from haskie.collection import Collection
-from haskie.document import Document
-from haskie.index import Row
+from haskie import cpu, home
+from haskie.collection.collection import Collection
+from haskie.collection.index import Row
+from haskie.document import convert
+from haskie.document.document import Document
+from haskie.indexing import chunk, embed_cache, models
 from haskie.settings import ChunkSettings, EmbeddingModel
 
 JOINER = "\n\n"  # between parts in the assembled markdown
@@ -151,7 +154,7 @@ async def embed_batch(
         chunks = chunk.split(text, chunking, batch.line_offset, batch.char_offset)
         vectors: list[list[float] | None] = [None] * len(chunks)
         if embedding is not None and chunks:
-            from haskie.embed import embed_texts
+            from haskie.indexing.embed import embed_texts
 
             vectors = list(embed_texts(embedding, [c.text for c in chunks]))
         return [Row(chunk=c, vector=v) for c, v in zip(chunks, vectors, strict=True)]

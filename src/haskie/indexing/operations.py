@@ -1,28 +1,38 @@
-"""Read model over the job history: one `Job` per pipeline workflow, one `Task` per micro-batch
-below it, and one `BulkJob` per whole-collection or whole-document job. Nothing here is stored;
-every field comes from DBOS's workflow tables, which the nightly retention round bounds.
+"""Read model over the operation history, in the three words this app counts work in.
+
+An **operation** is the whole of what someone asked for: import a document, index one document
+into a collection, index a whole collection, delete a collection, delete a document, maintain a
+collection, download a model. A **job** is one stage of an operation - convert, embed or index.
+A **task** is one micro-batch: one durable step below a job.
+
+"Workflow" is DBOS's word for the thing that runs any of them, and it stays in the modules that
+talk to DBOS (`workflows`, `dbos_names`, `sysdb`, `models`). Nothing this module returns says it.
+
+Nothing here is stored; every field comes from DBOS's workflow tables, which the nightly retention
+round bounds.
 
 Three workflows carry a document through the pipeline (`dbos_names.PIPELINE_WORKFLOWS`), and each
-is a job of its own: `import_document` converts it, `ensure_embedding` fills its embedding cache,
-`index_collection_document` writes one collection's table from that cache. Every one of them cuts
-its stage into `stage_slice` children with a durable step per micro-batch, so a job's tasks are
+runs a job of an operation: `import_document` converts it, `ensure_embedding` fills its embedding
+cache, `index_collection_document` writes one collection's table from that cache. Every one of them
+cuts its stage into `stage_slice` children with a durable step per micro-batch, so a job's tasks are
 those micro-batches: the batch list comes from each child's input, the finished count from its
 step log (`sysdb`, one grouped query for the whole page). Counts are summed over the children, so
 how a stage was sliced never shows here.
 
-Every other kind of workflow this app runs is listed through one generic read model instead:
-`list_kind` returns a page of `JobRow` for a whole-collection job, a model download or a
-maintenance run, so the Jobs view has a section per kind. Documents are a kind there too, mapped
-from the `Job` above, because they alone also have tasks and a cancel.
+Every other kind of operation this app runs is listed through one generic read model instead:
+`list_operations` returns a page of `Operation` for a whole-collection operation, a model download
+or a maintenance run, so the Operations view has a section per kind. Documents are a kind there
+too, folded out of the pipeline listing below, because they alone also have jobs, tasks and a
+cancel.
 
-Reads only: cancelling a job writes, so it lives in `workflows` beside the ids it writes by.
+Reads only: cancelling an operation writes, so it lives in `workflows` beside the ids it writes by.
 
-The action, the collection and the document are read out of the workflow id (`imp:{doc}:{uuid}`,
-`emb:{doc}:{uuid}`, `idx-col:{collection}:{doc}:{uuid}`, through `workflows.job_names`), never out
-of the recorded input: that makes the collection filter an id prefix the database can apply, and a
-page of jobs costs no input payloads at all. Every other kind whose work belongs to one collection
-carries the name in the same place (`{prefix}:{collection}:{rest}`), and a download reads its kind
-and model out of its id (`dl:{kind}:{model}`), for the same reason.
+The action, the collection and the document are read out of the id (`imp:{doc}:{uuid}`,
+`emb:{doc}:{uuid}`, `idx-col:{collection}:{doc}:{uuid}`, through `workflows.pipeline_names`), never
+out of the recorded input: that makes the collection filter an id prefix the database can apply,
+and a page of operations costs no input payloads at all. Every other kind whose work belongs to one
+collection carries the name in the same place (`{prefix}:{collection}:{rest}`), and a download reads
+its kind and model out of its id (`dl:{kind}:{model}`), for the same reason.
 
 Every listing is a read of DBOS's own tables through its `*_async` API, so every one of them is
 awaited. The row builders below take what those reads returned and touch nothing: they stay sync.
@@ -34,8 +44,10 @@ from typing import Literal, get_args
 import msgspec
 from dbos import DBOS
 
-from haskie import models, session, sysdb, workflows
-from haskie.dbos_names import (
+from haskie import sysdb
+from haskie.errors import InvalidInput, NotFound
+from haskie.indexing import models, workflows
+from haskie.indexing.dbos_names import (
     ACTIVE_STATUS,
     BULK_WORKFLOWS,
     COLLECTION_DOCUMENT_WORKFLOW,
@@ -47,33 +59,41 @@ from haskie.dbos_names import (
     STAGE_STEP,
     STAGE_WORKFLOW,
     BulkWorkflow,
-    WorkflowStatus,
+    RunStatus,
 )
-from haskie.errors import InvalidInput, NotFound
+from haskie.indexing.pipeline import Batch
+from haskie.indexing.workflows import (
+    STAGE_ORDER,
+    BatchResult,
+    PipelineAction,
+    Stage,
+    pipeline_names,
+)
 from haskie.paging import DEFAULT_PAGE_SIZE, OffsetCursor, Order, Page, check_page_size
-from haskie.pipeline import Batch
-from haskie.workflows import STAGE_ORDER, BatchResult, JobAction, Stage, job_names
+from haskie.search import session
 
-# Jobs are always newest first, so the cursor carries no sort of its own; it names the listing the
-# next page continues in and the offset into it, which is all an ordered-by-created_at listing of a
-# workflow history can page on.
-JOB_SORT = "created_at"
-JOB_ORDER: Order = "desc"
-# Both job listings page on an offset: DBOS's history has one fixed order and no sort of its own.
-CURSOR = OffsetCursor(JOB_SORT, JOB_ORDER)
+# Operations are always newest first, so the cursor carries no sort of its own; it names the
+# listing the next page continues in and the offset into it, which is all an ordered-by-created_at
+# listing of a run history can page on.
+SORT = "created_at"
+ORDER: Order = "desc"
+# Both listings page on an offset: DBOS's history has one fixed order and no sort of its own.
+CURSOR = OffsetCursor(SORT, ORDER)
 
 
-class Job(msgspec.Struct):
-    """One run of one pipeline workflow over one document.
+class _StageRun(msgspec.Struct):
+    """One run of one pipeline over one document, as DBOS's history holds it: the raw row
+    `fold_operations` folds into an operation and its jobs. Internal on purpose - nothing outside
+    module sees it, and no route returns it.
 
     `collection` is None for an import and an embed: both are collection-independent, and only the
     index of a member belongs to a collection."""
 
     id: str
-    action: JobAction
+    action: PipelineAction
     collection: str | None
     doc: str
-    status: WorkflowStatus
+    status: RunStatus
     created_at: float
     updated_at: float
     error: str | None
@@ -82,8 +102,8 @@ class Job(msgspec.Struct):
     tasks_total: int = 0
 
 
-# A whole-collection or whole-document job is reported under the name DBOS records it as, so the
-# kind the API reports is the workflow name (`test_workflows` pins that against the registry).
+# A whole-collection or whole-document operation is reported under the name DBOS records it as, so
+# the kind the API reports is the workflow name (`test_workflows` pins that against the registry).
 BulkKind = BulkWorkflow
 BULK_KINDS: tuple[BulkKind, ...] = BULK_WORKFLOWS
 BULK_TITLES: dict[BulkKind, str] = {
@@ -93,110 +113,113 @@ BULK_TITLES: dict[BulkKind, str] = {
 }
 
 
-class BulkJob(msgspec.Struct):
-    """One whole-collection or whole-document job: what the 202 of an "index all", a collection
-    delete or a document delete points at.
+class OperationProgress(msgspec.Struct):
+    """How far one whole-collection or whole-document operation got: what the 202 of an "index
+    all", a collection delete or a document delete points at.
 
     `collection` is None for a document delete: it spans every collection the document is in."""
 
     id: str
     kind: BulkKind
     collection: str | None
-    status: WorkflowStatus
+    status: RunStatus
     progress: workflows.BulkProgress | None = None
     error: str | None = None
 
 
-# Declared in the order the Jobs view shows the sections, so `KIND_ORDER` is the type itself.
-JobKind = Literal["document", "collection", "download", "maintenance"]
-KIND_ORDER: tuple[JobKind, ...] = get_args(JobKind)
-KIND_LABELS: dict[JobKind, str] = {
+# Declared in the order the Operations view shows the sections, so `KIND_ORDER` is the type itself.
+OperationKind = Literal["document", "collection", "download", "maintenance"]
+KIND_ORDER: tuple[OperationKind, ...] = get_args(OperationKind)
+KIND_LABELS: dict[OperationKind, str] = {
     "document": "Documents",
     "collection": "Collections",
     "download": "Model downloads",
     "maintenance": "Maintenance",
 }
-DOCUMENT_KIND: JobKind = "document"  # the one kind with a listing of its own, and its own cursor
+DOCUMENT_KIND: OperationKind = "document"  # the one kind with a listing of its own, and its cursor
 
 
-class StageJob(msgspec.Struct):
-    """One stage of a document operation, and the workflow whose batches it is made of: the
-    convert and index stages run in the operation's own workflow, the embed stage in the
-    `ensure_embedding` child it spawns (see `fold_operations`)."""
+class Job(msgspec.Struct):
+    """One stage of an operation, and the run whose batches it is made of: the convert and index
+    stages run in the operation's own run, the embed stage in the `ensure_embedding` child it
+    spawns (see `operations`)."""
 
+    id: str  # pass it to `list_tasks` for this job's batches
     stage: Stage
-    job_id: str  # pass it to `list_tasks` for this stage's batches
-    status: WorkflowStatus
-    tasks_done: int
-    tasks_running: int
-    tasks_total: int
-    seconds: float | None = None  # how long the stage ran; None while it still does
+    status: RunStatus
+    created_at: float
+    updated_at: float
+    error: str | None
+    tasks_done: int = 0
+    tasks_running: int = 0
+    tasks_total: int = 0
+    seconds: float | None = None  # how long the job ran; None while it still does
 
 
-class JobRow(msgspec.Struct):
-    """One job of any kind, in the shape the Operations view lists: what every kind has in common,
-    plus the numbers only that kind has in `detail` (tasks for a document, pages for a bulk index,
-    warm for a download). Kept flat and untyped on purpose - it is a read model for a table.
+class Operation(msgspec.Struct):
+    """One operation of any kind, in the shape the Operations view lists: what every kind has in
+    common, plus the numbers only that kind has in `detail` (tasks for a document, pages for a bulk
+    index, warm for a download). Kept flat and untyped on purpose - it is a read model for a table.
 
-    A document row is one operation (an import, or an index of one document) and lists its stages:
-    the jobs it is made of, each with the batches it ran."""
+    A document operation (an import, or an index of one document) lists the `jobs` it is made of,
+    each with the tasks it ran."""
 
     id: str
-    kind: JobKind
+    kind: OperationKind
     title: str  # human text: "collection / doc", "index collection X", "download reranker Y"
-    status: WorkflowStatus
+    status: RunStatus
     created_at: float
     updated_at: float
     error: str | None
     origin: str | None = None  # the session whose action started it; None for the web UI
     detail: dict[str, int | str | bool | None] = {}
-    stages: list[StageJob] = []  # documents only, in pipeline order
+    jobs: list[Job] = []  # documents only, in pipeline order
 
 
-class JobKindSummary(msgspec.Struct):
-    """One section of the Jobs view: what to call it, and how much of it is running right now."""
+class OperationKindSummary(msgspec.Struct):
+    """One section of the Operations view: what to call it, and how much of it is running now."""
 
-    kind: JobKind
+    kind: OperationKind
     label: str
     active: int
 
 
 class Task(msgspec.Struct):
     id: str
-    child_id: str  # the `stage_slice` workflow that ran the batch; the task id is `{it}:{seq}`
+    child_id: str  # the `stage_slice` run that did the batch; the task id is `{it}:{seq}`
     stage: Stage
     seq: int
     # convert: PDF pages [start, end); embed: the one part; index: the part range written together
     page_start: int
     page_end: int
-    status: WorkflowStatus
+    status: RunStatus
     result: int | None  # convert: pages needing OCR; embed/index: chunks
     error: str | None
 
 
-def _named(workflow_id: str) -> str:
-    """The name in the second segment of an id (`{prefix}:{name}:{rest}`): the one thing the job
-    is about, whichever kind of name it is. "?" for any other id."""
-    parts = workflow_id.split(":", 2)
+def _named(operation_id: str) -> str:
+    """The name in the second segment of an id (`{prefix}:{name}:{rest}`): the one thing the
+    operation is about, whichever kind of name it is. "?" for any other id."""
+    parts = operation_id.split(":", 2)
     return parts[1] if len(parts) == 3 else "?"
 
 
-def _collection_of(workflow_id: str) -> str | None:
-    """The collection a job belongs to; None when it belongs to none.
+def _collection_of(operation_id: str) -> str | None:
+    """The collection an operation belongs to; None when it belongs to none.
 
     A document delete is the exception: `del-doc:{doc}:{uuid}` carries a document where every
     other id carries a collection, and the delete spans every collection the document is in."""
-    if workflow_id.startswith(f"{workflows.DELETE_DOCUMENT_PREFIX}:"):
+    if operation_id.startswith(f"{workflows.DELETE_DOCUMENT_PREFIX}:"):
         return None
-    name = _named(workflow_id)
+    name = _named(operation_id)
     return None if name == "?" else name
 
 
-# --- one listing per kind of job ----------------------------------------------------------
+# --- one listing per kind of operation -----------------------------------------------------
 
 # Kind -> the DBOS workflow names it lists. `document` is missing on purpose: it has a listing of
-# its own (`list_jobs`), because it is the only kind whose rows carry micro-batch counts.
-KIND_NAMES: dict[JobKind, list[str]] = {
+# its own (`_pipeline_page`), because it is the only kind whose rows carry micro-batch counts.
+KIND_NAMES: dict[OperationKind, list[str]] = {
     "collection": list(BULK_KINDS),
     "download": [DOWNLOAD_WORKFLOW],
     # `maintain_collection` is only the debounced handle that waits: the run itself is the child
@@ -204,25 +227,25 @@ KIND_NAMES: dict[JobKind, list[str]] = {
     "maintenance": [MAINTAIN_PARTITION_WORKFLOW, DAILY_MAINTENANCE_WORKFLOW],
 }
 
-# The same table read the other way, for counting active workflows by kind in one query.
-KIND_BY_NAME: dict[str, JobKind] = {
+# The same table read the other way, for counting active runs by kind in one query.
+KIND_BY_NAME: dict[str, OperationKind] = {
     **dict.fromkeys(PIPELINE_WORKFLOWS, "document"),
     **{name: kind for kind, names in KIND_NAMES.items() for name in names},
 }
 
-# Kind -> the id prefix that keeps one collection's jobs only. Downloads and document deletes
+# Kind -> the id prefix that keeps one collection's operations only. Downloads and document deletes
 # belong to no collection, so a collection filter leaves the section holding them empty rather
 # than unfiltered.
-_COLLECTION_PREFIX: dict[JobKind, list[str]] = {
+_COLLECTION_PREFIX: dict[OperationKind, list[str]] = {
     "collection": [f"{workflows.BULK_INDEX_PREFIX}:", f"{workflows.BULK_DELETE_PREFIX}:"],
     "maintenance": [f"{workflows.MAINTAIN_PREFIX}:"],
 }
 
 
-def _checked_kind(kind: str) -> JobKind:
+def _checked_kind(kind: str) -> OperationKind:
     """A kind is a trust boundary: an unknown one is a mistake in the request, not an empty page."""
     if kind not in KIND_ORDER:
-        raise InvalidInput(f"unknown job kind {kind!r}; allowed: {', '.join(KIND_ORDER)}")
+        raise InvalidInput(f"unknown operation kind {kind!r}; allowed: {', '.join(KIND_ORDER)}")
     return kind
 
 
@@ -231,15 +254,17 @@ def _bulk_kind(name: str | None) -> BulkKind | None:
     return name if name in BULK_KINDS else None
 
 
-def _kind_prefix(kind: JobKind, collection: str | None) -> list[str] | None:
+def _kind_prefix(kind: OperationKind, collection: str | None) -> list[str] | None:
     if collection is None:
         return None
     return [f"{prefix}{collection}:" for prefix in _COLLECTION_PREFIX.get(kind, [])] or None
 
 
-async def _kind_statuses(kind: JobKind, collection: str | None, limit: int, offset: int) -> list:
+async def _kind_statuses(
+    kind: OperationKind, collection: str | None, limit: int, offset: int
+) -> list:
     """One window of the DBOS history for one kind, newest first. Inputs stay on disk; the output
-    is loaded only because DBOS carries a workflow's error alongside it."""
+    is loaded only because DBOS carries a run's error alongside it."""
     return await DBOS.list_workflows_async(
         name=KIND_NAMES[kind],
         workflow_id_prefix=_kind_prefix(kind, collection),
@@ -251,23 +276,24 @@ async def _kind_statuses(kind: JobKind, collection: str | None, limit: int, offs
     )
 
 
-async def list_kind(
+async def list_operations(
     kind: str,
     collection: str | None = None,
     page_size: int = DEFAULT_PAGE_SIZE,
     cursor: str | None = None,
-) -> Page[JobRow]:
-    """One page of the jobs of one kind, newest first.
+) -> Page[Operation]:
+    """One page of the operations of one kind, newest first.
 
-    Documents keep a listing of their own, with the batch counts only they carry, and are mapped
+    Documents keep a listing of their own, with the batch counts only they carry, and are folded
     into the common shape here; the rest are one window of the DBOS history each, paged on an
     opaque offset cursor bound to the kind that issued it."""
     check_page_size(page_size)
     checked = _checked_kind(kind)
     if checked == DOCUMENT_KIND:
-        page = await list_jobs(collection, page_size, cursor)
+        page = await _pipeline_page(collection, page_size, cursor)
         return Page(
-            items=await _with_origins(fold_operations(page.items)), next_cursor=page.next_cursor
+            items=await _with_origins(fold_operations(page.items)),
+            next_cursor=page.next_cursor,
         )
     offset = _decode_cursor(cursor, checked)
     # one row more than the page: its presence is what tells us another page exists
@@ -280,7 +306,7 @@ async def list_kind(
     )
 
 
-async def _with_origins(rows: list[JobRow]) -> list[JobRow]:
+async def _with_origins(rows: list[Operation]) -> list[Operation]:
     """Name the session that started each row, where one did: one query for the page."""
     origins = await session.origins([row.id for row in rows])
     for row in rows:
@@ -288,17 +314,17 @@ async def _with_origins(rows: list[JobRow]) -> list[JobRow]:
     return rows
 
 
-async def list_kinds() -> list[JobKindSummary]:
-    """Every kind, in the order the Jobs view shows them, with how many of each are enqueued or
-    running right now - one grouped query for all of them, not one per section."""
+async def list_kinds() -> list[OperationKindSummary]:
+    """Every kind, in the order the Operations view shows them, with how many of each are enqueued
+    or running right now - one grouped query for all of them, not one per section."""
     active = await sysdb.active_counts_by_name()
-    counts: dict[JobKind, int] = dict.fromkeys(KIND_ORDER, 0)
+    counts: dict[OperationKind, int] = dict.fromkeys(KIND_ORDER, 0)
     for name, count in active.items():
         kind = KIND_BY_NAME.get(name)
         if kind is not None:
             counts[kind] += count
     return [
-        JobKindSummary(kind=kind, label=KIND_LABELS[kind], active=counts[kind])
+        OperationKindSummary(kind=kind, label=KIND_LABELS[kind], active=counts[kind])
         for kind in KIND_ORDER
     ]
 
@@ -314,16 +340,16 @@ class QueueActivity(msgspec.Struct):
 
 
 class Activity(msgspec.Struct):
-    """The indicator every view shows: coarse jobs (`job.*` queues) and the tasks they are made of
-    (`task.*` queues)."""
+    """The indicator every view shows: operations (`operation.*` queues) and the tasks they are
+    made of (`task.*` queues)."""
 
-    jobs: QueueActivity
+    operations: QueueActivity
     tasks: QueueActivity
 
 
 async def activity() -> Activity:
-    # The embed stage an import or an index spawned is waited for by the one that spawned it (see
-    # `fold_operations`): counting both would read "2 jobs" for one operation.
+    # The embed job an import or an index spawned is waited for by the one that spawned it (see
+    # `operations`): counting both would read "2 operations" for one operation.
     by_family = await sysdb.queue_activity(skip=[workflows.EMBEDDING_QUEUE])
 
     def family(name: str) -> QueueActivity:
@@ -331,106 +357,110 @@ async def activity() -> Activity:
         running = counts.get(PENDING_STATUS, 0)
         return QueueActivity(queued=sum(counts.values()) - running, running=running)
 
-    return Activity(jobs=family("job"), tasks=family("task"))
+    return Activity(operations=family("operation"), tasks=family("task"))
 
 
-def _document_title(job: Job) -> str:
-    """What the job is doing, in one line: an index names the collection it writes, an import and
-    an embed name what they do to the document instead."""
-    if job.collection is not None:
-        return f"{job.collection} / {job.doc}"
-    return f"{job.action} {job.doc}"
+def _document_title(run: _StageRun) -> str:
+    """What the operation is doing, in one line: an index names the collection it writes, an import
+    and an embed name what they do to the document instead."""
+    if run.collection is not None:
+        return f"{run.collection} / {run.doc}"
+    return f"{run.action} {run.doc}"
 
 
-def fold_operations(jobs: list[Job]) -> list[JobRow]:
-    """The page as operations: an import or an index of one document, with the embed job it
-    spawned folded in as its embed stage rather than listed as a job of its own.
+def fold_operations(runs: list[_StageRun]) -> list[Operation]:
+    """The page as operations: an import or an index of one document, with the embed run it
+    spawned folded in as its embed job rather than listed as an operation of its own.
 
     The child is found by id: `workflows._ensure_embedding` names it `emb:{doc}:{tail}` with the
     tail of its parent's id. An embed whose parent is not on this page (a page boundary fell
-    between them, or the parent is gone) stays a row of its own, because hiding it would lose it.
+    between them, or the parent is gone) stays an operation of its own, because hiding it would
+    lose it.
     """
-    embeds = {job.id: job for job in jobs if job.action == "embed"}
-    folded = {_embed_id(job) for job in jobs if job.action != "embed"}
-    out: list[JobRow] = []
-    for job in jobs:
-        if job.action == "embed" and job.id in folded:
+    embeds = {run.id: run for run in runs if run.action == "embed"}
+    folded = {_embed_id(run) for run in runs if run.action != "embed"}
+    out: list[Operation] = []
+    for run in runs:
+        if run.action == "embed":
+            if run.id not in folded:
+                out.append(_document_row(run, [_job("embed", run)]))
             continue
-        if job.action == "embed":
-            out.append(_document_row(job, [_stage_job("embed", job)]))
-            continue
-        embed = embeds.get(_embed_id(job))
-        own = _stage_job("convert" if job.action == "import" else "index", job, embed)
-        embed_stage = [] if embed is None else [_stage_job("embed", embed)]
-        stages = [own, *embed_stage] if job.action == "import" else [*embed_stage, own]
-        out.append(_document_row(job, stages))
+        embed = embeds.get(_embed_id(run))
+        own = _job("convert" if run.action == "import" else "index", run, embed)
+        embed_job = [] if embed is None else [_job("embed", embed)]
+        jobs = [own, *embed_job] if run.action == "import" else [*embed_job, own]
+        out.append(_document_row(run, jobs))
     return out
 
 
-def _embed_id(job: Job) -> str:
-    return f"{workflows.EMBED_PREFIX}:{job.doc}:{job.id.rsplit(':', 1)[-1]}"
+def _embed_id(run: _StageRun) -> str:
+    return f"{workflows.EMBED_PREFIX}:{run.doc}:{run.id.rsplit(':', 1)[-1]}"
 
 
-def _stage_job(stage: Stage, job: Job, embed: Job | None = None) -> StageJob:
-    """One stage, read from the workflow that runs it. The embed child sets the stages around it
-    straight: an import converts before it spawns the embed, so a convert stage with an embed
-    beside it is over; an index writes after the embed, so an index stage waits while the embed is
-    not done and runs once it is. Without the child, the workflow's own status stands."""
-    status = job.status
+def _job(stage: Stage, run: _StageRun, embed: _StageRun | None = None) -> Job:
+    """One job, read from the run that carries it. The embed child sets the jobs around it
+    straight: an import converts before it spawns the embed, so a convert job with an embed
+    beside it is over; an index writes after the embed, so an index job waits while the embed is
+    not done and runs once it is. Without the child, the run's own status stands."""
+    status = run.status
     if embed is not None and stage == "convert":
         status = "SUCCESS"
     if embed is not None and stage == "index" and status in ACTIVE_STATUS:
         status = "PENDING" if embed.status == "SUCCESS" else "ENQUEUED"
-    return StageJob(
+    return Job(
+        id=run.id,
         stage=stage,
-        job_id=job.id,
         status=status,
-        tasks_done=job.tasks_done,
-        tasks_running=job.tasks_running,
-        tasks_total=job.tasks_total,
-        seconds=_stage_seconds(stage, job, embed) if _is_over(status) else None,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        # a job this listing declared successful never failed, whatever the run around it did
+        error=None if status == "SUCCESS" else run.error,
+        tasks_done=run.tasks_done,
+        tasks_running=run.tasks_running,
+        tasks_total=run.tasks_total,
+        seconds=_job_seconds(stage, run, embed) if _is_over(status) else None,
     )
 
 
-def _is_over(status: WorkflowStatus) -> bool:
-    """Whether a stage has stopped running. DELAYED is a debounce waiting, not work in flight, but
-    no stage is ever debounced, so "not active" is the whole of it here."""
+def _is_over(status: RunStatus) -> bool:
+    """Whether a job has stopped running. DELAYED is a debounce waiting, not work in flight, but
+    no job is ever debounced, so "not active" is the whole of it here."""
     return status not in ACTIVE_STATUS
 
 
-def _stage_seconds(stage: Stage, job: Job, embed: Job | None) -> float:
-    """How long one finished stage ran, from the workflow timestamps alone. The owning workflow
-    spans more than its own stage: an import converts and then waits for the embed it spawned, and
-    an index waits for the embed before it writes. The child's timestamps split the two."""
+def _job_seconds(stage: Stage, run: _StageRun, embed: _StageRun | None) -> float:
+    """How long one finished job ran, from the run's timestamps alone. The owning run spans more
+    than its own stage: an import converts and then waits for the embed it spawned, and an index
+    waits for the embed before it writes. The child's timestamps split the two."""
     if embed is None:
-        return max(0.0, job.updated_at - job.created_at)
+        return max(0.0, run.updated_at - run.created_at)
     if stage == "convert":
-        return max(0.0, embed.created_at - job.created_at)
+        return max(0.0, embed.created_at - run.created_at)
     if stage == "index":
-        return max(0.0, job.updated_at - embed.updated_at)
+        return max(0.0, run.updated_at - embed.updated_at)
     return max(0.0, embed.updated_at - embed.created_at)
 
 
-def _document_row(job: Job, stages: list[StageJob]) -> JobRow:
-    return JobRow(
-        id=job.id,
+def _document_row(run: _StageRun, jobs: list[Job]) -> Operation:
+    return Operation(
+        id=run.id,
         kind="document",
-        title=_document_title(job),
-        status=job.status,
-        created_at=job.created_at,
-        updated_at=job.updated_at,
-        error=job.error,
+        title=_document_title(run),
+        status=run.status,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        error=run.error,
         detail={
-            "tasks_done": sum(s.tasks_done for s in stages),
-            "tasks_running": sum(s.tasks_running for s in stages),
-            "tasks_total": sum(s.tasks_total for s in stages),
+            "tasks_done": sum(j.tasks_done for j in jobs),
+            "tasks_running": sum(j.tasks_running for j in jobs),
+            "tasks_total": sum(j.tasks_total for j in jobs),
         },
-        stages=stages,
+        jobs=jobs,
     )
 
 
-async def _kind_row(kind: JobKind, status) -> JobRow:
-    return JobRow(
+async def _kind_row(kind: OperationKind, status) -> Operation:
+    return Operation(
         id=status.workflow_id,
         kind=kind,
         title=_title(kind, status),
@@ -442,14 +472,17 @@ async def _kind_row(kind: JobKind, status) -> JobRow:
     )
 
 
-def _title(kind: JobKind, status) -> str:
-    """Human text for one row: what this job is doing, read out of its id and its workflow name.
+def _title(kind: OperationKind, status) -> str:
+    """Human text for one row: what this operation is doing, read out of its id and the name DBOS
+    recorded it under.
 
-    `document` never arrives here: it has a row builder of its own (see `list_kind`)."""
+    `document` never arrives here: it has a row builder of its own (see `list_operations`)."""
     if kind == "collection":
         bulk = _bulk_kind(status.name)  # the listing selects exactly these three names
-        # the second segment is a collection for the two bulk jobs, a document for a delete
-        return f"{BULK_TITLES[bulk]} {_named(status.workflow_id)}" if bulk else "collection job"
+        # the second segment is a collection for the two bulk kinds, a document for a delete
+        return (
+            f"{BULK_TITLES[bulk]} {_named(status.workflow_id)}" if bulk else "collection operation"
+        )
     if kind == "download":
         download_kind, model = models.model_names(status.workflow_id)
         return f"download {download_kind} {model}"
@@ -458,9 +491,9 @@ def _title(kind: JobKind, status) -> str:
     return f"maintain {_named(status.workflow_id)}"
 
 
-async def _detail(kind: JobKind, status) -> dict[str, int | str | bool | None]:
+async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | None]:
     """The numbers only this kind has. A bulk index publishes its progress as a DBOS event, which
-    is read without waiting: a job that has not finished its first page yet simply has none.
+    is read without waiting: an operation that has not finished its first page yet simply has none.
 
     Async because that read is one, even with no wait: the event lives in the system database."""
     if kind == "download":
@@ -474,13 +507,13 @@ async def _detail(kind: JobKind, status) -> dict[str, int | str | bool | None]:
     return {}
 
 
-def _job(status, children: list, done_by_child: dict[str, int]) -> Job:
+def _stage_run(status, children: list, done_by_child: dict[str, int]) -> _StageRun:
     # a listing selects the three pipeline workflows by name, so every id parses; an id of an
     # older shape is listed as an import of an unknown document rather than failing the page
-    action, collection, doc = job_names(status.workflow_id) or ("import", None, "?")
+    action, collection, doc = pipeline_names(status.workflow_id) or ("import", None, "?")
     totals = [len(found[1]) if (found := workflows.stage_input(c)) else 0 for c in children]
     done = [done_by_child.get(c.workflow_id, 0) for c in children]
-    return Job(
+    return _StageRun(
         id=status.workflow_id,
         action=action,
         collection=collection,
@@ -515,17 +548,18 @@ def _cursor(source: str, offset: int) -> str:
     return CURSOR.encode(source, offset)
 
 
-async def list_jobs(
+async def _pipeline_page(
     collection: str | None = None, page_size: int = DEFAULT_PAGE_SIZE, cursor: str | None = None
-) -> Page[Job]:
-    """One page of pipeline jobs, newest first, with the finished batches of the whole page
-    counted in one grouped query.
+) -> Page[_StageRun]:
+    """One page of pipeline runs, newest first, with the finished batches of the whole page
+    counted in one grouped query. `fold_operations` folds these into the document operations the API
+    serves; nothing else reads them.
 
-    The collection filter is the workflow id's prefix, so the database cuts the window after it
-    has filtered: a busy collection can no longer push a quiet one out of the page. It keeps
-    collection index jobs only - an import and an embed belong to no collection.
+    The collection filter is the id's prefix, so the database cuts the window after it has
+    filtered: a busy collection can no longer push a quiet one out of the page. It keeps collection
+    index runs only - an import and an embed belong to no collection.
 
-    A job that starts while the page is walked shifts the offsets behind it, so a job can repeat
+    A run that starts while the page is walked shifts the offsets behind it, so a row can repeat
     or be skipped across a page boundary - the same trade an offset cursor over a live history
     always makes."""
     check_page_size(page_size)
@@ -547,7 +581,7 @@ async def list_jobs(
         [c.workflow_id for group in children.values() for c in group], STAGE_STEP
     )
     return Page(
-        items=[_job(s, children[s.workflow_id], done) for s in page],
+        items=[_stage_run(s, children[s.workflow_id], done) for s in page],
         next_cursor=(
             _cursor(DOCUMENT_KIND, offset + page_size) if len(statuses) > page_size else None
         ),
@@ -555,8 +589,8 @@ async def list_jobs(
 
 
 async def stage_children(ids: list[str]) -> dict[str, list]:
-    """The stage children of each listed pipeline workflow, keyed by parent; a parent with none
-    maps to an empty list. One DBOS read for the whole page."""
+    """The stage children of each listed pipeline run, keyed by parent; a parent with none maps to
+    an empty list. One DBOS read for the whole page."""
     children: dict[str, list] = {i: [] for i in ids}
     if ids:
         found = await DBOS.list_workflows_async(
@@ -579,8 +613,8 @@ class ChunksAt(msgspec.Struct):
 async def chunks_since(cutoff: float) -> list[ChunksAt]:
     """Every successful index that completed on or after `cutoff`, oldest first.
 
-    DBOS's own retention round bounds this history, so the chart reaches back as far as the
-    workflow rows do and no further."""
+    DBOS's own retention round bounds this history, so the chart reaches back as far as its rows
+    do and no further."""
     since_ms = int(cutoff * 1000)
     live = {
         s.workflow_id: s
@@ -589,7 +623,7 @@ async def chunks_since(cutoff: float) -> list[ChunksAt]:
         )
         if s.completed_at is not None and s.completed_at >= since_ms
     }
-    # only the index stage writes chunks, and its batches record how many: read those step logs
+    # only the index job writes chunks, and its batches record how many: read those step logs
     # alone, side by side
     indexes = [
         (parent, child)
@@ -604,17 +638,17 @@ async def chunks_since(cutoff: float) -> list[ChunksAt]:
     points = [
         ChunksAt(
             (status.completed_at or 0) / 1000,
-            (job_names(job_id) or ("index", None, "?"))[1] or "?",
-            chunks[job_id],
+            (pipeline_names(operation_id) or ("index", None, "?"))[1] or "?",
+            chunks[operation_id],
         )
-        for job_id, status in live.items()
+        for operation_id, status in live.items()
     ]
     return sorted(points, key=lambda point: point.ts)
 
 
 def _ordered(tasks: list[Task]) -> list[Task]:
-    """Stage by stage, batch by batch: the order the pipeline planned them in. Slices of one
-    stage run side by side, so this is a plan order, not a finishing order."""
+    """Stage by stage, batch by batch: the order the pipeline planned them in. Slices of one job
+    run side by side, so this is a plan order, not a finishing order."""
     return sorted(tasks, key=lambda t: (STAGE_ORDER.index(t.stage), t.seq))
 
 
@@ -627,7 +661,7 @@ async def list_tasks(job_id: str) -> list[Task]:
     return _ordered([task for child in children for task in await _stage_tasks(child)])
 
 
-def _task(child_id: str, stage: Stage, batch: Batch, status: WorkflowStatus, output, error) -> Task:
+def _task(child_id: str, stage: Stage, batch: Batch, status: RunStatus, output, error) -> Task:
     return Task(
         id=f"{child_id}:{batch.seq}",
         child_id=child_id,
@@ -643,7 +677,7 @@ def _task(child_id: str, stage: Stage, batch: Batch, status: WorkflowStatus, out
 
 async def _stage_tasks(child) -> list[Task]:
     """One Task per micro-batch of one stage child: finished batches from its step log; the next
-    one is running while the child runs; the rest wait. A child holds one slice of the stage, and
+    one is running while the child runs; the rest wait. A child holds one slice of the job, and
     the batches keep the `seq` the plan gave them, so the slices reassemble by `seq` alone."""
     found = workflows.stage_input(child)
     if found is None:
@@ -674,22 +708,22 @@ def _step_outcome(step) -> tuple[int | None, str | None]:
     return (output if isinstance(output, int) else None), (str(error) if error else None)
 
 
-async def bulk_job(job_id: str) -> BulkJob:
-    """The state of one whole-collection or whole-document job: its DBOS status plus the progress
+async def progress(operation_id: str) -> OperationProgress:
+    """The state of one whole-collection or whole-document operation: its status plus the progress
     event a bulk index publishes after every page. `progress` stays None for a delete, which has
     no pages, and for an index that has not finished its first page yet."""
-    status = await DBOS.get_workflow_status_async(job_id)
+    status = await DBOS.get_workflow_status_async(operation_id)
     if status is None:
-        raise NotFound(f"job not found: {job_id}")
+        raise NotFound(f"operation not found: {operation_id}")
     kind = _bulk_kind(status.name)
-    if kind is None:  # a job of another kind: not a bulk job
-        raise NotFound(f"job not found: {job_id}")
-    progress = await DBOS.get_event_async(job_id, workflows.PROGRESS_EVENT, timeout_seconds=0)
-    return BulkJob(
-        id=job_id,
+    if kind is None:  # an operation of another kind: it publishes no progress
+        raise NotFound(f"operation not found: {operation_id}")
+    found = await DBOS.get_event_async(operation_id, workflows.PROGRESS_EVENT, timeout_seconds=0)
+    return OperationProgress(
+        id=operation_id,
         kind=kind,
-        collection=_collection_of(job_id),
+        collection=_collection_of(operation_id),
         status=status.status,
-        progress=progress if isinstance(progress, workflows.BulkProgress) else None,
+        progress=found if isinstance(found, workflows.BulkProgress) else None,
         error=str(status.error) if status.error else None,
     )

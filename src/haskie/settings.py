@@ -282,10 +282,10 @@ AUDIT_RETENTION = Meta(
     ),
 )
 RETENTION_DAYS = Meta(
-    title="Job history (days)",
+    title="Operation history (days)",
     description=(
-        "How many days of finished indexing jobs and their micro-batch results stay visible "
-        "under Jobs. The nightly maintenance run deletes everything older."
+        "How many days of finished operations and their tasks stay visible under Operations. "
+        "The nightly maintenance run deletes everything older."
     ),
 )
 
@@ -445,15 +445,15 @@ class PipelineSettings(msgspec.Struct):
 
 
 class RetentionSettings(msgspec.Struct):
-    """How long history is kept: the job history in DBOS's own tables, and the audit trail on
-    disk. Both are swept by the nightly maintenance run (see `workflows.daily_maintenance`), so
+    """How long history is kept: the operation history in DBOS's own tables, and the audit trail
+    on disk. Both are swept by the nightly maintenance run (see `workflows.daily_maintenance`), so
     they are answered in the same place."""
 
-    job_days: Annotated[int, RETENTION_DAYS] = 28
+    operation_days: Annotated[int, RETENTION_DAYS] = 28
     audit_days: Annotated[int, AUDIT_RETENTION] = 90
 
     def __post_init__(self) -> None:
-        _at_least(1, job_days=self.job_days)
+        _at_least(1, operation_days=self.operation_days)
         _at_least(0, audit_days=self.audit_days)  # 0 = keep everything
 
 
@@ -561,34 +561,10 @@ def _store(settings: UserSettings) -> None:
         _state = _Loaded(settings)
 
 
-# Field names stored by earlier builds. msgspec ignores a key it does not know, so without
-# this a home written before the rename would come back silently reset to defaults. A key a
-# later build dropped needs nothing: it is ignored the same way.
-_RENAMED_SECTIONS = (("defaults", "conversion"), ("indexing", "pipeline"))
-_RENAMED_RETENTION = (("days", "job_days"),)
-
-
-def _renamed(stored: dict[str, Any]) -> dict[str, Any]:
-    """A stored settings blob under the current field names. Idempotent: a blob already written
-    by this build has none of the old keys and comes back unchanged."""
-    for old, new in _RENAMED_SECTIONS:
-        if old in stored:
-            stored.setdefault(new, stored.pop(old))
-    retention = stored.setdefault("retention", {})
-    if isinstance(retention, dict):
-        for old, new in _RENAMED_RETENTION:
-            if old in retention:
-                retention.setdefault(new, retention.pop(old))
-        # audit retention used to live under its own "maintenance" section
-        audit_days = (stored.pop("maintenance", None) or {}).get("audit_retention_days")
-        if audit_days is not None:
-            retention.setdefault("audit_days", audit_days)
-    return stored
-
-
 def _decode(raw: str) -> UserSettings:
-    """Decode a stored settings row, renaming the fields earlier builds wrote first."""
-    return msgspec.convert(_renamed(msgspec.json.decode(raw, type=dict)), UserSettings)
+    """Decode a stored settings row. No renames of old keys: a home written under other field
+    names is at another `db.SCHEMA_VERSION` and is refused before its settings are read."""
+    return msgspec.json.decode(raw, type=UserSettings)
 
 
 async def load_user_settings_or_none() -> UserSettings | None:

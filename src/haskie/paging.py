@@ -25,7 +25,7 @@ CURSOR_VERSION = 1
 
 def check_page_size(size: int, cap: int = MAX_PAGE_SIZE, field: str = "page_size") -> int:
     """The one page-size bound check. `cap` and `field` differ where a listing pages something
-    dearer than a metadata row (see `textsearch`)."""
+    dearer than a metadata row (see `search.text`)."""
     if not 1 <= size <= cap:
         raise InvalidInput(f"{field} must be 1..{cap}, got {size}")
     return size

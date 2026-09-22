@@ -33,31 +33,10 @@ from conftest import (
     text_pdf,
 )
 
-from haskie import (
-    audit,
-    chunk,
-    convert,
-    db,
-    document,
-    embed,
-    embed_cache,
-    home,
-    logs,
-    maintenance,
-    pipeline,
-)
-from haskie.chunk import Chunk
-from haskie.collection import Collection, DocumentCounts, Member
-from haskie.document import Document
-from haskie.errors import (
-    Conflict,
-    HaskieError,
-    InvalidInput,
-    NotFound,
-    NotReady,
-    PermanentError,
-)
-from haskie.index import (
+from haskie import audit, db, home, logs
+from haskie.collection import maintenance
+from haskie.collection.collection import Collection, DocumentCounts, Member
+from haskie.collection.index import (
     PLAIN_SCHEMA,
     CollectionIndex,
     Hit,
@@ -67,6 +46,18 @@ from haskie.index import (
     _partitions,
     row_score,
 )
+from haskie.document import convert, document
+from haskie.document.document import Document
+from haskie.errors import (
+    Conflict,
+    HaskieError,
+    InvalidInput,
+    NotFound,
+    NotReady,
+    PermanentError,
+)
+from haskie.indexing import chunk, embed, embed_cache, pipeline
+from haskie.indexing.chunk import Chunk
 from haskie.paging import PageRequest
 from haskie.settings import (
     ChunkSettings,
@@ -1271,7 +1262,7 @@ async def test_one_document_sits_in_two_collections_and_a_detach_leaves_both_alo
     params = embed_cache.params(doc, ChunkSettings(), None)
     rows = home.HOME / "rows" / "000000.rows.json"
     rows.parent.mkdir(parents=True, exist_ok=True)
-    rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0])]))
+    rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0], seq=1)]))
     cache_id = await embed_cache.write(params, [rows], None)
 
     assert await document.collections_of(doc.name) == ["alpha", "beta"]
@@ -1306,7 +1297,7 @@ async def test_deleting_a_document_takes_every_membership_and_cache_row_with_it(
     params = embed_cache.params(doc, ChunkSettings(), None)
     rows = home.HOME / "rows" / "000000.rows.json"
     rows.parent.mkdir(parents=True, exist_ok=True)
-    rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0])]))
+    rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0], seq=1)]))
     await embed_cache.write(params, [rows], None)
 
     await document.remove_files(doc.name)
@@ -1500,7 +1491,7 @@ async def test_delete_on_an_outdated_table_removes_nothing_instead_of_dropping_i
 @pytest.mark.anyio
 async def test_add_parts_without_a_vector_is_rejected(tmp_path: Path) -> None:
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, COMPACT)
-    (row,) = [Row(chunk=c) for c in chunk.split(MD, SMALL)[:1]]
+    (row,) = [Row(chunk=c, seq=1) for c in chunk.split(MD, SMALL)[:1]]
     with pytest.raises(ValueError, match="carries no vector"):
         await index.add_parts("g.md", "s", "m", _aparts([(0, [row])]))
 
@@ -1525,7 +1516,7 @@ async def test_finish_on_an_empty_index_is_a_no_op(tmp_path: Path) -> None:
 TINY = EmbeddingModel("test/tiny", 32)  # 32 / 16 = 2 PQ sub-vectors, enough rows per codebook
 
 
-def _row(text: str, vector: list[float] | None = None) -> Row:
+def _row(text: str, vector: list[float] | None = None, seq: int = 1) -> Row:
     return Row(
         chunk=Chunk(
             heading="H",
@@ -1537,6 +1528,7 @@ def _row(text: str, vector: list[float] | None = None) -> Row:
             parents=[],
         ),
         vector=vector,
+        seq=seq,
     )
 
 
@@ -1551,7 +1543,11 @@ async def _fill(
     index: CollectionIndex, doc: str, part: int, count: int, vectors: bool = False
 ) -> None:
     rows = [
-        _row(f"{doc} part{part} row{i} lancedb", _vector(part * 1000 + i) if vectors else None)
+        _row(
+            f"{doc} part{part} row{i} lancedb",
+            _vector(part * 1000 + i) if vectors else None,
+            seq=part * count + i + 1,
+        )
         for i in range(count)
     ]
     await index.add_parts(doc, f"documents/{doc}", f"documents/{doc}.md", _aparts([(part, rows)]))
@@ -1866,6 +1862,7 @@ def test_score_prefers_the_most_specific_signal(name: str, row: dict, expected: 
 PLAIN_ROW: dict = dict.fromkeys(PLAIN_SCHEMA.names, "") | {
     "part": 0,
     "chunk_id": 0,
+    "seq": 1,
     "line_start": 0,
     "line_end": 0,
     "char_start": 0,
@@ -1896,6 +1893,7 @@ def test_hit_names_the_collection_that_matched_and_builds_a_citation(tmp_path: P
             "doc": "book.pdf",
             "chunk_id": 1,
             "part": 2,
+            "seq": 7,
             "source_path": "documents/1f/book.pdf/original.pdf",
             "markdown_path": "documents/1f/book.pdf/original.pdf.md",
             "line_start": 10,
@@ -1911,6 +1909,7 @@ def test_hit_names_the_collection_that_matched_and_builds_a_citation(tmp_path: P
         }
     )
     assert hit.collection == "notes"
+    assert (hit.chunk_id, hit.part, hit.seq) == (1, 2, 7), "where in the document it sits"
     assert hit.parents == ["Part I", "Chapter 2"]
     assert hit.header == "Part I > Chapter 2 > Results"
     assert hit.location == "book.pdf p.3-4 L10-20"
@@ -1946,8 +1945,8 @@ async def test_cross_encode_rescores_candidates_best_first(
 ) -> None:
     """The cross-encoder is CPU work, so it runs in a worker thread; its score replaces whatever
     the retrieval stage put on the row (see `row_score`)."""
-    from haskie import models
-    from haskie.index import cross_encode
+    from haskie.collection.index import cross_encode
+    from haskie.indexing import models
 
     checked: list[tuple[str, str]] = []
 
@@ -1970,7 +1969,7 @@ async def test_an_index_with_an_embedding_stores_a_vector_column(tmp_path: Path)
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, EmbeddingModel("test/model", 2))
     (chunk_,) = chunk.split("# H\n\nbody\n", ChunkSettings())
 
-    row = Row(chunk=chunk_, vector=[0.1, 0.2])
+    row = Row(chunk=chunk_, vector=[0.1, 0.2], seq=1)
     await index.add_parts("g.md", "documents/g.md", "documents/g.md.md", _aparts([(0, [row])]))
 
     table = await index._existing()
@@ -1988,7 +1987,13 @@ async def test_add_parts_writes_one_fragment_for_many_parts(tmp_path: Path) -> N
     does not break the group."""
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     chunks = chunk.split(MD, SMALL)
-    parts = [(0, [Row(chunk=c) for c in chunks]), (1, []), (2, [Row(chunk=c) for c in chunks])]
+    numbered = list(enumerate(chunks + chunks, start=1))
+    half = len(chunks)
+    parts = [
+        (0, [Row(chunk=c, seq=seq) for seq, c in numbered[:half]]),
+        (1, []),
+        (2, [Row(chunk=c, seq=seq) for seq, c in numbered[half:]]),
+    ]
 
     written = await index.add_parts("g.md", "documents/g.md", "documents/g.md.md", _aparts(parts))
 
@@ -2008,7 +2013,7 @@ async def test_delete_parts_removes_only_the_range(tmp_path: Path) -> None:
     (chunk_,) = chunk.split("# H\n\nbody\n", ChunkSettings())
     for doc in ("a.md", "b.md"):
         await index.add_parts(
-            doc, "s", "m", _aparts([(part, [Row(chunk=chunk_)]) for part in range(4)])
+            doc, "s", "m", _aparts([(part, [Row(chunk=chunk_, seq=part + 1)]) for part in range(4)])
         )
 
     await index.delete_parts("a.md", 1, 3)
@@ -2031,7 +2036,10 @@ async def test_fts_rows_is_empty_without_an_fts_index(tmp_path: Path) -> None:
     assert await empty.fts_rows("lancedb", 10) == [], "a table with no rows in it"
 
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
-    rows = [Row(chunk=c) for c in chunk.split("# H\n\nlancedb chapter one\n", ChunkSettings())]
+    rows = [
+        Row(chunk=c, seq=seq)
+        for seq, c in enumerate(chunk.split("# H\n\nlancedb chapter one\n", ChunkSettings()), 1)
+    ]
     await index.add_parts("d.md", "documents/d.md", "documents/d.md.md", _aparts([(0, rows)]))
     assert await index.has_index("text") is False, "written, not indexed: the state under test"
     assert await index.fts_rows("lancedb", 10) == [], "rows are there, the full-text index is not"
@@ -2052,7 +2060,7 @@ async def test_search_rows_returns_raw_rows_without_cutting(tmp_path: Path) -> N
         c for i in range(6) for c in chunk.split(f"# H\n\nlancedb chapter {i}\n", ChunkSettings())
     ]
     assert len(chunks) == 6, "one chunk per text, or the row counts below mean nothing"
-    rows = [Row(chunk=c) for c in chunks]
+    rows = [Row(chunk=c, seq=seq) for seq, c in enumerate(chunks, 1)]
     await index.add_parts("d.md", "documents/d.md", "documents/d.md.md", _aparts([(0, rows)]))
     await index.finish()
     settings = SearchSettings(limit=2, candidates=4)
@@ -2095,7 +2103,7 @@ async def test_query_vector_is_none_for_fts_and_without_embedding(
     vector_column: bool,
     expected: list[float] | None,
 ) -> None:
-    from haskie import models
+    from haskie.indexing import models
 
     path = tmp_path / "index"
     vector_field = pa.field("vector", pa.list_(pa.float32(), 384))
@@ -2321,10 +2329,10 @@ async def test_two_collections_with_the_same_chunk_settings_share_one_cache_entr
 #
 # `CollectionIndex` splits search into retrieval (`search_rows`), the query embedding
 # (`query_vector`) and row-to-Hit (`hit`), so a session embeds once, fans out and rescores once.
-# `session.rrf_merge` fuses the per-collection rankings by rank, because two indexes do not score
-# on the same scale. `textsearch.merge` merges raw BM25 scores instead: one lexical scorer with
-# the same tokenizer answers in every collection. Both count a passage once, because one document
-# may be a member of several of the collections being searched.
+# `retrieval.rrf_merge` fuses the per-collection rankings by rank, because two indexes do not
+# score on the same scale. `search.text.merge` merges raw BM25 scores instead: one lexical scorer
+# with the same tokenizer answers in every collection. Both count a passage once, because one
+# document may be a member of several of the collections being searched.
 
 # How long one collection of a fan-out may wait for the other before the test calls it sequential.
 CONCURRENT_SEARCH_SECONDS = 5.0
@@ -2352,7 +2360,7 @@ TEXT_QUERY = ("lancedb", ["alpha", "beta"], 25)
 async def test_set_collections_rejects(
     name: str, session_id: str, collections: list[str], error: type[Exception], match: str
 ) -> None:
-    from haskie import session
+    from haskie.search import session
 
     await Collection.create("a")
     with pytest.raises(error, match=match):
@@ -2362,7 +2370,7 @@ async def test_set_collections_rejects(
 
 @pytest.mark.anyio
 async def test_set_collections_deduplicates_and_keeps_order() -> None:
-    from haskie import session
+    from haskie.search import session
 
     for name in ("a", "b"):
         await Collection.create(name)
@@ -2376,7 +2384,7 @@ async def test_set_collections_deduplicates_and_keeps_order() -> None:
 async def test_session_collections_keep_their_order_and_survive_reorder() -> None:
     """The selection is rows with a position, not a JSON list: reordering it rewrites the rows,
     and a session that selected nothing is still a session."""
-    from haskie import session
+    from haskie.search import session
 
     for name in ("a", "b", "c"):
         await Collection.create(name)
@@ -2401,7 +2409,7 @@ async def test_session_collections_keep_their_order_and_survive_reorder() -> Non
 async def test_session_search_skips_a_collection_that_disappeared(caplog, monkeypatch) -> None:
     """Deleting a collection drops it from every session (one cascade), so a name without a row
     can only come from a delete between the two reads of the search. It is skipped, not raised."""
-    from haskie import session
+    from haskie.search import retrieval, session
 
     async def nothing_found(names: list[str]) -> dict:
         return {}
@@ -2411,7 +2419,7 @@ async def test_session_search_skips_a_collection_that_disappeared(caplog, monkey
     monkeypatch.setattr(Collection, "load_settings", staticmethod(nothing_found))
 
     with caplog.at_level("WARNING"):
-        assert await session.search("s1", "anything") == []
+        assert await retrieval.chunks(await session.collections_for("s1"), "anything") == []
     assert events(caplog) == ["session_collection_missing"]
 
 
@@ -2422,7 +2430,7 @@ async def test_session_search_reads_its_collections_concurrently(monkeypatch) ->
     hold the first retrieval until the wait times out, and the timeout fails the search."""
     import asyncio
 
-    from haskie import session
+    from haskie.search import retrieval, session
 
     for name in ("a", "b"):
         await Collection.create(name)
@@ -2437,7 +2445,7 @@ async def test_session_search_reads_its_collections_concurrently(monkeypatch) ->
 
     monkeypatch.setattr(CollectionIndex, "search_rows", paired)
 
-    assert await session.search("s1", "anything") == []
+    assert await retrieval.chunks(await session.collections_for("s1"), "anything") == []
     assert all(event.is_set() for event in arrived.values()), "both collections were read"
 
 
@@ -2446,7 +2454,7 @@ async def test_session_search_counts_a_passage_once_across_collections() -> None
     """The same document in two chosen collections puts the same chunk in both rankings. A caller
     wants one hit per passage, so it is credited to the first collection that returned it and the
     copy is dropped before the ranks are counted."""
-    from haskie import session
+    from haskie.search import retrieval, session
 
     for name in ("alpha", "beta"):
         collection = await Collection.create(name)
@@ -2455,7 +2463,7 @@ async def test_session_search_counts_a_passage_once_across_collections() -> None
         await index.finish()
     await session.set_collections("s1", ["alpha", "beta"])
 
-    hits = await session.search("s1", "lancedb", limit=10)
+    hits = await retrieval.chunks(await session.collections_for("s1"), "lancedb", limit=10)
 
     assert len(hits) == 3, "three chunks, not six: the copies are merged away"
     passages = {(hit.doc, hit.part, hit.chunk_id) for hit in hits}
@@ -2484,9 +2492,9 @@ async def test_session_search_counts_a_passage_once_across_collections() -> None
 def test_rrf_merge_orders_by_rank_and_sums_duplicates(
     name: str, ranked: list[list[str]], expected: list[tuple[str, float]]
 ) -> None:
-    from haskie import session
+    from haskie.search import retrieval
 
-    merged = session.rrf_merge(ranked, k=60)
+    merged = retrieval.rrf_merge(ranked, k=60)
 
     assert [item for item, _ in merged] == [item for item, _ in expected], name
     assert [score for _, score in merged] == pytest.approx([s for _, s in expected]), name
@@ -2554,25 +2562,26 @@ def _identity(pairs: list[tuple]) -> list[tuple[str, str, int, int]]:
 def test_text_merge_orders_by_score_then_identity(
     name: str, per_collection: list[list[tuple]], expected: list[tuple[str, str, int, int]]
 ) -> None:
-    from haskie import textsearch
+    # aliased: `text` is a chunk field and a parameter name all over this module
+    from haskie.search import text as fulltext
 
-    merged = textsearch.merge([_retrieved(rows) for rows in per_collection])
+    merged = fulltext.merge([_retrieved(rows) for rows in per_collection])
 
     assert _identity(merged) == expected, name
 
 
 def _digest() -> str:
     """The query identity `TEXT_QUERY` hashes to, read at collection time by the table below."""
-    from haskie import textsearch
+    from haskie.search import text as fulltext
 
-    return textsearch.query_hash(*TEXT_QUERY)
+    return fulltext.query_hash(*TEXT_QUERY)
 
 
 def _wire_cursor(**overrides) -> str:
     """A cursor built straight on the wire format, for the fields `make_cursor` never varies."""
-    from haskie import textsearch
+    from haskie.search import text as fulltext
 
-    payload: dict = {"k": [_digest(), 10], "s": textsearch.SORT, "o": textsearch.ORDER, "v": 1}
+    payload: dict = {"k": [_digest(), 10], "s": fulltext.SORT, "o": fulltext.ORDER, "v": 1}
     payload.update(overrides)
     return base64.urlsafe_b64encode(msgspec.json.encode(payload)).decode().rstrip("=")
 
@@ -2597,23 +2606,23 @@ def _wire_cursor(**overrides) -> str:
 def test_text_cursor_roundtrip_and_rejects_other_query(
     name: str, rejected: tuple | dict | str, detail: str
 ) -> None:
-    from haskie import textsearch
+    from haskie.search import text as fulltext
 
     q, collections, page_size = TEXT_QUERY
-    assert textsearch.parse_cursor(None, q, collections, page_size) == 0, "no cursor, first page"
-    issued = textsearch.make_cursor(q, collections, page_size, 50)
-    assert textsearch.parse_cursor(issued, q, collections, page_size) == 50, "round trip"
-    assert textsearch.make_cursor(q, ["beta", "alpha"], page_size, 50) == issued, "order-free"
+    assert fulltext.parse_cursor(None, q, collections, page_size) == 0, "no cursor, first page"
+    issued = fulltext.make_cursor(q, collections, page_size, 50)
+    assert fulltext.parse_cursor(issued, q, collections, page_size) == 50, "round trip"
+    assert fulltext.make_cursor(q, ["beta", "alpha"], page_size, 50) == issued, "order-free"
 
     if isinstance(rejected, tuple):
-        cursor = textsearch.make_cursor(*rejected)  # a cursor this module issued, another page
+        cursor = fulltext.make_cursor(*rejected)  # a cursor this module issued, another page
     elif isinstance(rejected, dict):
         cursor = _wire_cursor(**rejected)
     else:
         cursor = rejected
 
     with pytest.raises(InvalidInput) as raised:
-        textsearch.parse_cursor(cursor, q, collections, page_size)
+        fulltext.parse_cursor(cursor, q, collections, page_size)
     assert detail in str(raised.value), name
 
 
@@ -2629,9 +2638,9 @@ def test_text_cursor_roundtrip_and_rejects_other_query(
     ],
 )
 def test_text_split_collections(name: str, collections: str | None, expected) -> None:
-    from haskie import textsearch
+    from haskie.search import text as fulltext
 
-    assert textsearch.split_collections(collections) == expected, name
+    assert fulltext.split_collections(collections) == expected, name
 
 
 # --- storage -----------------------------------------------------------------------

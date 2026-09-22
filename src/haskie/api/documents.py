@@ -16,11 +16,14 @@ from litestar.enums import RequestEncodingType
 from litestar.params import Body
 from litestar.response import File, Stream
 
-from haskie import audit, convert, cpu, document, embed_cache, logs, render, session, workflows
+from haskie import audit, cpu, logs
 from haskie.api.common import PAGED, BulkStarted, Describe
-from haskie.document import DocStatus, Document, ImportOptions, Staged
+from haskie.document import convert, document, render
+from haskie.document.document import DocStatus, Document, ImportOptions, Staged
 from haskie.errors import InvalidInput, NotFound
+from haskie.indexing import embed_cache, workflows
 from haskie.paging import Page, PageRequest
+from haskie.search import session
 
 
 class ImportRequest(ImportOptions):
@@ -62,7 +65,7 @@ async def import_document(data: ImportRequest, session_id: str | None = None) ->
     `queued`; convert and embed then run in the background, so poll `get_document` for `imported`.
 
     Args:
-        session_id: The conversation's id; the import and its job then show in that session.
+        session_id: The conversation's id; the import and its operation then show in that session.
     """
     if data.staging_id is not None and data.path is None:
         row = await document.import_staged(data.staging_id, data)
@@ -74,9 +77,9 @@ async def import_document(data: ImportRequest, session_id: str | None = None) ->
         raise InvalidInput("give either staging_id or path")
     audit.attach(doc=row.name, size=row.size)
     logs.bind(doc=row.name)
-    job_id = await workflows.start_import(row.name)
-    audit.attach(job_id=job_id)
-    await session.record(session_id, "import", row.name, workflow_id=job_id)
+    operation_id = await workflows.start_import(row.name)
+    audit.attach(operation_id=operation_id)
+    await session.record(session_id, "import", row.name, operation_id=operation_id)
     return row
 
 
@@ -113,11 +116,11 @@ async def delete_document(doc: str) -> BulkStarted:
     its embedding cache and its row go.
 
     Accepted, not done: each collection's index is cleaned on its own partition, which takes as
-    long as the work already queued there. Poll the job for the outcome.
+    long as the work already queued there. Poll the operation for the outcome.
     """
-    job_id = await workflows.start_delete_document(doc)
-    audit.attach(job_id=job_id)
-    return BulkStarted(job_id=job_id)
+    operation_id = await workflows.start_delete_document(doc)
+    audit.attach(operation_id=operation_id)
+    return BulkStarted(operation_id=operation_id)
 
 
 @post("/api/documents/{doc:str}/import", status_code=202)
@@ -129,9 +132,9 @@ async def reimport_document(doc: str) -> BulkStarted:
     the pipeline is being written right now, so re-running would race it. `start_import` is what
     refuses the rest, with a conflict.
     """
-    job_id = await workflows.start_import(doc)
-    audit.attach(job_id=job_id)
-    return BulkStarted(job_id=job_id)
+    operation_id = await workflows.start_import(doc)
+    audit.attach(operation_id=operation_id)
+    return BulkStarted(operation_id=operation_id)
 
 
 @get("/api/documents/{doc:str}/collections")
@@ -204,7 +207,7 @@ async def get_markdown(doc: str, full: bool = False) -> Stream:
 async def describe_document(doc: str, data: Describe, session_id: str | None = None) -> Document:
     """Replace what the document is said to be. Empty clears it.
 
-    The description is what `search_documents` returns beside each match, so it is worth writing
+    The description is what `search_sources` returns beside each match, so it is worth writing
     for anything an agent is expected to choose between.
 
     Args:

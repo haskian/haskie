@@ -51,7 +51,7 @@ const MAINTENANCE_FIELDS: NumberField<PipelineSettings>[] = [
 ]
 
 const RETENTION_FIELDS: NumberField<RetentionSettings>[] = [
-  { key: 'job_days', min: 1 },
+  { key: 'operation_days', min: 1 },
   { key: 'audit_days', min: 0 },
 ]
 

@@ -122,7 +122,8 @@ def _convert_pool() -> ProcessPoolExecutor | None:
             # start a second server. A forkserver child is forked from a clean, thread-free
             # process instead, so `__main__` is never re-run and plain `fork` stays unsafe-free.
             context = multiprocessing.get_context("forkserver")
-            context.set_forkserver_preload(["haskie.convert"])  # import once, not per child
+            # import once, not per child
+            context.set_forkserver_preload(["haskie.document.convert"])
             _pool = ProcessPoolExecutor(max_workers=workers, mp_context=context)
         return _pool
 

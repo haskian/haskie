@@ -16,7 +16,7 @@ from typing import Literal
 import msgspec
 import pyromark
 
-from haskie.convert import PAGE_MARKER
+from haskie.document.convert import PAGE_MARKER
 
 HEADING_OPEN = re.compile(r"<h([1-6])>")
 

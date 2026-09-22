@@ -8,11 +8,15 @@ import time
 from collections.abc import AsyncIterator, Iterator
 from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import anyio
 import anyio.to_thread
 import pytest
 from dbos import WorkflowStatusString
+
+if TYPE_CHECKING:  # every helper below imports haskie when it runs, not when pytest collects
+    from haskie.indexing.chunk import Chunk
 
 TEARDOWN_GRACE_SECONDS = 2.0  # how long a cancelled step may still be running at teardown
 TEARDOWN_POLL_SECONDS = 0.05
@@ -47,9 +51,10 @@ def fast_runtime() -> None:
     The step retry intervals are not here: DBOS copies them into the decorator at import, so the
     two retry tests pay the real wait. `-n auto` absorbs it.
     """
-    from haskie import cpu, workflows
+    from haskie import cpu
+    from haskie.indexing import workflows
 
-    workflows.JOB_POLL = 0.02
+    workflows.OPERATION_POLL = 0.02
     workflows.TASK_POLL = 0.02
     cpu.CONVERT_WORKERS = 0
 
@@ -78,7 +83,8 @@ def _use_home(path: Path) -> Path:
 
 def _drop_caches(patch: pytest.MonkeyPatch) -> None:
     """Drop the process caches that would otherwise answer from another home."""
-    from haskie import db, models, settings
+    from haskie import db, settings
+    from haskie.indexing import models
 
     patch.setattr(db, "_migrated", set())
     patch.setattr(settings, "_state", None)
@@ -113,7 +119,8 @@ def template_home(tmp_path_factory: pytest.TempPathFactory, fast_runtime: None) 
     """
     from dbos import DBOS
 
-    from haskie import home, workflows
+    from haskie import home
+    from haskie.indexing import workflows
 
     path = tmp_path_factory.mktemp("template-home")
     with pytest.MonkeyPatch.context() as patch:
@@ -183,7 +190,7 @@ async def dbos(seeded_home: Path):
     Async, so the boot, the teardown and the test body share one event loop: an async workflow
     enqueued by the test is enqueued from that loop, while DBOS runs it on its own background
     loop (see `workflows.start`)."""
-    from haskie import workflows
+    from haskie.indexing import workflows
 
     await workflows.start()
     stop_sweeping = threading.Event()
@@ -229,7 +236,7 @@ async def wait_for(workflow_id: str):
     defaults to a whole second, which is longer than most of these workflows take."""
     from dbos import DBOS
 
-    from haskie import workflows
+    from haskie.indexing import workflows
 
     handle = await DBOS.retrieve_workflow_async(workflow_id)
     return await handle.get_result(polling_interval_sec=workflows.TASK_POLL)
@@ -256,7 +263,7 @@ async def await_terminal(workflow_ids: list[str]) -> None:
 async def until(condition, message: str, timeout: float = WAIT) -> None:
     """Wait for something a background task does; polled, because no result handle carries it.
     `condition` is a coroutine function."""
-    from haskie import workflows
+    from haskie.indexing import workflows
 
     deadline = time.monotonic() + timeout
     while not await condition():
@@ -290,7 +297,7 @@ async def restart_dbos() -> None:
     reopens already carries the queues and the schedules, so the boot only reads them."""
     from dbos import DBOS
 
-    from haskie import workflows
+    from haskie.indexing import workflows
 
     await anyio.to_thread.run_sync(partial(DBOS.destroy, workflow_completion_timeout_sec=0))
     await workflows.start()
@@ -335,7 +342,7 @@ async def document_names() -> list[str]:
 
 async def maintenance_state(collection: str):
     """The maintenance columns of a collection that is expected to exist."""
-    from haskie.collection import Collection
+    from haskie.collection.collection import Collection
 
     state = await Collection(collection).maintenance_state()
     assert state is not None, f"no collection row for {collection}"
@@ -350,7 +357,8 @@ async def import_row(name: str, content: bytes | str = MD, into: Path | None = N
     """The document row and its file, with no pipeline started: the source is written outside the
     document store (under the home's `incoming/` unless `into` says where) and copied in, the way
     a real import reads a file the user already has."""
-    from haskie import document, home
+    from haskie import home
+    from haskie.document import document
 
     source = (into or home.HOME / "incoming") / name
     source.parent.mkdir(parents=True, exist_ok=True)
@@ -359,32 +367,45 @@ async def import_row(name: str, content: bytes | str = MD, into: Path | None = N
 
 
 async def seed_index(collection: str, doc: str, text: str, heading: str = "Alpha") -> None:
-    """One indexed chunk of an imported document in a collection's table.
+    """One indexed chunk of an imported document in a collection's table: the common case of
+    `seed_chunks`, for a test that only needs something to match."""
+    from haskie.indexing.chunk import Chunk
 
-    The real write path with no embedding model, so what a test gets is what a full-text-only
-    collection holds — without paying for a pipeline run to put it there.
-    """
-    from haskie import document
-    from haskie.chunk import Chunk
-    from haskie.collection import Collection
-    from haskie.index import Row
-
-    row = await document.get(doc)
-    chunk = Chunk(
-        heading=heading,
-        text=text,
-        line_start=5,
-        line_end=7,
-        char_start=0,
-        char_end=len(text),
-        parents=["Title"],
+    await seed_chunks(
+        collection,
+        doc,
+        [
+            Chunk(
+                heading=heading,
+                text=text,
+                line_start=5,
+                line_end=7,
+                char_start=0,
+                char_end=len(text),
+                parents=["Title"],
+            )
+        ],
     )
 
-    async def parts() -> AsyncIterator[tuple[int, list[Row]]]:
-        yield 0, [Row(chunk=chunk)]
 
+async def seed_chunks(collection: str, doc: str, chunks: "list[Chunk]") -> None:
+    """Several indexed chunks of one imported document, numbered `seq` 1..N the way a real index
+    numbers them (see `embed_cache._merge`).
+
+    The real write path with no embedding model, so what a test gets is what a full-text-only
+    collection holds — without paying for a pipeline run to put it there. The chunks carry real
+    offsets into the document's markdown, which the caller builds itself.
+    """
+    from haskie.collection.collection import Collection
+    from haskie.collection.index import Row
+    from haskie.document import document
+
+    row = await document.get(doc)
+    rows = [Row(chunk=chunk, seq=seq) for seq, chunk in enumerate(chunks, start=1)]
     index = Collection(collection).index_with(None)
-    await index.add_parts(doc, row.relative(row.original), row.relative(row.markdown), parts())
+    await index.add_parts(
+        doc, row.relative(row.original), row.relative(row.markdown), one_part(0, rows)
+    )
     await index.finish()  # the full-text index the search reads
 
 
@@ -405,7 +426,7 @@ def legacy_index(path: Path, doc: str, text: str, heading: str = "H"):
 async def import_document(dbos, name: str, content: bytes | str, tmp_dir: Path):
     """Import one file and wait for its pipeline; returns the document row. What most workflow
     and API tests start from."""
-    from haskie import document
+    from haskie.document import document
 
     row = await import_row(name, content, tmp_dir)
     assert await wait_for(await dbos.start_import(row.name)) == "imported"
@@ -530,9 +551,9 @@ async def attach_via_api(client, collection: str, doc: str) -> str:
     """Attach one imported document over the API and wait for the collection to index it."""
     response = await client.post(f"/api/collections/{collection}/documents", json={"document": doc})
     assert response.status_code == 202, response.text
-    job_id = response.json()["job_id"]
-    assert await wait_for(job_id) == "indexed"
-    return job_id
+    operation_id = response.json()["operation_id"]
+    assert await wait_for(operation_id) == "indexed"
+    return operation_id
 
 
 def events(caplog) -> list[str]:

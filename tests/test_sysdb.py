@@ -10,8 +10,9 @@ from pathlib import Path
 import pytest
 from dbos import DBOS
 
-from haskie import dbos_names, jobs, sysdb, workflows
-from haskie.collection import Collection
+from haskie import sysdb
+from haskie.collection.collection import Collection
+from haskie.indexing import dbos_names, operations, workflows
 from haskie.settings import PipelineSettings, UserSettings, save_user_settings
 
 from conftest import attach_document, import_document, text_pdf  # isort: skip
@@ -35,24 +36,24 @@ async def _imported(dbos, tmp_path: Path, pages: int) -> str:
     return row.name
 
 
-async def _job_id(action: str, collection: str | None = None) -> str:
-    """The id of the one job with this action (and collection): the ids carry a uuid, so a test
-    that names a child workflow has to read the parent's id first."""
+async def _run_id(action: str, collection: str | None = None) -> str:
+    """The id of the one pipeline run with this action (and collection): the ids carry a uuid, so
+    a test that names a child workflow has to read the parent's id first."""
     found = [
-        job
-        for job in (await jobs.list_jobs(page_size=50)).items
-        if job.action == action and job.collection == collection
+        run
+        for run in (await operations._pipeline_page(page_size=50)).items
+        if run.action == action and run.collection == collection
     ]
-    assert len(found) == 1, f"expected one {action} job, got {[job.id for job in found]}"
+    assert len(found) == 1, f"expected one {action} run, got {[run.id for run in found]}"
     return found[0].id
 
 
 async def test_step_counts_group_by_workflow(dbos, tmp_path) -> None:
-    """The import is the parent of its convert slices and the embed job of its own. One grouped
+    """The import is the parent of its convert slices and the embed run of its own. One grouped
     query counts the batches every one of them recorded."""
     doc = await _imported(dbos, tmp_path, pages=2)
-    import_id = await _job_id("import")
-    embed_id = await _job_id("embed")
+    import_id = await _run_id("import")
+    embed_id = await _run_id("embed")
     converts = [f"{import_id}:convert:{i}" for i in range(2)]
     embeds = [f"{embed_id}:embed:{i}" for i in range(2)]
 
@@ -62,7 +63,7 @@ async def test_step_counts_group_by_workflow(dbos, tmp_path) -> None:
 
     await Collection.create("grp")
     await attach_document(dbos, "grp", doc)
-    index_id = await _job_id("index", "grp")
+    index_id = await _run_id("index", "grp")
 
     assert await sysdb.step_counts([f"{index_id}:index"], dbos_names.STAGE_STEP) == {
         f"{index_id}:index": 2
@@ -72,14 +73,14 @@ async def test_step_counts_group_by_workflow(dbos, tmp_path) -> None:
 
 
 async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) -> None:
-    """Once a document is imported and indexed, its job and task workflows are all SUCCESS and
-    drop out.
+    """Once a document is imported and indexed, its operation and task workflows are all SUCCESS
+    and drop out.
 
     What remains is the maintenance run the collection index asked for, DELAYED on
-    `job.maintenance` until its debounce expires. That is not queued work: nobody is waiting on
-    it, and it sits there for a whole `maintenance_idle_seconds`. Counting it made the indicator
-    read "1 queued" with an idle machine, while the Jobs view - which counts `ACTIVE_STATUS` -
-    showed nothing.
+    `operation.maintenance` until its debounce expires. That is not queued work: nobody is waiting
+    on it, and it sits there for a whole `maintenance_idle_seconds`. Counting it made the indicator
+    read "1 queued" with an idle machine, while the Operations view - which counts `ACTIVE_STATUS`
+    - showed nothing.
     """
     from haskie import db
 
@@ -122,7 +123,7 @@ async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) 
         )
     assert await sysdb.queue_activity() == {
         "task": {"ENQUEUED": 1, "PENDING": 1},
-        "job": {"PENDING": 2},
+        "operation": {"PENDING": 2},
     }, "the prefix of the queue name is the family; the status is kept for the caller to fold"
     assert await sysdb.queue_activity(skip=[workflows.EMBEDDING_QUEUE]) == {
         "task": {"ENQUEUED": 1, "PENDING": 1},
@@ -136,8 +137,8 @@ async def test_stale_active_ids_pages_over_another_versions_workflows(
     from haskie import db
 
     await _imported(dbos, tmp_path, pages=1)
-    import_id = await _job_id("import")
-    async with db.connect() as conn:  # pretend the jobs are still running under an older build
+    import_id = await _run_id("import")
+    async with db.connect() as conn:  # pretend the work is still running under an older build
         await conn.execute(
             "update workflow_status set status = 'ENQUEUED', application_version = 'old-build'"
         )

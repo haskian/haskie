@@ -1,11 +1,11 @@
 """Documents: one row in `documents`, one folder under ~/.haskie/documents/<shard>/<name>/.
 
 A document is first class and belongs to no collection: it is imported once, under a name that
-never changes, and any number of collections may then hold it (`collection.py`). What a document
-owns lives in its folder — `original.<ext>` (the file as uploaded), `original.<ext>.md` (the
-markdown assembled from it once, at import), `parts/` (the per-micro-batch markdown that every
-collection re-chunks from), `preview/` (built lazily on first open) and `embeddings/` (the
-cache `embed_cache.py` writes) — so deleting the folder deletes everything but the rows, and the
+never changes, and any number of collections may then hold it (`collection/collection.py`). What a
+document owns lives in its folder — `original.<ext>` (the file as uploaded), `original.<ext>.md`
+(the markdown assembled from it once, at import), `parts/` (the per-micro-batch markdown that every
+collection re-chunks from), `preview/` (built lazily on first open) and `embeddings/` (the cache
+`indexing/embed_cache.py` writes) — so deleting the folder deletes everything but the rows, and the
 rows cascade from the document's own.
 
 Two-phase intake: `stage` writes an upload into `staging/` with a `staging` row beside it, and
@@ -25,15 +25,17 @@ sync.
 import re
 import shutil
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Any, Literal, Protocol, get_args
 from uuid import uuid4
 
 import anyio
 import anyio.to_thread
 import msgspec
 
-from haskie import convert, cpu, db, home
+from haskie import cpu, db, home
+from haskie.document import convert
 from haskie.errors import Conflict, InvalidInput, NotFound, NotReady, PermanentError
 from haskie.paging import Page, PageRequest, key_reader, keyset, resolve_sort
 from haskie.settings import Parser, load_user_settings
@@ -440,6 +442,21 @@ async def describe_of(docs: set[str]) -> dict[str, str]:
     return {name: description for name, description in rows}
 
 
+class Described(Protocol):
+    """A search row carrying the description of the document it points at."""
+
+    doc: str
+    description: str
+
+
+def fill_descriptions(rows: Iterable[Described], described: dict[str, str]) -> None:
+    """Put each row's description on it, empty for a document that has none. A description
+    belongs to the document rather than to the row, so every search fills it the same way, from
+    one `describe_of` over its whole shortlist."""
+    for row in rows:
+        row.description = described.get(row.doc, "")
+
+
 async def collections_of(name: str) -> list[str]:
     """Every collection holding the document, in name order."""
     async with db.connect() as conn:
@@ -449,6 +466,29 @@ async def collections_of(name: str) -> list[str]:
         )
         rows = await cursor.fetchall()
     return [collection for (collection,) in rows]
+
+
+async def memberships(docs: set[str], collections: list[str]) -> dict[str, list[str]]:
+    """Which of `collections` hold each of `docs`, in name order; a document none of them hold is
+    absent. One query for a whole search result, the way `describe_of` is one for its
+    descriptions: a search that folds hits to documents needs every membership at once."""
+    if not docs or not collections:
+        return {}
+    wanted = list(docs)
+    names = list(set(collections))
+    async with db.connect() as conn:
+        cursor = await conn.execute(
+            "select document, collection from collection_documents "
+            f"where document in ({db.placeholders(len(wanted))}) "
+            f"and collection in ({db.placeholders(len(names))}) "
+            "order by document, collection",
+            [*wanted, *names],
+        )
+        rows = await cursor.fetchall()
+    held: dict[str, list[str]] = {}
+    for name, collection in rows:
+        held.setdefault(name, []).append(collection)
+    return held
 
 
 # --- preview ------------------------------------------------------------------

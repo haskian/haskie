@@ -20,9 +20,10 @@ import aiosqlite
 import anyio
 import msgspec
 
-from haskie import db, document, home
+from haskie import db, home
+from haskie.collection.index import CollectionIndex, Hit, IndexStats, forget_schema
+from haskie.document import document
 from haskie.errors import Conflict, NotFound
-from haskie.index import CollectionIndex, Hit, IndexStats, forget_schema
 from haskie.paging import Page, PageRequest, key_reader, keyset, resolve_sort
 from haskie.settings import (
     ChunkSettings,

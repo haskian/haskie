@@ -28,8 +28,10 @@ from anyio.from_thread import start_blocking_portal
 from litestar.testing import AsyncTestClient, RequestFactory
 
 from haskie import app as app_module
-from haskie import audit, document, errors, home, logs
-from haskie.collection import Collection
+from haskie import audit, errors, home, logs
+from haskie.collection.collection import Collection
+from haskie.document import document
+from haskie.indexing.chunk import Chunk
 
 from conftest import (  # isort: skip
     api_app,
@@ -38,6 +40,7 @@ from conftest import (  # isort: skip
     document_names,
     forget_settings,
     get_page,
+    seed_chunks,
     seed_index,
     stage_and_import,
     wait_for,
@@ -105,8 +108,8 @@ async def ready(client: AsyncTestClient, tmp_path: Path) -> AsyncTestClient:
 
 
 def _requested(lines: list[dict]) -> list[str]:
-    """The events a request produced, in order; a workflow writes its own (see `workflows`)."""
-    return [line["event"] for line in lines if line["actor"] != "workflow"]
+    """The events a request produced, in order; an operation writes its own (see `workflows`)."""
+    return [line["event"] for line in lines if line["actor"] != "operation"]
 
 
 # --- the route and error table ------------------------------------------------------
@@ -176,8 +179,8 @@ def _requested(lines: list[dict]) -> list[str]:
             503, "is not loaded yet",
         ),
         (
-            "session search limit below one -> unprocessable",
-            "GET", "/api/search?session_id=s1&q=alpha&limit=0", None, None,
+            "explore limit below one -> unprocessable",
+            "GET", "/api/search/explore?session_id=s1&q=alpha&limit=0", None, None,
             422, "Expected `int` >= 1",
         ),
         (
@@ -186,14 +189,19 @@ def _requested(lines: list[dict]) -> list[str]:
             404, "job not found: ghost",
         ),
         (
-            "progress of an unknown job -> not found",
-            "GET", "/api/jobs/ghost/progress", None, None,
-            404, "job not found: ghost",
+            "progress of an unknown operation -> not found",
+            "GET", "/api/operations/ghost/progress", None, None,
+            404, "operation not found: ghost",
         ),
         (
-            "cancel an unknown job -> not found",
-            "DELETE", "/api/jobs/ghost", None, None,
-            404, "job not found: ghost",
+            "cancel an unknown operation -> not found",
+            "DELETE", "/api/operations/ghost", None, None,
+            404, "operation not found: ghost",
+        ),
+        (
+            "an unknown operation kind -> unprocessable",
+            "GET", "/api/operations?kind=bogus", None, None,
+            422, "unknown operation kind 'bogus'",
         ),
         (
             "stage an unsupported file type -> unprocessable",
@@ -390,7 +398,7 @@ async def test_collection_reranker_override_starts_its_download(
 ) -> None:
     """Q1: saving a reranker for one collection used to change nothing but the row, so the first
     search of that collection answered "not loaded yet" for a model nothing ever fetched."""
-    from haskie import embed
+    from haskie.indexing import embed
 
     loaded: list[str] = []
     monkeypatch.setattr(embed, "warm_reranker", loaded.append)
@@ -451,8 +459,9 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
             "indexing",
         ]
     )
-    assert options["active_job_statuses"] == ["ENQUEUED", "PENDING"]
-    assert options["job_kinds"][0] == "document" and "index_collection" in options["bulk_kinds"]
+    assert options["active_statuses"] == ["ENQUEUED", "PENDING"]
+    assert options["operation_kinds"][0] == "document"
+    assert "index_collection" in options["bulk_kinds"]
 
 
 # --- the two-call intake --------------------------------------------------------------
@@ -535,7 +544,7 @@ async def test_a_failed_import_can_be_re_run(client: AsyncTestClient, tmp_path: 
     again = await client.post(f"/api/documents/{row['name']}/import")
 
     assert again.status_code == 202, again.text
-    assert await wait_for(again.json()["job_id"]) == "imported"
+    assert await wait_for(again.json()["operation_id"]) == "imported"
     assert (await client.get(f"/api/documents/{row['name']}")).json()["error"] is None
 
 
@@ -593,6 +602,36 @@ async def test_one_document_serves_two_collections(client: AsyncTestClient) -> N
     )
 
 
+async def test_the_operations_listing_names_its_sections_and_its_activity(
+    client: AsyncTestClient,
+) -> None:
+    """The three collection-free routes answer beside `/api/operations/{id}`: `kinds` and
+    `activity` are their own path segments, so neither is read as an operation id."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "guide.md", MD.encode())
+    await attach_via_api(client, "notes", "guide.md")
+
+    kinds = await client.get("/api/operations/kinds")
+    activity = await client.get("/api/operations/activity")
+
+    assert kinds.status_code == 200, kinds.text
+    assert [k["kind"] for k in kinds.json()] == [
+        "document",
+        "collection",
+        "download",
+        "maintenance",
+    ]
+    assert all(k["label"] and k["active"] >= 0 for k in kinds.json())
+    assert activity.status_code == 200, activity.text
+    assert set(activity.json()) == {"operations", "tasks"}
+    assert all(set(counts) == {"queued", "running"} for counts in activity.json().values())
+    listed = (await client.get("/api/operations", params={"kind": "document"})).json()["items"]
+    (indexed,) = [row for row in listed if row["title"] == "notes / guide.md"]
+    assert [job["stage"] for job in indexed["jobs"]] == ["embed", "index"]
+    assert (await client.get(f"/api/jobs/{indexed['jobs'][-1]['id']}/tasks")).status_code == 200
+
+
 async def test_deleting_a_collection_keeps_its_documents(client: AsyncTestClient) -> None:
     await client.post("/api/init", json={"profile": "none"})
     for name in ("kept", "dropped"):
@@ -604,11 +643,11 @@ async def test_deleting_a_collection_keeps_its_documents(client: AsyncTestClient
     deleted = await client.delete("/api/collections/dropped")
 
     assert deleted.status_code == 202, "the deletion is queued, not done in the request"
-    job_id = deleted.json()["job_id"]
-    await wait_for(job_id)
-    progress = (await client.get(f"/api/jobs/{job_id}/progress")).json()
+    operation_id = deleted.json()["operation_id"]
+    await wait_for(operation_id)
+    progress = (await client.get(f"/api/operations/{operation_id}/progress")).json()
     assert (progress["id"], progress["kind"], progress["status"]) == (
-        job_id,
+        operation_id,
         "delete_collection",
         "SUCCESS",
     )
@@ -632,7 +671,7 @@ async def test_deleting_a_document_removes_it_from_every_collection(
     deleted = await client.delete("/api/documents/guide.md")
 
     assert deleted.status_code == 202, deleted.text
-    await wait_for(deleted.json()["job_id"])
+    await wait_for(deleted.json()["operation_id"])
     assert (await client.get("/api/documents")).json()["items"] == []
     assert (await client.get("/api/documents/guide.md")).status_code == 404
     for name in ("alpha", "beta"):
@@ -673,6 +712,11 @@ async def test_reading_one_document(client: AsyncTestClient) -> None:
 # --- search over several collections ---------------------------------------------------
 
 
+def _explore(session_id: str, q: str, granularity: str = "chunk") -> dict[str, str]:
+    """The query arguments of one exploration, at the granularity the web UI asks for."""
+    return {"session_id": session_id, "q": q, "granularity": granularity}
+
+
 async def test_session_search_returns_each_passage_once(client: AsyncTestClient) -> None:
     """A document in two collections of one session is two copies of the same chunk. A caller
     searching passages wants it once, credited to the first collection it chose."""
@@ -691,7 +735,7 @@ async def test_session_search_returns_each_passage_once(client: AsyncTestClient)
         "alpha",
         "beta",
     ]
-    hits = (await client.get("/api/search", params={"session_id": "s1", "q": "shared"})).json()
+    hits = (await client.get("/api/search/explore", params=_explore("s1", "shared"))).json()
 
     identity = [(h["doc"], h["part"], h["chunk_id"]) for h in hits]
     assert len(set(identity)) == len(identity), "no passage is returned twice"
@@ -730,7 +774,7 @@ async def test_session_history_holds_every_action_newest_first(
     )
     assert attached.status_code == 202, attached.text
     await ready.put("/api/sessions/s2", json={"collections": ["notes"]})
-    hits = (await ready.get("/api/search", params={"session_id": "s2", "q": "alpha"})).json()
+    hits = (await ready.get("/api/search/explore", params=_explore("s2", "alpha"))).json()
     await ready.get("/api/search/text", params={"session_id": "s2", "q": "alpha"})
     await ready.get("/api/search/text", params={"q": "alpha"})  # no session: no event
     await ready.put(
@@ -753,12 +797,12 @@ async def test_session_history_holds_every_action_newest_first(
         ("import", "later.md"),
     ], "newest first, and the unsessioned search is absent"
     by_action = {(row["action"], row["detail"].get("scope")): row for row in history}
-    session_search = by_action[("search", "session")]
+    session_search = by_action[("search", "explore")]
     assert session_search["detail"]["hits"] == len(hits) > 0
     assert session_search["detail"]["docs"] == list(dict.fromkeys(hit["doc"] for hit in hits))
     assert by_action[("search", "text")]["detail"]["hits"] > 0
-    assert by_action[("import", None)]["workflow_id"] == history[-1]["workflow_id"] is not None
-    assert by_action[("attach", None)]["workflow_id"] == attached.json()["job_id"]
+    assert by_action[("import", None)]["operation_id"] == history[-1]["operation_id"] is not None
+    assert by_action[("attach", None)]["operation_id"] == attached.json()["operation_id"]
     assert by_action[("attach", None)]["detail"] == {"collection": "notes"}
     assert by_action[("collections", None)]["detail"] == {"collections": ["notes"]}
     assert all(row["duration_ms"] >= 0 and row["ts"] > 0 for row in history)
@@ -770,11 +814,11 @@ async def test_session_history_holds_every_action_newest_first(
 
     (tmp_path / "plain.md").write_text("# Plain\n")
     await ready.post("/api/documents/import", json={"path": str(tmp_path / "plain.md")})
-    jobs = (await ready.get("/api/jobs/by-kind", params={"kind": "document"})).json()["items"]
-    origins = {job["id"]: job["origin"] for job in jobs}
-    assert origins[attached.json()["job_id"]] == "s2"
-    assert origins[history[-1]["workflow_id"]] == "s2"
-    assert [job["origin"] for job in jobs if "plain.md" in job["title"]] == [None], (
+    listed = (await ready.get("/api/operations", params={"kind": "document"})).json()["items"]
+    origins = {row["id"]: row["origin"] for row in listed}
+    assert origins[attached.json()["operation_id"]] == "s2"
+    assert origins[history[-1]["operation_id"]] == "s2"
+    assert [row["origin"] for row in listed if "plain.md" in row["title"]] == [None], (
         "an import from the web UI came from nobody's session"
     )
 
@@ -789,21 +833,276 @@ async def test_session_search_survives_the_deletion_of_a_collection(
         await attach_via_api(client, name, f"{name}.md")
     await client.put("/api/sessions/s1", json={"collections": ["kept", "dropped"]})
     assert (
-        len((await client.get("/api/search", params={"session_id": "s1", "q": "shared"})).json())
-        == 2
+        len((await client.get("/api/search/explore", params=_explore("s1", "shared"))).json()) == 2
     )
 
     deleted = await client.delete("/api/collections/dropped")
 
     assert deleted.status_code == 202
-    await wait_for(deleted.json()["job_id"])
+    await wait_for(deleted.json()["operation_id"])
 
-    search = await client.get("/api/search", params={"session_id": "s1", "q": "shared"})
+    search = await client.get("/api/search/explore", params=_explore("s1", "shared"))
     assert search.status_code == 200, "one deleted collection must not break every later search"
     assert [hit["collection"] for hit in search.json()] == ["kept"]
     assert [(s["id"], s["collections"]) for s in (await client.get("/api/sessions")).json()] == [
         ("s1", ["kept"])
     ]
+
+
+# --- passages, excerpts and sources -----------------------------------------------------
+
+# One paragraph, one sentence per line, so a passage that widens to whole sentences also has to
+# recount its lines. "lancedb" is in both of the chunks seeded below and in neither section around
+# them, so the query reaches exactly the two chunks that are meant to merge.
+PASSAGE_MD = (
+    "# Guide\n"
+    "\n"
+    "## Retrieval\n"
+    "\n"
+    "One table holds every chunk of a lancedb document.\n"
+    "A chunk overlaps the chunk before it, so one sentence can sit in two of them at once.\n"
+    "Merging the consecutive chunks of a lancedb answer back into a passage is what a reader "
+    "wants.\n"
+    "The passage then begins and ends where a sentence does.\n"
+    "\n"
+    "## Elsewhere\n"
+    "\n"
+    "This section says nothing about tables at all.\n"
+)
+
+
+async def _markdown_of(doc: str) -> str:
+    """The converted markdown of an imported document, as it is on disk: what a chunk's
+    `char_start` and `char_end` are offsets into, and what a passage is widened in."""
+    row = await document.get(doc)
+    return (home.HOME / row.relative(row.markdown)).read_text(encoding="utf-8")
+
+
+def _chunk(markdown: str, start: str, end: str, heading: str = "Retrieval") -> Chunk:
+    """One chunk cut out of `markdown` between two of its own substrings, with the offsets and
+    line numbers that cut really has. `start` and `end` fall mid-sentence on purpose: a passage
+    has to widen past both."""
+    char_start = markdown.index(start)
+    char_end = markdown.index(end) + len(end)
+    return Chunk(
+        heading=heading,
+        text=markdown[char_start:char_end],
+        line_start=markdown.count("\n", 0, char_start) + 1,
+        line_end=markdown.count("\n", 0, char_end) + 1,
+        char_start=char_start,
+        char_end=char_end,
+        parents=["Guide"],
+    )
+
+
+async def _member(collection: str, doc: str) -> None:
+    """Make an imported document a member of a collection without running its index; the chunks
+    are seeded by hand right after (as the `ready` fixture does with `seed_index`)."""
+    found = await Collection.get(collection)
+    await found.add(doc)
+    await found.set_member_status(doc, "indexed")
+
+
+async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
+    """One collection holding `guide.md` as two consecutive chunks that overlap each other, plus
+    a third chunk of the section below that the query never matches."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "guide.md", PASSAGE_MD.encode())
+    markdown = await _markdown_of("guide.md")
+    await _member("notes", "guide.md")
+    await seed_chunks(
+        "notes",
+        "guide.md",
+        [
+            _chunk(markdown, "every chunk of a lancedb", "so one sentence can sit"),
+            _chunk(markdown, "sit in two of them", "answer back into a"),
+            _chunk(markdown, "This section says", "about tables at all.", heading="Elsewhere"),
+        ],
+    )
+
+
+async def test_explore_merges_consecutive_chunks_into_one_passage(
+    client: AsyncTestClient,
+) -> None:
+    """Two chunks that sit next to each other in one document are one passage: stitched by their
+    offsets, so the text they share is in it once, and widened to the sentences they cut into."""
+    await _guide_with_two_chunks(client)
+
+    chunks = (await client.get("/api/search/explore", params={"q": "lancedb"})).json()
+    response = await client.get(
+        "/api/search/explore", params={"q": "lancedb", "granularity": "passage"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert {hit["seq"] for hit in chunks} == {1, 2}, "only the two that mention lancedb match"
+    (passage,) = response.json()
+    assert (passage["seq_start"], passage["seq_end"]) == (1, 2), "the range the chunks cover"
+    assert passage["text"].startswith("One table holds"), "widened back to the sentence start"
+    assert passage["text"].rstrip().endswith("is what a reader wants."), "and to the sentence end"
+    assert passage["text"].count("sit in two of them") == 1, "the shared text is not repeated"
+    assert (passage["line_start"], passage["line_end"]) == (5, 7), "lines recounted for the text"
+    assert passage["header"] == "Guide > Retrieval"
+    assert passage["location"] == "guide.md L5-7", "written to be cited"
+    assert passage["doc"] == "guide.md" and passage["collection"] == "notes"
+    assert passage["score"] > 0
+
+
+async def test_explore_excerpts_are_the_passages_and_so_is_the_excerpts_route(
+    client: AsyncTestClient,
+) -> None:
+    """An excerpt is the whole passage today (the trimming step is later), and the MCP route is
+    the same search as the exploration at that granularity."""
+    await _guide_with_two_chunks(client)
+
+    passages = (
+        await client.get("/api/search/explore", params={"q": "lancedb", "granularity": "passage"})
+    ).json()
+    excerpts = (
+        await client.get("/api/search/explore", params={"q": "lancedb", "granularity": "excerpt"})
+    ).json()
+    route = await client.get("/api/search/excerpts", params={"q": "lancedb"})
+
+    assert excerpts == passages
+    assert route.status_code == 200, route.text
+    assert route.json() == excerpts
+    nothing = await client.get("/api/search/excerpts", params={"q": "nothingmatchesthis"})
+    assert nothing.json() == [], "no hits is an answer, not an error"
+
+
+async def _two_collections_sharing_a_document(client: AsyncTestClient) -> str:
+    """`shared.md` in both collections and `beta-only.md` in one: two documents that only `beta`
+    covers on its own. Returns the markdown of the shared document."""
+    await client.post("/api/init", json={"profile": "none"})
+    for name in ("alpha", "beta"):
+        await client.post("/api/collections", json={"name": name})
+    await stage_and_import(client, "shared.md", PASSAGE_MD.encode())
+    await stage_and_import(client, "beta-only.md", PASSAGE_MD.encode())
+    await client.put("/api/documents/shared.md/description", json={"description": "the guide"})
+    markdown = await _markdown_of("shared.md")
+    chunks = [
+        _chunk(markdown, "every chunk of a lancedb", "so one sentence can sit"),
+        _chunk(markdown, "sit in two of them", "answer back into a"),
+        _chunk(markdown, "This section says", "about tables at all.", heading="Elsewhere"),
+    ]
+    for name in ("alpha", "beta"):
+        await _member(name, "shared.md")
+        await seed_chunks(name, "shared.md", chunks)
+    await _member("beta", "beta-only.md")
+    await seed_chunks("beta", "beta-only.md", chunks)
+    return markdown
+
+
+async def test_sources_fold_hits_to_documents_and_cover_them_with_collections(
+    client: AsyncTestClient,
+) -> None:
+    """One row per document with the hot sections inside it, and the fewest collections a
+    follow-up search has to select to reach every row."""
+    await _two_collections_sharing_a_document(client)
+
+    response = await client.get("/api/search/sources", params={"q": "lancedb"})
+
+    assert response.status_code == 200, response.text
+    found = response.json()
+    rows = {row["doc"]: row for row in found["documents"]}
+    assert set(rows) == {"shared.md", "beta-only.md"}
+    assert found["collections"] == ["beta"], "one collection holds both: the cover is one name"
+    shared = rows["shared.md"]
+    assert shared["collections"] == ["alpha", "beta"], "every searched collection holding it"
+    assert rows["beta-only.md"]["collections"] == ["beta"]
+    assert shared["description"] == "the guide", "the document's own description, not a chunk's"
+    assert shared["chunks"] == 2, "the chunks that matched, not every chunk it has"
+    assert [section["header"] for section in shared["sections"]] == ["Guide > Retrieval"]
+    section = shared["sections"][0]
+    assert section["chunks"] == 2 and section["score"] > 0
+    assert section["location"].startswith("shared.md L"), "written to be cited"
+    # every chunk that matched sits under that one heading, so the two scores are the same fold
+    assert shared["score"] == section["score"]
+    scores = [row["score"] for row in found["documents"]]
+    assert scores == sorted(scores, reverse=True), "best document first"
+
+
+async def test_sources_bound_their_limit_and_their_sections(client: AsyncTestClient) -> None:
+    await _two_collections_sharing_a_document(client)
+
+    one = await client.get("/api/search/sources", params={"q": "lancedb", "limit": 1})
+    assert one.status_code == 200, one.text
+    assert len(one.json()["documents"]) == 1, "the shortlist is cut to the limit"
+    assert one.json()["collections"] == ["beta"], "the cover is of the documents returned"
+
+    none = await client.get("/api/search/sources", params={"q": "lancedb", "sections": 0})
+    assert none.status_code == 422 and "sections must be 1..20, got 0" in none.text
+    too_many = await client.get("/api/search/sources", params={"q": "lancedb", "limit": 101})
+    assert too_many.status_code == 422 and "limit must be 1..100, got 101" in too_many.text
+
+
+async def _scoped_collections(client: AsyncTestClient) -> None:
+    """One document per collection and a session that selected only `alpha`."""
+    await client.post("/api/init", json={"profile": "none"})
+    for name in ("alpha", "beta"):
+        await client.post("/api/collections", json={"name": name})
+        await stage_and_import(client, f"{name}.md", f"# {name}\n\nshared token\n".encode())
+        await attach_via_api(client, name, f"{name}.md")
+    await client.put("/api/sessions/s1", json={"collections": ["alpha"]})
+
+
+@pytest.mark.parametrize(
+    ("name", "params", "expected"),
+    [
+        (
+            "named collections win over the session",
+            {"session_id": "s1", "collections": "beta"},
+            ["beta.md"],
+        ),
+        ("the session wins over everything", {"session_id": "s1"}, ["alpha.md"]),
+        ("neither: every collection", {}, ["alpha.md", "beta.md"]),
+        ("an empty filter is not a filter", {"collections": ""}, ["alpha.md", "beta.md"]),
+    ],
+)
+async def test_the_search_scope_is_the_names_then_the_session_then_everything(
+    client: AsyncTestClient, name: str, params: dict, expected: list[str]
+) -> None:
+    await _scoped_collections(client)
+
+    response = await client.get("/api/search/explore", params={"q": "shared", **params})
+
+    assert response.status_code == 200, response.text
+    assert sorted({hit["doc"] for hit in response.json()}) == expected, name
+
+
+@pytest.mark.parametrize(
+    ("path", "key"),
+    [
+        ("/api/search/explore", None),
+        ("/api/search/excerpts", None),
+        ("/api/search/sources", "documents"),
+    ],
+)
+async def test_every_search_rejects_a_collection_nobody_owns(
+    client: AsyncTestClient, path: str, key: str | None
+) -> None:
+    """A name the caller chose just now is a mistake in the request, not an empty result."""
+    await _scoped_collections(client)
+
+    unknown = await client.get(path, params={"q": "shared", "collections": "ghost"})
+
+    assert unknown.status_code == 404, unknown.text
+    assert "collection not found: ghost" in unknown.text
+    known = await client.get(path, params={"q": "shared", "collections": "alpha"})
+    assert known.status_code == 200, known.text
+    assert (known.json()[key] if key else known.json()) != []
+
+
+async def test_the_mcp_surface_offers_one_search_per_question(api_client: AsyncTestClient) -> None:
+    """Two tools for the two questions an agent has — what do the sources say, and which sources
+    are there. The searches the web UI drives stay REST-only, or an agent would have to choose
+    between three that answer with overlapping chunks."""
+    from litestar_mcp import LitestarMCP
+
+    served = set(api_client.app.plugins.get(LitestarMCP).discovered_tools)
+
+    assert {"search_excerpts", "search_sources"} <= served
+    assert served.isdisjoint({"search", "search_text", "explore", "search_collection"})
 
 
 # --- audit trail ---------------------------------------------------------------------
@@ -818,15 +1117,15 @@ async def test_every_audited_route_appends_one_record(client: AsyncTestClient) -
     await stage_and_import(client, "guide.md", MD.encode())
     await client.put("/api/documents/guide.md/description", json={"description": "the guide"})
     attach_job = await attach_via_api(client, "notes", "guide.md")
-    reindex_job = (await client.post("/api/collections/notes/index")).json()["job_id"]
-    await wait_for(reindex_job)
-    await client.delete(f"/api/jobs/{attach_job}")
+    reindex = (await client.post("/api/collections/notes/index")).json()["operation_id"]
+    await wait_for(reindex)
+    await client.delete(f"/api/operations/{attach_job}")
     await client.put("/api/sessions/s1", json={"collections": ["notes"]})
     await client.delete("/api/collections/notes/documents/guide.md")
-    delete_doc = (await client.delete("/api/documents/guide.md")).json()["job_id"]
+    delete_doc = (await client.delete("/api/documents/guide.md")).json()["operation_id"]
     await wait_for(delete_doc)
-    delete_job = (await client.delete("/api/collections/notes")).json()["job_id"]
-    await wait_for(delete_job)  # the trail is read once the queued work is cancelled and gone
+    delete_collection = (await client.delete("/api/collections/notes")).json()["operation_id"]
+    await wait_for(delete_collection)  # read once the queued work is cancelled and gone
 
     lines = audit_lines()
     assert _requested(lines) == [
@@ -840,7 +1139,7 @@ async def test_every_audited_route_appends_one_record(client: AsyncTestClient) -
         "document.describe",
         "collection.attach",
         "collection.reindex",
-        "job.cancel",
+        "operation.cancel",
         "session.collections.set",
         "collection.detach",
         "document.delete",
@@ -865,20 +1164,20 @@ async def test_every_audited_route_appends_one_record(client: AsyncTestClient) -
         "notes",
         "guide.md",
     )
-    assert by_event["collection.attach"]["detail"] == {"job_id": attach_job}
+    assert by_event["collection.attach"]["operation_id"] == attach_job
     assert (by_event["collection.detach"]["collection"], by_event["collection.detach"]["doc"]) == (
         "notes",
         "guide.md",
     )
     assert by_event["document.delete"]["doc"] == "guide.md"
-    assert by_event["collection.reindex"]["detail"] == {"job_id": reindex_job}
-    assert by_event["job.cancel"]["workflow_id"] == attach_job, "a known field, not free-form"
+    assert by_event["collection.reindex"]["operation_id"] == reindex
+    assert by_event["operation.cancel"]["operation_id"] == attach_job, "a known field, not free"
     assert by_event["session.collections.set"]["session_id"] == "s1"
-    assert by_event["collection.delete"]["detail"] == {"job_id": delete_job}
+    assert by_event["collection.delete"]["operation_id"] == delete_collection
 
     indexed = next(line for line in lines if line["event"] == "index.completed")
     assert (indexed["actor"], indexed["collection"], indexed["doc"]) == (
-        "workflow",
+        "operation",
         "notes",
         "guide.md",
     )
@@ -1139,9 +1438,9 @@ def _text_cursor(
     offset: int = 1,
 ) -> str:
     """A real cursor of some query, built at collection time for the table below."""
-    from haskie import textsearch
+    from haskie.search import text
 
-    return textsearch.make_cursor(q, collections or ["alpha", "beta"], page_size, offset)
+    return text.make_cursor(q, collections or ["alpha", "beta"], page_size, offset)
 
 
 def _listing_cursor() -> str:

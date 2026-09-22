@@ -5,12 +5,13 @@ from typing import get_args
 import msgspec
 from litestar import get, post, put
 
-from haskie import audit, home, jobs, models, workflows
-from haskie.collection import ACTIVE_MEMBER_STATUSES, MEMBER_STATUSES, MemberStatus
-from haskie.dbos_names import ACTIVE_STATUS
-from haskie.document import ACTIVE_DOCUMENT_STATUSES, DOCUMENT_STATUSES, DocStatus
-from haskie.embed import device_name
+from haskie import audit, home
+from haskie.collection.collection import ACTIVE_MEMBER_STATUSES, MEMBER_STATUSES, MemberStatus
+from haskie.document.document import ACTIVE_DOCUMENT_STATUSES, DOCUMENT_STATUSES, DocStatus
 from haskie.errors import Conflict
+from haskie.indexing import models, operations, workflows
+from haskie.indexing.dbos_names import ACTIVE_STATUS
+from haskie.indexing.embed import device_name
 from haskie.settings import (
     PROFILES,
     RERANKER_MODELS,
@@ -63,9 +64,9 @@ class Options(msgspec.Struct):
     active_document_statuses: tuple[DocStatus, ...]  # in the import pipeline: a poll waits on them
     member_statuses: tuple[MemberStatus, ...]
     active_member_statuses: tuple[MemberStatus, ...]
-    active_job_statuses: tuple[str, ...]  # DBOS workflow statuses that are still on their way
-    job_kinds: tuple[jobs.JobKind, ...]  # in the order the Jobs view shows its sections
-    bulk_kinds: tuple[jobs.BulkKind, ...]  # the jobs a 202 points at
+    active_statuses: tuple[str, ...]  # run statuses that are still on their way
+    operation_kinds: tuple[operations.OperationKind, ...]  # the order the Operations view shows
+    bulk_kinds: tuple[operations.BulkKind, ...]  # the operations a 202 points at
 
 
 def _changed_fields(before: msgspec.Struct, after: msgspec.Struct, prefix: str = "") -> list[str]:
@@ -142,9 +143,9 @@ OPTIONS = Options(
     active_document_statuses=ACTIVE_DOCUMENT_STATUSES,
     member_statuses=MEMBER_STATUSES,
     active_member_statuses=ACTIVE_MEMBER_STATUSES,
-    active_job_statuses=tuple(ACTIVE_STATUS),
-    job_kinds=jobs.KIND_ORDER,
-    bulk_kinds=jobs.BULK_KINDS,
+    active_statuses=tuple(ACTIVE_STATUS),
+    operation_kinds=operations.KIND_ORDER,
+    bulk_kinds=operations.BULK_KINDS,
 )
 
 

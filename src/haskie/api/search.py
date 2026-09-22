@@ -1,15 +1,23 @@
-"""Session selection and the two searches that are not scoped to one collection."""
+"""Session selection and the searches that are not scoped to one collection."""
 
 import time
+from typing import Literal
 
 import msgspec
 from litestar import get, put
 
-from haskie import audit, jobs, session, textsearch
+from haskie import audit
 from haskie.api.common import Limit
+from haskie.collection.index import Hit
 from haskie.errors import InvalidInput
-from haskie.index import Hit
+from haskie.indexing import operations
 from haskie.paging import DEFAULT_PAGE_SIZE, Page
+from haskie.search import retrieval, session, text
+from haskie.search.passage import Excerpt, Passage, Sources
+
+# What one search returns: the chunks the index holds, the passages they merge into, or the
+# excerpt of a passage an agent quotes. Plain alias, like `SearchMode`: a query parameter.
+Granularity = Literal["chunk", "passage", "excerpt"]
 
 
 class SessionCollections(msgspec.Struct):
@@ -25,7 +33,8 @@ async def list_sessions() -> list[session.SessionSummary]:
 @put("/api/sessions/{session_id:str}", mcp_tool="set_session_collections")
 @audit.audited("session.collections.set")
 async def put_session(session_id: str, data: SessionCollections) -> list[str]:
-    """Choose which collections a session searches. Call before `search` with that session id."""
+    """Choose which collections a session searches. Call before `search_excerpts` with that
+    session id."""
     chosen = await session.set_collections(session_id, data.collections)
     audit.attach(collections=len(chosen))
     await session.record(
@@ -34,15 +43,88 @@ async def put_session(session_id: str, data: SessionCollections) -> list[str]:
     return chosen
 
 
-@get("/api/search", mcp_tool="search")
-async def search_session(session_id: str, q: str, limit: Limit = None) -> list[Hit]:
-    """Search the collections selected for `session_id`; `limit` defaults to the user setting.
+@get("/api/search/explore")
+async def explore(
+    q: str,
+    granularity: Granularity = "chunk",
+    session_id: str | None = None,
+    collections: str | None = None,
+    limit: Limit = None,
+) -> list[Hit] | list[Passage] | list[Excerpt]:
+    """Search at the granularity the caller wants: the exploration endpoint the UI drives.
 
-    A passage held by several of those collections is returned once, not once per collection.
+    Where it looks: the comma-separated `collections` if given, else the collections selected for
+    `session_id`, else every collection. `limit` defaults to the user setting.
+
+    What comes back per granularity: `chunk`, the index rows themselves, overlapping as they were
+    stored; `passage`, the consecutive chunks of one document merged and widened to whole
+    sentences; `excerpt`, a passage with the parts that do not answer the query left out.
     """
     started = time.perf_counter()
-    found = await session.search(session_id, q, limit)
-    await session.record_search(session_id, "session", q, found, started)
+    names = await retrieval.scope(session_id, collections)
+    if granularity == "passage":
+        found: list[Hit] | list[Passage] | list[Excerpt] = await retrieval.passages(names, q, limit)
+    elif granularity == "excerpt":
+        found = await retrieval.excerpts(names, q, limit)
+    else:
+        found = await retrieval.chunks(names, q, limit)
+    await session.record_search(session_id, "explore", q, found, started)
+    return found
+
+
+@get("/api/search/excerpts", mcp_tool="search_excerpts")
+async def search_excerpts(
+    q: str, session_id: str | None = None, collections: str | None = None, limit: Limit = None
+) -> list[Excerpt]:
+    """What the sources say about a question, as passages ready to quote, best first.
+
+    Each excerpt is what one document says in one place: the chunks that matched, merged where
+    they sit next to each other and widened to whole sentences, so it begins and ends where the
+    author did and never repeats the overlap between two chunks. Cite it by its `header` (the
+    heading path inside the document) and its `location` (document, pages, lines); `markdown_file`
+    is the whole document on disk when the excerpt is not enough.
+
+    Where it looks: the comma-separated `collections` if given, else the collections selected for
+    `session_id`, else every collection. Run `search_sources` first when the question is which
+    documents or collections cover a topic, then `set_session_collections` with the cover it
+    returns. No results is an answer: the sources do not cover this, and saying so beats guessing.
+
+    Args:
+        session_id: The conversation's id; the search then shows in that session's history.
+    """
+    started = time.perf_counter()
+    found = await retrieval.excerpts(await retrieval.scope(session_id, collections), q, limit)
+    await session.record_search(session_id, "excerpts", q, found, started)
+    return found
+
+
+@get("/api/search/sources", mcp_tool="search_sources")
+async def search_sources(
+    q: str,
+    session_id: str | None = None,
+    collections: str | None = None,
+    limit: Limit = None,
+    sections: int | None = None,
+) -> Sources:
+    """Which documents cover a topic, and which collections to select to read them.
+
+    One row per document rather than per passage: `score` folds its best matching chunk with all
+    of them (so many weak mentions never outrank one strong one), `chunks` counts them, `sections`
+    names the hottest headings inside it with their `location`, and `collections` says which of
+    the searched collections hold it. `documents` is that list, best first; `collections` at the
+    top level is the smallest set of collections covering every document in it — pass it to
+    `set_session_collections`, then ask `search_excerpts` for the passages themselves.
+
+    Where it looks: the comma-separated `collections` if given, else the collections selected for
+    `session_id`, else every collection. No results is an answer: nothing here covers the topic.
+
+    Args:
+        session_id: The conversation's id; the search then shows in that session's history.
+    """
+    started = time.perf_counter()
+    names = await retrieval.scope(session_id, collections)
+    found = await retrieval.sources(names, q, limit, sections)
+    await session.record_search(session_id, "sources", q, found.documents, started)
     return found
 
 
@@ -63,9 +145,9 @@ async def search_trend(days: int = 7) -> list[session.SearchAt]:
 
 
 @get("/api/insights/chunks")
-async def chunk_trend(days: int = 7) -> list[jobs.ChunksAt]:
+async def chunk_trend(days: int = 7) -> list[operations.ChunksAt]:
     """Every finished index of the last `days` days, oldest first, for the Insights chart."""
-    return await jobs.chunks_since(_trend_cutoff(days))
+    return await operations.chunks_since(_trend_cutoff(days))
 
 
 @get("/api/sessions/{session_id:str}/history")
@@ -74,7 +156,7 @@ async def session_history(session_id: str) -> list[session.SessionEvent]:
     return await session.history(session_id)
 
 
-@get("/api/search/text", mcp_tool="search_text")
+@get("/api/search/text")
 async def search_text(
     q: str,
     collections: str | None = None,
@@ -93,52 +175,7 @@ async def search_text(
         session_id: The conversation's id; the search then shows in that session's history.
     """
     started = time.perf_counter()
-    page = await textsearch.search(q, textsearch.split_collections(collections), page_size, cursor)
+    page = await text.search(q, text.split_collections(collections), page_size, cursor)
     if cursor is None:  # one event per search, not one per page of it
         await session.record_search(session_id, "text", q, page.items, started)
     return page
-
-
-@get("/api/search/documents", mcp_tool="search_documents")
-async def search_documents(
-    q: str, collections: str | None = None, limit: Limit = None, session_id: str | None = None
-) -> list[textsearch.DocumentMatch]:
-    """Which documents to read for a query, rather than which passages answer it.
-
-    The same full-text scan as `search_text`, folded to one row per document: `score` blends the
-    document's best chunk with the sum of every chunk that matched (a harmonic mean, so many weak
-    chunks never outrank one strong one) and `chunks` says how many there were. Use it to narrow
-    to a shortlist, then `search_text` or `search` for the passages themselves. `limit` defaults
-    to the shortlist size `textsearch` keeps.
-
-    Args:
-        session_id: The conversation's id; the search then shows in that session's history.
-    """
-    started = time.perf_counter()
-    found = await textsearch.search_documents(q, textsearch.split_collections(collections), limit)
-    await session.record_search(session_id, "documents", q, found, started)
-    return found
-
-
-@get("/api/search/documents/{doc:str}", mcp_tool="document_passages")
-async def document_passages(
-    doc: str,
-    q: str,
-    collections: str | None = None,
-    limit: Limit = None,
-    session_id: str | None = None,
-) -> list[Hit]:
-    """The passages of one document that `search_documents` counted for it, best first.
-
-    The same scan as `search_documents` with the same `limit`, kept to `doc`. Use it to read why a
-    shortlisted document is there before opening the whole thing.
-
-    Args:
-        session_id: The conversation's id; the search then shows in that session's history.
-    """
-    started = time.perf_counter()
-    found = await textsearch.document_passages(
-        q, doc, textsearch.split_collections(collections), limit
-    )
-    await session.record_search(session_id, "passages", q, found, started)
-    return found

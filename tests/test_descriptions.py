@@ -1,7 +1,8 @@
-"""Descriptions, renaming at import, and the document shortlist.
+"""Descriptions, renaming at import, and what a search row points at.
 
-A real index, not a fixture row: `search_documents` folds a BM25 ranking, so the ranking has to be
-one LanceDB actually produced.
+A real index over real files, not fixture rows: a description has to survive an import and show up
+in the reads the UI and an agent use, and the paths a search row carries have to open from outside
+the app.
 """
 
 from collections.abc import AsyncIterator
@@ -11,8 +12,7 @@ import pytest
 from litestar.testing import AsyncTestClient
 
 from haskie import app as app_module
-from haskie import document, textsearch
-from haskie.errors import InvalidInput
+from haskie.document import document
 
 from conftest import attach_via_api, stage_and_import, wait_import  # isort: skip
 
@@ -132,73 +132,6 @@ async def test_rename_at_import(
     assert (await wait_import(client, expected))["status"] == "imported", name
 
 
-async def test_search_documents_returns_one_row_per_document_best_first(
-    shelf: AsyncTestClient,
-) -> None:
-    """The shortlist, not the passages: distinct documents, ranked, with their description."""
-    matches = (await shelf.get("/api/search/documents", params={"q": "parsing"})).json()
-
-    docs = [m["doc"] for m in matches]
-    assert docs == sorted(set(docs), key=docs.index), "one row per document"
-    assert set(docs) == {"compilers.md", "os.md"}, "the document that never says it is left out"
-    assert docs[0] == "compilers.md", "the stronger match leads"
-    assert [m["score"] for m in matches] == sorted((m["score"] for m in matches), reverse=True)
-
-    best = matches[0]
-    assert best["collection"] == "lit", "where the best chunk came from"
-    passages = (
-        await shelf.get("/api/search/documents/compilers.md", params={"q": "parsing"})
-    ).json()
-    top, total = max(p["score"] for p in passages), sum(p["score"] for p in passages)
-    assert best["score"] == pytest.approx(2 * top * total / (top + total)), "best and sum blended"
-    assert best["description"] == "the dragon book"
-    assert best["chunks"] >= 1 and best["text"], "the evidence for the document being listed"
-    assert best["heading"] == "Compilers"
-
-
-async def test_search_documents_folds_a_shared_document_into_one_row(
-    shelf: AsyncTestClient,
-) -> None:
-    """A document in two collections is still one document to read."""
-    await shelf.post("/api/collections", json={"name": "extra"})
-    await attach_via_api(shelf, "extra", "compilers.md")
-
-    matches = (await shelf.get("/api/search/documents", params={"q": "parsing"})).json()
-
-    assert [m["doc"] for m in matches].count("compilers.md") == 1
-    best = next(m for m in matches if m["doc"] == "compilers.md")
-    assert best["collection"] in {"extra", "lit"}, "one of the collections that hold it"
-    assert best["description"] == "the dragon book", "the description is the document's"
-
-
-async def test_search_documents_honours_limit_and_collection_filter(
-    shelf: AsyncTestClient,
-) -> None:
-    one = (await shelf.get("/api/search/documents", params={"q": "parsing", "limit": 1})).json()
-    assert len(one) == 1
-
-    filtered = await shelf.get(
-        "/api/search/documents", params={"q": "parsing", "collections": "lit"}
-    )
-    assert [m["doc"] for m in filtered.json()] == [
-        m["doc"] for m in (await shelf.get("/api/search/documents", params={"q": "parsing"})).json()
-    ]
-
-    unknown = await shelf.get(
-        "/api/search/documents", params={"q": "parsing", "collections": "ghost"}
-    )
-    assert unknown.status_code == 404 and "collection not found: ghost" in unknown.text
-
-
-@pytest.mark.parametrize(
-    ("name", "limit"),
-    [("zero", 0), ("negative", -1), ("above the cap", textsearch.MAX_DOCUMENTS + 1)],
-)
-async def test_search_documents_rejects_a_bad_limit(name: str, limit: int) -> None:
-    with pytest.raises(InvalidInput, match="limit must be 1.."):
-        await textsearch.search_documents("parsing", None, limit)
-
-
 async def test_descriptions_are_read_in_one_query(shelf: AsyncTestClient) -> None:
     """`describe_of` is the batched read the shortlist uses; absent means no description. It is a
     document read, not a collection one: a description belongs to the document."""
@@ -215,7 +148,8 @@ async def test_results_carry_an_absolute_path_and_position(shelf: AsyncTestClien
     derived on read (`CollectionIndex.hit`) and have to actually exist. They point into the
     document's own folder, not into the collection that matched.
     """
-    match = (await shelf.get("/api/search/documents", params={"q": "parsing"})).json()[0]
+    found = (await shelf.get("/api/search/sources", params={"q": "parsing"})).json()
+    match = found["documents"][0]
     markdown, source = Path(match["markdown_file"]), Path(match["source_file"])
 
     assert markdown.is_absolute() and source.is_absolute()
@@ -229,39 +163,3 @@ async def test_results_carry_an_absolute_path_and_position(shelf: AsyncTestClien
     hit = (await shelf.get("/api/collections/lit/search", params={"q": "parsing"})).json()[0]
     assert Path(hit["markdown_file"]).is_file()
     assert hit["markdown_file"].endswith(hit["markdown_path"]), "absolute is home plus relative"
-
-
-async def test_document_passages_unfold_a_shortlist_row(shelf: AsyncTestClient) -> None:
-    """The passages behind a document's row: as many as it counted, best first, and none for a
-    document the scan never reached."""
-    matches = (await shelf.get("/api/search/documents", params={"q": "parsing"})).json()
-    best = matches[0]
-
-    passages = (
-        await shelf.get(f"/api/search/documents/{best['doc']}", params={"q": "parsing"})
-    ).json()
-
-    assert len(passages) == best["chunks"], "exactly the chunks the row counted"
-    assert {p["doc"] for p in passages} == {best["doc"]}
-    assert [p["score"] for p in passages] == sorted((p["score"] for p in passages), reverse=True)
-    assert passages[0]["text"] == best["text"], "the row's evidence is the best passage"
-
-    unmatched = await shelf.get("/api/search/documents/networks.md", params={"q": "parsing"})
-    assert unmatched.json() == [], "a document the query never matched has no passages"
-    bad = await shelf.get(
-        f"/api/search/documents/{best['doc']}", params={"q": "parsing", "limit": 0}
-    )
-    assert bad.status_code == 422 and "Expected `int` >= 1" in bad.text
-
-
-@pytest.mark.parametrize(
-    ("name", "best", "total", "expected"),
-    [
-        ("one chunk scores itself", 3.0, 3.0, 3.0),
-        ("a second chunk as strong lifts it, short of double", 3.0, 6.0, 4.0),
-        ("many weak chunks stay under twice the best", 1.0, 100.0, pytest.approx(200 / 101)),
-        ("nothing matched scores nothing", 0.0, 0.0, 0.0),
-    ],
-)
-def test_document_score(name: str, best: float, total: float, expected: float) -> None:
-    assert textsearch._document_score(best, total) == expected, name
