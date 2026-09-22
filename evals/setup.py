@@ -1,6 +1,10 @@
 """Idempotent setup for the eval corpus: download once, import once, index once. Re-running this
 is always safe - it converges to the same end state rather than duplicating or erroring.
 
+Idempotent means checking first, not writing and catching the conflict: every write below is
+preceded by a read that decides whether the write is needed at all, so a re-run's server log
+reads the same as a first run's - no 409s logged and swallowed, because none are ever sent.
+
 Starting the isolated haskie instance itself is `mise run eval:setup`'s job (it shells out to
 `haskie ensure --home ...`), not this module's - this file only talks to whatever server `api`
 points at, over HTTP, and never touches the filesystem of a haskie home directly. That the
@@ -16,6 +20,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 CORPUS_DIR = ROOT / "corpus"  # downloaded PDFs live here, never under the project's own library/
@@ -59,7 +64,7 @@ def fetch(sources: tuple[Source, ...] = SOURCES, directory: Path = CORPUS_DIR) -
     return files
 
 
-def call(method: str, path: str, api: str, body: dict | None = None) -> dict:
+def call(method: str, path: str, api: str, body: dict | None = None) -> Any:
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(  # noqa: S310
         f"{api.rstrip('/')}{path}",
@@ -67,24 +72,38 @@ def call(method: str, path: str, api: str, body: dict | None = None) -> dict:
         method=method,
         headers={"content-type": "application/json"},
     )
+    with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
+        return json.loads(response.read() or b"{}")
+
+
+def get_or_none(path: str, api: str) -> Any | None:
+    """The parsed body of `GET path`, or `None` if the server says it does not exist yet.
+
+    This is what makes every write below idempotent by checking rather than by catching a
+    conflict: a 404 here is an ordinary, expected answer, not an error path."""
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
-            return json.loads(response.read() or b"{}")
+        return call("GET", path, api)
     except urllib.error.HTTPError as error:
-        if error.code == 409:
-            return {}  # already exists: not a failure, this call is meant to be idempotent
-        raise RuntimeError(
-            f"{method} {path} -> {error.code}: {error.read().decode()[:300]}"
-        ) from error
+        if error.code == 404:
+            return None
+        raise RuntimeError(f"GET {path} -> {error.code}: {error.read().decode()[:300]}") from error
+
+
+def ensure_collection(collection: str, description: str, api: str) -> None:
+    if get_or_none(f"/api/collections/{collection}", api) is None:
+        call("POST", "/api/collections", api, {"name": collection, "description": description})
 
 
 def import_all(files: list[Path], api: str) -> list[str]:
-    """Import each file, or adopt the row already there. A path import is refused with a
-    conflict once the document exists, which is the state a re-run should reach anyway."""
+    """The name of each file once imported - already there, or freshly imported."""
     names = []
     for file in files:
+        existing = get_or_none(f"/api/documents/{file.name}", api)
+        if existing is not None:
+            names.append(existing["name"])
+            continue
         row = call("POST", "/api/documents/import", api, {"path": str(file.resolve())})
-        names.append(row.get("name") or file.name)
+        names.append(row["name"])
     return names
 
 
@@ -106,7 +125,9 @@ def await_status(names: list[str], wanted: str, api: str, limit: float = 1800) -
 
 def attach_all(names: list[str], collection: str, api: str) -> None:
     for name in names:
-        call("POST", f"/api/collections/{collection}/documents", api, {"document": name})
+        held_by = call("GET", f"/api/documents/{name}/collections", api)
+        if collection not in held_by:
+            call("POST", f"/api/collections/{collection}/documents", api, {"document": name})
 
 
 def await_indexed(expected: int, collection: str, api: str, limit: float = 1800) -> bool:
@@ -122,7 +143,7 @@ def await_indexed(expected: int, collection: str, api: str, limit: float = 1800)
 
 def main(api: str = DEFAULT_API, collection: str = COLLECTION) -> int:
     files = fetch()
-    call("POST", "/api/collections", api, {"name": collection, "description": DESCRIPTION})
+    ensure_collection(collection, DESCRIPTION, api)
     names = import_all(files, api)
     ready = await_status(names, "imported", api)
     attach_all(ready, collection, api)
