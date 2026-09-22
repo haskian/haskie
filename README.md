@@ -69,7 +69,7 @@ Open the UI, drop files into Documents (they are converted and embedded on impor
 collection, add the documents that belong to it. Then hand it to Claude Code:
 
 ```sh
-haskie install claude       # MCP server, plus a skill that knows when to reach for it
+haskie install claude       # MCP server, a skill saying how, and a rule saying when
 ```
 
 and ask it something only your documents know.
@@ -104,17 +104,35 @@ build` first; without the built UI the app still runs, API and MCP only.
 
 ## MCP: what your agent gets
 
-Endpoint `POST http://127.0.0.1:8000/mcp`. Tools: `list_documents`, `get_document`,
-`add_document`, `describe_document`, `list_collections`, `get_collection`,
-`list_collection_documents`, `add_document_to_collection`, `remove_document_from_collection`,
-`set_session_collections`, `search_excerpts`, `search_sources`.
-`search_sources` answers which documents — and which collections — cover a topic; hand the
-collections it names to `set_session_collections`, then use `search_excerpts` with the same id for
-the rest of the conversation. That is how an agent scopes itself to *this topic's* sources.
+Endpoint `POST http://127.0.0.1:8000/mcp`. The REST API is the same handlers; its OpenAPI
+document is at `/schema/openapi.json`, and `web/src/schema.d.ts` is generated from it.
+
+Twelve tools, in three groups:
+
+- **Search** — `search_excerpts` is the search, and what an agent answers from: passages merged
+  from adjacent chunks and widened to whole sentences, each with a `header` breadcrumb and a
+  `location` to cite. `search_sources` answers which documents, and which collections, cover
+  the topic, for a reading list or when `search_excerpts` came back empty or beside the point: one row per document with its best
+  passage, its hottest sections, and the smallest set of collections holding every row, which
+  `set_session_collections` records for the rest of the conversation. Every search takes an
+  optional comma-separated `collections`; without it, the session's selection; without that,
+  everything.
+- **Catalogue** — `list_collections`, `get_collection`, `list_collection_documents`,
+  `list_documents`, `get_document`. Paged, sortable, and each collection carries the description
+  that says what it is for.
+- **Write** — `add_document` imports a local file by absolute path, `add_document_to_collection`
+  attaches and queues its index, `remove_document_from_collection` detaches,
+  `describe_document` sets what a document is about. Creating and deleting collections, and
+  deleting documents, stay in the web UI.
 
 Every tool that searches or changes something also takes an optional session id. Pass the same id
 on each call and the Sessions view replays what that conversation searched, imported and attached,
 and each operation it started names the conversation as its origin.
+
+REST only: `GET /api/search/text` (BM25, no model, paged), `GET /api/search/explore` (the same
+retrieval at chunk, passage or excerpt granularity), `GET /api/collections/{c}/search` (one
+collection with per-call tuning), plus staging uploads, settings, operations, insights and the
+document renderers the UI drives.
 
 ### Claude Code
 
@@ -122,14 +140,20 @@ and each operation it started names the conversation as its origin.
 haskie install claude       # --scope user (default) or project, --url for a different endpoint
 ```
 
-Three things, because the tools alone are not enough:
+Four things, because the tools alone are not enough:
 
 - **The MCP entry**, registered with `claude mcp add --transport http`. Print it instead of
   running it if the `claude` CLI is not on PATH.
 - **A skill** at `~/.claude/skills/haskie/SKILL.md`, whose trigger names the collections this home
-  actually holds — so it fires on *coffee roasting* rather than on the word "documents". It also
-  says which search to start with, how to cite a hit, and that no hits is an answer. Re-run
-  `haskie install claude` after adding a collection to refresh it.
+  actually holds — so it fires on *coffee roasting* rather than on the word "documents". Its body
+  is the reference an agent works from: `search_excerpts` first, `search_sources` and
+  `set_session_collections` for a reading list or when it finds nothing, every tool's arguments and
+  the fields it returns, which fields to cite, and what a 503, 404 or 422 means.
+- **A rule** at `~/.claude/rules/haskie.md`, loaded into every session. A skill is only weighed
+  when Claude picks a tool for a task, so a plain "what is X", a plan, or a moment of doubt never
+  reaches it and gets answered from memory. The rule says to search the collections first in all
+  of those cases, and before any web search on a topic they cover — the same mechanism Context7
+  uses. Re-run `haskie install claude` after adding a collection to refresh the skill and the rule.
 - **A SessionStart hook** running `haskie ensure --no-wait`, so a session that starts while
   nothing is serving brings the server up. It costs one loopback request when haskie is already
   running, which is the usual case.

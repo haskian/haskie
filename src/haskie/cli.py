@@ -335,11 +335,12 @@ def install_claude(
     url: Annotated[str, typer.Option(help="MCP endpoint of this haskie.")] = MCP_URL,
     scope: Annotated[Scope, typer.Option(help="Where Claude Code records it.")] = "user",
 ) -> None:
-    """Register the MCP server with Claude Code and write the haskie skill.
+    """Register the MCP server with Claude Code and write the haskie skill and rule.
 
-    Three things a client needs that the tool descriptions cannot supply: the endpoint, a server
-    running at it, and a skill saying when the user's own documents beat a web search. Re-run
-    after adding a collection to refresh the skill's trigger.
+    Four things a client needs that the tool descriptions cannot supply: the endpoint, a server
+    running at it, a skill saying how to search the user's own documents, and a rule loaded into
+    every session saying when to - before answering from memory, planning, or the web. Re-run
+    after adding a collection to refresh both.
     """
     import asyncio
 
@@ -362,6 +363,7 @@ def install_claude(
     destination = claude.write_skill(scope, found)
     named = ", ".join(collection.name for collection in found) or "none yet"
     typer.echo(f"wrote {destination}")
+    typer.echo(f"wrote {claude.write_rule(scope, found)}")
     typer.echo(f"  collections in the trigger: {named}")
 
     added = claude.install_hook(scope, home.HOME, url)
