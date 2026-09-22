@@ -7,9 +7,9 @@ import { href, useRoute } from '../router'
 const BUSY_MS = 1500
 const IDLE_MS = 5000
 
-// ponytail: the design's statusbar hints list the running and queued jobs by name. `/api/jobs/
-// activity` answers counts only, and the per-job listing is a page away, so the hints are dropped
-// rather than faked.
+// ponytail: the design's statusbar hints list the running and queued work by name.
+// `/api/operations/activity` answers counts only, and the listing is a page away, so the hints
+// are dropped rather than faked.
 export function Statusbar({ status }: { status: Status }) {
   const route = useRoute()
   const [sessions, setSessions] = useState<number | null>(null)
@@ -51,7 +51,7 @@ export function Statusbar({ status }: { status: Status }) {
       <span className="spacer" />
       <a className="statusbar-item" href={href({ name: 'operations' })}>
         <Activity className="icon" />
-        <Queue label="Jobs" running={counts?.jobs.running ?? 0} queued={counts?.jobs.queued ?? 0} />
+        <Queue label="Operations" running={counts?.operations.running ?? 0} queued={counts?.operations.queued ?? 0} />
         <span className="muted">·</span>
         <Queue label="Tasks" running={counts?.tasks.running ?? 0} queued={counts?.tasks.queued ?? 0} />
       </a>

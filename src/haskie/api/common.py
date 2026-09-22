@@ -16,9 +16,10 @@ PAGED = {"page": Provide(page_request, sync_to_thread=False)}
 
 
 class BulkStarted(msgspec.Struct):
-    """A job was accepted and runs in the background; follow it at /api/jobs/{job_id}/progress."""
+    """An operation was accepted and runs in the background; follow it at
+    /api/operations/{operation_id}/progress."""
 
-    job_id: str
+    operation_id: str
 
 
 class Describe(msgspec.Struct):

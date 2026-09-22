@@ -13,11 +13,13 @@ import msgspec
 import pytest
 from conftest import import_row
 
-from haskie import db, document, embed_cache
-from haskie.chunk import CHUNK_VERSION, Chunk
-from haskie.document import Document
-from haskie.embed_cache import NO_MODEL, Params
-from haskie.index import Row
+from haskie import db
+from haskie.collection.index import Row
+from haskie.document import document
+from haskie.document.document import Document
+from haskie.indexing import embed_cache
+from haskie.indexing.chunk import CHUNK_VERSION, Chunk
+from haskie.indexing.embed_cache import NO_MODEL, Params
 from haskie.settings import ChunkSettings, EmbeddingModel
 
 pytestmark = pytest.mark.anyio  # most cases await; the pure ones ignore the marker
@@ -46,6 +48,7 @@ BASE_ID = "5b753e61445f55f1c72657b07433c4f470c359deeb6057b6286fa9d6e1f89b46"
 
 
 def _row(text: str, vector: list[float] | None = None) -> Row:
+    """An embed slice's row: `seq` is left at 0, the way a slice writes it. `_merge` numbers it."""
     return Row(
         chunk=Chunk(
             heading="Title",
@@ -195,6 +198,35 @@ async def test_write_lookup_read_round_trip(
     assert entry.bytes == embed_cache.file_path(doc.name, cache_id).stat().st_size, name
     wire = msgspec.json.decode(msgspec.json.encode(entry))
     assert set(wire) == set(embed_cache.ENTRY_COLUMNS), "the row is the wire shape, `doc` renamed"
+
+
+async def test_seq_numbers_the_whole_document_across_its_parts(tmp_path: Path) -> None:
+    """The parts are chunked in parallel and each one numbers its chunks from zero, so `seq` is
+    the merge's job: 1..N over every part in order, with an empty part consuming no number."""
+    doc = await import_row(DOC, BODY)
+    params = msgspec.structs.replace(BASE, doc=doc.name)
+    groups = [
+        [_row("alpha lancedb"), _row("beta lancedb")],
+        [],
+        [_row("gamma lancedb")],
+        [_row("delta lancedb"), _row("epsilon lancedb")],
+    ]
+    assert all(row.seq == 0 for group in groups for row in group), "unnumbered going in"
+    parts = _parts(tmp_path / "scratch", groups)
+
+    cache_id = await embed_cache.write(params, parts, None)
+
+    read = [group async for group in embed_cache.read(doc.name, cache_id, 0, 4)]
+
+    assert [part for part, _ in read] == [0, 2, 3], "the empty part yields no rows"
+    numbered = [(row.seq, row.chunk.text) for _, group in read for row in group]
+    assert numbered == [
+        (1, "alpha lancedb"),
+        (2, "beta lancedb"),
+        (3, "gamma lancedb"),
+        (4, "delta lancedb"),
+        (5, "epsilon lancedb"),
+    ], "1..N in document order, through the parquet round trip"
 
 
 async def test_read_of_a_range_returns_only_that_range(tmp_path: Path) -> None:

@@ -199,11 +199,11 @@ def _signal(pid: int, number: int) -> bool:
 def stop(home_dir: HomeOption = None) -> None:
     """Stop the haskie serving this home.
 
-    SIGTERM first, so uvicorn's graceful shutdown runs the app's shutdown hooks: they stop the job
+    SIGTERM first, so uvicorn's graceful shutdown runs the app's shutdown hooks: they stop the
     pipeline and hand the home lock back. A server still there after `STOP_DEADLINE` gets a SIGINT,
     which is what uvicorn force-quits on once it is already shutting down - the hooks themselves
-    are unbounded, and DBOS can outlast the drain `run` bounds. In-flight jobs are durable, so a
-    forced exit costs a recovery at the next boot rather than the work.
+    are unbounded, and DBOS can outlast the drain `run` bounds. In-flight operations are durable,
+    so a forced exit costs a recovery at the next boot rather than the work.
 
     The lock is both how this finds the server and how it knows the server is gone; nothing else
     is left behind to clean up (see `home.running_pid`).
@@ -378,8 +378,8 @@ def destroy(
 ) -> None:
     """Delete the home directory and everything in it.
 
-    Every document, collection, index, preview and job record goes. There is no undo and nothing
-    is backed up first. Stop `haskie run` before this: removing the database under a running
+    Every document, collection, index, preview and operation record goes. There is no undo and
+    nothing is backed up first. Stop `haskie run` before this: removing the database under a running
     server leaves it writing into deleted files.
     """
     import asyncio

@@ -11,8 +11,9 @@ import pytest
 from litestar.testing import AsyncTestClient
 
 from haskie import app as app_module
-from haskie import document, textsearch
+from haskie.document import document
 from haskie.errors import InvalidInput
+from haskie.search import passage, text
 
 from conftest import attach_via_api, stage_and_import, wait_import  # isort: skip
 
@@ -192,11 +193,11 @@ async def test_search_documents_honours_limit_and_collection_filter(
 
 @pytest.mark.parametrize(
     ("name", "limit"),
-    [("zero", 0), ("negative", -1), ("above the cap", textsearch.MAX_DOCUMENTS + 1)],
+    [("zero", 0), ("negative", -1), ("above the cap", text.MAX_DOCUMENTS + 1)],
 )
 async def test_search_documents_rejects_a_bad_limit(name: str, limit: int) -> None:
     with pytest.raises(InvalidInput, match="limit must be 1.."):
-        await textsearch.search_documents("parsing", None, limit)
+        await text.search_documents("parsing", None, limit)
 
 
 async def test_descriptions_are_read_in_one_query(shelf: AsyncTestClient) -> None:
@@ -264,4 +265,4 @@ async def test_document_passages_unfold_a_shortlist_row(shelf: AsyncTestClient) 
     ],
 )
 def test_document_score(name: str, best: float, total: float, expected: float) -> None:
-    assert textsearch._document_score(best, total) == expected, name
+    assert passage.harmonic(best, total) == expected, name

@@ -23,7 +23,7 @@ from haskie import home
 from haskie.errors import Conflict, InvalidInput
 
 if TYPE_CHECKING:
-    from haskie.collection import CollectionSummary
+    from haskie.collection.collection import CollectionSummary
 
 Scope = Literal["user", "project"]  # where Claude Code keeps a setting: this user, or this project
 
@@ -73,14 +73,20 @@ time.
 
 ## Which search
 
-- **Cold start, one question, no setup** — `search_text`. BM25 over every collection at once, with
-  no collection selection and no embedding model.
-- **"Which documents cover X?"** — `search_documents`. One row per document, to pick a shortlist
-  before reading passages; `document_passages` unfolds one row into the passages it counted.
-- **A conversation scoped to a topic** — `set_session_collections` once, then `search` for the
-  rest of it.
-- **One known collection, tuned options** — `search_collection`, with `mode`, `fusion`, `reranker`
-  and `candidates`.
+Two tools, for the two questions.
+
+- **"What do the sources say about X?"** — `search_excerpts`. Hybrid retrieval over the scope,
+  returned as excerpts rather than raw chunks: hits that landed on neighbouring chunks are one
+  piece of text, widened both ways to whole sentences, best first. This is what you answer from.
+- **"Which documents cover X, and which collections hold them?"** — `search_sources`. One row per
+  document — its best passage, how much of it matched, the hot sections inside it — plus the
+  smallest set of collections that covers every document returned.
+
+Both take an optional list of collections. Given one, they search those; given none, the
+session's collections; with no session selection either, everything the user owns.
+
+Run `search_sources` first to see what covers the topic, hand the collections it names to
+`set_session_collections`, then stay on `search_excerpts` for the rest of the conversation.
 
 ## The session id
 
@@ -90,23 +96,24 @@ takes one. The argument is optional in the schema, but a call without it belongs
 the user's Sessions page never shows what this conversation searched, imported or started. If that
 line is not in your context, use one short stable string for the whole conversation instead.
 
-`set_session_collections` takes that id too: pass the collections that match the topic, then call
-`search` with the same id. It is the difference between searching the user's shelf on this subject
-and searching everything they own.
-
-Start with `search_text` when in doubt. It needs nothing set up and it answers from a cold start.
+`set_session_collections` takes that id too: pass the collections that match the topic — the ones
+`search_sources` named — then call `search_excerpts` with the same id. It is the difference between
+searching the user's shelf on this subject and searching everything they own.
 
 ## Reading the results
 
-Every hit carries the text plus `header` (the enclosing headings, as a breadcrumb) and `location`
-(`doc p.3-4 L10-20`). Both are written to be quoted — cite the document by name, not "your
-collection says".
+Every excerpt carries the text plus `header` (the enclosing headings, as a breadcrumb) and
+`location` (`doc p.3-4 L10-20`). Both are written to be quoted — cite the document by name, not
+"your collection says". An excerpt already begins and ends on a sentence boundary, so quote it as
+it comes. A source row carries the same two fields for its best passage, and each of its sections
+names the headings its matches sit under.
 
 ## Rules
 
 - No hits is an answer. Say the collections do not cover it, then fall back to the web — never
   pass a web result off as one of their sources.
-- A 503 means a model is still downloading. `search_text` needs no model, so use it meanwhile.
+- A 503 means a model is still downloading. Wait and try again, or tell the user what is holding
+  the search up.
 - A document exists on its own and belongs to any number of collections. `add_document` imports it
   once; `add_document_to_collection` attaches it and queues the index, and
   `remove_document_from_collection` detaches it without deleting it. It is not searchable in a
@@ -253,7 +260,7 @@ async def read_collections() -> "list[CollectionSummary]":
     `collection` is imported here rather than at module level: it reaches LanceDB, and the CLI
     imports this module on every invocation for `MCP_URL`.
     """
-    from haskie.collection import Collection
+    from haskie.collection.collection import Collection
     from haskie.paging import MAX_PAGE_SIZE, PageRequest
 
     page = await Collection.page(PageRequest(page_size=MAX_PAGE_SIZE))

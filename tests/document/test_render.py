@@ -8,7 +8,7 @@ import re
 
 import pytest
 
-from haskie import render
+from haskie.document import render
 
 pytestmark = pytest.mark.anyio
 

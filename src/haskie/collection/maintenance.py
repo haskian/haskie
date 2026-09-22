@@ -17,8 +17,8 @@ from datetime import timedelta
 
 import msgspec
 
-from haskie.collection import Collection
-from haskie.index import IndexStats
+from haskie.collection.collection import Collection
+from haskie.collection.index import IndexStats
 from haskie.logs import get_logger
 from haskie.settings import EmbeddingModel, PipelineSettings
 

@@ -1,8 +1,8 @@
-"""Agent sessions: which collections a session searches, and the search across them.
+"""Agent sessions: which collections a session searches, and what it was seen doing.
 
-One document may sit in several collections, so the same passage can come back from more than one
-of them. A session search is about passages, not about memberships, so a chunk is merged once (see
-`search`).
+The search itself is `retrieval.chunks` over the collections a session selected, which is where
+it belongs: one document may sit in several collections, so the same passage can come back from
+more than one of them, and a search is about passages rather than about memberships.
 """
 
 import sqlite3
@@ -12,21 +12,15 @@ from typing import Any, Literal, Protocol
 
 import msgspec
 
-from haskie import cpu, db, models
-from haskie.collection import Collection
-from haskie.embed import embed_query, rerank_scores
+from haskie import db
+from haskie.collection.collection import Collection
 from haskie.errors import InvalidInput, NotFound
-from haskie.index import CollectionIndex, Hit, RowKey, first_per_key, gather_rows, row_key
-from haskie.logs import get_logger
-from haskie.settings import SearchOverrides, load_user_settings
 
 MAX_SESSION_ID = 128
 MAX_COLLECTIONS = 100  # a session selects collections by hand; a longer list is a client mistake
 MAX_HISTORY = 100  # ponytail: the newest events only; page it when someone scrolls past 100
 # What a session can be seen doing. `collections` is the selection itself being set.
 type Action = Literal["search", "import", "attach", "detach", "describe", "collections"]
-
-_log = get_logger(__name__)
 
 
 async def load() -> dict[str, list[str]]:
@@ -111,7 +105,8 @@ class EventDetail(msgspec.Struct, omit_defaults=True):
     the generated client knows the fields: every one is optional, and an action fills the few that
     apply to it."""
 
-    scope: str | None = None  # search: "session", "text", "documents", "passages", or a collection
+    # search: "explore", "excerpts", "sources", "text", "documents", "passages", or a collection
+    scope: str | None = None
     hits: int | None = None  # search: how many passages came back
     docs: list[str] | None = None  # search: the distinct documents among the hits, best first
     collection: str | None = None  # attach, detach
@@ -122,13 +117,13 @@ class SessionEvent(msgspec.Struct):
     """One thing a session did: what, to what, and what came of it in one line.
 
     `detail` is whatever that action has to say: `hits`, `docs` and `scope` for a search,
-    `collections` for a selection. `workflow_id` names the operation the action started, if any."""
+    `collections` for a selection. `operation_id` names the operation the action started, if any."""
 
     ts: float  # unix seconds
     action: Action
     subject: str  # the query, the document, "document -> collection", the chosen collections
     detail: EventDetail
-    workflow_id: str | None
+    operation_id: str | None
     duration_ms: int
 
 
@@ -144,7 +139,7 @@ async def record(
     subject: str,
     *,
     detail: EventDetail | None = None,
-    workflow_id: str | None = None,
+    operation_id: str | None = None,
     duration_ms: int = 0,
 ) -> None:
     """Append one event to the session's history; a no-op without a session.
@@ -160,7 +155,7 @@ async def record(
         )
         await conn.execute(
             "insert into session_events "
-            "(session_id, ts, action, subject, detail, workflow_id, duration_ms) "
+            "(session_id, ts, action, subject, detail, operation_id, duration_ms) "
             "values (?, ?, ?, ?, ?, ?, ?)",
             (
                 session,
@@ -168,7 +163,7 @@ async def record(
                 action,
                 subject,
                 msgspec.json.encode(detail or EventDetail()),
-                workflow_id,
+                operation_id,
                 duration_ms,
             ),
         )
@@ -184,7 +179,7 @@ async def record_search(
     session: str | None, scope: str, query: str, found: Sequence[Found], started: float
 ) -> None:
     """A search as one event: the query, how many hits, which documents, and where it looked
-    (`session`, `text`, `documents` or a collection's name). `started` is a `perf_counter`."""
+    (the scopes `EventDetail` lists, or a collection's name). `started` is a `perf_counter`."""
     docs = list(dict.fromkeys(hit.doc for hit in found))
     await record(
         session,
@@ -219,7 +214,7 @@ async def history(session: str, limit: int = MAX_HISTORY) -> list[SessionEvent]:
     """What the session did, newest first."""
     async with db.connect() as conn:
         cursor = await conn.execute(
-            "select ts, action, subject, detail, workflow_id, duration_ms from session_events "
+            "select ts, action, subject, detail, operation_id, duration_ms from session_events "
             "where session_id = ? order by ts desc, id desc limit ?",
             (session, limit),
         )
@@ -230,120 +225,23 @@ async def history(session: str, limit: int = MAX_HISTORY) -> list[SessionEvent]:
             action,
             subject,
             msgspec.json.decode(detail, type=EventDetail),
-            workflow_id,
+            operation_id,
             duration_ms,
         )
-        for ts, action, subject, detail, workflow_id, duration_ms in rows
+        for ts, action, subject, detail, operation_id, duration_ms in rows
     ]
 
 
-async def origins(workflow_ids: list[str]) -> dict[str, str]:
+async def origins(operation_ids: list[str]) -> dict[str, str]:
     """Which session started each of these operations; an id nobody's session started is absent.
-    One query for a whole page of jobs."""
-    if not workflow_ids:
+    One query for a whole page of operations."""
+    if not operation_ids:
         return {}
-    marks = db.placeholders(len(workflow_ids))
+    marks = db.placeholders(len(operation_ids))
     async with db.connect() as conn:
         cursor = await conn.execute(
-            f"select workflow_id, session_id from session_events where workflow_id in ({marks})",
-            workflow_ids,
+            f"select operation_id, session_id from session_events where operation_id in ({marks})",
+            operation_ids,
         )
         rows = await cursor.fetchall()
-    return {workflow_id: session_id for workflow_id, session_id in rows}
-
-
-def rrf_merge[T](ranked: list[list[T]], k: int) -> list[tuple[T, float]]:
-    """Reciprocal rank fusion: every item scores the sum of `1 / (k + rank)` over the rankings it
-    appears in, best first. Ties keep the order of first appearance.
-
-    Pure, and the only merge that needs no calibration between the inputs: two LanceDB indexes
-    score rows on their own scale, so their ranks are comparable where their scores are not.
-    """
-    scores: dict[T, float] = {}
-    for ranking in ranked:
-        for rank, item in enumerate(ranking, start=1):
-            scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank)
-    return sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
-
-
-async def search(session: str, query: str, limit: int | None = None) -> list[Hit]:
-    """Search every collection of the session and merge the results into one ranking.
-
-    The query is embedded once and each model is checked once for the whole fan-out, the
-    collections are then read concurrently, and the per-collection rankings are fused by rank (see
-    `rrf_merge`): the merged `Hit.score` is an RRF score, or the cross-encoder's when a reranker is
-    on. A single collection keeps its own scores, because there is nothing to compare them with.
-
-    A passage counts once. The same document may be a member of several of the chosen collections,
-    and each of their tables then holds the same chunk; a caller searching them wants one hit per
-    passage, not one per collection that happens to hold it. So a chunk enters the fusion from the
-    first collection in the session's order that returned it, and the later collections' copies are
-    dropped before the ranks are counted — otherwise a document in two collections would be fused
-    with itself and outrank an equally good one that sits in a single collection.
-
-    A collection deleted since the session chose it is skipped, so one stale name does not break
-    every search. A collection that fails to answer is not: a silent hole in the results would be
-    read as "no match".
-    """
-    user = await load_user_settings()
-    base = user.search
-    limit = limit or base.limit
-    names = await collections_for(session)
-    found = await Collection.load_settings(names)
-    for name in names:
-        if name not in found:
-            _log.warning("session_collection_missing", session_id=session, collection=name)
-    plans = [
-        (Collection(name), found[name].resolve_search(user)) for name in names if name in found
-    ]
-    if not plans:
-        return []
-    if len(plans) == 1:
-        return await plans[0][0].search(query, SearchOverrides(limit=limit))
-
-    embedding = user.embedding_model
-    vector: list[float] | None = None
-    if embedding is not None and any(settings.mode != "fts" for _, settings in plans):
-        await models.require_ready("embedding", embedding.name)
-        vector = await cpu.on_cpu(embed_query, embedding, query)
-    if base.reranker != "none":
-        await models.require_ready("reranker", base.reranker_model)  # fail before the fan-out
-    candidates = max(base.candidates, limit)
-    chosen = {collection.name: settings for collection, settings in plans}
-
-    async def retrieve(index: CollectionIndex) -> list[dict]:
-        settings = chosen[index.collection]
-        wanted = None if settings.mode == "fts" else vector
-        try:
-            return await index.search_rows(query, wanted, settings, candidates)
-        except Exception:
-            _log.exception(
-                "session_collection_search_failed", collection=index.collection, session_id=session
-            )
-            raise
-
-    retrieved = await gather_rows(
-        [collection.index_with(embedding) for collection, _ in plans], retrieve
-    )
-
-    # `retrieved` is in the order of `plans`, which is the session's own order, so the first
-    # collection that holds a passage is the one it is credited to.
-    rows: dict[RowKey, tuple[CollectionIndex, dict]] = {}
-    rankings: dict[str, list[RowKey]] = {index.collection: [] for index, _ in retrieved}
-    for index, row in first_per_key((i, r) for i, found in retrieved for r in found):
-        key = row_key(row)
-        rows[key] = (index, row)
-        rankings[index.collection].append(key)
-    merged = rrf_merge(list(rankings.values()), base.rrf_k)[:candidates]
-    if base.reranker != "none":
-        scores = await cpu.on_cpu(
-            rerank_scores, base.reranker_model, query, [rows[key][1]["text"] for key, _ in merged]
-        )
-        merged = sorted(zip([key for key, _ in merged], scores, strict=True), key=_by_score)
-    return [rows[key][0].hit(rows[key][1], score) for key, score in merged[:limit]]
-
-
-def _by_score(scored: tuple[RowKey, float]) -> float:
-    """Sort key for the merged ranking: best first, so the score is negated rather than the list
-    reversed (reversing would also flip the stable tie order)."""
-    return -scored[1]
+    return {operation_id: session_id for operation_id, session_id in rows}

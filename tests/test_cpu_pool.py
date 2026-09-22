@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from haskie import convert, cpu
+from haskie import cpu
+from haskie.document import convert
 
 from conftest import text_pdf  # isort: skip
 

@@ -161,18 +161,18 @@
   <script src="https://unpkg.com/lucide@latest"></script>
   <script src="design.js"></script>
   <script>
-    // regroup jobs by status or kind; sections rebuilt from job data attributes
-    const jobs = [...document.querySelectorAll('.operation')].map((job) => ({ job, status: job.closest('.operation-section').dataset.status, kind: job.dataset.kind, day: job.dataset.day }));
+    // regroup operations by status or kind; sections rebuilt from operation data attributes
+    const operations = [...document.querySelectorAll('.operation')].map((operation) => ({ operation, status: operation.closest('.operation-section').dataset.status, kind: operation.dataset.kind, day: operation.dataset.day }));
     const list = document.querySelector('.operations');
     function group(by) {
       list.replaceChildren();
-      for (const key of [...new Set(jobs.map((j) => j[by]))]) {
+      for (const key of [...new Set(operations.map((o) => o[by]))]) {
         const section = document.createElement('section');
         section.className = 'operation-section section';
         section.dataset.status = key;
         section.innerHTML = '<span class="mono muted"></span>';
         section.firstChild.textContent = key;
-        section.append(...jobs.filter((j) => j[by] === key).map((j) => j.job));
+        section.append(...operations.filter((o) => o[by] === key).map((o) => o.operation));
         list.append(section);
       }
     }

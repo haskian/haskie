@@ -1,9 +1,9 @@
 """Read-only raw SQL over the DBOS system tables, which live in our own SQLite file.
 
 DBOS's Python API answers one workflow (or one page of workflows) at a time. A read model over a
-whole page of jobs needs aggregates: how many steps each stage slice recorded, how many children
-each job has in which status. One grouped query answers that for every job on the page, where the
-API would need a call per workflow.
+whole page of operations needs aggregates: how many steps each stage slice recorded, how many
+children each one has in which status. One grouped query answers that for every row on the page,
+where the API would need a call per workflow.
 
 Nothing here writes: DBOS owns every row in these tables. `db.connect()` opens the same file DBOS
 was configured with, so the reads see its committed state through WAL.
@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from itertools import batched
 
 from haskie import db
-from haskie.dbos_names import ACTIVE_STATUS
+from haskie.indexing.dbos_names import ACTIVE_STATUS
 
 # SQLite allows 999 bound parameters by default; one query per page keeps every list under it.
 SYSDB_PAGE = 500
@@ -42,8 +42,8 @@ async def step_counts(workflow_ids: list[str], function_name: str) -> dict[str, 
 async def active_counts_by_name() -> dict[str, int]:
     """How many workflows of each name are enqueued or running right now.
 
-    One query for the whole app: the jobs view shows an active count per kind, and a kind is a set
-    of workflow names, so counting through the API would cost a listing per name."""
+    One query for the whole app: the Operations view shows an active count per kind, and a kind is
+    a set of workflow names, so counting through the API would cost a listing per name."""
     async with db.connect() as conn:
         rows = await conn.execute_fetchall(
             "select name, count(*) from workflow_status "
@@ -55,17 +55,17 @@ async def active_counts_by_name() -> dict[str, int]:
 
 
 async def queue_activity(skip: Sequence[str] = ()) -> dict[str, dict[str, int]]:
-    """Enqueued/running workflows per queue family ("job" or "task"), by status.
+    """Enqueued/running workflows per queue family ("operation" or "task"), by status.
 
-    The queue name carries the family as its prefix (`job.indexing`, `task.embedding`), so one
+    The queue name carries the family as its prefix (`operation.indexing`, `task.embedding`), so one
     grouped query over the prefix answers the whole indicator; a workflow started outside a queue
     has no name and is not counted. `skip` names queues left out: a child that its parent waits
     for is the same work as the parent, not a second one.
 
     `ACTIVE_STATUS` only: a DELAYED workflow is a debounce waiting out its period, not work
     waiting for a slot. Counting it made the indicator read "1 queued" for a whole
-    `maintenance_idle_seconds` after the last document, with nothing queued and the Jobs view -
-    which counts the same `ACTIVE_STATUS` - showing nothing."""
+    `maintenance_idle_seconds` after the last document, with nothing queued and the Operations
+    view - which counts the same `ACTIVE_STATUS` - showing nothing."""
     async with db.connect() as conn:
         rows = await conn.execute_fetchall(
             "select substr(queue_name, 1, instr(queue_name, '.') - 1), status, count(*) "

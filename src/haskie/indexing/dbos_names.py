@@ -1,20 +1,21 @@
-"""The DBOS vocabulary shared across the app: workflow statuses, the names DBOS stores rows
+"""The DBOS vocabulary shared across the app: run statuses, the names DBOS stores rows
 under, and the one helper that reads a DBOS error.
 
-A leaf on purpose: `sysdb`, `jobs` and `models` need these names, and `workflows`, which defines
-the workflows, imports all three. Every workflow is registered under its name here explicitly
-(`@DBOS.workflow(name=...)`), never under its qualname, because DBOS looks a workflow up by that
-name on recovery and `jobs` selects rows by these strings.
+A leaf on purpose: `sysdb`, `operations` and `models` need these names, and `workflows`, which
+defines the workflows, imports all three. Every workflow is registered under its name here
+explicitly (`@DBOS.workflow(name=...)`), never under its qualname, because DBOS looks a workflow up
+by that name on recovery and `operations` selects rows by these strings.
 """
 
 from typing import Literal, get_args
 
 from dbos._error import DBOSMaxStepRetriesExceeded
 
-# What DBOS records a workflow's progress as. Spelled out as a union rather than carried through
+# What DBOS records a run's progress as. An operation, a job and a task are all runs of a DBOS
+# workflow, and the app calls all three a run. Spelled out as a union rather than carried through
 # as a bare string, so a read model states the vocabulary it can hold and the generated OpenAPI
 # document gives the web client the same closed set (`test_workflows` pins it against DBOS).
-type WorkflowStatus = Literal[
+type RunStatus = Literal[
     "ENQUEUED",
     "PENDING",
     "SUCCESS",
@@ -23,17 +24,17 @@ type WorkflowStatus = Literal[
     "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
     "DELAYED",
 ]
-WORKFLOW_STATUSES: tuple[WorkflowStatus, ...] = get_args(WorkflowStatus.__value__)
+RUN_STATUSES: tuple[RunStatus, ...] = get_args(RunStatus.__value__)
 
 # Enqueued or running: the workflow is still on its way.
-PENDING_STATUS: WorkflowStatus = "PENDING"  # dequeued and running
-ENQUEUED_STATUS: WorkflowStatus = "ENQUEUED"
-# `list[str]`, not `list[WorkflowStatus]`: DBOS takes it as a query argument, and a list of a
+PENDING_STATUS: RunStatus = "PENDING"  # dequeued and running
+ENQUEUED_STATUS: RunStatus = "ENQUEUED"
+# `list[str]`, not `list[RunStatus]`: DBOS takes it as a query argument, and a list of a
 # literal type is not a list of str, because a list is invariant in its item type.
 ACTIVE_STATUS: list[str] = [ENQUEUED_STATUS, PENDING_STATUS]
 
 # The three pipeline-shaped workflows: each cuts a stage into `stage_slice` children with one
-# `try_batch` step per micro-batch, which is what the Jobs view reads as a job with tasks.
+# `try_batch` step per micro-batch, which is what the Operations view reads as a job with tasks.
 IMPORT_WORKFLOW = "import_document"  # convert, then pre-warm the embedding cache
 EMBED_WORKFLOW = "ensure_embedding"  # one cached embedding of one document, deduplicated
 COLLECTION_DOCUMENT_WORKFLOW = "index_collection_document"  # cached rows into one collection
@@ -41,8 +42,8 @@ PIPELINE_WORKFLOWS = [IMPORT_WORKFLOW, EMBED_WORKFLOW, COLLECTION_DOCUMENT_WORKF
 STAGE_WORKFLOW = "stage_parts"  # workflows.stage_slice
 STAGE_STEP = "try_batch"  # workflows.try_batch
 
-# Whole-collection and whole-document jobs. Also the kind the API reports for them, so the three
-# names are a type: `jobs.BulkKind` is this one.
+# Whole-collection and whole-document operations. Also the kind the API reports for them, so the
+# three names are a type: `operations.BulkKind` is this one.
 BulkWorkflow = Literal["index_collection", "delete_collection", "delete_document"]
 BULK_WORKFLOWS: tuple[BulkWorkflow, ...] = get_args(BulkWorkflow)
 INDEX_COLLECTION_WORKFLOW, DELETE_COLLECTION_WORKFLOW, DELETE_DOCUMENT_WORKFLOW = BULK_WORKFLOWS

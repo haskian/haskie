@@ -2,8 +2,8 @@ import type { SessionSummary } from '../../api'
 import { relative } from '../../format'
 import type { RangeGroup } from '../../ui'
 
-// ponytail: "active" is recent activity alone; a running job the session started would count
-// too, but that needs the operations listing joined in. Add it when idle-with-a-job misleads.
+// ponytail: "active" is recent activity alone; a running operation the session started would
+// count too, but that needs the operations listing joined in. Add it when it misleads.
 const ACTIVE_WINDOW_SECONDS = 15 * 60
 
 /** Two bands: the sessions seen in the last 15 minutes, then the rest; newest first in each,

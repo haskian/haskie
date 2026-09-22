@@ -2,7 +2,7 @@
 
 Scores are raw BM25, not fused ranks: one lexical scorer with the same tokenizer and the same
 chunk size answers in every collection, so two collections score on one scale and the merge can
-sort on the score itself. That is the difference with `session.search`, which has to fuse ranks
+sort on the score itself. That is the difference with `retrieval.chunks`, which has to fuse ranks
 because a hybrid ranking has no scale to share. Normalizing per collection would be worse than
 either: it would put every collection's rank-1 chunk on page one, whatever it matched.
 
@@ -22,11 +22,19 @@ import hashlib
 
 import msgspec
 
-from haskie import document
-from haskie.collection import Collection
+from haskie.collection.collection import Collection
+from haskie.collection.index import (
+    CollectionIndex,
+    Hit,
+    first_per_key,
+    gather_rows,
+    row_key,
+    row_score,
+)
+from haskie.document import document
 from haskie.errors import InvalidInput, NotFound
-from haskie.index import CollectionIndex, Hit, first_per_key, gather_rows, row_key, row_score
 from haskie.paging import DEFAULT_PAGE_SIZE, OffsetCursor, Order, Page, check_page_size
+from haskie.search.passage import DocumentMatch, document_match
 from haskie.settings import load_user_settings
 
 MAX_TEXT_PAGE_SIZE = 200  # a page of chunks is a page of text; 200 is already a lot for an agent
@@ -76,6 +84,24 @@ def parse_cursor(cursor: str | None, q: str, collections: list[str], page_size: 
     return offset
 
 
+async def checked_names(collections: list[str] | None) -> list[str]:
+    """The collections a search covers: the names the caller gave, deduplicated and in its own
+    order, or every collection when it named none.
+
+    A name nobody owns is a mistake in the request, not an empty result — unlike a session's
+    stale name, which `retrieval.chunks` skips, because the caller did not choose it just now.
+    """
+    known = await Collection.names()
+    if not collections:
+        return known
+    names = list(dict.fromkeys(collections))
+    owned = set(known)
+    unknown = next((name for name in names if name not in owned), None)
+    if unknown is not None:
+        raise NotFound(f"collection not found: {unknown}")
+    return names
+
+
 def split_collections(raw: str | None) -> list[str] | None:
     """The comma-separated `collections` query argument as names, or None for "every collection".
 
@@ -122,12 +148,7 @@ async def search(
     caller pages to. Searches are not audited, like every other search.
     """
     check_page_size(page_size, MAX_TEXT_PAGE_SIZE)
-    known = await Collection.names()
-    names = list(dict.fromkeys(collections)) if collections else known
-    # an unknown name is a mistake in the request, not an empty page (as when a session picks one)
-    unknown = next((name for name in names if name not in set(known)), None)
-    if unknown is not None:
-        raise NotFound(f"collection not found: {unknown}")
+    names = await checked_names(collections)
     chosen = [Collection(name) for name in names]
     offset = parse_cursor(cursor, q, names, page_size)
     depth = offset + page_size
@@ -153,31 +174,6 @@ async def search(
     )
 
 
-class DocumentMatch(msgspec.Struct):
-    """One document the query matched, and the best evidence that it did.
-
-    The answer to "which documents should I read", not "which passages answer this": `score` is
-    the harmonic mean of the document's best chunk and the sum of every scanned chunk that came
-    from it (see `_document_score`), and `chunks` how many there were. The evidence fields are its
-    best chunk.
-    """
-
-    collection: str  # the collection whose table held the best chunk; the document belongs to none
-    doc: str
-    score: float
-    chunks: int
-    description: str
-    heading: str
-    location: str
-    text: str  # the best chunk, so a caller can see why the document is on the list
-    # Where the document is on disk, so a tool outside the app can open or grep it. The lines are
-    # the best chunk's, in `markdown_file`: somewhere to start reading, not the whole match.
-    source_file: str
-    markdown_file: str
-    line_start: int
-    line_end: int
-
-
 async def search_documents(
     q: str, collections: list[str] | None = None, limit: int | None = None
 ) -> list[DocumentMatch]:
@@ -189,53 +185,25 @@ async def search_documents(
     chunk came from. Scores are raw BM25 and therefore comparable, for the reason in the module
     docstring.
     """
-    limit = _document_limit(limit)
-    page = await search(q, collections, page_size=_scan_size(limit))
+    limit = document_limit(limit)
+    page = await search(q, collections, page_size=scan_size(limit))
     by_doc: dict[str, list[Hit]] = {}
     for hit in page.items:
         by_doc.setdefault(hit.doc, []).append(hit)
-    ranked = sorted(map(_document_match, by_doc.values()), key=lambda m: (-m.score, m.doc))
-    ranked = ranked[:limit]
-    await _attach_descriptions(ranked)
+    ranked = sorted(map(document_match, by_doc.values()), key=lambda m: (-m.score, m.doc))[:limit]
+    # one query for the whole shortlist: a description belongs to the document, so there is
+    # nothing to group by collection
+    document.fill_descriptions(ranked, await document.describe_of({m.doc for m in ranked}))
     return ranked
 
 
-def _document_match(hits: list[Hit]) -> DocumentMatch:
-    """One document's row from its matched chunks, in the order the page ranked them: the first
-    hit is its best one, and the passage the row shows."""
-    best = hits[0]
-    return DocumentMatch(
-        collection=best.collection,
-        doc=best.doc,
-        score=_document_score(best.score, sum(hit.score for hit in hits)),
-        chunks=len(hits),
-        description="",
-        heading=best.heading,
-        location=best.location,
-        text=best.text,
-        source_file=best.source_file,
-        markdown_file=best.markdown_file,
-        line_start=best.line_start,
-        line_end=best.line_end,
-    )
-
-
-def _document_score(best: float, total: float) -> float:
-    """How strongly a document matches: the harmonic mean of its best chunk and the sum of all
-    its matched chunks. A document matched once scores its one chunk. Every further chunk lifts
-    it, but the mean stays under twice the best, so many weak chunks never outrank one strong one,
-    and a document with a few strong chunks is not held back for having few."""
-    if best <= 0 or total <= 0:
-        return 0.0
-    return 2 * best * total / (best + total)
-
-
-def _document_limit(limit: int | None) -> int:
-    """The shortlist size the caller asked for, defaulted and bounded."""
+def document_limit(limit: int | None) -> int:
+    """The shortlist size the caller asked for, defaulted and bounded. Shared with the hybrid
+    document search (`retrieval.sources`), which answers the same question."""
     return check_page_size(DEFAULT_DOCUMENTS if limit is None else limit, MAX_DOCUMENTS, "limit")
 
 
-def _scan_size(limit: int) -> int:
+def scan_size(limit: int) -> int:
     """How many chunks the shortlist of `limit` documents is folded from."""
     return min(limit * DOCUMENT_SCAN, MAX_TEXT_PAGE_SIZE)
 
@@ -248,13 +216,5 @@ async def document_passages(
     The same scan `search_documents` folds, for the same `limit`, kept to `doc`: exactly the
     `chunks` its row counted, unfolded. A document the scan never reached is an empty list.
     """
-    page = await search(q, collections, page_size=_scan_size(_document_limit(limit)))
+    page = await search(q, collections, page_size=scan_size(document_limit(limit)))
     return [hit for hit in page.items if hit.doc == doc]
-
-
-async def _attach_descriptions(matches: list[DocumentMatch]) -> None:
-    """Fill in each match's description. One query for the whole shortlist: a description belongs
-    to the document, so there is nothing to group by collection."""
-    described = await document.describe_of({match.doc for match in matches})
-    for match in matches:
-        match.description = described.get(match.doc, "")

@@ -32,8 +32,8 @@ export type Status = Wire<'Status'>
 export type ModelStatus = Wire<'ModelStatus'>
 export type Task = Wire<'Task'>
 export type Activity = Wire<'Activity'>
-export type JobRow = Wire<'JobRow'>
-export type StageJob = Wire<'StageJob'>
+export type Operation = Wire<'Operation'>
+export type Job = Wire<'Job'>
 export type SessionSummary = Wire<'SessionSummary'>
 // Not `Wire`: `EventDetail` is the one struct whose fields really are absent on the wire
 // (`omit_defaults`), so completing them would promise fields no action fills.
@@ -41,11 +41,11 @@ export type EventDetail = components['schemas']['EventDetail']
 export type SessionEvent = Omit<Wire<'SessionEvent'>, 'detail'> & { detail: EventDetail }
 export type SearchAt = Wire<'SearchAt'>
 export type ChunksAt = Wire<'ChunksAt'>
-export type JobKindSummary = Wire<'JobKindSummary'>
-// Work the backend only accepts (202) and runs in the background. `job_id` is what a poll of
-// `jobProgress` follows.
+export type OperationKindSummary = Wire<'OperationKindSummary'>
+// Work the backend only accepts (202) and runs in the background. `operation_id` is what a poll of
+// `operationProgress` follows.
 export type BulkStarted = Wire<'BulkStarted'>
-export type BulkJob = Wire<'BulkJob'>
+export type OperationProgress = Wire<'OperationProgress'>
 export type Preview = Wire<'Preview'>
 export type Staged = Wire<'Staged'>
 export type Member = Wire<'Member'>
@@ -62,9 +62,11 @@ export type MemberStatus = Member['status']
 export type SearchMode = NonNullable<SearchSettings['mode']>
 export type Fusion = NonNullable<SearchSettings['fusion']>
 export type Reranker = NonNullable<SearchSettings['reranker']>
-export type JobKind = JobRow['kind']
-export type Stage = StageJob['stage']
-export type WorkflowStatus = JobRow['status']
+export type OperationKind = Operation['kind']
+export type Stage = Job['stage']
+export type RunStatus = Operation['status']
+// The three whole-thing operations of the collection kind; `Operation.detail.bulk` carries it.
+export type BulkKind = OperationProgress['kind']
 // What a session can be seen doing; `collections` is the selection itself being set.
 export type SessionAction = SessionEvent['action']
 
@@ -72,7 +74,7 @@ export type SessionAction = SessionEvent['action']
 export const DOCUMENT_STATUSES: readonly DocStatus[] = ['queued', 'converting', 'embedding', 'imported', 'error', 'cancelled', 'deleting']
 // Still on its way: what the UI polls for and shows a spinner against.
 export const ACTIVE_DOCUMENT_STATUSES: readonly DocStatus[] = ['queued', 'converting', 'embedding']
-export const ACTIVE_JOB_STATUSES: ReadonlySet<WorkflowStatus> = new Set<WorkflowStatus>(['ENQUEUED', 'PENDING'])
+export const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(['ENQUEUED', 'PENDING'])
 
 // What a collection may override of the chunking defaults; null is "use the default".
 export type ChunkOverrides = Pick<CollectionSettings, keyof ChunkSettings>
@@ -105,9 +107,9 @@ export const MAX_PAGE_SIZE = 1000 // the backend's cap; a bigger page_size is re
 // no name for a shared parameter set, so they are read off one listing that takes them.
 export type PageRequest = Omit<NonNullable<operations['ApiDocumentsListDocuments']['parameters']['query']>, 'status'>
 export type Order = NonNullable<PageRequest['order']>
-// Litestar names a paged response after its item type (`Page_haskie.document.Document_`), so the
-// schema has no generic to alias. The envelope comes from one of them; the items stay open.
-export type Page<T> = Omit<Wire<'Page_haskie.document.Listed_'>, 'items'> & { items: T[] }
+// Litestar names a paged response after its item type (`Page_haskie.document.document.Document_`),
+// so the schema has no generic to alias. The envelope comes from one of them; the items stay open.
+export type Page<T> = Omit<Wire<'Page_haskie.document.document.Listed_'>, 'items'> & { items: T[] }
 // What an import may say about the document it creates. Everything is optional: the file name
 // and the user's conversion defaults answer for whatever is left out.
 type ImportOptions = Partial<Omit<Wire<'ImportRequest'>, 'staging_id' | 'path'>>
@@ -229,16 +231,17 @@ export const api = {
   // Yields each frame as it arrives, so the first page shows without waiting for the last.
   markdown: (doc: string, full = false) => ndjson<Frame>(`${documentPath(doc)}/markdown${full ? '?full=true' : ''}`),
 
-  // One section of the Jobs view. The cursor is an opaque offset rather than a keyset, because
-  // the listing reads DBOS's workflow history, which has one fixed ordering (newest first) and no
+  // One section of the Operations view. The cursor is an opaque offset rather than a keyset,
+  // because the listing reads the run history, which has one fixed ordering (newest first) and no
   // sort of its own. A cursor belongs to the kind that issued it.
-  jobsByKind: (kind: JobKind, q: PageRequest & { collection?: string } = {}) =>
-    request<Page<JobRow>>(`/api/jobs/by-kind${pageQuery({ cursor: q.cursor, page_size: q.page_size }, { kind, collection: q.collection })}`),
-  jobKinds: () => request<JobKindSummary[]>('/api/jobs/kinds'),
-  activity: () => request<Activity>('/api/jobs/activity'),
+  operations: (kind: OperationKind, q: PageRequest & { collection?: string } = {}) =>
+    request<Page<Operation>>(`/api/operations${pageQuery({ cursor: q.cursor, page_size: q.page_size }, { kind, collection: q.collection })}`),
+  operationKinds: () => request<OperationKindSummary[]>('/api/operations/kinds'),
+  activity: () => request<Activity>('/api/operations/activity'),
+  // One job of an operation: its micro-batches.
   jobTasks: (jobId: string) => request<Task[]>(`/api/jobs/${jobId}/tasks`),
-  jobProgress: (jobId: string) => request<BulkJob>(`/api/jobs/${jobId}/progress`),
-  deleteJob: (jobId: string) => request<void>(`/api/jobs/${jobId}`, { method: 'DELETE' }),
+  operationProgress: (operationId: string) => request<OperationProgress>(`/api/operations/${operationId}/progress`),
+  cancelOperation: (operationId: string) => request<void>(`/api/operations/${operationId}`, { method: 'DELETE' }),
 
   // Full-text search across every collection, for Explore's "all collections" scope: there is no
   // session and no one collection to answer the query, so the paged endpoint stands in for one.
@@ -258,5 +261,5 @@ export const api = {
   saveSession: (id: string, collections: string[]) =>
     request<string[]>(`/api/sessions/${encodeURIComponent(id)}`, json('PUT', { collections })),
   search: (sessionId: string, q: string) =>
-    request<Hit[]>(`/api/search?session_id=${encodeURIComponent(sessionId)}&q=${encodeURIComponent(q)}`),
+    request<Hit[]>(`/api/search/explore?granularity=chunk&session_id=${encodeURIComponent(sessionId)}&q=${encodeURIComponent(q)}`),
 }

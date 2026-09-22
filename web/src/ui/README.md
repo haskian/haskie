@@ -23,7 +23,7 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | --- | --- |
 | `Shell` | `<Shell current="documents" counts={counts} side={<Groups />}>{page}</Shell>` — page frame, logo, nav. |
 | `Logo` | `<Logo />` — the mark and wordmark, linking to Explore. |
-| `Statusbar` | `<Statusbar status={status} />` — fixed strip; polls `/api/jobs/activity` itself. |
+| `Statusbar` | `<Statusbar status={status} />` — fixed strip; polls `/api/operations/activity` itself. |
 | `Picker` | `<Picker options={scopes} value={scope} onChange={setScope} />` — `<details>` dropdown, each option a label plus a `sub`. |
 | `Tabs` | `<Tabs tabs={[{ id: 'match', label: 'Match' }]} selected={tab} onSelect={setTab} />` — the strip only; the caller renders the panels. |
 | `Modal` | `<Modal open={open} onClose={close} title={doc} subtitle="collection">{panels}</Modal>` — native `<dialog>`. |
@@ -32,7 +32,7 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `HitGrid` | `<HitGrid hits={hits} query={q} onOpen={open} />` or `<HitGrid matches={matches} query={q} />`. |
 | `SearchPanel` | `<SearchPanel run={(q) => api.searchCollection(name, q)} placeholder="Search this collection" />` — box, hits and match modal for one scope. |
 | `MatchModal` | `<MatchModal hit={open} query={q} onClose={close} />` — one result: the passage, and the document it came from. |
-| `Stages` | `<Stages stages={stages} variant="glass" stripes />` — one weighted bar per stage of a job. |
+| `Jobs` | `<Jobs jobs={jobs} variant="glass" stripes />` — one weighted bar per job of an operation. |
 | `Kv` | `<Kv rows={[['Status', doc.status], ['Size', bytes.format(doc.size)]]} />`. |
 | `Field` | `<Field label="Chunk size" help={docs['conversion.chunk_size'].description}><input className="input" /></Field>`. |
 | `Toggle` / `Check` | `<Toggle label="Classic background" checked={on} onChange={setOn} />` — `Toggle` renders `role="switch"`. |

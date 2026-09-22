@@ -28,9 +28,9 @@ FILE_MODE = 0o600
 # The daily files `path` writes, and the only ones `prune` may delete.
 FILE_NAME = re.compile(r"^audit-(\d{4}-\d{2}-\d{2})\.jsonl\Z")
 # Names `attach` fills on the record itself; anything else it receives goes into `detail`.
-# `collection` is the one a request or a workflow acted on; a document has no collection of its
+# `collection` is the one a request or an operation acted on; a document has no collection of its
 # own, so a document-scoped action carries `doc` alone.
-RECORD_FIELDS = frozenset({"collection", "doc", "session_id", "workflow_id"})
+RECORD_FIELDS = frozenset({"collection", "doc", "session_id", "operation_id"})
 
 # A plain stdlib logger: structlog's BoundLogger only knows the five standard levels, and the
 # ProcessorFormatter's ExtraAdder renders `extra` into the same JSON fields anyway.
@@ -50,7 +50,7 @@ class AuditRecord(msgspec.Struct, omit_defaults=True):
     app_version: str
     request_id: str | None = None
     session_id: str | None = None
-    workflow_id: str | None = None
+    operation_id: str | None = None
     collection: str | None = None
     doc: str | None = None
     error: str | None = None

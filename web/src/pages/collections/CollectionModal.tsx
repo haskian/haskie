@@ -1,18 +1,18 @@
 import { Minus, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  ACTIVE_JOB_STATUSES,
+  ACTIVE_STATUSES,
   api,
   MAX_PAGE_SIZE,
-  type BulkJob,
   type BulkStarted,
   type CollectionInfo,
   type Document,
   type Member,
+  type OperationProgress,
   type Options,
 } from '../../api'
 import { errorText, matchesText, needleOf } from '../../format'
-import { useBulkJob } from '../../hooks/useBulkJob'
+import { useOperation } from '../../hooks/useOperation'
 import { usePoll } from '../../hooks/usePoll'
 import { useRun } from '../../hooks/useRun'
 import { DescriptionBox, documentIcon, Kv, Modal, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
@@ -87,11 +87,11 @@ function CollectionBody({ name, onClose, onChanged }: { name: string; onClose: (
   usePoll((info?.counts.active ?? 0) > 0, poll)
 
   // "Index all" and "Delete collection" are accepted (202) and run in the background, so the
-  // modal follows the job. The callbacks keep one identity, or `useBulkJob` rebuilds its poll
-  // on every tick. A deleted collection has nothing left to re-read, so that branch only closes.
+  // modal follows the operation. The callbacks keep one identity, or `useOperation` rebuilds its
+  // poll on every tick. A deleted collection has nothing left to re-read, so that branch closes.
   const onBulkDone = useCallback(
-    (job: BulkJob) => {
-      if (job.kind === 'delete_collection') {
+    (operation: OperationProgress) => {
+      if (operation.kind === 'delete_collection') {
         void onChanged()
         onClose()
         return
@@ -100,7 +100,7 @@ function CollectionBody({ name, onClose, onChanged }: { name: string; onClose: (
     },
     [onChanged, onClose, refreshAll, setError],
   )
-  const bulk = useBulkJob(onBulkDone, setError)
+  const bulk = useOperation(onBulkDone, setError)
 
   const startBulk = (start: () => Promise<BulkStarted>): void => {
     setError(null)
@@ -227,7 +227,7 @@ function CollectionBody({ name, onClose, onChanged }: { name: string; onClose: (
               <Trash2 className="icon" />
               Delete collection
             </button>
-            {bulk.job !== null && <BulkStatus job={bulk.job} />}
+            {bulk.operation !== null && <BulkStatus operation={bulk.operation} />}
           </SettingsForm>
         )}
       </div>
@@ -260,15 +260,15 @@ function CollectionBody({ name, onClose, onChanged }: { name: string; onClose: (
   )
 }
 
-/** How a queued bulk job is going, beside the button that started it. */
-function BulkStatus({ job }: { job: BulkJob }) {
-  const running = ACTIVE_JOB_STATUSES.has(job.status)
-  const what = job.kind === 'index_collection' ? 'queueing documents' : 'deleting'
+/** How a queued operation is going, beside the button that started it. */
+function BulkStatus({ operation }: { operation: OperationProgress }) {
+  const running = ACTIVE_STATUSES.has(operation.status)
+  const what = operation.kind === 'index_collection' ? 'queueing documents' : 'deleting'
   return (
     <span className="muted">
-      {running ? `${what}…` : `${what}: ${job.status.toLowerCase()}`}
-      {job.progress !== null && ` ${job.progress.done}/${job.progress.total}`}
-      {job.error !== null && ` — ${job.error}`}
+      {running ? `${what}…` : `${what}: ${operation.status.toLowerCase()}`}
+      {operation.progress !== null && ` ${operation.progress.done}/${operation.progress.total}`}
+      {operation.error !== null && ` — ${operation.error}`}
     </span>
   )
 }

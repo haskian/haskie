@@ -1,7 +1,7 @@
 """Collection routes: the listing, one collection, its settings, its members and its search.
 
 A collection holds documents it does not own: attaching and detaching move a membership and the
-rows of this collection's index, never the document itself (see `collection.py`).
+rows of this collection's index, never the document itself (see `collection/collection.py`).
 """
 
 import time
@@ -9,17 +9,19 @@ import time
 import msgspec
 from litestar import delete, get, post, put
 
-from haskie import audit, logs, models, session, workflows
+from haskie import audit, logs
 from haskie.api.common import PAGED, BulkStarted, Describe, Limit
-from haskie.collection import (
+from haskie.collection.collection import (
     Collection,
     CollectionInfo,
     CollectionSummary,
     Member,
     MemberStatus,
 )
-from haskie.index import Hit
+from haskie.collection.index import Hit
+from haskie.indexing import models, workflows
 from haskie.paging import Page, PageRequest
+from haskie.search import session
 from haskie.settings import (
     CollectionSettings,
     Fusion,
@@ -75,15 +77,15 @@ async def delete_collection(collection: str) -> BulkStarted:
     """Queue the deletion: every index still running for this collection is cancelled first.
 
     Accepted, not done: cancelling a busy collection and removing its index takes as long as the
-    last running step, which is no time to hold a request open. Poll the job for the outcome.
+    last running step, which is no time to hold a request open. Poll the operation for the outcome.
     The documents survive; only this collection's memberships and index go.
     """
-    job_id = await workflows.start_delete_collection(collection)
-    audit.attach(job_id=job_id)
-    return BulkStarted(job_id=job_id)
+    operation_id = await workflows.start_delete_collection(collection)
+    audit.attach(operation_id=operation_id)
+    return BulkStarted(operation_id=operation_id)
 
 
-@get("/api/collections/{collection:str}/search", mcp_tool="search_collection")
+@get("/api/collections/{collection:str}/search")
 async def search_collection(
     collection: str,
     q: str,
@@ -144,12 +146,12 @@ async def describe_collection(collection: str, data: Describe) -> CollectionInfo
 async def index_collection(collection: str) -> BulkStarted:
     """(Re)index every member of the collection in the background.
 
-    Accepted, not done: the members are queued by a background job, a page at a time, so a
-    collection of ten thousand costs this request one insert. Poll the job for its progress.
+    Accepted, not done: the members are queued in the background, a page at a time, so a
+    collection of ten thousand costs this request one insert. Poll the operation for its progress.
     """
-    job_id = await workflows.start_index_collection(collection)
-    audit.attach(job_id=job_id)
-    return BulkStarted(job_id=job_id)
+    operation_id = await workflows.start_index_collection(collection)
+    audit.attach(operation_id=operation_id)
+    return BulkStarted(operation_id=operation_id)
 
 
 @get(
@@ -183,23 +185,23 @@ async def add_document(
     """Attach an imported document to this collection and queue its index.
 
     Accepted, not done: the document is chunked and embedded once per distinct chunk settings and
-    reused from its cache, but the first collection to ask still pays for it. Poll the job.
+    reused from its cache, but the first collection to ask still pays for it. Poll the operation.
 
     Args:
-        session_id: The conversation's id; the attach and its job then show in that session.
+        session_id: The conversation's id; the attach and its operation then show in that session.
     """
     audit.attach(doc=data.document)
     logs.bind(doc=data.document)
-    job_id = await workflows.attach(collection, data.document)
-    audit.attach(job_id=job_id)
+    operation_id = await workflows.attach(collection, data.document)
+    audit.attach(operation_id=operation_id)
     await session.record(
         session_id,
         "attach",
         data.document,
         detail=session.EventDetail(collection=collection),
-        workflow_id=job_id,
+        operation_id=operation_id,
     )
-    return BulkStarted(job_id=job_id)
+    return BulkStarted(operation_id=operation_id)
 
 
 @delete(
@@ -211,7 +213,7 @@ async def remove_document(collection: str, doc: str, session_id: str | None = No
     """Take one document out of this collection: its rows here go, the document stays.
 
     Waited out rather than queued: a detach cancels one index and deletes that collection's rows,
-    which is short enough to answer with the outcome instead of a job to poll.
+    which is short enough to answer with the outcome instead of an operation to poll.
 
     Args:
         session_id: The conversation's id; the detach then shows in that session's history.
@@ -226,7 +228,7 @@ async def remove_document(collection: str, doc: str, session_id: str | None = No
 @audit.audited("collection.reindex")
 async def index_collection_document(collection: str, doc: str) -> BulkStarted:
     """(Re)index one member: chunk and embed it if the cache misses, then write it into this
-    collection's index. Poll the job for the outcome."""
-    job_id = await workflows.start_index_collection_document(collection, doc)
-    audit.attach(job_id=job_id)
-    return BulkStarted(job_id=job_id)
+    collection's index. Poll the operation for the outcome."""
+    operation_id = await workflows.start_index_collection_document(collection, doc)
+    audit.attach(operation_id=operation_id)
+    return BulkStarted(operation_id=operation_id)

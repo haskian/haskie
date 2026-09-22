@@ -1,0 +1,428 @@
+"""Passages out of chunks: folding hits into spans, widening a span to boundaries a reader would
+stop at, and folding the same hits into the documents and collections that cover a query.
+
+Every offset below is a real offset into `MARKDOWN`: the fixture builds a `Hit` from a pair of
+snippets and reads its text, lines and char range out of the document, the way the index does.
+`harmonic` keeps its own test next to the document search it was written for.
+"""
+
+import pytest
+
+from haskie.collection.index import Hit, location
+from haskie.search.passage import (
+    MAX_EXPAND,
+    ChunkRange,
+    Excerpt,
+    Passage,
+    Sources,
+    expand,
+    fold_sources,
+    min_cover,
+    newline_offsets,
+    ranges,
+    top_documents,
+)
+
+# A long line with no sentence terminator, no blank line and no heading in it: what the widening
+# has nothing to stop at, so the cap is all that bounds it.
+RUN = ", ".join(f"service-{i:03d}" for i in range(80))
+
+MARKDOWN = f"""# Retries
+
+A background job retries a failed HTTP call. The retry has to be idempotent, or the side
+effect happens twice.
+
+## Backoff
+
+Exponential backoff with jitter spreads the retries. A fixed delay buys a thundering herd
+instead.
+
+## Ordering
+
+Never trust a wall clock for ordering
+### Skew
+Hosts drift apart by milliseconds.
+
+## Deduplication
+
+The consumer keys on an idempotency key. It drops any message it has already handled.
+
+## Backpressure
+
+{RUN}
+"""
+
+NEWLINES = newline_offsets(MARKDOWN)  # what `expand` counts lines with
+
+DOC = "retries.md"
+OTHER = "ordering.md"
+COLLECTION = "backend"
+
+
+def _at(snippet: str) -> int:
+    """Where `snippet` starts in the fixture. It has to appear exactly once, or the span a case
+    describes would not be the span it gets."""
+    assert MARKDOWN.count(snippet) == 1, f"not unique in the fixture: {snippet!r}"
+    return MARKDOWN.index(snippet)
+
+
+def _span(begin: str, end: str) -> tuple[int, int]:
+    """The char range from the start of `begin` through the end of `end`."""
+    return _at(begin), _at(end) + len(end)
+
+
+def _text(begin: str, end: str) -> str:
+    """The fixture's own text from the start of `begin` through the end of `end`."""
+    start, stop = _span(begin, end)
+    return MARKDOWN[start:stop]
+
+
+def _hit(
+    span: tuple[int, int],
+    seq: int,
+    score: float,
+    *,
+    doc: str = DOC,
+    collection: str = COLLECTION,
+    header: str = "Retries",
+    page_start: int | None = None,
+    page_end: int | None = None,
+) -> Hit:
+    """One indexed chunk of `MARKDOWN`, with the lines and the text its offsets really give."""
+    char_start, char_end = span
+    line_start = MARKDOWN.count("\n", 0, char_start) + 1
+    line_end = MARKDOWN.count("\n", 0, char_end - 1) + 1
+    parents, _, heading = header.rpartition(" > ")
+    return Hit(
+        collection=collection,
+        doc=doc,
+        source_path=f"documents/{doc}",
+        markdown_path=f"documents/{doc}.md",
+        part=0,
+        chunk_id=seq - 1,
+        seq=seq,
+        line_start=line_start,
+        line_end=line_end,
+        char_start=char_start,
+        char_end=char_end,
+        page_start=page_start,
+        page_end=page_end,
+        parents=parents.split(" > ") if parents else [],
+        heading=heading,
+        header=header,
+        location=location(doc, page_start, page_end, line_start, line_end),
+        text=MARKDOWN[char_start:char_end],
+        score=score,
+        source_file=f"/home/documents/{doc}",
+        markdown_file=f"/home/documents/{doc}.md",
+    )
+
+
+# The four chunks of the fixture, as the splitter would leave them: 1 and 2 overlap, 3 starts
+# past the end of 2 (the splitter dropped nothing, the query simply skipped a section), 4
+# overlaps 3 again.
+OPENING = _span("# Retries", "effect happens twice.")
+BACKOFF = _span("The retry has to be idempotent", "A fixed delay buys a thundering herd\ninstead.")
+SKEW = _span("### Skew", "already handled.")
+DEDUP = _span("The consumer keys", "already handled.")
+
+
+def _chunks(doc: str = DOC) -> list[Hit]:
+    return [
+        _hit(OPENING, 1, 4.0, doc=doc, header="Retries"),
+        _hit(BACKOFF, 2, 3.0, doc=doc, header="Retries > Backoff"),
+        _hit(SKEW, 3, 2.0, doc=doc, header="Retries > Ordering > Skew"),
+        _hit(DEDUP, 4, 1.0, doc=doc, header="Retries > Deduplication"),
+    ]
+
+
+ONE, TWO, THREE, FOUR = _chunks()
+OTHER_ONE = _hit(OPENING, 1, 4.0, doc=OTHER, collection="ops", header="Retries")
+
+
+# --- ranges ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "hits", "expected"),
+    [
+        ("no hits, no ranges", [], []),
+        ("one hit is a range of one", [TWO], [(COLLECTION, DOC, 2, 2)]),
+        ("consecutive chunks merge", [ONE, TWO], [(COLLECTION, DOC, 1, 2)]),
+        (
+            "the input order does not matter: the run is sorted by seq",
+            [TWO, ONE],
+            [(COLLECTION, DOC, 1, 2)],
+        ),
+        (
+            "a gap in seq splits the run, best span first",
+            [ONE, THREE],
+            [(COLLECTION, DOC, 1, 1), (COLLECTION, DOC, 3, 3)],
+        ),
+        (
+            "two documents never merge, however their seq lines up",
+            [ONE, _hit(BACKOFF, 2, 3.0, doc=OTHER)],
+            [(COLLECTION, DOC, 1, 1), (COLLECTION, OTHER, 2, 2)],
+        ),
+        (
+            "one document in two collections never merges: each numbers its own chunks",
+            [ONE, _hit(BACKOFF, 2, 3.0, collection="ops")],
+            [(COLLECTION, DOC, 1, 1), ("ops", DOC, 2, 2)],
+        ),
+        (
+            "spans that score the same sort by document, then by position",
+            [_hit(SKEW, 3, 4.0), ONE, OTHER_ONE],
+            [("ops", OTHER, 1, 1), (COLLECTION, DOC, 1, 1), (COLLECTION, DOC, 3, 3)],
+        ),
+    ],
+)
+def test_ranges_folds_consecutive_chunks_of_one_document(
+    name: str, hits: list[Hit], expected: list[tuple[str, str, int, int]]
+) -> None:
+    folded = ranges(hits)
+
+    shape = [(r.chunks[0].collection, r.chunks[0].doc, r.seq_start, r.seq_end) for r in folded]
+    assert shape == expected, name
+
+
+def test_a_range_carries_the_span_and_the_score_of_its_members() -> None:
+    """The span is the union of its chunks, and the score is the document rule applied to one
+    span: one strong chunk lifted by what sits next to it."""
+    (folded,) = ranges([ONE, TWO])
+
+    assert (folded.char_start, folded.char_end) == (ONE.char_start, TWO.char_end)
+    assert (folded.line_start, folded.line_end) == (ONE.line_start, TWO.line_end)
+    assert folded.chunks == [ONE, TWO], "the members, ascending, for a caller that wants them"
+    assert folded.score == pytest.approx(2 * 4.0 * 7.0 / 11.0), "harmonic(best 4, sum 7)"
+
+
+# --- expand ---------------------------------------------------------------------------
+
+
+def _range(char_start: int, char_end: int, **fields) -> ChunkRange:
+    """A range of one chunk over `[char_start, char_end)`, as `ranges` would build it."""
+    return ranges([_hit((char_start, char_end), 1, 2.0, **fields)])[0]
+
+
+@pytest.mark.parametrize(
+    ("name", "span", "expected", "lines"),
+    [
+        (
+            "a range starting mid-sentence widens back to the previous terminator",
+            _span("has to be idempotent", "or the side"),
+            _text("The retry", "effect happens twice."),
+            (3, 4),
+        ),
+        (
+            "a blank line stops the widening at the paragraph it started",
+            _span("jitter spreads", "spreads the retries"),
+            _text("Exponential", "spreads the retries."),
+            (8, 8),
+        ),
+        (
+            "a heading ends the passage before itself",
+            _span("a wall clock", "clock for ordering"),
+            "Never trust a wall clock for ordering",
+            (13, 13),
+        ),
+        (
+            "a heading line starts the passage after itself",
+            _span("drift apart", "by milliseconds"),
+            "Hosts drift apart by milliseconds.",
+            (15, 15),
+        ),
+        (
+            "the start of the file is a boundary of its own",
+            (0, len("# Retries")),
+            "# Retries",
+            (1, 1),
+        ),
+        (
+            "text with no boundary in it is cut at MAX_EXPAND on both sides",
+            (_at(RUN) + 400, _at(RUN) + 450),
+            MARKDOWN[_at(RUN) + 400 - MAX_EXPAND : _at(RUN) + 450 + MAX_EXPAND].strip(),
+            (23, 23),
+        ),
+        (
+            "the end of the file stops the widening",
+            (len(MARKDOWN) - 40, len(MARKDOWN)),
+            MARKDOWN[len(MARKDOWN) - 40 - MAX_EXPAND :].strip(),
+            (23, 23),
+        ),
+    ],
+)
+def test_expand_widens_a_range_to_the_nearest_boundary(
+    name: str, span: tuple[int, int], expected: str, lines: tuple[int, int]
+) -> None:
+    passage = expand(_range(*span), MARKDOWN, NEWLINES, Passage)
+
+    assert passage.text == expected, name
+    assert (passage.line_start, passage.line_end) == lines, f"{name}: lines recounted"
+    assert MARKDOWN[passage.char_start : passage.char_end] == expected, f"{name}: offsets agree"
+    assert not passage.text[:1].isspace() and not passage.text[-1:].isspace(), name
+
+
+def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() -> None:
+    """A passage is cited the way a chunk is, so `header` and `location` come from the chunk that
+    ranked it, with the lines it ended up covering."""
+    hits = [
+        _hit(_span("# Retries", "HTTP call."), 1, 1.0, page_start=1, page_end=1),
+        _hit(
+            _span("The retry", "effect happens twice."),
+            2,
+            5.0,
+            header="Retries > Backoff",
+            page_start=2,
+            page_end=3,
+        ),
+    ]
+
+    passage = expand(ranges(hits)[0], MARKDOWN, NEWLINES, Passage)
+
+    assert passage.header == "Retries > Backoff", "the best-scoring chunk names the passage"
+    assert (passage.page_start, passage.page_end) == (2, 3), "the best chunk's pages"
+    assert passage.location == f"{DOC} p.2-3 L1-4", "rebuilt over the passage's own lines"
+    assert (passage.seq_start, passage.seq_end) == (1, 2)
+    assert passage.collection == COLLECTION
+    assert passage.markdown_file == f"/home/documents/{DOC}.md"
+    assert passage.score == pytest.approx(2 * 5.0 * 6.0 / 11.0)
+    assert passage.text.startswith("# Retries") and passage.text.endswith("twice.")
+
+
+def test_an_excerpt_is_a_passage() -> None:
+    """The trimming step is not written yet, so the type exists, the shape is the passage's, and
+    `expand` builds whichever of the two the caller asked for."""
+    span = _range(*OPENING)
+    passage = expand(span, MARKDOWN, NEWLINES, Passage)
+
+    excerpt = expand(span, MARKDOWN, NEWLINES, Excerpt)
+
+    assert isinstance(excerpt, Excerpt) and isinstance(excerpt, Passage)
+    assert excerpt.text == passage.text and excerpt.location == passage.location
+
+
+# --- fold_sources ---------------------------------------------------------------------
+
+
+def _sources(hits: list[Hit], memberships=None, limit: int = 10, sections: int = 3) -> Sources:
+    return fold_sources(top_documents(hits, limit), memberships or {}, sections)
+
+
+def test_one_document_folds_to_one_row_of_evidence() -> None:
+    """The first hit of a document is its best one, so the row shows that chunk and scores the
+    whole group; the description is left for the caller, which is the only part that needs IO."""
+    found = _sources([ONE, TWO, THREE])
+
+    (source,) = found.documents
+    assert (source.doc, source.chunks) == (DOC, 3)
+    assert source.score == pytest.approx(2 * 4.0 * 9.0 / 13.0), "harmonic(best 4, sum 9)"
+    assert (source.text, source.heading, source.location) == (ONE.text, "Retries", ONE.location)
+    assert (source.line_start, source.line_end) == (ONE.line_start, ONE.line_end)
+    assert (source.source_file, source.markdown_file) == (ONE.source_file, ONE.markdown_file)
+    assert source.description == "", "filled in by the caller, from the metadata store"
+    assert source.collections == [COLLECTION], "nothing looked up, so the table that matched it"
+    assert found.collections == [COLLECTION]
+
+
+def test_a_document_in_two_collections_names_both_and_is_covered_by_one() -> None:
+    found = _sources([ONE, OTHER_ONE], memberships={DOC: ["archive", COLLECTION], OTHER: ["ops"]})
+
+    assert [(s.doc, s.collections) for s in found.documents] == [
+        (OTHER, ["ops"]),
+        (DOC, ["archive", COLLECTION]),
+    ], "equal scores sort by document name; the memberships are carried as given"
+    assert found.collections == ["archive", "ops"], "one per document, ties picked by name"
+
+
+@pytest.mark.parametrize(
+    ("name", "hits", "limit", "expected"),
+    [
+        ("no hits, no sources", [], 10, []),
+        (
+            "one strong chunk outranks three weak ones",
+            [_hit(OPENING, 1, 5.0)] + [_hit(OPENING, i, 2.0, doc=OTHER) for i in (1, 2, 3)],
+            10,
+            [(DOC, 5.0), (OTHER, 2 * 2.0 * 6.0 / 8.0)],
+        ),
+        (
+            "the limit cuts the tail of the ranking",
+            [_hit(OPENING, 1, 5.0), _hit(OPENING, 1, 4.0, doc=OTHER)],
+            1,
+            [(DOC, 5.0)],
+        ),
+        (
+            "documents that score the same sort by name",
+            [_hit(OPENING, 1, 3.0), _hit(OPENING, 1, 3.0, doc=OTHER)],
+            10,
+            [(OTHER, 3.0), (DOC, 3.0)],
+        ),
+    ],
+)
+def test_fold_sources_ranks_documents_by_the_harmonic_of_best_and_sum(
+    name: str, hits: list[Hit], limit: int, expected: list[tuple[str, float]]
+) -> None:
+    found = _sources(hits, limit=limit)
+
+    assert [(s.doc, pytest.approx(s.score)) for s in found.documents] == expected, name
+
+
+def test_sections_are_the_headings_the_query_kept_landing_under() -> None:
+    """A document is worth reading in one place more than another. The sections score the way the
+    document does, so two weak chunks under one heading can outrank one middling chunk alone."""
+    hits = [
+        _hit(BACKOFF, 2, 3.0, header="Retries > Backoff"),
+        _hit(SKEW, 3, 2.5, header="Retries > Ordering > Skew"),
+        _hit(DEDUP, 4, 2.0, header="Retries > Backoff"),
+        _hit(OPENING, 1, 1.0, header="Retries"),
+    ]
+
+    (source,) = _sources(hits, sections=2).documents
+
+    assert [(s.header, s.chunks) for s in source.sections] == [
+        ("Retries > Backoff", 2),
+        ("Retries > Ordering > Skew", 1),
+    ], "top 2 by score; the lone weak heading is cut"
+    hot = source.sections[0]
+    assert hot.score == pytest.approx(2 * 3.0 * 5.0 / 8.0), "harmonic(best 3, sum 5)"
+    assert (hot.line_start, hot.line_end) == (3, 19), "min and max over the heading's chunks"
+    assert hot.location == f"{DOC} L3-19", "cited over the whole heading, not one chunk"
+
+
+def test_sections_that_score_the_same_sort_by_header() -> None:
+    hits = [_hit(OPENING, 1, 2.0, header=h) for h in ("Retries > Zoning", "Retries > Backoff")]
+
+    (source,) = _sources(hits, sections=5).documents
+
+    assert [s.header for s in source.sections] == ["Retries > Backoff", "Retries > Zoning"]
+
+
+# --- min_cover ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "doc_collections", "expected"),
+    [
+        ("nothing to cover", {}, []),
+        ("one collection holds every document", {"a.md": ["ops"], "b.md": ["ops"]}, ["ops"]),
+        (
+            "the collection holding the most uncovered documents is picked first",
+            {"a.md": ["ops"], "b.md": ["ops"], "c.md": ["backend"]},
+            ["ops", "backend"],
+        ),
+        (
+            "two collections are needed and tie, so they are picked by name",
+            {"a.md": ["ops"], "b.md": ["backend"]},
+            ["backend", "ops"],
+        ),
+        ("a document in two collections needs only one", {"a.md": ["ops", "backend"]}, ["backend"]),
+        (
+            "a document no collection holds is left uncovered rather than looped over",
+            {"a.md": ["ops"], "b.md": []},
+            ["ops"],
+        ),
+    ],
+)
+def test_min_cover_is_the_fewest_collections_that_hold_every_document(
+    name: str, doc_collections: dict[str, list[str]], expected: list[str]
+) -> None:
+    assert min_cover(doc_collections) == expected, name

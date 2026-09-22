@@ -14,7 +14,7 @@ not a model, and embedding dims are left out because `settings.PROFILES` fixes t
 name. `chunk.CHUNK_VERSION` is in, so a change to the splitting code retires every entry it would
 have produced differently. The id is the full sha256 of the URN, not a truncated one: a collision
 here serves one document's vectors as another's, so it is a correctness key, unlike `home.shard`
-(spread) or `textsearch.query_hash` (cursor validation).
+(spread) or `search.text.query_hash` (cursor validation).
 
 Visibility: `lookup` answers a hit only when both the row and the file exist. `write` puts the file
 in place (atomic replace) before it inserts the row (`insert or ignore`), so a reader never sees a
@@ -23,8 +23,10 @@ Two callers wanting the same missing entry are serialized above this module, by 
 deduplication of `workflows.ensure_embedding`; this module only makes the outcome idempotent.
 
 Module owns the parquet schema and the row shape it is read back into (`index.Row`), the way
-`index.py` owns LanceDB's; the chunk columns inside both come from `chunk.record`. File writes
-and reads run in a worker thread: pyarrow is sync.
+`collection/index.py` owns LanceDB's; the chunk columns inside both come from `chunk.record`. One
+column is this module's own: `seq`, the row's 1-based position among the document's chunks, which
+only the merge across parts can number (see `_merge`). File writes and reads run in a worker thread:
+pyarrow is sync.
 """
 
 import hashlib
@@ -39,9 +41,11 @@ import msgspec
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from haskie import chunk, db, document, home
-from haskie.chunk import CHUNK_VERSION, Chunk
-from haskie.index import Row
+from haskie import db, home
+from haskie.collection.index import Row
+from haskie.document import document
+from haskie.indexing import chunk
+from haskie.indexing.chunk import CHUNK_VERSION, Chunk
 from haskie.settings import Chunker, ChunkSettings, EmbeddingModel, Parser
 
 NO_MODEL = "none"  # the `model` of a profile without an embedding model: chunks only, no vectors
@@ -73,7 +77,7 @@ class Entry(Params, frozen=True):
 
 
 # The struct's field order is the column order, so the insert, the SELECT and the row decode
-# cannot drift apart (`document.py` does the same for `documents`).
+# cannot drift apart (`document/document.py` does the same for `documents`).
 ENTRY_COLUMNS: tuple[str, ...] = tuple(f.encode_name for f in msgspec.structs.fields(Entry))
 ENTRY_SELECT = ", ".join(ENTRY_COLUMNS)
 
@@ -132,6 +136,7 @@ def rows_path(doc: str, id: str, seq: int) -> Path:
 _PLAIN = pa.schema(
     [
         ("part", pa.int32()),
+        ("seq", pa.int32()),
         ("heading", pa.string()),
         ("text", pa.string()),
         ("line_start", pa.int32()),
@@ -152,13 +157,13 @@ def _schema(dims: int | None) -> pa.Schema:
 
 
 def _batch(part: int, rows: list[Row], dims: int | None) -> pa.RecordBatch:
-    records = [chunk.record(row.chunk, row.vector, dims, part=part) for row in rows]
+    records = [chunk.record(row.chunk, row.vector, dims, part=part, seq=row.seq) for row in rows]
     return pa.RecordBatch.from_pylist(records, schema=_schema(dims))
 
 
 def _rows(batch: pa.RecordBatch) -> list[Row]:
     return [
-        Row(chunk=msgspec.convert(record, Chunk), vector=record.get("vector"))
+        Row(chunk=msgspec.convert(record, Chunk), vector=record.get("vector"), seq=record["seq"])
         for record in batch.to_pylist()
     ]
 
@@ -166,14 +171,21 @@ def _rows(batch: pa.RecordBatch) -> list[Row]:
 def _merge(parts: list[Path], target: Path, dims: int | None) -> tuple[int, int]:
     """Stream every `rows.json` into `target` as one row group each, through a `.tmp` and one
     replace, so a reader never sees a partial file. Returns (rows, bytes). An empty part still
-    gets a row group, so group `n` is always part `n` (an empty group is skipped on read)."""
+    gets a row group, so group `n` is always part `n` (an empty group is skipped on read).
+
+    This is also where `Row.seq` is filled in: the parts are chunked in parallel and each one
+    numbers its chunks from zero, so the merge is the first place that sees the whole document
+    in order.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     total = 0
     with home.atomic_replace(target) as tmp, pq.ParquetWriter(tmp, _schema(dims)) as writer:
         for part, path in enumerate(parts):
             rows = msgspec.json.decode(path.read_bytes(), type=list[Row])
-            writer.write_batch(_batch(part, rows, dims))
+            for seq, row in enumerate(rows, total + 1):
+                row.seq = seq
             total += len(rows)
+            writer.write_batch(_batch(part, rows, dims))
     return total, target.stat().st_size
 
 

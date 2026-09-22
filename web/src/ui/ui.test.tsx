@@ -10,7 +10,7 @@ import { Kv } from './Kv'
 import { Mark } from './Mark'
 import { markTerms } from './markTerms'
 import { Picker } from './Picker'
-import { Stages, type StageRow } from './Stages'
+import { Jobs, type JobBar } from './Jobs'
 import { Tabs } from './Tabs'
 import { Tile } from './Tile'
 import { Check, Toggle } from './Toggle'
@@ -41,6 +41,7 @@ const HIT: Hit = {
   markdown_path: 'markdown/area.md',
   part: 0,
   chunk_id: 3,
+  seq: 4,
   line_start: 12,
   line_end: 18,
   char_start: 420,
@@ -72,7 +73,7 @@ const MATCH: DocumentMatch = {
   line_end: 9,
 }
 
-const stage = (over: Partial<StageRow> = {}): StageRow => ({ label: 'Embed', done: 9, total: 22, state: 'active', ...over })
+const bar = (over: Partial<JobBar> = {}): JobBar => ({ label: 'Embed', done: 9, total: 22, state: 'active', ...over })
 
 describe('Picker', () => {
   const options = [
@@ -181,22 +182,22 @@ describe('GallerySection', () => {
   ])
 })
 
-describe('Stages', () => {
+describe('Jobs', () => {
   check([
     {
       name: 'glass with stripes',
-      element: <Stages stages={[stage()]} variant="glass" stripes />,
+      element: <Jobs jobs={[bar()]} variant="glass" stripes />,
       contains: ['class="stages stages-glass stages-stripes"'],
     },
     {
       name: 'line variant drops the stripes',
-      element: <Stages stages={[stage({ state: 'done', done: 22 })]} variant="line" />,
+      element: <Jobs jobs={[bar({ state: 'done', done: 22 })]} variant="line" />,
       contains: ['class="stages stages-line"'],
       missing: ['stages-stripes'],
     },
     {
-      name: 'an active stage spins the settings icon and fills the bar to its share',
-      element: <Stages stages={[stage({ weight: 2.2 })]} variant="glass" />,
+      name: 'an active job spins the settings icon and fills the bar to its share',
+      element: <Jobs jobs={[bar({ weight: 2.2 })]} variant="glass" />,
       contains: [
         'class="stage active"',
         '--progress:0.4090909090909091',
@@ -208,57 +209,57 @@ describe('Stages', () => {
       ],
     },
     {
-      name: 'a done stage checks off and fills the bar',
-      element: <Stages stages={[stage({ state: 'done', done: 22, seconds: 38 })]} variant="line" />,
+      name: 'a done job checks off and fills the bar',
+      element: <Jobs jobs={[bar({ state: 'done', done: 22, seconds: 38 })]} variant="line" />,
       contains: ['class="stage done"', '--progress:1', 'lucide-check icon"', '<span>22/22</span>', '<span>38 sec</span>'],
     },
     {
-      name: 'a todo stage is plain, with a clock and an empty bar',
-      element: <Stages stages={[stage({ state: 'todo', done: 0 })]} variant="line" />,
+      name: 'a todo job is plain, with a clock and an empty bar',
+      element: <Jobs jobs={[bar({ state: 'todo', done: 0 })]} variant="line" />,
       contains: ['class="stage"', '--progress:0', 'lucide-clock icon"'],
       missing: ['spin'],
     },
     {
-      name: 'an error stage is plain, with a cross',
-      element: <Stages stages={[stage({ state: 'error', done: 0 })]} variant="line" />,
+      name: 'an error job is plain, with a cross',
+      element: <Jobs jobs={[bar({ state: 'error', done: 0 })]} variant="line" />,
       contains: ['class="stage"', 'lucide-x icon"'],
       missing: ['stage done', 'stage active'],
     },
     {
-      name: 'a stage with no total and nothing to say knows no counts, so it shows none',
-      element: <Stages stages={[stage({ state: 'todo', done: 0, total: 0 })]} variant="line" />,
+      name: 'a job with no total and nothing to say knows no counts, so it shows none',
+      element: <Jobs jobs={[bar({ state: 'todo', done: 0, total: 0 })]} variant="line" />,
       contains: ['--progress:0'],
       missing: ['stage-meta'],
     },
     {
-      name: 'a done stage with no total fills its bar anyway',
-      element: <Stages stages={[stage({ state: 'done', done: 0, total: 0 })]} variant="line" />,
+      name: 'a done job with no total fills its bar anyway',
+      element: <Jobs jobs={[bar({ state: 'done', done: 0, total: 0 })]} variant="line" />,
       contains: ['class="stage done"', '--progress:1'],
       missing: ['stage-meta'],
     },
     {
-      name: 'a note stands in for the time a stage was never timed at',
-      element: <Stages stages={[stage({ state: 'done', done: 0, total: 0, note: 'loaded' })]} variant="line" />,
+      name: 'a note stands in for the time a job was never timed at',
+      element: <Jobs jobs={[bar({ state: 'done', done: 0, total: 0, note: 'loaded' })]} variant="line" />,
       contains: ['<span class="stage-meta"><span></span><span>loaded</span></span>'],
       missing: ['0/0'],
     },
     {
-      name: 'a note follows the counts when the stage has both',
-      element: <Stages stages={[stage({ state: 'active', note: '1 skipped' })]} variant="glass" />,
+      name: 'a note follows the counts when the job has both',
+      element: <Jobs jobs={[bar({ state: 'active', note: '1 skipped' })]} variant="glass" />,
       contains: ['<span class="stage-meta"><span>9/22</span><span>1 skipped</span></span>'],
     },
     {
-      name: 'a timed stage says its note and its duration together',
-      element: <Stages stages={[stage({ state: 'done', done: 22, seconds: 38, note: 'loaded' })]} variant="line" />,
+      name: 'a timed job says its note and its duration together',
+      element: <Jobs jobs={[bar({ state: 'done', done: 22, seconds: 38, note: 'loaded' })]} variant="line" />,
       contains: ['<span>22/22</span>', '<span>loaded · 38 sec</span>'],
     },
     {
       name: 'no weight leaves the custom property out',
-      element: <Stages stages={[stage()]} variant="glass" />,
+      element: <Jobs jobs={[bar()]} variant="glass" />,
       contains: ['--progress:'],
       missing: ['--weight'],
     },
-    { name: 'no stages renders an empty strip', element: <Stages stages={[]} variant="line" />, contains: ['class="stages stages-line"'], missing: ['stage-bar'] },
+    { name: 'no jobs renders an empty strip', element: <Jobs jobs={[]} variant="line" />, contains: ['class="stages stages-line"'], missing: ['stage-bar'] },
   ])
 })
 

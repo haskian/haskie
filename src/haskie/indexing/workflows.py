@@ -6,17 +6,21 @@ and a queryable history (workflow list, children, steps). The one thing it does 
 way to stop a step that is already running, which `collection_lock` below answers for; nothing
 else here keeps state of its own.
 
+An operation is what a user asked for; a job is one stage of it (convert, embed, index); a task is
+one micro-batch below a job. Every one of them is a DBOS workflow, which is the word this module
+and the DBOS-facing ones beside it use; see `operations.py` for the read model that never does.
+
 Layout:
-- `import_document` per imported document, on `job.indexing`: convert, then pre-warm the
+- `import_document` per imported document, on `operation.indexing`: convert, then pre-warm the
   embedding cache under the user's default chunk settings (most collections use them, so
   attaching to one is then free). Ends at document status `imported`; no collection is touched.
-- `ensure_embedding` per (document, `embed_cache.Params`), on `job.embedding`, deduplicated by the
-  cache id: whoever asks for a missing embedding first computes it, everyone else asking for the
-  same one meanwhile waits on that run. A hit in the cache returns at once. This is the only
+- `ensure_embedding` per (document, `embed_cache.Params`), on `operation.embedding`, deduplicated
+  by the cache id: whoever asks for a missing embedding first computes it, everyone else asking for
+  the same one meanwhile waits on that run. A hit in the cache returns at once. This is the only
   place chunks and vectors are computed.
-- `index_collection_document` per (collection, document), on `job.indexing`: ensures the embedding
-  the collection's chunk settings call for, then writes it from the cache into the collection's
-  table. Moves the membership's status, never the document's.
+- `index_collection_document` per (collection, document), on `operation.indexing`: ensures the
+  embedding the collection's chunk settings call for, then writes it from the cache into the
+  collection's table. Moves the membership's status, never the document's.
 - Convert, embed and index are cut into at most `pipeline.document_parallelism` contiguous
   slices, one `stage_slice` child each, with a durable step per micro-batch, so one large document
   spreads over the slots instead of trickling through a single one. Each stage has a queue of its
@@ -27,15 +31,15 @@ Layout:
   collection's index partition, so rows are never deleted while a step of another document writes
   them. A detach runs one; `delete_document_workflow` runs one per collection the document is in,
   then drops the document's folder and row.
-- `maintain_collection` per collection, debounced, on `job.maintenance`: compaction and index
-  (re)build, handed to the collection's index partition. See `maintenance.py`; a burst of
+- `maintain_collection` per collection, debounced, on `operation.maintenance`: compaction and index
+  (re)build, handed to the collection's index partition. See `collection/maintenance.py`; a burst of
   documents coalesces into one run. The nightly housekeeping schedule sits there too.
 - `index_collection_workflow` / `delete_collection_workflow` / `delete_document_workflow` on
-  `job.collection`: whole-thing work the request only starts. A collection with ten thousand
+  `operation.collection`: whole-thing work the request only starts. A collection with ten thousand
   documents costs the caller one insert instead of ten thousand, and nothing blocks an HTTP
   request for minutes.
-- Model downloads live in `models.py` (`job.downloads`), the job/task read model in `jobs.py`, and
-  the grouped reads of DBOS's own tables it needs in `sysdb.py`.
+- Model downloads live in `models.py` (`operation.downloads`), the operation/job/task read model in
+  `operations.py`, and the grouped reads of DBOS's own tables it needs in `sysdb.py`.
 
 Every workflow and every step here is `async def`. A queued async workflow is dispatched as a task
 on DBOS's background event loop rather than onto its thread pool, so a workflow that only waits on
@@ -53,13 +57,13 @@ Workflow ids, every one starting with a prefix that names its kind and the names
 `imp:{doc}:{uuid}` for an import, `emb:{doc}:{uuid}` for an embedding run,
 `idx-col:{collection}:{doc}:{uuid}` for a collection index, `{parent}:{stage}:{slice}` for each
 convert or embed child and `{parent}:index` for the index child, `bulk-index:{collection}:{uuid}`
-and `bulk-delete:{collection}:{uuid}` for the two bulk jobs, `del-doc:{doc}:{uuid}` for a document
-delete (and `{parent}:rm:{collection}` for each collection it leaves), `maint:{collection}:{run}`
-for a maintenance run, and `dl:{stage}:{model}` for a model download (see `models`).
-`document.safe_name` keeps `:` out of every name, so a prefix is unambiguous: one query finds a
-whole job. Child ids are deterministic, so a replay after a crash re-attaches to the child that
-already exists instead of starting a second one. Every workflow is registered under an explicit
-name (see `dbos_names`).
+and `bulk-delete:{collection}:{uuid}` for the two bulk operations, `del-doc:{doc}:{uuid}` for a
+document delete (and `{parent}:rm:{collection}` for each collection it leaves),
+`maint:{collection}:{run}` for a maintenance run, and `dl:{stage}:{model}` for a model download
+(see `models`). `document.safe_name` keeps `:` out of every name, so a prefix is unambiguous: one
+query finds a whole operation. Child ids are deterministic, so a replay after a crash re-attaches
+to the child that already exists instead of starting a second one. Every workflow is registered
+under an explicit name (see `dbos_names`).
 """
 
 import asyncio
@@ -88,22 +92,15 @@ from dbos import (
 from dbos._dbos import _get_dbos_instance
 from dbos._workflow_commands import garbage_collect
 
-from haskie import (
-    APP_VERSION,
-    audit,
-    db,
-    document,
-    embed_cache,
-    home,
-    logs,
-    maintenance,
-    models,
-    pipeline,
-    sysdb,
-)
-from haskie.collection import Collection, MemberStatus
+from haskie import APP_VERSION, audit, db, home, logs, sysdb
+from haskie.collection import maintenance
+from haskie.collection.collection import Collection, MemberStatus
 from haskie.cpu import configure_cpu_budget, shutdown_pool
-from haskie.dbos_names import (
+from haskie.document import document
+from haskie.document.document import DocStatus, Document, configure_preview_slots
+from haskie.errors import Conflict, InvalidInput, NotFound, PermanentError
+from haskie.indexing import embed_cache, models, pipeline
+from haskie.indexing.dbos_names import (
     ACTIVE_STATUS,
     COLLECTION_DOCUMENT_WORKFLOW,
     DAILY_MAINTENANCE_WORKFLOW,
@@ -118,9 +115,7 @@ from haskie.dbos_names import (
     STAGE_WORKFLOW,
     root_cause,
 )
-from haskie.document import DocStatus, Document, configure_preview_slots
-from haskie.errors import Conflict, InvalidInput, NotFound, PermanentError
-from haskie.pipeline import Batch
+from haskie.indexing.pipeline import Batch
 from haskie.settings import (
     ChunkSettings,
     EmbeddingModel,
@@ -131,13 +126,15 @@ from haskie.settings import (
 
 _log = logs.get_logger(__name__)
 
-# Queues. A `job.*` queue carries coarse jobs, which are made of tasks and mostly wait on them; a
-# `task.*` queue carries the work itself, and its cap is that stage's share of the CPU budget.
-INDEXING_QUEUE = "job.indexing"  # one import or collection-index orchestrator per document
-EMBEDDING_QUEUE = "job.embedding"  # one `ensure_embedding` per cache id; its own queue, because
-# an orchestrator on `job.indexing` waits on it, and a queue waiting on itself can fill up and stop
-COLLECTION_QUEUE = "job.collection"  # whole-collection index/delete and document delete
-MAINTENANCE_QUEUE = "job.maintenance"  # debounced maintenance and the nightly schedule
+# Queues. An `operation.*` queue carries operations, which are made of jobs and tasks and mostly
+# wait on them; a `task.*` queue carries the work itself, and its cap is that stage's share of the
+# CPU budget.
+INDEXING_QUEUE = "operation.indexing"  # one import or collection-index orchestrator per document
+EMBEDDING_QUEUE = "operation.embedding"  # one `ensure_embedding` per cache id; its own queue,
+# because an orchestrator on `operation.indexing` waits on it, and a queue waiting on itself can
+# fill up and stop
+COLLECTION_QUEUE = "operation.collection"  # whole-collection index/delete and document delete
+MAINTENANCE_QUEUE = "operation.maintenance"  # debounced maintenance and the nightly schedule
 CONVERT_QUEUE = "task.converting"  # convert slices; cap = the stage's share of the CPU budget
 EMBED_QUEUE = "task.embedding"  # embed slices; cap = the stage's share of the CPU budget
 INDEX_QUEUE = "task.indexing"  # index children, maintenance and removals. LanceDB takes one
@@ -146,7 +143,7 @@ INDEX_QUEUE = "task.indexing"  # index children, maintenance and removals. Lance
 
 MAINTENANCE_CONCURRENCY = 4  # each waits on a child, so this bounds tasks, not LanceDB writers
 MAINTENANCE_TIMEOUT_SECONDS = 3600  # compaction of a very large collection, not a per-batch budget
-COLLECTION_CONCURRENCY = 2  # a whole-collection job only enqueues or cancels; two is plenty
+COLLECTION_CONCURRENCY = 2  # a whole-collection operation only enqueues or cancels; two is plenty
 DOWNLOAD_CONCURRENCY = 2  # a download is network bound; two at a time saturates any link
 DOCUMENT_CONCURRENCY_CAP = 64  # an orchestrator is cheap now, but its children are not; keep a cap
 ADOPT_PAGE = 500  # stale workflows resumed per query at boot
@@ -166,18 +163,18 @@ DELETE_DOCUMENT_PREFIX = "del-doc"
 MAINTAIN_PREFIX = "maint"  # `maint:{collection}:{parent}`: one collection's runs, one id prefix
 PROGRESS_EVENT = "progress"  # the DBOS event a bulk index publishes after every page
 
-# What a pipeline job does to its document: one per prefix above, and the word the Jobs view
-# shows for a job that belongs to no collection.
-JobAction = Literal["import", "embed", "index"]
-_JOB_ACTIONS: dict[str, JobAction] = {
+# What a pipeline run does to its document: one per prefix above, and the word the Operations view
+# shows for an operation that belongs to no collection.
+PipelineAction = Literal["import", "embed", "index"]
+_PIPELINE_ACTIONS: dict[str, PipelineAction] = {
     IMPORT_PREFIX: "import",
     EMBED_PREFIX: "embed",
     COLLECTION_DOCUMENT_PREFIX: "index",
 }
 
 
-def job_names(workflow_id: str) -> tuple[JobAction, str | None, str] | None:
-    """The action, the collection and the document one pipeline job id carries; None when the id
+def pipeline_names(workflow_id: str) -> tuple[PipelineAction, str | None, str] | None:
+    """The action, the collection and the document one pipeline id carries; None when the id
     is not one of the three shapes.
 
     Here because this module writes those ids (see the prefixes above). `imp:{doc}:{uuid}` and
@@ -185,7 +182,7 @@ def job_names(workflow_id: str) -> tuple[JobAction, str | None, str] | None:
     `document.safe_name` keeps `:` out of a document and a collection name alike, so the split
     is exact."""
     parts = workflow_id.split(":")
-    action = _JOB_ACTIONS.get(parts[0])
+    action = _PIPELINE_ACTIONS.get(parts[0])
     if action is None:
         return None
     if action == "index":
@@ -198,13 +195,13 @@ def job_names(workflow_id: str) -> tuple[JobAction, str | None, str] | None:
 # continuously, idle or not, so the two kinds of queue get different ones.
 #
 # A `task.*` queue is on the critical path of a document: its interval is added at every stage
-# hand-off, so it stays short. A `job.*` queue carries work a user starts and then watches, where
-# a second before it is picked up is invisible. DBOS's own default is 1 s for both.
-JOB_POLL = 1.0
+# hand-off, so it stays short. An `operation.*` queue carries work a user starts and then watches,
+# where a second before it is picked up is invisible. DBOS's own default is 1 s for both.
+OPERATION_POLL = 1.0
 TASK_POLL = 0.25
 
 Stage = Literal["convert", "embed", "index"]
-# The order a document moves through them, which is also the order the Jobs view lists its tasks.
+# The order a document moves through them, and the order the Operations view lists its tasks.
 STAGE_ORDER: tuple[Stage, ...] = get_args(Stage)
 STAGE_QUEUE: dict[Stage, str] = {
     "convert": CONVERT_QUEUE,
@@ -449,7 +446,7 @@ def _start_adoption() -> None:
 
 class Queue(msgspec.Struct, frozen=True):
     """One registered DBOS queue: its name, how wide it is under the current settings, and
-    whether it admits one workflow per partition. The `job.`/`task.` prefix picks the polling
+    whether it admits one workflow per partition. The `operation.`/`task.` prefix picks the polling
     interval and is the family `sysdb.queue_activity` groups by."""
 
     name: str
@@ -485,7 +482,9 @@ async def apply_settings(settings: UserSettings) -> None:
             queue.name,
             global_concurrency=queue.concurrency(indexing, caps),
             partition_concurrency=queue.partition_concurrency,
-            polling_interval_sec=JOB_POLL if queue.name.startswith("job.") else TASK_POLL,
+            polling_interval_sec=(
+                OPERATION_POLL if queue.name.startswith("operation.") else TASK_POLL
+            ),
         )
     await models.ensure_models(settings)
     await schedule_pending_maintenance(indexing.maintenance_idle_seconds)
@@ -732,8 +731,8 @@ def stage_input(child) -> tuple[Stage, list[Batch]] | None:
     """The stage and the micro-batches a `stage_slice` child was given, read back out of its
     recorded input; None when DBOS did not keep it.
 
-    Here rather than in `jobs`, so the argument positions and the signature they index into are
-    edited in one place."""
+    Here rather than in `operations`, so the argument positions and the signature they index into
+    are edited in one place."""
     args = child.input["args"] if child.input else None
     return (args[0], args[1]) if args else None
 
@@ -931,10 +930,10 @@ async def _record(
     which an append-only trail tolerates."""
     await audit.record(
         event,
-        actor="workflow",
+        actor="operation",
         outcome="ok" if error is None else "error",
         duration_ms=int((time.perf_counter() - started) * 1000),
-        workflow_id=DBOS.workflow_id,
+        operation_id=DBOS.workflow_id,
         collection=collection,
         doc=doc,
         error=error,
@@ -958,10 +957,10 @@ async def maintain_collection(collection: str) -> maintenance.Report:
     waits.
 
     Two hops because a debounce needs deduplication, and a partitioned queue does not support it:
-    this one sits on the unpartitioned `job.maintenance` queue, the work it enqueues on the
+    this one sits on the unpartitioned `operation.maintenance` queue, the work it enqueues on the
     partition every index write already uses.
 
-    The child's id names the collection and this run, so the jobs view filters maintenance by
+    The child's id names the collection and this run, so the Operations view filters maintenance by
     collection with an id prefix like every other listing, and a replay re-attaches to the child
     that already exists instead of starting a second one."""
     with (
@@ -1079,7 +1078,7 @@ async def delete_document_workflow(doc: str) -> None:
         await remove_document_row(doc)
 
 
-# --- whole-collection jobs -------------------------------------------------------------------
+# --- whole-collection operations ---------------------------------------------------------
 
 
 @retried_step
@@ -1100,7 +1099,7 @@ async def enqueue_page(collection: str, after: str | None, bulk_id: str) -> Bulk
 
     Not a step: DBOS refuses to start a workflow inside one. The listing above is the step, and
     its recorded output is what makes a replay walk the same names in the same order. Each child
-    gets an id derived from the bulk job, so a replay re-attaches to the workflow it already
+    gets an id derived from the bulk operation, so a replay re-attaches to the workflow it already
     started; a document indexing under an older id is returned by the deduplication in
     `_enqueue_index` instead of being queued twice.
 
@@ -1192,18 +1191,18 @@ async def delete_collection_workflow(collection: str) -> None:
 
 
 @retried_step
-async def purge_job_history() -> int:
-    """Delete every job DBOS finished longer than `retention.job_days` ago, with the stage children
-    and step logs below it; returns the cutoff it purged before, as unix ms.
+async def purge_operation_history() -> int:
+    """Delete every operation DBOS finished longer than `retention.operation_days` ago, with the
+    stage children and step logs below it; returns the cutoff it purged before, as unix ms.
 
-    That history is the whole Jobs view, and DBOS removes none of it on its own: without this the
+    That history is the whole Operations view, and DBOS removes none of it on its own: without this
     system database grows with every document, forever. Retried: it is a long series of SQLite
     writes, any of which can lose the file to another writer for a moment, and a second round over
     the same cutoff deletes nothing.
 
     DBOS's own collection is sync SQLAlchemy over the same file and has no async twin, so it runs
     in a worker thread."""
-    days = (await load_user_settings()).retention.job_days
+    days = (await load_user_settings()).retention.operation_days
     cutoff = int((time.time() - days * 86400) * 1000)
     await anyio.to_thread.run_sync(
         partial(
@@ -1233,7 +1232,7 @@ async def sweep_staging() -> int:
 async def daily_maintenance(scheduled_time: datetime, context: Any) -> None:
     """Nightly housekeeping: the job history, the audit trail and the staging folder. Takes the
     two arguments every DBOS schedule passes."""
-    purged_before_ms = await purge_job_history()
+    purged_before_ms = await purge_operation_history()
     deleted = await prune_audit()
     swept = await sweep_staging()
     _log.info(
@@ -1252,7 +1251,7 @@ async def _start(
 ) -> str:
     """Enqueue one workflow under an explicit id and return that id.
 
-    Every job here is deduplicated the same way: a second call made while the first is still on
+    Every operation here is deduplicated the same way: a second call made while the first is still
     its way returns the run already in flight rather than starting a second one."""
     with (
         SetWorkflowID(workflow_id),
@@ -1269,8 +1268,8 @@ IMPORTABLE: tuple[DocStatus, ...] = ("queued", "error", "cancelled")
 
 
 async def start_import(doc: str) -> str:
-    """Queue the import pipeline of one document; a second call while it runs returns the same
-    job. The id names the document, so a job and its stage children share one prefix.
+    """Queue the import of one document; a second call while it runs returns the same operation.
+    The id names the document, so an operation and its stage children share one prefix.
 
     The only admission rule for an import, so a re-import goes through here too rather than
     repeating the check at the route."""
@@ -1304,16 +1303,16 @@ async def _enqueue_index(collection: str, doc: str, workflow_id: str | None = No
 
 async def start_index_collection_document(collection: str, doc: str) -> str:
     """Queue the index of one member into its collection; a second call while it runs returns the
-    same job. Both names are checked before anything is queued."""
+    same operation. Both names are checked before anything is queued."""
     await (await Collection.get(collection)).member(doc)  # NotFound before anything is queued
     return await _enqueue_index(collection, doc)
 
 
 async def attach(collection: str, doc: str) -> str:
-    """Add an imported document to a collection and queue its index; returns the job id. Only an
-    imported document can be attached, which `Collection.add` enforces: one still importing has no
-    markdown to chunk yet, one being deleted must not gain a membership the delete's snapshot
-    missed."""
+    """Add an imported document to a collection and queue its index; returns the operation id.
+    Only an imported document can be attached, which `Collection.add` enforces: one still
+    importing has no markdown to chunk yet, one being deleted must not gain a membership the
+    delete's snapshot missed."""
     found = await Collection.get(collection)  # NotFound before anything is written
     await found.add(doc)
     # `_enqueue_index`, not `start_index_collection_document`: `add` just wrote the membership
@@ -1380,8 +1379,8 @@ async def _active_document_workflows(doc: str) -> list[str]:
 
 
 async def start_delete_document(doc: str) -> str:
-    """Queue the deletion of a document from everywhere; returns the id of the job. A second call
-    while one runs is deduplicated into it."""
+    """Queue the deletion of a document from everywhere; returns the id of the operation. A second
+    call while one runs is deduplicated into it."""
     await document.get(doc)  # NotFound before anything is queued
     return await _start(
         COLLECTION_QUEUE,
@@ -1393,10 +1392,10 @@ async def start_delete_document(doc: str) -> str:
 
 
 async def start_index_collection(collection: str) -> str:
-    """Queue a (re)index of every member of the collection; returns the id of the bulk job.
+    """Queue a (re)index of every member of the collection; returns the id of the operation.
 
-    A second call while one runs is deduplicated into the job already running, so an impatient
-    "Index all" cannot queue the collection twice."""
+    A second call while one runs is deduplicated into the operation already running, so an
+    impatient "Index all" cannot queue the collection twice."""
     await Collection.get(collection)  # NotFound before anything is queued
     return await _start(
         COLLECTION_QUEUE,
@@ -1408,10 +1407,10 @@ async def start_index_collection(collection: str) -> str:
 
 
 async def start_delete_collection(collection: str) -> str:
-    """Queue the deletion of the collection; returns the id of the bulk job.
+    """Queue the deletion of the collection; returns the id of the operation.
 
-    On the `job.collection` queue rather than the collection's index partition: there it would
-    wait behind every document it is about to cancel."""
+    On the `operation.collection` queue rather than the collection's index partition: there it
+    would wait behind every document it is about to cancel."""
     await Collection.get(collection)  # NotFound before anything is queued
     return await _start(
         COLLECTION_QUEUE,
@@ -1422,21 +1421,22 @@ async def start_delete_collection(collection: str) -> str:
     )
 
 
-async def cancel_job(job_id: str) -> None:
-    """Cancel one pipeline job and record what that left behind: an import stops the document, an
-    index stops that one membership, and an embed stops neither - it writes only the cache.
+async def cancel_operation(operation_id: str) -> None:
+    """Cancel one pipeline operation and record what that left behind: an import stops the
+    document, an index stops that one membership, and an embed stops neither - it writes only the
+    cache.
 
-    Here rather than in `jobs`, which is a read model: this writes, and it reads the names it
-    writes by out of the id grammar this module owns (see `job_names`).
+    Here rather than in `operations`, which is a read model: this writes, and it reads the names it
+    writes by out of the id grammar this module owns (see `pipeline_names`).
 
-    No-op on a job that already finished: its document status is final."""
-    found = await DBOS.get_workflow_status_async(job_id)
+    No-op on an operation that already finished: its document status is final."""
+    found = await DBOS.get_workflow_status_async(operation_id)
     if found is None:
-        raise NotFound(f"job not found: {job_id}")
+        raise NotFound(f"operation not found: {operation_id}")
     if found.status not in ACTIVE_STATUS:
         return
-    await DBOS.cancel_workflow_async(job_id, cancel_children=True)
-    names = job_names(job_id)
+    await DBOS.cancel_workflow_async(operation_id, cancel_children=True)
+    names = pipeline_names(operation_id)
     if names is None:
         return
     action, collection, doc = names

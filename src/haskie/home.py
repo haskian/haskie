@@ -7,9 +7,9 @@ pays for, so both roots insert a shard directory (`shard`) between them and the 
 lives at `<root>/<shard>/<name>/`, and a root spreads over 256 directories.
 
 A filesystem call blocks, so every async function here runs its work in a worker thread. The sync
-ones (`atomic_replace`, `atomic_write_sync`) are for code that already runs in one: `convert.py`
-and `embed_cache.py` are sync by nature (pyarrow, the parsers) and would otherwise hop threads
-twice for one write.
+ones (`atomic_replace`, `atomic_write_sync`) are for code that already runs in one:
+`document/convert.py` and `indexing/embed_cache.py` are sync by nature (pyarrow, the parsers) and
+would otherwise hop threads twice for one write.
 
 The home lock (`claim_home` and friends) is sync for a different reason: it runs before there
 is an event loop at all, as the app's first startup hook.
@@ -43,7 +43,7 @@ _LAYOUT: dict[str, str] = {
     "STAGING_ROOT": "staging",  # uploads not yet imported; swept by the nightly maintenance
     "AUDIT_DIR": "audit",
     "DB_FILE": "haskie.db",
-    "MODEL_CACHE": "cache/models",  # compiled CoreML models (see embed.py); ORT creates it
+    "MODEL_CACHE": "cache/models",  # compiled CoreML models (see indexing/embed.py); ORT creates it
     "LOCK_FILE": "haskie.lock",  # one running haskie per home (see `claim_home`)
 }
 _MADE = ("COLLECTION_ROOT", "DOCUMENT_ROOT", "STAGING_ROOT", "AUDIT_DIR")  # the rest are files
@@ -222,8 +222,8 @@ def atomic_replace(path: Path) -> Iterator[Path]:
 
 def atomic_write_sync(path: Path, data: bytes | str, encoding: str = "utf-8") -> None:
     """One whole payload through `atomic_replace`, for code that already runs in a worker thread
-    (see `convert.py`). Calling it from a coroutine blocks that event loop; await `atomic_write`
-    there instead."""
+    (see `document/convert.py`). Calling it from a coroutine blocks that event loop; await
+    `atomic_write` there instead."""
     payload = data.encode(encoding) if isinstance(data, str) else data
     with atomic_replace(path) as tmp:
         tmp.write_bytes(payload)

@@ -417,15 +417,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/jobs": {
+    "/api/operations": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** ListJobs */
-        get: operations["ApiJobsListJobs"];
+        /** ListOperations */
+        get: operations["ApiOperationsListOperations"];
         put?: never;
         post?: never;
         delete?: never;
@@ -434,15 +434,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/jobs/by-kind": {
+    "/api/operations/kinds": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** ListJobsByKind */
-        get: operations["ApiJobsByKindListJobsByKind"];
+        /** ListOperationKinds */
+        get: operations["ApiOperationsKindsListOperationKinds"];
         put?: never;
         post?: never;
         delete?: never;
@@ -451,24 +451,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/jobs/kinds": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** ListJobKinds */
-        get: operations["ApiJobsKindsListJobKinds"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/jobs/activity": {
+    "/api/operations/activity": {
         parameters: {
             query?: never;
             header?: never;
@@ -476,7 +459,7 @@ export interface paths {
             cookie?: never;
         };
         /** GetActivity */
-        get: operations["ApiJobsActivityGetActivity"];
+        get: operations["ApiOperationsActivityGetActivity"];
         put?: never;
         post?: never;
         delete?: never;
@@ -502,15 +485,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/jobs/{job_id}/progress": {
+    "/api/operations/{operation_id}/progress": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** GetJobProgress */
-        get: operations["ApiJobsJobIdProgressGetJobProgress"];
+        /** GetOperationProgress */
+        get: operations["ApiOperationsOperationIdProgressGetOperationProgress"];
         put?: never;
         post?: never;
         delete?: never;
@@ -519,7 +502,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/jobs/{job_id}": {
+    "/api/operations/{operation_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -529,8 +512,8 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** DeleteJob */
-        delete: operations["ApiJobsJobIdDeleteJob"];
+        /** CancelOperation */
+        delete: operations["ApiOperationsOperationIdCancelOperation"];
         options?: never;
         head?: never;
         patch?: never;
@@ -570,15 +553,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/search": {
+    "/api/search/explore": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** SearchSession */
-        get: operations["ApiSearchSearchSession"];
+        /** Explore */
+        get: operations["ApiSearchExploreExplore"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/search/excerpts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** SearchExcerpts */
+        get: operations["ApiSearchExcerptsSearchExcerpts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/search/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** SearchSources */
+        get: operations["ApiSearchSourcesSearchSources"];
         put?: never;
         post?: never;
         delete?: never;
@@ -695,23 +712,12 @@ export interface components {
     schemas: {
         /** Activity */
         Activity: {
-            jobs: components["schemas"]["QueueActivity"];
+            operations: components["schemas"]["QueueActivity"];
             tasks: components["schemas"]["QueueActivity"];
         };
         /** AddDocument */
         AddDocument: {
             document: string;
-        };
-        /** BulkJob */
-        BulkJob: {
-            id: string;
-            /** @enum {string} */
-            kind: "index_collection" | "delete_collection" | "delete_document";
-            collection: string | null;
-            /** @enum {string} */
-            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
-            progress?: components["schemas"]["BulkProgress"] | null;
-            error?: string | null;
         };
         /** BulkProgress */
         BulkProgress: {
@@ -723,7 +729,7 @@ export interface components {
         };
         /** BulkStarted */
         BulkStarted: {
-            job_id: string;
+            operation_id: string;
         };
         /** ChunkSettings */
         ChunkSettings: {
@@ -927,6 +933,25 @@ export interface components {
             collection?: string | null;
             collections?: string[] | null;
         };
+        /** Excerpt */
+        Excerpt: {
+            collection: string;
+            doc: string;
+            header: string;
+            location: string;
+            seq_start: number;
+            seq_end: number;
+            line_start: number;
+            line_end: number;
+            char_start: number;
+            char_end: number;
+            page_start: number | null;
+            page_end: number | null;
+            text: string;
+            score: number;
+            source_file: string;
+            markdown_file: string;
+        };
         /** FieldDoc */
         FieldDoc: {
             title: string;
@@ -940,6 +965,7 @@ export interface components {
             markdown_path: string;
             part: number;
             chunk_id: number;
+            seq: number;
             line_start: number;
             line_end: number;
             char_start: number;
@@ -956,6 +982,15 @@ export interface components {
             source_file: string;
             /** @default  */
             markdown_file: string;
+        };
+        /** HotSection */
+        HotSection: {
+            header: string;
+            score: number;
+            chunks: number;
+            line_start: number;
+            line_end: number;
+            location: string;
         };
         /** ImportRequest */
         ImportRequest: {
@@ -987,9 +1022,7 @@ export interface components {
         Job: {
             id: string;
             /** @enum {string} */
-            action: "import" | "embed" | "index";
-            collection: string | null;
-            doc: string;
+            stage: "convert" | "embed" | "index";
             /** @enum {string} */
             status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
             created_at: number;
@@ -1001,30 +1034,7 @@ export interface components {
             tasks_running: number;
             /** @default 0 */
             tasks_total: number;
-        };
-        /** JobKindSummary */
-        JobKindSummary: {
-            /** @enum {string} */
-            kind: "document" | "collection" | "download" | "maintenance";
-            label: string;
-            active: number;
-        };
-        /** JobRow */
-        JobRow: {
-            id: string;
-            /** @enum {string} */
-            kind: "document" | "collection" | "download" | "maintenance";
-            title: string;
-            /** @enum {string} */
-            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
-            created_at: number;
-            updated_at: number;
-            error: string | null;
-            origin?: string | null;
-            detail?: {
-                [key: string]: number | string | boolean | null;
-            };
-            stages?: components["schemas"]["StageJob"][];
+            seconds?: number | null;
         };
         /** Listed */
         Listed: {
@@ -1078,6 +1088,41 @@ export interface components {
             state: "pending" | "loading" | "ready" | "error";
             error?: string | null;
         };
+        /** Operation */
+        Operation: {
+            id: string;
+            /** @enum {string} */
+            kind: "document" | "collection" | "download" | "maintenance";
+            title: string;
+            /** @enum {string} */
+            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
+            created_at: number;
+            updated_at: number;
+            error: string | null;
+            origin?: string | null;
+            detail?: {
+                [key: string]: number | string | boolean | null;
+            };
+            jobs?: components["schemas"]["Job"][];
+        };
+        /** OperationKindSummary */
+        OperationKindSummary: {
+            /** @enum {string} */
+            kind: "document" | "collection" | "download" | "maintenance";
+            label: string;
+            active: number;
+        };
+        /** OperationProgress */
+        OperationProgress: {
+            id: string;
+            /** @enum {string} */
+            kind: "index_collection" | "delete_collection" | "delete_document";
+            collection: string | null;
+            /** @enum {string} */
+            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
+            progress?: components["schemas"]["BulkProgress"] | null;
+            error?: string | null;
+        };
         /** Options */
         Options: {
             parsers: ("anydoc" | "plain")[];
@@ -1097,45 +1142,58 @@ export interface components {
             active_document_statuses: ("queued" | "converting" | "embedding" | "imported" | "error" | "cancelled" | "deleting")[];
             member_statuses: ("pending" | "indexing" | "indexed" | "error" | "cancelled")[];
             active_member_statuses: ("pending" | "indexing" | "indexed" | "error" | "cancelled")[];
-            active_job_statuses: string[];
-            job_kinds: ("document" | "collection" | "download" | "maintenance")[];
+            active_statuses: string[];
+            operation_kinds: ("document" | "collection" | "download" | "maintenance")[];
             bulk_kinds: ("index_collection" | "delete_collection" | "delete_document")[];
         };
         /** Page[CollectionSummary] */
-        "Page_haskie.collection.CollectionSummary_": {
+        "Page_haskie.collection.collection.CollectionSummary_": {
             items: components["schemas"]["CollectionSummary"][];
             next_cursor?: string | null;
             total?: number | null;
         };
         /** Page[Member] */
-        "Page_haskie.collection.Member_": {
+        "Page_haskie.collection.collection.Member_": {
             items: components["schemas"]["Member"][];
             next_cursor?: string | null;
             total?: number | null;
         };
-        /** Page[Listed] */
-        "Page_haskie.document.Listed_": {
-            items: components["schemas"]["Listed"][];
-            next_cursor?: string | null;
-            total?: number | null;
-        };
         /** Page[Hit] */
-        "Page_haskie.index.Hit_": {
+        "Page_haskie.collection.index.Hit_": {
             items: components["schemas"]["Hit"][];
             next_cursor?: string | null;
             total?: number | null;
         };
-        /** Page[JobRow] */
-        "Page_haskie.jobs.JobRow_": {
-            items: components["schemas"]["JobRow"][];
+        /** Page[Listed] */
+        "Page_haskie.document.document.Listed_": {
+            items: components["schemas"]["Listed"][];
             next_cursor?: string | null;
             total?: number | null;
         };
-        /** Page[Job] */
-        "Page_haskie.jobs.Job_": {
-            items: components["schemas"]["Job"][];
+        /** Page[Operation] */
+        "Page_haskie.indexing.operations.Operation_": {
+            items: components["schemas"]["Operation"][];
             next_cursor?: string | null;
             total?: number | null;
+        };
+        /** Passage */
+        Passage: {
+            collection: string;
+            doc: string;
+            header: string;
+            location: string;
+            seq_start: number;
+            seq_end: number;
+            line_start: number;
+            line_end: number;
+            char_start: number;
+            char_end: number;
+            page_start: number | null;
+            page_end: number | null;
+            text: string;
+            score: number;
+            source_file: string;
+            markdown_file: string;
         };
         /** PipelineSettings */
         PipelineSettings: {
@@ -1235,11 +1293,11 @@ export interface components {
         /** RetentionSettings */
         RetentionSettings: {
             /**
-             * Job history (days)
-             * @description How many days of finished indexing jobs and their micro-batch results stay visible under Jobs. The nightly maintenance run deletes everything older.
+             * Operation history (days)
+             * @description How many days of finished operations and their tasks stay visible under Operations. The nightly maintenance run deletes everything older.
              * @default 28
              */
-            job_days: number;
+            operation_days: number;
             /**
              * Audit retention (days)
              * @description Days of audit files kept under HASKIE_HOME/audit; older daily files are deleted by the daily maintenance run. 0 keeps everything.
@@ -1396,7 +1454,7 @@ export interface components {
             action: "search" | "import" | "attach" | "detach" | "describe" | "collections";
             subject: string;
             detail: components["schemas"]["EventDetail"];
-            workflow_id: string | null;
+            operation_id: string | null;
             duration_ms: number;
         };
         /** SessionSummary */
@@ -1405,17 +1463,27 @@ export interface components {
             collections: string[];
             last_at: number | null;
         };
-        /** StageJob */
-        StageJob: {
-            /** @enum {string} */
-            stage: "convert" | "embed" | "index";
-            job_id: string;
-            /** @enum {string} */
-            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
-            tasks_done: number;
-            tasks_running: number;
-            tasks_total: number;
-            seconds?: number | null;
+        /** Source */
+        Source: {
+            collection: string;
+            doc: string;
+            score: number;
+            chunks: number;
+            description: string;
+            heading: string;
+            location: string;
+            text: string;
+            source_file: string;
+            markdown_file: string;
+            line_start: number;
+            line_end: number;
+            collections: string[];
+            sections: components["schemas"]["HotSection"][];
+        };
+        /** Sources */
+        Sources: {
+            documents: components["schemas"]["Source"][];
+            collections: string[];
         };
         /** Staged */
         Staged: {
@@ -1711,7 +1779,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Page_haskie.document.Listed_"];
+                    "application/json": components["schemas"]["Page_haskie.document.document.Listed_"];
                 };
             };
             /** @description Bad request syntax or unsupported method */
@@ -2104,7 +2172,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Page_haskie.collection.CollectionSummary_"];
+                    "application/json": components["schemas"]["Page_haskie.collection.collection.CollectionSummary_"];
                 };
             };
             /** @description Bad request syntax or unsupported method */
@@ -2426,7 +2494,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Page_haskie.collection.Member_"];
+                    "application/json": components["schemas"]["Page_haskie.collection.collection.Member_"];
                 };
             };
             /** @description Bad request syntax or unsupported method */
@@ -2565,46 +2633,7 @@ export interface operations {
             };
         };
     };
-    ApiJobsListJobs: {
-        parameters: {
-            query?: {
-                collection?: string | null;
-                page_size?: number;
-                cursor?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Request fulfilled, document follows */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Page_haskie.jobs.Job_"];
-                };
-            };
-            /** @description Bad request syntax or unsupported method */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        status_code: number;
-                        detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
-                    };
-                };
-            };
-        };
-    };
-    ApiJobsByKindListJobsByKind: {
+    ApiOperationsListOperations: {
         parameters: {
             query: {
                 kind: string;
@@ -2624,7 +2653,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Page_haskie.jobs.JobRow_"];
+                    "application/json": components["schemas"]["Page_haskie.indexing.operations.Operation_"];
                 };
             };
             /** @description Bad request syntax or unsupported method */
@@ -2644,7 +2673,7 @@ export interface operations {
             };
         };
     };
-    ApiJobsKindsListJobKinds: {
+    ApiOperationsKindsListOperationKinds: {
         parameters: {
             query?: never;
             header?: never;
@@ -2659,12 +2688,12 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JobKindSummary"][];
+                    "application/json": components["schemas"]["OperationKindSummary"][];
                 };
             };
         };
     };
-    ApiJobsActivityGetActivity: {
+    ApiOperationsActivityGetActivity: {
         parameters: {
             query?: never;
             header?: never;
@@ -2721,12 +2750,12 @@ export interface operations {
             };
         };
     };
-    ApiJobsJobIdProgressGetJobProgress: {
+    ApiOperationsOperationIdProgressGetOperationProgress: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                job_id: string;
+                operation_id: string;
             };
             cookie?: never;
         };
@@ -2738,7 +2767,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BulkJob"];
+                    "application/json": components["schemas"]["OperationProgress"];
                 };
             };
             /** @description Bad request syntax or unsupported method */
@@ -2758,12 +2787,12 @@ export interface operations {
             };
         };
     };
-    ApiJobsJobIdDeleteJob: {
+    ApiOperationsOperationIdCancelOperation: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                job_id: string;
+                operation_id: string;
             };
             cookie?: never;
         };
@@ -2854,11 +2883,13 @@ export interface operations {
             };
         };
     };
-    ApiSearchSearchSession: {
+    ApiSearchExploreExplore: {
         parameters: {
             query: {
-                session_id: string;
                 q: string;
+                granularity?: "chunk" | "passage" | "excerpt";
+                session_id?: string | null;
+                collections?: string | null;
                 limit?: number | null;
             };
             header?: never;
@@ -2873,7 +2904,88 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Hit"][];
+                    "application/json": components["schemas"]["Hit"][] | components["schemas"]["Passage"][] | components["schemas"]["Excerpt"][];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiSearchExcerptsSearchExcerpts: {
+        parameters: {
+            query: {
+                q: string;
+                session_id?: string | null;
+                collections?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Excerpt"][];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiSearchSourcesSearchSources: {
+        parameters: {
+            query: {
+                q: string;
+                session_id?: string | null;
+                collections?: string | null;
+                limit?: number | null;
+                sections?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Sources"];
                 };
             };
             /** @description Bad request syntax or unsupported method */
@@ -3025,7 +3137,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Page_haskie.index.Hit_"];
+                    "application/json": components["schemas"]["Page_haskie.collection.index.Hit_"];
                 };
             };
             /** @description Bad request syntax or unsupported method */

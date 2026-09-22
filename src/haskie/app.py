@@ -16,10 +16,11 @@ from litestar.static_files import create_static_files_router
 from litestar.types import ControllerRouterHandler, ExceptionHandlersMap, Message, Scope
 from litestar_mcp import LitestarMCP
 
-from haskie import APP_VERSION, home, logs, workflows
+from haskie import APP_VERSION, home, logs
 from haskie.api import ROUTE_HANDLERS
-from haskie.document import UPLOAD_MAX_BYTES
+from haskie.document.document import UPLOAD_MAX_BYTES
 from haskie.errors import HaskieError
+from haskie.indexing import workflows
 
 # The built UI, wherever it is: inside the package when haskie was installed, or `web/dist` in a
 # checkout. Absent in both places means API and MCP only.

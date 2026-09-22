@@ -13,6 +13,7 @@ const HIT: Hit = {
   markdown_path: 'markdown/area-lights.md',
   part: 0,
   chunk_id: 3,
+  seq: 4,
   line_start: 41,
   line_end: 58,
   char_start: 1204,
@@ -111,7 +112,7 @@ describe('searchSections', () => {
   const cases: Array<{ name: string; value: Scope; expected: string }> = [
     { name: 'every collection goes to the full-text endpoint', value: { kind: 'all' }, expected: '/api/search/text?page_size=50&q=shadow' },
     { name: 'one collection searches that collection', value: { kind: 'collection', name: 'A–E' }, expected: '/api/collections/A%E2%80%93E/search?q=shadow' },
-    { name: 'a session searches through the session', value: { kind: 'session', id: 'agent-1' }, expected: '/api/search?session_id=agent-1&q=shadow' },
+    { name: 'a session searches through the session', value: { kind: 'session', id: 'agent-1' }, expected: '/api/search/explore?granularity=chunk&session_id=agent-1&q=shadow' },
   ]
   for (const testCase of cases) {
     test(testCase.name, async () => {

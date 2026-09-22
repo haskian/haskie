@@ -13,8 +13,8 @@ from typing import Any
 import msgspec
 from semantic_text_splitter import MarkdownSplitter, TextSplitter
 
-from haskie import render
-from haskie.convert import PAGE_MARKER
+from haskie.document import render
+from haskie.document.convert import PAGE_MARKER
 from haskie.settings import ChunkSettings
 
 CHUNK_VERSION = 1  # see the module docstring

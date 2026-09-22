@@ -17,9 +17,11 @@ from conftest import (
     one_part,
 )
 
-from haskie import chunk, db, home, models, session
-from haskie.collection import Collection
+from haskie import db, home
+from haskie.collection.collection import Collection
 from haskie.errors import NotFound
+from haskie.indexing import chunk, models
+from haskie.search import retrieval, session
 from haskie.settings import (
     ChunkSettings,
     CollectionSettings,
@@ -53,8 +55,9 @@ async def test_search_limit_user_and_collection_level(dbos, tmp_path: Path) -> N
     assert effective.chunk_size == 30, "a search override does not leak into the chunk settings"
 
     await session.set_collections("s", ["lim"])
-    assert len(await session.search("s", "common")) == 2, "session cut to the user limit"
-    assert len(await session.search("s", "common", limit=3)) == 3
+    chosen = await session.collections_for("s")
+    assert len(await retrieval.chunks(chosen, "common")) == 2, "session cut to the user limit"
+    assert len(await retrieval.chunks(chosen, "common", limit=3)) == 3
 
 
 async def test_an_outdated_index_is_reported_and_rebuilt(dbos, tmp_path: Path) -> None:
@@ -107,10 +110,11 @@ async def test_session_search_merges_collections(dbos, tmp_path: Path) -> None:
         await session.set_collections("s1", ["a", "ghost"])
     await session.set_collections("s1", ["a", "b"])
 
-    hits = await session.search("s1", "shared", limit=10)
+    hits = await retrieval.chunks(await session.collections_for("s1"), "shared", limit=10)
 
     assert {h.collection for h in hits} == {"a", "b"}
-    assert await session.search("unknown-session", "shared") == []
+    unknown = await session.collections_for("unknown-session")
+    assert await retrieval.chunks(unknown, "shared") == []
 
 
 async def test_session_search_counts_a_shared_document_once(dbos, tmp_path: Path) -> None:
@@ -126,7 +130,7 @@ async def test_session_search_counts_a_shared_document_once(dbos, tmp_path: Path
     await attach_document(dbos, "first", solo.name)
     await session.set_collections("s", ["first", "second"])
 
-    hits = await session.search("s", "shared", limit=10)
+    hits = await retrieval.chunks(await session.collections_for("s"), "shared", limit=10)
 
     keys = [(h.doc, h.part, h.chunk_id) for h in hits]
     assert len(keys) == len(set(keys)), f"one hit per passage, got {keys}"
@@ -138,7 +142,7 @@ async def test_session_search_counts_a_shared_document_once(dbos, tmp_path: Path
 async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkeypatch) -> None:
     """Three collections, one embedding: the query used to be embedded (and the model checked)
     once per collection."""
-    from haskie.index import Row
+    from haskie.collection.index import Row
     from haskie.settings import PROFILES
 
     await save_user_settings(UserSettings(embedding="compact"))
@@ -148,7 +152,7 @@ async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkey
         collection = await Collection.create(name)
         (chunk_,) = chunk.split(f"# {name}\n\nshared token {name}\n", ChunkSettings())
         index = collection.index_with(compact)
-        row = Row(chunk=chunk_, vector=[0.1] * compact.dims)
+        row = Row(chunk=chunk_, vector=[0.1] * compact.dims, seq=1)
         # a document name per collection: the merge keys on (doc, part, chunk_id), so one name
         # shared by all three would be one passage and this test would see a single hit
         await index.add_parts(
@@ -166,10 +170,10 @@ async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkey
     async def require_ready(kind: str, model: str) -> None:
         checked.append((kind, model))
 
-    monkeypatch.setattr(session, "embed_query", fake_embed)
+    monkeypatch.setattr(retrieval, "embed_query", fake_embed)
     monkeypatch.setattr(models, "require_ready", require_ready)
 
-    hits = await session.search("s", "shared", limit=10)
+    hits = await retrieval.chunks(await session.collections_for("s"), "shared", limit=10)
 
     assert {h.collection for h in hits} == {"a", "b", "c"}
     assert embedded == ["shared"], "one embedding for the whole fan-out"
@@ -202,9 +206,9 @@ async def test_session_search_reranks_once_over_the_merge(
         calls.append(texts)
         return [float(i) for i in range(len(texts))]
 
-    monkeypatch.setattr(session, "rerank_scores", fake_rerank)
+    monkeypatch.setattr(retrieval, "rerank_scores", fake_rerank)
 
-    hits = await session.search("s", "shared")
+    hits = await retrieval.chunks(await session.collections_for("s"), "shared")
 
     assert len(calls) == 1, "one cross-encoder pass, not one per collection"
     (texts,) = calls
@@ -220,7 +224,7 @@ async def test_session_search_propagates_a_broken_collection(
 ) -> None:
     """A collection that cannot answer must not be silently dropped: an empty result reads as
     "no match", which is a different answer."""
-    from haskie.index import CollectionIndex
+    from haskie.collection.index import CollectionIndex
 
     for name in ("a", "b"):
         await Collection.create(name)
@@ -235,6 +239,6 @@ async def test_session_search_propagates_a_broken_collection(
 
     with caplog.at_level("ERROR"):
         with pytest.raises(RuntimeError, match="index unreadable"):
-            await session.search("s", "shared")
+            await retrieval.chunks(await session.collections_for("s"), "shared")
 
     assert "session_collection_search_failed" in events(caplog)

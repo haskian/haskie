@@ -18,7 +18,7 @@ import {
 } from "../api";
 import type { PageProps } from "../App";
 import { errorText, bytes, dateTime, day, matchesText, needleOf } from "../format";
-import { useBulkJob } from "../hooks/useBulkJob";
+import { useOperation } from "../hooks/useOperation";
 import { usePaged } from "../hooks/usePaged";
 import { usePoll } from "../hooks/usePoll";
 import { useRun } from "../hooks/useRun";
@@ -353,13 +353,13 @@ function DocumentModal({
     load().catch((cause: unknown) => setError(errorText(cause)));
   }, [load, setError]);
 
-  // A deletion is accepted (202) and runs in the background: the modal follows the job, then
+  // A deletion is accepted (202) and runs in the background: the modal follows it, then
   // closes and lets the listing re-read itself.
   const onDeleted = useCallback(() => {
     onClose();
     onChanged();
   }, [onClose, onChanged]);
-  const deletion = useBulkJob(onDeleted, setError);
+  const deletion = useOperation(onDeleted, setError);
 
   const remove = () => {
     if (doc === null) return;

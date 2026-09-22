@@ -11,8 +11,8 @@ import pytest
 from conftest import get_page, import_row, walk_pages
 from litestar.testing import AsyncTestClient
 
-from haskie import document
-from haskie.collection import Collection
+from haskie.collection.collection import Collection
+from haskie.document import document
 
 pytestmark = pytest.mark.anyio
 
