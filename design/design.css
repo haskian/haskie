@@ -223,9 +223,16 @@ body:has(.modal[open]) { overflow: hidden; }
 
 /* match panel: the one search result a modal is opened on, shown by every page that searches */
 .match { display: grid; gap: var(--sp-6); align-content: start; padding: var(--sp-6) 0; }
-.match-text { margin: 0; max-width: 64ch; padding-left: var(--sp-4); border-left: 2px solid var(--line); font-size: var(--fs-lg); line-height: 1.5; }
+.match-text { position: relative; margin: 0; max-width: 64ch; padding-left: var(--sp-4); padding-bottom: var(--sp-6); border-left: 2px solid var(--line); font-size: var(--fs-lg); line-height: 1.5; }
 .match-text::before { content: open-quote; }
 .match-text::after { content: close-quote; }
+.match-seq { position: absolute; right: 0; bottom: 0; font: 400 var(--fs-xs)/1.4 var(--font-mono); letter-spacing: var(--tracking-mono); color: var(--text-muted); }
+/* a source as one block: the document once, then its hot sections indented, each a jump */
+.sections { display: grid; gap: var(--sp-1); }
+.sections-head { display: flex; justify-content: space-between; gap: var(--sp-4); padding-bottom: var(--sp-2); border-bottom: 1px solid var(--line); font-size: var(--fs-sm); }
+.section-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: var(--sp-3); padding: var(--sp-2) 0 var(--sp-2) var(--sp-4); border-bottom: 1px solid var(--line-soft); font-size: var(--fs-sm); cursor: pointer; }
+.section-row:hover { background: var(--line-soft); }
+.section-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 0; height: 100%; } /* fills its panel, so each pane scrolls on its own */
 .pane { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; min-height: 0; } /* a long crumb or line shortens, never widens the pane */
 .pane + .pane { border-left: var(--border); }

@@ -9,8 +9,9 @@
     /* page layout only; tokens live in design.css */
     .explore { display: grid; gap: var(--sp-6); align-content: start; }
     .match { display: grid; gap: var(--sp-6); align-content: start; padding: var(--sp-6) 0; }
-    .match-text { margin: 0; max-width: 64ch; padding-left: var(--sp-4); border-left: 2px solid var(--line); font-size: var(--fs-lg); line-height: 1.5; }
+    .match-text { position: relative; margin: 0; max-width: 64ch; padding-left: var(--sp-4); padding-bottom: var(--sp-6); border-left: 2px solid var(--line); font-size: var(--fs-lg); line-height: 1.5; }
     .match-text::before { content: open-quote; } .match-text::after { content: close-quote; }
+    .match-seq { position: absolute; right: 0; bottom: 0; font: 400 var(--fs-xs)/1.4 var(--font-mono); letter-spacing: var(--tracking-mono); color: var(--text-muted); }
   </style>
 </head>
 <body>
@@ -171,7 +172,7 @@
           <dt>Heading</dt><dd id="modal-heading">—</dd>
           <dt>Query</dt><dd class="code" id="modal-query">shadow</dd>
         </dl>
-        <blockquote class="match-text" id="modal-text">Match</blockquote>
+        <blockquote class="match-text" id="modal-text">Match<span class="match-seq" id="modal-seq">4</span></blockquote>
         <div class="hits" id="modal-passages" hidden>
           <article class="hit" style="--score: 1.00">
             <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Area</span></span><span class="mono muted">0.91</span></header>
