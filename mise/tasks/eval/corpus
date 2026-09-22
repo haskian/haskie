@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#MISE description="Download the open-licensed coding books and import them as the 'coding-books' collection"
+set -euo pipefail
+# A comment pasted in with the command becomes an argument: zsh only strips `#` interactively
+# when interactive_comments is set, and a run directory named `#` is not a helpful error.
+args=()
+for a in "$@"; do case "$a" in \#*) break ;; *) args+=("$a") ;; esac; done
+set -- "${args[@]+"${args[@]}"}"
+# The corpus is public on purpose: the baseline arm can reach the same pages, which is what makes
+# the comparison a measurement of cost and precision rather than of who was allowed to look.
+uv run haskie ensure --url http://127.0.0.1:8000/mcp
+uv run python -m evals.corpus "${1:-library/coding-books}"

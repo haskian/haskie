@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="Print the means per task and arm from a finished grid, and write rows.json beside it"
+set -euo pipefail
+# A comment pasted in with the command becomes an argument: zsh only strips `#` interactively
+# when interactive_comments is set, and a run directory named `#` is not a helpful error.
+args=()
+for a in "$@"; do case "$a" in \#*) break ;; *) args+=("$a") ;; esac; done
+set -- "${args[@]+"${args[@]}"}"
+uv run python -m evals.summary "${1:-evals/runs}"

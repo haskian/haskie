@@ -1,0 +1,12 @@
+{
+  "name": "hybrid_rrf",
+  "collections": [
+    "ai-retrieval"
+  ],
+  "evidence": [
+    "akarsu-2026-bm25-corrective-rag-benchmarking-retrieval.pdf"
+  ],
+  "module": "retrieval",
+  "lookup_required": true,
+  "lookup_expected": true
+}

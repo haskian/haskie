@@ -248,7 +248,7 @@ async def session_history(session_id: str) -> list[session.SessionEvent]:
 async def search_text(
     q: str,
     collections: str | None = None,
-    page_size: int = DEFAULT_PAGE_SIZE,
+    page_size: int = SEARCH_PAGE_SIZE,
     cursor: str | None = None,
     session_id: str | None = None,
 ) -> Page[Hit]:

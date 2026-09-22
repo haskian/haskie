@@ -1,0 +1,13 @@
+{
+  "name": "psis_smoothing",
+  "collections": [
+    "methods-bayesian"
+  ],
+  "evidence": [
+    "vehtari-2015-practical-bayesian-model-evaluation-leaveoneout.pdf",
+    "vehtari-2015-pareto-smoothed-importance-sampling.pdf"
+  ],
+  "module": "psis",
+  "lookup_required": true,
+  "lookup_expected": true
+}

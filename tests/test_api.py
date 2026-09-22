@@ -3008,11 +3008,15 @@ def _text_identity(page: dict) -> list[tuple]:
 def _text_cursor(
     q: str = "haskell",
     collections: list[str] | None = None,
-    page_size: int = 100,
+    page_size: int = SEARCH_PAGE_SIZE,
     offset: int = 1,
 ) -> str:
-    """A real cursor of some query, built at collection time for the table below."""
-    from haskie.search import text
+    """A real cursor of some query, built at collection time for the table below.
+
+    The page size has to be the one the endpoint would have issued the cursor with, or the
+    request is rejected as belonging to another query before it reaches what is under test.
+    """
+    from haskie import textsearch
 
     return text.make_cursor(q, collections or ["alpha", "beta"], page_size, offset)
 
@@ -3086,6 +3090,20 @@ async def test_text_search_filters_collections_and_rejects_unknown(
     assert "collection not found: ghost" in unknown.text
 
 
+async def test_text_search_defaults_to_a_page_an_mcp_client_can_hold(
+    client: AsyncTestClient,
+) -> None:
+    """This was the one search that took the paging default of 100 rather than the Results
+    setting every other search follows. A hundred passages is a reply no MCP client will hold, so
+    the caller was handed a truncation notice and none of them."""
+    await _text_collections(client, "alpha", "beta", "gamma", "delta")
+
+    page = (await client.get("/api/search/text", params={"q": "haskell"})).json()
+
+    assert len(page["items"]) == SEARCH_PAGE_SIZE
+    assert page["next_cursor"] is not None, "the rest is a page away, not missing"
+
+
 async def test_text_search_pages_without_overlap(client: AsyncTestClient) -> None:
     await _text_collections(client, "alpha", "beta")
     whole = await get_page(client, "/api/search/text", q="haskell", page_size=100)
@@ -3106,7 +3124,7 @@ async def test_text_search_answers_an_empty_page_past_the_last_hit(
 ) -> None:
     """A cursor is an offset into a ranking that may have shrunk since it was issued."""
     await _text_collections(client, "alpha")
-    deep = _text_cursor(collections=["alpha"], page_size=100, offset=100)
+    deep = _text_cursor(collections=["alpha"], offset=100)
 
     page = await client.get(
         "/api/search/text", params={"q": "haskell", "collections": "alpha", "cursor": deep}

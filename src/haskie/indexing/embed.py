@@ -18,11 +18,19 @@ slower. At fixed sizes CoreML ran 3-4x faster, but compiled each model for 8 s t
 first. The setting stays for the day CoreML handles dynamic sizes well.
 
 Building a session holds the GIL for its whole duration (measured: the loop that owns the request
-freezes for it), and CoreML adds a model compilation to that. CoreML keeps its compiled models in
-`home.MODEL_CACHE`, so only the first build of a model pays for it.
+freezes for it), and CoreML adds a model compilation to that. Two things keep the freeze short:
+CoreML keeps its compiled models in `home.MODEL_CACHE`, so only the first build of a model pays
+for the compilation, and cross-encoders always build on CPU: they score at most `candidates` texts
+per search, which CPU does in milliseconds, while their CoreML build stalled the app for seconds.
+
+Text embedding does not use CoreML either. ONNX Runtime cannot place a whole bge graph on CoreML
+(1223 nodes, 785 supported, split into 146 partitions), and running inference across that many
+subgraphs allocates per partition: embedding 30 chunks with bge-large peaked at 35.7 GB of RSS
+against 2.5 GB on CPU, which the OS answers with SIGKILL. CPU was also faster for both sizes
+measured (bge-large 1.7s vs 10.5s; bge-small 0.3s either way), so nothing is traded away. CUDA and
+the other accelerators are unaffected - only CoreML places a partial graph like this.
 """
 
-import ctypes
 import threading
 from functools import cache
 from pathlib import Path
@@ -38,6 +46,8 @@ from haskie.settings import Accelerator
 
 # a provider entry as ONNX Runtime takes it: a name, or a (name, options) pair
 Provider = str | tuple[str, dict[str, str]]
+RERANKER_ACCELERATOR: Accelerator = "cpu"
+EMBEDDING_COREML = False  # see the module docstring: CoreML costs 14x the memory and 6x the time
 
 # Construction (download, session setup) is serialized, using a model is not, and the lock is
 # outside the cache so the second caller of a model being built waits and then gets that one:
@@ -78,45 +88,19 @@ def with_options(names: list[str], model_cache: str) -> list[Provider]:
     ]
 
 
-@cache
-def onnx_runtime() -> Any:
-    """ONNX Runtime, with its telemetry off. Every path to it goes through here first: the
-    providers, and the fastembed models and cross-encoders built below.
-
-    Its telemetry (Microsoft's 1DS SDK) uploads usage events from a thread of its own, and a
-    process that exits mid-upload crashes in that thread: `recursive_mutex lock failed`, or a
-    segmentation fault (macOS crash reports of the test workers: 4 of 6 runs; none of 8 with it
-    off). A local app has no business sending them either."""
+def providers(accelerator: Accelerator = "auto", *, coreml: bool = True) -> list[Provider]:
     import onnxruntime
 
-    onnxruntime.disable_telemetry_events()
-    return onnxruntime
+    names = select_providers(onnxruntime.get_available_providers(), accelerator)
+    if not coreml:
+        names = drop_coreml(names)
+    return with_options(names, str(home.MODEL_CACHE))
 
 
-@cache
-def nvidia_loads(provider: str) -> bool:
-    """Whether NVIDIA provider `provider` runs here: the driver, and the libraries its ONNX
-    Runtime library links to (CUDA and cuDNN; TensorRT's own for TensorRT).
-
-    ONNX Runtime's CUDA build lists both on every machine. A session asked for one that cannot
-    load logs an error and falls back, while the status would report the GPU. Loading the
-    provider's own library follows whichever versions the installed build needs.
-    """
-    library = Path(onnx_runtime().__file__).parent / "capi" / NVIDIA_LIBRARIES[provider]
-    try:
-        ctypes.CDLL("libcuda.so.1")  # the driver's, present only with an NVIDIA driver
-        ctypes.CDLL(str(library))
-    except OSError:
-        return False
-    return True
-
-
-def providers(accelerator: Accelerator = Accelerator.AUTO) -> list[Provider]:
-    available = onnx_runtime().get_available_providers()
-    # Only `auto` may pick an NVIDIA provider, so only it loads their libraries to find out.
-    if accelerator == Accelerator.AUTO:
-        available = [p for p in available if p not in NVIDIA_LIBRARIES or nvidia_loads(p)]
-    return with_options(select_providers(available, accelerator), str(home.MODEL_CACHE))
+def drop_coreml(names: list[str]) -> list[str]:
+    """Without CoreML, keeping CPU as the fallback it always is."""
+    kept = [name for name in names if name != "CoreMLExecutionProvider"]
+    return kept if kept else ["CPUExecutionProvider"]
 
 
 def provider_name(provider: Provider) -> str:
@@ -197,61 +181,8 @@ _TOKENIZER_FILES = [
 @cache
 def _register_custom() -> None:
     from fastembed import TextEmbedding
-    from fastembed.common.model_description import ModelSource, PoolingType
 
-    for name, spec in CUSTOM_EMBEDDERS.items():
-        TextEmbedding.add_custom_model(
-            model=name,
-            pooling=PoolingType.CLS,
-            normalization=True,
-            sources=ModelSource(hf=name),
-            dim=spec["dim"],
-            model_file=spec["model_file"],
-            additional_files=spec["additional_files"],
-        )
-
-
-def _local_copy(description: Any) -> Path:
-    """A model's files as real files in one directory.
-
-    ONNX Runtime refuses an external-data file (`model.onnx_data`) that resolves outside the
-    model's own directory, and the Hugging Face cache fastembed downloads into keeps every file as
-    a link into a blob store elsewhere. So a model with external data is downloaded into a plain
-    directory beside fastembed's cache instead, at its pinned revision where it has one.
-    """
-    from fastembed.common.utils import define_cache_dir
-    from huggingface_hub import snapshot_download
-
-    repo = description.sources.hf
-    revision = CUSTOM_EMBEDDERS.get(description.model, {}).get("revision")
-    target = define_cache_dir() / "local" / repo.replace("/", "--") / (revision or "main")
-    snapshot_download(
-        repo,
-        revision=revision,
-        local_dir=target,
-        allow_patterns=[description.model_file, *description.additional_files, *_TOKENIZER_FILES],
-    )
-    return target
-
-
-@cache
-def _build_cross_encoder(name: str, accelerator: Accelerator):
-    """fastembed's ONNX cross-encoder, an MLX reranker for the models fastembed cannot run
-    (`mlx_models`), or an ONNX encoder finished by its own head (`onnx_rerank`). All answer
-    `rerank(query, texts)` with one score per text, in order."""
-    if runtime(name) == Runtime.MLX:
-        return mlx_models.reranker(name)
-    onnx_runtime()
-    if name in onnx_rerank.REVISIONS:
-        return onnx_rerank.HeadedCrossEncoder(name, model_providers(name, accelerator))
-    from fastembed.rerank.cross_encoder import TextCrossEncoder
-
-    _register_custom_rerankers()
-    return TextCrossEncoder(model_name=name, providers=model_providers(name, accelerator))
-
-
-# Cross-encoders fastembed does not list whose ONNX export is the whole classifier, head and all.
-CUSTOM_RERANKERS = ["mixedbread-ai/mxbai-rerank-xsmall-v1", "mixedbread-ai/mxbai-rerank-base-v1"]
+    return TextEmbedding(model_name=name, providers=providers(accelerator, coreml=EMBEDDING_COREML))
 
 
 @cache

@@ -2,11 +2,11 @@
 #MISE description="Lint, format and type-check Python (ruff, ty) and web (oxlint, tsc), and prove web/src/schema.d.ts still matches the API. Pass --fix to apply fixes; CI runs it read-only."
 set -euo pipefail
 if [ "${1:-}" = "--fix" ]; then
-  uv run ruff check --fix src tests
-  uv run ruff format src tests
+  uv run ruff check --fix src tests evals
+  uv run ruff format src tests evals
 else
-  uv run ruff check src tests
-  uv run ruff format --check src tests
+  uv run ruff check src tests evals
+  uv run ruff format --check src tests evals
 fi
 uv run ty check
 # Before tsc: the frontend's types are generated from the API, so a stale file type-checks fine
