@@ -3,7 +3,6 @@ stop at, and folding the same hits into the documents and collections that cover
 
 Every offset below is a real offset into `MARKDOWN`: the fixture builds a `Hit` from a pair of
 snippets and reads its text, lines and char range out of the document, the way the index does.
-`harmonic` keeps its own test next to the document search it was written for.
 """
 
 import pytest
@@ -17,6 +16,7 @@ from haskie.search.passage import (
     Sources,
     expand,
     fold_sources,
+    harmonic,
     min_cover,
     newline_offsets,
     ranges,
@@ -138,6 +138,24 @@ def _chunks(doc: str = DOC) -> list[Hit]:
 
 ONE, TWO, THREE, FOUR = _chunks()
 OTHER_ONE = _hit(OPENING, 1, 4.0, doc=OTHER, collection="ops", header="Retries")
+
+
+# --- harmonic -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "best", "total", "expected"),
+    [
+        ("one chunk scores itself", 3.0, 3.0, 3.0),
+        ("a second chunk as strong lifts it, short of double", 3.0, 6.0, 4.0),
+        ("many weak chunks stay under twice the best", 1.0, 100.0, pytest.approx(200 / 101)),
+        ("nothing matched scores nothing", 0.0, 0.0, 0.0),
+    ],
+)
+def test_harmonic_folds_the_best_chunk_with_the_sum(
+    name: str, best: float, total: float, expected: float
+) -> None:
+    assert harmonic(best, total) == expected, name
 
 
 # --- ranges ---------------------------------------------------------------------------

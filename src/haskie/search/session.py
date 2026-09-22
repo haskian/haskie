@@ -105,7 +105,7 @@ class EventDetail(msgspec.Struct, omit_defaults=True):
     the generated client knows the fields: every one is optional, and an action fills the few that
     apply to it."""
 
-    # search: "explore", "excerpts", "sources", "text", "documents", "passages", or a collection
+    # search: "explore", "excerpts", "sources", "text", or a collection name
     scope: str | None = None
     hits: int | None = None  # search: how many passages came back
     docs: list[str] | None = None  # search: the distinct documents among the hits, best first

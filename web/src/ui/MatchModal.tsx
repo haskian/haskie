@@ -1,59 +1,48 @@
 import { useEffect, useState } from 'react'
-import { api, type Document, type Hit } from '../api'
+import { api, type Document, type HotSection } from '../api'
 import type { Anchor } from './anchor'
 import { DocumentPanes } from './DocumentPanes'
-import { HitGrid } from './HitGrid'
 import { Kv } from './Kv'
 import { Mark } from './Mark'
-import { isHit, position, type Match } from './match'
+import { headingOf, isSource, position, type Match } from './match'
 import { Modal } from './Modal'
 import { Tabs, type TabDef } from './Tabs'
 
 const MATCH_TAB = 'modal-match'
 const DOCUMENT_TAB = 'modal-document'
-// A passage is one match; a document match opens on every passage behind it.
-const tabsFor = (single: boolean): TabDef[] => [
-  { id: MATCH_TAB, label: single ? 'Match' : 'Matches' },
+// A chunk or passage is one match; a source opens on the sections where its matches live.
+const tabsFor = (source: boolean): TabDef[] => [
+  { id: MATCH_TAB, label: source ? 'Sections' : 'Match' },
   { id: DOCUMENT_TAB, label: 'Document' },
 ]
 
 /**
  * One search result, opened: the match itself, and the document it came from. Every page with a
- * `HitGrid` opens the same thing. `collections` is the scope the query ran over, so a document
- * match can fetch its passages from the same scan.
+ * `HitGrid` opens the same thing.
  */
-export function MatchModal({
-  hit,
-  query,
-  collections,
-  onClose,
-}: {
-  hit: Match | null
-  query: string
-  collections?: string[]
-  onClose: () => void
-}) {
+export function MatchModal({ hit, query, onClose }: { hit: Match | null; query: string; onClose: () => void }) {
   return (
     <Modal open={hit !== null} onClose={onClose} title={hit?.doc ?? ''} subtitle={hit?.collection}>
       {/* Keyed by document: a result from another document starts its panels over, while one
           from the same document only scrolls them. */}
-      {hit !== null && <MatchBody key={hit.doc} hit={hit} query={query} collections={collections} />}
+      {hit !== null && <MatchBody key={hit.doc} hit={hit} query={query} />}
     </Modal>
   )
 }
 
-// A passage knows where it starts; a document match only which heading it is under.
-const anchorOf = (hit: Match): Anchor => ({ heading: hit.heading, offset: isHit(hit) ? hit.char_start : undefined })
+// A chunk or passage knows where it starts; a source only which heading its best chunk is under.
+const anchorOf = (hit: Match): Anchor => ({ heading: headingOf(hit), offset: isSource(hit) ? undefined : hit.char_start })
+// A section is a heading breadcrumb; its last step is the heading the document is anchored by.
+const sectionAnchor = (section: HotSection): Anchor => ({ heading: section.header.split(' > ').at(-1) ?? '' })
 
-function MatchBody({ hit, query, collections }: { hit: Match; query: string; collections?: string[] }) {
+function MatchBody({ hit, query }: { hit: Match; query: string }) {
   const [tab, setTab] = useState(MATCH_TAB)
   // Fetched because the panes need the document's preview kind, which a hit does not carry.
   const [row, setRow] = useState<Document | null>(null)
-  // A document match lists every passage behind it; the one picked is where the document opens.
-  const [passages, setPassages] = useState<Hit[] | null>(null)
-  const [picked, setPicked] = useState<Hit | null>(null)
+  // The section picked in a source is where the document opens.
+  const [picked, setPicked] = useState<Anchor | null>(null)
   const name = hit.doc
-  const single = isHit(hit)
+  const source = isSource(hit)
 
   useEffect(() => {
     let live = true
@@ -63,51 +52,51 @@ function MatchBody({ hit, query, collections }: { hit: Match; query: string; col
         if (live) setRow(fetched)
       })
       .catch(() => undefined)
-    if (!single) {
-      api
-        .documentPassages(name, query, collections)
-        .then((found) => {
-          if (live) setPassages(found)
-        })
-        .catch(() => undefined)
-    }
     return () => {
       live = false
     }
-  }, [name, query, collections, single])
+  }, [name])
 
-  const jump = (passage: Hit) => {
-    setPicked(passage)
+  const jump = (section: HotSection) => {
+    setPicked(sectionAnchor(section))
     setTab(DOCUMENT_TAB)
   }
 
   return (
     <>
-      <Tabs tabs={tabsFor(single)} selected={tab} onSelect={setTab} />
+      <Tabs tabs={tabsFor(source)} selected={tab} onSelect={setTab} />
       <div id={MATCH_TAB} role="tabpanel" className="match" hidden={tab !== MATCH_TAB}>
         <Kv
           rows={[
             ['Score', <span key="score" className="mono">{hit.score.toFixed(2)}</span>],
-            ['Collection', hit.collection],
-            single ? ['Position', position(hit)] : ['Passages', hit.chunks],
-            ['Heading', hit.heading || '—'],
+            ['Collection', source ? hit.collections.join(', ') : hit.collection],
+            source ? ['Chunks', hit.chunks] : ['Position', position(hit)],
+            ['Heading', headingOf(hit) || '—'],
             ['Query', <span key="query" className="code">{query}</span>],
           ]}
         />
-        {single ? (
+        {source ? (
+          <ul className="list">
+            {hit.sections.map((section) => (
+              <li key={section.header} className="list-item" role="button" tabIndex={0} onClick={() => jump(section)}>
+                <span className="mono muted">{section.score.toFixed(2)}</span>
+                <span>{section.header || '—'}</span>
+                <span className="mono muted">
+                  {section.chunks} {section.chunks === 1 ? 'chunk' : 'chunks'} · {section.location}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
           <blockquote className="match-text">
             <Mark text={hit.text} query={query} />
           </blockquote>
-        ) : (
-          passages !== null && <HitGrid hits={passages} query={query} onOpen={jump} />
         )}
       </div>
       <div id={DOCUMENT_TAB} role="tabpanel" hidden={tab !== DOCUMENT_TAB}>
         {/* The whole document, not the preview, streamed from the moment the modal opens so it
             is already at the match when its tab is chosen. */}
-        {row !== null && (
-          <DocumentPanes doc={row.name} preview={row.preview} full anchor={anchorOf(picked ?? hit)} shown={tab === DOCUMENT_TAB} />
-        )}
+        {row !== null && <DocumentPanes doc={row.name} preview={row.preview} full anchor={picked ?? anchorOf(hit)} shown={tab === DOCUMENT_TAB} />}
       </div>
     </>
   )

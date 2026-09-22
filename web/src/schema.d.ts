@@ -672,40 +672,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/search/documents": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** SearchDocuments */
-        get: operations["ApiSearchDocumentsSearchDocuments"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/search/documents/{doc}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** DocumentPassages */
-        get: operations["ApiSearchDocumentsDocumentPassages"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -881,21 +847,6 @@ export interface components {
             by_status?: {
                 [key: string]: number;
             };
-        };
-        /** DocumentMatch */
-        DocumentMatch: {
-            collection: string;
-            doc: string;
-            score: number;
-            chunks: number;
-            description: string;
-            heading: string;
-            location: string;
-            text: string;
-            source_file: string;
-            markdown_file: string;
-            line_start: number;
-            line_end: number;
         };
         /** EmbeddingModel */
         EmbeddingModel: {
@@ -3138,88 +3089,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Page_haskie.collection.index.Hit_"];
-                };
-            };
-            /** @description Bad request syntax or unsupported method */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        status_code: number;
-                        detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
-                    };
-                };
-            };
-        };
-    };
-    ApiSearchDocumentsSearchDocuments: {
-        parameters: {
-            query: {
-                q: string;
-                collections?: string | null;
-                limit?: number | null;
-                session_id?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Request fulfilled, document follows */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["DocumentMatch"][];
-                };
-            };
-            /** @description Bad request syntax or unsupported method */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        status_code: number;
-                        detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
-                    };
-                };
-            };
-        };
-    };
-    ApiSearchDocumentsDocumentPassages: {
-        parameters: {
-            query: {
-                q: string;
-                collections?: string | null;
-                limit?: number | null;
-                session_id?: string | null;
-            };
-            header?: never;
-            path: {
-                doc: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Request fulfilled, document follows */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Hit"][];
                 };
             };
             /** @description Bad request syntax or unsupported method */

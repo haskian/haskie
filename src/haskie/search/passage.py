@@ -234,13 +234,14 @@ class HotSection(msgspec.Struct):
     location: str
 
 
-class DocumentMatch(msgspec.Struct):
+class Source(msgspec.Struct):
     """One document the query matched, and the best evidence that it did.
 
     The answer to "which documents should I read", not "which passages answer this": `score` is
     the harmonic mean of the document's best chunk and the sum of every scanned chunk that came
     from it (see `harmonic`), and `chunks` how many there were. The evidence fields are its best
-    chunk.
+    chunk; `sections` and `collections` say where in the document the query landed and which of
+    the searched collections hold it.
     """
 
     collection: str  # the collection whose table held the best chunk; the document belongs to none
@@ -257,12 +258,6 @@ class DocumentMatch(msgspec.Struct):
     markdown_file: str
     line_start: int
     line_end: int
-
-
-class Source(DocumentMatch):
-    """A document worth reading, as a hybrid search answers it: the same row, plus where in the
-    document the query landed and which of the searched collections hold it."""
-
     collections: list[str]  # every searched collection holding it, in name order
     sections: list[HotSection]  # where in it the query landed, best first
 
@@ -272,27 +267,6 @@ class Sources(msgspec.Struct):
 
     documents: list[Source]
     collections: list[str]  # the fewest that together hold every document above
-
-
-def document_match(hits: list[Hit]) -> DocumentMatch:
-    """One document's row from its matched chunks, in the order they were ranked: the first hit
-    is its best one, and the passage the row shows. `description` is left empty for the caller to
-    fill, because it lives in the metadata store and nothing here does IO."""
-    best = hits[0]
-    return DocumentMatch(
-        collection=best.collection,
-        doc=best.doc,
-        score=_document_score(hits),
-        chunks=len(hits),
-        description="",
-        heading=best.heading,
-        location=best.location,
-        text=best.text,
-        source_file=best.source_file,
-        markdown_file=best.markdown_file,
-        line_start=best.line_start,
-        line_end=best.line_end,
-    )
 
 
 def _document_score(hits: list[Hit]) -> float:
@@ -329,10 +303,23 @@ def fold_sources(
 
 
 def _source(hits: list[Hit], memberships: dict[str, list[str]], sections: int) -> Source:
-    """One document's row, plus the two things only a hybrid search answers for it."""
+    """One document's row from its matched chunks, in the order they were ranked: the first hit
+    is its best one, and the passage the row shows. `description` is left empty for the caller to
+    fill, because it lives in the metadata store and nothing here does IO."""
     best = hits[0]
     return Source(
-        **msgspec.structs.asdict(document_match(hits)),
+        collection=best.collection,
+        doc=best.doc,
+        score=_document_score(hits),
+        chunks=len(hits),
+        description="",
+        heading=best.heading,
+        location=best.location,
+        text=best.text,
+        source_file=best.source_file,
+        markdown_file=best.markdown_file,
+        line_start=best.line_start,
+        line_end=best.line_end,
         # a document whose memberships were not looked up is credited to the table that matched it
         collections=memberships.get(best.doc, [best.collection]),
         sections=_sections(hits, sections),

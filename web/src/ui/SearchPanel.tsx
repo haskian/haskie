@@ -52,7 +52,7 @@ export function SearchPanel({ run, placeholder }: { run: (query: string) => Prom
       <SearchBox value={query} onChange={setQuery} placeholder={placeholder} onSubmit={submit} onClear={clear} busy={busy} />
       {error !== null && <p className="muted">{error}</p>}
       <SearchTook counts={`${hits.length} sections`} ms={took} />
-      <HitGrid hits={hits} query={asked} onOpen={setOpen} />
+      <HitGrid results={hits} query={asked} onOpen={setOpen} />
       <MatchModal hit={open} query={asked} onClose={() => setOpen(null)} />
     </>
   )

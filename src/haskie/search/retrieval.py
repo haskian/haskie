@@ -39,6 +39,12 @@ MAX_SCAN = 200
 PASSAGE_SCAN = 4  # chunks scanned per passage asked for: consecutive ones merge into one passage
 DEFAULT_SECTIONS = 3  # hot sections per document: where in it the answer is, not an outline
 MAX_SECTIONS = 20
+DEFAULT_DOCUMENTS = 10  # a shortlist to choose from, not a page of passages
+MAX_DOCUMENTS = 100  # a shortlist nobody reads past; `excerpts` is there for the passages
+# Chunks scanned per document asked for. A document can hold many matching chunks, so the scan has
+# to go deeper than the answer or the tail of the shortlist would be whichever documents happened
+# to crowd the top with chunks.
+DOCUMENT_SCAN = 20
 
 _log = get_logger(__name__)
 
@@ -202,6 +208,16 @@ async def excerpts(names: list[str], query: str, limit: int | None = None) -> li
     return await _expanded(names, query, limit, Excerpt)
 
 
+def _document_limit(limit: int | None) -> int:
+    """The shortlist size the caller asked for, defaulted and bounded."""
+    return check_page_size(DEFAULT_DOCUMENTS if limit is None else limit, MAX_DOCUMENTS, "limit")
+
+
+def _scan_size(limit: int) -> int:
+    """How many chunks the shortlist of `limit` documents is folded from."""
+    return min(limit * DOCUMENT_SCAN, MAX_SCAN)
+
+
 async def sources(
     names: list[str], query: str, limit: int | None = None, sections: int | None = None
 ) -> Sources:
@@ -213,11 +229,11 @@ async def sources(
     and `collections` names which of the searched collections hold it. `Sources.collections` is
     the cover: the fewest collections a follow-up search has to select to reach every row.
     """
-    limit = text.document_limit(limit)
+    limit = _document_limit(limit)
     wanted = check_page_size(
         DEFAULT_SECTIONS if sections is None else sections, MAX_SECTIONS, "sections"
     )
-    hits = await chunks(names, query, text.scan_size(limit))
+    hits = await chunks(names, query, _scan_size(limit))
     # the shortlist is cut first: only a document that made it is worth a membership and a
     # description, and both are one query for the whole of it
     kept = passage.top_documents(hits, limit)

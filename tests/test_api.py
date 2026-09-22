@@ -1096,15 +1096,13 @@ async def test_every_search_rejects_a_collection_nobody_owns(
 async def test_the_mcp_surface_offers_one_search_per_question(api_client: AsyncTestClient) -> None:
     """Two tools for the two questions an agent has — what do the sources say, and which sources
     are there. The searches the web UI drives stay REST-only, or an agent would have to choose
-    between five that answer with overlapping chunks."""
+    between three that answer with overlapping chunks."""
     from litestar_mcp import LitestarMCP
 
     served = set(api_client.app.plugins.get(LitestarMCP).discovered_tools)
 
     assert {"search_excerpts", "search_sources"} <= served
-    assert served.isdisjoint(
-        {"search", "search_text", "search_documents", "document_passages", "search_collection"}
-    )
+    assert served.isdisjoint({"search", "search_text", "explore", "search_collection"})
 
 
 # --- audit trail ---------------------------------------------------------------------

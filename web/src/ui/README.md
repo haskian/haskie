@@ -29,9 +29,9 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `Modal` | `<Modal open={open} onClose={close} title={doc} subtitle="collection">{panels}</Modal>` — native `<dialog>`. |
 | `Tile` | `<Tile icon={FileText} name={doc.name} sub={doc.description} hint={doc.description} onClick={open} />`. |
 | `GallerySection` | `<GallerySection label="A–E" large>{tiles}</GallerySection>`. |
-| `HitGrid` | `<HitGrid hits={hits} query={q} onOpen={open} />` or `<HitGrid matches={matches} query={q} />`. |
+| `HitGrid` | `<HitGrid results={hits} query={q} onOpen={open} />` — chunks, passages, excerpts or sources; one card shape. |
 | `SearchPanel` | `<SearchPanel run={(q) => api.searchCollection(name, q)} placeholder="Search this collection" />` — box, hits and match modal for one scope. |
-| `MatchModal` | `<MatchModal hit={open} query={q} onClose={close} />` — one result: the passage, and the document it came from. |
+| `MatchModal` | `<MatchModal hit={open} query={q} onClose={close} />` — one result: the text (or a source's hot sections), and the document it came from. |
 | `Jobs` | `<Jobs jobs={jobs} variant="glass" stripes />` — one weighted bar per job of an operation. |
 | `Kv` | `<Kv rows={[['Status', doc.status], ['Size', bytes.format(doc.size)]]} />`. |
 | `Field` | `<Field label="Chunk size" help={docs['conversion.chunk_size'].description}><input className="input" /></Field>`. |
@@ -49,7 +49,7 @@ component in.
 | --- | --- |
 | `documents` | `documentIcon(doc.suffix)`, `nameRange(name)`, `groupByRange(rows, (row) => row.name)` and `NAME_RANGES` — the icon and the gallery bands every listing uses. |
 | `searchFields` | `effectiveSearch(overrides, defaults)` and `visibleSearchFields(effective)` — what a search actually runs with, and which fields a form asks for. |
-| `match` | `position(hit)` and the `Match` type — where a result sits in its document. |
+| `match` | `position(hit)`, `headingOf(hit)`, the kind guards and the `Match` type — where a result sits in its document. |
 | `markTerms` | `markTerms(text, query)` — the list `Mark` renders. |
 
 Icons come from `lucide-react` and always carry `className="icon"`; the design

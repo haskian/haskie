@@ -155,7 +155,7 @@ function SessionBody({ id, chosen, onSaved }: { id: string; chosen: string[]; on
   }
 
   const run = async (query: string) => {
-    const hits = await api.search(id, query)
+    const hits = await api.explore(query, 'chunk', { session_id: id })
     setSearched((count) => count + 1)
     return hits
   }

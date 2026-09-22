@@ -27,7 +27,12 @@ export type Document = Wire<'Listed'>
 export type CollectionInfo = Wire<'CollectionInfo'>
 export type EmbeddingEntry = Wire<'Entry'> // `embed_cache.Entry`: one cached embedding of a document
 export type Hit = Wire<'Hit'>
-export type DocumentMatch = Wire<'DocumentMatch'>
+// A passage: consecutive chunks read back from the markdown and widened to whole sentences.
+// `Excerpt` is a passage on the wire today; the type name is what a later trimming step keeps.
+export type Passage = Wire<'Passage'>
+export type Source = Wire<'Source'>
+export type Sources = Wire<'Sources'>
+export type HotSection = Wire<'HotSection'>
 export type Status = Wire<'Status'>
 export type ModelStatus = Wire<'ModelStatus'>
 export type Task = Wire<'Task'>
@@ -58,6 +63,7 @@ export type Chunker = ChunkSettings['chunker']
 export type Accelerator = PipelineSettings['accelerator']
 export type EmbeddingProfile = UserSettings['embedding']
 export type DocStatus = Document['status']
+export type Granularity = NonNullable<operations['ApiSearchExploreExplore']['parameters']['query']['granularity']>
 export type MemberStatus = Member['status']
 export type SearchMode = NonNullable<SearchSettings['mode']>
 export type Fusion = NonNullable<SearchSettings['fusion']>
@@ -243,23 +249,27 @@ export const api = {
   operationProgress: (operationId: string) => request<OperationProgress>(`/api/operations/${operationId}/progress`),
   cancelOperation: (operationId: string) => request<void>(`/api/operations/${operationId}`, { method: 'DELETE' }),
 
-  // Full-text search across every collection, for Explore's "all collections" scope: there is no
-  // session and no one collection to answer the query, so the paged endpoint stands in for one.
-  // One page of passages is what Explore shows.
-  searchText: (q: string) => request<Page<Hit>>(`/api/search/text${pageQuery({ page_size: 50 }, { q })}`),
-  // Which documents to read for a query, rather than which passages answer it.
-  searchDocuments: (q: string, collections?: string[], limit?: number) =>
-    request<DocumentMatch[]>(`/api/search/documents${pageQuery({}, { q, collections: collections?.join(','), limit: limit?.toString() })}`),
-  // The passages behind one row of `searchDocuments`: the same scan, kept to that document.
-  documentPassages: (doc: string, q: string, collections?: string[]) =>
-    request<Hit[]>(`/api/search/documents/${encodeURIComponent(doc)}${pageQuery({}, { q, collections: collections?.join(',') })}`),
-
   sessions: () => request<SessionSummary[]>('/api/sessions'),
   sessionHistory: (id: string) => request<SessionEvent[]>(`/api/sessions/${encodeURIComponent(id)}/history`),
   searchTrend: (days: number) => request<SearchAt[]>(`/api/insights/searches${pageQuery({}, { days: String(days) })}`),
   chunkTrend: (days: number) => request<ChunksAt[]>(`/api/insights/chunks${pageQuery({}, { days: String(days) })}`),
   saveSession: (id: string, collections: string[]) =>
     request<string[]>(`/api/sessions/${encodeURIComponent(id)}`, json('PUT', { collections })),
-  search: (sessionId: string, q: string) =>
-    request<Hit[]>(`/api/search/explore?granularity=chunk&session_id=${encodeURIComponent(sessionId)}&q=${encodeURIComponent(q)}`),
+
+  // The two searches Explore runs, over one scope: `collections` when given, else the session's
+  // selection, else every collection (the backend applies that order).
+  explore: <G extends Granularity>(q: string, granularity: G, scope: SearchScope = {}) =>
+    request<ExploreResult<G>>(`/api/search/explore${pageQuery({}, { q, granularity, ...scopeQuery(scope) })}`),
+  searchSources: (q: string, scope: SearchScope = {}) => request<Sources>(`/api/search/sources${pageQuery({}, { q, ...scopeQuery(scope) })}`),
 }
+
+/** Which collections a search runs over; empty means every one. */
+export interface SearchScope {
+  collections?: string[]
+  session_id?: string
+}
+
+const scopeQuery = (scope: SearchScope) => ({ collections: scope.collections?.join(','), session_id: scope.session_id })
+
+/** What each granularity of `explore` answers with. */
+export type ExploreResult<G extends Granularity> = G extends 'chunk' ? Hit[] : Passage[]

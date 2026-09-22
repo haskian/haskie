@@ -31,19 +31,11 @@ from haskie.collection.index import (
     row_key,
     row_score,
 )
-from haskie.document import document
 from haskie.errors import InvalidInput, NotFound
 from haskie.paging import DEFAULT_PAGE_SIZE, OffsetCursor, Order, Page, check_page_size
-from haskie.search.passage import DocumentMatch, document_match
 from haskie.settings import load_user_settings
 
 MAX_TEXT_PAGE_SIZE = 200  # a page of chunks is a page of text; 200 is already a lot for an agent
-DEFAULT_DOCUMENTS = 10  # a shortlist to choose from, not a page of passages
-MAX_DOCUMENTS = 100  # a shortlist nobody reads past; `search` is there for the chunks themselves
-# Chunks scanned per document asked for. A document can hold many matching chunks, so the scan has
-# to go deeper than the answer or the tail of the shortlist would be whichever documents happened
-# to crowd the top with chunks.
-DOCUMENT_SCAN = 20
 MAX_DEPTH = 1000  # every page re-runs the whole ranking, so how deep a walk may go is capped
 
 # A cursor is bound to a sort name and direction (see paging.encode_cursor), so a cursor from a
@@ -172,49 +164,3 @@ async def search(
         next_cursor=make_cursor(q, names, page_size, depth) if more and depth < MAX_DEPTH else None,
         total=None,
     )
-
-
-async def search_documents(
-    q: str, collections: list[str] | None = None, limit: int | None = None
-) -> list[DocumentMatch]:
-    """The distinct documents a full-text query matches, best first.
-
-    The same BM25 scan as `search`, folded to one row per document — by document name alone, not
-    by (collection, document): a document in two collections is one document to read, and the
-    passages behind it were already deduplicated by `merge`. `collection` names where its best
-    chunk came from. Scores are raw BM25 and therefore comparable, for the reason in the module
-    docstring.
-    """
-    limit = document_limit(limit)
-    page = await search(q, collections, page_size=scan_size(limit))
-    by_doc: dict[str, list[Hit]] = {}
-    for hit in page.items:
-        by_doc.setdefault(hit.doc, []).append(hit)
-    ranked = sorted(map(document_match, by_doc.values()), key=lambda m: (-m.score, m.doc))[:limit]
-    # one query for the whole shortlist: a description belongs to the document, so there is
-    # nothing to group by collection
-    document.fill_descriptions(ranked, await document.describe_of({m.doc for m in ranked}))
-    return ranked
-
-
-def document_limit(limit: int | None) -> int:
-    """The shortlist size the caller asked for, defaulted and bounded. Shared with the hybrid
-    document search (`retrieval.sources`), which answers the same question."""
-    return check_page_size(DEFAULT_DOCUMENTS if limit is None else limit, MAX_DOCUMENTS, "limit")
-
-
-def scan_size(limit: int) -> int:
-    """How many chunks the shortlist of `limit` documents is folded from."""
-    return min(limit * DOCUMENT_SCAN, MAX_TEXT_PAGE_SIZE)
-
-
-async def document_passages(
-    q: str, doc: str, collections: list[str] | None = None, limit: int | None = None
-) -> list[Hit]:
-    """The passages of one document behind its row in the shortlist, best first.
-
-    The same scan `search_documents` folds, for the same `limit`, kept to `doc`: exactly the
-    `chunks` its row counted, unfolded. A document the scan never reached is an empty list.
-    """
-    page = await search(q, collections, page_size=scan_size(document_limit(limit)))
-    return [hit for hit in page.items if hit.doc == doc]

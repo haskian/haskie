@@ -207,7 +207,7 @@ async def get_markdown(doc: str, full: bool = False) -> Stream:
 async def describe_document(doc: str, data: Describe, session_id: str | None = None) -> Document:
     """Replace what the document is said to be. Empty clears it.
 
-    The description is what `search_documents` returns beside each match, so it is worth writing
+    The description is what `search_sources` returns beside each match, so it is worth writing
     for anything an agent is expected to choose between.
 
     Args:

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { FileText } from 'lucide-react'
 import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { DocumentMatch, Hit } from '../api'
+import type { Hit, Passage, Source } from '../api'
 import { Field } from './Field'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
@@ -58,7 +58,7 @@ const HIT: Hit = {
   markdown_file: '/home/ada/.haskie/markdown/area.md',
 }
 
-const MATCH: DocumentMatch = {
+const SOURCE: Source = {
   collection: 'P–T',
   doc: 'sun.pdf',
   score: 0.79,
@@ -71,6 +71,30 @@ const MATCH: DocumentMatch = {
   markdown_file: '/home/ada/.haskie/markdown/sun.md',
   line_start: 3,
   line_end: 9,
+  collections: ['P–T', 'U–Z'],
+  sections: [
+    { header: 'Elevation tables', score: 0.79, chunks: 4, line_start: 3, line_end: 9, location: 'sun.pdf p.4 L3-9' },
+    { header: 'Elevation tables > Corrections', score: 0.31, chunks: 2, line_start: 12, line_end: 15, location: 'sun.pdf p.5 L12-15' },
+  ],
+}
+
+const PASSAGE: Passage = {
+  collection: 'A–E',
+  doc: 'area.pdf',
+  header: 'Lighting > Soft shadows',
+  location: 'area.pdf p.2 L41-58',
+  seq_start: 4,
+  seq_end: 5,
+  line_start: 41,
+  line_end: 58,
+  char_start: 1204,
+  char_end: 2102,
+  page_start: 2,
+  page_end: 2,
+  text: 'Area lights soften the shadow edge in proportion to their size. A larger light reads as a softer edge.',
+  score: 0.88,
+  source_file: '/home/ada/.haskie/sources/area.pdf',
+  markdown_file: '/home/ada/.haskie/markdown/area.md',
 }
 
 const bar = (over: Partial<JobBar> = {}): JobBar => ({ label: 'Embed', done: 9, total: 22, state: 'active', ...over })
@@ -122,19 +146,19 @@ describe('Picker', () => {
 
 describe('Tabs', () => {
   const tabs = [
-    { id: 'tab-sections', label: 'Sections · 6' },
-    { id: 'tab-literature', label: 'Literature · 6' },
+    { id: 'tab-matches', label: 'Excerpts · 6' },
+    { id: 'tab-sources', label: 'Sources · 3' },
   ]
   check([
     {
       name: 'the strip is a tablist',
-      element: <Tabs tabs={tabs} selected="tab-sections" onSelect={noop} />,
+      element: <Tabs tabs={tabs} selected="tab-matches" onSelect={noop} />,
       contains: ['<div class="tabs" role="tablist">'],
     },
     {
       name: 'the selected tab is the only one marked',
-      element: <Tabs tabs={tabs} selected="tab-literature" onSelect={noop} />,
-      contains: ['aria-selected="false" aria-controls="tab-sections">Sections · 6', 'aria-selected="true" aria-controls="tab-literature">Literature · 6'],
+      element: <Tabs tabs={tabs} selected="tab-sources" onSelect={noop} />,
+      contains: ['aria-selected="false" aria-controls="tab-matches">Excerpts · 6', 'aria-selected="true" aria-controls="tab-sources">Sources · 3'],
     },
     {
       name: 'no tabs renders an empty strip',
@@ -353,7 +377,7 @@ describe('HitGrid', () => {
   check([
     {
       name: 'a section hit carries its collection, score, marked text and position',
-      element: <HitGrid hits={[HIT]} query="shadow" />,
+      element: <HitGrid results={[HIT]} query="shadow" />,
       contains: [
         '<div class="hits">',
         'class="hit" style="--score:1"',
@@ -367,36 +391,46 @@ describe('HitGrid', () => {
     },
     {
       name: 'a hit with no heading falls back to the header',
-      element: <HitGrid hits={[{ ...HIT, heading: '' }]} query="shadow" />,
+      element: <HitGrid results={[{ ...HIT, heading: '' }]} query="shadow" />,
       contains: ['<span>Lighting › Soft shadows</span>'],
     },
     {
       name: 'a hit with no page shows the chunk alone',
-      element: <HitGrid hits={[{ ...HIT, page_start: null }]} query="shadow" />,
+      element: <HitGrid results={[{ ...HIT, page_start: null }]} query="shadow" />,
       contains: ['chunk '],
       missing: ['p. '],
     },
     {
       name: 'the bar ranks a hit among the others: best full, worst at the floor',
-      element: <HitGrid hits={[HIT, { ...HIT, chunk_id: 4, score: 0.4 }]} query="shadow" />,
+      element: <HitGrid results={[HIT, { ...HIT, chunk_id: 4, score: 0.4 }]} query="shadow" />,
       contains: ['style="--score:1"', 'style="--score:0.1"'],
     },
     {
-      name: 'a literature match carries the same tag head and its chunk count',
-      element: <HitGrid matches={[MATCH]} query="shadow" />,
+      name: 'a source carries the same tag head, its chunk count and its section count',
+      element: <HitGrid results={[SOURCE]} query="shadow" />,
       contains: [
         '<span class="kind">P–T</span><span>sun.pdf</span>',
         'Sun position by date, time and latitude.',
-        '<span>6 chunks</span>',
+        '<span>6 chunks · 2 sections</span>',
       ],
       missing: ['hit-title'],
     },
     {
-      name: 'a match without a description falls back to the matched text',
-      element: <HitGrid matches={[{ ...MATCH, description: '' }]} query="shadow" />,
+      name: 'a passage names its chunk run and the last step of its breadcrumb',
+      element: <HitGrid results={[PASSAGE]} query="shadow" />,
+      contains: ['<span>Soft shadows</span>', '<span>p. 2 · chunks 4–5</span>'],
+    },
+    {
+      name: 'a passage of one chunk names that chunk by its sequence number',
+      element: <HitGrid results={[{ ...PASSAGE, seq_end: 4, page_start: null }]} query="shadow" />,
+      contains: ['<span>chunk 4 · lines 41–58</span>'],
+    },
+    {
+      name: 'a source without a description falls back to the matched text',
+      element: <HitGrid results={[{ ...SOURCE, description: '' }]} query="shadow" />,
       contains: ['<mark>shadow</mark> 1.4×'],
     },
-    { name: 'no hits renders an empty grid', element: <HitGrid hits={[]} query="" />, contains: ['<div class="hits"></div>'] },
-    { name: 'no matches renders an empty grid', element: <HitGrid matches={[]} query="" />, contains: ['<div class="hits"></div>'] },
+    { name: 'no hits renders an empty grid', element: <HitGrid results={[] as Hit[]} query="" />, contains: ['<div class="hits"></div>'] },
+    { name: 'no sources renders an empty grid', element: <HitGrid results={[] as Source[]} query="" />, contains: ['<div class="hits"></div>'] },
   ])
 })

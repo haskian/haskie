@@ -42,23 +42,22 @@
             </ul>
           </details>
           <details class="picker">
-            <summary><span class="picker-value"><span>Hybrid</span><span class="sub">vector + BM25, rrf</span></span><i data-lucide="chevron-down" class="icon"></i></summary>
+            <summary><span class="picker-value"><span>Excerpts</span><span class="sub">what an agent reads</span></span><i data-lucide="chevron-down" class="icon"></i></summary>
             <ul class="picker-list" role="listbox">
-              <li role="option" tabindex="0" aria-selected="true"><span>Hybrid</span><span class="sub">vector + BM25, rrf</span></li>
-              <li role="option" tabindex="0" aria-selected="false"><span>Vector</span><span class="sub">embedding similarity only</span></li>
-              <li role="option" tabindex="0" aria-selected="false"><span>Text</span><span class="sub">BM25, no model needed</span></li>
-              <li role="option" tabindex="0" aria-selected="false"><span>Reranked</span><span class="sub">cross-encoder over candidates</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span>Chunks</span><span class="sub">as indexed · may overlap</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span>Passages</span><span class="sub">adjacent chunks · whole sentences</span></li>
+              <li role="option" tabindex="0" aria-selected="true"><span>Excerpts</span><span class="sub">what an agent reads</span></li>
             </ul>
           </details>
-          <input class="input" type="search" value="shadow" placeholder="Search across collections" id="q" />
+          <input class="input" type="search" value="shadow" placeholder="Search your collections" id="q" />
           <button class="btn btn-ghost" type="button" aria-label="Clear" onclick="q.value = ''; q.focus()"><i data-lucide="x" class="icon"></i></button>
         </form>
-        <p class="mono muted">6 sections · 3 documents · 31 ms</p>
+        <p class="mono muted">6 excerpts · 3 sources · 31 ms</p>
         <div class="tabs" role="tablist">
-          <button class="tab" role="tab" aria-selected="true" aria-controls="tab-sections">Sections · 6</button>
-          <button class="tab" role="tab" aria-selected="false" aria-controls="tab-literature">Literature · 6</button>
+          <button class="tab" role="tab" aria-selected="true" aria-controls="tab-matches">Excerpts · 6</button>
+          <button class="tab" role="tab" aria-selected="false" aria-controls="tab-sources">Sources · 3</button>
         </div>
-        <div id="tab-sections" role="tabpanel">
+        <div id="tab-matches" role="tabpanel">
           <div class="hits">
             <article class="hit" style="--score: 1.00" data-heading="Lighting › Soft shadows">
               <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Area</span></span><span class="mono muted">0.91</span></header>
@@ -104,7 +103,7 @@
             </article>
           </div>
         </div>
-        <div id="tab-literature" role="tabpanel" hidden>
+        <div id="tab-sources" role="tabpanel" hidden>
           <div class="hits">
             <article class="hit" style="--score: 1.00">
               <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Area</span></span><span class="mono muted">0.91</span></header>
