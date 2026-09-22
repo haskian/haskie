@@ -1,2 +1,4 @@
-"""Measuring how well a coding agent uses haskie: run a task under a fixed arm, reduce the
-transcript to the calls that gathered knowledge, and compare arms on what they retrieved."""
+"""Evaluating whether a coding agent reaches for haskie's search before it reaches for a file.
+
+Not part of the product: this measures the server, it does not ship with it.
+"""

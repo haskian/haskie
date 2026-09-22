@@ -1,53 +1,44 @@
-"""A pytest plugin that writes each test's node id, outcome and marker to one JSON file.
+"""One row per task and arm. Deliberately no averaging: iteration 1 runs each cell once, and a
+table of means over one sample would just be the sample dressed up."""
 
-Scoring a task means running its tests against whatever the agent wrote, and the summary line
-pytest prints is not something to parse. `EVAL_REPORT` names the file to write; without it the
-plugin does nothing, so a task's tests still run by hand the ordinary way.
-"""
+from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
-from typing import Any
 
-KEY = "EVAL_REPORT"
-DISCRIMINATING = "discriminating"
-_MARKER_HELP = (
-    f"{DISCRIMINATING}: the assertion that separates having read the source from remembering the "
-    "gist. Reported apart from the rest, because that is the number the eval is after."
+HEAD = (
+    f"{'task':<18}{'arm':<5}{'correct':>8}{'tests':>8}{'disc':>8}"
+    f"{'search1st':>10}{'illegit':>8}{'sub':>6}{'evid':>7}{'secs':>7}"
 )
 
 
-# Module level rather than on the config: a `TestReport` carries no way back to it, and one
-# pytest process is one scoring run.
-_OUTCOMES: dict[str, dict[str, Any]] = {}
+def _cell(passed: int, total: int) -> str:
+    return f"{passed}/{total}"
 
 
-def pytest_configure(config: Any) -> None:
-    config.addinivalue_line("markers", _MARKER_HELP)
-    _OUTCOMES.clear()
+def _bool(value: bool | None) -> str:
+    return "n/a" if value is None else ("yes" if value else "no")
 
 
-def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:
-    for item in items:
-        _OUTCOMES[item.nodeid] = {
-            "outcome": "notrun",  # a collection error leaves the test never reported on
-            DISCRIMINATING: item.get_closest_marker(DISCRIMINATING) is not None,
-        }
+def table(results: list) -> str:
+    lines = [HEAD, "-" * len(HEAD)]
+    for r in results:
+        b = r.behaviour
+        sub = "n/a" if b.substitution_rate is None else f"{b.substitution_rate:.2f}"
+        lines.append(
+            f"{r.task:<18}{r.arm:<5}"
+            f"{'yes' if r.correct else 'no':>8}"
+            f"{_cell(r.tests_passed, r.tests_total):>8}"
+            f"{_cell(r.discriminating_passed, r.discriminating_total):>8}"
+            f"{_bool(b.search_first):>10}"
+            f"{b.illegitimate_doc_store_lookups:>8}"
+            f"{sub:>6}"
+            f"{_cell(len(r.retrieved), r.evidence_total):>7}"
+            f"{r.seconds:>7.1f}"
+        )
+    return "\n".join(lines)
 
 
-def pytest_runtest_logreport(report: Any) -> None:
-    known = _OUTCOMES.get(report.nodeid)
-    if known is None:
-        return
-    # A failure in setup is a failure of the task, not a missing result, so the first non-passing
-    # phase wins and a later phase does not overwrite it.
-    if report.when == "call" or report.outcome != "passed":
-        if known["outcome"] in ("notrun", "passed"):
-            known["outcome"] = report.outcome
-
-
-def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
-    destination = os.environ.get(KEY)
-    if destination:
-        Path(destination).write_text(json.dumps(_OUTCOMES), encoding="utf-8")
+def write_report(results: list, runs: Path) -> None:
+    text = table(results)
+    (runs / "report.txt").write_text(text + "\n", encoding="utf-8")
+    print(text)

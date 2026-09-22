@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="Run eval tasks against the isolated instance. Args: [task|all] [--arms a b] [--model ...]"
+set -euo pipefail
+home="${HASKIE_EVAL_HOME:-$PWD/evals/.haskie-eval}"
+api="${HASKIE_EVAL_URL:-http://127.0.0.1:8123}"
+uv run haskie ensure --home "$home" --url "$api/mcp"
+uv run python -m evals.run "$@" --api "$api" --home "$home"

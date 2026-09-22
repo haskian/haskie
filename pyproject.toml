@@ -59,9 +59,6 @@ build-backend = "uv_build"
 
 [tool.ruff]
 line-length = 100
-# A task's tests import the module the agent is asked to write, which exists only in a run
-# directory. Nothing here type-checks or resolves against this repo.
-extend-exclude = ["evals/tasks"]
 target-version = "py313"
 
 [tool.ruff.lint]
@@ -69,6 +66,8 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.ty.src]
 include = ["src", "tests", "evals"]
+# A task's test_task.py imports the module the agent is asked to write, which never exists in
+# this repo - it exists only in the workspace `run.py` grades.
 exclude = ["evals/tasks"]
 
 [tool.ty.analysis]
@@ -82,9 +81,6 @@ replace-imports-with-any = [
 ]
 
 [tool.pytest.ini_options]
-# `evals` is a top-level package rather than part of `haskie`: it measures the server, it is
-# not part of it, and the src layout keeps it out of the wheel.
-testpaths = ["tests", "evals/tests"]
-pythonpath = ["."]
+testpaths = ["tests"]
 markers = ["network: downloads models from Hugging Face"]
 addopts = "-m 'not network'"

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Start the isolated haskie eval instance, download the corpus, import and index it (idempotent)"
+set -euo pipefail
+home="${HASKIE_EVAL_HOME:-$PWD/evals/.haskie-eval}"
+api="${HASKIE_EVAL_URL:-http://127.0.0.1:8123}"
+collection="${HASKIE_EVAL_COLLECTION:-eval-programming-books}"
+uv run haskie ensure --home "$home" --url "$api/mcp"
+uv run python -m evals.setup "$api" "$collection"

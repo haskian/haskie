@@ -1,10 +1,8 @@
-Write `mlfq.py` in the current directory, implementing the priority rules of the multi-level
-feedback queue exactly as the OSTEP chapter "Scheduling: The Multi-Level Feedback Queue" finally
-states them — the chapter revises its own rules partway through, so use the set it ends on.
-Standard library only.
+Write `mlfq.py` in the current directory. Standard library only.
 
-Priorities are integers where 0 is the topmost (highest-priority) queue and `levels - 1` is the
-bottom. Define exactly these names:
+Implement the priority-adjustment rule of a multi-level feedback queue scheduler, exactly as the
+final version in "Scheduling: The Multi-Level Feedback Queue" states it. Priorities are integers,
+where 0 is the topmost (highest-priority) queue and `levels - 1` is the bottom.
 
     def on_enter(levels: int) -> int:
         """The priority a job is given when it enters the system."""
@@ -21,7 +19,5 @@ bottom. Define exactly these names:
     def boost(priorities: list[int]) -> list[int]:
         """Every job's priority after the periodic boost."""
 
-Follow the chapter's final rules rather than the version you would write from memory, and say
-which rule each branch implements. If you cannot confirm the rules against a source, write your
-best attempt rather than stopping, and mark it `# unconfirmed`. Write the file in this session
-either way; do not stop to ask.
+The chapter revises its own rule partway through - use the version it ends on, not an earlier
+draft of it. Say which rule each branch of your code implements.

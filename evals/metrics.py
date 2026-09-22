@@ -1,161 +1,142 @@
-"""Trace-derived measures of retrieval strategy.
+from __future__ import annotations
 
-The eval is interested in *how* Claude gathers knowledge, not only whether the final code passes.
-In particular, it distinguishes Haskie discovery from later filesystem inspection. Grepping a file
-that Haskie already identified is not the same behaviour as grepping the document store before
-using Haskie at all.
-"""
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
 
-import msgspec
+HASKIE_PREFIX = "mcp__haskie__"
+# Only these tools can reach a file directly. `Bash` counts only when its command names a path
+# under the document root - most of what Bash does in a coding task is not a lookup at all.
+FILE_TOOLS = ("Read", "Grep", "Glob", "Bash")
 
-from evals.trace import HASKIE_RETRIEVAL, ToolCall, Trace, mentions
+
+@dataclass(frozen=True)
+class Call:
+    seq: int
+    name: str
+    input: dict
+    result: str  # the tool's result text; empty if the transcript ends before it answers
 
 
-def is_lookup(call: ToolCall) -> bool:
-    """A successful knowledge-gathering call.
+def _text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return ""
 
-    Haskie metadata calls such as ``list_collections`` are deliberately excluded: they establish
-    what exists, but they are not evidence retrieval. A Bash call counts only when it names the
-    document store.
+
+def calls(transcript: str) -> list[Call]:
+    """Every tool call the agent made, paired with its result, in order.
+
+    Parsed from `tool_use`/`tool_result` blocks rather than a text search over the whole
+    transcript. The transcript's `system.init` event lists every tool the MCP server exposes -
+    `mcp__haskie__search` included - whether or not the agent ever calls it, so a substring
+    search over the raw text would read every run as having used haskie.
     """
-    if call.is_error:
-        return False
-    if call.kind == "haskie":
-        return call.name in HASKIE_RETRIEVAL
-    if call.kind in {"grep", "glob", "read", "web"}:
-        return True
-    return call.kind == "bash" and call.on_library
-
-
-def lookups(trace: Trace) -> list[ToolCall]:
-    return [call for call in trace.calls if is_lookup(call)]
-
-
-def haskie_calls(trace: Trace) -> list[ToolCall]:
-    return [call for call in trace.calls if call.kind == "haskie"]
-
-
-def haskie_lookups(trace: Trace) -> list[ToolCall]:
-    return [call for call in trace.calls if call.kind == "haskie" and call.name in HASKIE_RETRIEVAL]
-
-
-def queries(trace: Trace) -> list[str]:
+    events = [json.loads(line) for line in transcript.splitlines() if line.strip()]
+    results = {
+        block["tool_use_id"]: _text(block.get("content"))
+        for event in events
+        if event.get("type") == "user"
+        for block in event.get("message", {}).get("content", [])
+        if block.get("type") == "tool_result"
+    }
     found = []
-    for call in haskie_lookups(trace):
-        for name in ("q", "query"):
-            if isinstance(call.input.get(name), str):
-                found.append(call.input[name])
-    return found
-
-
-def substitution_rate(trace: Trace) -> float | None:
-    """Share of knowledge-gathering calls that did not use Haskie retrieval."""
-    gathered = lookups(trace)
-    if not gathered:
-        return None
-    return sum(1 for call in gathered if call.kind != "haskie") / len(gathered)
-
-
-def leaks(trace: Trace) -> list[ToolCall]:
-    """Filesystem lookups of a path previously disclosed by a Haskie retrieval call."""
-    seen: set[str] = set()
-    found = []
-    for call in trace.calls:
-        if call.kind == "haskie" and call.name in HASKIE_RETRIEVAL:
-            seen.update(call.returned)
+    for event in events:
+        if event.get("type") != "assistant":
             continue
-        if is_lookup(call) and call.on_library and any(mentions(call.input, path) for path in seen):
-            found.append(call)
+        for block in event.get("message", {}).get("content", []):
+            if block.get("type") == "tool_use":
+                found.append(
+                    Call(
+                        len(found),
+                        block.get("name", ""),
+                        block.get("input") or {},
+                        results.get(block["id"], ""),
+                    )
+                )
     return found
 
 
-def filesystem_first(trace: Trace) -> bool:
-    """Whether the first actual knowledge lookup touched the document store without Haskie."""
-    first = next(iter(lookups(trace)), None)
-    return first is not None and first.kind != "haskie" and first.on_library
+def is_haskie(call: Call) -> bool:
+    return call.name.startswith(HASKIE_PREFIX)
 
 
-def first_lookup_kind(trace: Trace) -> str:
-    first = next(iter(lookups(trace)), None)
-    return "none" if first is None else ("haskie" if first.kind == "haskie" else first.kind)
+def _mentions(value: object, needle: str) -> bool:
+    if isinstance(value, str):
+        return needle in value
+    if isinstance(value, dict):
+        return any(_mentions(v, needle) for v in value.values())
+    if isinstance(value, list):
+        return any(_mentions(v, needle) for v in value)
+    return False
 
 
-def haskie_then_filesystem(trace: Trace) -> int:
-    """Count filesystem lookups after Haskie has already disclosed at least one path."""
+def is_doc_store_lookup(call: Call, doc_root: Path) -> bool:
+    """A call that reached a haskie-managed document directly, bypassing search."""
+    return call.name in FILE_TOOLS and _mentions(call.input, str(doc_root))
+
+
+def disclosed_paths(call: Call, doc_root: Path) -> set[str]:
+    """Document-store paths this haskie call's result handed back.
+
+    A hit carries `source_file`/`markdown_file` as absolute paths - this is what makes
+    `grep <that path>` possible at all, and it is what "knows where the markdown lives" means in
+    practice.
+    """
+    return set(re.findall(re.escape(str(doc_root)) + r"[\w./+-]*", call.result))
+
+
+@dataclass(frozen=True)
+class Behaviour:
+    lookups: int  # haskie calls + doc-store lookups, combined
+    haskie_calls: int
+    doc_store_lookups: int
+    search_first: bool | None  # None when the run never looked anything up at all
+    legitimate_doc_store_lookups: int  # a prior haskie result had already named that path
+    illegitimate_doc_store_lookups: int  # reached a document with no search justifying it
+    substitution_rate: float | None  # share of lookups that were doc-store, not haskie
+
+
+def behaviour(transcript: str, doc_root: Path) -> Behaviour:
+    every = calls(transcript)
+    lookups = [c for c in every if is_haskie(c) or is_doc_store_lookup(c, doc_root)]
+    doc_store = [c for c in every if is_doc_store_lookup(c, doc_root)]
+
+    search_first = is_haskie(lookups[0]) if lookups else None
+
     seen: set[str] = set()
-    count = 0
-    for call in trace.calls:
-        if call.kind == "haskie" and call.name in HASKIE_RETRIEVAL:
-            seen.update(call.returned)
-        elif is_lookup(call) and call.on_library and any(
-            mentions(call.input, path) for path in seen
-        ):
-            count += 1
-    return count
+    legitimate = illegitimate = 0
+    for call in every:
+        if is_haskie(call):
+            seen.update(disclosed_paths(call, doc_root))
+        elif is_doc_store_lookup(call, doc_root):
+            if any(_mentions(call.input, path) for path in seen):
+                legitimate += 1
+            else:
+                illegitimate += 1
 
-
-def spills(trace: Trace) -> list[ToolCall]:
-    return [call for call in haskie_lookups(trace) if call.spilled_to is not None]
-
-
-class Summary(msgspec.Struct):
-    session_id: str
-    ok: bool
-    num_turns: int
-    cost_usd: float
-    duration_ms: int
-    lookups: int
-    haskie: int
-    substitution_rate: float | None
-    filesystem_first: bool
-    first_lookup: str
-    haskie_then_filesystem: int
-    leaks: int
-    spills: int
-    denied: int
-    queries: list[str]
-
-
-def summarize(trace: Trace) -> Summary:
-    return Summary(
-        session_id=trace.session_id,
-        ok=trace.ok,
-        num_turns=trace.num_turns,
-        cost_usd=trace.cost_usd,
-        duration_ms=trace.duration_ms,
-        lookups=len(lookups(trace)),
-        haskie=len(haskie_lookups(trace)),
-        substitution_rate=substitution_rate(trace),
-        filesystem_first=filesystem_first(trace),
-        first_lookup=first_lookup_kind(trace),
-        haskie_then_filesystem=haskie_then_filesystem(trace),
-        leaks=len(leaks(trace)),
-        spills=len(spills(trace)),
-        denied=len(trace.denied),
-        queries=queries(trace),
+    return Behaviour(
+        lookups=len(lookups),
+        haskie_calls=sum(1 for c in every if is_haskie(c)),
+        doc_store_lookups=len(doc_store),
+        search_first=search_first,
+        legitimate_doc_store_lookups=legitimate,
+        illegitimate_doc_store_lookups=illegitimate,
+        substitution_rate=(len(doc_store) / len(lookups)) if lookups else None,
     )
 
 
-class Trigger(msgspec.Struct):
-    searched_when_needed: int
-    needed: int
-    searched_when_not: int
-    not_needed: int
-
-    @property
-    def precision(self) -> float | None:
-        searched = self.searched_when_needed + self.searched_when_not
-        return self.searched_when_needed / searched if searched else None
-
-    @property
-    def recall(self) -> float | None:
-        return self.searched_when_needed / self.needed if self.needed else None
-
-
-def trigger(runs: list[tuple[bool, bool]]) -> Trigger:
-    return Trigger(
-        searched_when_needed=sum(1 for expected, searched in runs if expected and searched),
-        needed=sum(1 for expected, _ in runs if expected),
-        searched_when_not=sum(1 for expected, searched in runs if not expected and searched),
-        not_needed=sum(1 for expected, _ in runs if not expected),
+def retrieved(transcript: str, doc_root: Path, evidence: list[str]) -> list[str]:
+    """Which of a task's evidence documents a haskie search actually surfaced, by name appearing
+    in a disclosed path. Separate from `behaviour`: this checks retrieval quality, not tool
+    choice - a run can search correctly and still miss the right passage, or vice versa."""
+    disclosed = " ".join(
+        path
+        for call in calls(transcript)
+        if is_haskie(call)
+        for path in disclosed_paths(call, doc_root)
     )
+    return [name for name in evidence if name in disclosed]

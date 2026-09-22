@@ -11,9 +11,8 @@ dist/
 # built by `mise run build`
 src/haskie/web/
 
-# research paper library (local only)
-library/
-
-# eval run output: transcripts and whatever the agents wrote
+evals/corpus/
+evals/.haskie-eval/
 evals/runs/
-evals/calibration/
+
+library/

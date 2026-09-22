@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="Stop the isolated haskie eval instance"
+set -euo pipefail
+uv run haskie stop --home "${HASKIE_EVAL_HOME:-$PWD/evals/.haskie-eval}"

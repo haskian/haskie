@@ -1,8 +1,0 @@
-{
-  "name": "lru_cache",
-  "module": "lru",
-  "collections": [],
-  "evidence": [],
-  "lookup_required": false,
-  "lookup_expected": false
-}
