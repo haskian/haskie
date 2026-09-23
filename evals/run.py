@@ -2,8 +2,11 @@
 
 Arm A has no haskie access at all. Arm B has haskie's MCP tools and nothing else - no skill, no
 project instructions. The two exist to answer one question before any other: with nothing but
-the raw tools, does the agent reach for search before it reaches for a file. Arms that add a
-skill or a CLAUDE.md instruction come after this pair is trusted, not alongside it.
+the raw tools, does the agent reach for search before it reaches for a file. Arm C has the same
+tools as B plus one written instruction telling it to search before writing code - the "skill or
+CLAUDE.md instruction" step, now that A/B is trusted. It isolates one variable at a time: B vs A
+shows what the bare tool does on its own; C vs B shows what explicit coaching adds on top of that,
+each holding everything else about the task fixed.
 """
 
 from __future__ import annotations
@@ -38,8 +41,16 @@ HASKIE_TOOLS = (
     "mcp__haskie__search_text",
     "mcp__haskie__document_passages",
 )
-ARMS = ("a", "b")
-TASKS = ("mlfq_priority", "reusable_barrier", "revision_ranges")
+ARMS = ("a", "b", "c")
+TASKS = (
+    "mlfq_priority",
+    "reusable_barrier",
+    "revision_ranges",
+    "bounded_buffer",
+    "git_objects",
+    "h2o",
+    "git_history_split",
+)
 
 # pytest's summary line lists whichever outcomes occurred, in its own fixed order - "failed"
 # before "passed" when both are present - not always "passed" first. Matching each `N <word>`
@@ -102,6 +113,14 @@ def prompt_for(task: Task, arm: str, collection: str) -> str:
     )
     if arm == "a":
         return f"{header}{task.prompt}"
+    if arm == "c":
+        coaching = (
+            f"\n\nYou have a Haskie MCP collection named {collection} available, containing the "
+            "source this task is grounded in. Search it before writing any code - confirm the "
+            "source's exact wording and design first, rather than relying on general "
+            "familiarity with the topic."
+        )
+        return f"{header}{task.prompt}{coaching}"
     haskie_note = (
         f"\n\nYou have a Haskie MCP collection named {collection} available. It may or may not "
         "have material relevant to this task."
@@ -110,7 +129,7 @@ def prompt_for(task: Task, arm: str, collection: str) -> str:
 
 
 def allowed_tools(arm: str) -> list[str]:
-    return [*CODING_TOOLS, *(HASKIE_TOOLS if arm == "b" else ())]
+    return [*CODING_TOOLS, *(HASKIE_TOOLS if arm in ("b", "c") else ())]
 
 
 # A parent Claude Code session and its spawned `claude -p` child share the same on-disk OAuth
@@ -125,7 +144,9 @@ def run_agent(task: Task, arm: str, directory: Path, model: str, api: str, colle
     work = directory / "work"
     work.mkdir(parents=True, exist_ok=True)
     mcp = directory / "mcp.json"
-    servers = {"haskie": {"type": "http", "url": f"{api.rstrip('/')}/mcp"}} if arm == "b" else {}
+    servers = (
+        {"haskie": {"type": "http", "url": f"{api.rstrip('/')}/mcp"}} if arm in ("b", "c") else {}
+    )
     mcp.write_text(json.dumps({"mcpServers": servers}, indent=2) + "\n")
 
     for attempt in range(1, AUTH_RETRY_ATTEMPTS + 1):
@@ -247,7 +268,7 @@ def grade(
     passed, total = run_pytest(task.tests, work)
     disc_passed, disc_total = run_pytest(task.tests, work, marker="discriminating")
     transcript = (directory / "transcript.jsonl").read_text(encoding="utf-8", errors="replace")
-    found = metrics.retrieved(transcript, doc_root, task.evidence) if arm == "b" else []
+    found = metrics.retrieved(transcript, doc_root, task.evidence) if arm in ("b", "c") else []
     behaviour = metrics.behaviour(transcript, doc_root)
     result = Result(
         task.name,
@@ -285,8 +306,10 @@ def warm_auth() -> None:
     )
 
 
-def run_one(task: Task, arm: str, model: str, api: str, home: Path, collection: str) -> Result:
-    directory = RUNS / arm / task.name
+def run_one(
+    task: Task, arm: str, sample: int, model: str, api: str, home: Path, collection: str
+) -> Result:
+    directory = RUNS / arm / task.name / str(sample)
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir(parents=True)
@@ -309,15 +332,19 @@ def main() -> int:
     parser.add_argument(
         "--collection", default=os.environ.get("HASKIE_EVAL_COLLECTION", "eval-programming-books")
     )
+    parser.add_argument(
+        "--samples", type=int, default=int(os.environ.get("EVAL_SAMPLES", "3"))
+    )
     args = parser.parse_args()
 
     tasks = [load_task(t) for t in (TASKS if args.task == "all" else [args.task])]
     RUNS.mkdir(parents=True, exist_ok=True)
     warm_auth()
     results = [
-        run_one(task, arm, args.model, args.api, args.home, args.collection)
+        run_one(task, arm, sample, args.model, args.api, args.home, args.collection)
         for arm in args.arms
         for task in tasks
+        for sample in range(args.samples)
     ]
     write_report(results, RUNS)
     return 0 if all(r.correct for r in results) else 1

@@ -46,6 +46,16 @@ SOURCES = (
         "https://greenteapress.com/semaphores/LittleBookOfSemaphores.pdf",
     ),
     Source("pro-git.pdf", "https://github.com/progit/progit2/releases/download/2.1.443/progit.pdf"),
+    # `git history split`, added to git in 2026 - after every model's training cutoff at the time
+    # this task was written, so passing its discriminating test requires an actual search, not
+    # general git familiarity. Pinned to the commit that introduced this doc, not `master`: the
+    # command is explicitly marked experimental ("THE BEHAVIOR MAY CHANGE"), and the test is
+    # grounded in this exact wording.
+    Source(
+        "git-history-split.txt",
+        "https://raw.githubusercontent.com/git/git/"
+        "d11b348f7840c7ae4aba5d273ff56c813475a88e/Documentation/git-history.adoc",
+    ),
 )
 
 

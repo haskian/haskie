@@ -14,6 +14,7 @@ src/haskie/web/
 evals/corpus/
 evals/.haskie-eval/
 evals/runs/
+evals/results.md
 
 library/
 

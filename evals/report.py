@@ -1,39 +1,57 @@
-"""One row per task and arm. Deliberately no averaging: iteration 1 runs each cell once, and a
-table of means over one sample would just be the sample dressed up."""
+"""One row per task and arm, aggregated over `--samples` independent runs of that cell.
+
+Iteration 1 ran each cell once - a table of means over one sample would have just been the
+sample dressed up, so it reported a single pass/fail instead. This is iteration 2: enough
+repeats per cell to report a rate instead of a coin flip. `results` must already be grouped by
+cell - consecutive entries sharing a (task, arm) pair - which is how `run.py` produces them
+(arm, then task, then sample, as nested loops), so no separate sort is needed here."""
 
 from __future__ import annotations
 
+from itertools import groupby
 from pathlib import Path
 
 HEAD = (
-    f"{'task':<18}{'arm':<5}{'correct':>8}{'tests':>8}{'disc':>8}"
-    f"{'search1st':>10}{'illegit':>8}{'sub':>6}{'evid':>7}{'secs':>7}"
+    f"{'task':<18}{'arm':<5}{'n':>3}{'correct':>8}{'tests':>10}{'disc':>9}"
+    f"{'search1st':>10}{'illegit':>8}{'sub':>6}{'evid':>9}{'secs':>7}"
 )
 
 
 def _cell(passed: int, total: int) -> str:
-    return f"{passed}/{total}"
-
-
-def _bool(value: bool | None) -> str:
-    return "n/a" if value is None else ("yes" if value else "no")
+    return f"{passed}/{total}" if total else "n/a"
 
 
 def table(results: list) -> str:
     lines = [HEAD, "-" * len(HEAD)]
-    for r in results:
-        b = r.behaviour
-        sub = "n/a" if b.substitution_rate is None else f"{b.substitution_rate:.2f}"
+    for (task, arm), group in groupby(results, key=lambda r: (r.task, r.arm)):
+        cell = list(group)
+        n = len(cell)
+
+        search_first = [
+            r.behaviour.search_first for r in cell if r.behaviour.search_first is not None
+        ]
+        sub_rates = [
+            r.behaviour.substitution_rate
+            for r in cell
+            if r.behaviour.substitution_rate is not None
+        ]
+        sub = f"{sum(sub_rates) / len(sub_rates):.2f}" if sub_rates else "n/a"
+        tests = _cell(sum(r.tests_passed for r in cell), sum(r.tests_total for r in cell))
+        disc = _cell(
+            sum(r.discriminating_passed for r in cell), sum(r.discriminating_total for r in cell)
+        )
+        evid = _cell(sum(len(r.retrieved) for r in cell), sum(r.evidence_total for r in cell))
+
         lines.append(
-            f"{r.task:<18}{r.arm:<5}"
-            f"{'yes' if r.correct else 'no':>8}"
-            f"{_cell(r.tests_passed, r.tests_total):>8}"
-            f"{_cell(r.discriminating_passed, r.discriminating_total):>8}"
-            f"{_bool(b.search_first):>10}"
-            f"{b.illegitimate_doc_store_lookups:>8}"
+            f"{task:<18}{arm:<5}{n:>3}"
+            f"{_cell(sum(1 for r in cell if r.correct), n):>8}"
+            f"{tests:>10}"
+            f"{disc:>9}"
+            f"{_cell(sum(search_first), len(search_first)):>10}"
+            f"{sum(r.behaviour.illegitimate_doc_store_lookups for r in cell):>8}"
             f"{sub:>6}"
-            f"{_cell(len(r.retrieved), r.evidence_total):>7}"
-            f"{r.seconds:>7.1f}"
+            f"{evid:>9}"
+            f"{sum(r.seconds for r in cell) / n:>7.1f}"
         )
     return "\n".join(lines)
 
