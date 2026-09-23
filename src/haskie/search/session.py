@@ -1,6 +1,6 @@
 """Agent sessions: which collections a session searches, and what it was seen doing.
 
-The search itself is `retrieval.chunks` over the collections a session selected, which is where
+The search itself is `flow.chunks` over the collections a session selected, which is where
 it belongs: one document may sit in several collections, so the same passage can come back from
 more than one of them, and a search is about passages rather than about memberships.
 """

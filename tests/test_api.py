@@ -891,6 +891,8 @@ def _chunk(markdown: str, start: str, end: str, heading: str = "Retrieval") -> C
         line_end=markdown.count("\n", 0, char_end) + 1,
         char_start=char_start,
         char_end=char_end,
+        byte_start=len(markdown[:char_start].encode()),
+        byte_end=len(markdown[:char_end].encode()),
         parents=["Guide"],
     )
 

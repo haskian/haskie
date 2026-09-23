@@ -1,17 +1,19 @@
-"""Retrieval over a set of collections, in the three shapes a caller asks for.
+"""What each step of a search does, and the IO it takes to do it.
 
-One core and three answers: `chunks` is the hybrid fan-out every search runs, `passages` widens
-the chunks it returned into readable text, `excerpts` is what an agent quotes, and `sources` folds
-the same hits to one row per document. Everything pure — merging chunks, widening them, folding
-them, covering them with collections — lives in `passage.py`; the IO lives here.
+`flow.py` says in what order the steps run and which search runs which of them; this is what
+they call. The pure folds — chunks into spans, spans into passages, hits into documents — live in
+`passage.py`, so what is left here is the IO: reading the collections, checking the models,
+reading the markdown a span is widened against.
 
 `scope` is the one place that decides which collections a search covers: the names the caller
 gave, else the session's selection, else every collection.
 """
 
 import asyncio
+from contextlib import ExitStack
+from typing import BinaryIO
 
-import anyio
+import anyio.to_thread
 import msgspec
 
 from haskie import cpu
@@ -20,33 +22,123 @@ from haskie.collection.index import (
     CollectionIndex,
     Hit,
     RowKey,
+    cross_encode,
     first_per_key,
     gather_rows,
     row_key,
+    row_score,
 )
 from haskie.document import document
 from haskie.indexing import models
-from haskie.indexing.embed import embed_query, rerank_scores
+from haskie.indexing.embed import embed_query
 from haskie.logs import get_logger
-from haskie.paging import check_page_size
 from haskie.search import passage, session, text
-from haskie.search.passage import Excerpt, Passage, Sources
-from haskie.settings import load_user_settings
-
-# How deep any of these searches reads. A passage or a document row is folded from several chunks,
-# so the scan goes deeper than the answer; this is where that stops.
-MAX_SCAN = 200
-PASSAGE_SCAN = 4  # chunks scanned per passage asked for: consecutive ones merge into one passage
-DEFAULT_SECTIONS = 3  # hot sections per document: where in it the answer is, not an outline
-MAX_SECTIONS = 20
-DEFAULT_DOCUMENTS = 10  # a shortlist to choose from, not a page of passages
-MAX_DOCUMENTS = 100  # a shortlist nobody reads past; `excerpts` is there for the passages
-# Chunks scanned per document asked for. A document can hold many matching chunks, so the scan has
-# to go deeper than the answer or the tail of the shortlist would be whichever documents happened
-# to crowd the top with chunks.
-DOCUMENT_SCAN = 20
+from haskie.search.passage import Passage, Sources
+from haskie.settings import SearchSettings, load_user_settings
 
 _log = get_logger(__name__)
+
+
+# --- what a search resolves before it reads anything ------------------------------
+
+
+class Plan(msgspec.Struct):
+    """Which collections a search covers and how, settled once for the whole fan-out.
+
+    The ranking-level `settings` are the user's, except where a single collection is searched:
+    then its own overrides are what the caller chose, and there is no second collection to
+    disagree with.
+    """
+
+    settings: SearchSettings
+    indexes: list[tuple[CollectionIndex, SearchSettings]]  # in the caller's order
+    vector: list[float] | None  # the query embedding, None for a lexical search
+
+    @property
+    def names(self) -> list[str]:
+        """The collections this search covers, in the caller's order."""
+        return [index.collection for index, _ in self.indexes]
+
+
+async def plan(names: list[str], query: str) -> Plan | None:
+    """Resolve the settings, embed the query once and check each model once, or None when there
+    is nothing left to search.
+
+    A collection deleted since the caller chose it is skipped, so one stale name does not break
+    every search.
+    """
+    user = await load_user_settings()
+    found = await Collection.load_settings(names)
+    for name in names:
+        if name not in found:
+            _log.warning("session_collection_missing", collection=name)
+    plans = [
+        (Collection(name), found[name].resolve_search(user)) for name in names if name in found
+    ]
+    if not plans:
+        return None
+    settings = plans[0][1] if len(plans) == 1 else user.search
+
+    embedding = user.embedding_model
+    vector: list[float] | None = None
+    if embedding is not None and any(one.mode != "fts" for _, one in plans):
+        await models.require_ready("embedding", embedding.name)
+        vector = await cpu.on_cpu(embed_query, embedding, query)
+    if settings.reranker != "none":
+        await models.require_ready("reranker", settings.reranker_model)  # before the fan-out
+    return Plan(
+        settings=settings,
+        indexes=[(one.index_with(embedding), where) for one, where in plans],
+        vector=vector,
+    )
+
+
+# --- the rows a search works on ---------------------------------------------------
+
+
+class Pool(msgspec.Struct):
+    """The rows a search read and the ranking over them: what flows from step to step.
+
+    The rows are kept whole rather than turned into `Hit`s as they are read, because the score a
+    row answers with is decided by the steps after it.
+    """
+
+    rows: dict[RowKey, tuple[CollectionIndex, dict]]
+    rankings: dict[str, list[RowKey]]  # one per collection, in that collection's own order
+    ranked: list[tuple[RowKey, float]] = []  # merged, best first
+
+
+async def fan_out(where: Plan, query: str, candidates: int) -> Pool:
+    """Read every collection concurrently and keep one row per passage.
+
+    A passage counts once. The same document may be a member of several of the chosen
+    collections, and each of their tables then holds the same chunk; a caller searching them wants
+    one hit per passage, not one per collection that happens to hold it. So a chunk is credited to
+    the first collection in the caller's order that returned it, and the later copies are dropped
+    before the ranks are counted — otherwise a document in two collections would be fused with
+    itself and outrank an equally good one that sits in a single collection.
+
+    A collection that fails to answer fails the search: a silent hole in a merged ranking reads as
+    "no match".
+    """
+    chosen = {index.collection: settings for index, settings in where.indexes}
+
+    async def read(index: CollectionIndex) -> list[dict]:
+        settings = chosen[index.collection]
+        wanted = None if settings.mode == "fts" else where.vector
+        try:
+            return await index.search_rows(query, wanted, settings, candidates)
+        except Exception:
+            _log.exception("session_collection_search_failed", collection=index.collection)
+            raise
+
+    retrieved = await gather_rows([index for index, _ in where.indexes], read)
+    pool = Pool(rows={}, rankings={index.collection: [] for index, _ in retrieved})
+    for index, row in first_per_key((i, r) for i, rows in retrieved for r in rows):
+        key = row_key(row)
+        pool.rows[key] = (index, row)
+        pool.rankings[index.collection].append(key)
+    return pool
 
 
 def rrf_merge[T](ranked: list[list[T]], k: int) -> list[tuple[T, float]]:
@@ -63,177 +155,112 @@ def rrf_merge[T](ranked: list[list[T]], k: int) -> list[tuple[T, float]]:
     return sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
 
 
-async def chunks(names: list[str], query: str, limit: int | None = None) -> list[Hit]:
-    """Search every collection in `names` and merge the results into one ranking.
+def merge(pool: Pool, rrf_k: int, candidates: int) -> Pool:
+    """One ranking out of the per-collection ones, fused by rank (see `rrf_merge`).
 
-    The query is embedded once and each model is checked once for the whole fan-out, the
-    collections are then read concurrently, and the per-collection rankings are fused by rank (see
-    `rrf_merge`): the merged `Hit.score` is an RRF score, or the cross-encoder's when a reranker is
-    on. A single collection keeps its own scores, because there is nothing to compare them with.
-
-    A passage counts once. The same document may be a member of several of the chosen collections,
-    and each of their tables then holds the same chunk; a caller searching them wants one hit per
-    passage, not one per collection that happens to hold it. So a chunk enters the fusion from the
-    first collection in `names` that returned it, and the later collections' copies are dropped
-    before the ranks are counted — otherwise a document in two collections would be fused with
-    itself and outrank an equally good one that sits in a single collection.
-
-    A collection deleted since the caller chose it is skipped, so one stale name does not break
-    every search. A collection that fails to answer is not: a silent hole in the results would be
-    read as "no match".
+    A single collection keeps its own scores: there is nothing to compare them with, and fusing a
+    lone ranking with itself would only replace a real score with a rank.
     """
-    user = await load_user_settings()
-    base = user.search
-    limit = limit or base.limit
-    found = await Collection.load_settings(names)
-    for name in names:
-        if name not in found:
-            _log.warning("session_collection_missing", collection=name)
-    plans = [
-        (Collection(name), found[name].resolve_search(user)) for name in names if name in found
-    ]
-    if not plans:
-        return []
-    if len(plans) == 1:
-        collection, settings = plans[0]
-        index = collection.index_with(user.embedding_model)
-        return await index.search(query, msgspec.structs.replace(settings, limit=limit))
-
-    embedding = user.embedding_model
-    vector: list[float] | None = None
-    if embedding is not None and any(settings.mode != "fts" for _, settings in plans):
-        await models.require_ready("embedding", embedding.name)
-        vector = await cpu.on_cpu(embed_query, embedding, query)
-    if base.reranker != "none":
-        await models.require_ready("reranker", base.reranker_model)  # fail before the fan-out
-    candidates = max(base.candidates, limit)
-    chosen = {collection.name: settings for collection, settings in plans}
-
-    async def retrieve(index: CollectionIndex) -> list[dict]:
-        settings = chosen[index.collection]
-        wanted = None if settings.mode == "fts" else vector
-        try:
-            return await index.search_rows(query, wanted, settings, candidates)
-        except Exception:
-            _log.exception("session_collection_search_failed", collection=index.collection)
-            raise
-
-    retrieved = await gather_rows(
-        [collection.index_with(embedding) for collection, _ in plans], retrieve
-    )
-
-    # `retrieved` is in the order of `plans`, which is the caller's own order, so the first
-    # collection that holds a passage is the one it is credited to.
-    rows: dict[RowKey, tuple[CollectionIndex, dict]] = {}
-    rankings: dict[str, list[RowKey]] = {index.collection: [] for index, _ in retrieved}
-    for index, row in first_per_key((i, r) for i, found_rows in retrieved for r in found_rows):
-        key = row_key(row)
-        rows[key] = (index, row)
-        rankings[index.collection].append(key)
-    merged = rrf_merge(list(rankings.values()), base.rrf_k)[:candidates]
-    if base.reranker != "none":
-        scores = await cpu.on_cpu(
-            rerank_scores, base.reranker_model, query, [rows[key][1]["text"] for key, _ in merged]
-        )
-        merged = sorted(zip([key for key, _ in merged], scores, strict=True), key=_by_score)
-    return [rows[key][0].hit(rows[key][1], score) for key, score in merged[:limit]]
+    if len(pool.rankings) == 1:
+        keys = next(iter(pool.rankings.values()))
+        merged = [(key, row_score(pool.rows[key][1])) for key in keys]
+    else:
+        merged = rrf_merge(list(pool.rankings.values()), rrf_k)
+    return msgspec.structs.replace(pool, ranked=merged[:candidates])
 
 
-def _by_score(scored: tuple[RowKey, float]) -> float:
-    """Sort key for the merged ranking: best first, so the score is negated rather than the list
-    reversed (reversing would also flip the stable tie order)."""
-    return -scored[1]
+async def rerank(pool: Pool, query: str, settings: SearchSettings) -> Pool:
+    """Rescore the merged candidates with a cross-encoder, which reads query and chunk together.
 
-
-async def scope(session_id: str | None, collections: str | None) -> list[str]:
-    """Which collections a search covers: the comma-separated `collections` if the caller named
-    any, else the session's selection if it has one, else every collection.
-
-    A name nobody owns is a mistake in the request, not an empty result — unlike a session's
-    stale name, which `chunks` skips, because the caller did not choose it just now.
+    One pass for the whole search rather than one per collection: the pool it rescores is what
+    every collection returned, and its scores are the only ones comparable across them. The model
+    is CPU work, so it runs in a worker thread under one slot of the CPU budget.
     """
-    named = text.split_collections(collections)
-    if named:
-        return await text.checked_names(named)
-    selected = await session.collections_for(session_id) if session_id else []
-    return selected or await text.checked_names(None)
+    if settings.reranker == "none":
+        return pool
+    rows = [pool.rows[key][1] for key, _ in pool.ranked]
+    rescored = [(row_key(row), row_score(row)) for row in await cross_encode(query, rows, settings)]
+    return msgspec.structs.replace(pool, ranked=rescored)
 
 
-async def _markdown_of(spans: list[passage.ChunkRange]) -> dict[str, tuple[str, list[int]]]:
-    """The whole markdown behind each span with the offsets of its newlines, keyed by the file it
-    was read from and read once per document however many spans came out of it. Concurrent: the
-    reads are independent, and a passage cannot be widened before its document is in hand."""
-    files = list(dict.fromkeys(one.chunks[0].markdown_file for one in spans))
-    read = await asyncio.gather(*(anyio.Path(file).read_text(encoding="utf-8") for file in files))
-    return {
-        file: (markdown, passage.newline_offsets(markdown))
-        for file, markdown in zip(files, read, strict=True)
-    }
+def to_hits(pool: Pool, limit: int) -> list[Hit]:
+    """The best `limit` of the ranking, as the `Hit`s a caller cites and opens."""
+    return [pool.rows[key][0].hit(pool.rows[key][1], score) for key, score in pool.ranked[:limit]]
 
 
-async def _expanded[P: Passage](
-    names: list[str], query: str, limit: int | None, cls: type[P]
-) -> list[P]:
-    """The `limit` best passages of `names`, as `cls`.
+# --- what the hits are folded into ------------------------------------------------
 
-    A passage is what the chunks of one document that sit next to each other say together, widened
-    to whole sentences (see `passage.expand`): the reader gets text that begins and ends where the
-    author did, and never the overlap between two chunks twice. The scan goes `PASSAGE_SCAN` times
-    deeper than `limit`, because consecutive chunks fold into one passage.
+
+async def widen[P: Passage](hits: list[Hit], limit: int, cls: type[P]) -> list[P]:
+    """The `limit` best passages of these hits, as `cls`.
+
+    A passage is what the chunks of one document that sit next to each other say together (see
+    `passage.ranges`), widened to whole sentences (`passage.expand`): the reader gets text that
+    begins and ends where the author did, and never the overlap between two chunks twice.
     """
-    limit = limit or (await load_user_settings()).search.limit
-    hits = await chunks(names, query, min(limit * PASSAGE_SCAN, MAX_SCAN))
-    # cut before the markdown is read: the spans are already best first, and widening one keeps
-    # the score it was ranked by
+    # cut before anything is read: the spans are already best first, and widening one keeps the
+    # score it was ranked by
     spans = passage.ranges(hits)[:limit]
-    read = await _markdown_of(spans)
-    found: list[P] = []
-    for span in spans:
-        markdown, newlines = read[span.chunks[0].markdown_file]
-        found.append(passage.expand(span, markdown, newlines, cls))
-    return found
+    windows = await _windows_of(spans)
+    return [passage.expand(span, window, cls) for span, window in zip(spans, windows, strict=True)]
 
 
-async def passages(names: list[str], query: str, limit: int | None = None) -> list[Passage]:
-    """The passages of `names` that answer the query, best first."""
-    return await _expanded(names, query, limit, Passage)
+# Bytes read around a span, per side. `MAX_EXPAND` is a count of characters and a character is at
+# most four bytes in UTF-8, so this much always covers what the widening may reach.
+WINDOW_BYTES = 4 * passage.MAX_EXPAND
 
 
-async def excerpts(names: list[str], query: str, limit: int | None = None) -> list[Excerpt]:
-    """The passages of `names` that answer the query, as an agent quotes them, best first.
+async def _windows_of(spans: list[passage.ChunkRange]) -> list[passage.Window]:
+    """The markdown around each span, read by seeking to it rather than reading the document.
 
-    An excerpt is the whole passage today. Cutting the parts of it that do not answer the query
-    is a later step, and this is the one place it goes.
+    One worker thread for the whole search and one open file per document, however many spans
+    each holds. Measured: ten spans cost 166us in a single hop against 717us fanned out one hop
+    per document - a hop costs more than the few kilobytes it would overlap.
     """
-    return await _expanded(names, query, limit, Excerpt)
+    return await anyio.to_thread.run_sync(_read_windows, spans)
 
 
-def _document_limit(limit: int | None) -> int:
-    """The shortlist size the caller asked for, defaulted and bounded."""
-    return check_page_size(DEFAULT_DOCUMENTS if limit is None else limit, MAX_DOCUMENTS, "limit")
+def _read_windows(spans: list[passage.ChunkRange]) -> list[passage.Window]:
+    """Every span's window, in the order asked for. Sync: the caller runs it in a worker thread,
+    where the seeks and reads are ordinary blocking IO."""
+    with ExitStack() as stack:
+        handles: dict[str, BinaryIO] = {}
+        windows: list[passage.Window] = []
+        for span in spans:
+            path = span.chunks[0].markdown_file
+            if path not in handles:
+                handles[path] = stack.enter_context(open(path, "rb"))
+            windows.append(_read_window(handles[path], span))
+        return windows
 
 
-def _scan_size(limit: int) -> int:
-    """How many chunks the shortlist of `limit` documents is folded from."""
-    return min(limit * DOCUMENT_SCAN, MAX_SCAN)
+def _read_window(handle: BinaryIO, span: passage.ChunkRange) -> passage.Window:
+    """One span's surroundings: the span itself and `WINDOW_BYTES` either side of it, as much of
+    that as the file holds.
 
-
-async def sources(
-    names: list[str], query: str, limit: int | None = None, sections: int | None = None
-) -> Sources:
-    """Which documents of `names` answer the query, and the smallest set of collections holding
-    them.
-
-    One row per document rather than per passage: its score folds its best chunk with the sum of
-    every chunk it matched (see `passage.harmonic`), `sections` says where in it the answer sits,
-    and `collections` names which of the searched collections hold it. `Sources.collections` is
-    the cover: the fewest collections a follow-up search has to select to reach every row.
+    Decoded in two halves so one pass over the bytes answers both questions: how many characters
+    sit before the span (which is where the window starts, in the document's own offsets) and
+    what the window says. A seek lands on a byte, so the read may open mid-character - decoding
+    drops that half character from the prefix and from the text alike, which is what keeps the
+    two consistent.
     """
-    limit = _document_limit(limit)
-    wanted = check_page_size(
-        DEFAULT_SECTIONS if sections is None else sections, MAX_SECTIONS, "sections"
-    )
-    hits = await chunks(names, query, _scan_size(limit))
+    start = max(0, span.byte_start - WINDOW_BYTES)
+    handle.seek(start)
+    raw = handle.read(span.byte_end - start + WINDOW_BYTES)
+    before = raw[: span.byte_start - start].decode(errors="ignore")
+    text = before + raw[span.byte_start - start :].decode(errors="ignore")
+    return passage.Window(text=text, char_start=span.char_start - len(before))
+
+
+async def shortlist(hits: list[Hit], names: list[str], limit: int, sections: int) -> Sources:
+    """Which documents these hits came from, one row per document, and the collections to select
+    to read them.
+
+    Its score folds its best chunk with the sum of every chunk it matched (see
+    `passage.harmonic`), `sections` says where in it the answer sits, and `collections` names
+    which of the searched collections hold it. `Sources.collections` is the cover: the fewest
+    collections a follow-up search has to select to reach every row.
+    """
     # the shortlist is cut first: only a document that made it is worth a membership and a
     # description, and both are one query for the whole of it
     kept = passage.top_documents(hits, limit)
@@ -241,6 +268,23 @@ async def sources(
     memberships, described = await asyncio.gather(
         document.memberships(docs, names), document.describe_of(docs)
     )
-    found = passage.fold_sources(kept, memberships, wanted)
+    found = passage.fold_sources(kept, memberships, sections)
     document.fill_descriptions(found.documents, described)
     return found
+
+
+# --- which collections a search covers --------------------------------------------
+
+
+async def scope(session_id: str | None, collections: str | None) -> list[str]:
+    """Which collections a search covers: the comma-separated `collections` if the caller named
+    any, else the session's selection if it has one, else every collection.
+
+    A name nobody owns is a mistake in the request, not an empty result — unlike a session's
+    stale name, which `plan` skips, because the caller did not choose it just now.
+    """
+    named = text.split_collections(collections)
+    if named:
+        return await text.checked_names(named)
+    selected = await session.collections_for(session_id) if session_id else []
+    return selected or await text.checked_names(None)

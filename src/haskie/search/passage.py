@@ -6,18 +6,22 @@ agent wants back is one span of the document that starts and ends where a reader
 passage.
 
 Three foldings live here, all of them pure. `ranges` merges the chunks of one document that sit
-next to each other (`Hit.seq`) into one span. `expand` widens one such span to the nearest
-sentence, paragraph or heading boundary of the markdown it was cut from, which is the only step
-that needs the file. `top_documents` and `fold_sources` answer the other question - which
-documents and which collections cover this - by folding the same hits per document instead of per
-span.
+next to each other (`Hit.seq`) into one span. `expand` widens one such span to the nearest newline
+or sentence boundary of the markdown it was cut from, which is the only step that needs the text.
+`top_documents` and `fold_sources` answer the other question - which documents and which
+collections cover this - by folding the same hits per document instead of per span.
+
+`expand` is given a `Window` rather than the document: the widening reaches at most `MAX_EXPAND`
+characters, so a few hundred bytes around the span are enough, and `retrieval.py` reads exactly
+those (the chunk rows carry the byte offsets to seek to). Line numbers come from the chunk rows
+too - each one stores the line its text starts on - so nothing here counts the newlines of a
+document it cannot see.
 
 `harmonic` is the scoring rule all of them share: a span or a document scores the harmonic mean
 of its best chunk and the sum of every chunk it holds. No IO: `retrieval.py` reads the markdown
 and the memberships and hands them in.
 """
 
-import bisect
 import re
 
 import msgspec
@@ -50,6 +54,8 @@ class ChunkRange(msgspec.Struct):
     line_end: int
     char_start: int  # 0-based offsets into the document's markdown
     char_end: int
+    byte_start: int  # the same span in bytes, which is what the markdown file is seeked to
+    byte_end: int
     score: float  # harmonic(best, sum) over the members
 
 
@@ -96,6 +102,8 @@ def _range(chunks: list[Hit]) -> ChunkRange:
         line_end=max(hit.line_end for hit in chunks),
         char_start=min(hit.char_start for hit in chunks),
         char_end=max(hit.char_end for hit in chunks),
+        byte_start=min(hit.byte_start for hit in chunks),
+        byte_end=max(hit.byte_end for hit in chunks),
         score=harmonic(best, sum(hit.score for hit in chunks)),
     )
 
@@ -135,39 +143,57 @@ MAX_EXPAND = 300  # chars per side; past this a passage stops being an excerpt
 # whitespace: the "e.g." case is accepted rather than special-cased, because stopping one clause
 # early reads worse than no expansion at all.
 SENTENCE_END = re.compile(r"[.!?][\"')\]]?\s")
-PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n")
-# The whole ATX heading line: expanding backward starts after it, forward stops before it.
-HEADING_LINE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t].*\n?", re.MULTILINE)
 
 
-def newline_offsets(markdown: str) -> list[int]:
-    """Where every newline of a document sits, ascending. Counted once per document, so that
-    `expand` finds the line a passage starts on by bisecting this rather than by counting the
-    newlines before it again per passage."""
-    return [match.start() for match in re.finditer("\n", markdown)]
+class Window(msgspec.Struct):
+    """A slice of a document's markdown wide enough to widen one span in, and where it sits.
+
+    `char_start` is the offset of `text[0]` in the whole document, so a span's own offsets
+    translate into the window and the widened ones translate back out.
+    """
+
+    text: str
+    char_start: int  # 0-based, in the document this was read from
+
+    def local(self, char: int) -> int:
+        """Where a document offset falls in this window. Never negative: a markdown rewritten
+        since it was indexed gives a passage that is wrong either way, but a stale offset must not
+        index backwards out of the slice. Past the end needs no guard - slicing and `str.find`
+        clamp there by themselves."""
+        return max(0, char - self.char_start)
 
 
-def expand[P: Passage](span: ChunkRange, markdown: str, newlines: list[int], cls: type[P]) -> P:
-    """Widen a span to the nearest boundary on each side and read it out of `markdown`, as `cls`.
+def expand[P: Passage](span: ChunkRange, window: Window, cls: type[P]) -> P:
+    """Widen a span to the nearest boundary on each side and read it out of `window`, as `cls`.
 
     The chunk splitter cuts on size, so a span starts and ends mid-sentence as often as not.
-    Widening stops at the first sentence terminator, paragraph break or heading line within
-    `MAX_EXPAND` characters, and at `MAX_EXPAND` itself when the text offers none - a passage
-    that ran to the next heading would be a section, not a quote.
+    Widening stops at the first of three boundaries, in this order: a newline, because a line is
+    where the document itself stopped - a heading, a list item, a table row, the end of a
+    paragraph; the outermost whole sentence inside `MAX_EXPAND` characters, which is what a line
+    longer than the cap offers instead; and the cap, when the text offers neither.
 
-    `newlines` is `newline_offsets(markdown)`; `cls` is the shape the caller wants its passages
-    in (`Passage` or one of its kinds), so an excerpt is built rather than converted from one.
+    The line numbers are the span's own, corrected by the newlines the widening crossed: a chunk
+    row records the line its text starts on, and widening moves at most `MAX_EXPAND` characters,
+    so counting inside that stretch answers what scanning the whole document used to.
+
+    `cls` is the shape the caller wants its passages in (`Passage` or one of its kinds), so an
+    excerpt is built rather than converted from one.
     """
-    limit = len(markdown)
-    start = _widen_back(markdown, min(span.char_start, limit))
-    end = _widen_forward(markdown, min(span.char_end, limit))
+    markdown = window.text
+    from_start, from_end = window.local(span.char_start), window.local(span.char_end)
+    start = _widen_back(markdown, from_start)
+    end = _widen_forward(markdown, from_end)
     raw = markdown[start:end]
     text = raw.strip()
     # the offsets have to describe `text`, not the slice it was stripped out of
-    char_start = start + len(raw) - len(raw.lstrip())
-    char_end = char_start + len(text)
-    line_start = _line_at(newlines, char_start)
-    line_end = _line_at(newlines, max(char_start, char_end - 1))
+    local_start = start + len(raw) - len(raw.lstrip())
+    local_end = local_start + len(text)
+    char_start = window.char_start + local_start
+    char_end = window.char_start + local_end
+    line_start = _line_shift(markdown, span.line_start, from_start, local_start)
+    line_end = _line_shift(
+        markdown, span.line_end, max(from_start, from_end - 1), max(local_start, local_end - 1)
+    )
     best = max(span.chunks, key=lambda hit: (hit.score, -hit.seq))
     return cls(
         collection=best.collection,
@@ -190,34 +216,38 @@ def expand[P: Passage](span: ChunkRange, markdown: str, newlines: list[int], cls
 
 
 def _widen_back(markdown: str, char_start: int) -> int:
-    """Just after the last boundary before `char_start`, or the cap when there is none.
-
-    Offsets into the whole string rather than a slice of it: `^` only means "line start" when the
-    pattern can see the character before the window.
-    """
+    """Where a passage starting at `char_start` begins once widened: after the nearest newline
+    before it, else after the first whole sentence inside the cap, else at the cap."""
     cap = max(0, char_start - MAX_EXPAND)
-    starts = [cap]
-    for pattern in (SENTENCE_END, PARAGRAPH_BREAK, HEADING_LINE):
-        starts += [match.end() for match in pattern.finditer(markdown, cap, char_start)]
-    return max(starts)
+    line = markdown.rfind("\n", cap, char_start)
+    if line != -1:
+        return line + 1
+    sentence = SENTENCE_END.search(markdown, cap, char_start)
+    return sentence.end() if sentence else cap
 
 
 def _widen_forward(markdown: str, char_end: int) -> int:
-    """At the first boundary after `char_end`, or the cap when there is none. A sentence
-    terminator belongs to the sentence it closes; a heading belongs to the section it opens."""
+    """Where a passage ending at `char_end` stops once widened: at the nearest newline after it,
+    else after the last whole sentence inside the cap, else at the cap."""
     cap = min(len(markdown), char_end + MAX_EXPAND)
-    ends = [cap]
-    for pattern in (SENTENCE_END, PARAGRAPH_BREAK):
-        if (match := pattern.search(markdown, char_end, cap)) is not None:
-            ends.append(match.end())
-    if (heading := HEADING_LINE.search(markdown, char_end, cap)) is not None:
-        ends.append(heading.start())
-    return min(ends)
+    line = markdown.find("\n", char_end, cap)
+    if line != -1:
+        return line
+    end = cap
+    for sentence in SENTENCE_END.finditer(markdown, char_end, cap):
+        end = sentence.end()
+    return end
 
 
-def _line_at(newlines: list[int], pos: int) -> int:
-    """The 1-based line `pos` sits on: the newlines before it, counted by bisecting them."""
-    return bisect.bisect_left(newlines, pos) + 1
+def _line_shift(markdown: str, line: int, anchor: int, pos: int) -> int:
+    """The line `pos` is on, given that `anchor` is on `line`: the newlines between the two.
+
+    Either direction. Widening moves the start back and the end forward, but stripping whitespace
+    moves both the other way, and either can cross a newline the chunk had counted.
+    """
+    if pos >= anchor:
+        return line + markdown.count("\n", anchor, pos)
+    return line - markdown.count("\n", pos, anchor)
 
 
 # --- sources ---------------------------------------------------------------------

@@ -12,7 +12,7 @@ from haskie.collection.index import Hit
 from haskie.errors import InvalidInput
 from haskie.indexing import operations
 from haskie.paging import DEFAULT_PAGE_SIZE, Page
-from haskie.search import retrieval, session, text
+from haskie.search import flow, retrieval, session, text
 from haskie.search.passage import Excerpt, Passage, Sources
 
 # What one search returns: the chunks the index holds, the passages they merge into, or the
@@ -63,11 +63,11 @@ async def explore(
     started = time.perf_counter()
     names = await retrieval.scope(session_id, collections)
     if granularity == "passage":
-        found: list[Hit] | list[Passage] | list[Excerpt] = await retrieval.passages(names, q, limit)
+        found: list[Hit] | list[Passage] | list[Excerpt] = await flow.passages(names, q, limit)
     elif granularity == "excerpt":
-        found = await retrieval.excerpts(names, q, limit)
+        found = await flow.excerpts(names, q, limit)
     else:
-        found = await retrieval.chunks(names, q, limit)
+        found = await flow.chunks(names, q, limit)
     await session.record_search(session_id, "explore", q, found, started)
     return found
 
@@ -93,7 +93,7 @@ async def search_excerpts(
         session_id: The conversation's id; the search then shows in that session's history.
     """
     started = time.perf_counter()
-    found = await retrieval.excerpts(await retrieval.scope(session_id, collections), q, limit)
+    found = await flow.excerpts(await retrieval.scope(session_id, collections), q, limit)
     await session.record_search(session_id, "excerpts", q, found, started)
     return found
 
@@ -123,7 +123,7 @@ async def search_sources(
     """
     started = time.perf_counter()
     names = await retrieval.scope(session_id, collections)
-    found = await retrieval.sources(names, q, limit, sections)
+    found = await flow.sources(names, q, limit, sections)
     await session.record_search(session_id, "sources", q, found.documents, started)
     return found
 

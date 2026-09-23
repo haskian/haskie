@@ -31,6 +31,10 @@ class Chunk(msgspec.Struct):
     line_end: int  # 1-based, inclusive
     char_start: int  # 0-based offsets into the full markdown
     char_end: int
+    # The same span in bytes, which is what a file can be seeked to: a search reads the few
+    # hundred bytes around a chunk rather than the whole document (see `search.retrieval`).
+    byte_start: int
+    byte_end: int
     parents: list[str]  # enclosing headings, outermost first (excludes `heading`)
     page_start: int | None = None  # 1-based PDF pages, from page markers; None for non-PDF
     page_end: int | None = None
@@ -74,10 +78,14 @@ def _heading_ancestry(text: str) -> tuple[list[int], list[tuple[str, list[str]]]
 
 
 def split(
-    text: str, settings: ChunkSettings, line_offset: int = 0, char_offset: int = 0
+    text: str,
+    settings: ChunkSettings,
+    line_offset: int = 0,
+    char_offset: int = 0,
+    byte_offset: int = 0,
 ) -> list[Chunk]:
-    """`line_offset` / `char_offset` = lines / chars preceding `text` in the full document
-    (batched indexing)."""
+    """`line_offset` / `char_offset` / `byte_offset` = lines / chars / bytes preceding `text` in
+    the full document (batched indexing)."""
     splitter_cls = MarkdownSplitter if settings.chunker == "markdown" else TextSplitter
     splitter = splitter_cls(settings.chunk_size, overlap=settings.chunk_overlap)
     offsets, ancestry = _heading_ancestry(text)
@@ -92,11 +100,17 @@ def split(
         idx = bisect_right(marker_offsets, pos) - 1
         return markers[idx][1] if idx >= 0 else None
 
+    # Byte offsets are walked, not looked up: the splitter yields ascending starts, so the cursor
+    # encodes only the text between two chunks and the whole run costs one pass over `text`.
+    char_at = byte_at = 0
     chunks: list[Chunk] = []
     for start, body in splitter.chunk_indices(text):
         if not HTML_COMMENT.sub("", body).strip():
             continue  # a lone page marker is not content
         end = start + len(body)
+        byte_at += len(text[char_at:start].encode())
+        char_at = start  # `start`, not `end`: the next chunk begins inside this one's overlap
+        byte_start = byte_offset + byte_at
         idx = bisect_right(offsets, start) - 1
         if idx < 0 and offsets and offsets[0] < end:
             idx = 0  # no heading before the chunk but one inside it (e.g. after a page marker)
@@ -109,6 +123,8 @@ def split(
                 line_end=line_at(end),
                 char_start=char_offset + start,
                 char_end=char_offset + end,
+                byte_start=byte_start,
+                byte_end=byte_start + len(body.encode()),
                 parents=parents,
                 page_start=page_at(start),
                 # a marker at the very end belongs to the next chunk's page, not this one's

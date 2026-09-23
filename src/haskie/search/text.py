@@ -2,7 +2,7 @@
 
 Scores are raw BM25, not fused ranks: one lexical scorer with the same tokenizer and the same
 chunk size answers in every collection, so two collections score on one scale and the merge can
-sort on the score itself. That is the difference with `retrieval.chunks`, which has to fuse ranks
+sort on the score itself. That is the difference with `flow.chunks`, which has to fuse ranks
 because a hybrid ranking has no scale to share. Normalizing per collection would be worse than
 either: it would put every collection's rank-1 chunk on page one, whatever it matched.
 
@@ -81,7 +81,7 @@ async def checked_names(collections: list[str] | None) -> list[str]:
     order, or every collection when it named none.
 
     A name nobody owns is a mistake in the request, not an empty result — unlike a session's
-    stale name, which `retrieval.chunks` skips, because the caller did not choose it just now.
+    stale name, which `flow.chunks` skips, because the caller did not choose it just now.
     """
     known = await Collection.names()
     if not collections:

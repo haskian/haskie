@@ -921,6 +921,8 @@ export interface components {
             line_end: number;
             char_start: number;
             char_end: number;
+            byte_start: number;
+            byte_end: number;
             page_start: number | null;
             page_end: number | null;
             parents: string[];

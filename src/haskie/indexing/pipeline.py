@@ -49,8 +49,9 @@ class Batch(msgspec.Struct):
     seq: int
     start: int  # convert: first page, 0-based; embed/index: part number
     end: int  # convert: exclusive page bound; embed/index: part number + 1
-    line_offset: int = 0  # embed: lines / chars preceding this part in the assembled file
+    line_offset: int = 0  # embed: lines / chars / bytes preceding this part in the assembled file
     char_offset: int = 0
+    byte_offset: int = 0
 
 
 # --- convert --------------------------------------------------------------------
@@ -124,14 +125,13 @@ async def _parts(doc: Document) -> list[Path]:
 async def plan_embed(doc: Document) -> list[Batch]:
     """One batch per part, carrying the part's offsets inside the assembled file (one pass)."""
     batches: list[Batch] = []
-    line_offset = char_offset = 0
+    line_offset = char_offset = byte_offset = 0
     for i, part in enumerate(await _parts(doc)):
-        batches.append(
-            Batch(seq=i, start=i, end=i + 1, line_offset=line_offset, char_offset=char_offset)
-        )
+        batches.append(Batch(i, i, i + 1, line_offset, char_offset, byte_offset))
         text = await anyio.Path(part).read_text(encoding="utf-8")
         line_offset += text.count("\n") + JOINER.count("\n")
         char_offset += len(text) + len(JOINER)
+        byte_offset += len(text.encode()) + len(JOINER.encode())
     return batches
 
 
@@ -151,7 +151,9 @@ async def embed_batch(
 
     def chunk_and_embed() -> list[Row]:
         # ponytail: heading ancestry is per part; headings opened in an earlier part are not parents
-        chunks = chunk.split(text, chunking, batch.line_offset, batch.char_offset)
+        chunks = chunk.split(
+            text, chunking, batch.line_offset, batch.char_offset, batch.byte_offset
+        )
         vectors: list[list[float] | None] = [None] * len(chunks)
         if embedding is not None and chunks:
             from haskie.indexing.embed import embed_texts

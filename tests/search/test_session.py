@@ -20,8 +20,8 @@ from conftest import (
 from haskie import db, home
 from haskie.collection.collection import Collection
 from haskie.errors import NotFound
-from haskie.indexing import chunk, models
-from haskie.search import retrieval, session
+from haskie.indexing import chunk, embed, models
+from haskie.search import flow, retrieval, session
 from haskie.settings import (
     ChunkSettings,
     CollectionSettings,
@@ -56,8 +56,8 @@ async def test_search_limit_user_and_collection_level(dbos, tmp_path: Path) -> N
 
     await session.set_collections("s", ["lim"])
     chosen = await session.collections_for("s")
-    assert len(await retrieval.chunks(chosen, "common")) == 2, "session cut to the user limit"
-    assert len(await retrieval.chunks(chosen, "common", limit=3)) == 3
+    assert len(await flow.chunks(chosen, "common")) == 2, "session cut to the user limit"
+    assert len(await flow.chunks(chosen, "common", limit=3)) == 3
 
 
 async def test_an_outdated_index_is_reported_and_rebuilt(dbos, tmp_path: Path) -> None:
@@ -110,11 +110,11 @@ async def test_session_search_merges_collections(dbos, tmp_path: Path) -> None:
         await session.set_collections("s1", ["a", "ghost"])
     await session.set_collections("s1", ["a", "b"])
 
-    hits = await retrieval.chunks(await session.collections_for("s1"), "shared", limit=10)
+    hits = await flow.chunks(await session.collections_for("s1"), "shared", limit=10)
 
     assert {h.collection for h in hits} == {"a", "b"}
     unknown = await session.collections_for("unknown-session")
-    assert await retrieval.chunks(unknown, "shared") == []
+    assert await flow.chunks(unknown, "shared") == []
 
 
 async def test_session_search_counts_a_shared_document_once(dbos, tmp_path: Path) -> None:
@@ -130,7 +130,7 @@ async def test_session_search_counts_a_shared_document_once(dbos, tmp_path: Path
     await attach_document(dbos, "first", solo.name)
     await session.set_collections("s", ["first", "second"])
 
-    hits = await retrieval.chunks(await session.collections_for("s"), "shared", limit=10)
+    hits = await flow.chunks(await session.collections_for("s"), "shared", limit=10)
 
     keys = [(h.doc, h.part, h.chunk_id) for h in hits]
     assert len(keys) == len(set(keys)), f"one hit per passage, got {keys}"
@@ -173,7 +173,7 @@ async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkey
     monkeypatch.setattr(retrieval, "embed_query", fake_embed)
     monkeypatch.setattr(models, "require_ready", require_ready)
 
-    hits = await retrieval.chunks(await session.collections_for("s"), "shared", limit=10)
+    hits = await flow.chunks(await session.collections_for("s"), "shared", limit=10)
 
     assert {h.collection for h in hits} == {"a", "b", "c"}
     assert embedded == ["shared"], "one embedding for the whole fan-out"
@@ -206,9 +206,9 @@ async def test_session_search_reranks_once_over_the_merge(
         calls.append(texts)
         return [float(i) for i in range(len(texts))]
 
-    monkeypatch.setattr(retrieval, "rerank_scores", fake_rerank)
+    monkeypatch.setattr(embed, "rerank_scores", fake_rerank)
 
-    hits = await retrieval.chunks(await session.collections_for("s"), "shared")
+    hits = await flow.chunks(await session.collections_for("s"), "shared")
 
     assert len(calls) == 1, "one cross-encoder pass, not one per collection"
     (texts,) = calls
@@ -239,6 +239,6 @@ async def test_session_search_propagates_a_broken_collection(
 
     with caplog.at_level("ERROR"):
         with pytest.raises(RuntimeError, match="index unreadable"):
-            await retrieval.chunks(await session.collections_for("s"), "shared")
+            await flow.chunks(await session.collections_for("s"), "shared")
 
     assert "session_collection_search_failed" in events(caplog)

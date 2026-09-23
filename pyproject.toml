@@ -9,6 +9,7 @@ dependencies = [
     "litestar-mcp>=0.13.2",
     "lancedb>=0.38.0",
     "msgspec>=0.19.0",
+    "pydantic-graph>=2.48.0",
     "firecrawl-anydoc>=0.2.4",
     "pdf-inspector>=1.20.0",
     "pyromark>=0.9.13",
