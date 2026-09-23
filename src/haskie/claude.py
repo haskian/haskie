@@ -1,4 +1,4 @@
-"""Installing haskie into Claude Code: the MCP entry, the SessionStart hook and the skill.
+"""Installing haskie into Claude Code: the MCP entry, the SessionStart hook, the skill and the rule.
 
 Everything Claude Code's own configuration looks like lives here - where its files are, the argv
 its CLI takes, the shape of a hook in its settings - so `cli` stays the way in and never a second
@@ -9,6 +9,12 @@ The MCP tool descriptions are the handler docstrings, so they say what each tool
 cannot say is when to reach for haskie at all, which search to start with, or that these documents
 are the user's own and outrank a web result. That is what a skill is for, and it is why the trigger
 line is generated from the collections a home actually holds rather than shipped as a fixed string.
+
+A skill is only weighed when Claude is choosing a tool for a task. A plain knowledge question, a
+plan, or a moment of doubt does not read as a task, so the skill never fires and the answer comes
+from memory. The rule under `rules/` closes that gap: Claude Code loads every file there into the
+system prompt of every session, which is how Context7 gets consulted "even when you think you know
+the answer". The rule says *when*; the skill says *how*.
 """
 
 import shlex
@@ -16,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -29,6 +36,9 @@ Scope = Literal["user", "project"]  # where Claude Code keeps a setting: this us
 
 SKILL_NAME = "haskie"
 USER_CLAUDE = Path.home() / ".claude"
+# The skill and the rule are markdown, laid out under `claude_code/` exactly as they land under
+# `.claude/`, with `{topics}` and `{announcement}` for what only install time knows.
+TEMPLATES = files("haskie") / "claude_code"
 HOOK_MARKER = " ensure --home "  # what identifies a hook of ours, whatever path invoked it
 HOOK_TIMEOUT_SECONDS = 90
 DEFAULT_HOST = "127.0.0.1"  # loopback: one user's documents, and nothing authenticates a caller
@@ -42,13 +52,6 @@ MCP_URL = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/mcp"
 # does not crowd every other collection out of the trigger line.
 DESCRIPTION_BUDGET = 120
 
-_TRIGGER = (
-    "Search the user's own curated document collections instead of answering from the web or from "
-    "memory. Use whenever a question touches a topic they have collected sources on{topics}; when "
-    'they say "my documents", "my collection", "what do my sources say"; or when they want an '
-    "answer cited to something they own."
-)
-
 _ANNOUNCEMENT = "This conversation's haskie session id is {session_id}."
 
 
@@ -61,65 +64,9 @@ def session_announcement(session_id: str) -> str:
     )
 
 
-_BODY = f"""\
-# haskie — the user's own sources
-
-The collections behind these tools are documents the user chose and trusts. For anything they
-cover, they outrank a web search: prefer them, and say which document the answer came from.
-
-Run `list_collections` whenever you are unsure what exists. Each collection's `description` says
-what it is for, and that list is authoritative — the trigger above is a snapshot from install
-time.
-
-## Which search
-
-Two tools, for the two questions.
-
-- **"What do the sources say about X?"** — `search_excerpts`. Hybrid retrieval over the scope,
-  returned as excerpts rather than raw chunks: hits that landed on neighbouring chunks are one
-  piece of text, widened both ways to whole sentences, best first. This is what you answer from.
-- **"Which documents cover X, and which collections hold them?"** — `search_sources`. One row per
-  document — its best passage, how much of it matched, the hot sections inside it — plus the
-  smallest set of collections that covers every document returned.
-
-Both take an optional list of collections. Given one, they search those; given none, the
-session's collections; with no session selection either, everything the user owns.
-
-Run `search_sources` first to see what covers the topic, hand the collections it names to
-`set_session_collections`, then stay on `search_excerpts` for the rest of the conversation.
-
-## The session id
-
-haskie's SessionStart hook prints this conversation's id into your context, as
-"{_ANNOUNCEMENT.format(session_id="…")}" — use that id, unchanged, on every haskie tool call that
-takes one. The argument is optional in the schema, but a call without it belongs to no session, so
-the user's Sessions page never shows what this conversation searched, imported or started. If that
-line is not in your context, use one short stable string for the whole conversation instead.
-
-`set_session_collections` takes that id too: pass the collections that match the topic — the ones
-`search_sources` named — then call `search_excerpts` with the same id. It is the difference between
-searching the user's shelf on this subject and searching everything they own.
-
-## Reading the results
-
-Every excerpt carries the text plus `header` (the enclosing headings, as a breadcrumb) and
-`location` (`doc p.3-4 L10-20`). Both are written to be quoted — cite the document by name, not
-"your collection says". An excerpt already begins and ends on a sentence boundary, so quote it as
-it comes. A source row carries the same two fields for its best passage, and each of its sections
-names the headings its matches sit under.
-
-## Rules
-
-- No hits is an answer. Say the collections do not cover it, then fall back to the web — never
-  pass a web result off as one of their sources.
-- A 503 means a model is still downloading. Wait and try again, or tell the user what is holding
-  the search up.
-- A document exists on its own and belongs to any number of collections. `add_document` imports it
-  once; `add_document_to_collection` attaches it and queues the index, and
-  `remove_document_from_collection` detaches it without deleting it. It is not searchable in a
-  collection until that index finishes; poll `list_collection_documents`.
-- Creating and deleting collections is not exposed over MCP. Point the user at the web UI.
-"""
+def template(relative: str) -> str:
+    """One of the markdown files under `claude_code/`, by the path it will have under `.claude/`."""
+    return (TEMPLATES / relative).read_text(encoding="utf-8")
 
 
 def _claude_dir(scope: Scope) -> Path:
@@ -130,6 +77,11 @@ def _claude_dir(scope: Scope) -> Path:
 def skill_path(scope: Scope) -> Path:
     """Where the skill file goes. `project` keeps it with a repository, `user` with the user."""
     return _claude_dir(scope) / "skills" / SKILL_NAME / "SKILL.md"
+
+
+def rule_path(scope: Scope) -> Path:
+    """Where the rule goes. Claude Code loads every `rules/*.md` into each session's context."""
+    return _claude_dir(scope) / "rules" / f"{SKILL_NAME}.md"
 
 
 def settings_path(scope: Scope) -> Path:
@@ -158,8 +110,14 @@ def _topics(collections: "list[CollectionSummary]") -> str:
 
 def render_skill(collections: "list[CollectionSummary]") -> str:
     """The SKILL.md for this home. Deterministic, so re-running rewrites rather than accumulates."""
-    trigger = _TRIGGER.format(topics=_topics(collections))
-    return f"---\nname: {SKILL_NAME}\ndescription: >-\n  {trigger}\n---\n\n{_BODY}"
+    return template(f"skills/{SKILL_NAME}/SKILL.md").format(
+        topics=_topics(collections), announcement=_ANNOUNCEMENT.format(session_id="…")
+    )
+
+
+def render_rule(collections: "list[CollectionSummary]") -> str:
+    """The always-loaded rule for this home, naming the same collections as the skill's trigger."""
+    return template(f"rules/{SKILL_NAME}.md").format(topics=_topics(collections))
 
 
 def _write(destination: Path, text: str) -> Path:
@@ -176,6 +134,11 @@ def _write(destination: Path, text: str) -> Path:
 def write_skill(scope: Scope, collections: "list[CollectionSummary]") -> Path:
     """Put the skill where Claude Code looks for it, and say where that was."""
     return _write(skill_path(scope), render_skill(collections))
+
+
+def write_rule(scope: Scope, collections: "list[CollectionSummary]") -> Path:
+    """Put the rule where Claude Code loads it every session, and say where that was."""
+    return _write(rule_path(scope), render_rule(collections))
 
 
 def own_command() -> list[str]:

@@ -14,6 +14,20 @@ export function headingOf(match: Match): string {
   return match.heading
 }
 
+/** A hot section's citation without the document name it repeats: "p.3 L7-43" out of
+ *  "doc.pdf p.3 L7-43". The block naming the section already names the document once. */
+export function cite(location: string, doc: string): string {
+  return location.startsWith(doc) ? location.slice(doc.length).trim() : location
+}
+
+/** The chunk a quoted match covers, as a bare number for the bottom corner of the quote: one
+ *  chunk's sequence, a passage's run, or nothing for a source (which shows no quote). */
+export function seqLabel(match: Match): string {
+  if (isPassage(match)) return match.seq_start === match.seq_end ? `${match.seq_start}` : `${match.seq_start}–${match.seq_end}`
+  if (isHit(match)) return `${match.seq}`
+  return ''
+}
+
 /** Where the match sits in the document: page and chunk, page and chunk run, or the lines. */
 export function position(match: Match): string {
   if (isHit(match) && match.page_start !== null) return `p. ${match.page_start} · chunk ${match.chunk_id}`

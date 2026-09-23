@@ -4,7 +4,7 @@ import type { Anchor } from './anchor'
 import { DocumentPanes } from './DocumentPanes'
 import { Kv } from './Kv'
 import { Mark } from './Mark'
-import { headingOf, isSource, position, type Match } from './match'
+import { cite, headingOf, isSource, position, seqLabel, type Match } from './match'
 import { Modal } from './Modal'
 import { Tabs, type TabDef } from './Tabs'
 
@@ -76,20 +76,27 @@ function MatchBody({ hit, query }: { hit: Match; query: string }) {
           ]}
         />
         {source ? (
-          <ul className="list">
+          // The source as one block: a head row naming the document and its total, then its hot
+          // sections indented under it, each citing itself without repeating the document name.
+          <div className="sections">
+            <div className="sections-head">
+              <span>{hit.doc}</span>
+              <span className="mono muted">{hit.chunks} {hit.chunks === 1 ? 'chunk' : 'chunks'}</span>
+            </div>
             {hit.sections.map((section) => (
-              <li key={section.header} className="list-item" role="button" tabIndex={0} onClick={() => jump(section)}>
+              <div key={section.header} className="section-row" role="button" tabIndex={0} onClick={() => jump(section)}>
                 <span className="mono muted">{section.score.toFixed(2)}</span>
-                <span>{section.header || '—'}</span>
+                <span className="section-title">{section.header || '—'}</span>
                 <span className="mono muted">
-                  {section.chunks} {section.chunks === 1 ? 'chunk' : 'chunks'} · {section.location}
+                  {section.chunks} {section.chunks === 1 ? 'chunk' : 'chunks'} · {cite(section.location, hit.doc)}
                 </span>
-              </li>
+              </div>
             ))}
-          </ul>
+          </div>
         ) : (
           <blockquote className="match-text">
             <Mark text={hit.text} query={query} />
+            <span className="match-seq" title={`chunk ${seqLabel(hit)}`}>{seqLabel(hit)}</span>
           </blockquote>
         )}
       </div>

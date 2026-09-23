@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Hit, Passage, SearchScope, Source } from '../api'
-import { position, type Match } from '../ui/match'
+import { cite, position, seqLabel, type Match } from '../ui/match'
 import { parseScope, scopeParams, type Scope } from './explore/scope'
 
 const HIT: Hit = {
@@ -103,6 +103,33 @@ describe('position', () => {
   for (const testCase of cases) {
     test(testCase.name, () => {
       expect(position(testCase.value)).toBe(testCase.expected)
+    })
+  }
+})
+
+describe('seqLabel', () => {
+  const cases: Array<{ name: string; value: Match; expected: string }> = [
+    { name: 'a hit is its own sequence number', value: HIT, expected: '4' },
+    { name: 'a passage over several chunks is the run', value: PASSAGE, expected: '4–6' },
+    { name: 'a passage of one chunk is that number alone', value: { ...PASSAGE, seq_end: 4 }, expected: '4' },
+    { name: 'a source shows no quote, so no number', value: SOURCE, expected: '' },
+  ]
+  for (const testCase of cases) {
+    test(testCase.name, () => {
+      expect(seqLabel(testCase.value)).toBe(testCase.expected)
+    })
+  }
+})
+
+describe('cite', () => {
+  const cases: Array<{ name: string; location: string; doc: string; expected: string }> = [
+    { name: 'a PDF drops the document name, keeping page and lines', location: 'area-lights.pdf p.2 L41-58', doc: 'area-lights.pdf', expected: 'p.2 L41-58' },
+    { name: 'a non-PDF keeps only its lines', location: 'notes.md L7-43', doc: 'notes.md', expected: 'L7-43' },
+    { name: 'a location that does not start with the name is left whole', location: 'p.2 L41-58', doc: 'area-lights.pdf', expected: 'p.2 L41-58' },
+  ]
+  for (const testCase of cases) {
+    test(testCase.name, () => {
+      expect(cite(testCase.location, testCase.doc)).toBe(testCase.expected)
     })
   }
 })

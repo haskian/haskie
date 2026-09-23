@@ -592,8 +592,11 @@ def test_install_claude(
     assert result.exit_code == 0, result.output
     assert case.expect_in_output in _text(result)
     written = claude.skill_path(case.scope).read_text()
+    rule = claude.rule_path(case.scope).read_text()
     for expected in case.expect_in_skill:
         assert expected in written
+        assert expected in rule, "the rule names the same collections as the trigger"
+    assert "before answering from memory" in rule, "the rule fires on knowledge questions"
     hooks = json.loads(claude.settings_path(case.scope).read_text())["hooks"]["SessionStart"]
     hooked = hooks[0]["hooks"][0]["command"]
     assert claude.HOOK_MARKER in hooked, "the hook starts haskie"
@@ -626,6 +629,9 @@ def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
     written = claude.skill_path("project").read_text()
     assert written.count("name: haskie") == 1, "rewritten, not appended to"
     assert "adr: Architecture decisions" in written, "the new collection reached the trigger"
+    rule = claude.rule_path("project").read_text()
+    assert rule.count("Search the user's own") == 1, "rewritten, not appended to"
+    assert "adr: Architecture decisions" in rule, "the new collection reached the rule"
 
 
 # `install_hook` merges into a file the user owns, so its branches are worth reaching directly
@@ -697,18 +703,39 @@ def test_install_hook_refuses_a_settings_file_it_cannot_parse(
     assert settings_file.read_text() == "{not json", "left exactly as it was"
 
 
-def test_the_skill_only_names_tools_the_server_actually_serves() -> None:
-    """The skill tells Claude which tool to reach for, so a renamed tool makes it wrong in a way
-    nothing else catches: the file is prose, and it is written at install time."""
-    served = {
+def _served_tools() -> set[str]:
+    return {
         name
         for module in (Path(__file__).parents[1] / "src" / "haskie" / "api").glob("*.py")
         for name in re.findall(r'mcp_tool="([^"]+)"', module.read_text(encoding="utf-8"))
     }
-    named = {word for word in re.findall(r"`([a-z_]+)`", claude._BODY) if "_" in word}
 
-    assert named, "the skill is supposed to name the tools"
-    assert named <= served, f"the skill names tools that do not exist: {sorted(named - served)}"
+
+TOOL_VERBS = ("list_", "get_", "add_", "remove_", "set_", "search_", "describe_")
+# A backticked word, with or without an argument list after it: `search_excerpts(q, ...)`.
+BACKTICKED = re.compile(r"`([a-z_]+)(?:\([^`]*\))?`")
+
+
+@pytest.mark.parametrize(
+    "prose", [claude.render_skill([]), claude.render_rule([])], ids=["skill", "rule"]
+)
+def test_the_prose_only_names_tools_the_server_actually_serves(prose: str) -> None:
+    """The skill and the rule tell Claude which tool to reach for, so a renamed tool makes them
+    wrong in a way nothing else catches: both are prose, written at install time. Field names
+    are backticked too, so only words shaped like a tool are held to the served set."""
+    named = {word for word in BACKTICKED.findall(prose) if word.startswith(TOOL_VERBS)}
+
+    assert named, "the prose is supposed to name the tools"
+    served = _served_tools()
+    assert named <= served, f"it names tools that do not exist: {sorted(named - served)}"
+
+
+def test_the_skill_names_every_tool_the_server_serves() -> None:
+    """A new tool that the skill never mentions is one Claude never reaches for."""
+    named = set(BACKTICKED.findall(claude.render_skill([])))
+    served = _served_tools()
+
+    assert served <= named, f"the skill never mentions: {sorted(served - named)}"
 
 
 def test_the_default_url_matches_where_mcp_is_mounted() -> None:
