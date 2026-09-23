@@ -46,6 +46,8 @@ const HIT: Hit = {
   line_end: 18,
   char_start: 420,
   char_end: 640,
+  byte_start: 420,
+  byte_end: 640,
   page_start: 2,
   page_end: 2,
   parents: ['Lighting'],

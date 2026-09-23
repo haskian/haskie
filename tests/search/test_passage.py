@@ -14,18 +14,23 @@ from haskie.search.passage import (
     Excerpt,
     Passage,
     Sources,
+    Window,
     expand,
     fold_sources,
     harmonic,
     min_cover,
-    newline_offsets,
     ranges,
     top_documents,
 )
 
-# A long line with no sentence terminator, no blank line and no heading in it: what the widening
-# has nothing to stop at, so the cap is all that bounds it.
+# A long line with no sentence terminator and no newline in it: what the widening has nothing to
+# stop at, so the cap is all that bounds it.
 RUN = ", ".join(f"service-{i:03d}" for i in range(80))
+
+# A long line that does offer sentences: past the cap in both directions, so the widening has to
+# fall back from the newline rule to the outermost whole sentences it can reach.
+SENTENCE_TAIL = "explains how a consumer handles a duplicate message."
+SENTENCES = " ".join(f"Sentence {i} {SENTENCE_TAIL}" for i in range(12))
 
 MARKDOWN = f"""# Retries
 
@@ -50,9 +55,15 @@ The consumer keys on an idempotency key. It drops any message it has already han
 ## Backpressure
 
 {RUN}
+
+## Long line
+
+{SENTENCES}
 """
 
-NEWLINES = newline_offsets(MARKDOWN)  # what `expand` counts lines with
+# What `expand` is handed: `retrieval` reads a window around the span, and the whole fixture is
+# one such window that happens to start at the beginning of the document.
+WHOLE = Window(text=MARKDOWN, char_start=0)
 
 DOC = "retries.md"
 OTHER = "ordering.md"
@@ -105,6 +116,8 @@ def _hit(
         line_end=line_end,
         char_start=char_start,
         char_end=char_end,
+        byte_start=len(MARKDOWN[:char_start].encode()),
+        byte_end=len(MARKDOWN[:char_end].encode()),
         page_start=page_start,
         page_end=page_end,
         parents=parents.split(" > ") if parents else [],
@@ -226,28 +239,22 @@ def _range(char_start: int, char_end: int, **fields) -> ChunkRange:
     ("name", "span", "expected", "lines"),
     [
         (
-            "a range starting mid-sentence widens back to the previous terminator",
+            "a newline bounds the passage: the line the span sits on",
             _span("has to be idempotent", "or the side"),
-            _text("The retry", "effect happens twice."),
-            (3, 4),
+            _text("A background job", "or the side"),
+            (3, 3),
         ),
         (
-            "a blank line stops the widening at the paragraph it started",
-            _span("jitter spreads", "spreads the retries"),
-            _text("Exponential", "spreads the retries."),
-            (8, 8),
-        ),
-        (
-            "a heading ends the passage before itself",
-            _span("a wall clock", "clock for ordering"),
-            "Never trust a wall clock for ordering",
-            (13, 13),
-        ),
-        (
-            "a heading line starts the passage after itself",
+            "a heading is a line of its own, so it is never widened into",
             _span("drift apart", "by milliseconds"),
             "Hosts drift apart by milliseconds.",
             (15, 15),
+        ),
+        (
+            "the line before a heading stops at itself",
+            _span("a wall clock", "clock for ordering"),
+            "Never trust a wall clock for ordering",
+            (13, 13),
         ),
         (
             "the start of the file is a boundary of its own",
@@ -256,7 +263,13 @@ def _range(char_start: int, char_end: int, **fields) -> ChunkRange:
             (1, 1),
         ),
         (
-            "text with no boundary in it is cut at MAX_EXPAND on both sides",
+            "a line longer than the cap falls back to the outermost whole sentences",
+            (_at("Sentence 5 explains"), _at("Sentence 5 explains") + 30),
+            _text("Sentence 1 explains", f"Sentence 9 {SENTENCE_TAIL}"),
+            (27, 27),
+        ),
+        (
+            "neither a newline nor a sentence end in range: the cap is all there is",
             (_at(RUN) + 400, _at(RUN) + 450),
             MARKDOWN[_at(RUN) + 400 - MAX_EXPAND : _at(RUN) + 450 + MAX_EXPAND].strip(),
             (23, 23),
@@ -264,20 +277,50 @@ def _range(char_start: int, char_end: int, **fields) -> ChunkRange:
         (
             "the end of the file stops the widening",
             (len(MARKDOWN) - 40, len(MARKDOWN)),
-            MARKDOWN[len(MARKDOWN) - 40 - MAX_EXPAND :].strip(),
-            (23, 23),
+            _text("Sentence 7 explains", f"Sentence 11 {SENTENCE_TAIL}"),
+            (27, 27),
         ),
     ],
 )
 def test_expand_widens_a_range_to_the_nearest_boundary(
     name: str, span: tuple[int, int], expected: str, lines: tuple[int, int]
 ) -> None:
-    passage = expand(_range(*span), MARKDOWN, NEWLINES, Passage)
+    passage = expand(_range(*span), WHOLE, Passage)
 
     assert passage.text == expected, name
     assert (passage.line_start, passage.line_end) == lines, f"{name}: lines recounted"
     assert MARKDOWN[passage.char_start : passage.char_end] == expected, f"{name}: offsets agree"
     assert not passage.text[:1].isspace() and not passage.text[-1:].isspace(), name
+
+
+@pytest.mark.parametrize(
+    ("name", "span", "before"),
+    [
+        ("a window opening mid-line", _span("The consumer keys", "idempotency key."), 200),
+        (
+            "a window opening exactly at the widened start",
+            _span("Hosts drift", "milliseconds."),
+            35,
+        ),
+        ("a window with nothing to spare after it", _span("### Skew", "milliseconds."), 500),
+    ],
+)
+def test_expand_reports_document_offsets_from_a_window(
+    name: str, span: tuple[int, int], before: int
+) -> None:
+    """A search reads a few hundred bytes around the span, not the document, so `expand` works in
+    window coordinates and has to hand back offsets and lines of the document itself."""
+    start = max(0, span[0] - before)
+    window = Window(text=MARKDOWN[start : span[1] + before], char_start=start)
+    folded = _range(*span)
+
+    passage = expand(folded, window, Passage)
+
+    whole = expand(folded, WHOLE, Passage)
+    assert (passage.char_start, passage.char_end) == (whole.char_start, whole.char_end), name
+    assert (passage.line_start, passage.line_end) == (whole.line_start, whole.line_end), name
+    assert passage.text == whole.text, name
+    assert MARKDOWN[passage.char_start : passage.char_end] == passage.text, name
 
 
 def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() -> None:
@@ -295,7 +338,7 @@ def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() 
         ),
     ]
 
-    passage = expand(ranges(hits)[0], MARKDOWN, NEWLINES, Passage)
+    passage = expand(ranges(hits)[0], WHOLE, Passage)
 
     assert passage.header == "Retries > Backoff", "the best-scoring chunk names the passage"
     assert (passage.page_start, passage.page_end) == (2, 3), "the best chunk's pages"
@@ -311,9 +354,9 @@ def test_an_excerpt_is_a_passage() -> None:
     """The trimming step is not written yet, so the type exists, the shape is the passage's, and
     `expand` builds whichever of the two the caller asked for."""
     span = _range(*OPENING)
-    passage = expand(span, MARKDOWN, NEWLINES, Passage)
+    passage = expand(span, WHOLE, Passage)
 
-    excerpt = expand(span, MARKDOWN, NEWLINES, Excerpt)
+    excerpt = expand(span, WHOLE, Excerpt)
 
     assert isinstance(excerpt, Excerpt) and isinstance(excerpt, Passage)
     assert excerpt.text == passage.text and excerpt.location == passage.location

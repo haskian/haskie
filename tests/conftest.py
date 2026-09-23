@@ -382,6 +382,8 @@ async def seed_index(collection: str, doc: str, text: str, heading: str = "Alpha
                 line_end=7,
                 char_start=0,
                 char_end=len(text),
+                byte_start=0,
+                byte_end=len(text.encode()),
                 parents=["Title"],
             )
         ],

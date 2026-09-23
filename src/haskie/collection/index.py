@@ -63,6 +63,8 @@ PLAIN_SCHEMA = pa.schema(
         ("line_end", pa.int32()),
         ("char_start", pa.int32()),
         ("char_end", pa.int32()),
+        ("byte_start", pa.int32()),
+        ("byte_end", pa.int32()),
         ("page_start", pa.int32()),
         ("page_end", pa.int32()),
         ("parents", pa.string()),
@@ -100,6 +102,8 @@ class Hit(msgspec.Struct):
     line_end: int
     char_start: int  # 0-based, in markdown_path
     char_end: int
+    byte_start: int  # the same span in bytes: what `markdown_file` is seeked to
+    byte_end: int
     page_start: int | None  # 1-based PDF pages; None for non-PDF
     page_end: int | None
     parents: list[str]  # enclosing headings, outermost first
@@ -421,7 +425,7 @@ class CollectionIndex:
 
     # --- search ----------------------------------------------------------
     # Split into three steps so a cross-collection search embeds the query once, retrieves from
-    # every index in parallel and rescores the merge once (see retrieval.chunks). `search` below
+    # every index in parallel and rescores the merge once (see search.flow). `search` below
     # is the single-index composition of the same steps.
 
     async def query_vector(self, query: str, settings: SearchSettings) -> list[float] | None:
@@ -436,6 +440,23 @@ class CollectionIndex:
         await models.require_ready("embedding", self.embedding.name)
         return await cpu.on_cpu(embed_query, self.embedding, query)
 
+    async def _readable(self) -> lancedb.AsyncTable | None:
+        """The table to read from, or None when there is nothing this build can read.
+
+        A table written by an older version answers nothing rather than failing the search it is
+        part of: a session may search ten collections, and one of them waiting for "Index all"
+        (which `index_outdated` already says, next to the button that does it) is not a reason to
+        answer none of them. Logged, because an empty collection and an unreadable one look the
+        same from the outside.
+        """
+        table = await self._existing()
+        if table is None or await table.count_rows() == 0:
+            return None
+        if not await self.schema_current(table):
+            _log.warning("index_table_outdated", collection=self.collection, path=str(self.path))
+            return None
+        return table
+
     async def search_rows(
         self, query: str, vector: list[float] | None, settings: SearchSettings, limit: int
     ) -> list[dict]:
@@ -447,8 +468,8 @@ class CollectionIndex:
         the embedding the others have. A hybrid query always fuses over at least
         `settings.candidates` rows, because the fusion is only as good as its candidate pool.
         """
-        table = await self._existing()
-        if table is None or await table.count_rows() == 0:
+        table = await self._readable()
+        if table is None:
             return []
         if vector is None or not await self.has_vector_column():
             return await (await table.search(query, query_type="fts")).limit(limit).to_list()
@@ -473,8 +494,8 @@ class CollectionIndex:
         asks every collection at once (see search/text.py), and one still building its index would
         make the whole query wait for it. `search_rows` is the opposite trade for one collection.
         """
-        table = await self._existing()
-        if table is None or await table.count_rows() == 0 or not await self.has_index("text"):
+        table = await self._readable()
+        if table is None or not await self.has_index("text"):
             return []
         return await (await table.search(query, query_type="fts")).limit(limit).to_list()
 
@@ -490,7 +511,7 @@ class CollectionIndex:
     def hit(self, r: dict, score: float | None = None) -> Hit:
         """One result row as a `Hit`, with the file paths resolved against this index's home.
         `score` replaces the row's own signal: a merged ranking over several indexes scores its
-        rows together, because per-index scores are not comparable (see retrieval.chunks)."""
+        rows together, because per-index scores are not comparable (see search.flow)."""
         parents = r["parents"].split(PARENT_SEP) if r["parents"] else []
         heading = r["heading"]
         line_start, line_end = r["line_start"], r["line_end"]
@@ -508,6 +529,8 @@ class CollectionIndex:
             line_end=line_end,
             char_start=r["char_start"],
             char_end=r["char_end"],
+            byte_start=r["byte_start"],
+            byte_end=r["byte_end"],
             page_start=page_start,
             page_end=page_end,
             parents=parents,
@@ -578,7 +601,7 @@ def row_score(r: dict) -> float:
 
 # What identifies one passage, wherever it is stored. The collection is deliberately not part of
 # it: the same chunk of the same document is the same answer, whichever collection's table it came
-# out of, so `search.retrieval.chunks` and `search.text.merge` both count it once.
+# out of, so `search.flow.chunks` and `search.text.merge` both count it once.
 RowKey = tuple[str, int, int]
 
 
@@ -615,7 +638,7 @@ def first_per_key(
 
     The same document may be a member of several collections, whose tables then hold the same
     chunk. A search is about passages, not memberships, so the copies are dropped; which copy is
-    "first" is the caller's ranking decision (see search.retrieval.chunks and search.text.merge).
+    "first" is the caller's ranking decision (see search.flow.chunks and search.text.merge).
     """
     unique: dict[RowKey, tuple[CollectionIndex, dict]] = {}
     for index, row in pairs:

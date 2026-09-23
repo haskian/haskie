@@ -143,6 +143,8 @@ _PLAIN = pa.schema(
         ("line_end", pa.int32()),
         ("char_start", pa.int32()),
         ("char_end", pa.int32()),
+        ("byte_start", pa.int32()),
+        ("byte_end", pa.int32()),
         ("parents", pa.list_(pa.string())),
         ("page_start", pa.int32()),
         ("page_end", pa.int32()),

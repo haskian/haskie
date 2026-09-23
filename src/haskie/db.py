@@ -23,14 +23,17 @@ import msgspec
 from haskie import home
 from haskie.errors import HaskieError
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 """`pragma user_version` of the schema below.
 
 A home stamped with it has exactly these tables and is opened as it is. Any other stamp is a
 shape this build cannot read, so the home is refused (see `migrate`). Bumped last when chunks
-gained a document-wide `seq` and `session_events.workflow_id` became `operation_id`: an embedding
-cache and a LanceDB table written without that column, or a history column under the old name,
-must never be read by this build.
+gained the byte offsets a search seeks the markdown to: an embedding cache or a LanceDB table
+written without those columns must never be read by this build.
+
+Before 1.0.0 this is the only migration there is, and it covers the stores this version does not
+stamp as well. A change to what a chunk holds retires the embedding cache and every collection's
+table, and rather than version each of them, the home is refused and rebuilt from the sources.
 """
 
 # Every statement is `if not exists`, so a crash partway through leaves `user_version` at 0 and

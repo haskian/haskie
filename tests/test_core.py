@@ -190,6 +190,30 @@ def test_chunk(name: str, text: str, settings: ChunkSettings, expected: list) ->
     got = [(c.heading, c.line_start, c.line_end, c.parents) for c in chunks]
     assert got == expected, name
     assert all(text[c.char_start : c.char_end] == c.text for c in chunks), name
+    data = text.encode()
+    assert all(data[c.byte_start : c.byte_end].decode() == c.text for c in chunks), name
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "offset"),
+    [
+        ("ascii: a byte offset is the char offset", "# H\n\nplain words here\n", 0),
+        ("two-byte characters push the bytes past the chars", "# Ü\n\ncafé näher dabei\n", 0),
+        ("three- and four-byte characters too", "# 見\n\n見出し 🌍 text after\n", 0),
+        ("a part of a batched document starts where the one before it ended", "# H\n\né\n", 97),
+    ],
+)
+def test_chunk_byte_offsets_index_the_encoded_markdown(name: str, text: str, offset: int) -> None:
+    """What a search seeks to. A char offset is not a file position once a document leaves ASCII,
+    so the byte range is carried beside it and has to cut the same text out of the bytes."""
+    chunks = chunk.split(text, ChunkSettings(chunk_size=12, chunk_overlap=0), byte_offset=offset)
+    data = text.encode()
+
+    assert chunks, name
+    cut = [data[c.byte_start - offset : c.byte_end - offset].decode() for c in chunks]
+    assert cut == [c.text for c in chunks], name
+    assert all(c.byte_start >= c.char_start for c in chunks), f"{name}: bytes never run short"
+    assert chunks[0].byte_start == offset + len(text[: chunks[0].char_start].encode()), name
 
 
 def test_chunk_pages_from_markers() -> None:
@@ -1525,6 +1549,8 @@ def _row(text: str, vector: list[float] | None = None, seq: int = 1) -> Row:
             line_end=1,
             char_start=0,
             char_end=len(text),
+            byte_start=0,
+            byte_end=len(text.encode()),
             parents=[],
         ),
         vector=vector,
@@ -1900,6 +1926,8 @@ def test_hit_names_the_collection_that_matched_and_builds_a_citation(tmp_path: P
             "line_end": 20,
             "char_start": 100,
             "char_end": 200,
+            "byte_start": 104,
+            "byte_end": 210,
             "page_start": 3,
             "page_end": 4,
             "parents": "Part I > Chapter 2",
@@ -1913,6 +1941,7 @@ def test_hit_names_the_collection_that_matched_and_builds_a_citation(tmp_path: P
     assert hit.parents == ["Part I", "Chapter 2"]
     assert hit.header == "Part I > Chapter 2 > Results"
     assert hit.location == "book.pdf p.3-4 L10-20"
+    assert (hit.byte_start, hit.byte_end) == (104, 210), "what a search seeks the markdown to"
     assert hit.score == 0.5
 
 
@@ -2409,7 +2438,7 @@ async def test_session_collections_keep_their_order_and_survive_reorder() -> Non
 async def test_session_search_skips_a_collection_that_disappeared(caplog, monkeypatch) -> None:
     """Deleting a collection drops it from every session (one cascade), so a name without a row
     can only come from a delete between the two reads of the search. It is skipped, not raised."""
-    from haskie.search import retrieval, session
+    from haskie.search import flow, session
 
     async def nothing_found(names: list[str]) -> dict:
         return {}
@@ -2419,7 +2448,7 @@ async def test_session_search_skips_a_collection_that_disappeared(caplog, monkey
     monkeypatch.setattr(Collection, "load_settings", staticmethod(nothing_found))
 
     with caplog.at_level("WARNING"):
-        assert await retrieval.chunks(await session.collections_for("s1"), "anything") == []
+        assert await flow.chunks(await session.collections_for("s1"), "anything") == []
     assert events(caplog) == ["session_collection_missing"]
 
 
@@ -2430,7 +2459,7 @@ async def test_session_search_reads_its_collections_concurrently(monkeypatch) ->
     hold the first retrieval until the wait times out, and the timeout fails the search."""
     import asyncio
 
-    from haskie.search import retrieval, session
+    from haskie.search import flow, session
 
     for name in ("a", "b"):
         await Collection.create(name)
@@ -2445,7 +2474,7 @@ async def test_session_search_reads_its_collections_concurrently(monkeypatch) ->
 
     monkeypatch.setattr(CollectionIndex, "search_rows", paired)
 
-    assert await retrieval.chunks(await session.collections_for("s1"), "anything") == []
+    assert await flow.chunks(await session.collections_for("s1"), "anything") == []
     assert all(event.is_set() for event in arrived.values()), "both collections were read"
 
 
@@ -2454,7 +2483,7 @@ async def test_session_search_counts_a_passage_once_across_collections() -> None
     """The same document in two chosen collections puts the same chunk in both rankings. A caller
     wants one hit per passage, so it is credited to the first collection that returned it and the
     copy is dropped before the ranks are counted."""
-    from haskie.search import retrieval, session
+    from haskie.search import flow, session
 
     for name in ("alpha", "beta"):
         collection = await Collection.create(name)
@@ -2463,7 +2492,7 @@ async def test_session_search_counts_a_passage_once_across_collections() -> None
         await index.finish()
     await session.set_collections("s1", ["alpha", "beta"])
 
-    hits = await retrieval.chunks(await session.collections_for("s1"), "lancedb", limit=10)
+    hits = await flow.chunks(await session.collections_for("s1"), "lancedb", limit=10)
 
     assert len(hits) == 3, "three chunks, not six: the copies are merged away"
     passages = {(hit.doc, hit.part, hit.chunk_id) for hit in hits}
