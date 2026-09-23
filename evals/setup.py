@@ -56,6 +56,32 @@ SOURCES = (
         "https://raw.githubusercontent.com/git/git/"
         "d11b348f7840c7ae4aba5d273ff56c813475a88e/Documentation/git-history.adoc",
     ),
+    # A second, unrelated-domain test of the same "newer than training" recipe: GitHub's REST API
+    # version 2026-03-10, its first calendar version to ship breaking changes, shipped in March
+    # 2026. Several of its changes directly reverse a years-old, heavily-documented shape (a
+    # submodule's `type` in the contents API, the enum values in code scanning's language list) -
+    # so a guess without searching isn't just uninformed, it actively favors the old, wrong
+    # answer. Pinned to the commit fetched at task-writing time, since this changelog accretes new
+    # version sections over time and a later fetch would return a different (still correct, but
+    # different) document.
+    Source(
+        "github-api-breaking-changes.md",
+        "https://raw.githubusercontent.com/github/docs/"
+        "098f865b56a2ff87b8acdbd07e78218571071777/data/reusables/rest-api/"
+        "breaking-changes-changelog.md",
+    ),
+    # Distributed systems: the paper's own authors host it, no pinning needed - a 2014 academic
+    # PDF at a stable URL, unlike the two live-repo docs above.
+    Source("raft.pdf", "https://raft.github.io/raft.pdf"),
+    # Architectural design: CC BY 3.0 ("The Architecture of Open Source Applications" license),
+    # unlike most architecture writing (e.g. Fowler's bliki, all-rights-reserved). Pinned to the
+    # `main` branch's rendered HTML as of task-writing time via this exact path; the book itself
+    # is finished and not actively revised, so drift risk here is low, but the file is still a
+    # live repo path rather than a tagged release.
+    Source(
+        "scalable-web-architecture.html",
+        "https://raw.githubusercontent.com/aosabook/aosabook/main/docs/en/v2/distsys.html",
+    ),
 )
 
 

@@ -50,6 +50,9 @@ TASKS = (
     "git_objects",
     "h2o",
     "git_history_split",
+    "github_api_breaking_changes",
+    "raft_election",
+    "collapsed_forwarding",
 )
 
 # pytest's summary line lists whichever outcomes occurred, in its own fixed order - "failed"
