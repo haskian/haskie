@@ -113,47 +113,72 @@ def allowed_tools(arm: str) -> list[str]:
     return [*CODING_TOOLS, *(HASKIE_TOOLS if arm == "b" else ())]
 
 
+# A parent Claude Code session and its spawned `claude -p` child share the same on-disk OAuth
+# credentials; if the child's launch lands mid-refresh, it fails its very first turn with this
+# exact message and no tool calls, indistinguishable from a real task failure except for the
+# text - and a retry a moment later succeeds cleanly.
+AUTH_RETRY_MARKER = "OAuth session expired and could not be refreshed"
+AUTH_RETRY_ATTEMPTS = 3
+
+
 def run_agent(task: Task, arm: str, directory: Path, model: str, api: str, collection: str) -> int:
     work = directory / "work"
     work.mkdir(parents=True, exist_ok=True)
     mcp = directory / "mcp.json"
     servers = {"haskie": {"type": "http", "url": f"{api.rstrip('/')}/mcp"}} if arm == "b" else {}
     mcp.write_text(json.dumps({"mcpServers": servers}, indent=2) + "\n")
-    argv = [
-        claude_binary(),
-        "-p",
-        prompt_for(task, arm, collection),
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--setting-sources",
-        "project",
-        "--strict-mcp-config",
-        "--mcp-config",
-        str(mcp.resolve()),
-        "--allowedTools",
-        *allowed_tools(arm),
-        "--model",
-        model,
-        "--max-turns",
-        os.environ.get("EVAL_MAX_TURNS", "40"),
-        "--session-id",
-        str(uuid.uuid4()),
-    ]
-    (directory / "argv.json").write_text(json.dumps(argv, indent=2) + "\n")
-    with (
-        (directory / "transcript.jsonl").open("wb") as transcript,
-        (directory / "stderr.txt").open("wb") as stderr,
-    ):
-        completed = subprocess.run(
-            argv,
-            cwd=work,
-            stdout=transcript,
-            stderr=stderr,
-            stdin=subprocess.DEVNULL,
-            env=subprocess_environment(),
-            check=False,
+
+    for attempt in range(1, AUTH_RETRY_ATTEMPTS + 1):
+        argv = [
+            claude_binary(),
+            "-p",
+            prompt_for(task, arm, collection),
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--setting-sources",
+            "project",
+            "--strict-mcp-config",
+            "--mcp-config",
+            str(mcp.resolve()),
+            "--allowedTools",
+            *allowed_tools(arm),
+            "--model",
+            model,
+            "--max-turns",
+            os.environ.get("EVAL_MAX_TURNS", "40"),
+            "--session-id",
+            str(uuid.uuid4()),
+        ]
+        (directory / "argv.json").write_text(json.dumps(argv, indent=2) + "\n")
+        with (
+            (directory / "transcript.jsonl").open("wb") as transcript,
+            (directory / "stderr.txt").open("wb") as stderr,
+        ):
+            completed = subprocess.run(
+                argv,
+                cwd=work,
+                stdout=transcript,
+                stderr=stderr,
+                stdin=subprocess.DEVNULL,
+                env=subprocess_environment(),
+                check=False,
+            )
+        if completed.returncode == 0:
+            return completed.returncode
+        transcript_text = (directory / "transcript.jsonl").read_text(
+            encoding="utf-8", errors="replace"
         )
+        if AUTH_RETRY_MARKER not in transcript_text:
+            return completed.returncode
+        if attempt < AUTH_RETRY_ATTEMPTS:
+            backoff = 3 * attempt
+            print(
+                f"  {task.name}/{arm}: transient auth failure, retrying "
+                f"({attempt}/{AUTH_RETRY_ATTEMPTS}) in {backoff}s...",
+                file=sys.stderr,
+            )
+            time.sleep(backoff)
     return completed.returncode
 
 
@@ -245,6 +270,21 @@ def grade(
     return result
 
 
+def warm_auth() -> None:
+    """`claude auth status` is a cheap, no-turn call that still forces a pending OAuth refresh to
+    happen. Doing that once here, before any eval subprocess starts, means the run's later
+    subprocesses see an already-fresh token instead of each independently racing to refresh the
+    same on-disk credentials the moment it goes stale - the actual cause behind AUTH_RETRY_MARKER,
+    which retrying alone doesn't fully cover when the contention window outlasts the retries."""
+    subprocess.run(
+        [claude_binary(), "auth", "status"],
+        env=subprocess_environment(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
 def run_one(task: Task, arm: str, model: str, api: str, home: Path, collection: str) -> Result:
     directory = RUNS / arm / task.name
     if directory.exists():
@@ -273,6 +313,7 @@ def main() -> int:
 
     tasks = [load_task(t) for t in (TASKS if args.task == "all" else [args.task])]
     RUNS.mkdir(parents=True, exist_ok=True)
+    warm_auth()
     results = [
         run_one(task, arm, args.model, args.api, args.home, args.collection)
         for arm in args.arms

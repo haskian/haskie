@@ -16,3 +16,5 @@ evals/.haskie-eval/
 evals/runs/
 
 library/
+
+mise.local.toml
