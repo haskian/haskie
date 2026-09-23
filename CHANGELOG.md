@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.4.0 - 2026-09-23
+#### Features
+- an always-loaded rule for the sources, and a clearer match modal (#10) - (53d1709) - Črtomir Majer
+
+- - -
+
 ## v0.3.0 - 2026-09-22
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>search excerpts and sources over MCP, packages by feature (#9) - (3e138cc) - Črtomir Majer
