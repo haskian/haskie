@@ -21,6 +21,7 @@ dependencies = [
     "structlog>=25.1.0",
     "typer>=0.15.0",
     "unicode-segmentation-rs>=0.3.3",
+    "numpy>=2.0",
 ]
 
 [project.scripts]
@@ -30,6 +31,12 @@ haskie = "haskie.cli:cli"
 # CUDA for embeddings, opted into with `uv sync --extra gpu`; Apple Silicon (CoreML) needs nothing
 # extra, and onnxruntime-gpu ships no macOS wheel, so the marker makes the extra a no-op there.
 gpu = ["onnxruntime-gpu>=1.17.0; sys_platform != 'darwin'"]
+# Jina's listwise rerankers on Apple Silicon (`indexing/mlx_models.py`), opted into with
+# `uv sync --extra mlx`; the marker makes the extra a no-op anywhere MLX has no Metal to run on.
+mlx = [
+    "mlx-embeddings>=0.1 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "mlx-lm>=0.31 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
 
 [dependency-groups]
 dev = [
@@ -57,6 +64,11 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.ty.src]
 include = ["src", "tests"]
+
+[tool.ty.analysis]
+# The mlx extra installs these on Apple Silicon only, so CI and Linux have none of them. Typed as
+# Any everywhere, installed or not, so the check says the same on every machine.
+replace-imports-with-any = ["mlx.**", "mlx_lm.**", "mlx_embeddings.**", "transformers.**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

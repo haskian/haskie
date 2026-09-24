@@ -1,6 +1,6 @@
 """Search: the pipelines in `flow.py`, the steps they run in `retrieval.py`, the pure folds in
-`passage.py`, the full-text listing in `text.py`, and which collections a session searches in
-`session.py`.
+`passage.py` and `collapse.py` (near-duplicates folded into `also_in`), the full-text listing in
+`text.py`, and which collections a session searches in `session.py`.
 
 Six words for six things, each a piece of one document. In the order a search meets them:
 

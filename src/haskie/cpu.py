@@ -43,7 +43,7 @@ class ResizableSemaphore[S]:
 
 # Sized from `cpu_budget` by `workflows.apply_settings`; the default is what a process that never
 # applied settings runs on.
-# ponytail: a threading primitive on purpose. Two event loops take from this budget - Litestar's
+# a threading primitive on purpose. Two event loops take from this budget - Litestar's
 # (previews, requests) and DBOS's background loop (tasks, maintenance) - and an asyncio or anyio
 # primitive belongs to exactly one of them. Only a thread-safe one can be the shared ceiling.
 _cpu_slots = ResizableSemaphore(threading.BoundedSemaphore, PipelineSettings().cpu_budget)

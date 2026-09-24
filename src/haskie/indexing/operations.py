@@ -39,10 +39,11 @@ awaited. The row builders below take what those reads returned and touch nothing
 """
 
 import asyncio
+from datetime import UTC, datetime
 from enum import StrEnum
 
 import msgspec
-from dbos import DBOS
+from dbos import DBOS, WorkflowStatus
 
 from haskie import sysdb
 from haskie.errors import InvalidInput, NotFound
@@ -53,6 +54,7 @@ from haskie.indexing.dbos_names import (
     COLLECTION_DOCUMENT_WORKFLOW,
     DAILY_MAINTENANCE_WORKFLOW,
     DOWNLOAD_WORKFLOW,
+    EMBED_WORKFLOW,
     MAINTAIN_PARTITION_WORKFLOW,
     PIPELINE_WORKFLOWS,
     STAGE_STEP,
@@ -339,7 +341,7 @@ async def list_kinds() -> list[OperationKindSummary]:
 
 
 class QueueActivity(msgspec.Struct):
-    """One queue family right now: `queued` waits for a slot, `running` holds one.
+    """One kind of work right now: `running` is under way, `queued` waits its turn.
 
     A debounced run waiting out its period (DELAYED) is neither: it is not work anyone is waiting
     on, so it stays out of the indicator (see `sysdb.queue_activity`)."""
@@ -349,8 +351,8 @@ class QueueActivity(msgspec.Struct):
 
 
 class Activity(msgspec.Struct):
-    """The indicator every view shows: operations (`operation.*` queues) and the tasks they are
-    made of (`task.*` queues)."""
+    """The indicator every view shows: operations (`operation.*` queues), and the micro-batches
+    they are made of, running and left to run."""
 
     operations: QueueActivity
     tasks: QueueActivity
@@ -359,14 +361,42 @@ class Activity(msgspec.Struct):
 async def activity() -> Activity:
     # The embed job an import or an index spawned is waited for by the one that spawned it (see
     # `fold_operations`): counting both would read "2 operations" for one operation.
-    by_family = await sysdb.queue_activity(skip=[workflows.EMBEDDING_QUEUE])
+    # every slice on a `task.*` queue; its batches are in its input, the finished ones in its steps
+    by_family, slices = await asyncio.gather(
+        sysdb.queue_activity(skip=[workflows.EMBEDDING_QUEUE]),
+        DBOS.list_workflows_async(
+            name=STAGE_WORKFLOW, status=list(ACTIVE_STATUS), load_output=False
+        ),
+    )
+    counts = by_family.get("operation", {})
+    running = counts.get(RunStatus.PENDING, 0)
+    operations = QueueActivity(queued=sum(counts.values()) - running, running=running)
+    done = await sysdb.step_counts([one.workflow_id for one in slices], STAGE_STEP)
+    return Activity(operations=operations, tasks=batch_activity(slices, done))
 
-    def family(name: str) -> QueueActivity:
-        counts = by_family.get(name, {})
-        running = counts.get(RunStatus.PENDING, 0)
-        return QueueActivity(queued=sum(counts.values()) - running, running=running)
 
-    return Activity(operations=family("operation"), tasks=family("task"))
+def _batch_count(child: WorkflowStatus) -> int:
+    """How many micro-batches a stage slice was given; 0 when its input cannot be read back."""
+    found = workflows.stage_input(child)
+    return len(found[1]) if found else 0
+
+
+def _runs_a_batch(child: WorkflowStatus, done: int, total: int) -> bool:
+    """Whether a slice is working on a batch now: it runs its batches one after another, so a
+    running slice with any left works on exactly one."""
+    return child.status == RunStatus.PENDING and done < total
+
+
+def batch_activity(slices: list[WorkflowStatus], done: dict[str, int]) -> QueueActivity:
+    """The micro-batches of the active stage slices: one running in each running slice, and every
+    other batch not yet done waiting, in a running slice or in one still waiting for a slot."""
+    running = left = 0
+    for one in slices:
+        total = _batch_count(one)
+        finished = done.get(one.workflow_id, 0)
+        running += _runs_a_batch(one, finished, total)
+        left += max(0, total - finished)
+    return QueueActivity(queued=left - running, running=running)
 
 
 def _document_title(run: _StageRun) -> str:
@@ -525,7 +555,7 @@ def _stage_run(status, children: list, done_by_child: dict[str, int]) -> _StageR
         None,
         "?",
     )
-    totals = [len(found[1]) if (found := workflows.stage_input(c)) else 0 for c in children]
+    totals = [_batch_count(c) for c in children]
     done = [done_by_child.get(c.workflow_id, 0) for c in children]
     return _StageRun(
         id=status.workflow_id,
@@ -537,10 +567,8 @@ def _stage_run(status, children: list, done_by_child: dict[str, int]) -> _StageR
         updated_at=(status.updated_at or 0) / 1000,
         error=str(status.error) if status.error else None,
         tasks_done=sum(done),
-        # a running child works on exactly one batch: its steps are sequential
         tasks_running=sum(
-            c.status == RunStatus.PENDING and d < t
-            for c, d, t in zip(children, done, totals, strict=True)
+            _runs_a_batch(c, d, t) for c, d, t in zip(children, done, totals, strict=True)
         ),
         tasks_total=sum(totals),
     )
@@ -619,48 +647,59 @@ async def stage_children(ids: list[str]) -> dict[str, list]:
 
 
 class ChunksAt(msgspec.Struct):
-    """One finished index of one document into one collection, as a point on the Insights chart:
-    when it completed, where, and how many chunks it wrote."""
+    """One finished indexing of one document, as a point on the Insights chart: when it completed,
+    what it indexed, and how many chunks it wrote. An import embeds the document's chunks and an
+    index writes them into a collection, so a document imported and then indexed is two points."""
 
     ts: float  # unix seconds
-    collection: str
+    document: str
+    collection: str | None  # the collection an index wrote into; None for an import
     chunks: int
 
 
 async def chunks_since(cutoff: float) -> list[ChunksAt]:
-    """Every successful index that completed on or after `cutoff`, oldest first.
+    """Every successful import and index that completed on or after `cutoff`, oldest first.
 
-    DBOS's own retention round bounds this history, so the chart reaches back as far as its rows
-    do and no further."""
-    since_ms = int(cutoff * 1000)
+    An import's chunks are its embed run's; an embed run an index started is part of that index,
+    which counts the chunks it writes, so it is left out. DBOS's own retention round bounds this
+    history, so the chart reaches back as far as its rows do and no further."""
     live = {
         s.workflow_id: s
         for s in await DBOS.list_workflows_async(
-            name=COLLECTION_DOCUMENT_WORKFLOW, status=RunStatus.SUCCESS, load_input=False
+            name=[COLLECTION_DOCUMENT_WORKFLOW, EMBED_WORKFLOW],
+            status=RunStatus.SUCCESS,
+            completed_after=datetime.fromtimestamp(cutoff, UTC).isoformat(),
+            load_input=False,
+            load_output=False,
         )
-        if s.completed_at is not None and s.completed_at >= since_ms
+        if _counted(s)
     }
-    # only the index job writes chunks, and its batches record how many: read those step logs
-    # alone, side by side
-    indexes = [
-        (parent, child)
-        for parent, group in (await stage_children(list(live))).items()
-        for child in group
-        if (found := workflows.stage_input(child)) and found[0] == Stage.INDEX
-    ]
-    written = await asyncio.gather(*(_stage_tasks(child) for _, child in indexes))
+    # a finished run's slices all finished, and each returned the chunks of every batch it ran;
+    # its stage is in its id, `{parent}:{stage}[:{slice}]`, so no input is unpickled
     chunks: dict[str, int] = dict.fromkeys(live, 0)
-    for (parent, _), tasks in zip(indexes, written, strict=True):
-        chunks[parent] += sum(t.result or 0 for t in tasks if t.status == RunStatus.SUCCESS)
-    points = [
-        ChunksAt(
-            (status.completed_at or 0) / 1000,
-            (pipeline_names(operation_id) or (PipelineAction.INDEX, None, "?"))[1] or "?",
-            chunks[operation_id],
+    if live:
+        for child in await DBOS.list_workflows_async(
+            parent_workflow_id=list(live), name=STAGE_WORKFLOW, load_input=False
+        ):
+            parent = child.parent_workflow_id or ""
+            stage = child.workflow_id.removeprefix(f"{parent}:").split(":")[0]
+            if parent in chunks and stage in (Stage.EMBED, Stage.INDEX):
+                chunks[parent] += sum(child.output or [])
+    points: list[ChunksAt] = []
+    for workflow_id, status in live.items():
+        _, collection, document = pipeline_names(workflow_id) or (None, None, "?")
+        points.append(
+            ChunksAt((status.completed_at or 0) / 1000, document, collection, chunks[workflow_id])
         )
-        for operation_id, status in live.items()
-    ]
     return sorted(points, key=lambda point: point.ts)
+
+
+def _counted(run: WorkflowStatus) -> bool:
+    """Whether a run is a point of its own: every index, and an embed run an import started."""
+    if run.name != EMBED_WORKFLOW:
+        return True
+    parent = pipeline_names(run.parent_workflow_id or "")
+    return parent is not None and parent[0] == PipelineAction.IMPORT
 
 
 def _ordered(tasks: list[Task]) -> list[Task]:

@@ -22,6 +22,9 @@ export type FieldDoc = Wire<'FieldDoc'>
 // Every choice the UI offers, including the status and kind vocabularies. One fetch per page load
 // answers it (see `api.options`).
 export type Options = Wire<'Options'>
+export type ModelCard = Wire<'ModelCard'>
+export type EmbeddingModel = Wire<'EmbeddingModel'>
+export type InitChoices = Wire<'Init'> // what the first run picks: the profile and the search
 export type ImportedDocument = Wire<'Document'>
 export type Document = Wire<'Listed'>
 export type CollectionInfo = Wire<'CollectionInfo'>
@@ -35,6 +38,7 @@ export type Passage = Wire<'Passage'>
 export type Source = Wire<'Source'>
 export type Sources = Wire<'Sources'>
 export type HotSection = Wire<'HotSection'>
+export type Lines = Wire<'Lines'>
 export type Status = Wire<'Status'>
 export type ModelStatus = Wire<'ModelStatus'>
 export type Task = Wire<'Task'>
@@ -120,11 +124,45 @@ type ImportOptions = Partial<Omit<Wire<'ImportRequest'>, 'staging_id' | 'path'>>
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init)
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}))
-    throw new Error(body.detail ?? `${response.status} ${response.statusText}`)
-  }
+  await failed(response)
   return response.status === 204 ? (undefined as T) : response.json()
+}
+
+/** Throw a failed response's `detail` (Litestar's error body), else its status line. */
+async function failed(response: Response): Promise<void> {
+  if (response.ok) return
+  const body = await response.json().catch(() => ({}))
+  throw new Error(body.detail ?? `${response.status} ${response.statusText}`)
+}
+
+/** One step of a search and how long it took, from the `Server-Timing` header (`search.flow`). */
+export interface StepTiming {
+  step: string
+  label: string
+  ms: number
+}
+
+/** An answer, and the steps the server took to give it. */
+export interface Timed<T> {
+  body: T
+  steps: StepTiming[]
+}
+
+/** `retrieve;dur=41.2;desc="LanceDB retrieval", merge;dur=0.3;desc="Fuse rankings"` as steps. A
+ *  missing header is no steps; a step without a `desc` is named by itself. */
+export function parseServerTiming(header: string | null): StepTiming[] {
+  if (!header) return []
+  return header.split(',').map((entry) => {
+    const [step, ...params] = entry.trim().split(';')
+    const param = (key: string) => params.map((one) => one.trim()).find((one) => one.startsWith(`${key}=`))?.slice(key.length + 1)
+    return { step, label: param('desc')?.replace(/^"|"$/g, '') ?? step, ms: Number(param('dur') ?? 0) }
+  })
+}
+
+async function timedRequest<T>(url: string): Promise<Timed<T>> {
+  const response = await fetch(url)
+  await failed(response)
+  return { body: (await response.json()) as T, steps: parseServerTiming(response.headers.get('Server-Timing')) }
 }
 
 const json = (method: string, body: unknown): RequestInit => ({
@@ -175,7 +213,7 @@ let optionsOnce: Promise<Options> | undefined
 
 export const api = {
   status: () => request<Status>('/api/status'),
-  init: (profile: EmbeddingProfile) => request<UserSettings>('/api/init', json('POST', { profile })),
+  init: (choices: InitChoices) => request<UserSettings>('/api/init', json('POST', choices)),
   // The server answers a module-level constant, so one fetch per page load is enough. The promise
   // is the cache: `useOptions` reads it with React's `use`, so every view sees the same object.
   options: () => (optionsOnce ??= request<Options>('/api/options')),
@@ -230,6 +268,9 @@ export const api = {
   documentEmbeddings: (doc: string) => request<EmbeddingEntry[]>(`${documentPath(doc)}/embeddings`),
   describeDocument: (doc: string, description: string) =>
     request<ImportedDocument>(`${documentPath(doc)}/description`, json('PUT', { description })),
+  // Some lines of the converted markdown: what an `also_in` place reads back when it is opened.
+  lines: (doc: string, lineStart: number, lineEnd: number) =>
+    request<Lines>(`${documentPath(doc)}/lines${pageQuery({}, { line_start: String(lineStart), line_end: String(lineEnd) })}`),
   previewUrl: (doc: string) => `${documentPath(doc)}/preview`,
   sourceUrl: (doc: string) => `${documentPath(doc)}/source`,
   // Yields each frame as it arrives, so the first page shows without waiting for the last.
@@ -255,10 +296,12 @@ export const api = {
     request<string[]>(`/api/sessions/${encodeURIComponent(id)}`, json('PUT', { collections })),
 
   // The two searches Explore runs, over one scope: `collections` when given, else the session's
-  // selection, else every collection (the backend applies that order).
+  // selection, else every collection (the backend applies that order). Each answers with the
+  // steps it took, for the breakdown under the total.
   explore: <G extends Granularity>(q: string, granularity: G, scope: SearchScope = {}) =>
-    request<ExploreResult<G>>(`/api/search/explore${pageQuery({}, { q, granularity, ...scopeQuery(scope) })}`),
-  searchSources: (q: string, scope: SearchScope = {}) => request<Sources>(`/api/search/sources${pageQuery({}, { q, ...scopeQuery(scope) })}`),
+    timedRequest<ExploreResult<G>>(`/api/search/explore${pageQuery({}, { q, granularity, ...scopeQuery(scope) })}`),
+  searchSources: (q: string, scope: SearchScope = {}) =>
+    timedRequest<Sources>(`/api/search/sources${pageQuery({}, { q, ...scopeQuery(scope) })}`),
 }
 
 /** Which collections a search runs over; empty means every one. */

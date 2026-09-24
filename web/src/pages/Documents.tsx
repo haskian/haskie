@@ -105,7 +105,7 @@ export function Documents({
     setStaged((rows) =>
       rows.map((one) => (one.staging_id === id ? { ...one, name } : one)),
     );
-  // ponytail: dropping a row only forgets it here; the staged bytes age out on the server.
+  // dropping a row only forgets it here; the staged bytes age out on the server.
   const forget = (id: string) =>
     setStaged((rows) => rows.filter((one) => one.staging_id !== id));
   const namesOk =

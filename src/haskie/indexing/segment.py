@@ -43,7 +43,8 @@ class SpanKind(StrEnum):
 
 # The markdown a piece came from, as a reader names it: a sentence's is the paragraph's innermost
 # container (a list item or a blockquote, else plain text), every other piece its own leaf block.
-# A heading is one only in a section of headings alone, whose chunk is its heading lines (`pack`).
+# A heading is never a piece of a chunk: headings are its path (`pack`), and the type names them
+# only as the chunker reads them.
 class PieceType(StrEnum):
     HEADING = "heading"
     TEXT = "text"
@@ -95,7 +96,7 @@ class Packed(msgspec.Struct, frozen=True):
     """One chunk as `pack` cuts it: its pieces, and the rule of the cut after it, named by the
     step that makes the cut rather than read back off the pieces later. The first chunk of a
     section also carries the heading pieces that open the section: they are not its text, only
-    what its heading path is read from. A section of headings alone is one with no pieces."""
+    what its heading path is read from."""
 
     pieces: list[Span]
     end_reason: CutReason
@@ -351,8 +352,9 @@ def pack(pieces: list[Span], size: int, short: float, end_reason: CutReason) -> 
     The headings a section opens with are no part of any chunk's text: every chunk is embedded
     under the whole heading path (`chunk.framed`), so a heading in the text would be read twice.
     They ride on the section's first chunk as `Packed.headings`, for the path to be read from. A
-    section of headings alone is the one exception: they are all it has, so its chunks are its
-    heading lines, which would otherwise be nowhere a reader or a keyword search finds them.
+    section of headings alone makes no chunk: a heading says where a point is, not the point, and
+    in books those sections are mostly page headers, page numbers and chapter title pages the
+    converter read as headings. `chunk.pack` carries its headings on to the next chunk's path.
 
     The section's last chunk ends for `end_reason`, the rule of the cut after the section: a
     heading, or the edge of the text. Every other chunk ends at a paragraph (between two groups
@@ -361,10 +363,9 @@ def pack(pieces: list[Span], size: int, short: float, end_reason: CutReason) -> 
     head = 0
     while head < len(pieces) and pieces[head].kind == SpanKind.HEADING:
         head += 1
-    opening = pieces[:head]
-    if not pieces:
+    opening, body = pieces[:head], pieces[head:]
+    if not body:
         return []
-    body = pieces[head:] or pieces  # a section of headings alone is made of its headings
     paragraphs = [list(same) for _, same in groupby(body, lambda p: p.paragraph)]
     groups = _merge(paragraphs, size, short)
     chunks: list[Packed] = []

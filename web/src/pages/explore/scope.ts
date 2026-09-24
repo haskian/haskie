@@ -7,7 +7,7 @@ export const SESSION_PREFIX = 'session:'
 /** What the scope picker's value stands for. */
 export type Scope = { kind: 'all' } | { kind: 'collection'; name: string } | { kind: 'session'; id: string }
 
-// ponytail: a collection literally named "session:x" would read as a session here. Two pickers, or
+// a collection literally named "session:x" would read as a session here. Two pickers, or
 // a composite value, would rule that out; one prefix is enough for names people actually use.
 export function parseScope(value: string): Scope {
   if (value === ALL_SCOPE) return { kind: 'all' }

@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import type { Chunker, ChunkSettings, CollectionOverrides, Fusion, Options, Reranker, SearchMode, SearchSettings } from '../../api'
-import { effectiveSearch, Field, Picker, SEARCH_BOUNDS, visibleSearchFields, type NumericKeys, type PickerOption } from '../../ui'
+import { effectiveSearch, Field, Picker, rerankerOption, SEARCH_BOUNDS, visibleSearchFields, type NumericKeys, type PickerOption } from '../../ui'
 
 type SearchField = keyof SearchSettings
 
@@ -84,11 +84,9 @@ export function SettingsForm({
     value: string | null,
     fallback: string,
     onChange: (next: string | null) => void,
+    toOption: (item: string) => PickerOption<string> = (item) => ({ value: item, label: item }),
   ): ReactNode => {
-    const choices: PickerOption<string>[] = [
-      { value: '', label: DEFAULT_OPTION_LABEL, sub: String(fallback) },
-      ...items.map((item) => ({ value: item, label: item })),
-    ]
+    const choices: PickerOption<string>[] = [{ value: '', label: DEFAULT_OPTION_LABEL, sub: String(fallback) }, ...items.map(toOption)]
     return (
       <Field key={key} label={label(docKey, key)} help={help(docKey)}>
         <Picker options={choices} value={value ?? ''} onChange={(next) => onChange(next === '' ? null : next)} ariaLabel={key} />
@@ -122,6 +120,7 @@ export function SettingsForm({
       draft.search.reranker_model,
       searchDefaults.reranker_model,
       (next) => setSearch('reranker_model', next),
+      (item) => rerankerOption(item, options.reranker_cards),
     ),
     candidates: searchNumber('candidates'),
   }

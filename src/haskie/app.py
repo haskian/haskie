@@ -22,6 +22,7 @@ from haskie.audit import Actor
 from haskie.document.document import UPLOAD_MAX_BYTES
 from haskie.errors import HaskieError
 from haskie.indexing import workflows
+from haskie.search import flow
 
 # The built UI, wherever it is: inside the package when haskie was installed, or `web/dist` in a
 # checkout. Absent in both places means API and MCP only.
@@ -30,6 +31,7 @@ _CHECKOUT_WEB = Path(__file__).resolve().parents[2] / "web" / "dist"
 WEB_DIST = _PACKAGED_WEB if _PACKAGED_WEB.is_dir() else _CHECKOUT_WEB
 REQUEST_ID_KEY = "request_id"
 REQUEST_ID_HEADER = "X-Request-Id"
+TRACE_KEY = "search_trace"
 MCP_PATH = "/mcp"
 
 _log = logs.get_logger(__name__)
@@ -47,6 +49,7 @@ async def bind_request_context(request: Request) -> None:
     """
     request_id = uuid4().hex
     request.scope["state"][REQUEST_ID_KEY] = request_id
+    request.scope["state"][TRACE_KEY] = flow.start_trace()
     logs.clear()
     path = request.scope["path"]
     # `collection` and `document` are what every collection and document route is keyed by, so the
@@ -71,6 +74,9 @@ async def add_request_id(message: Message, scope: Scope) -> None:
         request_id = scope["state"].get(REQUEST_ID_KEY)
         if request_id is not None:
             MutableScopeHeaders(message)[REQUEST_ID_HEADER] = request_id
+        # a search's step timings (`search.flow`): what its breakdown on screen is read from
+        if steps := scope["state"].get(TRACE_KEY):
+            MutableScopeHeaders(message)["Server-Timing"] = flow.server_timing(steps)
 
 
 # --- errors -----------------------------------------------------------------

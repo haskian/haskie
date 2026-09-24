@@ -132,6 +132,12 @@ def _requested(lines: list[dict]) -> list[str]:
             422, "Invalid enum value 'bogus'",
         ),
         (
+            "unknown reranker model at init -> unprocessable",
+            "POST", "/api/init",
+            {"profile": "none", "search": {"reranker_model": "no/such-model"}}, None,
+            422, "unknown reranker model: no/such-model",
+        ),
+        (
             "settings out of range -> unprocessable",
             "PUT", "/api/settings", {"pipeline": {"embedding_weight": 0}}, None,
             422, "embedding_weight must be >= 1, got 0",
@@ -467,6 +473,34 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     assert "index_collection" in options["bulk_kinds"]
 
 
+@pytest.mark.parametrize(
+    ("name", "body", "expected"),
+    [
+        (
+            "the profile alone: hybrid search, no reranker",
+            {"profile": "none"},
+            ("hybrid", "none", "Xenova/ms-marco-MiniLM-L-6-v2"),
+        ),
+        (
+            "the search picked with it is stored with it",
+            {
+                "profile": "none",
+                "search": {"mode": "fts", "reranker_model": "BAAI/bge-reranker-base"},
+            },
+            ("fts", "none", "BAAI/bge-reranker-base"),
+        ),
+    ],
+)
+async def test_init_stores_the_search_it_was_given(
+    client: AsyncTestClient, name: str, body: dict, expected: tuple[str, str, str]
+) -> None:
+    response = await client.post("/api/init", json=body)
+
+    assert response.status_code == 201, f"{name}: {response.text}"
+    search = (await client.get("/api/settings")).json()["search"]
+    assert (search["mode"], search["reranker"], search["reranker_model"]) == expected, name
+
+
 # --- the two-call intake --------------------------------------------------------------
 
 
@@ -712,6 +746,46 @@ async def test_reading_one_document(client: AsyncTestClient) -> None:
     assert described.json()["description"] == "the guide"
 
 
+@pytest.mark.parametrize(
+    ("name", "params", "status", "text"),
+    [
+        (
+            "a heading and its paragraph",
+            {"line_start": 5, "line_end": 7},
+            200,
+            "## Alpha\n\nalpha body about lancedb",
+        ),
+        ("one line", {"line_start": 3, "line_end": 3}, 200, "intro text"),
+        ("past the end reads what is there", {"line_start": 11, "line_end": 30}, 200, "beta body"),
+        ("an end before the start", {"line_start": 7, "line_end": 5}, 422, None),
+        ("line zero: lines count from 1", {"line_start": 0, "line_end": 3}, 422, None),
+        ("more than a pointer's worth", {"line_start": 1, "line_end": 401}, 422, None),
+    ],
+)
+async def test_reading_lines_of_one_document(
+    client: AsyncTestClient, name: str, params: dict, status: int, text: str | None
+) -> None:
+    """What the web UI reads when an `also_in` place is opened: its lines, and no more."""
+    await client.post("/api/init", json={"profile": "none"})
+    await stage_and_import(client, "guide.md", MD.encode())
+
+    response = await client.get("/api/documents/guide.md/lines", params=params)
+
+    assert response.status_code == status, f"{name}: {response.text}"
+    if text is not None:
+        assert response.json() == {"text": text}, name
+
+
+async def test_reading_lines_of_a_document_nobody_imported(client: AsyncTestClient) -> None:
+    await client.post("/api/init", json={"profile": "none"})
+
+    response = await client.get(
+        "/api/documents/ghost.md/lines", params={"line_start": 1, "line_end": 2}
+    )
+
+    assert response.status_code == 404
+
+
 # --- search over several collections ---------------------------------------------------
 
 
@@ -834,7 +908,7 @@ async def test_session_search_survives_the_deletion_of_a_collection(
     await client.post("/api/init", json={"profile": "none"})
     for name in ("kept", "dropped"):
         await client.post("/api/collections", json={"name": name})
-        await stage_and_import(client, f"{name}.md", f"# {name}\n\nshared token\n".encode())
+        await stage_and_import(client, f"{name}.md", f"# {name}\n\nshared {name}\n".encode())
         await attach_via_api(client, name, f"{name}.md")
     await client.put("/api/sessions/s1", json={"collections": ["kept", "dropped"]})
     assert (
@@ -927,6 +1001,54 @@ async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
             _chunk(markdown, "This section says", "about tables at all.", heading="Elsewhere"),
         ],
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "path", "params", "steps"),
+    [
+        (
+            "chunks: the ranking, then the fold",
+            "/api/search/explore",
+            {"q": "lancedb", "granularity": "chunk"},
+            ["plan", "retrieve", "merge", "rerank", "hits", "collapse_hits"],
+        ),
+        (
+            "excerpts: the ranking, then passages merged, folded and read",
+            "/api/search/excerpts",
+            {"q": "lancedb"},
+            ["plan", "retrieve", "merge", "rerank", "hits", "collapse_ranges", "widen"],
+        ),
+        (
+            "sources: the ranking, then documents",
+            "/api/search/sources",
+            {"q": "lancedb"},
+            ["plan", "retrieve", "merge", "rerank", "hits", "shortlist"],
+        ),
+    ],
+)
+async def test_a_search_answers_with_the_time_each_step_took(
+    client: AsyncTestClient, name: str, path: str, params: dict, steps: list[str]
+) -> None:
+    """`Server-Timing`, the W3C header browsers show beside a request: one entry per step, in the
+    order the steps ran, each with how long it took and what it is."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "guide.md", MD.encode())
+    await attach_via_api(client, "notes", "guide.md")
+
+    response = await client.get(path, params=params)
+
+    assert response.status_code == 200, f"{name}: {response.text}"
+    entries = [entry.strip().split(";") for entry in response.headers["server-timing"].split(",")]
+    assert [entry[0] for entry in entries] == steps, name
+    assert all(entry[1].startswith("dur=") and float(entry[1][4:]) >= 0 for entry in entries), name
+    assert entries[1][2] == 'desc="LanceDB retrieval"', name
+
+
+async def test_a_request_that_searches_nothing_carries_no_timing(client: AsyncTestClient) -> None:
+    response = await client.get("/api/status")
+
+    assert "server-timing" not in response.headers
 
 
 async def test_explore_merges_consecutive_chunks_into_one_passage(
@@ -1048,7 +1170,7 @@ async def _scoped_collections(client: AsyncTestClient) -> None:
     await client.post("/api/init", json={"profile": "none"})
     for name in ("alpha", "beta"):
         await client.post("/api/collections", json={"name": name})
-        await stage_and_import(client, f"{name}.md", f"# {name}\n\nshared token\n".encode())
+        await stage_and_import(client, f"{name}.md", f"# {name}\n\nshared {name}\n".encode())
         await attach_via_api(client, name, f"{name}.md")
     await client.put("/api/sessions/s1", json={"collections": ["alpha"]})
 
@@ -1623,7 +1745,7 @@ async def test_search_trend_lists_every_recent_search_oldest_first(ready: AsyncT
     assert bad.status_code == 422 and "days must be 1.." in bad.text
 
 
-async def test_chunk_trend_lists_finished_indexes_and_bounds_its_window(
+async def test_chunk_trend_lists_imports_and_indexes_and_bounds_its_window(
     client: AsyncTestClient,
 ) -> None:
     await client.post("/api/init", json={"profile": "none"})
@@ -1631,9 +1753,12 @@ async def test_chunk_trend_lists_finished_indexes_and_bounds_its_window(
     await stage_and_import(client, "guide.md", MD.encode())
     await attach_via_api(client, "notes", "guide.md")
 
-    (point,) = (await client.get("/api/insights/chunks", params={"days": 1})).json()
+    points = (await client.get("/api/insights/chunks", params={"days": 1})).json()
 
-    assert (point["collection"], point["chunks"] > 0) == ("notes", True)
-    assert abs(point["ts"] - time.time()) < 60
+    imported, indexed = points
+    assert (imported["document"], imported["collection"]) == ("guide.md", None), "the import"
+    assert (indexed["document"], indexed["collection"]) == ("guide.md", "notes"), "then the index"
+    assert imported["chunks"] == indexed["chunks"] > 0, "the chunks embedded are the ones written"
+    assert all(abs(point["ts"] - time.time()) < 60 for point in points)
     bad = await client.get("/api/insights/chunks", params={"days": 367})
     assert bad.status_code == 422 and "days must be 1.." in bad.text

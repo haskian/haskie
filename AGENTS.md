@@ -15,6 +15,7 @@ mise run test    # Python suite, parallel, with coverage
 mise run schema  # regenerate web/src/schema.d.ts from the API; check fails on drift
 mise run dev     # API on :8000 and the Vite dev server on :5173, together
 mise run build   # build the web UI into src/haskie/web
+mise run clean-run  # build, destroy ~/.haskie (asks first), reinstall, run on the clean home
 mise run dist    # build, then the wheel and sdist into dist/
 mise run smoke   # install the built wheel in a fresh venv, check the CLI and bundled UI
 mise run bump    # version bump from the commits, patch when none implies one

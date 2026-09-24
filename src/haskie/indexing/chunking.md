@@ -97,11 +97,11 @@ gives the chunk its `page_start` and `page_end`.
 
 Headings are metadata, not content. A heading line over text is never in a chunk's text. The
 headings a section opens with are its heading path, kept on every chunk of the section
-(`Chunk.headings`) to cite it by. A section of headings alone is the one exception: stacked
-headings with nothing under them, a chapter title right before the next one, a document of
-titles. Its heading lines are all it has, so they are its chunk's text, as pieces of type
-`heading`. They are cut like any paragraph when they run past the size. Such a chunk's frame is
-the path above its own headings only, possibly empty, so the models never read a heading twice.
+(`Chunk.headings`) to cite it by. A section of headings alone makes no chunk: a chapter title
+right before the next one, a part title, a document of titles. A heading says where a point is,
+not the point, and in converted books most such sections are page headers, page numbers and
+chapter title pages read as headings: 318 of 8,318 chunks in one home of books, none worth
+returning. Their headings still open the path of the chunks after them.
 
 The optional `frames` step (`chunk_frame`, on by default) also makes the path the chunk's
 frame. The models read every chunk of the section after it (`chunk.framed`). A path longer than

@@ -49,6 +49,7 @@ const CHUNK: Hit = {
   score: 0.91,
   source_file: '/Users/ada/.haskie/documents/area-lights.pdf',
   markdown_file: '/Users/ada/.haskie/markdown/area-lights.md',
+  also_in: [],
 }
 
 const [FIRST, SECOND, THIRD] = ['A point light casts a hard edge. ', 'Area lights soften it in proportion to their size. ', 'Sky light softens it most.']

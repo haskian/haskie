@@ -154,7 +154,10 @@ async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkey
         collection = await Collection.create(name)
         (chunk_,) = chunk.split(f"# {name}\n\nshared token {name}\n", ChunkSettings())
         index = collection.index_with(compact)
-        row = Row(chunk=chunk_, vector=[0.1] * compact.dims, seq=1)
+        # a vector of its own per collection: three equal vectors would be one point, folded
+        vector = [0.1] * compact.dims
+        vector["abc".index(name)] = 1.0
+        row = Row(chunk=chunk_, vector=vector, seq=1)
         # a document name per collection: the merge keys on (document, seq), so one name
         # shared by all three would be one passage and this test would see a single hit
         await index.add_parts(
@@ -180,6 +183,49 @@ async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkey
     assert {h.collection for h in hits} == {"a", "b", "c"}
     assert embedded == ["shared"], "one embedding for the whole fan-out"
     assert checked == [("embedding", compact.name)], "one check, not one per collection"
+
+
+async def test_session_search_folds_a_near_duplicate_by_its_vector(dbos, monkeypatch) -> None:
+    """The fold runs on the vectors the index returned: two documents whose chunks embed alike
+    come back as one hit that names the other, though their words have little in common. If the
+    rows lost their vectors, the search would fall back to words and keep both."""
+    from haskie.collection.index import Row
+    from haskie.settings import PROFILES
+
+    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
+    compact = PROFILES[EmbeddingProfile.COMPACT]
+    assert compact is not None
+    vector = [0.1] * compact.dims  # one point, embedded twice
+    bodies = {
+        "a": "# Retries\n\nA retried call has to be idempotent, or it happens twice.\n",
+        "b": "# Delivery\n\nMake each request safe to repeat: the job may send it again.\n",
+    }
+    for name, body in bodies.items():
+        collection = await Collection.create(name)
+        (chunk_,) = chunk.split(body, ChunkSettings())
+        index = collection.index_with(compact)
+        await index.add_parts(
+            f"{name}.md",
+            f"documents/{name}.md",
+            f"documents/{name}.md.md",
+            one_part(0, [Row(chunk=chunk_, vector=vector, seq=1)]),
+        )
+        await index.finish()
+    await session.set_collections("s", ["a", "b"])
+
+    async def require_ready(kind: str, model: str) -> None:
+        return None
+
+    monkeypatch.setattr(retrieval, "embed_query", lambda model, text: vector)
+    monkeypatch.setattr(models, "require_ready", require_ready)
+
+    (hit,) = await flow.chunks(await session.collections_for("s"), "idempotent retries", limit=10)
+
+    assert [ref.document for ref in hit.also_in] == [({"a.md", "b.md"} - {hit.document}).pop()], (
+        "the other document, folded in"
+    )
+    assert len(hit.also_in) == 1
+    assert hit.also_in[0].similarity == pytest.approx(1.0), "by its vector: the words differ"
 
 
 async def test_session_search_reranks_once_over_the_merge(

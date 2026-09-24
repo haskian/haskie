@@ -2,10 +2,17 @@
 
 import msgspec
 import pytest
+from dbos import WorkflowStatus
 
 from haskie.indexing import operations
-from haskie.indexing.dbos_names import RunStatus
-from haskie.indexing.workflows import PipelineAction
+from haskie.indexing.dbos_names import COLLECTION_DOCUMENT_WORKFLOW, EMBED_WORKFLOW, RunStatus
+from haskie.indexing.pipeline import Batch
+from haskie.indexing.workflows import (
+    COLLECTION_DOCUMENT_PREFIX,
+    IMPORT_PREFIX,
+    PipelineAction,
+    Stage,
+)
 
 TAIL = "c3680a02207a41f89078486d1b3a4c90"
 DOC = "principles.pdf"
@@ -182,3 +189,87 @@ def test_operations_sum_the_counters() -> None:
 def test_job_seconds(name: str, page: list, expected: list[float | None]) -> None:
     (row,) = operations.fold_operations(page)
     assert [j.seconds for j in row.jobs] == expected, name
+
+
+def _status(**fields: object) -> WorkflowStatus:
+    """A workflow as DBOS lists it, with the fields a case sets."""
+    one = WorkflowStatus()
+    for name, value in fields.items():
+        setattr(one, name, value)
+    return one
+
+
+def _slice(workflow_id: str, status: RunStatus, batches: int | None) -> WorkflowStatus:
+    """A stage slice with `batches` micro-batches in its recorded input, or with an input DBOS
+    could not read back (None), which it hands over as the raw text."""
+    plan = [Batch(seq=seq, start=seq, end=seq + 1) for seq in range(batches or 0)]
+    recorded = {"args": (Stage.EMBED, plan, None), "kwargs": {}} if batches is not None else "gASV"
+    return _status(workflow_id=workflow_id, status=status, input=recorded)
+
+
+@pytest.mark.parametrize(
+    ("name", "slices", "done", "expected"),
+    [
+        ("nothing active", [], {}, (0, 0)),
+        (
+            "three slices running, 39 of 66 batches done: one running in each, 24 waiting",
+            [_slice(f"embed-{i}", RunStatus.PENDING, 22) for i in range(3)],
+            {"embed-0": 13, "embed-1": 13, "embed-2": 13},
+            (3, 24),
+        ),
+        (
+            "a slice waiting for a slot holds every batch it was given",
+            [_slice("embed-3", RunStatus.ENQUEUED, 22)],
+            {},
+            (0, 22),
+        ),
+        (
+            "a running slice past its last batch runs none: it is finishing an index",
+            [_slice("index-0", RunStatus.PENDING, 4)],
+            {"index-0": 4},
+            (0, 0),
+        ),
+        (
+            "a slice whose input cannot be read has no batches to count",
+            [_slice("embed-old", RunStatus.PENDING, None)],
+            {},
+            (0, 0),
+        ),
+    ],
+)
+def test_task_activity_counts_micro_batches(
+    name: str, slices: list[WorkflowStatus], done: dict[str, int], expected: tuple[int, int]
+) -> None:
+    counted = operations.batch_activity(slices, done)
+
+    assert (counted.running, counted.queued) == expected, name
+
+
+@pytest.mark.parametrize(
+    ("name", "run", "expected"),
+    [
+        ("an index", _status(name=COLLECTION_DOCUMENT_WORKFLOW, parent_workflow_id=None), True),
+        (
+            "an import's embed run",
+            _status(name=EMBED_WORKFLOW, parent_workflow_id=f"{IMPORT_PREFIX}:guide.md:6e2f"),
+            True,
+        ),
+        (
+            "an embed run an index started: its chunks are the index's",
+            _status(
+                name=EMBED_WORKFLOW,
+                parent_workflow_id=f"{COLLECTION_DOCUMENT_PREFIX}:notes:guide.md:6e2f",
+            ),
+            False,
+        ),
+        (
+            "an embed run no pipeline started",
+            _status(name=EMBED_WORKFLOW, parent_workflow_id=None),
+            False,
+        ),
+    ],
+)
+def test_the_chunk_chart_counts_each_import_and_index_once(
+    name: str, run: WorkflowStatus, expected: bool
+) -> None:
+    assert operations._counted(run) is expected, name

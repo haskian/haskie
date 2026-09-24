@@ -13,7 +13,7 @@ import { errorText, matchesText, needleOf } from '../format'
 
 const PAGE_SIZE = 500
 /** Every collection in the home, as a gallery banded by name; one modal per collection. */
-export function Collections({ route, counts }: PageProps<Extract<Route, { name: 'collections' }>>) {
+export function Collections({ route, counts, refreshStatus }: PageProps<Extract<Route, { name: 'collections' }>>) {
   const [creating, setCreating] = useState(false)
   const [search, setSearch] = useState('')
   const [name, setName] = useState('')
@@ -53,6 +53,8 @@ export function Collections({ route, counts }: PageProps<Extract<Route, { name: 
   }
 
   const close = useCallback(() => navigate({ name: 'collections' }), [])
+  // stable, because the modal's polls restart whenever it changes
+  const changed = useCallback(() => Promise.all([refresh(), refreshStatus()]), [refresh, refreshStatus])
 
   return (
     <Shell current={route.name} counts={counts}>
@@ -82,7 +84,8 @@ export function Collections({ route, counts }: PageProps<Extract<Route, { name: 
           </button>
         )}
       </div>
-      <CollectionModal name={route.collection} onClose={close} onChanged={refresh} />
+      {/* a collection's reranker override is a model the status bar lists */}
+      <CollectionModal name={route.collection} onClose={close} onChanged={changed} />
       <Modal open={creating} onClose={() => setCreating(false)} title="New collection" subtitle="collection">
         {/* A form, so Enter creates the way the browser already does it. */}
         <form className="collection-panel" onSubmit={create}>

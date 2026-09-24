@@ -20,6 +20,7 @@ import aiosqlite
 import anyio
 import lancedb
 import msgspec
+import numpy as np
 import pyarrow as pa
 import pytest
 import structlog
@@ -37,6 +38,7 @@ from haskie import audit, db, home, logs
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection, DocumentCounts, Member, MemberStatus
 from haskie.collection.index import (
+    FTS_COLUMN,
     PLAIN_SCHEMA,
     CollectionIndex,
     Hit,
@@ -61,6 +63,9 @@ from haskie.indexing.chunk import Chunk, Piece, Position
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order, PageRequest
 from haskie.settings import (
+    PROFILES,
+    RERANKER_MODELS,
+    RERANKERS,
     Accelerator,
     Chunker,
     ChunkSettings,
@@ -69,6 +74,8 @@ from haskie.settings import (
     EmbeddingModel,
     EmbeddingProfile,
     Fusion,
+    Matryoshka,
+    ModelCard,
     Parser,
     PipelineSettings,
     Reranker,
@@ -81,6 +88,7 @@ from haskie.settings import (
     load_user_settings,
     load_user_settings_or_none,
     save_user_settings,
+    sort_by,
 )
 
 SMALL = ChunkSettings(chunk_size=40)
@@ -217,6 +225,46 @@ def test_search_overrides_resolve_per_field() -> None:
         0.9,
     )
     assert SearchOverrides().resolve(user) == user
+
+
+@pytest.mark.parametrize(
+    ("name", "card"),
+    [(model.name, model.card) for model in PROFILES.values() if model is not None]
+    + list(RERANKERS.items()),
+)
+def test_every_model_says_what_it_is(name: str, card: ModelCard | None) -> None:
+    """An embedder or reranker is chosen by what its card says, so none may go without one."""
+    assert card is not None and card.description, name
+    assert list(card.metadata)[:4] == ["Parameters", "Languages", "License", "Device"], name
+    assert all(card.metadata.values()), f"{name}: no empty fact"
+
+
+@pytest.mark.parametrize(
+    ("name", "keys", "expected"),
+    [
+        ("one key, ascending", [lambda x: x[0]], [(1, "b"), (1, "a"), (2, "a")]),
+        (
+            "a tie goes to the next key",
+            [lambda x: x[0], lambda x: x[1]],
+            [(1, "a"), (1, "b"), (2, "a")],
+        ),
+        ("no keys: the order given", [], [(2, "a"), (1, "b"), (1, "a")]),
+    ],
+)
+def test_sort_by_orders_by_each_key_in_turn(name: str, keys: list, expected: list) -> None:
+    assert sort_by([(2, "a"), (1, "b"), (1, "a")], *keys) == expected, name
+
+
+def test_models_are_listed_smallest_first() -> None:
+    """Every picker lists them in this order: full-text only first, then embedders by vector size
+    and, at one size, by parameters; rerankers by parameters, the smallest the default."""
+    embedders = [(m.dims, m.card.params if m.card else 0) for m in PROFILES.values() if m]
+    rerankers = [card.params for card in RERANKERS.values()]
+
+    assert next(iter(PROFILES.values())) is None, "full-text only first"
+    assert embedders == sorted(embedders)
+    assert rerankers == sorted(rerankers)
+    assert RERANKER_MODELS[0] == "Xenova/ms-marco-MiniLM-L-6-v2", "the default stays the smallest"
 
 
 def test_every_setting_has_title_and_definition() -> None:
@@ -1526,9 +1574,9 @@ async def test_finish_builds_fts_once_and_later_rows_are_still_found(
     await _fill(index, "b.md", 0, 2)
     await index.finish()
 
-    assert builds == ["text"], "one build across two documents"
-    assert await index.has_index("text") is True
-    assert [list(i.columns) for i in await table.list_indices()] == [["text"]], "and one index"
+    assert builds == [FTS_COLUMN], "one build across two documents"
+    assert await index.has_index(FTS_COLUMN) is True
+    assert [list(i.columns) for i in await table.list_indices()] == [[FTS_COLUMN]], "and one index"
     found = {hit.document for hit in await index.search("lancedb", SearchSettings(limit=10))}
     assert found == {"a.md", "b.md"}, "the rows added after the build are still found"
 
@@ -1784,7 +1832,14 @@ async def test_search_falls_back_to_fts_without_an_embedding_model(tmp_path: Pat
     path = tmp_path / "index"
     schema = PLAIN_SCHEMA.append(pa.field("vector", pa.list_(pa.float32(), 2)))
     table = lancedb.connect(str(path)).create_table("chunks", schema=schema)
-    row = {"document": "a.md", "seq": 1, "headings": ["H"], "text": "hi", "vector": [0.1, 0.2]}
+    row = {
+        "document": "a.md",
+        "seq": 1,
+        "headings": ["H"],
+        "text": "hi",
+        FTS_COLUMN: "H\n\nhi",
+        "vector": [0.1, 0.2],
+    }
     table.add([row])
     index = CollectionIndex(path, "notes", tmp_path, None)
     await index.finish()  # build the full-text index the fallback needs
@@ -1928,7 +1983,7 @@ async def test_cross_encode_rescores_candidates_best_first(
     monkeypatch.setattr(models, "require_ready", require_ready)
     monkeypatch.setattr(embed, "rerank_scores", lambda model, q, ts: [float(len(t)) for t in ts])
     settings = SearchSettings(reranker=Reranker.CROSS_ENCODER)
-    rows = [{"text": text, "headings": [], "frame": [], "_score": 9.0} for text in texts]
+    rows = [{"text": text, FTS_COLUMN: text, "frame": [], "_score": 9.0} for text in texts]
 
     ranked = await cross_encode("q", rows, settings)
 
@@ -2489,7 +2544,22 @@ async def test_session_search_counts_a_passage_once_across_collections() -> None
     for name in ("alpha", "beta"):
         collection = await Collection.create(name)
         index = collection.index_with(None)
-        await _fill(index, "shared.md", 0, 3)
+        # three chunks that say different things: the copies across the two collections are what
+        # merges here, not three chunks near-duplicating one another
+        rows = [
+            _row(text, None, seq=seq)
+            for seq, text in enumerate(
+                [
+                    "LanceDB keeps each collection as one table of chunks.",
+                    "A hybrid lancedb query fuses BM25 with the vector ranking.",
+                    "Compaction merges the small fragments lancedb writes leave behind.",
+                ],
+                start=1,
+            )
+        ]
+        await index.add_parts(
+            "shared.md", "documents/shared.md", "documents/shared.md.md", _aparts([(0, rows)])
+        )
         await index.finish()
     await session.set_collections("s1", ["alpha", "beta"])
 
@@ -2805,13 +2875,43 @@ def test_cross_encoders_build_on_cpu_whatever_the_accelerator(monkeypatch) -> No
         def __init__(self, model_name: str, providers: list) -> None:
             seen.append(providers)
 
+        @classmethod
+        def add_custom_model(cls, **_: object) -> None:  # the registration of mxbai and the like
+            pass
+
     monkeypatch.setattr(module, "TextCrossEncoder", Recorder)
     embed._build_cross_encoder.cache_clear()
+    embed._register_custom_rerankers.cache_clear()
     try:
         embed._cross_encoder("Xenova/ms-marco-MiniLM-L-6-v2")
     finally:
         embed._build_cross_encoder.cache_clear()
     assert seen == [["CPUExecutionProvider"]]
+
+
+@pytest.mark.parametrize(
+    ("name", "model", "expected"),
+    [
+        ("a model whole: its vector as it came", COMPACT, [3.0, 4.0, 0.0, 0.0]),
+        (
+            "a Matryoshka cut: the first values, normalized again",
+            EmbeddingModel("test/cut", 2, matryoshka=Matryoshka()),
+            [0.6, 0.8],
+        ),
+        (
+            "nomic's cut: a layer norm over the whole vector first",
+            EmbeddingModel("test/cut", 2, matryoshka=Matryoshka(layer_norm=True)),
+            # centred by the mean 1.75, then the scale no longer matters: (1.25, 2.25) normalized
+            [1.25 / np.hypot(1.25, 2.25), 2.25 / np.hypot(1.25, 2.25)],
+        ),
+    ],
+)
+def test_a_vector_is_stored_whole_or_cut_as_the_profile_says(
+    name: str, model: EmbeddingModel, expected: list[float]
+) -> None:
+    vector = np.array([3.0, 4.0, 0.0, 0.0])
+
+    assert embed._cut(model, vector).tolist() == pytest.approx(expected), name
 
 
 def test_embedding_helpers_short_circuit_on_empty_input() -> None:

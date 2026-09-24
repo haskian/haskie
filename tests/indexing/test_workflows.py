@@ -384,7 +384,7 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
     collection = await Collection.create("q")
     await collection.set_overrides(CollectionOverrides(chunk_size=60))
     pdf = await import_row(
-        "book.pdf", text_pdf([f"Chapter {i} word{i}" for i in range(1, 26)]), tmp_path
+        "book.pdf", text_pdf([f"the page {i} has word{i} in it" for i in range(1, 26)]), tmp_path
     )
 
     first = await dbos.start_import(pdf.name)
@@ -660,7 +660,7 @@ async def test_documents_run_in_parallel_up_to_workers(
     await _use(dbos, workers=workers, batch_pages=1, document_parallelism=1)
     await Collection.create("par")
     docs = [
-        await import_row(f"p{i}.pdf", text_pdf([f"P{i}A tokq{i}", f"P{i}B"]), tmp_path)
+        await import_row(f"p{i}.pdf", text_pdf([f"p{i}a tokq{i}", f"p{i}b"]), tmp_path)
         for i in range(3)
     ]
     overlap = Overlap(pipeline.convert_batch, wait_for=2)
@@ -686,7 +686,7 @@ async def test_batches_of_one_document_run_in_parallel_up_to_workers(
     workers = 3
     await _use(dbos, workers=workers, batch_pages=1)
     await Collection.create("wide")
-    doc = await import_row("s.pdf", text_pdf([f"S{i} toks{i}" for i in range(6)]), tmp_path)
+    doc = await import_row("s.pdf", text_pdf([f"s{i} toks{i}" for i in range(6)]), tmp_path)
     overlap = Overlap(pipeline.convert_batch, wait_for=workers)
     monkeypatch.setattr(pipeline, "convert_batch", overlap)
 
@@ -715,7 +715,7 @@ async def test_stage_queues_cap_each_stage_separately(
     caps = workflows.stage_caps((await load_user_settings()).pipeline)
     assert (caps[Stage.CONVERT], caps[Stage.EMBED]) == (2, 1), "the split this test is about"
     docs = [
-        await import_row(f"c{i}.pdf", text_pdf([f"C{i}A tokc{i}", f"C{i}B"]), tmp_path)
+        await import_row(f"c{i}.pdf", text_pdf([f"c{i}a tokc{i}", f"c{i}b"]), tmp_path)
         for i in range(3)
     ]
     converting = Overlap(pipeline.convert_batch, wait_for=caps[Stage.CONVERT])
@@ -754,7 +754,7 @@ async def test_the_cpu_budget_bounds_every_stage_together(
     assert sum(caps.values()) > cpu_budget, "the queues alone would have allowed more"
     await Collection.create("budget")
     docs = [
-        await import_row(f"b{i}.pdf", text_pdf([f"B{i}A tokb{i}", f"B{i}B"]), tmp_path)
+        await import_row(f"b{i}.pdf", text_pdf([f"b{i}a tokb{i}", f"b{i}b"]), tmp_path)
         for i in range(3)
     ]
     running = CpuOverlap()  # one counter for both stages
@@ -835,7 +835,7 @@ async def test_document_parallelism_caps_a_single_document(
     """`document_parallelism` bounds the slices a document is cut into, so one big file cannot
     take every worker while other documents wait. At 1 the whole stage is one child again."""
     await _use(dbos, workers=3, batch_pages=1, document_parallelism=1)
-    doc = await import_row("s.pdf", text_pdf([f"S{i} toks{i}" for i in range(4)]), tmp_path)
+    doc = await import_row("s.pdf", text_pdf([f"s{i} toks{i}" for i in range(4)]), tmp_path)
     overlap = Overlap(pipeline.convert_batch, wait_for=1)
     monkeypatch.setattr(pipeline, "convert_batch", overlap)
 
@@ -2435,3 +2435,30 @@ async def test_daily_maintenance_sweeps_stale_staged_uploads(dbos) -> None:
 
     assert not document.staging_path(stale.staging_id).exists()
     assert document.staging_path(fresh.staging_id).is_file(), "a fresh upload is still wanted"
+
+
+# the start of what DBOS hands back for an input it can no longer unpickle: the pickle, as text
+UNREADABLE_INPUT = "gASVQAQAAAAAAAB9lCiMBGFyZ3OUjBloYXNraWUuaW5kZXhpbmcud29ya2Zsb3dzlIwFU3RhZ2WU"
+
+
+@pytest.mark.parametrize(
+    ("name", "recorded", "expected"),
+    [
+        (
+            "a recorded input: its stage and batches",
+            {"args": (Stage.INDEX, [Batch(seq=0, start=0, end=1)], None), "kwargs": {}},
+            (Stage.INDEX, [Batch(seq=0, start=0, end=1)]),
+        ),
+        ("an input DBOS did not keep", None, None),
+        ("an input recorded before a struct in it changed shape", UNREADABLE_INPUT, None),
+    ],
+)
+def test_stage_input_reads_the_batches_a_child_was_given(
+    name: str, recorded: object, expected: tuple[Stage, list[Batch]] | None
+) -> None:
+    from dbos import WorkflowStatus
+
+    child = WorkflowStatus()
+    child.input = recorded  # ty: ignore[invalid-assignment]
+
+    assert workflows.stage_input(child) == expected, name

@@ -244,6 +244,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document}/lines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GetLines */
+        get: operations["ApiDocumentsLinesGetLines"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document}/description": {
         parameters: {
             query?: never;
@@ -745,7 +762,8 @@ export interface components {
         /** ChunksAt */
         ChunksAt: {
             ts: number;
-            collection: string;
+            document: string;
+            collection: string | null;
             chunks: number;
         };
         /** CollectionInfo */
@@ -875,19 +893,31 @@ export interface components {
          * @enum {string}
          */
         DocumentStatus: "queued" | "converting" | "embedding" | "imported" | "error" | "cancelled" | "deleting";
+        /** DuplicateCosine */
+        DuplicateCosine: {
+            chunk: number;
+            passage: number;
+        };
         /** EmbeddingModel */
         EmbeddingModel: {
             name: string;
             dims: number;
             accelerator?: components["schemas"]["Accelerator"];
+            duplicate?: components["schemas"]["DuplicateCosine"] | null;
+            card?: components["schemas"]["ModelCard"] | null;
+            /** @default  */
+            query_prefix: string;
+            /** @default  */
+            document_prefix: string;
+            matryoshka?: components["schemas"]["Matryoshka"] | null;
         };
         /**
          * EmbeddingProfile
-         * @description Text-embedding model that turns chunks into vectors for semantic search. Chosen at first run; changing it later requires "Index all" in every collection. none = full-text (BM25) search only; compact = bge-small (384 dims, English); quality = bge-large (1024 dims, English); multilingual = multilingual-e5-large (1024 dims).
+         * @description Text-embedding model that turns chunks into vectors for semantic search. Chosen at first run; changing it later requires "Index all" in every collection. none = full-text (BM25) search only. Each profile lists its model, size, languages, license and the hardware it runs well on.
          * @default none
          * @enum {string}
          */
-        EmbeddingProfile: "none" | "compact" | "quality" | "multilingual";
+        EmbeddingProfile: "none" | "compact" | "balanced" | "gte-base" | "arctic-m" | "nomic-v1.5" | "nomic-v1.5-512" | "jina-v2-small" | "jina-v2-base" | "modernbert-mlx" | "jina-v5-nano-mlx" | "quality" | "multilingual" | "bge-m3" | "jina-v3";
         /** Entry */
         Entry: {
             document: string;
@@ -931,6 +961,7 @@ export interface components {
             score: number;
             source_file: string;
             markdown_file: string;
+            also_in?: components["schemas"]["PassageReference"][];
         };
         /** FieldDoc */
         FieldDoc: {
@@ -979,6 +1010,21 @@ export interface components {
             source_file: string;
             /** @default  */
             markdown_file: string;
+            also_in?: components["schemas"]["HitReference"][];
+        };
+        /** HitReference */
+        HitReference: {
+            collection: string;
+            document: string;
+            seq: number;
+            header: string;
+            location: string;
+            line_start: number;
+            line_end: number;
+            score: number;
+            relation: components["schemas"]["Relation"];
+            similarity: number;
+            via?: string | null;
         };
         /** HotSection */
         HotSection: {
@@ -1012,6 +1058,7 @@ export interface components {
         /** Init */
         Init: {
             profile: components["schemas"]["EmbeddingProfile"];
+            search?: components["schemas"]["SearchSettings"];
         };
         /** Job */
         Job: {
@@ -1028,6 +1075,10 @@ export interface components {
             /** @default 0 */
             tasks_total: number;
             seconds?: number | null;
+        };
+        /** Lines */
+        Lines: {
+            text: string;
         };
         /** Listed */
         Listed: {
@@ -1056,6 +1107,11 @@ export interface components {
             last_maintained_at: number | null;
             vector_index_rows: number;
         };
+        /** Matryoshka */
+        Matryoshka: {
+            /** @default false */
+            layer_norm: boolean;
+        };
         /** Member */
         Member: {
             document: components["schemas"]["Document"];
@@ -1071,6 +1127,14 @@ export interface components {
          * @enum {string}
          */
         MemberStatus: "pending" | "indexing" | "indexed" | "error" | "cancelled";
+        /** ModelCard */
+        ModelCard: {
+            description: string;
+            params: number;
+            metadata: {
+                [key: string]: string;
+            };
+        };
         /**
          * ModelKind
          * @enum {string}
@@ -1132,6 +1196,9 @@ export interface components {
             fusions: components["schemas"]["Fusion"][];
             rerankers: components["schemas"]["Reranker"][];
             reranker_models: string[];
+            reranker_cards: {
+                [key: string]: components["schemas"]["ModelCard"];
+            };
             docs: {
                 [key: string]: components["schemas"]["FieldDoc"];
             };
@@ -1208,6 +1275,22 @@ export interface components {
             score: number;
             source_file: string;
             markdown_file: string;
+            also_in?: components["schemas"]["PassageReference"][];
+        };
+        /** PassageReference */
+        PassageReference: {
+            collection: string;
+            document: string;
+            seq_start: number;
+            seq_end: number;
+            header: string;
+            location: string;
+            line_start: number;
+            line_end: number;
+            score: number;
+            relation: components["schemas"]["Relation"];
+            similarity: number;
+            via?: string | null;
         };
         /**
          * PieceType
@@ -1313,6 +1396,13 @@ export interface components {
             running: number;
         };
         /**
+         * Relation
+         * @description How a folded result overlaps the result it was measured against (`search.collapse`): the
+         *     one it is listed under, or its reference's `via`.
+         * @enum {string}
+         */
+        Relation: "duplicate" | "contained" | "same_span";
+        /**
          * Reranker
          * @description Second-stage scoring applied to the Candidates of any mode (vector, fts or hybrid). cross-encoder: a model reads query and chunk together and rescores each pair; slower but more precise than embeddings. none: keep the retrieval order.
          * @default none
@@ -1405,7 +1495,7 @@ export interface components {
             reranker?: components["schemas"]["Reranker"] | null;
             /**
              * Reranker model
-             * @description Cross-encoder used when Reranker is cross-encoder. ms-marco-MiniLM-L-6 is fast and English; bge-reranker-base is stronger; jina-reranker-v2 is multilingual. Downloaded on first use.
+             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded on first use.
              */
             reranker_model?: string | null;
         };
@@ -1414,7 +1504,7 @@ export interface components {
             /**
              * Results
              * @description Number of results a search returns.
-             * @default 10
+             * @default 25
              */
             limit: number;
             /**
@@ -1458,7 +1548,7 @@ export interface components {
             reranker?: components["schemas"]["Reranker"];
             /**
              * Reranker model
-             * @description Cross-encoder used when Reranker is cross-encoder. ms-marco-MiniLM-L-6 is fast and English; bge-reranker-base is stronger; jina-reranker-v2 is multilingual. Downloaded on first use.
+             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded on first use.
              * @default Xenova/ms-marco-MiniLM-L-6-v2
              */
             reranker_model: string;
@@ -2108,6 +2198,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiDocumentsLinesGetLines: {
+        parameters: {
+            query: {
+                line_start: number;
+                line_end: number;
+            };
+            header?: never;
+            path: {
+                document: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Lines"];
                 };
             };
             /** @description Bad request syntax or unsupported method */

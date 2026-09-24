@@ -5,7 +5,7 @@ import { dateTime, duration, relative } from './format'
 const at = (year: number, month: number, day: number, hour: number, minute: number): number =>
   new Date(year, month - 1, day, hour, minute).getTime() / 1000
 
-// ponytail: `bytes` is not tested. It formats in the reader's own locale, so every expectation
+// `bytes` is not tested. It formats in the reader's own locale, so every expectation
 // would assert the runtime's locale data rather than anything this file decides.
 
 describe('dateTime', () => {

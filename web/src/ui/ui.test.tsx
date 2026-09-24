@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { FileText } from 'lucide-react'
 import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { Hit, Passage, Source } from '../api'
+import type { Hit, Passage, Source, Status } from '../api'
 import { Field } from './Field'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
@@ -11,6 +11,8 @@ import { MatchModal } from './MatchModal'
 import { Mark } from './Mark'
 import { markTerms } from './markTerms'
 import { Picker } from './Picker'
+import { SearchTook } from './SearchTook'
+import { Statusbar } from './Statusbar'
 import { Jobs, type JobBar } from './Jobs'
 import { Tabs } from './Tabs'
 import { Tile } from './Tile'
@@ -61,6 +63,7 @@ const HIT: Hit = {
   score: 0.9123,
   source_file: '/home/ada/.haskie/sources/area.pdf',
   markdown_file: '/home/ada/.haskie/markdown/area.md',
+  also_in: [],
 }
 
 const SOURCE: Source = {
@@ -100,6 +103,7 @@ const PASSAGE: Passage = {
   score: 0.88,
   source_file: '/home/ada/.haskie/sources/area.pdf',
   markdown_file: '/home/ada/.haskie/markdown/area.md',
+  also_in: [],
 }
 
 const bar = (over: Partial<JobBar> = {}): JobBar => ({ label: 'Embed', done: 9, total: 22, state: 'active', ...over })
@@ -389,9 +393,7 @@ describe('HitGrid', () => {
         '<span class="tag"><span class="kind">A–E</span><span>area.pdf</span></span>',
         '<span class="mono muted">0.91</span>',
         '<mark>shadow</mark>',
-        '<span>Soft shadows</span>',
-        'p. 2 · ',
-        'chunk ',
+        '<span>Soft shadows</span><span>p. 2</span><span>chunk 4</span>',
       ],
     },
     {
@@ -421,14 +423,19 @@ describe('HitGrid', () => {
       missing: ['hit-title'],
     },
     {
-      name: 'a passage names its chunk run and the last step of its breadcrumb',
+      name: 'a passage: its heading on one line, its page and lines on the next',
       element: <HitGrid results={[PASSAGE]} query="shadow" />,
-      contains: ['<span>Soft shadows</span>', '<span>p. 2 · chunks 4–5</span>'],
+      contains: ['<footer class="hit-foot"><span>Soft shadows</span><span>p. 2 · lines 41–58</span><span>chunks 4–5</span></footer>'],
     },
     {
-      name: 'a passage of one chunk names that chunk by its sequence number',
-      element: <HitGrid results={[{ ...PASSAGE, seq_end: 4, page_start: null }]} query="shadow" />,
-      contains: ['<span>chunk 4 · lines 41–58</span>'],
+      name: 'a passage without pages is its lines alone',
+      element: <HitGrid results={[{ ...PASSAGE, page_start: null, page_end: null }]} query="shadow" />,
+      contains: ['<span>lines 41–58</span><span>chunks 4–5</span>'],
+    },
+    {
+      name: 'a chunk with no heading keeps the heading line, empty',
+      element: <HitGrid results={[{ ...HIT, headings: [], header: '' }]} query="shadow" />,
+      contains: ['<footer class="hit-foot"><span>\u00a0</span><span>p. 2</span><span>chunk 4</span></footer>'],
     },
     {
       name: 'a source without a description falls back to the matched text',
@@ -465,21 +472,6 @@ describe('MatchModal', () => {
       ],
     },
     {
-      name: 'a chunk of headings alone shows them grey, under the path above them',
-      element: (
-        <MatchModal
-          match={{ ...HIT, headings: ['Book', 'Index', 'Terms'], frame: ['Book'], text: '# Index\n\n## Terms', layout: [{ type: 'heading', position: 0 }, { type: 'heading', position: 9 }] }}
-          query=""
-          onClose={noop}
-        />
-      ),
-      contains: [
-        '<span class="chunk-piece chunk-frame">Book\n\n',
-        '<span class="chunk-piece chunk-heading"># Index\n\n<span class="hint" role="tooltip"><strong>Heading</strong><span class="sub mono">position 0 · 9 chars · 1 words</span></span></span>',
-        '<span class="chunk-piece chunk-heading">## Terms<span class="hint" role="tooltip"><strong>Heading</strong>',
-      ],
-    },
-    {
       name: 'a chunk before any heading has no grey path',
       element: <MatchModal match={{ ...HIT, headings: [], frame: [], header: '' }} query="" onClose={noop} />,
       contains: ['<blockquote class="match-text chunk-text"><span class="chunk-piece">'],
@@ -502,6 +494,142 @@ describe('MatchModal', () => {
         '<th>text</th>',
         '<th>total</th>',
       ],
+    },
+  ])
+})
+
+describe('also_in', () => {
+  // the same paragraph in a second book, folded into the result by the search
+  const REFERENCE = {
+    collection: 'A–E',
+    document: 'lighting-notes.md',
+    header: 'Shadows > Area lights',
+    location: 'lighting-notes.md L12-14',
+    line_start: 12,
+    line_end: 14,
+    score: 0.74,
+    relation: 'contained' as const,
+    similarity: 0.97,
+    via: null,
+  }
+  check([
+    {
+      name: 'a tile counts the places that say the same, and the other documents they are in',
+      element: (
+        <HitGrid
+          results={[
+            {
+              ...PASSAGE,
+              also_in: [
+                { ...REFERENCE, seq_start: 3, seq_end: 3 },
+                { ...REFERENCE, seq_start: 9, seq_end: 9 },
+                { ...REFERENCE, document: 'render-book.pdf', seq_start: 2, seq_end: 2 },
+                { ...REFERENCE, document: PASSAGE.document, seq_start: 40, seq_end: 40 },
+              ],
+            },
+          ]}
+          query="shadow"
+        />
+      ),
+      contains: [' · also in 4 / 2</span>'],
+    },
+    {
+      name: 'a tile with nothing folded says nothing about it',
+      element: <HitGrid results={[HIT]} query="shadow" />,
+      missing: ['also in'],
+      contains: [],
+    },
+    {
+      name: 'the modal lists each place, how close it is and where, and counts them all',
+      element: <MatchModal match={{ ...HIT, also_in: [{ ...REFERENCE, seq: 3 }, { ...REFERENCE, seq: 8, location: 'lighting-notes.md L30-31' }] }} query="shadow" onClose={noop} />,
+      contains: [
+        '<div class="sections-head"><span>Also in</span><span class="mono muted">2 places</span></div>',
+        '<span class="mono muted" title="contained, 0.97">inside 0.97</span>',
+        '<span class="section-title">lighting-notes.md · Shadows &gt; Area lights</span>',
+        '<span class="mono muted">L12-14</span>',
+      ],
+    },
+    {
+      name: 'a place measured against another in the list names it',
+      element: (
+        <MatchModal
+          match={{ ...HIT, also_in: [{ ...REFERENCE, seq: 3 }, { ...REFERENCE, seq: 8, location: 'lighting-notes.md L30-31', relation: 'duplicate' as const, via: REFERENCE.location }] }}
+          query="shadow"
+          onClose={noop}
+        />
+      ),
+      contains: ['<span class="mono muted">L30-31 · via lighting-notes.md L12-14</span>', '<span class="mono muted">L12-14</span>'],
+    },
+    {
+      name: 'each place is a closed disclosure: its lines are read only when it is opened',
+      element: <MatchModal match={{ ...HIT, also_in: [{ ...REFERENCE, seq: 3 }] }} query="shadow" onClose={noop} />,
+      contains: ['<details><summary class="section-row">', '<blockquote class="match-text also-text">Loading…</blockquote></details>'],
+      missing: ['open=""'],
+    },
+    {
+      name: 'the modal of a match with nothing folded shows no list',
+      element: <MatchModal match={PASSAGE} query="shadow" onClose={noop} />,
+      contains: [],
+      missing: ['Also in'],
+    },
+  ])
+})
+
+describe('Statusbar', () => {
+  const status = (models: Status['models']): Status => ({ initialized: true, home: '/home/ada/.haskie', embedding: null, device: 'CPU', models, settings_error: null })
+  const bge = { kind: 'embedding' as const, name: 'BAAI/bge-small-en-v1.5', state: 'ready' as const, error: null }
+  const minilm = { kind: 'reranker' as const, name: 'Xenova/ms-marco-MiniLM-L-6-v2', state: 'loading' as const, error: null }
+  check([
+    {
+      name: 'a ready embedding is a green check, its name in the hint only',
+      element: <Statusbar status={status([bge])} />,
+      contains: [
+        '<span class="muted">Embedding</span><span class="statusbar-counts"><b class="done" aria-label="ready">',
+        '<span class="hint" role="tooltip"><span class="hint-rows"><span>BAAI/bge-small-en-v1.5</span><span class="muted"></span><span class="code">ready</span>',
+      ],
+      missing: ['Reranker', 'bge-small-en-v1.5 ·'],
+    },
+    {
+      name: 'a reranker shows only when one is on, and a loading one spins',
+      element: <Statusbar status={status([bge, minilm])} />,
+      contains: ['<span class="muted">Reranker</span><span class="statusbar-counts"><b class="running" aria-label="loading">', '<span>Xenova/ms-marco-MiniLM-L-6-v2</span>'],
+    },
+    {
+      name: 'no embedding model: full-text only, no hint',
+      element: <Statusbar status={status([])} />,
+      contains: ['<span class="muted">Embedding</span><span class="statusbar-counts"><b>full-text only</b></span></span>'],
+      missing: ['role="tooltip"'],
+    },
+  ])
+})
+
+describe('SearchTook', () => {
+  const steps = [
+    { step: 'plan', label: 'Embed the query', ms: 12.34 },
+    { step: 'retrieve', label: 'LanceDB retrieval', ms: 41.2 },
+  ]
+  check([
+    {
+      name: 'the total, and under it the server time, step by step',
+      element: <SearchTook counts="3 excerpts" ms={80} steps={steps} />,
+      contains: [
+        '<p class="mono muted search-took" tabindex="0">3 excerpts · 80 ms<span class="hint hint-below" role="tooltip">',
+        '<span class="label label-mono">Server · 54 ms</span>',
+        '<span>LanceDB retrieval</span><span class="muted">retrieve</span><span class="code">41 ms</span>',
+        '<span class="code">12 ms</span>',
+      ],
+    },
+    {
+      name: 'a search that timed no steps: the total alone, no hint',
+      element: <SearchTook counts="3 chunks" ms={80} />,
+      contains: ['<p class="mono muted search-took">3 chunks · 80 ms</p>'],
+      missing: ['role="tooltip"'],
+    },
+    {
+      name: 'before the first search: a blank line, no hint',
+      element: <SearchTook counts="" ms={null} steps={steps} />,
+      contains: ['<p class="mono muted search-took" tabindex="0"> </p>'],
+      missing: ['role="tooltip"'],
     },
   ])
 })

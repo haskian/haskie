@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, type Document, type Hit, type HotSection } from '../api'
 import type { Anchor } from './anchor'
 import { DocumentPanes } from './DocumentPanes'
 import { Kv } from './Kv'
 import { Mark } from './Mark'
-import { CUT_REASONS, PIECE_NAMES, chunkSizes, cite, frameOf, headingOf, isHit, isSource, lastHeading, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Size } from './match'
+import { CUT_REASONS, PIECE_NAMES, RELATIONS, alsoOf, chunkSizes, cite, frameOf, headingOf, isHit, isSource, lastHeading, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Reference, type Size } from './match'
+import { errorText } from '../format'
 import { Modal } from './Modal'
 import { Tabs, type TabDef } from './Tabs'
 
@@ -45,10 +46,10 @@ function Cut({ side, reason }: { side: 'before' | 'after'; reason: Hit['start_re
 }
 
 /** One piece of a chunk, outlined on hover with a hint naming its type, where it starts and how
- *  big it is. A heading is grey like the path above it: only a chunk of headings alone has any. */
+ *  big it is. */
 function Piece({ piece, query }: { piece: ChunkPiece; query: string }) {
   return (
-    <span className={piece.type === 'heading' ? 'chunk-piece chunk-heading' : 'chunk-piece'}>
+    <span className="chunk-piece">
       <Mark text={piece.text} query={query} />
       <span className="hint" role="tooltip">
         <strong>{PIECE_NAMES[piece.type]}</strong>
@@ -133,6 +134,60 @@ function ChunkSizes({ hit }: { hit: Hit }) {
   )
 }
 
+/** One place in `also_in`: a row naming it, which opens on click to the lines it points at,
+ *  read from the document the first time rather than carried by every search result. */
+function AlsoRow({ reference, query }: { reference: Reference; query: string }) {
+  const [text, setText] = useState<string | null>(null)
+  const [failed, setFailed] = useState<string | null>(null)
+  const asked = useRef(false) // one read per row, however often it is opened before it answers
+  const opened = (open: boolean) => {
+    if (!open || asked.current) return
+    asked.current = true
+    api
+      .lines(reference.document, reference.line_start, reference.line_end)
+      .then((read) => setText(read.text))
+      .catch((cause: unknown) => setFailed(errorText(cause)))
+  }
+  return (
+    <details onToggle={(event) => opened(event.currentTarget.open)}>
+      <summary className="section-row">
+        <span className="mono muted" title={`${reference.relation}, ${reference.similarity.toFixed(2)}`}>
+          {RELATIONS[reference.relation]} {reference.similarity.toFixed(2)}
+        </span>
+        <span className="section-title">
+          {reference.document} · {reference.header || '—'}
+        </span>
+        <span className="mono muted">
+          {cite(reference.location, reference.document)}
+          {/* the relation is to that place in this list, not to the match */}
+          {reference.via && ` · via ${reference.via}`}
+        </span>
+      </summary>
+      <blockquote className="match-text also-text">{failed ?? (text === null ? 'Loading…' : <Mark text={text} query={query} />)}</blockquote>
+    </details>
+  )
+}
+
+/** The other places that say what the match says, folded into it by the search: how close each
+ *  one is, where it sits, and how many there are. */
+function AlsoIn({ match, query }: { match: Match; query: string }) {
+  const count = alsoOf(match).length
+  if (count === 0) return null
+  return (
+    <div className="sections">
+      <div className="sections-head">
+        <span>Also in</span>
+        <span className="mono muted">
+          {count} {count === 1 ? 'place' : 'places'}
+        </span>
+      </div>
+      {alsoOf(match).map((reference) => (
+        <AlsoRow key={`${reference.collection}:${reference.location}`} reference={reference} query={query} />
+      ))}
+    </div>
+  )
+}
+
 function MatchBody({ match, query }: { match: Match; query: string }) {
   const [tab, setTab] = useState(MATCH_TAB)
   // Fetched because the panes need the document's preview kind, which a match does not carry.
@@ -200,6 +255,7 @@ function MatchBody({ match, query }: { match: Match; query: string }) {
             <span className="match-seq" title={`chunk ${seqLabel(match)}`}>{seqLabel(match)}</span>
           </blockquote>
         )}
+        <AlsoIn match={match} query={query} />
       </div>
       <div id={DOCUMENT_TAB} role="tabpanel" hidden={tab !== DOCUMENT_TAB}>
         {/* The whole document, not the preview, streamed from the moment the modal opens so it

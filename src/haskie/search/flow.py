@@ -7,22 +7,29 @@ dropped or reordered by reading this file alone.
 
 Four pipelines over one set of steps:
 
-    chunks     retrieve -> merge -> rerank -> hits
-    passages   retrieve -> merge -> rerank -> hits -> widen
-    excerpts   retrieve -> merge -> rerank -> hits -> widen
+    chunks     retrieve -> merge -> rerank -> hits -> collapse_hits
+    passages   retrieve -> merge -> rerank -> hits -> collapse_ranges -> widen
+    excerpts   retrieve -> merge -> rerank -> hits -> collapse_ranges -> widen
     sources    retrieve -> merge -> rerank -> hits -> shortlist
 
 The first four steps are the search every answer shares; what follows is the fold that answer is
-made of, and it is a step rather than something every search pays for. `chunks` stops at the
-ranking. `passages` and `excerpts` merge the chunks of one document that sit next to each other
-into one readable span. `sources` folds the same hits per document instead.
+made of, and it is a step rather than something every search pays for. `chunks` folds each
+near-duplicate hit into the hit it repeats (`collapse`). `passages` and `excerpts` merge the chunks
+of one document that sit next to each other into one readable span, fold near-duplicate spans the
+same way, and read only the spans they answer with. `sources` folds the same hits per document
+instead.
 
 Two numbers steer that. `scan` is how deep the ranking goes and is what `hits` cuts to; `limit`
-is how many answers the caller asked for and is what the last step cuts to. They are equal for
-`chunks`, and the folding pipelines scan deeper than they answer, because several chunks go into
-one passage and many into one document row.
+is how many answers the caller asked for and is what the last fold cuts to. Every pipeline scans
+deeper than it answers: a folded near-duplicate frees its slot for the next result down, several
+chunks go into one passage, and many into one document row.
 """
 
+import functools
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, cast
 
 import msgspec
@@ -32,12 +39,13 @@ from pydantic_graph.step import StepFunction
 from haskie.collection.index import Hit
 from haskie.paging import check_page_size
 from haskie.search import retrieval
-from haskie.search.passage import Excerpt, Passage, Sources
+from haskie.search.passage import Excerpt, HitRange, Passage, Sources
 from haskie.settings import load_user_settings
 
 # How deep any of these searches reads. A passage or a document row is folded from several chunks,
 # so the scan goes deeper than the answer; this is where that stops.
 MAX_SCAN = 200
+CHUNK_SCAN = 2  # chunks scanned per chunk asked for: a folded near-duplicate frees its slot
 PASSAGE_SCAN = 4  # chunks scanned per passage asked for: consecutive ones merge into one passage
 DEFAULT_SECTIONS = 3  # hot sections per document: where in it the answer is, not an outline
 MAX_SECTIONS = 20
@@ -62,6 +70,73 @@ class Search(msgspec.Struct):
     sections: int = DEFAULT_SECTIONS  # `sources` only
 
 
+# --- the trace --------------------------------------------------------------------
+
+
+class StepTime(msgspec.Struct, frozen=True):
+    """How long one step of a search took."""
+
+    step: str  # the step's function name
+    label: str  # what it does, as the web UI names it
+    ms: float
+
+
+# What each step is, for a person reading the breakdown. `plan` is the work before the graph:
+# settings, the query embedding, the model checks.
+STEP_LABELS: dict[str, str] = {
+    "plan": "Embed the query",
+    "retrieve": "LanceDB retrieval",
+    "merge": "Fuse rankings",
+    "rerank": "Rerank",
+    "hits": "Read hits",
+    "collapse_hits": "Fold near-duplicates",
+    "collapse_ranges": "Merge and fold passages",
+    "widen": "Read and widen passages",
+    "shortlist": "Fold into documents",
+}
+
+# The steps of the searches one request runs, in the order they finished. A list per request,
+# started by the app (`app.bind_request_context`) and turned into its `Server-Timing` header: the
+# handlers answer what they always did, and an MCP call is timed the same way without seeing it.
+_trace: ContextVar[list[StepTime] | None] = ContextVar("haskie_search_trace", default=None)
+
+
+def start_trace() -> list[StepTime]:
+    """A trace for the current request; every step timed from here on lands in it."""
+    steps: list[StepTime] = []
+    _trace.set(steps)
+    return steps
+
+
+@contextmanager
+def _timing(step: str) -> Iterator[None]:
+    """Records how long the block took under `step`, failed or not."""
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        steps = _trace.get()
+        if steps is not None:
+            elapsed = (time.perf_counter() - started) * 1000
+            steps.append(StepTime(step=step, label=STEP_LABELS.get(step, step), ms=elapsed))
+
+
+def server_timing(steps: list[StepTime]) -> str:
+    """The `Server-Timing` header (W3C) of a trace: `retrieve;dur=41.2;desc="LanceDB retrieval"`."""
+    return ", ".join(f'{one.step};dur={one.ms:.1f};desc="{one.label}"' for one in steps)
+
+
+def _timed[F: StepFunction[Any, Any, Any, Any]](step: F, name: str) -> F:
+    """`step`, recording how long it took under `name`."""
+
+    @functools.wraps(step)
+    async def run(ctx: StepContext[Any, Any, Any]) -> Any:
+        with _timing(name):
+            return await step(ctx)
+
+    return cast(F, run)
+
+
 # --- the steps --------------------------------------------------------------------
 
 
@@ -80,25 +155,38 @@ async def rerank(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Po
     return await retrieval.rerank(ctx.inputs, ctx.state.query, ctx.state.plan.settings)
 
 
-async def hits(ctx: StepContext[Search, None, retrieval.Pool]) -> list[Hit]:
+async def hits(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Scanned:
     """The ranking, as far down as this search scans, as hits."""
-    return retrieval.to_hits(ctx.inputs, ctx.state.scan)
+    return retrieval.scan(ctx.inputs, ctx.state.scan)
 
 
-async def widen(ctx: StepContext[Search, None, list[Hit]]) -> list[Passage]:
-    """Consecutive chunks of one document, merged and widened to where a reader stops.
+async def collapse_hits(ctx: StepContext[Search, None, retrieval.Scanned]) -> list[Hit]:
+    """The best hits, each near-duplicate folded into the hit it repeats."""
+    return await retrieval.collapse_hits(ctx.inputs, ctx.state.plan.embedding, ctx.state.limit)
+
+
+async def collapse_ranges(
+    ctx: StepContext[Search, None, retrieval.Scanned],
+) -> list[HitRange]:
+    """Consecutive chunks of one document merged into one range, and each near-duplicate range
+    folded into the range it repeats."""
+    return await retrieval.collapse_ranges(ctx.inputs, ctx.state.plan.embedding, ctx.state.limit)
+
+
+async def widen(ctx: StepContext[Search, None, list[HitRange]]) -> list[Passage]:
+    """The kept ranges, widened to where a reader stops.
 
     `Search.shape` decides the type: an excerpt is the whole passage today, and cutting the parts
     of it that do not answer the query is a later step that would go here.
     """
-    return await retrieval.widen(ctx.inputs, ctx.state.limit, ctx.state.shape)
+    return await retrieval.widen(ctx.inputs, ctx.state.shape)
 
 
-async def shortlist(ctx: StepContext[Search, None, list[Hit]]) -> Sources:
+async def shortlist(ctx: StepContext[Search, None, retrieval.Scanned]) -> Sources:
     """The same hits folded per document instead of per passage, with the collections to read
     them from."""
     return await retrieval.shortlist(
-        ctx.inputs, ctx.state.plan.names, ctx.state.limit, ctx.state.sections
+        ctx.inputs.hits, ctx.state.plan.names, ctx.state.limit, ctx.state.sections
     )
 
 
@@ -117,7 +205,12 @@ def _chain[T](
     builder = GraphBuilder(state_type=Search, output_type=output)
     # `list[Any]`: a chain is heterogeneous — each step's output is the next one's input — and
     # the builder checks that pairing itself when it draws the edges
-    chain: list[Any] = [builder.step(step) for step in steps]
+    # every step is a module function; the protocol they are typed by does not promise a name
+    names: list[str] = [cast(Any, step).__name__ for step in steps]
+    chain: list[Any] = [
+        builder.step(_timed(step, name), node_id=name)
+        for step, name in zip(steps, names, strict=True)
+    ]
     pairs = zip(chain, chain[1:], strict=False)  # one edge short of the chain, by construction
     builder.add(
         builder.edge_from(builder.start_node).to(chain[0]),
@@ -129,8 +222,8 @@ def _chain[T](
 
 RANKING = (retrieve, merge, rerank, hits)  # the search every answer shares
 
-CHUNKS = _chain(list[Hit], *RANKING)
-PASSAGES = _chain(list[Passage], *RANKING, widen)
+CHUNKS = _chain(list[Hit], *RANKING, collapse_hits)
+PASSAGES = _chain(list[Passage], *RANKING, collapse_ranges, widen)
 SOURCES = _chain(Sources, *RANKING, shortlist)
 
 
@@ -143,7 +236,7 @@ async def chunks(names: list[str], query: str, limit: int | None = None) -> list
     The merged `Hit.score` is an RRF score, or the cross-encoder's when a reranker is on; a single
     collection keeps its own scores, because there is nothing to compare them with.
     """
-    state = await _search(names, query, limit)
+    state = await _search(names, query, limit, deeper=CHUNK_SCAN)
     return await CHUNKS.run(state=state) if state else []
 
 
@@ -178,7 +271,7 @@ async def _search(
     names: list[str],
     query: str,
     limit: int | None,
-    deeper: int = 1,
+    deeper: int,
     shape: type[Passage] = Passage,
     sections: int | None = None,
 ) -> Search | None:
@@ -189,12 +282,12 @@ async def _search(
     pipeline builds is folded from, which is what turns the caller's limit into the scan depth.
     """
     limit = limit or (await load_user_settings()).search.limit
-    where = await retrieval.plan(names, query)
+    with _timing("plan"):
+        where = await retrieval.plan(names, query)
     if where is None:
         return None
-    # a pipeline that folds scans deeper than it answers, and that is what `MAX_SCAN` bounds; one
-    # that answers with the ranking itself reads exactly as far as it was asked to
-    scan = min(limit * deeper, MAX_SCAN) if deeper > 1 else limit
+    # a pipeline that folds scans deeper than it answers, and that is what `MAX_SCAN` bounds
+    scan = max(limit, min(limit * deeper, MAX_SCAN))
     return Search(
         query=query,
         plan=where,

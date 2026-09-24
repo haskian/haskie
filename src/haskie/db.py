@@ -23,19 +23,15 @@ import msgspec
 from haskie import home
 from haskie.errors import HaskieError
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 """`pragma user_version` of the schema below.
 
 A home stamped with it has exactly these tables and is opened as it is. Any other stamp is a
 shape this build cannot read, so the home is refused (see `migrate`). Against the last release
-(12), Structure-Aware Chunking changed what a chunk holds and how it is named:
-- A chunk is typed pieces with a heading path (`headings`), the path it is embedded after
-  (`frame`), and why it was cut (`start_reason`, `end_reason`).
-- A chunk row names its document `document`, not `doc`. `seq` alone numbers a chunk: `chunk_id`
-  is gone.
-- Chunk settings lost `chunk_overlap` and gained `chunk_merge_below` and `chunk_frame`, in the
-  `embeddings` table and in the cache id.
-- A collection row keeps its `overrides` and counts `pending_documents`.
+(15), a collection's LanceDB table holds `framed`, each chunk's heading path and text as the
+models read them, and full-text search reads that column instead of `text`. A section of headings
+alone no longer makes a chunk (`chunk.CHUNK_VERSION` 2), so its headings are found through the
+chunks under them.
 
 A cache file or LanceDB table written the old way must never be read by this build.
 
