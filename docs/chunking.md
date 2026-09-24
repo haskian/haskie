@@ -1,8 +1,58 @@
-# Structure-Aware Chunking: where a chunk is cut, and why
+# Chunking
 
-This is the reference for `chunk.py` and `segment.py`. The README's
-[Chunking](../../../README.md#chunking) section gives the overview: the settings, the steps, and
-where a chunk is stored.
+Structure-Aware Chunking cuts a document where its author did. A chunk never spans two sections.
+It cuts at a blank line before it cuts inside a paragraph, and between sentences before it cuts
+inside one. A table or code block stays whole unless it is longer than a chunk. Chunks never
+overlap. The code is
+`src/haskie/indexing/chunk.py` (the steps) and `segment.py` (the pure folds they call).
+
+## Settings
+
+Each applies to all collections, or to one as an override. Sizes are in characters.
+
+| setting | default | what it does |
+| --- | --- | --- |
+| `chunker` | `markdown` | `markdown` reads headings, lists, tables and code. `text` splits on blank lines and sentences only |
+| `chunk_size` | 1200 | the most one chunk holds. With a frame, the frame counts toward it |
+| `chunk_merge_below` | 66 | a paragraph under this percentage of `chunk_size` joins a neighbour, when the two fit one chunk |
+| `chunk_frame` | on | `markdown` only: the embedding, the reranker and the full-text index read each chunk with its heading path in front |
+
+## Steps
+
+`chunk.pipeline(settings)` builds the steps. Each hands its output to the next. Chunking runs once
+per part: the whole document, or `batch_pages` pages of a PDF.
+
+```mermaid
+flowchart TD
+    part(["markdown of one part"])
+    part -- "chunker = markdown" --> blocks["<b>blocks</b><br/>paragraphs and list items as prose;<br/>headings, tables and code blocks whole"]
+    part -- "chunker = text" --> paragraphs["<b>paragraphs</b><br/>every run of non-blank lines"]
+    blocks --> sentences["<b>sentences</b><br/>prose cut into sentences (Unicode UAX #29)"]
+    paragraphs --> sentences
+    sentences --> sections["<b>sections</b><br/>a heading after content, or one no deeper<br/>than the one before, opens one"]
+    sections -- "chunk_frame on" --> frames["<b>frames</b><br/>heading path, at most half a chunk"]
+    sections -- "chunk_frame off, or text" --> pack
+    frames --> pack["<b>pack</b><br/>paragraphs packed into chunks, short ones merged,<br/>every cut named with its reason"]
+    pack --> locate["<b>locate</b><br/>offsets, lines, pages, heading path"]
+    locate --> chunks(["chunks"])
+```
+
+## Where a chunk goes
+
+```mermaid
+flowchart LR
+    chunk["<b>Chunk</b><br/>headings, frame, typed pieces,<br/>offsets, cut reasons"]
+    cache[("<b>embedding cache</b><br/>parquet under the document")]
+    table[("<b>LanceDB row</b><br/>text, frame, framed, layout,<br/>offsets, cut reasons,<br/>vector (with a model)")]
+    hit["<b>Hit</b><br/>row plus score, header,<br/>location"]
+    chunk -- "embed frame + text<br/>(with a model)" --> cache
+    cache -- "index" --> table
+    table -- "BM25 and reranker<br/>read frame + text" --> hit
+```
+
+The embedding, the reranker and the full-text index all read the frame and the text together
+(the `framed` column). So a heading's words find every chunk under it, and a heading never needs a
+chunk of its own. Without an embedding model, chunks are cached and indexed without vectors.
 
 ## Gaps and cuts
 
@@ -86,22 +136,22 @@ language setting is needed.
 
 ## Page markers
 
-Page markers (`<!-- page 3 -->`, which the converter writes) are page metadata, not content.
-Every step reads one as whitespace. So a marker never decides a gap, and no piece or chunk starts
-or ends on one. Inside a chunk, `convert.without_markers` takes it out of the text. The text that
-is embedded, indexed and shown has no markers, and a blank line around a marker stays one blank
-line. The chunk's offsets still cover the source, markers included. A marker's offset is what
-gives the chunk its `page_start` and `page_end`.
+Page markers (`<!-- page 3 -->`, which the converter writes) are metadata. Every step reads one as
+whitespace. So a marker never decides a gap, and no piece or chunk starts or ends on one. Inside a
+chunk, `convert.without_markers` takes it out of the text. The text that is embedded, indexed and
+shown has no markers, and a blank line around a marker stays one blank line. The chunk's offsets
+still cover the source, markers included. A marker's offset is what gives the chunk its `page_start`
+and `page_end`.
 
 ## Headings
 
-Headings are metadata, not content. A heading line over text is never in a chunk's text. The
-headings a section opens with are its heading path, kept on every chunk of the section
-(`Chunk.headings`) to cite it by. A section of headings alone makes no chunk: a chapter title
-right before the next one, a part title, a document of titles. A heading says where a point is,
-not the point, and in converted books most such sections are page headers, page numbers and
-chapter title pages read as headings: 318 of 8,318 chunks in one home of books, none worth
-returning. Their headings still open the path of the chunks after them.
+Headings are metadata too. A heading line over text is never in a chunk's text. The headings a
+section opens with are its heading path, kept on every chunk of the section (`Chunk.headings`) to
+cite it by. A section of headings alone makes no chunk: a chapter title right before the next one, a
+part title, a document of titles. A heading says where a point is. In converted books, most such
+sections are page headers, page numbers and chapter title pages read as headings: 318 of 8,318
+chunks in one home of books, none worth returning. Their headings still open the path of the chunks
+after them.
 
 The optional `frames` step (`chunk_frame`, on by default) also makes the path the chunk's
 frame. The models read every chunk of the section after it (`chunk.framed`). A path longer than
@@ -110,21 +160,26 @@ long is cut (`chunk._shortened`). Without the step the frame is empty, and the t
 size. The `text` chunker cuts no sections at headings and never frames. It still files each chunk
 under its heading path for citing.
 
-Keyword search (the full-text index) reads a chunk's text alone: the heading path is not in it.
-This is deliberate. A heading's words would otherwise match every chunk of its section. The
-vector half of a search still reaches them through the frame each chunk was embedded with.
+Keyword search (the full-text index) reads the same `framed` column as the models, so a heading's
+words match every chunk of its section. That is how a heading is found without a chunk of its
+own.
 
 ## No overlap
 
-Chunks never overlap: every character is in at most one chunk. Heading lines over text, page
-markers and the whitespace between two chunks are in none. The context a neighbour's
-sentences would carry comes from the front of the chunk instead. The models read every chunk
-after its heading path, for example `Part II > Replication > Leaders` and then the text.
+Chunks never overlap: every character of text is in at most one chunk. With the `markdown`
+chunker, heading lines over text are in no chunk's text. Page markers and the whitespace between
+two chunks are in no chunk's text either, though a marker inside a chunk's span still counts
+toward its offsets. The context a neighbour's sentences would carry comes from the front of the
+chunk instead. The models and the full-text index read every chunk after its heading path, for
+example `Part II > Replication > Leaders` and then the text.
 
-This follows Contextual Retrieval ([Anthropic, 19 Sep 2024](https://www.anthropic.com/news/contextual-retrieval)).
-There, chunk-specific context is prepended to each chunk before it is embedded and before the
-BM25 index is built. Claude writes that context (50-100 tokens, from the whole document). Here
-it is the document's own heading path, which costs no model call. The article reports the drop
-in retrieval failures (1 - recall@20): contextual embeddings alone 35%, with contextual BM25
-49%, with a reranker on top 67%. It leaves chunk size, boundaries and overlap as a tuning choice
-and gives no overlap figure.
+Context prepended to each chunk, before it is embedded and indexed for BM25, cuts retrieval
+failures (1 - recall@20) by 35%. With contextual BM25 the cut is 49%, and with a reranker on top
+67% [1]. There an LLM writes 50-100 tokens of context per chunk. Here the document's own heading
+path is the context, so it costs no model call. The source leaves chunk size, boundaries and
+overlap as tuning choices, and gives no figure for overlap.
+
+## References
+
+1. Anthropic. "Introducing Contextual Retrieval." September 2024.
+   https://www.anthropic.com/news/contextual-retrieval
