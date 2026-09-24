@@ -1,5 +1,5 @@
 import { Activity, Bot, Check, Clock, Settings, X } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { api, type Activity as ActivityCounts, type ModelStatus, type Status } from '../api'
 import { usePoll } from '../hooks/usePoll'
 import { href, useRoute } from '../router'
@@ -31,7 +31,9 @@ export function Statusbar({ status }: { status: Status }) {
   const busy = counts !== null && Object.values(counts).some((queue) => queue.queued + queue.running > 0)
   usePoll(true, refresh, busy ? BUSY_MS : IDLE_MS)
 
-  const embedding = status.models.find((model) => model.kind === 'embedding') ?? null
+  const embedding = status.models.filter((model) => model.kind === 'embedding')
+  // a reranker is in the list only when one is on, in the settings or a collection's overrides
+  const rerankers = status.models.filter((model) => model.kind === 'reranker')
 
   return (
     <div className="statusbar" role="status">
@@ -42,12 +44,8 @@ export function Statusbar({ status }: { status: Status }) {
           <b>{sessions ?? '—'}</b>
         </span>
       </span>
-      <span className="statusbar-item">
-        <span className="muted">Embedding</span>
-        <span className="statusbar-counts">
-          <EmbeddingState model={embedding} />
-        </span>
-      </span>
+      <Models label="Embedding" models={embedding} none="full-text only" />
+      {rerankers.length > 0 && <Models label="Reranker" models={rerankers} />}
       <span className="spacer" />
       <a className="statusbar-item" href={href({ name: 'operations' })}>
         <Activity className="icon" />
@@ -59,26 +57,53 @@ export function Statusbar({ status }: { status: Status }) {
   )
 }
 
-function EmbeddingState({ model }: { model: ModelStatus | null }) {
-  if (model === null) return <b>full-text only</b>
-  if (model.state === 'ready')
+// The worst state of a kind's models is the one its icon shows: one reranker still loading
+// means a search that asks for it waits.
+const WORST_FIRST: ModelStatus['state'][] = ['error', 'loading', 'pending', 'ready']
+
+/** One kind of model as an icon: a check once ready, a spinner while it loads, a cross on an
+ *  error. The names and each one's state are in the hint, which opens downwards. */
+function Models({ label, models, none }: { label: string; models: ModelStatus[]; none?: string }) {
+  const state = WORST_FIRST.find((one) => models.some((model) => model.state === one))
+  return (
+    <span className="statusbar-item" tabIndex={0}>
+      <span className="muted">{label}</span>
+      <span className="statusbar-counts">
+        {state === undefined ? <b>{none}</b> : <StateIcon state={state} />}
+      </span>
+      {models.length > 0 && (
+        <span className="hint" role="tooltip">
+          <span className="hint-rows">
+            {models.map((model) => (
+              <Fragment key={model.name}>
+                <span>{model.name}</span>
+                <span className="muted">{model.error ?? ''}</span>
+                <span className="code">{model.state}</span>
+              </Fragment>
+            ))}
+          </span>
+        </span>
+      )}
+    </span>
+  )
+}
+
+function StateIcon({ state }: { state: ModelStatus['state'] }) {
+  if (state === 'ready')
     return (
-      <b className="done">
+      <b className="done" aria-label="ready">
         <Check className="icon" />
-        {model.name} · ready
       </b>
     )
-  if (model.state === 'error')
+  if (state === 'error')
     return (
-      <b>
+      <b aria-label="error">
         <X className="icon" />
-        {model.name} · error
       </b>
     )
   return (
-    <b className="running">
+    <b className="running" aria-label={state}>
       <Settings className="icon spin" />
-      {model.name} · {model.state}
     </b>
   )
 }

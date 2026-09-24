@@ -198,6 +198,10 @@ mark { background: none; color: inherit; font-weight: 600; text-decoration: unde
 .hint .sub { opacity: 0.6; margin-bottom: 2px; }
 :hover > .hint, :focus-visible > .hint { opacity: 1; transform: translateY(0); }
 .hint.flip { left: auto; right: 0; } /* set by script when the hint would leave the viewport */
+/* a hint that opens below its anchor, dark like every other hint, as wide as its rows need */
+.hint-below { top: calc(100% + var(--sp-2)); bottom: auto; max-width: none; transform: translateY(-4px); gap: var(--sp-3); text-transform: none; letter-spacing: 0; font-family: var(--font-sans); }
+.hint-below .muted, .hint-below .label { color: rgba(255, 255, 255, 0.6); }
+.search-took { position: relative; justify-self: start; cursor: default; }
 
 /* tabs: role=tablist with .tab buttons; aria-selected marks the active one, aria-controls names its panel */
 .tabs { display: flex; gap: var(--sp-6); }
@@ -239,7 +243,7 @@ body:has(.modal[open]) { overflow: hidden; }
 .chunk-cut-reason { color: var(--text); }
 .chunk-piece { position: relative; background: var(--paper); outline: 1px solid transparent; outline-offset: 1px; } /* an outline, not a border: hovering never reflows the text */
 .chunk-piece:hover { z-index: 1; outline-color: var(--text-faint); } /* above its neighbours, whose background would paint over its outline */
-.chunk-frame, .chunk-heading { color: var(--text-muted); background: var(--line-soft); } /* the heading path the models read ahead of the text, and the heading lines of a chunk of headings alone */
+.chunk-frame { color: var(--text-muted); background: var(--line-soft); } /* the heading path the models read ahead of the text */
 .chunk-piece > .hint { white-space: normal; user-select: none; } /* the text is pre-wrap, the hint is not; copying the text leaves the hints out */
 /* a source as one block: the document once, then its hot sections indented, each a jump */
 .sections { display: grid; gap: var(--sp-1); }
@@ -348,15 +352,15 @@ body.over .drop-overlay { opacity: 1; }
 .list-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
 .list-text .sub { font-size: var(--fs-xs); color: var(--text-muted); }
 /* hit: search result tile; --score drives the bottom bar */
-.hits { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--sp-4); }
+.hits { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(450px, 100%), 1fr)); gap: var(--sp-4); } /* 50% wider than it was; a container narrower than one tile gets one tile its width */
 .hit { display: grid; grid-template-columns: minmax(0, 1fr); cursor: pointer; } /* the head sits right on top of the box, as a job's does */
 .hit-body { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-3); padding: var(--sp-4); border: var(--border); background: rgba(255, 255, 255, 0.18); }
 .hit:hover .hit-body { background: var(--ink); color: var(--paper); }
 .hit:hover .hit-body .muted { color: rgba(255, 255, 255, 0.6); }
-.hit-head, .hit-foot { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-3); }
-.hit-foot > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } /* a long heading shortens; the position stays whole */
-.hit-foot > :last-child { flex-shrink: 0; }
-.hit-foot { font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--tracking-mono); text-transform: uppercase; color: var(--text-muted); }
+.hit-head { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-3); }
+/* a line each: the heading, the pages and lines, the chunks and where else it is */
+.hit-foot { display: grid; gap: var(--sp-1); font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--tracking-mono); text-transform: uppercase; color: var(--text-muted); }
+.hit-foot > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } /* a long line shortens, never wraps */
 /* four lines whatever the result says: a one-word hit and a long one make the same tile */
 .hit-text { margin: 0; font-size: var(--fs-sm); line-height: 1.5; height: calc(4 * 1.5em); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .hit-body::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: linear-gradient(var(--ok), var(--ok)) 0 0 / calc(var(--score, 0) * 100%) 100% no-repeat; }
@@ -367,10 +371,11 @@ body.over .drop-overlay { opacity: 1; }
 .statusbar-counts { display: inline-flex; gap: var(--sp-2); }
 .statusbar-counts b { display: inline-flex; align-items: center; gap: var(--sp-1); font-weight: 400; }
 .statusbar-counts b + b::before { content: "/"; margin-right: var(--sp-1); color: rgba(255, 255, 255, 0.4); }
-.statusbar-counts .running { color: var(--ok); }
+.statusbar-counts .running, .statusbar-counts .done { color: var(--ok); }
 .statusbar-counts .queued { color: rgba(255, 255, 255, 0.5); }
 .statusbar .hint { top: calc(100% + var(--sp-2)); bottom: auto; left: auto; right: 0; max-width: none; transform: translateY(-4px); background: var(--paper); color: var(--ink); font-family: var(--font-sans); text-transform: none; letter-spacing: 0; gap: var(--sp-3); }
 .statusbar-item:hover > .hint { transform: translateY(0); }
+.statusbar-item:has(~ .spacer) > .hint { left: 0; right: auto; } /* left of the gap: opens rightwards, into the page */
 .hint-section { display: grid; gap: var(--sp-1); }
 .hint-rows { display: grid; grid-template-columns: max-content max-content max-content; gap: 2px var(--sp-4); white-space: nowrap; }
 .statusbar .hint .muted { color: var(--text-muted); }
@@ -404,6 +409,8 @@ body:has(.statusbar) { padding-top: 40px; }
 .input-group > .btn-ghost { align-self: center; }
 input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
 .field { display: flex; flex-direction: column; gap: var(--sp-2); }
+/* a model's facts, hung under the picker that chose it: one box, the picker's border, no gap */
+.model-card { margin-top: calc(-1 * var(--sp-2)); padding: var(--sp-3) var(--sp-4); border: 1px solid var(--fog-2); border-top: 0; background: rgba(15, 19, 23, 0.03); }
 .input, .textarea {
   width: 100%; padding: var(--sp-3) var(--sp-4);
   font: inherit; color: var(--text); background: transparent;

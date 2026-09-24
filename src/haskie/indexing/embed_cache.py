@@ -56,7 +56,7 @@ class Params(msgspec.Struct, frozen=True):
     the `embeddings` columns `Entry` inherits."""
 
     document: str
-    model: str  # EmbeddingModel.name, or NO_MODEL
+    model: str  # EmbeddingModel.cache_name, or NO_MODEL
     chunk_size: int
     chunk_merge_below: int
     chunk_frame: bool
@@ -89,7 +89,7 @@ def params(
     """The key of one document under one collection's chunk settings and the global model."""
     return Params(
         document=doc.name,
-        model=embedding.name if embedding else NO_MODEL,
+        model=embedding.cache_name if embedding else NO_MODEL,
         chunk_version=CHUNK_VERSION,
         parser=doc.parser,
         skip_ocr_pages=doc.skip_ocr_pages,

@@ -103,10 +103,21 @@ export const pieceMeta = (piece: ChunkPiece): string =>
 /** Another place that says what a chunk or passage says, folded into it by the search. */
 export type Reference = Hit['also_in'][number] | Passage['also_in'][number]
 
-/** The places a match stands for besides itself, the first few of `alsoCount`; a source folds
- *  none. */
+/** How a place overlaps the match it is listed under, as a reader names it. Typed by the API's
+ *  own enum, so a new relation fails the build until it is named. */
+export const RELATIONS: Record<Reference['relation'], string> = {
+  duplicate: 'same',
+  contained: 'inside',
+  same_span: 'same lines',
+}
+
+/** Every place a match stands for besides itself; a source folds none. */
 export const alsoOf = (match: Match): Reference[] => (isSource(match) ? [] : match.also_in)
-export const alsoCount = (match: Match): number => (isSource(match) ? 0 : match.also_count)
+
+/** How many other documents those places are in: the independent sources, a repeat within the
+ *  match's own document not among them. */
+export const alsoDocuments = (match: Match): number =>
+  new Set(alsoOf(match).map((place) => place.document).filter((document) => document !== match.document)).size
 
 /** A hot section's citation without the document name it repeats: "p.3 L7-43" out of
  *  "doc.pdf p.3 L7-43". The block naming the section already names the document once. */
@@ -126,14 +137,26 @@ export function seqLabel(match: Match): string {
   return first === last ? `${first}` : `${first}–${last}`
 }
 
-/** Where the match sits in the document: page and chunk run, or chunk run and lines; a source,
- *  which covers no one run, only its lines. */
-export function position(match: Match): string {
-  if (isSource(match)) return `lines ${match.line_start}–${match.line_end}`
+const span = (unit: string, first: number, last: number): string => (first === last ? `${unit} ${first}` : `${unit}s ${first}–${last}`)
+
+/** Where the match sits in the document, in two parts: where to read it (its pages where the
+ *  document has pages, and a passage's lines, which is what it was widened to), then the chunks it
+ *  is made of. A source covers no one run: its lines, and no chunks. Either part may be empty. */
+export function placeOf(match: Match): [string, string] {
+  if (isSource(match)) return [span('line', match.line_start, match.line_end), '']
   const [first, last] = seqRange(match)
-  const run = first === last ? `chunk ${first}` : `chunks ${first}–${last}`
-  return match.page_start !== null ? `p. ${match.page_start} · ${run}` : `${run} · lines ${match.line_start}–${match.line_end}`
+  const pages =
+    match.page_start === null
+      ? ''
+      : match.page_end === null || match.page_end === match.page_start
+        ? `p. ${match.page_start}`
+        : `p. ${match.page_start}–${match.page_end}`
+  const lines = isHit(match) ? '' : span('line', match.line_start, match.line_end)
+  return [[pages, lines].filter(Boolean).join(' · '), span('chunk', first, last)]
 }
+
+/** Where the match sits in the document, as one line (see `placeOf`). */
+export const position = (match: Match): string => placeOf(match).filter(Boolean).join(' · ')
 
 /** How full a result's bar is, against the others on screen: the best fills it, the weakest keeps
  *  a tenth, so a strong set and a weak one both read as a ranking. One result, or a tie, fills. */

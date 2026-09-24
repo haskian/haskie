@@ -34,7 +34,13 @@ from haskie.indexing.embed import embed_query
 from haskie.logs import get_logger
 from haskie.search import collapse, passage, session, text
 from haskie.search.passage import Passage, Sources
-from haskie.settings import Reranker, SearchMode, SearchSettings, load_user_settings
+from haskie.settings import (
+    EmbeddingModel,
+    Reranker,
+    SearchMode,
+    SearchSettings,
+    load_user_settings,
+)
 
 _log = get_logger(__name__)
 
@@ -53,6 +59,7 @@ class Plan(msgspec.Struct):
     settings: SearchSettings
     indexes: list[tuple[CollectionIndex, SearchSettings]]  # in the caller's order
     vector: list[float] | None  # the query embedding, None for a lexical search
+    embedding: EmbeddingModel | None  # the model every index of the search embeds with
 
     @property
     def names(self) -> list[str]:
@@ -91,6 +98,7 @@ async def plan(names: list[str], query: str) -> Plan | None:
         settings=settings,
         indexes=[(one.index_with(embedding), where) for one, where in plans],
         vector=vector,
+        embedding=embedding,
     )
 
 
@@ -185,64 +193,78 @@ async def rerank(pool: Pool, query: str, settings: SearchSettings) -> Pool:
 
 
 class Scanned(msgspec.Struct):
-    """The ranking as far down as a search scans, as hits, and the space to compare them in.
+    """The ranking as far down as a search scans, as hits, and the vectors of their rows.
 
-    The space is built here, where the rows still carry their vectors: a `Hit` is what a caller
-    reads, and a vector on it would be a thousand floats in every answer.
+    The vectors are kept beside the hits rather than on them: a `Hit` is what a caller reads, and
+    a vector on it would be a thousand floats in every answer.
     """
 
     hits: list[Hit]
-    space: collapse.Space
+    vectors: list[list[float] | None]
 
 
 def scan(pool: Pool, limit: int) -> Scanned:
-    """The best `limit` of the ranking, as the `Hit`s a caller cites and opens, and the space
-    `collapse` compares them in."""
+    """The best `limit` of the ranking, as the `Hit`s a caller cites and opens, and their vectors
+    for `collapse` to compare them by."""
     taken = [(pool.rows[key], score) for key, score in pool.ranked[:limit]]
-    hits = [index.hit(row, score) for (index, row), score in taken]
-    # every collection of one search embeds with the same model (`plan`), so any row names it
-    model = next((index.embedding for (index, _), _ in taken if index.embedding), None)
-    vectors = [row.get("vector") for (_, row), _ in taken]
-    return Scanned(hits=hits, space=collapse.space([hit.text for hit in hits], vectors, model))
+    return Scanned(
+        hits=[index.hit(row, score) for (index, row), score in taken],
+        vectors=[row.get("vector") for (_, row), _ in taken],
+    )
 
 
 # --- what the hits are folded into ------------------------------------------------
 
 
-async def collapse_hits(scanned: Scanned, limit: int) -> list[Hit]:
-    """The `limit` best hits, each with the near-duplicates it stands for (see `collapse`).
-
-    CPU work that grows with the square of the scan - tens of milliseconds at the default depth -
-    so it runs in a worker thread rather than on the event loop the search came in on.
-    """
-    kept = await cpu.on_cpu(collapse.hits, scanned.hits, scanned.space, limit)
-    _log_collapse(scanned, len(scanned.hits), kept, limit)
+def _fold_hits(scanned: Scanned, model: EmbeddingModel | None, limit: int) -> list[Hit]:
+    where = collapse.spaces([hit.text for hit in scanned.hits], scanned.vectors, model)
+    kept = collapse.hits(scanned.hits, where, limit)
+    _log_collapse(where[0].kind, len(scanned.hits), kept, limit)
     return kept
 
 
-async def collapse_ranges(scanned: Scanned, limit: int) -> list[passage.HitRange]:
+def _fold_ranges(
+    scanned: Scanned, model: EmbeddingModel | None, limit: int
+) -> list[passage.HitRange]:
+    where = collapse.spaces([hit.text for hit in scanned.hits], scanned.vectors, model)
+    hit_ranges = passage.ranges(scanned.hits)
+    kept = collapse.ranges(hit_ranges, scanned.hits, where, limit)
+    _log_collapse(where[0].kind, len(hit_ranges), kept, limit)
+    return kept
+
+
+async def collapse_hits(scanned: Scanned, model: EmbeddingModel | None, limit: int) -> list[Hit]:
+    """The `limit` best hits, each with the near-duplicates it stands for (see `collapse`).
+
+    CPU work that grows with the square of the scan - tens of milliseconds at the default depth -
+    so it runs in a worker thread rather than on the event loop the search came in on, the
+    comparison spaces included.
+    """
+    return await cpu.on_cpu(_fold_hits, scanned, model, limit)
+
+
+async def collapse_ranges(
+    scanned: Scanned, model: EmbeddingModel | None, limit: int
+) -> list[passage.HitRange]:
     """The `limit` best hit ranges, each with the near-duplicates it stands for.
 
     Folded after `passage.ranges` rather than before: the chunks of one passage sit next to each
     other and read alike, and folding them would split the passage they make up. A worker thread
     runs the fold, as `collapse_hits` says.
     """
-    hit_ranges = passage.ranges(scanned.hits)
-    kept = await cpu.on_cpu(collapse.ranges, hit_ranges, scanned.hits, scanned.space, limit)
-    _log_collapse(scanned, len(hit_ranges), kept, limit)
-    return kept
+    return await cpu.on_cpu(_fold_ranges, scanned, model, limit)
 
 
 def _log_collapse(
-    scanned: Scanned, candidates: int, kept: list[Hit] | list[passage.HitRange], limit: int
+    space: str, candidates: int, kept: list[Hit] | list[passage.HitRange], limit: int
 ) -> None:
     """One line per search, so how often folding leaves an answer short can be counted."""
     _log.info(
         "search_collapsed",
-        space=scanned.space.kind,
+        space=space,
         candidates=candidates,
         kept=len(kept),
-        folded=sum(item.also_count for item in kept),
+        folded=sum(len(item.also_in) for item in kept),
         short=len(kept) < limit,
     )
 

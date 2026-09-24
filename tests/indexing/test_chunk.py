@@ -228,10 +228,10 @@ def _split(text: str, settings: ChunkSettings) -> list[Chunk]:
         ),
         # headings
         (
-            "stacked headings with nothing under them: one chunk of their lines, under the last",
+            "stacked headings with nothing under them make no chunk",
             "# A\n## B\n### C\n#### D\n##### E\n",
             WIDE,
-            [(["A", "B", "C", "D", "E"], ["# A\n", "## B\n", "### C\n", "#### D\n", "##### E"])],
+            [],
         ),
         (
             "stacked headings open one section, filed under the deepest",
@@ -249,16 +249,13 @@ def _split(text: str, settings: ChunkSettings) -> list[Chunk]:
             "sibling headings with nothing under them are separate sections, not a stack",
             "<!-- page 1 -->\n\n## Chapter 1\n\n<!-- page 2 -->\n\n## Chapter 2\n\nText.",
             WIDE,
-            [
-                (["Chapter 1"], ["## Chapter 1"]),
-                (["Chapter 2"], ["Text."]),
-            ],
+            [(["Chapter 2"], ["Text."])],
         ),
         (
             "a shallower heading after an empty one closes it too",
             "## Sub\n# Top\nText.",
             WIDE,
-            [(["Sub"], ["## Sub"]), (["Top"], ["Text."])],
+            [(["Top"], ["Text."])],
         ),
         (
             "an empty heading, then a deeper one with text: stacked, so one section under both",
@@ -267,16 +264,16 @@ def _split(text: str, settings: ChunkSettings) -> list[Chunk]:
             [(["A", "B"], ["Text."])],
         ),
         (
-            "an empty heading, then a sibling with text: the empty one is a chunk of its own",
+            "an empty heading, then a sibling with text: only the text is a chunk",
             "# A\n\n# B\n\nText.",
             WIDE,
-            [(["A"], ["# A"]), (["B"], ["Text."])],
+            [(["B"], ["Text."])],
         ),
         (
-            "a document of headings alone is its heading lines",
+            "a document of headings alone has no chunk",
             "# Book\n\n# Index\n\n## Terms\n",
             WIDE,
-            [(["Book"], ["# Book"]), (["Index", "Terms"], ["# Index\n\n", "## Terms"])],
+            [],
         ),
         (
             "every heading after text starts a new chunk, even when everything fits",
@@ -359,10 +356,10 @@ def _split(text: str, settings: ChunkSettings) -> list[Chunk]:
             [(["Prices"], ["| a | b |\n|---|---|\n| 1 | 2 |"])],
         ),
         (
-            "a heading as the last thing in the text is a chunk of its own",
+            "a heading as the last thing in the text makes no chunk",
             "Body one.\n\n# Tail",
             ChunkSettings(chunk_size=12),
-            [([], ["Body one."]), (["Tail"], ["# Tail"])],
+            [([], ["Body one."])],
         ),
         (
             "an HTML comment that is not a page marker is content",
@@ -615,7 +612,6 @@ def test_each_chunk_says_why_it_starts_and_ends_where_it_does(
     ("name", "text", "settings", "expected"),
     [
         ("a heading over text is no piece: it is the frame", "# Title\n\nBody.", WIDE, ["text"]),
-        ("a heading with nothing under it is", "# Title\n", WIDE, ["heading"]),
         ("sentences of a plain paragraph", "One. Two.", WIDE, ["text", "text"]),
         ("sentences of a list item", "- One. Two.\n- Three.", WIDE, ["list", "list", "list"]),
         ("a list item's own paragraphs", "- One.\n\n  More.\n", WIDE, ["list", "list"]),
@@ -662,12 +658,7 @@ def test_every_piece_is_typed_by_the_markdown_it_came_from(
     ("name", "text", "end_reason", "expected"),
     [
         ("nothing to pack", "", "edge", []),
-        (
-            "a section of headings alone: its heading lines, ending as the section does",
-            "# A\n## B\n",
-            "heading",
-            [("# A\n## B", ["A", "B"], "heading")],
-        ),
+        ("a section of headings alone: nothing", "# A\n## B\n", "heading", []),
         (
             "two paragraphs apart: a paragraph, then the section's end",
             f"# H\n\n{MID}\n\n{MID_TWO}",
@@ -1052,38 +1043,28 @@ def test_the_pipeline_is_composed_from_the_settings(
 @pytest.mark.parametrize(
     ("name", "text", "settings", "expected"),
     [
+        ("headings alone at the top: no chunk", "# A\n## B\n", WIDE, []),
         (
-            "headings alone at the top: nothing above them, so no frame",
-            "# A\n## B\n",
+            "an empty part and chapter still head the chapter after them",
+            "# Part II\n\n## Chapter 5\n\n## Chapter 6\n\nText.",
             WIDE,
-            [(["A", "B"], [])],
+            [(["Part II", "Chapter 6"], ["Part II", "Chapter 6"])],
         ),
         (
-            "headings alone under a chapter: framed by the chapter only, not by themselves",
+            "headings alone under a chapter: no chunk, and closed by the next chapter",
             "# Book\n\nIntro.\n\n## Part\n### Empty\n\n# Next\n\nMore.",
             WIDE,
-            [(["Book"], ["Book"]), (["Book", "Part", "Empty"], ["Book"]), (["Next"], ["Next"])],
+            [(["Book"], ["Book"]), (["Next"], ["Next"])],
         ),
         (
-            "a sibling chapter of headings alone closes the one before: not framed under it",
+            "a trailing chapter of headings alone: no chunk after the last text",
             "# Part I\n\n## Leaders\n\nLeaders take writes.\n\n# Part II\n",
             WIDE,
-            [(["Part I", "Leaders"], ["Part I", "Leaders"]), (["Part II"], [])],
-        ),
-        (
-            "stacked headings alone longer than what their frame leaves are cut between headings",
-            "# Book\n\nIntro.\n\n"
-            + "".join(f"{'#' * (i + 2)} Step number {i}\n" for i in range(5)),
-            ChunkSettings(chunk_size=60),
-            [
-                (["Book"], ["Book"]),
-                (["Book"] + [f"Step number {i}" for i in range(3)], ["Book"]),
-                (["Book"] + [f"Step number {i}" for i in range(5)], ["Book"]),
-            ],
+            [(["Part I", "Leaders"], ["Part I", "Leaders"])],
         ),
     ],
 )
-def test_headings_alone_are_framed_by_the_path_above_them(
+def test_headings_alone_make_no_chunk_but_head_the_ones_after(
     name: str, text: str, settings: ChunkSettings, expected: list
 ) -> None:
     chunks = _split(text, settings)

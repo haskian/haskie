@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#MISE description="Destroy ~/.haskie, reinstall the freshly built package and run it on a clean home"
+#MISE depends=["build"]
+set -euo pipefail
+home="$HOME/.haskie"
+# a server still running would keep writing into the files destroy deletes
+uv run haskie stop --home "$home"
+uv run haskie destroy --home "$home"
+uv sync --extra mlx --reinstall-package haskie  # mlx: a no-op off Apple Silicon
+uv run haskie run --home "$home"

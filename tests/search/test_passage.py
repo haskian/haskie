@@ -8,7 +8,7 @@ snippets and reads its text, lines and char range out of the document, the way t
 import msgspec
 import pytest
 
-from haskie.collection.index import Hit, location
+from haskie.collection.index import Hit, Relation, location
 from haskie.search.passage import (
     MAX_WIDEN,
     Excerpt,
@@ -235,6 +235,33 @@ def _range(char_start: int, char_end: int, **fields) -> HitRange:
     return ranges([_hit((char_start, char_end), 1, 2.0, **fields)])[0]
 
 
+@pytest.mark.parametrize(
+    ("name", "pages", "expected"),
+    [
+        ("chunks over several pages: the first to the last", [(1, 1), (2, 3), (4, 4)], (1, 4)),
+        ("one chunk across a page break", [(2, 3)], (2, 3)),
+        ("a document without pages", [(None, None), (None, None)], (None, None)),
+    ],
+)
+def test_a_passage_cites_every_page_its_chunks_cover(
+    name: str, pages: list[tuple[int | None, int | None]], expected: tuple
+) -> None:
+    """Not the best chunk's pages alone: a passage over pages 1 to 4 was cited as page 1."""
+    hits = [
+        _hit(span, seq, 1.0 if seq == 1 else 3.0, page_start=start, page_end=end)
+        for seq, (span, (start, end)) in enumerate(
+            zip([OPENING, BACKOFF, SKEW], pages, strict=False), 1
+        )
+    ]
+    (hit_range,) = ranges(hits)
+
+    widened = widen(hit_range, WHOLE, Passage)
+
+    assert (widened.page_start, widened.page_end) == expected, name
+    cited = "" if expected[0] is None else f" p.{expected[0]}-{expected[1]} "
+    assert cited in widened.location, f"{name}: the citation names the same pages"
+
+
 def test_widening_a_range_keeps_what_was_folded_into_it() -> None:
     """The pointers are decided on the range (`collapse`), before anything is read, and the
     passage is what the caller sees them on."""
@@ -248,14 +275,15 @@ def test_widening_a_range_keeps_what_was_folded_into_it() -> None:
         line_start=OTHER_ONE.line_start,
         line_end=OTHER_ONE.line_end,
         score=4.0,
+        relation=Relation.DUPLICATE,
         similarity=0.97,
     )
     (hit_range,) = ranges([ONE, TWO])
-    hit_range = msgspec.structs.replace(hit_range, also_in=[folded], also_count=3)
+    hit_range = msgspec.structs.replace(hit_range, also_in=[folded])
 
     widened = widen(hit_range, WHOLE, Passage)
 
-    assert (widened.also_in, widened.also_count) == ([folded], 3)
+    assert widened.also_in == [folded]
 
 
 @pytest.mark.parametrize(
@@ -358,8 +386,8 @@ def test_expand_reports_document_offsets_from_a_window(
 
 
 def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() -> None:
-    """A passage is cited the way a chunk is, so `header` and `location` come from the chunk that
-    ranked it, with the lines it ended up covering."""
+    """A passage is cited the way a chunk is: `header` from the chunk that ranked it, `location`
+    over the lines it ended up covering and the pages every one of its chunks is on."""
     hits = [
         _hit(_span("# Retries", "HTTP call."), 1, 1.0, page_start=1, page_end=1),
         _hit(
@@ -375,8 +403,8 @@ def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() 
     passage = widen(ranges(hits)[0], WHOLE, Passage)
 
     assert passage.header == "Retries > Backoff", "the best-scoring chunk names the passage"
-    assert (passage.page_start, passage.page_end) == (2, 3), "the best chunk's pages"
-    assert passage.location == f"{DOC} p.2-3 L1-4", "rebuilt over the passage's own lines"
+    assert (passage.page_start, passage.page_end) == (1, 3), "both chunks' pages, not the best's"
+    assert passage.location == f"{DOC} p.1-3 L1-4", "rebuilt over the passage's own lines"
     assert (passage.seq_start, passage.seq_end) == (1, 2)
     assert passage.collection == COLLECTION
     assert passage.markdown_file == f"/home/documents/{DOC}.md"
@@ -481,6 +509,20 @@ def test_sections_are_the_headings_the_query_kept_landing_under() -> None:
     assert hot.score == pytest.approx(2 * 3.0 * 5.0 / 8.0), "harmonic(best 3, sum 5)"
     assert (hot.line_start, hot.line_end) == (3, 19), "min and max over the heading's chunks"
     assert hot.location == f"{DOC} L3-19", "cited over the whole heading, not one chunk"
+
+
+def test_a_section_cites_every_page_its_chunks_cover() -> None:
+    """The best chunk sits on page 2, a weaker one under the same heading on page 4: the section
+    spans both, so citing the best chunk's page alone would send the reader to half of it."""
+    hits = [
+        _hit(BACKOFF, 2, 3.0, header="Retries > Backoff", page_start=2, page_end=2),
+        _hit(DEDUP, 4, 2.0, header="Retries > Backoff", page_start=4, page_end=4),
+    ]
+
+    (source,) = _sources(hits, sections=1).documents
+
+    (hot,) = source.sections
+    assert hot.location == location(DOC, 2, 4, hot.line_start, hot.line_end)
 
 
 def test_sections_that_score_the_same_sort_by_header() -> None:

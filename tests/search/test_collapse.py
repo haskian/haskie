@@ -10,11 +10,13 @@ import msgspec
 import numpy as np
 import pytest
 
-from haskie.collection.index import Hit, location
+from haskie.collection.index import Hit, Relation, location
+from haskie.indexing.chunk import Position
+from haskie.indexing.segment import PieceType
 from haskie.search import collapse
-from haskie.search.collapse import MAX_ALSO, Embedded, Worded
+from haskie.search.collapse import Space, Worded
 from haskie.search.passage import HitRange, ranges
-from haskie.settings import PROFILES, DuplicateCosine, EmbeddingModel, EmbeddingProfile
+from haskie.settings import PROFILES, EmbeddingModel, EmbeddingProfile
 
 RETRY = "A background job retries a failed HTTP call, so the call has to be idempotent."
 REWORDED = "Make the side effect safe to repeat, because the job may run the request twice."
@@ -23,10 +25,16 @@ CLOCKS = "Never trust a wall clock for ordering: hosts drift apart by millisecon
 OUTBOX = "A transactional outbox writes the event in the same transaction as the state change."
 # RETRY with a sentence either side: a fuller passage that holds the whole of RETRY
 FULLER = f"Retries are where most duplicate side effects come from. {RETRY} Key it on a request id."
+# A chapter that mentions an appendix, and a chunk that is nothing but the appendix's heading,
+# as the converter left it: the case where single words made the heading "contained" at 1.00
+MENTIONS = (
+    "The domain is the set of activities that those processes support. We show the Docker "
+    "configuration in Appendix D, and you'd find the rest of the setup there too."
+)
+HEADING = "## <u>APPENDIX D</u>"
 # RETRY and BACKOFF in one chunk: a fuller passage that holds two results kept apart
 BOTH = f"{RETRY} {BACKOFF}"
 
-BGE = DuplicateCosine(chunk=0.92, passage=0.95)
 BGE_SMALL = PROFILES[EmbeddingProfile.COMPACT]
 
 
@@ -67,8 +75,21 @@ def _hit(
     )
 
 
-def _words(hits: list[Hit]) -> Worded:
-    return Worded([hit.text for hit in hits])
+def _words(hits: list[Hit]) -> list[Space]:
+    """The spaces of a search without embeddings."""
+    return [Worded([hit.text for hit in hits])]
+
+
+def _embedded(hits: list[Hit], vectors: np.ndarray) -> list[Space]:
+    """The spaces of a bge search whose rows carry `vectors`."""
+    return collapse.spaces([hit.text for hit in hits], vectors.tolist(), BGE_SMALL)
+
+
+def _heading(text: str, score: float, **fields) -> Hit:
+    """A chunk of heading lines alone, as the chunker cuts a section with no text of its own."""
+    return msgspec.structs.replace(
+        _hit(text, score, **fields), layout=[Position(PieceType.HEADING, 0)]
+    )
 
 
 def _unit(*rows: list[float]) -> np.ndarray:
@@ -162,6 +183,21 @@ def _shape(kept: list[Hit]) -> list[tuple[str, int, float, list[str]]]:
             [("book.md", 1, 0.9, ["a.md"])],
         ),
         (
+            "a bare heading is never contained, though a passage holds every word of it",
+            [_hit(MENTIONS, 0.9, document="book.md"), _heading(HEADING, 0.8, document="book.pdf")],
+            2,
+            [("book.md", 1, 0.9, []), ("book.pdf", 1, 0.8, [])],
+        ),
+        (
+            "one heading in two books is no duplicate: too short to be a point",
+            [
+                _heading("## Summary", 0.9, document="a.md"),
+                _heading("## Summary", 0.8, document="b.md"),
+            ],
+            2,
+            [("a.md", 1, 0.9, []), ("b.md", 1, 0.8, [])],
+        ),
+        (
             "a hit holding two kept ones takes the best slot, and the freed slot goes to the next",
             [
                 _hit(RETRY, 0.9, document="a.md"),
@@ -180,7 +216,6 @@ def test_hits_fold_near_duplicates_in_words(
     kept = collapse.hits(found, _words(found), limit)
 
     assert _shape(kept) == expected, name
-    assert all(hit.also_count == len(hit.also_in) for hit in kept), f"{name}: under the cap"
 
 
 def test_a_fold_records_where_the_repeat_is_and_how_close_it_was() -> None:
@@ -197,14 +232,105 @@ def test_a_fold_records_where_the_repeat_is_and_how_close_it_was() -> None:
     assert kept.score == 0.9, "agreement does not raise the kept hit's score"
 
 
-def test_also_in_lists_the_best_few_and_counts_them_all() -> None:
-    found = [_hit(RETRY, 1.0 - i / 100, document=f"copy{i}.md") for i in range(MAX_ALSO + 3)]
+@pytest.mark.parametrize(
+    ("name", "found", "expected"),
+    [
+        (
+            "a copy is a duplicate",
+            [_hit(RETRY, 0.9, document="a.md"), _hit(RETRY, 0.8, document="copy.md")],
+            [("a.md", [("copy.md", Relation.DUPLICATE, 1.0)])],
+        ),
+        (
+            "a hit inside a fuller one ranked above it is contained",
+            [_hit(FULLER, 0.9, document="book.md"), _hit(RETRY, 0.8, document="a.md")],
+            [("book.md", [("a.md", Relation.CONTAINED, 1.0)])],
+        ),
+        (
+            "a hit a fuller one below it swapped out is contained in it",
+            [_hit(RETRY, 0.9, document="a.md"), _hit(FULLER, 0.8, document="book.md")],
+            [("book.md", [("a.md", Relation.CONTAINED, 1.0)])],
+        ),
+        (
+            "after a swap, what the old hit held is compared with the new one again",
+            [
+                _hit(RETRY, 0.9, document="a.md"),
+                _hit(RETRY, 0.85, document="copy.md"),
+                _hit(FULLER, 0.8, document="book.md"),
+            ],
+            [
+                (
+                    "book.md",
+                    [("a.md", Relation.CONTAINED, 1.0), ("copy.md", Relation.CONTAINED, 1.0)],
+                )
+            ],
+        ),
+        (
+            "one document chunked two ways shares its lines",
+            [
+                _hit(RETRY, 0.9, collection="backend", seq=3, char_start=200),
+                _hit(BACKOFF, 0.8, collection="ops", seq=2, char_start=230),
+            ],
+            [("patterns.md", [("patterns.md", Relation.SAME_SPAN, pytest.approx(48 / 78))])],
+        ),
+    ],
+)
+def test_a_reference_names_how_it_overlaps_the_hit_it_is_listed_under(
+    name: str, found: list[Hit], expected: list[tuple[str, list[tuple[str, Relation, float]]]]
+) -> None:
+    kept = collapse.hits(found, _words(found), 3)
+
+    shape = [
+        (h.document, [(r.document, r.relation, r.similarity) for r in h.also_in]) for h in kept
+    ]
+    assert shape == expected, name
+
+
+def test_a_repeat_the_new_leader_does_not_place_says_whom_it_was_measured_against() -> None:
+    """REWORDED shares no words with RETRY, but the model embeds the two alike, so it folds under
+    RETRY as a duplicate. FULLER then holds RETRY word for word and takes the slot, yet neither
+    space places REWORDED against FULLER: its 0.99 is to RETRY, and `via` names where that is."""
+    found = [
+        _hit(RETRY, 0.9, document="a.md"),
+        _hit(REWORDED, 0.85, document="reworded.md"),
+        _hit(FULLER, 0.8, document="book.md"),
+    ]
+    spaces = _embedded(found, _unit([1.0, 0.0, 0.0], [0.99, 0.14, 0.0], [0.0, 0.0, 1.0]))
+
+    (kept,) = collapse.hits(found, spaces, 3)
+
+    assert kept.document == "book.md"
+    assert [(r.document, r.relation, r.via) for r in kept.also_in] == [
+        ("a.md", Relation.CONTAINED, None),
+        ("reworded.md", Relation.DUPLICATE, found[0].location),
+    ]
+    assert kept.also_in[1].similarity == pytest.approx(0.99, abs=0.01)
+
+
+def test_every_repeat_is_listed_in_the_same_document_or_another() -> None:
+    """Two copies in one other book and a repeat further down the same document: three places."""
+    found = [
+        _hit(RETRY, 0.9, document="book.md", seq=4),
+        _hit(RETRY, 0.8, document="notes.md", seq=2),
+        _hit(RETRY, 0.7, document="notes.md", seq=9, char_start=900),
+        _hit(RETRY, 0.6, document="book.md", seq=40, char_start=4000),
+    ]
+
+    (kept,) = collapse.hits(found, _words(found), 3)
+
+    assert [(ref.document, ref.seq) for ref in kept.also_in] == [
+        ("notes.md", 2),
+        ("notes.md", 9),
+        ("book.md", 40),
+    ], "three places, best first; the UI counts the other documents among them: one"
+
+
+def test_also_in_lists_every_repeat_uncapped() -> None:
+    found = [_hit(RETRY, 1.0 - i / 100, document=f"copy{i}.md") for i in range(12)]
 
     (kept,) = collapse.hits(found, _words(found), 3)
 
     assert kept.document == "copy0.md"
-    assert [ref.document for ref in kept.also_in] == [f"copy{i}.md" for i in range(1, 6)]
-    assert kept.also_count == MAX_ALSO + 2, "the total, past what is listed"
+    assert [ref.document for ref in kept.also_in] == [f"copy{i}.md" for i in range(1, 12)]
 
 
 @pytest.mark.parametrize(
@@ -219,7 +345,7 @@ def test_hits_fold_near_duplicates_in_embeddings(name: str, cosine: float, folds
     found = [_hit(RETRY, 0.9, document="a.md"), _hit(REWORDED, 0.8, document="b.md")]
     vectors = _unit([1.0, 0.0], [cosine, float(np.sqrt(1 - cosine**2))])
 
-    kept = collapse.hits(found, Embedded(vectors, BGE, [hit.text for hit in found]), 2)
+    kept = collapse.hits(found, _embedded(found, vectors), 2)
 
     assert len(kept) == (1 if folds else 2), name
 
@@ -233,7 +359,7 @@ def test_identical_text_under_other_headings_folds_though_its_cosine_misses() ->
     ]
     vectors = _unit([1.0, 0.0], [0.90, float(np.sqrt(1 - 0.90**2))])
 
-    (kept,) = collapse.hits(found, Embedded(vectors, BGE, [hit.text for hit in found]), 2)
+    (kept,) = collapse.hits(found, _embedded(found, vectors), 2)
 
     assert [(ref.document, ref.similarity) for ref in kept.also_in] == [("notes.md", 1.0)]
 
@@ -250,8 +376,7 @@ def _passage(texts: list[str], document: str, first_seq: int, score: float) -> l
 
 
 def _ranges(scanned: list[Hit], vectors: np.ndarray, limit: int) -> list[HitRange]:
-    where = Embedded(vectors, BGE, [hit.text for hit in scanned])
-    return collapse.ranges(ranges(scanned), scanned, where, limit)
+    return collapse.ranges(ranges(scanned), scanned, _embedded(scanned, vectors), limit)
 
 
 E1, E2, E3, E4 = (list(row) for row in np.eye(4))
@@ -266,7 +391,7 @@ E1, E2, E3, E4 = (list(row) for row in np.eye(4))
             0.5,
             [REWORDED],
             [E2],
-            [("book.md", 1, 3, ["note.md"])],
+            [("book.md", 1, 3, [("note.md", "contained")])],
         ),
         (
             "chunk by chunk: the three-chunk passage takes the slot of the copy that outranked it",
@@ -274,7 +399,7 @@ E1, E2, E3, E4 = (list(row) for row in np.eye(4))
             0.9,
             [REWORDED],
             [E2],
-            [("book.md", 1, 3, ["note.md"])],
+            [("book.md", 1, 3, [("note.md", "contained")])],
         ),
         (
             "passage by passage: two chunks that match none singly but sum to the same point fold",
@@ -282,7 +407,7 @@ E1, E2, E3, E4 = (list(row) for row in np.eye(4))
             0.5,
             [REWORDED, OUTBOX],
             [[1.0, 1.0, 0.9, 0.0], [1.0, 1.0, 1.1, 0.0]],
-            [("book.md", 1, 3, ["note.md"])],
+            [("book.md", 1, 3, [("note.md", "duplicate")])],
         ),
         (
             "a passage on something else stays",
@@ -300,7 +425,7 @@ def test_ranges_fold_by_containment_or_by_their_mean_vectors(
     small_score: float,
     small: list[str],
     small_vectors: list[list[float]],
-    expected: list[tuple[str, int, int, list[str]]],
+    expected: list[tuple[str, int, int, list[tuple[str, str]]]],
 ) -> None:
     """The case from the design session: a mean vector of three chunks sits far from any one of
     them, so the passage-level cosine alone would keep a copy of its middle chunk."""
@@ -311,7 +436,12 @@ def test_ranges_fold_by_containment_or_by_their_mean_vectors(
     kept = _ranges(scanned, vectors, 2)
 
     shape = [
-        (r.hits[0].document, r.seq_start, r.seq_end, [ref.document for ref in r.also_in])
+        (
+            r.hits[0].document,
+            r.seq_start,
+            r.seq_end,
+            [(ref.document, ref.relation) for ref in r.also_in],
+        )
         for r in kept
     ]
     assert shape == expected, name
@@ -335,7 +465,7 @@ def test_a_folded_range_points_at_its_own_lines() -> None:
         "note.md", None, None, small_range.line_start, small_range.line_end
     )
     assert reference.similarity == pytest.approx(1.0), "its one chunk is the passage's middle"
-    assert kept.also_count == 1
+    assert len(kept.also_in) == 1
 
 
 # --- the space ------------------------------------------------------------------------
@@ -366,7 +496,8 @@ def test_the_space_is_embeddings_only_when_every_row_can_be_compared(
 ) -> None:
     texts = [RETRY, BACKOFF][: len(vectors)]
 
-    assert collapse.space(texts, vectors, model).kind == expected, name
+    first, *_ = collapse.spaces(texts, vectors, model)
+    assert first.kind == expected, f"{name}: compared first by {expected}"
 
 
 def test_folding_leaves_the_hits_it_was_given_alone() -> None:

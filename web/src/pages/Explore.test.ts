@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { Hit, Passage, SearchScope, Source } from '../api'
+import { parseServerTiming, type Hit, type Passage, type SearchScope, type Source, type StepTiming } from '../api'
 import { cite, position, seqLabel, type Match } from '../ui/match'
 import { parseScope, scopeParams, type Scope } from './explore/scope'
 
@@ -30,7 +30,6 @@ const HIT: Hit = {
   source_file: '/Users/ada/.haskie/documents/area-lights.pdf',
   markdown_file: '/Users/ada/.haskie/markdown/area-lights.md',
   also_in: [],
-  also_count: 0,
 }
 
 const SOURCE: Source = {
@@ -68,7 +67,6 @@ const PASSAGE: Passage = {
   source_file: '/Users/ada/.haskie/documents/area-lights.pdf',
   markdown_file: '/Users/ada/.haskie/markdown/area-lights.md',
   also_in: [],
-  also_count: 0,
 }
 
 describe('parseScope', () => {
@@ -101,12 +99,13 @@ describe('scopeParams', () => {
 
 describe('position', () => {
   const cases: Array<{ name: string; value: Match; expected: string }> = [
-    { name: 'a paged hit reads as page and chunk', value: HIT, expected: 'p. 2 · chunk 4' },
-    { name: 'page zero is a page, not a missing one', value: { ...HIT, page_start: 0 }, expected: 'p. 0 · chunk 4' },
-    { name: 'a hit with no pages names its chunk and lines', value: { ...HIT, page_start: null }, expected: 'chunk 4 · lines 41–58' },
+    { name: 'a paged chunk reads as its page and chunk', value: HIT, expected: 'p. 2 · chunk 4' },
+    { name: 'page zero is a page, not a missing one', value: { ...HIT, page_start: 0, page_end: 0 }, expected: 'p. 0 · chunk 4' },
+    { name: 'a chunk across two pages names both', value: { ...HIT, page_end: 3 }, expected: 'p. 2–3 · chunk 4' },
+    { name: 'a chunk with no pages is its chunk alone', value: { ...HIT, page_start: null, page_end: null }, expected: 'chunk 4' },
+    { name: 'a passage reads as its page, its lines and its chunks', value: PASSAGE, expected: 'p. 2 · lines 41–58 · chunks 4–6' },
+    { name: 'a passage of one line and one chunk, without pages', value: { ...PASSAGE, line_end: 41, seq_end: 4, page_start: null, page_end: null }, expected: 'line 41 · chunk 4' },
     { name: 'a source has only lines', value: SOURCE, expected: 'lines 41–58' },
-    { name: 'a passage names its page and chunk run', value: PASSAGE, expected: 'p. 2 · chunks 4–6' },
-    { name: 'a passage of one chunk names it, and without pages falls back to lines', value: { ...PASSAGE, seq_end: 4, page_start: null }, expected: 'chunk 4 · lines 41–58' },
   ]
   for (const testCase of cases) {
     test(testCase.name, () => {
@@ -140,4 +139,20 @@ describe('cite', () => {
       expect(cite(testCase.location, testCase.doc)).toBe(testCase.expected)
     })
   }
+})
+
+describe('parseServerTiming', () => {
+  const cases: Array<{ name: string; header: string | null; expected: StepTiming[] }> = [
+    { name: 'no header, no steps', header: null, expected: [] },
+    {
+      name: 'every step with its time and its name, in order',
+      header: 'plan;dur=12.3;desc="Embed the query", retrieve;dur=41.2;desc="LanceDB retrieval"',
+      expected: [
+        { step: 'plan', label: 'Embed the query', ms: 12.3 },
+        { step: 'retrieve', label: 'LanceDB retrieval', ms: 41.2 },
+      ],
+    },
+    { name: 'a step with no desc is named by itself', header: 'merge;dur=0.4', expected: [{ step: 'merge', label: 'merge', ms: 0.4 }] },
+  ]
+  for (const { name, header, expected } of cases) test(name, () => expect(parseServerTiming(header)).toEqual(expected))
 })

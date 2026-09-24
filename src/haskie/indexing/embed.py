@@ -13,8 +13,13 @@ per search, which CPU does in milliseconds, while their CoreML build stalled the
 
 import threading
 from functools import cache, lru_cache
+from pathlib import Path
+from typing import Any
+
+import numpy as np
 
 from haskie import home
+from haskie.indexing import mlx_models, onnx_rerank
 from haskie.settings import Accelerator, EmbeddingModel
 
 # a provider entry as ONNX Runtime takes it: a name, or a (name, options) pair
@@ -71,16 +76,122 @@ def device_name(accelerator: Accelerator = Accelerator.AUTO) -> str:
 
 @cache
 def _build_model(name: str, accelerator: Accelerator):
+    """fastembed's ONNX `TextEmbedding`, or an MLX embedder shaped like it (`mlx_models`)."""
+    if name in mlx_models.EMBEDDERS:
+        return mlx_models.embedder(name)
     from fastembed import TextEmbedding
 
-    return TextEmbedding(model_name=name, providers=providers(accelerator))
+    _register_custom()
+    description = next(
+        found for found in TextEmbedding._list_supported_models() if found.model == name
+    )
+    # a model over ONNX's 2 GB keeps its weights in an external file: see `_local_copy`
+    local = _local_copy(description) if description.additional_files else None
+    chosen = providers(accelerator)
+    if name in COREML_TOO_LARGE:
+        chosen = [one for one in chosen if provider_name(one) != "CoreMLExecutionProvider"]
+    return TextEmbedding(
+        model_name=name,
+        providers=chosen,
+        **({"specific_model_path": str(local)} if local else {}),
+    )
+
+
+# CoreML compiles a whole model into one protobuf, which caps at 2 GB: a model past that fails to
+# build on Apple Silicon ("CoreML.Specification.Model exceeded maximum protobuf size of 2GB") and
+# runs on the CPU instead. bge-m3 and e5-large pass, because CoreML takes only part of their graph.
+COREML_TOO_LARGE = {"jinaai/jina-embeddings-v3"}
+
+
+# Embedders fastembed does not list, each from an ONNX export of its own, pinned to a revision.
+# bge-m3: BAAI's export, whose first output is the token states; CLS pooling then normalizing them
+# is bge-m3's dense vector, the one its `sentence_embedding` output also gives.
+CUSTOM_EMBEDDERS: dict[str, dict] = {
+    "BAAI/bge-m3": {
+        "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+        "dim": 1024,
+        "model_file": "onnx/model.onnx",
+        "additional_files": ["onnx/model.onnx_data"],
+    },
+}
+# what fastembed downloads beside a model's own files (`common.model_management`)
+_TOKENIZER_FILES = [
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "preprocessor_config.json",
+]
+
+
+@cache
+def _register_custom() -> None:
+    from fastembed import TextEmbedding
+    from fastembed.common.model_description import ModelSource, PoolingType
+
+    for name, spec in CUSTOM_EMBEDDERS.items():
+        TextEmbedding.add_custom_model(
+            model=name,
+            pooling=PoolingType.CLS,
+            normalization=True,
+            sources=ModelSource(hf=name),
+            dim=spec["dim"],
+            model_file=spec["model_file"],
+            additional_files=spec["additional_files"],
+        )
+
+
+def _local_copy(description: Any) -> Path:
+    """A model's files as real files in one directory.
+
+    ONNX Runtime refuses an external-data file (`model.onnx_data`) that resolves outside the
+    model's own directory, and the Hugging Face cache fastembed downloads into keeps every file as
+    a link into a blob store elsewhere. So a model with external data is downloaded into a plain
+    directory beside fastembed's cache instead, at its pinned revision where it has one.
+    """
+    from fastembed.common.utils import define_cache_dir
+    from huggingface_hub import snapshot_download
+
+    repo = description.sources.hf
+    revision = CUSTOM_EMBEDDERS.get(description.model, {}).get("revision")
+    target = define_cache_dir() / "local" / repo.replace("/", "--") / (revision or "main")
+    snapshot_download(
+        repo,
+        revision=revision,
+        local_dir=target,
+        allow_patterns=[description.model_file, *description.additional_files, *_TOKENIZER_FILES],
+    )
+    return target
 
 
 @cache
 def _build_cross_encoder(name: str):
+    """fastembed's ONNX cross-encoder, an MLX reranker for the models fastembed cannot run
+    (`mlx_models`), or an ONNX encoder finished by its own head (`onnx_rerank`). All answer
+    `rerank(query, texts)` with one score per text, in order."""
+    if name in mlx_models.REVISIONS:
+        return mlx_models.reranker(name)
+    if name in onnx_rerank.REVISIONS:
+        return onnx_rerank.HeadedCrossEncoder(name, providers(RERANKER_ACCELERATOR))
     from fastembed.rerank.cross_encoder import TextCrossEncoder
 
+    _register_custom_rerankers()
     return TextCrossEncoder(model_name=name, providers=providers(RERANKER_ACCELERATOR))
+
+
+# Cross-encoders fastembed does not list whose ONNX export is the whole classifier, head and all.
+CUSTOM_RERANKERS = ["mixedbread-ai/mxbai-rerank-xsmall-v1"]
+
+
+@cache
+def _register_custom_rerankers() -> None:
+    from fastembed.common.model_description import ModelSource
+    from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+    for name in CUSTOM_RERANKERS:
+        TextCrossEncoder.add_custom_model(
+            model=name, sources=ModelSource(hf=name), model_file="onnx/model.onnx"
+        )
 
 
 def _model(name: str, accelerator: Accelerator):
@@ -93,17 +204,35 @@ def _cross_encoder(name: str):
         return _build_cross_encoder(name)
 
 
+LAYER_NORM_EPS = 1e-5  # torch's `layer_norm` default, which nomic's recipe runs with
+
+
 def embed_texts(model: EmbeddingModel, texts: list[str]) -> list[list[float]]:
-    """Document-side embeddings (one vector per text)."""
+    """Document-side embeddings (one vector per text), each after the model's document prefix."""
     if not texts:
         return []
     embedder = _model(model.name, model.accelerator)
-    return [v.tolist() for v in embedder.embed(texts)]
+    vectors = embedder.embed([model.document_prefix + t for t in texts])
+    return [_cut(model, v).tolist() for v in vectors]
 
 
 def embed_query(model: EmbeddingModel, text: str) -> list[float]:
-    """Query-side embedding (models like bge prepend a query instruction here)."""
-    return next(iter(_model(model.name, model.accelerator).query_embed(text))).tolist()
+    """Query-side embedding, after the model's query prefix. `query_embed` rather than `embed`:
+    a multi-task model (jina-v3) picks its query adapter there."""
+    embedder = _model(model.name, model.accelerator)
+    return _cut(model, next(iter(embedder.query_embed(model.query_prefix + text)))).tolist()
+
+
+def _cut(model: EmbeddingModel, vector: np.ndarray) -> np.ndarray:
+    """`vector` as the model's profile stores it: whole, or cut to its Matryoshka size and
+    normalized again, after a layer norm over the whole vector where the model asks for one.
+    The layer norm does not care that fastembed normalized first: it undoes any scale."""
+    if model.matryoshka is None:
+        return vector
+    if model.matryoshka.layer_norm:
+        vector = (vector - vector.mean()) / np.sqrt(vector.var() + LAYER_NORM_EPS)
+    cut = vector[: model.dims]
+    return cut / np.linalg.norm(cut)
 
 
 def warm(name: str, accelerator: Accelerator) -> None:

@@ -93,9 +93,12 @@ async def search_excerpts(
     it begins and ends where the author stopped. Cite it by its `header` (the heading path inside
     the document) and its `location` (document, pages, lines). `markdown_file` is the whole
     document on disk when the excerpt is not enough.
-    An excerpt that says what other places say lists them in `also_in` (`also_count` of them in
-    all) rather than returning each on its own. A place may be another document or elsewhere in
-    the same one: check its `document` before citing it as a second source.
+    An excerpt that says what other places say lists every one of them in `also_in`
+    rather than returning each on its own. Its `relation` says how: `duplicate` says the
+    same as a whole, `contained` sits inside this excerpt, which says more, and `same_span` is
+    these very lines, chunked another way. A `via` names the place in the same `also_in` the
+    relation was measured against, when that is not this excerpt. A place may be elsewhere in the
+    same document: check its `document` before citing it as a second source.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection. Run `search_sources` first when the question is which

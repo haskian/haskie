@@ -1,17 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   api,
-  type EmbeddingProfile,
-  type FieldDoc,
   type Options,
   type PipelineSettings,
   type RetentionSettings,
-  type SearchSettings,
   type UserSettings,
 } from '../api'
 import type { PageProps } from '../App'
 import { errorText } from '../format'
-import { Field, Picker, SEARCH_BOUNDS, Shell, Toggle, visibleSearchFields, type NumericKeys, type PickerOption } from '../ui'
+import { choices, docFor, EmbedderFacts, Field, Num, Picker, profileOptions, SearchField, Shell, Toggle, visibleSearchFields, type NumericKeys } from '../ui'
 import { classicBackground, setBackground as storeBackground } from './settings/background'
 import './Settings.css'
 
@@ -55,97 +52,9 @@ const RETENTION_FIELDS: NumberField<RetentionSettings>[] = [
   { key: 'audit_days', min: 0 },
 ]
 
-const EMPTY_DOC: FieldDoc = { title: '', description: '' }
-// The backend names every setting; a key it does not know falls back to the key itself.
-const docFor = (docs: Record<string, FieldDoc>, key: string): FieldDoc => docs[key] ?? { ...EMPTY_DOC, title: key }
-
-const choices = <T extends string>(values: readonly T[]): PickerOption<T>[] => values.map((value) => ({ value, label: value }))
-
-/** A number setting: the design's `.field` with a number input in it. */
-function Num({
-  label,
-  help,
-  value,
-  min,
-  max,
-  step,
-  onChange,
-}: {
-  label: string
-  help?: string
-  value: number
-  min?: number
-  max?: number
-  step?: number
-  onChange: (value: number) => void
-}) {
-  return (
-    <Field label={label} help={help}>
-      <input className="input" type="number" value={value} min={min} max={max} step={step} onChange={(event) => onChange(Number(event.target.value))} />
-    </Field>
-  )
-}
-
-function SearchField({
-  name,
-  search,
-  options,
-  onChange,
-}: {
-  name: keyof SearchSettings
-  search: SearchSettings
-  options: Options
-  onChange: (next: SearchSettings) => void
-}) {
-  const doc = docFor(options.docs, `search.${name}`)
-  switch (name) {
-    case 'mode':
-      return (
-        <Field label={doc.title} help={doc.description}>
-          <Picker ariaLabel={doc.title} options={choices(options.search_modes)} value={search.mode} onChange={(mode) => onChange({ ...search, mode })} />
-        </Field>
-      )
-    case 'fusion':
-      return (
-        <Field label={doc.title} help={doc.description}>
-          <Picker ariaLabel={doc.title} options={choices(options.fusions)} value={search.fusion} onChange={(fusion) => onChange({ ...search, fusion })} />
-        </Field>
-      )
-    case 'reranker':
-      return (
-        <Field label={doc.title} help={doc.description}>
-          <Picker ariaLabel={doc.title} options={choices(options.rerankers)} value={search.reranker} onChange={(reranker) => onChange({ ...search, reranker })} />
-        </Field>
-      )
-    case 'reranker_model':
-      return (
-        <Field label={doc.title} help={doc.description}>
-          <Picker
-            ariaLabel={doc.title}
-            options={choices(options.reranker_models)}
-            value={search.reranker_model}
-            onChange={(reranker_model) => onChange({ ...search, reranker_model })}
-          />
-        </Field>
-      )
-    default: {
-      const bounds = SEARCH_BOUNDS[name]
-      return (
-        <Num
-          label={doc.title}
-          help={doc.description}
-          value={search[name]}
-          min={bounds.min}
-          step={bounds.step}
-          onChange={(value) => onChange({ ...search, [name]: value })}
-        />
-      )
-    }
-  }
-}
 
 /** The user settings, section by section. Every label and help text comes from `/api/options`. */
-export function Settings({ route, counts }: PageProps) {
+export function Settings({ route, counts, refreshStatus }: PageProps) {
   const [settings, setSettings] = useState<UserSettings | null>(null)
   const [options, setOptions] = useState<Options | null>(null)
   const [section, setSection] = useState(SECTIONS[0].id)
@@ -225,15 +134,12 @@ export function Settings({ route, counts }: PageProps) {
         setSettings(stored)
         setSaved(true)
         setError(null)
+        void refreshStatus() // the profile or the reranker may need a model the status bar lacks
       })
       .catch((failure: unknown) => setError(errorText(failure)))
   }
 
-  const profiles: PickerOption<EmbeddingProfile>[] = Object.entries(options.embedding_profiles).map(([profile, model]) => ({
-    value: profile as EmbeddingProfile,
-    label: profile,
-    sub: model === null ? 'full-text only' : `${model.name} · ${model.dims} dims`,
-  }))
+  const profiles = profileOptions(options.embedding_profiles)
   const skipOcr = docFor(docs, 'conversion.skip_ocr_pages')
   const frame = docFor(docs, 'conversion.chunk_frame')
 
@@ -244,6 +150,7 @@ export function Settings({ route, counts }: PageProps) {
           <span className="mono muted">Embedding</span>
           <Field label={docFor(docs, 'embedding').title} help={docFor(docs, 'embedding').description}>
             <Picker ariaLabel="Embedding profile" options={profiles} value={settings.embedding} onChange={(embedding) => update({ embedding })} />
+            <EmbedderFacts model={options.embedding_profiles[settings.embedding]} />
           </Field>
           <Field label={docFor(docs, 'pipeline.accelerator').title} help={docFor(docs, 'pipeline.accelerator').description}>
             <Picker

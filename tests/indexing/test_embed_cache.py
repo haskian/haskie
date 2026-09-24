@@ -21,7 +21,7 @@ from haskie.indexing import embed_cache
 from haskie.indexing.chunk import CHUNK_VERSION, Chunk, Piece
 from haskie.indexing.embed_cache import NO_MODEL, Params
 from haskie.indexing.segment import PieceType
-from haskie.settings import Chunker, ChunkSettings, EmbeddingModel, Parser
+from haskie.settings import Chunker, ChunkSettings, EmbeddingModel, Matryoshka, Parser
 
 pytestmark = pytest.mark.anyio  # most cases await; the pure ones ignore the marker
 
@@ -121,6 +121,11 @@ def test_every_field_of_params_changes_the_id(name: str, field: str, value) -> N
     ("name", "embedding", "expected_model"),
     [
         ("a profile with an embedding model", TINY, "test/tiny"),
+        (
+            "a model cut to fewer dimensions is keyed apart from it whole",
+            EmbeddingModel("test/tiny", 2, matryoshka=Matryoshka()),
+            "test/tiny@2",
+        ),
         ("a profile without one indexes text only", None, NO_MODEL),
     ],
 )

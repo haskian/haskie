@@ -11,8 +11,8 @@ added, dropped or moved there alone:
 Every heading after content starts a new section (`sections`). Within a section, every paragraph
 is a chunk of its own: `pack` merges short ones with their neighbours and cuts long ones into
 whole sentences. A heading over text is never part of a chunk's text. It is citation metadata
-(`Chunk.headings`), worked out whatever the settings say. Only a section of headings alone has
-its heading lines as its text.
+(`Chunk.headings`), worked out whatever the settings say. A section of headings alone makes no
+chunk: its headings go on to the next chunk's path.
 
 `frames` is the one optional step (`chunk_frame`). It frames each section with its
 heading path, and the models read every chunk with that path in front (`framed`). The chunk size
@@ -44,7 +44,7 @@ from haskie.indexing import segment
 from haskie.indexing.segment import CutReason, Packed, PieceType, Span, SpanKind
 from haskie.settings import Chunker, ChunkSettings
 
-CHUNK_VERSION = 1  # see the module docstring
+CHUNK_VERSION = 3  # see the module docstring; 3: e5's query and passage prefixes
 HEADING_SEP = " > "  # between two headings of a heading path: "Part I > Chapter 2 > Retries"
 type Opened = tuple[int, str]  # a heading still open: its level, 1 to 6, and its text
 
@@ -69,8 +69,7 @@ class Chunk(msgspec.Struct):
     # before the first heading.
     headings: list[str]
     # The headings the models read ahead of the text (`framed`): `headings`, less its outermost
-    # ones when the whole path would take over half a chunk. A chunk of headings alone gets only
-    # the path above them, and every chunk gets none without the `frames` step.
+    # ones when the whole path would take over half a chunk; none without the `frames` step.
     frame: list[str]
     # The chunk's text as the pieces it was packed from: its sentences, and whole blocks where
     # the markdown has no sentences (a code block, a table), never a heading (see `headings`).
@@ -187,19 +186,16 @@ def sections(run: Chunking, pieces: list[Span]) -> list[Section]:
 
 def frames(run: Chunking, found: list[Section]) -> list[Section]:
     """Each section framed with the heading path it opens, on top of the headings `run.opened`
-    before the text, shortened to at most half a chunk. A section of headings alone has its
-    headings as its text, so its frame is only the path above them: never read twice."""
+    before the text, shortened to at most half a chunk. A section of headings alone makes no
+    chunk (`pack`), but its headings still open the path of the sections after it."""
     stack = list(run.opened)
     framed_sections: list[Section] = []
     for section in found:
-        own = [piece for piece in section.pieces if piece.kind == SpanKind.HEADING]
-        for piece in own:
-            _open(stack, (piece.level, piece.title))
-        path = [title for _, title in stack]  # after opening: a sibling chapter closes the last
-        if len(own) == len(section.pieces):
-            # a section's headings stack, each deeper than the last, so they end the path
-            path = path[: len(path) - len(own)]
-        path = _shortened(path, run.settings.chunk_size)
+        for piece in section.pieces:
+            if piece.kind == SpanKind.HEADING:
+                _open(stack, (piece.level, piece.title))
+        # after opening: a sibling chapter closes the last
+        path = _shortened([title for _, title in stack], run.settings.chunk_size)
         framed_sections.append(msgspec.structs.replace(section, frame=path))
     return framed_sections
 
@@ -208,15 +204,25 @@ def pack(run: Chunking, found: list[Section]) -> list[Packed]:
     """Each section's pieces packed into chunks along its paragraphs (`segment.pack`). Every chunk
     of a section shares its frame, so each gets the chunk size less that frame. `segment.fit`
     first cuts any piece longer than that. Every section but the last ends at the next one's
-    heading; the last ends at the edge of the text."""
+    heading; the last ends at the edge of the text.
+
+    A section of headings alone packs into no chunk, so its headings ride on the next chunk
+    instead, where `locate` reads the heading paths from: `# Part II` over an empty `## Ch 5`
+    still heads `## Ch 6` after it."""
     size = run.settings.chunk_size
     short = size * run.settings.chunk_merge_below / 100  # of the whole size, whatever the frame
     ends: list[CutReason] = [CutReason.HEADING] * (len(found) - 1) + [CutReason.EDGE]
     packed: list[Packed] = []
+    carried: list[Span] = []  # the headings of sections that made no chunk
     for section, end in zip(found, ends, strict=False):
         budget = size - len(frame(section.frame))
         pieces = segment.fit(run.text, section.pieces, budget)
         cut = segment.pack(pieces, budget, short, end)
+        if not cut:
+            carried += pieces
+            continue
+        cut[0] = msgspec.structs.replace(cut[0], headings=[*carried, *cut[0].headings])
+        carried = []
         packed += [msgspec.structs.replace(chunk, frame=section.frame) for chunk in cut]
     return packed
 
@@ -351,9 +357,7 @@ def locate(run: Chunking, packed: list[Packed]) -> list[Chunk]:
         byte_start = run.byte_offset + byte_at
         body_bytes = len(text[start:end].encode())  # the source's, page markers and all
         char_at, byte_at = end, byte_at + body_bytes
-        # filed under the heading its first piece is under; headings alone, under the last of them
-        alone = all(piece.kind == SpanKind.HEADING for piece in pieces)
-        idx = bisect_right(offsets, last.start if alone else start) - 1
+        idx = bisect_right(offsets, start) - 1  # filed under the heading its first piece is under
         headings = paths[idx] if idx >= 0 else before_any
         chunks.append(
             Chunk(

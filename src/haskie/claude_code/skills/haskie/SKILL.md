@@ -39,9 +39,12 @@ widened to the whole lines or sentences around them, so it starts and ends where
   `markdown_file`), `char_start`/`char_end` (0-based), `page_start`/`page_end` (PDF only, else
   null), `seq_start`/`seq_end` (chunk positions in the document)
 - repeats: `also_in`, the other places that say the same thing, folded into this excerpt instead
-  of returned on their own (each with `document`, `header`, `location`, `score`, `similarity`), and
-  `also_count`, how many there were when only the first few are listed. A place may be elsewhere
-  in the same document: cite it as a second source only when its `document` differs.
+  of returned on their own (each with `document`, `header`, `location`, `score`, `similarity`, and
+  `relation`: `duplicate` says the same as a whole, `contained` sits inside the excerpt, which
+  says more, `same_span` is the same lines chunked another way; a `via` names the place in the
+  same list the relation was measured against, when that is not the excerpt). Every folded place
+  is listed. A place may be elsewhere in the same document: cite it as a second source only when
+  its `document` differs.
 
 **`search_sources(q, session_id?, collections?, limit?, sections?)`** → `documents`, best first,
 and `collections`: the fewest collections that together hold every document listed, ready for

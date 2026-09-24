@@ -224,7 +224,7 @@ async def test_session_search_folds_a_near_duplicate_by_its_vector(dbos, monkeyp
     assert [ref.document for ref in hit.also_in] == [({"a.md", "b.md"} - {hit.document}).pop()], (
         "the other document, folded in"
     )
-    assert hit.also_count == 1
+    assert len(hit.also_in) == 1
     assert hit.also_in[0].similarity == pytest.approx(1.0), "by its vector: the words differ"
 
 

@@ -217,8 +217,6 @@ MAX_LINES = 400  # a pointer's lines, not a document: `markdown` is there for th
 class Lines(msgspec.Struct):
     """Some lines of a document's markdown, page markers taken out."""
 
-    line_start: int
-    line_end: int
     text: str
 
 
@@ -238,12 +236,11 @@ async def get_lines(document: str, line_start: int, line_end: int) -> Lines:
             f"got {line_start}-{line_end}"
         )
     info = await documents.get(document)
-    if not await anyio.Path(info.markdown).exists():
-        raise NotFound(f"document not imported yet: {document}")
-    raw = await anyio.to_thread.run_sync(_read_lines, info.markdown, line_start, line_end)
-    return Lines(
-        line_start=line_start, line_end=line_end, text=convert.without_markers(raw).strip()
-    )
+    try:
+        raw = await anyio.to_thread.run_sync(_read_lines, info.markdown, line_start, line_end)
+    except FileNotFoundError as missing:
+        raise NotFound(f"document not imported yet: {document}") from missing
+    return Lines(text=convert.without_markers(raw).strip())
 
 
 @put("/api/documents/{document:str}/description", mcp_tool="describe_document")

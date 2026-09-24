@@ -26,7 +26,7 @@ import re
 
 import msgspec
 
-from haskie.collection.index import Hit, location
+from haskie.collection.index import Hit, Relation, location
 from haskie.document.convert import without_markers
 
 # --- scoring ---------------------------------------------------------------------
@@ -58,7 +58,9 @@ class PassageReference(msgspec.Struct):
     line_start: int  # 1-based, in the document's markdown: what `/lines` reads it back by
     line_end: int
     score: float  # its own score, before it was folded
-    similarity: float  # how close it is to the passage it was folded into
+    relation: Relation
+    similarity: float  # how strongly `relation` holds: a cosine, a word share or a span share
+    via: str | None = None  # as `HitReference.via`
 
 
 class HitRange(msgspec.Struct):
@@ -74,8 +76,20 @@ class HitRange(msgspec.Struct):
     byte_start: int  # the same span in bytes, which is what the markdown file is seeked to
     byte_end: int
     score: float  # harmonic(best, sum) over the members
-    also_in: list[PassageReference] = []  # near-duplicates folded into it (`collapse`), best first
-    also_count: int = 0  # how many were folded in; `also_in` lists only the first few
+    also_in: list[PassageReference] = []  # every near-duplicate folded in (`collapse`), best first
+
+    @property
+    def best(self) -> Hit:
+        """The hit a range is cited by: its best score, the earliest on a tie."""
+        return max(self.hits, key=lambda hit: (hit.score, -hit.seq))
+
+
+def pages(hits: list[Hit]) -> tuple[int | None, int | None]:
+    """The pages a group of hits covers, first to last: every hit's, not only the best one's, or
+    a passage over pages 1 to 5 would be cited as page 1. None for a document without pages."""
+    starts = [hit.page_start for hit in hits if hit.page_start is not None]
+    ends = [hit.page_end for hit in hits if hit.page_end is not None]
+    return (min(starts) if starts else None, max(ends) if ends else None)
 
 
 def ranges(hits: list[Hit]) -> list[HitRange]:
@@ -150,8 +164,7 @@ class Passage(msgspec.Struct):
     score: float
     source_file: str  # absolute, for a tool outside the app
     markdown_file: str
-    also_in: list[PassageReference] = []  # near-duplicates folded into this passage, best first
-    also_count: int = 0  # how many were folded in; `also_in` lists only the first few
+    also_in: list[PassageReference] = []  # every near-duplicate folded in, best first
 
 
 class Excerpt(Passage):
@@ -218,20 +231,21 @@ def widen[P: Passage](hit_range: HitRange, window: Window, cls: type[P]) -> P:
     line_end = _line_shift(
         markdown, hit_range.line_end, max(from_start, from_end - 1), max(local_start, local_end - 1)
     )
-    best = max(hit_range.hits, key=lambda hit: (hit.score, -hit.seq))
+    best = hit_range.best
+    page_start, page_end = pages(hit_range.hits)
     return cls(
         collection=best.collection,
         document=best.document,
         header=best.header,
-        location=location(best.document, best.page_start, best.page_end, line_start, line_end),
+        location=location(best.document, page_start, page_end, line_start, line_end),
         seq_start=hit_range.seq_start,
         seq_end=hit_range.seq_end,
         line_start=line_start,
         line_end=line_end,
         char_start=char_start,
         char_end=char_end,
-        page_start=best.page_start,
-        page_end=best.page_end,
+        page_start=page_start,
+        page_end=page_end,
         # the offsets and lines above describe the source; the text a reader gets has no page
         # markers, as a chunk's has none (`convert.without_markers`)
         text=without_markers(text).strip(),
@@ -239,7 +253,6 @@ def widen[P: Passage](hit_range: HitRange, window: Window, cls: type[P]) -> P:
         source_file=best.source_file,
         markdown_file=best.markdown_file,
         also_in=hit_range.also_in,
-        also_count=hit_range.also_count,
     )
 
 
@@ -402,9 +415,7 @@ def _sections(hits: list[Hit], limit: int) -> list[HotSection]:
                 chunks=len(group),
                 line_start=line_start,
                 line_end=line_end,
-                location=location(
-                    best.document, best.page_start, best.page_end, line_start, line_end
-                ),
+                location=location(best.document, *pages(group), line_start, line_end),
             )
         )
     return sorted(found, key=lambda section: (-section.score, section.header))[:limit]

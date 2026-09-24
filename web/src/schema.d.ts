@@ -762,7 +762,8 @@ export interface components {
         /** ChunksAt */
         ChunksAt: {
             ts: number;
-            collection: string;
+            document: string;
+            collection: string | null;
             chunks: number;
         };
         /** CollectionInfo */
@@ -903,14 +904,20 @@ export interface components {
             dims: number;
             accelerator?: components["schemas"]["Accelerator"];
             duplicate?: components["schemas"]["DuplicateCosine"] | null;
+            card?: components["schemas"]["ModelCard"] | null;
+            /** @default  */
+            query_prefix: string;
+            /** @default  */
+            document_prefix: string;
+            matryoshka?: components["schemas"]["Matryoshka"] | null;
         };
         /**
          * EmbeddingProfile
-         * @description Text-embedding model that turns chunks into vectors for semantic search. Chosen at first run; changing it later requires "Index all" in every collection. none = full-text (BM25) search only; compact = bge-small (384 dims, English); quality = bge-large (1024 dims, English); multilingual = multilingual-e5-large (1024 dims).
+         * @description Text-embedding model that turns chunks into vectors for semantic search. Chosen at first run; changing it later requires "Index all" in every collection. none = full-text (BM25) search only. Each profile lists its model, size, languages, license and the hardware it runs well on.
          * @default none
          * @enum {string}
          */
-        EmbeddingProfile: "none" | "compact" | "quality" | "multilingual";
+        EmbeddingProfile: "none" | "compact" | "balanced" | "gte-base" | "arctic-m" | "nomic-v1.5" | "nomic-v1.5-512" | "jina-v2-small" | "jina-v2-base" | "modernbert-mlx" | "jina-v5-nano-mlx" | "quality" | "multilingual" | "bge-m3" | "jina-v3";
         /** Entry */
         Entry: {
             document: string;
@@ -955,8 +962,6 @@ export interface components {
             source_file: string;
             markdown_file: string;
             also_in?: components["schemas"]["PassageReference"][];
-            /** @default 0 */
-            also_count: number;
         };
         /** FieldDoc */
         FieldDoc: {
@@ -1006,8 +1011,6 @@ export interface components {
             /** @default  */
             markdown_file: string;
             also_in?: components["schemas"]["HitReference"][];
-            /** @default 0 */
-            also_count: number;
         };
         /** HitReference */
         HitReference: {
@@ -1019,7 +1022,9 @@ export interface components {
             line_start: number;
             line_end: number;
             score: number;
+            relation: components["schemas"]["Relation"];
             similarity: number;
+            via?: string | null;
         };
         /** HotSection */
         HotSection: {
@@ -1053,6 +1058,7 @@ export interface components {
         /** Init */
         Init: {
             profile: components["schemas"]["EmbeddingProfile"];
+            search?: components["schemas"]["SearchSettings"];
         };
         /** Job */
         Job: {
@@ -1072,8 +1078,6 @@ export interface components {
         };
         /** Lines */
         Lines: {
-            line_start: number;
-            line_end: number;
             text: string;
         };
         /** Listed */
@@ -1103,6 +1107,11 @@ export interface components {
             last_maintained_at: number | null;
             vector_index_rows: number;
         };
+        /** Matryoshka */
+        Matryoshka: {
+            /** @default false */
+            layer_norm: boolean;
+        };
         /** Member */
         Member: {
             document: components["schemas"]["Document"];
@@ -1118,6 +1127,14 @@ export interface components {
          * @enum {string}
          */
         MemberStatus: "pending" | "indexing" | "indexed" | "error" | "cancelled";
+        /** ModelCard */
+        ModelCard: {
+            description: string;
+            params: number;
+            metadata: {
+                [key: string]: string;
+            };
+        };
         /**
          * ModelKind
          * @enum {string}
@@ -1179,6 +1196,9 @@ export interface components {
             fusions: components["schemas"]["Fusion"][];
             rerankers: components["schemas"]["Reranker"][];
             reranker_models: string[];
+            reranker_cards: {
+                [key: string]: components["schemas"]["ModelCard"];
+            };
             docs: {
                 [key: string]: components["schemas"]["FieldDoc"];
             };
@@ -1256,8 +1276,6 @@ export interface components {
             source_file: string;
             markdown_file: string;
             also_in?: components["schemas"]["PassageReference"][];
-            /** @default 0 */
-            also_count: number;
         };
         /** PassageReference */
         PassageReference: {
@@ -1270,7 +1288,9 @@ export interface components {
             line_start: number;
             line_end: number;
             score: number;
+            relation: components["schemas"]["Relation"];
             similarity: number;
+            via?: string | null;
         };
         /**
          * PieceType
@@ -1376,6 +1396,13 @@ export interface components {
             running: number;
         };
         /**
+         * Relation
+         * @description How a folded result overlaps the result it was measured against (`search.collapse`): the
+         *     one it is listed under, or its reference's `via`.
+         * @enum {string}
+         */
+        Relation: "duplicate" | "contained" | "same_span";
+        /**
          * Reranker
          * @description Second-stage scoring applied to the Candidates of any mode (vector, fts or hybrid). cross-encoder: a model reads query and chunk together and rescores each pair; slower but more precise than embeddings. none: keep the retrieval order.
          * @default none
@@ -1468,7 +1495,7 @@ export interface components {
             reranker?: components["schemas"]["Reranker"] | null;
             /**
              * Reranker model
-             * @description Cross-encoder used when Reranker is cross-encoder. ms-marco-MiniLM-L-6 is fast and English; bge-reranker-base is stronger; jina-reranker-v2 is multilingual. Downloaded on first use.
+             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded on first use.
              */
             reranker_model?: string | null;
         };
@@ -1521,7 +1548,7 @@ export interface components {
             reranker?: components["schemas"]["Reranker"];
             /**
              * Reranker model
-             * @description Cross-encoder used when Reranker is cross-encoder. ms-marco-MiniLM-L-6 is fast and English; bge-reranker-base is stronger; jina-reranker-v2 is multilingual. Downloaded on first use.
+             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded on first use.
              * @default Xenova/ms-marco-MiniLM-L-6-v2
              */
             reranker_model: string;

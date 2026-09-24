@@ -8,7 +8,7 @@ import { Shell, Tabs, type TabDef } from '../ui'
 import { DAY, HOUR, stacked, trend, type Point, type Trend } from './insights/trend'
 
 const PLOT_HEIGHT = 240
-// Greys, darkest for the biggest series: a session or a collection is an identity, so its shade holds across ranges.
+// Greys, darkest for the biggest series: a session or a document is an identity, so its shade holds across ranges.
 const GREYS = ['#0f1317', '#333940', '#575e66', '#7b828b', '#9fa5ad', '#c0c5cb']
 
 // The tab id is the range in days, so the selected tab and the loaded range are one number.
@@ -30,16 +30,17 @@ const bucketLabel = (unixSeconds: number, byHour: boolean): string =>
 const loadSearches = (days: number): Promise<Point[]> =>
   api.searchTrend(days).then((points) => points.map((one) => ({ ts: one.ts, key: one.session_id, n: 1 })))
 const loadChunks = (days: number): Promise<Point[]> =>
-  api.chunkTrend(days).then((points) => points.map((one) => ({ ts: one.ts, key: one.collection, n: one.chunks })))
+  api.chunkTrend(days).then((points) => points.map((one) => ({ ts: one.ts, key: one.document, n: one.chunks })))
 
 /** Two trends over the same ranges: searches stacked by session, and indexed chunks stacked by
- *  collection: how much the agents use the shelf, and how much lands on it. */
+ *  document, an import and every index of it alike: how much the agents use the shelf, and how
+ *  much lands on it. */
 export function Insights({ route, counts }: PageProps) {
   return (
     <Shell current={route.name} counts={counts}>
       <div className="insights sections">
         <TrendChart what="searches" other="other sessions" load={loadSearches} />
-        <TrendChart what="chunks indexed" other="other collections" load={loadChunks} />
+        <TrendChart what="chunks indexed" other="other documents" load={loadChunks} />
       </div>
     </Shell>
   )

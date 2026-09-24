@@ -20,11 +20,17 @@ export default function App() {
   const [status, setStatus] = useState<Status | null>(null)
   const [counts, setCounts] = useState<NavCounts>({ documents: null, collections: null })
 
-  const refresh = useCallback(() => {
-    api.status().then(setStatus).catch(() => undefined)
-  }, [])
-  useEffect(refresh, [refresh])
-  // A model download is the only thing that changes the status on its own.
+  const refresh = useCallback(
+    () =>
+      api
+        .status()
+        .then(setStatus)
+        .catch(() => undefined),
+    [],
+  )
+  useEffect(() => void refresh(), [refresh])
+  // A model download is the only thing that changes the status on its own. A save that changes
+  // which models are needed (the embedding profile, a reranker) asks for it through `refreshStatus`.
   const downloading = status?.models.some((model) => model.state === 'loading' || model.state === 'pending') ?? false
   usePoll(downloading, refresh, STATUS_POLL_MS)
 
@@ -45,7 +51,7 @@ export default function App() {
 
   return (
     <>
-      <Page route={route} counts={counts} />
+      <Page route={route} counts={counts} refreshStatus={refresh} />
       <Statusbar status={status} />
     </>
   )
@@ -55,24 +61,25 @@ export default function App() {
 export interface PageProps<R extends Route = Route> {
   route: R
   counts: NavCounts
+  refreshStatus: () => Promise<void> // re-read the status, after a save that changes the models it lists
 }
 
 // Each page renders `Shell` itself, so its side sections and content share one component's state.
-function Page({ route, counts }: PageProps) {
+function Page({ route, counts, refreshStatus }: PageProps) {
   switch (route.name) {
     case 'explore':
-      return <Explore route={route} counts={counts} />
+      return <Explore route={route} counts={counts} refreshStatus={refreshStatus} />
     case 'documents':
-      return <Documents route={route} counts={counts} />
+      return <Documents route={route} counts={counts} refreshStatus={refreshStatus} />
     case 'collections':
-      return <Collections route={route} counts={counts} />
+      return <Collections route={route} counts={counts} refreshStatus={refreshStatus} />
     case 'operations':
-      return <Operations route={route} counts={counts} />
+      return <Operations route={route} counts={counts} refreshStatus={refreshStatus} />
     case 'sessions':
-      return <Sessions route={route} counts={counts} />
+      return <Sessions route={route} counts={counts} refreshStatus={refreshStatus} />
     case 'insights':
-      return <Insights route={route} counts={counts} />
+      return <Insights route={route} counts={counts} refreshStatus={refreshStatus} />
     case 'settings':
-      return <Settings route={route} counts={counts} />
+      return <Settings route={route} counts={counts} refreshStatus={refreshStatus} />
   }
 }

@@ -747,7 +747,11 @@ def stage_input(child) -> tuple[Stage, list[Batch]] | None:
 
     Here rather than in `operations`, so the argument positions and the signature they index into
     are edited in one place."""
-    args = child.input["args"] if child.input else None
+    # an input DBOS can no longer unpickle comes back as its raw text, with a warning: one recorded
+    # before a struct inside `Context` changed shape. Its batches are unknown, as if not kept.
+    if not isinstance(child.input, dict):
+        return None
+    args = child.input["args"]
     return (args[0], args[1]) if args else None
 
 
@@ -909,7 +913,7 @@ async def ensure_embedding(doc: str, params: embed_cache.Params) -> str:
         if found is not None:
             return found
         ctx = await load_context(doc, None)
-        current = ctx.embedding.name if ctx.embedding else embed_cache.NO_MODEL
+        current = ctx.embedding.cache_name if ctx.embedding else embed_cache.NO_MODEL
         if current != params.model:
             raise PermanentError(f"embedding model changed: wanted {params.model}, have {current}")
         ctx = msgspec.structs.replace(

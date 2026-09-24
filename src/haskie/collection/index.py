@@ -21,6 +21,7 @@ import math
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from datetime import timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,7 @@ class Row(msgspec.Struct):
 
 
 TABLE = "chunks"
+FTS_COLUMN = "framed"  # the column the full-text index is built on
 _log = get_logger(__name__)
 
 PLAIN_SCHEMA = pa.schema(
@@ -69,6 +71,9 @@ PLAIN_SCHEMA = pa.schema(
         ("headings", pa.list_(pa.string())),  # `Chunk.headings`, outermost first
         ("frame", pa.list_(pa.string())),  # `Chunk.frame`: what the models read ahead of `text`
         ("text", pa.string()),
+        # `chunk.framed(frame, text)`: what the models embed, and what full-text search reads, so a
+        # heading is found through every chunk under it and never needs a chunk of its own
+        (FTS_COLUMN, pa.string()),
         # `Chunk.layout`: where each piece starts in `text`, and its type
         ("layout", pa.list_(pa.struct([("type", pa.string()), ("position", pa.int32())]))),
         ("start_reason", pa.string()),
@@ -90,6 +95,15 @@ class IndexStats(msgspec.Struct):
     vector_index_rows: int  # rows the vector index covers; 0 without one
 
 
+class Relation(StrEnum):
+    """How a folded result overlaps the result it was measured against (`search.collapse`): the
+    one it is listed under, or its reference's `via`."""
+
+    DUPLICATE = "duplicate"  # the two say the same as a whole, or each holds the other
+    CONTAINED = "contained"  # it sits inside the result it was folded into, which says more
+    SAME_SPAN = "same_span"  # the same lines of one document, cut into chunks two ways
+
+
 class HitReference(msgspec.Struct):
     """Another hit that says what a hit says, folded into it rather than listed on its own:
     where else to cite the same point, not something to read again."""
@@ -102,7 +116,12 @@ class HitReference(msgspec.Struct):
     line_start: int  # 1-based, in the document's markdown: what `/lines` reads it back by
     line_end: int
     score: float  # its own score, before it was folded
-    similarity: float  # how close it is to the hit it was folded into
+    relation: Relation
+    similarity: float  # how strongly `relation` holds: a cosine, a word share or a span share
+    # set when `relation` and `similarity` were measured against another place in the same
+    # `also_in`, not the result it is listed under: the place it folded into first, whose slot a
+    # fuller result took later (the superset swap). That place's `location`.
+    via: str | None = None
 
 
 class Hit(msgspec.Struct):
@@ -139,8 +158,7 @@ class Hit(msgspec.Struct):
     # greps - `line_start`/`line_end` are lines in `markdown_file`.
     source_file: str = ""
     markdown_file: str = ""
-    also_in: list[HitReference] = []  # near-duplicates folded into this hit, best first
-    also_count: int = 0  # how many were folded in; `also_in` lists only the first few
+    also_in: list[HitReference] = []  # every near-duplicate folded into this hit, best first
 
 
 def location(
@@ -352,6 +370,7 @@ class CollectionIndex:
                 markdown_path=markdown_path,
                 part=part,
                 seq=row.seq,
+                **{FTS_COLUMN: framed(row.chunk.frame, row.chunk.text)},
             )
             for row in rows
         ]
@@ -383,7 +402,7 @@ class CollectionIndex:
         raw: dict[str, Any] = await table.stats()  # ty: ignore[invalid-assignment]
         fragments = raw["fragment_stats"]
         indexes = {tuple(config.columns): config for config in await table.list_indices()}
-        fts, vector = indexes.get(("text",)), indexes.get(("vector",))
+        fts, vector = indexes.get((FTS_COLUMN,)), indexes.get(("vector",))
         return IndexStats(
             num_rows=raw["num_rows"],
             num_fragments=fragments["num_fragments"],
@@ -400,10 +419,10 @@ class CollectionIndex:
         Rebuilding it per document costs O(rows) each time, so a collection of n documents used
         to cost O(n^2) to fill. Rows written after the build are still found (see above)."""
         table = await self._existing()
-        if table is None or not await table.count_rows() or await self.has_index("text"):
+        if table is None or not await table.count_rows() or await self.has_index(FTS_COLUMN):
             return
         # the async API has no `create_fts_index`; `FTS()` is the same index through `create_index`
-        await table.create_index("text", config=FTS(), replace=True)
+        await table.create_index(FTS_COLUMN, config=FTS(), replace=True)
         _log.info("fts_index_built", collection=self.collection, rows=await table.count_rows())
 
     async def optimize(self, keep: timedelta) -> None:
@@ -515,7 +534,7 @@ class CollectionIndex:
         make the whole query wait for it. `search_rows` is the opposite trade for one collection.
         """
         table = await self._readable()
-        if table is None or not await self.has_index("text"):
+        if table is None or not await self.has_index(FTS_COLUMN):
             return []
         return await (await table.search(query, query_type="fts")).limit(limit).to_list()
 
@@ -596,7 +615,7 @@ async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -
     from haskie.indexing.embed import rerank_scores
 
     await models.require_ready(models.ModelKind.RERANKER, settings.reranker_model)
-    read = [framed(r["frame"] or [], r["text"]) for r in rows]  # as they were embedded
+    read = [r[FTS_COLUMN] for r in rows]  # as they were embedded
     scores = await cpu.on_cpu(rerank_scores, settings.reranker_model, query, read)
     for row, score in zip(rows, scores, strict=True):
         row["_relevance_score"] = score

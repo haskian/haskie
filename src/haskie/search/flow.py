@@ -25,6 +25,11 @@ deeper than it answers: a folded near-duplicate frees its slot for the next resu
 chunks go into one passage, and many into one document row.
 """
 
+import functools
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, cast
 
 import msgspec
@@ -65,6 +70,73 @@ class Search(msgspec.Struct):
     sections: int = DEFAULT_SECTIONS  # `sources` only
 
 
+# --- the trace --------------------------------------------------------------------
+
+
+class StepTime(msgspec.Struct, frozen=True):
+    """How long one step of a search took."""
+
+    step: str  # the step's function name
+    label: str  # what it does, as the web UI names it
+    ms: float
+
+
+# What each step is, for a person reading the breakdown. `plan` is the work before the graph:
+# settings, the query embedding, the model checks.
+STEP_LABELS: dict[str, str] = {
+    "plan": "Embed the query",
+    "retrieve": "LanceDB retrieval",
+    "merge": "Fuse rankings",
+    "rerank": "Rerank",
+    "hits": "Read hits",
+    "collapse_hits": "Fold near-duplicates",
+    "collapse_ranges": "Merge and fold passages",
+    "widen": "Read and widen passages",
+    "shortlist": "Fold into documents",
+}
+
+# The steps of the searches one request runs, in the order they finished. A list per request,
+# started by the app (`app.bind_request_context`) and turned into its `Server-Timing` header: the
+# handlers answer what they always did, and an MCP call is timed the same way without seeing it.
+_trace: ContextVar[list[StepTime] | None] = ContextVar("haskie_search_trace", default=None)
+
+
+def start_trace() -> list[StepTime]:
+    """A trace for the current request; every step timed from here on lands in it."""
+    steps: list[StepTime] = []
+    _trace.set(steps)
+    return steps
+
+
+@contextmanager
+def _timing(step: str) -> Iterator[None]:
+    """Records how long the block took under `step`, failed or not."""
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        steps = _trace.get()
+        if steps is not None:
+            elapsed = (time.perf_counter() - started) * 1000
+            steps.append(StepTime(step=step, label=STEP_LABELS.get(step, step), ms=elapsed))
+
+
+def server_timing(steps: list[StepTime]) -> str:
+    """The `Server-Timing` header (W3C) of a trace: `retrieve;dur=41.2;desc="LanceDB retrieval"`."""
+    return ", ".join(f'{one.step};dur={one.ms:.1f};desc="{one.label}"' for one in steps)
+
+
+def _timed[F: StepFunction[Any, Any, Any, Any]](step: F, name: str) -> F:
+    """`step`, recording how long it took under `name`."""
+
+    @functools.wraps(step)
+    async def run(ctx: StepContext[Any, Any, Any]) -> Any:
+        with _timing(name):
+            return await step(ctx)
+
+    return cast(F, run)
+
+
 # --- the steps --------------------------------------------------------------------
 
 
@@ -90,7 +162,7 @@ async def hits(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Scan
 
 async def collapse_hits(ctx: StepContext[Search, None, retrieval.Scanned]) -> list[Hit]:
     """The best hits, each near-duplicate folded into the hit it repeats."""
-    return await retrieval.collapse_hits(ctx.inputs, ctx.state.limit)
+    return await retrieval.collapse_hits(ctx.inputs, ctx.state.plan.embedding, ctx.state.limit)
 
 
 async def collapse_ranges(
@@ -98,7 +170,7 @@ async def collapse_ranges(
 ) -> list[HitRange]:
     """Consecutive chunks of one document merged into one range, and each near-duplicate range
     folded into the range it repeats."""
-    return await retrieval.collapse_ranges(ctx.inputs, ctx.state.limit)
+    return await retrieval.collapse_ranges(ctx.inputs, ctx.state.plan.embedding, ctx.state.limit)
 
 
 async def widen(ctx: StepContext[Search, None, list[HitRange]]) -> list[Passage]:
@@ -133,7 +205,12 @@ def _chain[T](
     builder = GraphBuilder(state_type=Search, output_type=output)
     # `list[Any]`: a chain is heterogeneous — each step's output is the next one's input — and
     # the builder checks that pairing itself when it draws the edges
-    chain: list[Any] = [builder.step(step) for step in steps]
+    # every step is a module function; the protocol they are typed by does not promise a name
+    names: list[str] = [cast(Any, step).__name__ for step in steps]
+    chain: list[Any] = [
+        builder.step(_timed(step, name), node_id=name)
+        for step, name in zip(steps, names, strict=True)
+    ]
     pairs = zip(chain, chain[1:], strict=False)  # one edge short of the chain, by construction
     builder.add(
         builder.edge_from(builder.start_node).to(chain[0]),
@@ -205,7 +282,8 @@ async def _search(
     pipeline builds is folded from, which is what turns the caller's limit into the scan depth.
     """
     limit = limit or (await load_user_settings()).search.limit
-    where = await retrieval.plan(names, query)
+    with _timing("plan"):
+        where = await retrieval.plan(names, query)
     if where is None:
         return None
     # a pipeline that folds scans deeper than it answers, and that is what `MAX_SCAN` bounds

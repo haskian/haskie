@@ -7,21 +7,24 @@ from haskie import audit, home
 from haskie.collection.collection import ACTIVE_MEMBER_STATUSES, MEMBER_STATUSES, MemberStatus
 from haskie.document.document import ACTIVE_DOCUMENT_STATUSES, DOCUMENT_STATUSES, DocumentStatus
 from haskie.errors import Conflict
-from haskie.indexing import models, operations, workflows
+from haskie.indexing import mlx_models, models, operations, workflows
 from haskie.indexing.dbos_names import ACTIVE_STATUS, RunStatus
 from haskie.indexing.embed import device_name
 from haskie.settings import (
     PROFILES,
     RERANKER_MODELS,
+    RERANKERS,
     Accelerator,
     Chunker,
     EmbeddingModel,
     EmbeddingProfile,
     FieldDoc,
     Fusion,
+    ModelCard,
     Parser,
     Reranker,
     SearchMode,
+    SearchSettings,
     UserSettings,
     docs,
     init_user_settings,
@@ -42,7 +45,11 @@ class Status(msgspec.Struct):
 
 
 class Init(msgspec.Struct):
+    """The first run's choices: what to embed with, and how to search. Everything else starts at
+    its default and is changed in the settings later."""
+
     profile: EmbeddingProfile
+    search: SearchSettings = msgspec.field(default_factory=SearchSettings)
 
 
 class Options(msgspec.Struct):
@@ -56,6 +63,7 @@ class Options(msgspec.Struct):
     fusions: tuple[Fusion, ...]
     rerankers: tuple[Reranker, ...]
     reranker_models: tuple[str, ...]
+    reranker_cards: dict[str, ModelCard]  # every reranker model, offered here or not
     docs: dict[str, FieldDoc]  # title + definition per setting key, e.g. "conversion.chunk_size"
     embedding_profiles: dict[EmbeddingProfile, EmbeddingModel | None]
     document_statuses: tuple[DocumentStatus, ...]
@@ -100,10 +108,10 @@ async def get_status() -> Status:
 @post("/api/init")
 @audit.audited("settings.init")
 async def post_init(data: Init) -> UserSettings:
-    """First run: pick the embedding profile. The model downloads in the background; poll
-    /api/status -> models."""
+    """First run: pick the embedding profile, the search mode and the reranker. The models
+    download in the background; poll /api/status -> models."""
     audit.attach(profile=data.profile)
-    settings = UserSettings(embedding=data.profile)
+    settings = UserSettings(embedding=data.profile, search=data.search)
     if not await init_user_settings(settings):
         raise Conflict("already initialized; change embedding via settings and reindex")
     await workflows.apply_settings(settings)
@@ -135,9 +143,15 @@ OPTIONS = Options(
     search_modes=tuple(SearchMode),
     fusions=tuple(Fusion),
     rerankers=tuple(Reranker),
-    reranker_models=RERANKER_MODELS,
+    # an MLX model is offered only where it can load; one already chosen still validates
+    reranker_models=tuple(name for name in RERANKER_MODELS if mlx_models.loadable(name)),
+    reranker_cards=RERANKERS,
     docs=docs(),
-    embedding_profiles=PROFILES,
+    embedding_profiles={
+        profile: model
+        for profile, model in PROFILES.items()
+        if model is None or mlx_models.loadable(model.name)
+    },
     document_statuses=DOCUMENT_STATUSES,
     active_document_statuses=ACTIVE_DOCUMENT_STATUSES,
     member_statuses=MEMBER_STATUSES,
