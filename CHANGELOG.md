@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.6.0 - 2026-09-24
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>structure-aware chunking with typed pieces and heading frames (#12) - (7e761c5) - Črtomir Majer
+
+- - -
+
 ## v0.5.0 - 2026-09-23
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>search as a pipeline, passages read by seeking (#11) - (5f9ff46) - Črtomir Majer
