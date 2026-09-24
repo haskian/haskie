@@ -245,6 +245,8 @@ def test_widening_a_range_keeps_what_was_folded_into_it() -> None:
         seq_end=1,
         header="Retries",
         location=OTHER_ONE.location,
+        line_start=OTHER_ONE.line_start,
+        line_end=OTHER_ONE.line_end,
         score=4.0,
         similarity=0.97,
     )

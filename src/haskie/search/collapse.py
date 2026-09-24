@@ -260,6 +260,8 @@ def hits(found: list[Hit], where: Space, limit: int) -> list[Hit]:
             seq=hit.seq,
             header=hit.header,
             location=hit.location,
+            line_start=hit.line_start,
+            line_end=hit.line_end,
             score=hit.score,
             similarity=similarity,
         )
@@ -314,6 +316,8 @@ def ranges(
                 hit_range.line_start,
                 hit_range.line_end,
             ),
+            line_start=hit_range.line_start,
+            line_end=hit_range.line_end,
             score=hit_range.score,
             similarity=similarity,
         )

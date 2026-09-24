@@ -244,6 +244,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document}/lines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GetLines */
+        get: operations["ApiDocumentsLinesGetLines"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document}/description": {
         parameters: {
             query?: never;
@@ -999,6 +1016,8 @@ export interface components {
             seq: number;
             header: string;
             location: string;
+            line_start: number;
+            line_end: number;
             score: number;
             similarity: number;
         };
@@ -1050,6 +1069,12 @@ export interface components {
             /** @default 0 */
             tasks_total: number;
             seconds?: number | null;
+        };
+        /** Lines */
+        Lines: {
+            line_start: number;
+            line_end: number;
+            text: string;
         };
         /** Listed */
         Listed: {
@@ -1242,6 +1267,8 @@ export interface components {
             seq_end: number;
             header: string;
             location: string;
+            line_start: number;
+            line_end: number;
             score: number;
             similarity: number;
         };
@@ -2144,6 +2171,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiDocumentsLinesGetLines: {
+        parameters: {
+            query: {
+                line_start: number;
+                line_end: number;
+            };
+            header?: never;
+            path: {
+                document: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Lines"];
                 };
             };
             /** @description Bad request syntax or unsupported method */

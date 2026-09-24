@@ -517,6 +517,8 @@ describe('also_in', () => {
     document: 'lighting-notes.md',
     header: 'Shadows > Area lights',
     location: 'lighting-notes.md L12-14',
+    line_start: 12,
+    line_end: 14,
     score: 0.74,
     similarity: 0.97,
   }
@@ -541,6 +543,12 @@ describe('also_in', () => {
         '<span class="section-title">lighting-notes.md · Shadows &gt; Area lights</span>',
         '<span class="mono muted">L12-14</span>',
       ],
+    },
+    {
+      name: 'each place is a closed button: its lines are read only when it is opened',
+      element: <MatchModal match={{ ...HIT, also_in: [{ ...REFERENCE, seq: 3 }], also_count: 1 }} query="shadow" onClose={noop} />,
+      contains: ['<div class="section-row" role="button" tabindex="0" aria-expanded="false">'],
+      missing: ['also-text'],
     },
     {
       name: 'the modal of a match with nothing folded shows no list',

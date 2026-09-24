@@ -35,6 +35,7 @@ export type Passage = Wire<'Passage'>
 export type Source = Wire<'Source'>
 export type Sources = Wire<'Sources'>
 export type HotSection = Wire<'HotSection'>
+export type Lines = Wire<'Lines'>
 export type Status = Wire<'Status'>
 export type ModelStatus = Wire<'ModelStatus'>
 export type Task = Wire<'Task'>
@@ -230,6 +231,9 @@ export const api = {
   documentEmbeddings: (doc: string) => request<EmbeddingEntry[]>(`${documentPath(doc)}/embeddings`),
   describeDocument: (doc: string, description: string) =>
     request<ImportedDocument>(`${documentPath(doc)}/description`, json('PUT', { description })),
+  // Some lines of the converted markdown: what an `also_in` place reads back when it is opened.
+  lines: (doc: string, lineStart: number, lineEnd: number) =>
+    request<Lines>(`${documentPath(doc)}/lines${pageQuery({}, { line_start: String(lineStart), line_end: String(lineEnd) })}`),
   previewUrl: (doc: string) => `${documentPath(doc)}/preview`,
   sourceUrl: (doc: string) => `${documentPath(doc)}/source`,
   // Yields each frame as it arrives, so the first page shows without waiting for the last.

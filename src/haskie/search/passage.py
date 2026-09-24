@@ -55,6 +55,8 @@ class PassageReference(msgspec.Struct):
     seq_end: int
     header: str
     location: str
+    line_start: int  # 1-based, in the document's markdown: what `/lines` reads it back by
+    line_end: int
     score: float  # its own score, before it was folded
     similarity: float  # how close it is to the passage it was folded into
 

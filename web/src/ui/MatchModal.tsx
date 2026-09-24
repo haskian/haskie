@@ -4,7 +4,8 @@ import type { Anchor } from './anchor'
 import { DocumentPanes } from './DocumentPanes'
 import { Kv } from './Kv'
 import { Mark } from './Mark'
-import { CUT_REASONS, PIECE_NAMES, alsoCount, alsoOf, chunkSizes, cite, frameOf, headingOf, isHit, isSource, lastHeading, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Size } from './match'
+import { CUT_REASONS, PIECE_NAMES, alsoCount, alsoOf, chunkSizes, cite, frameOf, headingOf, isHit, isSource, lastHeading, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Reference, type Size } from './match'
+import { errorText } from '../format'
 import { Modal } from './Modal'
 import { Tabs, type TabDef } from './Tabs'
 
@@ -133,9 +134,53 @@ function ChunkSizes({ hit }: { hit: Hit }) {
   )
 }
 
+/** One place in `also_in`: a row naming it, which opens on click to the lines it points at,
+ *  read from the document the first time rather than carried by every search result. */
+function AlsoRow({ reference, query }: { reference: Reference; query: string }) {
+  const [open, setOpen] = useState(false)
+  const [text, setText] = useState<string | null>(null)
+  const [failed, setFailed] = useState<string | null>(null)
+  const toggle = () => {
+    setOpen(!open)
+    if (open || text !== null) return
+    api
+      .lines(reference.document, reference.line_start, reference.line_end)
+      .then((read) => setText(read.text))
+      .catch((cause: unknown) => setFailed(errorText(cause)))
+  }
+  return (
+    <>
+      <div
+        className="section-row"
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={toggle}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            toggle()
+          }
+        }}
+      >
+        <span className="mono muted">{reference.similarity.toFixed(2)}</span>
+        <span className="section-title">
+          {reference.document} · {reference.header || '—'}
+        </span>
+        <span className="mono muted">{cite(reference.location, reference.document)}</span>
+      </div>
+      {open && (
+        <blockquote className="match-text also-text">
+          {failed ?? (text === null ? 'Loading…' : <Mark text={text} query={query} />)}
+        </blockquote>
+      )}
+    </>
+  )
+}
+
 /** The other places that say what the match says, folded into it by the search: how close each
  *  one is, where it sits, and how many there were in all when only the first few are listed. */
-function AlsoIn({ match }: { match: Match }) {
+function AlsoIn({ match, query }: { match: Match; query: string }) {
   const count = alsoCount(match)
   if (count === 0) return null
   return (
@@ -147,13 +192,7 @@ function AlsoIn({ match }: { match: Match }) {
         </span>
       </div>
       {alsoOf(match).map((reference) => (
-        <div key={`${reference.collection}:${reference.location}`} className="section-row">
-          <span className="mono muted">{reference.similarity.toFixed(2)}</span>
-          <span className="section-title">
-            {reference.document} · {reference.header || '—'}
-          </span>
-          <span className="mono muted">{cite(reference.location, reference.document)}</span>
-        </div>
+        <AlsoRow key={`${reference.collection}:${reference.location}`} reference={reference} query={query} />
       ))}
     </div>
   )
@@ -226,7 +265,7 @@ function MatchBody({ match, query }: { match: Match; query: string }) {
             <span className="match-seq" title={`chunk ${seqLabel(match)}`}>{seqLabel(match)}</span>
           </blockquote>
         )}
-        <AlsoIn match={match} />
+        <AlsoIn match={match} query={query} />
       </div>
       <div id={DOCUMENT_TAB} role="tabpanel" hidden={tab !== DOCUMENT_TAB}>
         {/* The whole document, not the preview, streamed from the moment the modal opens so it

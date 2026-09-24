@@ -712,6 +712,46 @@ async def test_reading_one_document(client: AsyncTestClient) -> None:
     assert described.json()["description"] == "the guide"
 
 
+@pytest.mark.parametrize(
+    ("name", "params", "status", "text"),
+    [
+        (
+            "a heading and its paragraph",
+            {"line_start": 5, "line_end": 7},
+            200,
+            "## Alpha\n\nalpha body about lancedb",
+        ),
+        ("one line", {"line_start": 3, "line_end": 3}, 200, "intro text"),
+        ("past the end reads what is there", {"line_start": 11, "line_end": 30}, 200, "beta body"),
+        ("an end before the start", {"line_start": 7, "line_end": 5}, 422, None),
+        ("line zero: lines count from 1", {"line_start": 0, "line_end": 3}, 422, None),
+        ("more than a pointer's worth", {"line_start": 1, "line_end": 401}, 422, None),
+    ],
+)
+async def test_reading_lines_of_one_document(
+    client: AsyncTestClient, name: str, params: dict, status: int, text: str | None
+) -> None:
+    """What the web UI reads when an `also_in` place is opened: its lines, and no more."""
+    await client.post("/api/init", json={"profile": "none"})
+    await stage_and_import(client, "guide.md", MD.encode())
+
+    response = await client.get("/api/documents/guide.md/lines", params=params)
+
+    assert response.status_code == status, f"{name}: {response.text}"
+    if text is not None:
+        assert response.json() == {**params, "text": text}, name
+
+
+async def test_reading_lines_of_a_document_nobody_imported(client: AsyncTestClient) -> None:
+    await client.post("/api/init", json={"profile": "none"})
+
+    response = await client.get(
+        "/api/documents/ghost.md/lines", params={"line_start": 1, "line_end": 2}
+    )
+
+    assert response.status_code == 404
+
+
 # --- search over several collections ---------------------------------------------------
 
 

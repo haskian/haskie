@@ -5,10 +5,12 @@ changes, and which collections hold it is a membership the collection routes man
 """
 
 from collections.abc import AsyncIterator
+from itertools import islice
 from pathlib import Path
 from typing import Annotated, Literal
 
 import anyio
+import anyio.to_thread
 import msgspec
 from litestar import delete, get, post, put
 from litestar.datastructures import UploadFile
@@ -207,6 +209,41 @@ async def get_markdown(document: str, full: bool = False) -> Stream:
             yield msgspec.json.encode(page) + b"\n"
 
     return Stream(frames(), media_type="application/x-ndjson")
+
+
+MAX_LINES = 400  # a pointer's lines, not a document: `markdown` is there for the whole of it
+
+
+class Lines(msgspec.Struct):
+    """Some lines of a document's markdown, page markers taken out."""
+
+    line_start: int
+    line_end: int
+    text: str
+
+
+def _read_lines(path: Path, line_start: int, line_end: int) -> str:
+    """Lines `[line_start, line_end]` of `path`, read up to the last one rather than whole."""
+    with path.open(encoding="utf-8") as handle:
+        return "".join(islice(handle, line_start - 1, line_end))
+
+
+@get("/api/documents/{document:str}/lines")
+async def get_lines(document: str, line_start: int, line_end: int) -> Lines:
+    """Lines of the converted markdown, 1-based and inclusive: what a search result's `also_in`
+    points at, read back when the reader opens it. At most `MAX_LINES` at a time."""
+    if not 1 <= line_start <= line_end or line_end - line_start >= MAX_LINES:
+        raise InvalidInput(
+            f"lines must be 1 <= line_start <= line_end, at most {MAX_LINES} of them; "
+            f"got {line_start}-{line_end}"
+        )
+    info = await documents.get(document)
+    if not await anyio.Path(info.markdown).exists():
+        raise NotFound(f"document not imported yet: {document}")
+    raw = await anyio.to_thread.run_sync(_read_lines, info.markdown, line_start, line_end)
+    return Lines(
+        line_start=line_start, line_end=line_end, text=convert.without_markers(raw).strip()
+    )
 
 
 @put("/api/documents/{document:str}/description", mcp_tool="describe_document")

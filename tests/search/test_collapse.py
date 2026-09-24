@@ -191,6 +191,7 @@ def test_a_fold_records_where_the_repeat_is_and_how_close_it_was() -> None:
     (reference,) = kept.also_in
     assert (reference.collection, reference.document, reference.seq) == ("backend", "copy.md", 7)
     assert (reference.header, reference.location) == (found[1].header, found[1].location)
+    assert (reference.line_start, reference.line_end) == (found[1].line_start, found[1].line_end)
     assert reference.score == 0.8, "its own score, before it was folded"
     assert reference.similarity == 1.0, "every word of it is in the kept hit"
     assert kept.score == 0.9, "agreement does not raise the kept hit's score"
@@ -326,6 +327,10 @@ def test_a_folded_range_points_at_its_own_lines() -> None:
     (reference,) = kept.also_in
     (small_range,) = ranges(small)
     assert (reference.document, reference.seq_start, reference.seq_end) == ("note.md", 10, 10)
+    assert (reference.line_start, reference.line_end) == (
+        small_range.line_start,
+        small_range.line_end,
+    ), "the lines the UI reads it back by"
     assert reference.location == location(
         "note.md", None, None, small_range.line_start, small_range.line_end
     )
