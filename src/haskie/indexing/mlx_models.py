@@ -269,8 +269,8 @@ class JinaV5Embedder:
         self._model = _published(path, name, "model").JinaEmbeddingModel(
             json.loads((path / "config.json").read_text())
         )
-        # a .safetensors file always loads as one dict of arrays; mlx types every format's shape
-        weights: dict[str, Any] = mx.load(str(path / "model.safetensors"))  # ty: ignore[invalid-assignment]
+        # a .safetensors file always loads as one dict of arrays
+        weights: dict[str, Any] = mx.load(str(path / "model.safetensors"))
         self._model.load_weights(list(weights.items()))
         self._tokenizer = Tokenizer.from_file(str(path / "tokenizer.json"))
         self._lock = threading.Lock()  # see `ListwiseReranker`

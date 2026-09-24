@@ -65,6 +65,11 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ty.src]
 include = ["src", "tests"]
 
+[tool.ty.analysis]
+# The mlx extra installs these on Apple Silicon only, so CI and Linux have none of them. Typed as
+# Any everywhere, installed or not, so the check says the same on every machine.
+replace-imports-with-any = ["mlx.**", "mlx_lm.**", "mlx_embeddings.**", "transformers.**"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["network: downloads models from Hugging Face"]
