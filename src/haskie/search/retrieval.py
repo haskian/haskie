@@ -1,9 +1,9 @@
 """What each step of a search does, and the IO it takes to do it.
 
 `flow.py` says in what order the steps run and which search runs which of them; this is what
-they call. The pure folds — chunks into spans, spans into passages, hits into documents — live in
+they call. The pure folds — hits into ranges, ranges into passages, hits into documents — live in
 `passage.py`, so what is left here is the IO: reading the collections, checking the models,
-reading the markdown a span is widened against.
+reading the markdown a range is widened against.
 
 `scope` is the one place that decides which collections a search covers: the names the caller
 gave, else the session's selection, else every collection.
@@ -199,58 +199,59 @@ async def widen[P: Passage](hits: list[Hit], limit: int, cls: type[P]) -> list[P
     `passage.ranges`), widened to the line or the whole sentences around them (`passage.widen`).
     So the reader gets text that begins and ends where the author stopped.
     """
-    # cut before anything is read: the spans are already best first, and widening one keeps the
+    # cut before anything is read: the ranges are already best first, and widening one keeps the
     # score it was ranked by
-    spans = passage.ranges(hits)[:limit]
-    windows = await _windows_of(spans)
-    return [passage.widen(span, window, cls) for span, window in zip(spans, windows, strict=True)]
+    hit_ranges = passage.ranges(hits)[:limit]
+    windows = await _windows_of(hit_ranges)
+    pairs = zip(hit_ranges, windows, strict=True)
+    return [passage.widen(hit_range, window, cls) for hit_range, window in pairs]
 
 
-# Bytes read around a span, per side. `MAX_WIDEN` is a count of characters and a character is at
+# Bytes read around a range, per side. `MAX_WIDEN` is a count of characters and a character is at
 # most four bytes in UTF-8, so this much always covers what the widening may reach.
 WINDOW_BYTES = 4 * passage.MAX_WIDEN
 
 
-async def _windows_of(spans: list[passage.ChunkRange]) -> list[passage.Window]:
-    """The markdown around each span, read by seeking to it rather than reading the document.
+async def _windows_of(hit_ranges: list[passage.HitRange]) -> list[passage.Window]:
+    """The markdown around each range, read by seeking to it rather than reading the document.
 
-    One worker thread for the whole search and one open file per document, however many spans
-    each holds. Measured: ten spans cost 166us in a single hop against 717us fanned out one hop
+    One worker thread for the whole search and one open file per document, however many ranges
+    each holds. Measured: ten ranges cost 166us in a single hop against 717us fanned out one hop
     per document - a hop costs more than the few kilobytes it would overlap.
     """
-    return await anyio.to_thread.run_sync(_read_windows, spans)
+    return await anyio.to_thread.run_sync(_read_windows, hit_ranges)
 
 
-def _read_windows(spans: list[passage.ChunkRange]) -> list[passage.Window]:
-    """Every span's window, in the order asked for. Sync: the caller runs it in a worker thread,
+def _read_windows(hit_ranges: list[passage.HitRange]) -> list[passage.Window]:
+    """Every range's window, in the order asked for. Sync: the caller runs it in a worker thread,
     where the seeks and reads are ordinary blocking IO."""
     with ExitStack() as stack:
         handles: dict[str, BinaryIO] = {}
         windows: list[passage.Window] = []
-        for span in spans:
-            path = span.chunks[0].markdown_file
+        for hit_range in hit_ranges:
+            path = hit_range.hits[0].markdown_file
             if path not in handles:
                 handles[path] = stack.enter_context(open(path, "rb"))
-            windows.append(_read_window(handles[path], span))
+            windows.append(_read_window(handles[path], hit_range))
         return windows
 
 
-def _read_window(handle: BinaryIO, span: passage.ChunkRange) -> passage.Window:
-    """One span's surroundings: the span itself and `WINDOW_BYTES` either side of it, as much of
+def _read_window(handle: BinaryIO, hit_range: passage.HitRange) -> passage.Window:
+    """One range's surroundings: the range itself and `WINDOW_BYTES` either side of it, as much of
     that as the file holds.
 
     Decoded in two halves so one pass over the bytes answers both questions: how many characters
-    sit before the span (which is where the window starts, in the document's own offsets) and
+    sit before the range (which is where the window starts, in the document's own offsets) and
     what the window says. A seek lands on a byte, so the read may open mid-character - decoding
     drops that half character from the prefix and from the text alike, which is what keeps the
     two consistent.
     """
-    start = max(0, span.byte_start - WINDOW_BYTES)
+    start = max(0, hit_range.byte_start - WINDOW_BYTES)
     handle.seek(start)
-    raw = handle.read(span.byte_end - start + WINDOW_BYTES)
-    before = raw[: span.byte_start - start].decode(errors="ignore")
-    text = before + raw[span.byte_start - start :].decode(errors="ignore")
-    return passage.Window(text=text, char_start=span.char_start - len(before))
+    raw = handle.read(hit_range.byte_end - start + WINDOW_BYTES)
+    before = raw[: hit_range.byte_start - start].decode(errors="ignore")
+    text = before + raw[hit_range.byte_start - start :].decode(errors="ignore")
+    return passage.Window(text=text, char_start=hit_range.char_start - len(before))
 
 
 async def shortlist(hits: list[Hit], names: list[str], limit: int, sections: int) -> Sources:

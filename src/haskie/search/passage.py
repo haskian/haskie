@@ -6,18 +6,18 @@ What an agent wants back is one span of the document that starts and ends where 
 a passage.
 
 Three folds live here, all of them pure. `ranges` merges the chunks of one document that sit
-next to each other (`Hit.seq`) into one span. `widen` widens one such span to the nearest newline
+next to each other (`Hit.seq`) into one range. `widen` widens one such range to the nearest newline
 or sentence end of the markdown it was cut from. It is the only step that needs the text.
 `top_documents` and `fold_sources` answer the other question: which documents and which
-collections cover this. They fold the same hits per document instead of per span.
+collections cover this. They fold the same hits per document instead of per range.
 
 `widen` is given a `Window` rather than the document: the widening reaches at most `MAX_WIDEN`
-characters, so a few hundred bytes around the span are enough, and `retrieval.py` reads exactly
+characters, so a few hundred bytes around the range are enough, and `retrieval.py` reads exactly
 those (the chunk rows carry the byte offsets to seek to). Line numbers come from the chunk rows
 too - each one stores the line its text starts on - so nothing here counts the newlines of a
 document it cannot see.
 
-`harmonic` is the scoring rule all of them share: a span or a document scores the harmonic mean
+`harmonic` is the scoring rule all of them share: a range or a document scores the harmonic mean
 of its best chunk and the sum of every chunk it holds. No IO: `retrieval.py` reads the markdown
 and the memberships and hands them in.
 """
@@ -45,10 +45,10 @@ def harmonic(best: float, total: float) -> float:
 # --- chunk ranges ----------------------------------------------------------------
 
 
-class ChunkRange(msgspec.Struct):
-    """The matched chunks of one document that sit next to each other, as one span."""
+class HitRange(msgspec.Struct):
+    """The matched chunks of one document that sit next to each other, as one range."""
 
-    chunks: list[Hit]  # one collection and document, consecutive `seq`, ascending
+    hits: list[Hit]  # one collection and document, consecutive `seq`, ascending
     seq_start: int
     seq_end: int
     line_start: int
@@ -60,8 +60,8 @@ class ChunkRange(msgspec.Struct):
     score: float  # harmonic(best, sum) over the members
 
 
-def ranges(hits: list[Hit]) -> list[ChunkRange]:
-    """Fold hits into spans, best span first.
+def ranges(hits: list[Hit]) -> list[HitRange]:
+    """Fold hits into ranges, best range first.
 
     Only chunks with no gap between them merge: a gap is text the query did not match, and
     bridging it would put an unmatched paragraph inside a quoted passage. Ties sort by document
@@ -69,12 +69,12 @@ def ranges(hits: list[Hit]) -> list[ChunkRange]:
 
     Grouped by (collection, document) rather than by document: two collections may chunk the same
     document with different settings, and each numbers `seq` from 1, so a run across them would
-    merge spans cut at different offsets.
+    merge ranges cut at different offsets.
     """
     # ponytail: a chunk's identity should carry the settings it was cut with (its embedding cache
     # id), so grouping and deduplication can key on that instead of standing the collection in
     # for it.
-    found: list[ChunkRange] = []
+    found: list[HitRange] = []
     run: list[Hit] = []
     for hit in sorted(hits, key=lambda hit: (hit.collection, hit.document, hit.seq)):
         last = run[-1] if run else None
@@ -89,25 +89,23 @@ def ranges(hits: list[Hit]) -> list[ChunkRange]:
         run.append(hit)
     if run:
         found.append(_range(run))
-    return sorted(
-        found, key=lambda found: (-found.score, found.chunks[0].document, found.seq_start)
-    )
+    return sorted(found, key=lambda found: (-found.score, found.hits[0].document, found.seq_start))
 
 
-def _range(chunks: list[Hit]) -> ChunkRange:
-    """One span out of an ascending run of chunks of one document."""
-    best = max(hit.score for hit in chunks)
-    return ChunkRange(
-        chunks=chunks,
-        seq_start=chunks[0].seq,
-        seq_end=chunks[-1].seq,
-        line_start=min(hit.line_start for hit in chunks),
-        line_end=max(hit.line_end for hit in chunks),
-        char_start=min(hit.char_start for hit in chunks),
-        char_end=max(hit.char_end for hit in chunks),
-        byte_start=min(hit.byte_start for hit in chunks),
-        byte_end=max(hit.byte_end for hit in chunks),
-        score=harmonic(best, sum(hit.score for hit in chunks)),
+def _range(hits: list[Hit]) -> HitRange:
+    """One range out of an ascending run of hits of one document."""
+    best = max(hit.score for hit in hits)
+    return HitRange(
+        hits=hits,
+        seq_start=hits[0].seq,
+        seq_end=hits[-1].seq,
+        line_start=min(hit.line_start for hit in hits),
+        line_end=max(hit.line_end for hit in hits),
+        char_start=min(hit.char_start for hit in hits),
+        char_end=max(hit.char_end for hit in hits),
+        byte_start=min(hit.byte_start for hit in hits),
+        byte_end=max(hit.byte_end for hit in hits),
+        score=harmonic(best, sum(hit.score for hit in hits)),
     )
 
 
@@ -149,9 +147,9 @@ SENTENCE_END = re.compile(r"[.!?][\"')\]]?\s")
 
 
 class Window(msgspec.Struct):
-    """A slice of a document's markdown wide enough to widen one span in, and where it sits.
+    """A slice of a document's markdown wide enough to widen one range in, and where it sits.
 
-    `char_start` is the offset of `text[0]` in the whole document, so a span's own offsets
+    `char_start` is the offset of `text[0]` in the whole document, so a range's own offsets
     translate into the window and the widened ones translate back out.
     """
 
@@ -166,11 +164,11 @@ class Window(msgspec.Struct):
         return max(0, char - self.char_start)
 
 
-def widen[P: Passage](span: ChunkRange, window: Window, cls: type[P]) -> P:
-    """Widen a span to the nearest boundary on each side and read it out of `window`, as `cls`.
+def widen[P: Passage](hit_range: HitRange, window: Window, cls: type[P]) -> P:
+    """Widen a hit range to the nearest boundary on each side and read it out of `window`, as `cls`.
 
     A chunk is whole sentences, but a sentence longer than a chunk is cut on words. The text
-    around a span can also still be worth reading. Widening stops at the first of three
+    around a range can also still be worth reading. Widening stops at the first of three
     boundaries, in this order:
 
     - a newline, because a line is where the document itself stopped: a heading, a list item, a
@@ -178,7 +176,7 @@ def widen[P: Passage](span: ChunkRange, window: Window, cls: type[P]) -> P:
     - the outermost whole sentence inside `MAX_WIDEN` characters, for a line longer than that;
     - the `MAX_WIDEN` cap, when the text offers neither.
 
-    The line numbers are the span's own, corrected by the newlines the widening crossed: a chunk
+    The line numbers are the range's own, corrected by the newlines the widening crossed: a chunk
     row records the line its text starts on, and widening moves at most `MAX_WIDEN` characters,
     so counting inside that stretch answers what scanning the whole document used to.
 
@@ -186,7 +184,7 @@ def widen[P: Passage](span: ChunkRange, window: Window, cls: type[P]) -> P:
     excerpt is built rather than converted from one.
     """
     markdown = window.text
-    from_start, from_end = window.local(span.char_start), window.local(span.char_end)
+    from_start, from_end = window.local(hit_range.char_start), window.local(hit_range.char_end)
     start = _widen_back(markdown, from_start)
     end = _widen_forward(markdown, from_end)
     raw = markdown[start:end]
@@ -196,18 +194,18 @@ def widen[P: Passage](span: ChunkRange, window: Window, cls: type[P]) -> P:
     local_end = local_start + len(text)
     char_start = window.char_start + local_start
     char_end = window.char_start + local_end
-    line_start = _line_shift(markdown, span.line_start, from_start, local_start)
+    line_start = _line_shift(markdown, hit_range.line_start, from_start, local_start)
     line_end = _line_shift(
-        markdown, span.line_end, max(from_start, from_end - 1), max(local_start, local_end - 1)
+        markdown, hit_range.line_end, max(from_start, from_end - 1), max(local_start, local_end - 1)
     )
-    best = max(span.chunks, key=lambda hit: (hit.score, -hit.seq))
+    best = max(hit_range.hits, key=lambda hit: (hit.score, -hit.seq))
     return cls(
         collection=best.collection,
         document=best.document,
         header=best.header,
         location=location(best.document, best.page_start, best.page_end, line_start, line_end),
-        seq_start=span.seq_start,
-        seq_end=span.seq_end,
+        seq_start=hit_range.seq_start,
+        seq_end=hit_range.seq_end,
         line_start=line_start,
         line_end=line_end,
         char_start=char_start,
@@ -217,7 +215,7 @@ def widen[P: Passage](span: ChunkRange, window: Window, cls: type[P]) -> P:
         # the offsets and lines above describe the source; the text a reader gets has no page
         # markers, as a chunk's has none (`convert.without_markers`)
         text=without_markers(text).strip(),
-        score=span.score,
+        score=hit_range.score,
         source_file=best.source_file,
         markdown_file=best.markdown_file,
     )

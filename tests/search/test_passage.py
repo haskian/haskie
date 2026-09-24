@@ -1,4 +1,4 @@
-"""Passages out of chunks: folding hits into spans, widening a span to boundaries a reader would
+"""Passages out of chunks: folding hits into ranges, widening a range to boundaries a reader would
 stop at, and folding the same hits into the documents and collections that cover a query.
 
 Every offset below is a real offset into `MARKDOWN`: the fixture builds a `Hit` from a pair of
@@ -10,8 +10,8 @@ import pytest
 from haskie.collection.index import Hit, location
 from haskie.search.passage import (
     MAX_WIDEN,
-    ChunkRange,
     Excerpt,
+    HitRange,
     Passage,
     Sources,
     Window,
@@ -61,7 +61,7 @@ The consumer keys on an idempotency key. It drops any message it has already han
 {SENTENCES}
 """
 
-# What `widen` is handed: `retrieval` reads a window around the span, and the whole fixture is
+# What `widen` is handed: `retrieval` reads a window around the range, and the whole fixture is
 # one such window that happens to start at the beginning of the document.
 WHOLE = Window(text=MARKDOWN, char_start=0)
 
@@ -184,7 +184,7 @@ def test_harmonic_folds_the_best_chunk_with_the_sum(
             [(COLLECTION, DOC, 1, 2)],
         ),
         (
-            "a gap in seq splits the run, best span first",
+            "a gap in seq splits the range, best range first",
             [ONE, THREE],
             [(COLLECTION, DOC, 1, 1), (COLLECTION, DOC, 3, 3)],
         ),
@@ -210,7 +210,7 @@ def test_ranges_folds_consecutive_chunks_of_one_document(
 ) -> None:
     folded = ranges(hits)
 
-    shape = [(r.chunks[0].collection, r.chunks[0].document, r.seq_start, r.seq_end) for r in folded]
+    shape = [(r.hits[0].collection, r.hits[0].document, r.seq_start, r.seq_end) for r in folded]
     assert shape == expected, name
 
 
@@ -221,14 +221,14 @@ def test_a_range_carries_the_span_and_the_score_of_its_members() -> None:
 
     assert (folded.char_start, folded.char_end) == (ONE.char_start, TWO.char_end)
     assert (folded.line_start, folded.line_end) == (ONE.line_start, TWO.line_end)
-    assert folded.chunks == [ONE, TWO], "the members, ascending, for a caller that wants them"
+    assert folded.hits == [ONE, TWO], "the members, ascending, for a caller that wants them"
     assert folded.score == pytest.approx(2 * 4.0 * 7.0 / 11.0), "harmonic(best 4, sum 7)"
 
 
 # --- widen ---------------------------------------------------------------------------
 
 
-def _range(char_start: int, char_end: int, **fields) -> ChunkRange:
+def _range(char_start: int, char_end: int, **fields) -> HitRange:
     """A range of one chunk over `[char_start, char_end)`, as `ranges` would build it."""
     return ranges([_hit((char_start, char_end), 1, 2.0, **fields)])[0]
 
@@ -317,7 +317,7 @@ def test_a_passage_across_a_page_break_carries_no_page_marker() -> None:
 def test_expand_reports_document_offsets_from_a_window(
     name: str, span: tuple[int, int], before: int
 ) -> None:
-    """A search reads a few hundred bytes around the span, not the document, so `widen` works in
+    """A search reads a few hundred bytes around the range, not the document, so `widen` works in
     window coordinates and has to hand back offsets and lines of the document itself."""
     start = max(0, span[0] - before)
     window = Window(text=MARKDOWN[start : span[1] + before], char_start=start)

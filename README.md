@@ -209,8 +209,8 @@ collection deleted since the session chose it is skipped; a collection that fail
 the search, rather than leaving a hole that reads as "no match".
 
 What comes back is excerpts, not chunks. Every chunk carries `seq`, its 1-based position among its
-document's chunks. So hits that landed on consecutive chunks are one run, not several quotes of
-the same paragraph. The run's text is read back out of the source markdown and widened on each
+document's chunks. So hits that landed on consecutive chunks are one range, not several quotes of
+the same paragraph. The range's text is read back out of the source markdown and widened on each
 side: to the nearest line break, else to the outermost whole sentence within 300 characters, else
 to 300 characters. That is a passage. An excerpt is a passage with the irrelevant parts removed.
 Today it is the passage unchanged, and the type is where that trimming will go. So an excerpt

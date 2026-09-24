@@ -1,6 +1,6 @@
-"""The window a passage is widened in: what `retrieval` reads off disk for one span.
+"""The window a passage is widened in: what `retrieval` reads off disk for one hit_range.
 
-A chunk row carries byte offsets, so widening reads a couple of kilobytes around the span instead
+A chunk row carries byte offsets, so widening reads a couple of kilobytes around the range instead
 of the whole document. These check that the slice is the right one, that it starts on a character
 boundary whatever byte the seek landed on, and that a passage built from it is the passage the
 whole document would have given.
@@ -64,7 +64,7 @@ def _hit(markdown: str, path: Path, snippet: str) -> Hit:
         ("multi-byte, so the seek lands mid-character", WIDE, "Абзац 20 — über"),
         ("the first chunk: the window starts at the file", WIDE, "# Wiederholungen"),
         ("the last chunk: the read stops at the end of the file", WIDE, "Абзац 39 — über"),
-        ("a span whose own text is multi-byte", WIDE, "Абзац 7 — über Wiederholungen 🌍"),
+        ("a range whose own text is multi-byte", WIDE, "Абзац 7 — über Wiederholungen 🌍"),
     ],
 )
 def test_a_window_is_the_document_around_one_span(
@@ -72,15 +72,16 @@ def test_a_window_is_the_document_around_one_span(
 ) -> None:
     path = tmp_path / "doc.md"
     path.write_text(markdown, encoding="utf-8")
-    (span,) = ranges([_hit(markdown, path, snippet)])
+    (hit_range,) = ranges([_hit(markdown, path, snippet)])
 
-    (window,) = retrieval._read_windows([span])
+    (window,) = retrieval._read_windows([hit_range])
 
     assert window.text in markdown, f"{name}: a slice of the document, decoded whole"
-    start = window.local(span.char_start)
-    assert window.text[start : window.local(span.char_end)] == snippet, f"{name}: the span itself"
+    start = window.local(hit_range.char_start)
+    end = window.local(hit_range.char_end)
+    assert window.text[start:end] == snippet, f"{name}: the range itself"
     assert markdown[window.char_start : window.char_start + len(window.text)] == window.text, name
-    assert widen(span, window, Passage) == widen(span, Window(markdown, 0), Passage), name
+    assert widen(hit_range, window, Passage) == widen(hit_range, Window(markdown, 0), Passage), name
 
 
 def test_a_window_reads_a_window_and_not_the_file(tmp_path: Path) -> None:
@@ -88,9 +89,9 @@ def test_a_window_reads_a_window_and_not_the_file(tmp_path: Path) -> None:
     markdown = ASCII + "filler paragraph.\n\n" * 5000
     path = tmp_path / "big.md"
     path.write_text(markdown, encoding="utf-8")
-    (span,) = ranges([_hit(markdown, path, "Paragraph 20 about")])
+    (hit_range,) = ranges([_hit(markdown, path, "Paragraph 20 about")])
 
-    (window,) = retrieval._read_windows([span])
+    (window,) = retrieval._read_windows([hit_range])
 
     assert len(window.text) <= 2 * retrieval.WINDOW_BYTES + len("Paragraph 20 about")
     assert len(markdown) > 10 * len(window.text), "the document is far larger than what was read"
@@ -98,20 +99,20 @@ def test_a_window_reads_a_window_and_not_the_file(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_the_windows_of_a_search_come_back_in_order(tmp_path: Path) -> None:
-    """A search folds spans of several documents and expands them in rank order, so the windows
-    have to line up with the spans they were read for - not with the files they came from."""
+    """A search folds ranges of several documents and widens them in rank order, so the windows
+    have to line up with the ranges they were read for - not with the files they came from."""
     first, second = tmp_path / "one.md", tmp_path / "two.md"
     first.write_text(ASCII, encoding="utf-8")
     second.write_text(WIDE, encoding="utf-8")
-    spans = [
+    hit_ranges = [
         ranges([_hit(ASCII, first, "Paragraph 20 about")])[0],
         ranges([_hit(WIDE, second, "Абзац 20 — über")])[0],
         ranges([_hit(ASCII, first, "Paragraph 31 about")])[0],
     ]
 
-    windows = await retrieval._windows_of(spans)
+    windows = await retrieval._windows_of(hit_ranges)
 
-    assert len(windows) == len(spans)
-    for span, window in zip(spans, windows, strict=True):
-        start = window.local(span.char_start)
-        assert window.text[start : window.local(span.char_end)] == span.chunks[0].text
+    assert len(windows) == len(hit_ranges)
+    for hit_range, window in zip(hit_ranges, windows, strict=True):
+        start = window.local(hit_range.char_start)
+        assert window.text[start : window.local(hit_range.char_end)] == hit_range.hits[0].text

@@ -19,13 +19,13 @@ Six words for six things, each a piece of one document. In the order a search me
     offsets, plus what only a search knows: its `score`, which collection's table matched it, and
     the absolute paths to open it with. One hit is one chunk, so it is still cut to size.
 
-`ChunkRange` (`passage.py`)
+`HitRange` (`passage.py`)
     The hits of one document that sit next to each other (`seq`, `seq + 1`, ...), folded into
-    one span. It holds offsets and line numbers but no text, because nothing has been read yet.
+    one range. It holds offsets and line numbers but no text, because nothing has been read yet.
     It lets a search decide what to read before it pays for the read.
 
 `Passage` (`passage.py`)
-    A span widened to where a reader would stop, then read out of the document: to the line it
+    A range widened to where a reader would stop, then read out of the document: to the line it
     sits on, or to whole sentences when the line is long. It is the first of these that carries
     text. Its `text` is `markdown[char_start:char_end]` with the page markers taken out, so it is
     a quote, never chunks stitched together.
@@ -34,7 +34,7 @@ Six words for six things, each a piece of one document. In the order a search me
     A passage with the parts that do not answer the question removed. Today it is the passage
     itself, unchanged. The type gives that trimming one place to land.
 
-Between `ChunkRange` and `Passage` sits the only file read in a search. `retrieval` seeks to the
-span's byte offsets and reads a few kilobytes around it, and `passage.widen` widens inside that
+Between `HitRange` and `Passage` sits the only file read in a search. `retrieval` seeks to the
+range's byte offsets and reads a few kilobytes around it, and `passage.widen` widens inside that
 window.
 """
