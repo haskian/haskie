@@ -63,10 +63,12 @@ async def explore(
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection. `limit` defaults to the user setting.
 
-    What comes back per granularity: `chunk`, the index rows themselves, as they were stored;
-    `passage`, the consecutive chunks of one document merged and widened to the line or the whole
-    sentences around them; `excerpt`, a passage with the parts that do not answer the query left
-    out (today the passage itself).
+    What comes back per granularity: `chunk`, the matching index rows; `passage`, the consecutive
+    chunks of one document merged and widened to the line or the whole sentences around them;
+    `excerpt`, a passage with the parts that do not answer the query left out (today the passage
+    itself). At every granularity a near-duplicate is folded into the better result it repeats:
+    it is listed in that result's `also_in` rather than on its own, and its slot goes to the next
+    result down.
     """
     started = time.perf_counter()
     names = await retrieval.scope(session_id, collections)
@@ -91,6 +93,9 @@ async def search_excerpts(
     it begins and ends where the author stopped. Cite it by its `header` (the heading path inside
     the document) and its `location` (document, pages, lines). `markdown_file` is the whole
     document on disk when the excerpt is not enough.
+    An excerpt that says what other places say lists them in `also_in` (`also_count` of them in
+    all) rather than returning each on its own. A place may be another document or elsewhere in
+    the same one: check its `document` before citing it as a second source.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection. Run `search_sources` first when the question is which

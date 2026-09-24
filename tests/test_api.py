@@ -834,7 +834,7 @@ async def test_session_search_survives_the_deletion_of_a_collection(
     await client.post("/api/init", json={"profile": "none"})
     for name in ("kept", "dropped"):
         await client.post("/api/collections", json={"name": name})
-        await stage_and_import(client, f"{name}.md", f"# {name}\n\nshared token\n".encode())
+        await stage_and_import(client, f"{name}.md", f"# {name}\n\nshared {name}\n".encode())
         await attach_via_api(client, name, f"{name}.md")
     await client.put("/api/sessions/s1", json={"collections": ["kept", "dropped"]})
     assert (
@@ -1048,7 +1048,7 @@ async def _scoped_collections(client: AsyncTestClient) -> None:
     await client.post("/api/init", json={"profile": "none"})
     for name in ("alpha", "beta"):
         await client.post("/api/collections", json={"name": name})
-        await stage_and_import(client, f"{name}.md", f"# {name}\n\nshared token\n".encode())
+        await stage_and_import(client, f"{name}.md", f"# {name}\n\nshared {name}\n".encode())
         await attach_via_api(client, name, f"{name}.md")
     await client.put("/api/sessions/s1", json={"collections": ["alpha"]})
 

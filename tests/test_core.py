@@ -2489,7 +2489,22 @@ async def test_session_search_counts_a_passage_once_across_collections() -> None
     for name in ("alpha", "beta"):
         collection = await Collection.create(name)
         index = collection.index_with(None)
-        await _fill(index, "shared.md", 0, 3)
+        # three chunks that say different things: the copies across the two collections are what
+        # merges here, not three chunks near-duplicating one another
+        rows = [
+            _row(text, None, seq=seq)
+            for seq, text in enumerate(
+                [
+                    "LanceDB keeps each collection as one table of chunks.",
+                    "A hybrid lancedb query fuses BM25 with the vector ranking.",
+                    "Compaction merges the small fragments lancedb writes leave behind.",
+                ],
+                start=1,
+            )
+        ]
+        await index.add_parts(
+            "shared.md", "documents/shared.md", "documents/shared.md.md", _aparts([(0, rows)])
+        )
         await index.finish()
     await session.set_collections("s1", ["alpha", "beta"])
 

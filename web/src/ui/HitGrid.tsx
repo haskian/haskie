@@ -1,14 +1,17 @@
 import type { CSSProperties } from 'react'
 import { Mark } from './Mark'
-import { fillOf, headingOf, isSource, position, type Match } from './match'
+import { alsoCount, fillOf, headingOf, isSource, position, type Match } from './match'
 
 // `--score` drives the bar under a tile: the result's place among the others, not its raw score.
 const scoreStyle = (fill: number): CSSProperties => ({ '--score': fill }) as CSSProperties
 
 // A source shows what the document is about when it has a description; a chunk or passage shows
-// the text that matched. The footer's right cell is the position, or the size of the evidence.
+// the text that matched. The footer's right cell is the position, or the size of the evidence,
+// and how many other places say the same.
 const textOf = (match: Match): string => (isSource(match) ? match.description || match.text : match.text)
-const metaOf = (match: Match): string => (isSource(match) ? `${match.chunks} chunks · ${match.sections.length} sections` : position(match))
+const alsoIn = (match: Match): string => (alsoCount(match) > 0 ? ` · also in ${alsoCount(match)}` : '')
+const metaOf = (match: Match): string =>
+  isSource(match) ? `${match.chunks} chunks · ${match.sections.length} sections` : `${position(match)}${alsoIn(match)}`
 const keyOf = (match: Match): string =>
   isSource(match) ? `${match.collection}:${match.document}` : `${match.collection}:${match.document}:${match.char_start}` // offsets are unique in a document
 

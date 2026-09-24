@@ -4,7 +4,7 @@ import type { Anchor } from './anchor'
 import { DocumentPanes } from './DocumentPanes'
 import { Kv } from './Kv'
 import { Mark } from './Mark'
-import { CUT_REASONS, PIECE_NAMES, chunkSizes, cite, frameOf, headingOf, isHit, isSource, lastHeading, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Size } from './match'
+import { CUT_REASONS, PIECE_NAMES, alsoCount, alsoOf, chunkSizes, cite, frameOf, headingOf, isHit, isSource, lastHeading, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Size } from './match'
 import { Modal } from './Modal'
 import { Tabs, type TabDef } from './Tabs'
 
@@ -133,6 +133,32 @@ function ChunkSizes({ hit }: { hit: Hit }) {
   )
 }
 
+/** The other places that say what the match says, folded into it by the search: how close each
+ *  one is, where it sits, and how many there were in all when only the first few are listed. */
+function AlsoIn({ match }: { match: Match }) {
+  const count = alsoCount(match)
+  if (count === 0) return null
+  return (
+    <div className="sections">
+      <div className="sections-head">
+        <span>Also in</span>
+        <span className="mono muted">
+          {count} {count === 1 ? 'place' : 'places'}
+        </span>
+      </div>
+      {alsoOf(match).map((reference) => (
+        <div key={`${reference.collection}:${reference.location}`} className="section-row">
+          <span className="mono muted">{reference.similarity.toFixed(2)}</span>
+          <span className="section-title">
+            {reference.document} · {reference.header || '—'}
+          </span>
+          <span className="mono muted">{cite(reference.location, reference.document)}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function MatchBody({ match, query }: { match: Match; query: string }) {
   const [tab, setTab] = useState(MATCH_TAB)
   // Fetched because the panes need the document's preview kind, which a match does not carry.
@@ -200,6 +226,7 @@ function MatchBody({ match, query }: { match: Match; query: string }) {
             <span className="match-seq" title={`chunk ${seqLabel(match)}`}>{seqLabel(match)}</span>
           </blockquote>
         )}
+        <AlsoIn match={match} />
       </div>
       <div id={DOCUMENT_TAB} role="tabpanel" hidden={tab !== DOCUMENT_TAB}>
         {/* The whole document, not the preview, streamed from the moment the modal opens so it

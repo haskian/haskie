@@ -76,18 +76,54 @@ RERANKER_MODELS: tuple[str, ...] = (
 )
 
 
+class DuplicateCosine(msgspec.Struct, frozen=True):
+    """The raw cosines two search results must exceed to count as the same point
+    (`search.collapse`). Exceeded, not reached: Set-Encoder's near-duplicate is Jaccard > 0.5."""
+
+    chunk: float  # chunk to chunk, and containment
+    passage: float  # mean vector to mean vector: means are smoother, so they run higher
+
+
 class EmbeddingModel(msgspec.Struct):
     name: str
     dims: int
     accelerator: Accelerator = Accelerator.AUTO
+    duplicate: DuplicateCosine | None = None  # None: search results are compared by words alone
 
 
-# fastembed model ids. "none" = full-text search only.
+# The `duplicate` cosines are placeholders, not calibrated. No source gives a portable value:
+# SemDeDup tunes its threshold "for each dataset manually" [1], and the BGE card says to pick one
+# from your own score distribution [3]. Calibrate on ~50 labelled pairs per model and per level,
+# keeping precision near 1, so a wrong value folds too little rather than too much.
+#
+# - bge chunk 0.92: just under the 0.93 NeMo Curator uses in its examples (its default is 0.99,
+#   with another model) [2]. Measured once, with bge-small: the same paragraph under two different
+#   heading paths scored 0.927, which is why a copy the words find folds anyway
+#   (`search.collapse.Embedded`).
+# - passage above chunk: a mean vector is smoother than its chunks, so means of related spans sit
+#   closer together (inference, redundancy-diversity-coverage.md §3.4).
+# - e5 above bge: unrelated pairs average a raw cosine of 0.707 for multilingual-e5-large against
+#   0.308 for bge-large [4], and the e5 card puts its scores "around 0.7 to 1.0" [5]. The size of
+#   the step (0.97, 0.98) is judgement, not a formula. bge-small was not measured in [4] and
+#   borrows bge-large's values.
+#
+# [1] Abbas et al. 2023, SemDeDup, https://arxiv.org/abs/2303.09540
+# [2] NVIDIA NeMo Curator, semantic dedup, https://docs.nvidia.com/nemo/curator/latest/curate-text/process-data/deduplication/semdedup.html
+# [3] https://huggingface.co/BAAI/bge-large-en-v1.5 (FAQ on similarity scores)
+# [4] Parupudi 2026, Table 1 (preprint, single author), https://arxiv.org/abs/2606.29571
+# [5] https://huggingface.co/intfloat/multilingual-e5-large (FAQ)
+# [6] Set-Encoder (ECIR 2025), https://arxiv.org/abs/2404.06912
 PROFILES: dict[EmbeddingProfile, EmbeddingModel | None] = {
-    EmbeddingProfile.NONE: None,
-    EmbeddingProfile.COMPACT: EmbeddingModel("BAAI/bge-small-en-v1.5", 384),
-    EmbeddingProfile.QUALITY: EmbeddingModel("BAAI/bge-large-en-v1.5", 1024),
-    EmbeddingProfile.MULTILINGUAL: EmbeddingModel("intfloat/multilingual-e5-large", 1024),
+    EmbeddingProfile.NONE: None,  # full-text search only
+    EmbeddingProfile.COMPACT: EmbeddingModel(
+        "BAAI/bge-small-en-v1.5", 384, duplicate=DuplicateCosine(chunk=0.92, passage=0.95)
+    ),
+    EmbeddingProfile.QUALITY: EmbeddingModel(
+        "BAAI/bge-large-en-v1.5", 1024, duplicate=DuplicateCosine(chunk=0.92, passage=0.95)
+    ),
+    EmbeddingProfile.MULTILINGUAL: EmbeddingModel(
+        "intfloat/multilingual-e5-large", 1024, duplicate=DuplicateCosine(chunk=0.97, passage=0.98)
+    ),
 }
 
 
@@ -402,7 +438,7 @@ class ConversionSettings(ChunkSettings, frozen=True):
 
 
 class SearchSettings(msgspec.Struct):
-    limit: Annotated[int, LIMIT] = 10
+    limit: Annotated[int, LIMIT] = 25
     candidates: Annotated[int, CANDIDATES] = 50
     mode: Annotated[SearchMode, MODE] = SearchMode.HYBRID
     fusion: Annotated[Fusion, FUSION] = Fusion.RRF

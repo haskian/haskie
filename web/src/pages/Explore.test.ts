@@ -29,6 +29,8 @@ const HIT: Hit = {
   score: 0.91,
   source_file: '/Users/ada/.haskie/documents/area-lights.pdf',
   markdown_file: '/Users/ada/.haskie/markdown/area-lights.md',
+  also_in: [],
+  also_count: 0,
 }
 
 const SOURCE: Source = {
@@ -65,6 +67,8 @@ const PASSAGE: Passage = {
   score: 0.91,
   source_file: '/Users/ada/.haskie/documents/area-lights.pdf',
   markdown_file: '/Users/ada/.haskie/markdown/area-lights.md',
+  also_in: [],
+  also_count: 0,
 }
 
 describe('parseScope', () => {

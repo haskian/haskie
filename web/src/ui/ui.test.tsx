@@ -61,6 +61,8 @@ const HIT: Hit = {
   score: 0.9123,
   source_file: '/home/ada/.haskie/sources/area.pdf',
   markdown_file: '/home/ada/.haskie/markdown/area.md',
+  also_in: [],
+  also_count: 0,
 }
 
 const SOURCE: Source = {
@@ -100,6 +102,8 @@ const PASSAGE: Passage = {
   score: 0.88,
   source_file: '/home/ada/.haskie/sources/area.pdf',
   markdown_file: '/home/ada/.haskie/markdown/area.md',
+  also_in: [],
+  also_count: 0,
 }
 
 const bar = (over: Partial<JobBar> = {}): JobBar => ({ label: 'Embed', done: 9, total: 22, state: 'active', ...over })
@@ -502,6 +506,47 @@ describe('MatchModal', () => {
         '<th>text</th>',
         '<th>total</th>',
       ],
+    },
+  ])
+})
+
+describe('also_in', () => {
+  // the same paragraph in a second book, folded into the result by the search
+  const REFERENCE = {
+    collection: 'A–E',
+    document: 'lighting-notes.md',
+    header: 'Shadows > Area lights',
+    location: 'lighting-notes.md L12-14',
+    score: 0.74,
+    similarity: 0.97,
+  }
+  check([
+    {
+      name: 'a tile counts the places that say the same',
+      element: <HitGrid results={[{ ...PASSAGE, also_in: [{ ...REFERENCE, seq_start: 3, seq_end: 3 }], also_count: 4 }]} query="shadow" />,
+      contains: [' · also in 4</span>'],
+    },
+    {
+      name: 'a tile with nothing folded says nothing about it',
+      element: <HitGrid results={[HIT]} query="shadow" />,
+      missing: ['also in'],
+      contains: [],
+    },
+    {
+      name: 'the modal lists each place, how close it is and where, and counts them all',
+      element: <MatchModal match={{ ...HIT, also_in: [{ ...REFERENCE, seq: 3 }], also_count: 2 }} query="shadow" onClose={noop} />,
+      contains: [
+        '<div class="sections-head"><span>Also in</span><span class="mono muted">2 places</span></div>',
+        '<span class="mono muted">0.97</span>',
+        '<span class="section-title">lighting-notes.md · Shadows &gt; Area lights</span>',
+        '<span class="mono muted">L12-14</span>',
+      ],
+    },
+    {
+      name: 'the modal of a match with nothing folded shows no list',
+      element: <MatchModal match={PASSAGE} query="shadow" onClose={noop} />,
+      contains: [],
+      missing: ['Also in'],
     },
   ])
 })

@@ -45,6 +45,20 @@ def harmonic(best: float, total: float) -> float:
 # --- chunk ranges ----------------------------------------------------------------
 
 
+class PassageReference(msgspec.Struct):
+    """Another passage that says what a passage says, folded into it rather than listed on its
+    own: where else to cite the same point, not something to read again."""
+
+    collection: str
+    document: str
+    seq_start: int  # the chunks it covers, 1-based within the document
+    seq_end: int
+    header: str
+    location: str
+    score: float  # its own score, before it was folded
+    similarity: float  # how close it is to the passage it was folded into
+
+
 class HitRange(msgspec.Struct):
     """The matched chunks of one document that sit next to each other, as one range."""
 
@@ -58,6 +72,8 @@ class HitRange(msgspec.Struct):
     byte_start: int  # the same span in bytes, which is what the markdown file is seeked to
     byte_end: int
     score: float  # harmonic(best, sum) over the members
+    also_in: list[PassageReference] = []  # near-duplicates folded into it (`collapse`), best first
+    also_count: int = 0  # how many were folded in; `also_in` lists only the first few
 
 
 def ranges(hits: list[Hit]) -> list[HitRange]:
@@ -71,7 +87,7 @@ def ranges(hits: list[Hit]) -> list[HitRange]:
     document with different settings, and each numbers `seq` from 1, so a run across them would
     merge ranges cut at different offsets.
     """
-    # ponytail: a chunk's identity should carry the settings it was cut with (its embedding cache
+    # a chunk's identity should carry the settings it was cut with (its embedding cache
     # id), so grouping and deduplication can key on that instead of standing the collection in
     # for it.
     found: list[HitRange] = []
@@ -132,6 +148,8 @@ class Passage(msgspec.Struct):
     score: float
     source_file: str  # absolute, for a tool outside the app
     markdown_file: str
+    also_in: list[PassageReference] = []  # near-duplicates folded into this passage, best first
+    also_count: int = 0  # how many were folded in; `also_in` lists only the first few
 
 
 class Excerpt(Passage):
@@ -218,6 +236,8 @@ def widen[P: Passage](hit_range: HitRange, window: Window, cls: type[P]) -> P:
         score=hit_range.score,
         source_file=best.source_file,
         markdown_file=best.markdown_file,
+        also_in=hit_range.also_in,
+        also_count=hit_range.also_count,
     )
 
 

@@ -875,11 +875,17 @@ export interface components {
          * @enum {string}
          */
         DocumentStatus: "queued" | "converting" | "embedding" | "imported" | "error" | "cancelled" | "deleting";
+        /** DuplicateCosine */
+        DuplicateCosine: {
+            chunk: number;
+            passage: number;
+        };
         /** EmbeddingModel */
         EmbeddingModel: {
             name: string;
             dims: number;
             accelerator?: components["schemas"]["Accelerator"];
+            duplicate?: components["schemas"]["DuplicateCosine"] | null;
         };
         /**
          * EmbeddingProfile
@@ -931,6 +937,9 @@ export interface components {
             score: number;
             source_file: string;
             markdown_file: string;
+            also_in?: components["schemas"]["PassageReference"][];
+            /** @default 0 */
+            also_count: number;
         };
         /** FieldDoc */
         FieldDoc: {
@@ -979,6 +988,19 @@ export interface components {
             source_file: string;
             /** @default  */
             markdown_file: string;
+            also_in?: components["schemas"]["HitReference"][];
+            /** @default 0 */
+            also_count: number;
+        };
+        /** HitReference */
+        HitReference: {
+            collection: string;
+            document: string;
+            seq: number;
+            header: string;
+            location: string;
+            score: number;
+            similarity: number;
         };
         /** HotSection */
         HotSection: {
@@ -1208,6 +1230,20 @@ export interface components {
             score: number;
             source_file: string;
             markdown_file: string;
+            also_in?: components["schemas"]["PassageReference"][];
+            /** @default 0 */
+            also_count: number;
+        };
+        /** PassageReference */
+        PassageReference: {
+            collection: string;
+            document: string;
+            seq_start: number;
+            seq_end: number;
+            header: string;
+            location: string;
+            score: number;
+            similarity: number;
         };
         /**
          * PieceType
@@ -1414,7 +1450,7 @@ export interface components {
             /**
              * Results
              * @description Number of results a search returns.
-             * @default 10
+             * @default 25
              */
             limit: number;
             /**

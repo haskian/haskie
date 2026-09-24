@@ -5,6 +5,7 @@ Every offset below is a real offset into `MARKDOWN`: the fixture builds a `Hit` 
 snippets and reads its text, lines and char range out of the document, the way the index does.
 """
 
+import msgspec
 import pytest
 
 from haskie.collection.index import Hit, location
@@ -13,6 +14,7 @@ from haskie.search.passage import (
     Excerpt,
     HitRange,
     Passage,
+    PassageReference,
     Sources,
     Window,
     fold_sources,
@@ -231,6 +233,27 @@ def test_a_range_carries_the_span_and_the_score_of_its_members() -> None:
 def _range(char_start: int, char_end: int, **fields) -> HitRange:
     """A range of one chunk over `[char_start, char_end)`, as `ranges` would build it."""
     return ranges([_hit((char_start, char_end), 1, 2.0, **fields)])[0]
+
+
+def test_widening_a_range_keeps_what_was_folded_into_it() -> None:
+    """The pointers are decided on the range (`collapse`), before anything is read, and the
+    passage is what the caller sees them on."""
+    folded = PassageReference(
+        collection="ops",
+        document=OTHER,
+        seq_start=1,
+        seq_end=1,
+        header="Retries",
+        location=OTHER_ONE.location,
+        score=4.0,
+        similarity=0.97,
+    )
+    (hit_range,) = ranges([ONE, TWO])
+    hit_range = msgspec.structs.replace(hit_range, also_in=[folded], also_count=3)
+
+    widened = widen(hit_range, WHOLE, Passage)
+
+    assert (widened.also_in, widened.also_count) == ([folded], 3)
 
 
 @pytest.mark.parametrize(

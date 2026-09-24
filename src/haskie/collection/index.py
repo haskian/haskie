@@ -90,6 +90,19 @@ class IndexStats(msgspec.Struct):
     vector_index_rows: int  # rows the vector index covers; 0 without one
 
 
+class HitReference(msgspec.Struct):
+    """Another hit that says what a hit says, folded into it rather than listed on its own:
+    where else to cite the same point, not something to read again."""
+
+    collection: str
+    document: str
+    seq: int  # 1-based position among the document's chunks
+    header: str
+    location: str
+    score: float  # its own score, before it was folded
+    similarity: float  # how close it is to the hit it was folded into
+
+
 class Hit(msgspec.Struct):
     """One matching chunk with everything needed to cite or open it."""
 
@@ -124,6 +137,8 @@ class Hit(msgspec.Struct):
     # greps - `line_start`/`line_end` are lines in `markdown_file`.
     source_file: str = ""
     markdown_file: str = ""
+    also_in: list[HitReference] = []  # near-duplicates folded into this hit, best first
+    also_count: int = 0  # how many were folded in; `also_in` lists only the first few
 
 
 def location(

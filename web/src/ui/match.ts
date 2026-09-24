@@ -100,6 +100,14 @@ export function piecesOf(hit: Hit): ChunkPiece[] {
 export const pieceMeta = (piece: ChunkPiece): string =>
   `position ${piece.position} · ${Array.from(piece.text).length} chars · ${wordsIn(piece.text)} words`
 
+/** Another place that says what a chunk or passage says, folded into it by the search. */
+export type Reference = Hit['also_in'][number] | Passage['also_in'][number]
+
+/** The places a match stands for besides itself, the first few of `alsoCount`; a source folds
+ *  none. */
+export const alsoOf = (match: Match): Reference[] => (isSource(match) ? [] : match.also_in)
+export const alsoCount = (match: Match): number => (isSource(match) ? 0 : match.also_count)
+
 /** A hot section's citation without the document name it repeats: "p.3 L7-43" out of
  *  "doc.pdf p.3 L7-43". The block naming the section already names the document once. */
 export function cite(location: string, doc: string): string {

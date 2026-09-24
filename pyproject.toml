@@ -21,6 +21,7 @@ dependencies = [
     "structlog>=25.1.0",
     "typer>=0.15.0",
     "unicode-segmentation-rs>=0.3.3",
+    "numpy>=2.0",
 ]
 
 [project.scripts]
