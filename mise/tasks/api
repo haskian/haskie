@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
-#MISE description="Run the Litestar API + MCP server on :8000 with reload"
+#MISE description="Run the Litestar API + MCP server on :8451 with reload"
 set -euo pipefail
-uv run litestar --app haskie.app:app run --reload --port 8000
+uv run litestar --app haskie.app:app run --reload --port 8451

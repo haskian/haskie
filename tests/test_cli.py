@@ -206,7 +206,7 @@ def test_version_flag_answers_without_a_subcommand() -> None:
 
 
 @contextmanager
-def holding(address: str = "http://127.0.0.1:8000") -> Iterator[None]:
+def holding(address: str = "http://127.0.0.1:8451") -> Iterator[None]:
     """Claim the home for the body, and give it back afterwards. `claim_home` takes the address
     from the environment, the way `run` leaves it there."""
     with pytest.MonkeyPatch.context() as patch:
@@ -234,7 +234,7 @@ def test_claim_home_refuses_a_second_holder_and_says_who_has_it(
 
     assert "already running" in str(refused.value)
     assert str(elsewhere) in str(refused.value), "names the home, not just the port"
-    assert "127.0.0.1:8000" in str(refused.value), "names the holder's address"
+    assert "127.0.0.1:8451" in str(refused.value), "names the holder's address"
 
 
 def test_claim_home_claims_once_and_gives_the_home_back(elsewhere: Path) -> None:
@@ -606,7 +606,7 @@ def test_install_claude(
         recorded = argv_log.read_text().splitlines()
         assert recorded[0] == f"mcp remove -s {case.scope} haskie", "replaced, so re-running works"
         assert recorded[1] == (
-            f"mcp add -s {case.scope} --transport http haskie http://127.0.0.1:8000/mcp"
+            f"mcp add -s {case.scope} --transport http haskie http://127.0.0.1:8451/mcp"
         )
     else:
         assert not argv_log.exists()
@@ -674,7 +674,7 @@ def test_install_hook(case: HookCase, claude_workspace: Path, tmp_path: Path) ->
         settings_file.parent.mkdir(parents=True)
         settings_file.write_text(case.before)
 
-    added = claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8000/mcp")
+    added = claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8451/mcp")
 
     assert added is case.added
     settings = json.loads(settings_file.read_text())
@@ -698,7 +698,7 @@ def test_install_hook_refuses_a_settings_file_it_cannot_parse(
     settings_file.write_text("{not json")
 
     with pytest.raises(InvalidInput, match="not valid JSON"):
-        claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8000/mcp")
+        claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8451/mcp")
 
     assert settings_file.read_text() == "{not json", "left exactly as it was"
 
