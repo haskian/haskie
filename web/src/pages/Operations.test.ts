@@ -4,6 +4,9 @@ import type { JobState } from '../ui'
 import { dayGroup, groupOperations, statusGroup, type GroupBy } from './operations/group'
 import { endsOf, jobDefs, jobsFor, runState, stageInfo, tagOf, taskState, taskText } from './operations/jobs'
 
+// `active_run_statuses` as `/api/options` sends it.
+const ACTIVE: RunStatus[] = ['ENQUEUED', 'PENDING']
+
 // 2019-01-19 14:32 local time: the instant the design page is drawn at.
 const STARTED = new Date(2019, 0, 19, 14, 32).getTime() / 1000
 
@@ -11,7 +14,7 @@ const STARTED = new Date(2019, 0, 19, 14, 32).getTime() / 1000
 const OPERATION: Operation = {
   id: 'import:renders/lamp.pdf:0194f2',
   kind: 'document',
-  title: 'import renders/lamp.pdf',
+  title: 'renders/lamp.pdf',
   status: 'PENDING',
   created_at: STARTED,
   updated_at: STARTED + 38,
@@ -160,44 +163,44 @@ describe('jobsFor', () => {
       ],
     },
     {
-      name: 'a collection job counts the documents it queued, and says how many it skipped',
-      job: job({ kind: 'collection', title: 'index collection notes', status: 'PENDING', detail: { bulk: 'index_collection', done: 11, skipped: 1, total: 24 } }),
+      name: 'a collection job counts the documents it queued, with no note',
+      job: job({ kind: 'collection', title: 'collection notes', status: 'PENDING', detail: { bulk: 'index_collection', done: 11, total: 24 } }),
       tasks: null,
-      expected: [{ label: 'Queue', done: 11, total: 24, state: 'active', note: '1 skipped' }],
+      expected: [{ label: 'Queue', done: 11, total: 24, state: 'active', seconds: undefined }],
     },
     {
-      name: 'a finished collection job with no progress event counts nothing and skipped nothing',
-      job: job({ kind: 'collection', title: 'index collection notes', status: 'SUCCESS', detail: {} }),
+      name: 'a finished collection job with no progress event counts nothing',
+      job: job({ kind: 'collection', title: 'collection notes', status: 'SUCCESS', detail: {} }),
       tasks: null,
-      expected: [{ label: 'Queue', done: 0, total: 0, state: 'done', note: undefined, seconds: 38 }],
+      expected: [{ label: 'Queue', done: 0, total: 0, state: 'done', seconds: 38 }],
     },
     {
       name: 'a document delete is a delete, not a queue',
       job: job({ kind: 'collection', title: 'delete document gone.pdf', status: 'SUCCESS', detail: { bulk: 'delete_document' } }),
       tasks: null,
-      expected: [{ label: 'Delete', done: 0, total: 0, state: 'done', note: undefined, seconds: 38 }],
+      expected: [{ label: 'Delete', done: 0, total: 0, state: 'done', seconds: 38 }],
     },
     {
       name: 'a download is one task, done 1/1 and timed, and says whether the model is loaded',
-      job: job({ kind: 'download', title: 'download embedding BAAI/bge-small-en-v1.5', status: 'SUCCESS', detail: { warm: true } }),
+      job: job({ kind: 'download', title: 'embedding BAAI/bge-small-en-v1.5', status: 'SUCCESS', detail: { warm: true } }),
       tasks: null,
       expected: [{ label: 'Download', done: 1, total: 1, state: 'done', note: 'loaded', seconds: 38 }],
     },
     {
       name: 'a model the process never loaded says so',
-      job: job({ kind: 'download', title: 'download embedding BAAI/bge-small-en-v1.5', status: 'SUCCESS', detail: { warm: false } }),
+      job: job({ kind: 'download', title: 'embedding BAAI/bge-small-en-v1.5', status: 'SUCCESS', detail: { warm: false } }),
       tasks: null,
       expected: [{ label: 'Download', done: 1, total: 1, state: 'done', note: 'not loaded', seconds: 38 }],
     },
     {
       name: 'a maintenance run that failed shows an error stage',
-      job: job({ kind: 'maintenance', title: 'maintain notes', status: 'ERROR', error: 'lance: commit conflict', detail: {} }),
+      job: job({ kind: 'maintenance', title: 'notes', status: 'ERROR', error: 'lance: commit conflict', detail: {} }),
       tasks: null,
       expected: [{ label: 'Maintenance', done: 0, total: 1, state: 'error', seconds: 38 }],
     },
     {
       name: 'a cancelled maintenance run is neither done nor running',
-      job: job({ kind: 'maintenance', title: 'maintain notes', status: 'CANCELLED', detail: {} }),
+      job: job({ kind: 'maintenance', title: 'notes', status: 'CANCELLED', detail: {} }),
       tasks: null,
       expected: [{ label: 'Maintenance', done: 0, total: 1, state: 'todo', seconds: undefined }],
     },
@@ -205,22 +208,23 @@ describe('jobsFor', () => {
 
   for (const testCase of cases) {
     test(testCase.name, () => {
-      expect(jobsFor(testCase.job, testCase.tasks)).toEqual(testCase.expected)
+      expect(jobsFor(testCase.job, testCase.tasks, ACTIVE)).toEqual(testCase.expected)
     })
   }
 })
 
 describe('runState', () => {
-  const cases: { name: string; status: RunStatus; expected: JobState }[] = [
+  const cases: { name: string; status: RunStatus; active?: RunStatus[]; expected: JobState }[] = [
     { name: 'success is done', status: 'SUCCESS', expected: 'done' },
     { name: 'error is an error', status: 'ERROR', expected: 'error' },
     { name: 'enqueued is active', status: 'ENQUEUED', expected: 'active' },
     { name: 'pending is active', status: 'PENDING', expected: 'active' },
     { name: 'cancelled is neither', status: 'CANCELLED', expected: 'todo' },
+    { name: 'only the statuses the backend calls active are', status: 'PENDING', active: ['ENQUEUED'], expected: 'todo' },
   ]
   for (const testCase of cases) {
     test(testCase.name, () => {
-      expect(runState(testCase.status)).toBe(testCase.expected)
+      expect(runState(testCase.status, testCase.active ?? ACTIVE)).toBe(testCase.expected)
     })
   }
 })

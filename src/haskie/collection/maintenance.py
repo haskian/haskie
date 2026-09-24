@@ -3,17 +3,18 @@ path.
 
 Indexing one document must stay O(document). Everything that is O(collection) — compacting the
 fragments each commit leaves behind, folding new rows into the full-text index, training the
-approximate vector index — happens here instead, once per batch of documents rather than once per
+approximate vector index — happens here instead, once per burst of documents rather than once per
 document. `workflows.maintain_collection` debounces the runs and puts each one on the collection's
 index partition, so maintenance never writes a table while a document's index stage does.
 
-This module decides from the maintenance columns of the `collections` row: `pending_docs`
+A run's state lives in the maintenance columns of the `collections` row: `pending_documents`
 (documents indexed since the last finished run), `last_write_at`, `last_maintained_at` and
-`vector_index_rows` (rows the vector index was last trained on). `Collection` reads and writes
-them.
+`vector_index_rows` (rows the vector index was last trained on). This module reads the last one;
+`Collection` reads and writes them all.
 """
 
 from datetime import timedelta
+from enum import StrEnum
 
 import msgspec
 
@@ -33,11 +34,16 @@ RETRAIN_GROWTH = 2.0
 # not the last write.
 KEEP_VERSIONS = timedelta(minutes=10)
 
-SkipReason = str  # "no-collection" | "no-table" | "outdated"
+
+class SkipReason(StrEnum):
+    NO_COLLECTION = "no-collection"
+    NO_TABLE = "no-table"
+    OUTDATED = "outdated"
 
 
 class Report(msgspec.Struct):
-    """What one maintenance run did. Returned by the workflow, so it is the audit of the run."""
+    """What one maintenance run did. `workflows.maintain_on_partition` returns it, so DBOS keeps
+    it as the record of the run."""
 
     collection: str
     num_rows: int
@@ -78,15 +84,15 @@ async def run(
     """
     state_ = await collection.maintenance_state()
     if state_ is None:
-        return _skipped(collection.name, "no-collection")
+        return _skipped(collection.name, SkipReason.NO_COLLECTION)
     index = collection.index_with(embedding)
     before = await index.stats()
     if before is None:
-        return _skipped(collection.name, "no-table")
+        return _skipped(collection.name, SkipReason.NO_TABLE)
     if not await index.schema_current():
-        return _skipped(collection.name, "outdated")
+        return _skipped(collection.name, SkipReason.OUTDATED)
 
-    await index.finish()  # the full-text index of a collection whose first document predates it
+    await index.finish()  # builds the full-text index when an index run left the table without one
     await index.optimize(KEEP_VERSIONS)
     after = await index.stats() or before
 

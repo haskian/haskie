@@ -9,18 +9,18 @@ import pytest
 
 from haskie.collection.index import Hit, location
 from haskie.search.passage import (
-    MAX_EXPAND,
+    MAX_WIDEN,
     ChunkRange,
     Excerpt,
     Passage,
     Sources,
     Window,
-    expand,
     fold_sources,
     harmonic,
     min_cover,
     ranges,
     top_documents,
+    widen,
 )
 
 # A long line with no sentence terminator and no newline in it: what the widening has nothing to
@@ -61,7 +61,7 @@ The consumer keys on an idempotency key. It drops any message it has already han
 {SENTENCES}
 """
 
-# What `expand` is handed: `retrieval` reads a window around the span, and the whole fixture is
+# What `widen` is handed: `retrieval` reads a window around the span, and the whole fixture is
 # one such window that happens to start at the beginning of the document.
 WHOLE = Window(text=MARKDOWN, char_start=0)
 
@@ -93,7 +93,7 @@ def _hit(
     seq: int,
     score: float,
     *,
-    doc: str = DOC,
+    document: str = DOC,
     collection: str = COLLECTION,
     header: str = "Retries",
     page_start: int | None = None,
@@ -103,14 +103,12 @@ def _hit(
     char_start, char_end = span
     line_start = MARKDOWN.count("\n", 0, char_start) + 1
     line_end = MARKDOWN.count("\n", 0, char_end - 1) + 1
-    parents, _, heading = header.rpartition(" > ")
     return Hit(
         collection=collection,
-        doc=doc,
-        source_path=f"documents/{doc}",
-        markdown_path=f"documents/{doc}.md",
+        document=document,
+        source_path=f"documents/{document}",
+        markdown_path=f"documents/{document}.md",
         part=0,
-        chunk_id=seq - 1,
         seq=seq,
         line_start=line_start,
         line_end=line_end,
@@ -120,14 +118,14 @@ def _hit(
         byte_end=len(MARKDOWN[:char_end].encode()),
         page_start=page_start,
         page_end=page_end,
-        parents=parents.split(" > ") if parents else [],
-        heading=heading,
+        headings=header.split(" > ") if header else [],
+        frame=header.split(" > ") if header else [],
         header=header,
-        location=location(doc, page_start, page_end, line_start, line_end),
+        location=location(document, page_start, page_end, line_start, line_end),
         text=MARKDOWN[char_start:char_end],
         score=score,
-        source_file=f"/home/documents/{doc}",
-        markdown_file=f"/home/documents/{doc}.md",
+        source_file=f"/home/documents/{document}",
+        markdown_file=f"/home/documents/{document}.md",
     )
 
 
@@ -142,15 +140,15 @@ DEDUP = _span("The consumer keys", "already handled.")
 
 def _chunks(doc: str = DOC) -> list[Hit]:
     return [
-        _hit(OPENING, 1, 4.0, doc=doc, header="Retries"),
-        _hit(BACKOFF, 2, 3.0, doc=doc, header="Retries > Backoff"),
-        _hit(SKEW, 3, 2.0, doc=doc, header="Retries > Ordering > Skew"),
-        _hit(DEDUP, 4, 1.0, doc=doc, header="Retries > Deduplication"),
+        _hit(OPENING, 1, 4.0, document=doc, header="Retries"),
+        _hit(BACKOFF, 2, 3.0, document=doc, header="Retries > Backoff"),
+        _hit(SKEW, 3, 2.0, document=doc, header="Retries > Ordering > Skew"),
+        _hit(DEDUP, 4, 1.0, document=doc, header="Retries > Deduplication"),
     ]
 
 
 ONE, TWO, THREE, FOUR = _chunks()
-OTHER_ONE = _hit(OPENING, 1, 4.0, doc=OTHER, collection="ops", header="Retries")
+OTHER_ONE = _hit(OPENING, 1, 4.0, document=OTHER, collection="ops", header="Retries")
 
 
 # --- harmonic -------------------------------------------------------------------------
@@ -192,7 +190,7 @@ def test_harmonic_folds_the_best_chunk_with_the_sum(
         ),
         (
             "two documents never merge, however their seq lines up",
-            [ONE, _hit(BACKOFF, 2, 3.0, doc=OTHER)],
+            [ONE, _hit(BACKOFF, 2, 3.0, document=OTHER)],
             [(COLLECTION, DOC, 1, 1), (COLLECTION, OTHER, 2, 2)],
         ),
         (
@@ -212,7 +210,7 @@ def test_ranges_folds_consecutive_chunks_of_one_document(
 ) -> None:
     folded = ranges(hits)
 
-    shape = [(r.chunks[0].collection, r.chunks[0].doc, r.seq_start, r.seq_end) for r in folded]
+    shape = [(r.chunks[0].collection, r.chunks[0].document, r.seq_start, r.seq_end) for r in folded]
     assert shape == expected, name
 
 
@@ -227,7 +225,7 @@ def test_a_range_carries_the_span_and_the_score_of_its_members() -> None:
     assert folded.score == pytest.approx(2 * 4.0 * 7.0 / 11.0), "harmonic(best 4, sum 7)"
 
 
-# --- expand ---------------------------------------------------------------------------
+# --- widen ---------------------------------------------------------------------------
 
 
 def _range(char_start: int, char_end: int, **fields) -> ChunkRange:
@@ -271,7 +269,7 @@ def _range(char_start: int, char_end: int, **fields) -> ChunkRange:
         (
             "neither a newline nor a sentence end in range: the cap is all there is",
             (_at(RUN) + 400, _at(RUN) + 450),
-            MARKDOWN[_at(RUN) + 400 - MAX_EXPAND : _at(RUN) + 450 + MAX_EXPAND].strip(),
+            MARKDOWN[_at(RUN) + 400 - MAX_WIDEN : _at(RUN) + 450 + MAX_WIDEN].strip(),
             (23, 23),
         ),
         (
@@ -285,12 +283,23 @@ def _range(char_start: int, char_end: int, **fields) -> ChunkRange:
 def test_expand_widens_a_range_to_the_nearest_boundary(
     name: str, span: tuple[int, int], expected: str, lines: tuple[int, int]
 ) -> None:
-    passage = expand(_range(*span), WHOLE, Passage)
+    passage = widen(_range(*span), WHOLE, Passage)
 
     assert passage.text == expected, name
     assert (passage.line_start, passage.line_end) == lines, f"{name}: lines recounted"
     assert MARKDOWN[passage.char_start : passage.char_end] == expected, f"{name}: offsets agree"
     assert not passage.text[:1].isspace() and not passage.text[-1:].isspace(), name
+
+
+def test_a_passage_across_a_page_break_carries_no_page_marker() -> None:
+    """A page marker is the converter's, not the document's: a passage spanning one reads without
+    it, as a chunk does, while its offsets still cut the source the file holds."""
+    markdown = "# Retries\n\nThe retry waits.\n\n<!-- page 2 -->\n\nThen it runs again.\n"
+    span = (markdown.index("The retry"), markdown.index("again.") + len("again."))
+    passage = widen(_range(*span), Window(text=markdown, char_start=0), Passage)
+    assert "<!--" not in passage.text
+    assert passage.text == "The retry waits.\n\nThen it runs again."
+    assert "<!-- page 2 -->" in markdown[passage.char_start : passage.char_end], "the source's"
 
 
 @pytest.mark.parametrize(
@@ -308,15 +317,15 @@ def test_expand_widens_a_range_to_the_nearest_boundary(
 def test_expand_reports_document_offsets_from_a_window(
     name: str, span: tuple[int, int], before: int
 ) -> None:
-    """A search reads a few hundred bytes around the span, not the document, so `expand` works in
+    """A search reads a few hundred bytes around the span, not the document, so `widen` works in
     window coordinates and has to hand back offsets and lines of the document itself."""
     start = max(0, span[0] - before)
     window = Window(text=MARKDOWN[start : span[1] + before], char_start=start)
     folded = _range(*span)
 
-    passage = expand(folded, window, Passage)
+    passage = widen(folded, window, Passage)
 
-    whole = expand(folded, WHOLE, Passage)
+    whole = widen(folded, WHOLE, Passage)
     assert (passage.char_start, passage.char_end) == (whole.char_start, whole.char_end), name
     assert (passage.line_start, passage.line_end) == (whole.line_start, whole.line_end), name
     assert passage.text == whole.text, name
@@ -338,7 +347,7 @@ def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() 
         ),
     ]
 
-    passage = expand(ranges(hits)[0], WHOLE, Passage)
+    passage = widen(ranges(hits)[0], WHOLE, Passage)
 
     assert passage.header == "Retries > Backoff", "the best-scoring chunk names the passage"
     assert (passage.page_start, passage.page_end) == (2, 3), "the best chunk's pages"
@@ -352,11 +361,11 @@ def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() 
 
 def test_an_excerpt_is_a_passage() -> None:
     """The trimming step is not written yet, so the type exists, the shape is the passage's, and
-    `expand` builds whichever of the two the caller asked for."""
+    `widen` builds whichever of the two the caller asked for."""
     span = _range(*OPENING)
-    passage = expand(span, WHOLE, Passage)
+    passage = widen(span, WHOLE, Passage)
 
-    excerpt = expand(span, WHOLE, Excerpt)
+    excerpt = widen(span, WHOLE, Excerpt)
 
     assert isinstance(excerpt, Excerpt) and isinstance(excerpt, Passage)
     assert excerpt.text == passage.text and excerpt.location == passage.location
@@ -375,9 +384,9 @@ def test_one_document_folds_to_one_row_of_evidence() -> None:
     found = _sources([ONE, TWO, THREE])
 
     (source,) = found.documents
-    assert (source.doc, source.chunks) == (DOC, 3)
+    assert (source.document, source.chunks) == (DOC, 3)
     assert source.score == pytest.approx(2 * 4.0 * 9.0 / 13.0), "harmonic(best 4, sum 9)"
-    assert (source.text, source.heading, source.location) == (ONE.text, "Retries", ONE.location)
+    assert (source.text, source.header, source.location) == (ONE.text, ONE.header, ONE.location)
     assert (source.line_start, source.line_end) == (ONE.line_start, ONE.line_end)
     assert (source.source_file, source.markdown_file) == (ONE.source_file, ONE.markdown_file)
     assert source.description == "", "filled in by the caller, from the metadata store"
@@ -388,7 +397,7 @@ def test_one_document_folds_to_one_row_of_evidence() -> None:
 def test_a_document_in_two_collections_names_both_and_is_covered_by_one() -> None:
     found = _sources([ONE, OTHER_ONE], memberships={DOC: ["archive", COLLECTION], OTHER: ["ops"]})
 
-    assert [(s.doc, s.collections) for s in found.documents] == [
+    assert [(s.document, s.collections) for s in found.documents] == [
         (OTHER, ["ops"]),
         (DOC, ["archive", COLLECTION]),
     ], "equal scores sort by document name; the memberships are carried as given"
@@ -401,19 +410,19 @@ def test_a_document_in_two_collections_names_both_and_is_covered_by_one() -> Non
         ("no hits, no sources", [], 10, []),
         (
             "one strong chunk outranks three weak ones",
-            [_hit(OPENING, 1, 5.0)] + [_hit(OPENING, i, 2.0, doc=OTHER) for i in (1, 2, 3)],
+            [_hit(OPENING, 1, 5.0)] + [_hit(OPENING, i, 2.0, document=OTHER) for i in (1, 2, 3)],
             10,
             [(DOC, 5.0), (OTHER, 2 * 2.0 * 6.0 / 8.0)],
         ),
         (
             "the limit cuts the tail of the ranking",
-            [_hit(OPENING, 1, 5.0), _hit(OPENING, 1, 4.0, doc=OTHER)],
+            [_hit(OPENING, 1, 5.0), _hit(OPENING, 1, 4.0, document=OTHER)],
             1,
             [(DOC, 5.0)],
         ),
         (
             "documents that score the same sort by name",
-            [_hit(OPENING, 1, 3.0), _hit(OPENING, 1, 3.0, doc=OTHER)],
+            [_hit(OPENING, 1, 3.0), _hit(OPENING, 1, 3.0, document=OTHER)],
             10,
             [(OTHER, 3.0), (DOC, 3.0)],
         ),
@@ -424,7 +433,7 @@ def test_fold_sources_ranks_documents_by_the_harmonic_of_best_and_sum(
 ) -> None:
     found = _sources(hits, limit=limit)
 
-    assert [(s.doc, pytest.approx(s.score)) for s in found.documents] == expected, name
+    assert [(s.document, pytest.approx(s.score)) for s in found.documents] == expected, name
 
 
 def test_sections_are_the_headings_the_query_kept_landing_under() -> None:

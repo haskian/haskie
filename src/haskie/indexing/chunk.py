@@ -1,43 +1,121 @@
-"""Chunk markdown with semantic-text-splitter (Rust); attach line range and heading ancestry.
+"""Structure-Aware Chunking: markdown cut into chunks of whole sentences, with its blocks whole.
 
-`CHUNK_VERSION` is part of the embedding cache key (`embed_cache.Params`): a cached set of chunks
-is only reusable while this module splits the same text the same way. Bump it with any change
-here that alters the output for unchanged input and settings, or the cache keeps serving chunks
-the current code would no longer produce.
+This file says what chunking does and in what order. `segment.py` holds the pure folds the steps
+hand their work to, and `chunking.md` draws why a chunk starts and ends where it does. Every step
+is one function of the same shape. `pipeline` composes them from the settings, so a step can be
+added, dropped or moved there alone:
+
+    markdown   blocks     -> sentences -> sections -> [frames] -> pack -> locate
+    text       paragraphs -> sentences -> sections -> pack -> locate
+
+Every heading after content starts a new section (`sections`). Within a section, every paragraph
+is a chunk of its own: `pack` merges short ones with their neighbours and cuts long ones into
+whole sentences. A heading over text is never part of a chunk's text. It is citation metadata
+(`Chunk.headings`), worked out whatever the settings say. Only a section of headings alone has
+its heading lines as its text.
+
+`frames` is the one optional step (`chunk_frame`). It frames each section with its
+heading path, and the models read every chunk with that path in front (`framed`). The chunk size
+counts the path, so a section's chunks pack into what the path leaves. A path longer than half a
+chunk loses its outermost headings first (`_shortened`). Without the step, a chunk's frame is
+empty and its text gets the whole size. The `text` chunker cuts no sections at headings and
+frames nothing: every heading line stays in its text. It still files each chunk under its heading
+path for citing (`_heading_paths`).
+
+This is not a `pydantic_graph` like `search/flow.py`. A search runs on the event loop, while
+chunking is CPU work in a worker thread (`pipeline.embed_batch`). There a graph would need an
+event loop of its own for every part. A fold over the steps keeps the same shape without one.
+
+`CHUNK_VERSION` is part of the embedding cache key (`embed_cache.Params`). A cached set of chunks
+is reusable only while this module cuts the same text the same way. Bump it with any change that
+alters the output for unchanged input and settings. Otherwise the cache keeps serving chunks the
+current code would no longer produce.
 """
 
-import re
 from bisect import bisect_right
+from collections.abc import Callable, Sequence
+from itertools import accumulate
 from typing import Any
 
 import msgspec
-from semantic_text_splitter import MarkdownSplitter, TextSplitter
 
-from haskie.document import render
-from haskie.document.convert import PAGE_MARKER
-from haskie.settings import ChunkSettings
+from haskie.document.convert import PAGE_MARKER, without_markers
+from haskie.indexing import segment
+from haskie.indexing.segment import CutReason, Packed, PieceType, Span, SpanKind
+from haskie.settings import Chunker, ChunkSettings
 
 CHUNK_VERSION = 1  # see the module docstring
+HEADING_SEP = " > "  # between two headings of a heading path: "Part I > Chapter 2 > Retries"
+type Opened = tuple[int, str]  # a heading still open: its level, 1 to 6, and its text
 
-NEWLINE = re.compile(r"\n")
-HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
-TRAILING_COMMENTS = re.compile(r"(\s*<!--.*?-->\s*)+$", re.DOTALL)
+
+class Piece(msgspec.Struct):
+    """One of the pieces a chunk was packed from: a sentence, or a block kept whole."""
+
+    type: PieceType  # the markdown it came from (`segment.PieceType`)
+    text: str
+
+
+class Position(msgspec.Struct):
+    """Where one piece of a chunk starts in its text, in characters: what the index keeps of the
+    pieces, since it keeps their text joined."""
+
+    type: PieceType
+    position: int
 
 
 class Chunk(msgspec.Struct):
-    heading: str
-    text: str
+    # The headings the chunk sits under, outermost first and its own heading last; empty for text
+    # before the first heading.
+    headings: list[str]
+    # The headings the models read ahead of the text (`framed`): `headings`, less its outermost
+    # ones when the whole path would take over half a chunk. A chunk of headings alone gets only
+    # the path above them, and every chunk gets none without the `frames` step.
+    frame: list[str]
+    # The chunk's text as the pieces it was packed from: its sentences, and whole blocks where
+    # the markdown has no sentences (a code block, a table), never a heading (see `headings`).
+    # Joined, they are `text`, whitespace included; the last one ends where the chunk does. Page
+    # markers are taken out (`convert.without_markers`): they are pages, not text, so `text` can
+    # be shorter than the span the offsets below give.
+    pieces: list[Piece]
     line_start: int  # 1-based, inclusive
     line_end: int  # 1-based, inclusive
-    char_start: int  # 0-based offsets into the full markdown
+    char_start: int  # 0-based offsets into the full markdown, page markers included
     char_end: int
     # The same span in bytes, which is what a file can be seeked to: a search reads the few
     # hundred bytes around a chunk rather than the whole document (see `search.retrieval`).
     byte_start: int
     byte_end: int
-    parents: list[str]  # enclosing headings, outermost first (excludes `heading`)
     page_start: int | None = None  # 1-based PDF pages, from page markers; None for non-PDF
     page_end: int | None = None
+    start_reason: CutReason = CutReason.EDGE  # why the chunk starts and ends where it does
+    end_reason: CutReason = CutReason.EDGE
+
+    @property
+    def text(self) -> str:
+        return "".join(piece.text for piece in self.pieces)
+
+    @property
+    def header(self) -> str:
+        return HEADING_SEP.join(self.headings)
+
+    @property
+    def layout(self) -> list[Position]:
+        """Where each of `pieces` starts in `text`, with its type: 0 first."""
+        starts = accumulate((len(piece.text) for piece in self.pieces[:-1]), initial=0)
+        return [Position(p.type, at) for p, at in zip(self.pieces, starts, strict=True)]
+
+
+def frame(path: Sequence[str]) -> str:
+    """What the embedding model and the reranker read ahead of a chunk's text: its frame
+    (`Chunk.frame`) joined, then a blank line. A paragraph saying "they rose by 15%" means little
+    without the section it sits in, and no chunk's text holds its heading."""
+    return f"{HEADING_SEP.join(path)}\n\n" if path else ""
+
+
+def framed(path: Sequence[str], text: str) -> str:
+    """A chunk exactly as the models read it: its frame, then its text."""
+    return frame(path) + text
 
 
 def record(
@@ -46,11 +124,15 @@ def record(
     """One Arrow record for a chunk: its own fields, plus the columns the table adds around it.
 
     Both tables that hold chunks build their rows here - the parquet cache (`embed_cache`) and a
-    collection's LanceDB table (`index`) - so a new field on `Chunk` reaches both. `dims` is the
-    width of the table's vector column, or None for a table without one; pyarrow would write a
-    null for a missing vector, so a row without one is refused here instead.
+    collection's LanceDB table (`index`) - so a new field on `Chunk` reaches both. The record
+    carries the pieces and the text joined from them, and each table's schema takes the one it
+    stores: the cache keeps the pieces, the index the text its full-text search reads and the
+    `layout` of the pieces in it. `dims` is the width of the table's vector column, or None for a
+    table without one; pyarrow would write a null for a missing vector, so a row without one is
+    refused here instead.
     """
-    values = msgspec.to_builtins(chunk) | columns
+    joined = {"text": chunk.text, "layout": msgspec.to_builtins(chunk.layout)}
+    values = msgspec.to_builtins(chunk) | joined | columns
     if dims is not None:
         if vector is None:
             raise ValueError("the table has a vector column but the row carries no vector")
@@ -58,23 +140,101 @@ def record(
     return values
 
 
-def _heading_ancestry(text: str) -> tuple[list[int], list[tuple[str, list[str]]]]:
-    """Char offset of every heading plus (heading, parents) for it. One incremental decode
-    turns pyromark's byte offsets into char offsets."""
-    data = text.encode()
-    offsets: list[int] = []
-    ancestry: list[tuple[str, list[str]]] = []
-    stack: list[render.Heading] = []
-    byte_pos = char_pos = 0
-    for mark in render.headings(text):  # already in document order
-        char_pos += len(data[byte_pos : mark.offset].decode(errors="ignore"))
-        byte_pos = mark.offset
-        while stack and stack[-1].level >= mark.level:
-            stack.pop()
-        offsets.append(char_pos)
-        ancestry.append((mark.text, [h.text for h in stack]))
-        stack.append(mark)
-    return offsets, ancestry
+class Chunking(msgspec.Struct, frozen=True):
+    """One run of the pipeline, as every step of it sees it. The values that flow between the
+    steps are their inputs and outputs; this is what they all read."""
+
+    text: str
+    settings: ChunkSettings
+    # lines / chars / bytes before `text` in the whole document: it is chunked one part at a time
+    line_offset: int
+    char_offset: int
+    byte_offset: int
+    # the headings still open where `text` starts, opened in an earlier part
+    opened: tuple[Opened, ...] = ()
+
+
+# --- the steps --------------------------------------------------------------------
+
+
+def blocks(run: Chunking, _: None) -> list[Span]:
+    """The markdown's leaf blocks: paragraphs and list items as prose, the rest kept whole."""
+    return segment.blocks(run.text)
+
+
+def paragraphs(run: Chunking, _: None) -> list[Span]:
+    """Every run of non-blank lines as prose, whatever markdown it holds."""
+    return segment.paragraphs(run.text)
+
+
+def sentences(run: Chunking, found: list[Span]) -> list[Span]:
+    """The prose cut into sentences (Unicode UAX #29), the whole blocks left as they are."""
+    return segment.sentences(run.text, found)
+
+
+class Section(msgspec.Struct, frozen=True):
+    """One section as the steps between `sections` and `pack` see it."""
+
+    pieces: list[Span]
+    # the headings every chunk of the section is read under; empty without `frames`
+    frame: list[str] = []
+
+
+def sections(run: Chunking, pieces: list[Span]) -> list[Section]:
+    """The pieces grouped by section: every heading after content starts a new one."""
+    return [Section(found) for found in segment.sections(pieces)]
+
+
+def frames(run: Chunking, found: list[Section]) -> list[Section]:
+    """Each section framed with the heading path it opens, on top of the headings `run.opened`
+    before the text, shortened to at most half a chunk. A section of headings alone has its
+    headings as its text, so its frame is only the path above them: never read twice."""
+    stack = list(run.opened)
+    framed_sections: list[Section] = []
+    for section in found:
+        own = [piece for piece in section.pieces if piece.kind == SpanKind.HEADING]
+        for piece in own:
+            _open(stack, (piece.level, piece.title))
+        path = [title for _, title in stack]  # after opening: a sibling chapter closes the last
+        if len(own) == len(section.pieces):
+            # a section's headings stack, each deeper than the last, so they end the path
+            path = path[: len(path) - len(own)]
+        path = _shortened(path, run.settings.chunk_size)
+        framed_sections.append(msgspec.structs.replace(section, frame=path))
+    return framed_sections
+
+
+def pack(run: Chunking, found: list[Section]) -> list[Packed]:
+    """Each section's pieces packed into chunks along its paragraphs (`segment.pack`). Every chunk
+    of a section shares its frame, so each gets the chunk size less that frame. `segment.fit`
+    first cuts any piece longer than that. Every section but the last ends at the next one's
+    heading; the last ends at the edge of the text."""
+    size = run.settings.chunk_size
+    short = size * run.settings.chunk_merge_below / 100  # of the whole size, whatever the frame
+    ends: list[CutReason] = [CutReason.HEADING] * (len(found) - 1) + [CutReason.EDGE]
+    packed: list[Packed] = []
+    for section, end in zip(found, ends, strict=False):
+        budget = size - len(frame(section.frame))
+        pieces = segment.fit(run.text, section.pieces, budget)
+        cut = segment.pack(pieces, budget, short, end)
+        packed += [msgspec.structs.replace(chunk, frame=section.frame) for chunk in cut]
+    return packed
+
+
+# --- the pipelines ----------------------------------------------------------------
+
+type Step = Callable[[Chunking, Any], Any]  # each step's output is the next one's input
+
+
+def pipeline(settings: ChunkSettings) -> tuple[Step, ...]:
+    """The steps one run takes, in order: the chunker's own first step, then the optional one
+    the settings turn on. `frames` needs sections cut at headings, which only the markdown
+    chunker makes."""
+    read: Step = blocks if settings.chunker == Chunker.MARKDOWN else paragraphs
+    framing: tuple[Step, ...] = ()
+    if settings.chunk_frame and settings.chunker == Chunker.MARKDOWN:
+        framing = (frames,)
+    return (read, sentences, sections, *framing, pack, locate)
 
 
 def split(
@@ -83,52 +243,134 @@ def split(
     line_offset: int = 0,
     char_offset: int = 0,
     byte_offset: int = 0,
+    opened: Sequence[Opened] = (),
 ) -> list[Chunk]:
-    """`line_offset` / `char_offset` / `byte_offset` = lines / chars / bytes preceding `text` in
-    the full document (batched indexing)."""
-    splitter_cls = MarkdownSplitter if settings.chunker == "markdown" else TextSplitter
-    splitter = splitter_cls(settings.chunk_size, overlap=settings.chunk_overlap)
-    offsets, ancestry = _heading_ancestry(text)
-    newlines = [m.start() for m in NEWLINE.finditer(text)]
+    """`text` as chunks. The pipeline chunks a document one part at a time, so `line_offset`,
+    `char_offset` and `byte_offset` count what comes before `text` in the whole document, and
+    `opened` holds the headings still open where it starts (see `open_headings`)."""
+    run = Chunking(text, settings, line_offset, char_offset, byte_offset, tuple(opened))
+    value: Any = None
+    for step in pipeline(settings):
+        value = step(run, value)
+    return value
+
+
+# --- locate -----------------------------------------------------------------------
+
+
+def open_headings(text: str, opened: Sequence[Opened] = ()) -> list[Opened]:
+    """The headings still open at the end of `text`, outermost first, given those open where it
+    starts. What the next part of a document is chunked under: a chapter opened on page 9 still
+    frames the chunks of page 11, in the next part."""
+    stack = list(opened)
+    for block in segment.blocks(text):
+        if block.kind == SpanKind.HEADING:
+            _open(stack, (block.level, block.title))
+    return stack
+
+
+def _shortened(path: list[str], size: int) -> list[str]:
+    """The heading path a chunk of `size` is framed with: the whole path, less its outermost steps
+    while it would take over half a chunk, and a last heading still too long cut to fit. The
+    innermost heading says most about the text under it; the rest of a chunk is left for that
+    text."""
+    half = size // 2
+    path = list(path)
+    while len(path) > 1 and len(frame(path)) > half:
+        path.pop(0)
+    if path and len(frame(path)) > half:
+        cut = path[0][: max(0, half - len(frame([""])))].rstrip()
+        path = [cut] if cut else []
+    return path
+
+
+def _open(stack: list[Opened], heading: Opened) -> None:
+    """A heading closes every open one at its level or deeper, then opens under the rest."""
+    while stack and stack[-1][0] >= heading[0]:
+        stack.pop()
+    stack.append(heading)
+
+
+def _heading_paths(run: Chunking, pieces: list[Span]) -> tuple[list[int], list[list[str]]]:
+    """Char offset of every heading plus the heading path it opens, outermost first, on top of
+    the headings `run.opened` before the text. Read off the heading pieces the markdown pipeline
+    already cut (`Packed.headings`); the `text` pipeline cuts none, so its paths come from one
+    parse of its own."""
+    if run.settings.chunker == Chunker.TEXT:
+        pieces = segment.blocks(run.text)
+    offsets: list[int] = []
+    paths: list[list[str]] = []
+    stack = list(run.opened)
+    for piece in pieces:
+        if piece.kind == SpanKind.HEADING and not piece.continued:  # a cut heading is still one
+            _open(stack, (piece.level, piece.title))
+            offsets.append(piece.start)
+            paths.append([title for _, title in stack])
+    return offsets, paths
+
+
+def _newlines(text: str) -> list[int]:
+    found: list[int] = []
+    at = text.find("\n")
+    while at != -1:
+        found.append(at)
+        at = text.find("\n", at + 1)
+    return found
+
+
+def locate(run: Chunking, packed: list[Packed]) -> list[Chunk]:
+    """The chunks with their offsets, lines, pages and heading paths."""
+    text = run.text
+    offsets, paths = _heading_paths(run, [h for chunk in packed for h in chunk.headings])
+    before_any = [title for _, title in run.opened]  # ahead of this part's first heading
+    newlines = _newlines(text)
     markers = [(m.start(), int(m.group(1))) for m in PAGE_MARKER.finditer(text)]
     marker_offsets = [m[0] for m in markers]
 
     def line_at(pos: int) -> int:
-        return line_offset + bisect_right(newlines, pos - 1) + 1
+        return run.line_offset + bisect_right(newlines, pos - 1) + 1
 
     def page_at(pos: int) -> int | None:
         idx = bisect_right(marker_offsets, pos) - 1
         return markers[idx][1] if idx >= 0 else None
 
-    # Byte offsets are walked, not looked up: the splitter yields ascending starts, so the cursor
-    # encodes only the text between two chunks and the whole run costs one pass over `text`.
+    # Byte offsets are walked, not looked up: chunks tile the text in order, so the cursor
+    # encodes every character once, the gap before a chunk and then the chunk itself.
     char_at = byte_at = 0
     chunks: list[Chunk] = []
-    for start, body in splitter.chunk_indices(text):
-        if not HTML_COMMENT.sub("", body).strip():
-            continue  # a lone page marker is not content
-        end = start + len(body)
+    start_reason: CutReason = (
+        CutReason.EDGE
+    )  # each chunk starts at the cut the one before it ends at
+    for chunk in packed:
+        pieces = chunk.pieces
+        last = pieces[-1]
+        ends = [piece.end for piece in pieces[:-1]] + [last.visible_end]  # ends where its text does
+        texts = [without_markers(text[p.start : e]) for p, e in zip(pieces, ends, strict=True)]
+        start, end = pieces[0].start, last.visible_end
         byte_at += len(text[char_at:start].encode())
-        char_at = start  # `start`, not `end`: the next chunk begins inside this one's overlap
-        byte_start = byte_offset + byte_at
-        idx = bisect_right(offsets, start) - 1
-        if idx < 0 and offsets and offsets[0] < end:
-            idx = 0  # no heading before the chunk but one inside it (e.g. after a page marker)
-        heading, parents = ancestry[idx] if idx >= 0 else ("", [])
+        byte_start = run.byte_offset + byte_at
+        body_bytes = len(text[start:end].encode())  # the source's, page markers and all
+        char_at, byte_at = end, byte_at + body_bytes
+        # filed under the heading its first piece is under; headings alone, under the last of them
+        alone = all(piece.kind == SpanKind.HEADING for piece in pieces)
+        idx = bisect_right(offsets, last.start if alone else start) - 1
+        headings = paths[idx] if idx >= 0 else before_any
         chunks.append(
             Chunk(
-                heading=heading,
-                text=body,
+                headings=headings,
+                frame=chunk.frame,
+                pieces=[Piece(p.type, t) for p, t in zip(pieces, texts, strict=True)],
                 line_start=line_at(start),
                 line_end=line_at(end),
-                char_start=char_offset + start,
-                char_end=char_offset + end,
+                char_start=run.char_offset + start,
+                char_end=run.char_offset + end,
                 byte_start=byte_start,
-                byte_end=byte_start + len(body.encode()),
-                parents=parents,
+                byte_end=byte_start + body_bytes,
                 page_start=page_at(start),
-                # a marker at the very end belongs to the next chunk's page, not this one's
-                page_end=page_at(start + max(0, len(TRAILING_COMMENTS.sub("", body)) - 1)),
+                page_end=page_at(end - 1),
+                start_reason=start_reason,
+                end_reason=chunk.end_reason,
             )
         )
+        start_reason = chunk.end_reason
     return chunks

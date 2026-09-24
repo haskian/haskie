@@ -1,6 +1,6 @@
 export const HOUR = 3600
 export const DAY = 24 * HOUR
-/** The chart has six greys; a seventh series and beyond fold into one "other" series. */
+/** The chart has six greys. Past six series, the sixth and later fold into one "other" series. */
 export const MAX_SERIES = 6
 
 /** One thing that happened: when, under which series, and how much of it (one search, n chunks). */
@@ -39,8 +39,8 @@ const nextBucket = (start: number, byHour: boolean): number => {
   return date.getTime() / 1000
 }
 
-/** Totals per bucket per series over the last `days` days, biggest series first; the series
- *  past the sixth fold into one named `other`. */
+/** Totals per bucket per series over the last `days` days, biggest series first. Past six
+ *  series, the sixth and later fold into one named `other`. */
 export function trend(points: Point[], days: number, now: number, other: string): Trend {
   const byHour = days === 1
   const count = byHour ? 24 : days

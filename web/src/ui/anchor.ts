@@ -3,11 +3,11 @@ import type { Heading } from '../api'
 /** Where a search result sits in its document: the heading it is under, and how far in it starts. */
 export interface Anchor {
   heading: string
-  offset?: number // char offset of the match in the markdown; absent for a document match
+  offset?: number // char offset of the match in the markdown; absent for a source
 }
 
 /** The headings a table-of-contents entry sits under, outermost first, ending with the entry. */
-export function breadcrumb(toc: Heading[], index: number): string[] {
+export function headingPath(toc: Heading[], index: number): string[] {
   const trail: string[] = []
   let level = Infinity
   for (let at = index; at >= 0; at -= 1) {

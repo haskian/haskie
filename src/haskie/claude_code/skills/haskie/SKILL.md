@@ -30,9 +30,9 @@ setting. A hit held by several collections in scope is returned once.
 
 **`search_excerpts(q, session_id?, collections?, limit?)`** → excerpts, best first. One excerpt is
 what one document says in one place: the matching chunks merged where they sit next to each other,
-widened to whole sentences, so it starts and ends where the author did.
+widened to the whole lines or sentences around them, so it starts and ends where the author did.
 
-- cite: `doc`, `header` (heading breadcrumb, "parent > … > heading"), `location`
+- cite: `document`, `header` (heading breadcrumb, "parent > … > heading"), `location`
   ("doc p.3-4 L10-20")
 - read: `text`, `score`, `collection` (whose index matched)
 - open: `markdown_file` and `source_file` (absolute paths), `line_start`/`line_end` (1-based, in
@@ -41,10 +41,10 @@ widened to whole sentences, so it starts and ends where the author did.
 
 **`search_sources(q, session_id?, collections?, limit?, sections?)`** → `documents`, best first,
 and `collections`: the fewest collections that together hold every document listed, ready for
-`set_session_collections`. Per document: `doc`, `description`, `score` (its best chunk folded with
+`set_session_collections`. Per document: `document`, `description`, `score` (its best chunk folded with
 every chunk it matched, so a document that answers throughout beats one that answers once),
 `chunks` (how many matched), `collections` (the searched ones holding it), its best chunk as
-`text`, `heading`, `location`, `line_start`, `line_end`, and `sections`: the hottest headings
+`text`, `header`, `location`, `line_start`, `line_end`, and `sections`: the hottest headings
 inside it, each with `header`, `score`, `chunks`, `location`, `line_start`, `line_end`. Read the
 sections to know where in a long document to look. `sections` caps how many come back.
 
@@ -59,7 +59,7 @@ Paged tools take `page_size` (default 100, at most 1000), `cursor`, `sort` and `
 - **`list_collections(sort: name|created_at)`** → `name`, `description`, `created_at`, `counts`
   (`total`, `indexed`, `active`, `error`, `by_status`). This list is authoritative; the trigger
   above is a snapshot from install time.
-- **`get_collection(collection)`** → the same, plus its chunk `settings` and `effective` values,
+- **`get_collection(collection)`** → the same, plus its chunk `overrides` and `effective` values,
   `search` settings, `index_outdated`, `maintenance` and `index` statistics. Members are not here.
 - **`list_collection_documents(collection, status?, sort: name|size|status|updated_at)`** →
   memberships: the `document` row, `status` (`pending`, `indexing`, `indexed`, `error`,
@@ -68,7 +68,7 @@ Paged tools take `page_size` (default 100, at most 1000), `cursor`, `sort` and `
 - **`list_documents(status?, sort: name|size|status|updated_at)`** → document rows plus
   `collections`, how many hold it. `status` is one of `queued`, `converting`, `embedding`,
   `imported`, `error`, `cancelled`, `deleting`.
-- **`get_document(doc)`** → one such row.
+- **`get_document(document)`** → one such row.
 - A document row: `name`, `suffix`, `size`, `status`, `error`, `parser`, `skip_ocr_pages`,
   `description`, `created_at`, `updated_at`.
 
@@ -81,11 +81,11 @@ Every write takes `session_id`, so the change shows in the conversation's histor
   `get_document` until `imported` or `error`.
 - **`add_document_to_collection(collection, document)`** → `operation_id`. The document is not
   searchable there until its membership reads `indexed`: poll `list_collection_documents`.
-- **`remove_document_from_collection(collection, doc)`** → nothing. Detaches only; the document
+- **`remove_document_from_collection(collection, document)`** → nothing. Detaches only; the document
   stays imported.
-- **`describe_document(doc, description)`** → the updated row. An empty description clears it.
-  `search_sources` shows the description beside each match, so write one for anything an agent must
-  choose between.
+- **`describe_document(document, description)`** → the updated row. An empty description clears it.
+  `search_sources` shows the description beside each document, so write one for anything an agent
+  must choose between.
 - Not over MCP: creating or deleting a collection, deleting a document. Point the user at the web
   UI.
 

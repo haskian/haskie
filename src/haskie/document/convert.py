@@ -8,8 +8,8 @@ a coroutine blocks that event loop.
 
 import io
 import re
+from enum import StrEnum
 from pathlib import Path
-from typing import Literal
 
 import msgspec
 import pyromark
@@ -29,10 +29,29 @@ ANYDOC_SUFFIXES = {
 }  # fmt: skip
 SUPPORTED_SUFFIXES = TEXT_SUFFIXES | HTML_SUFFIXES | IMAGE_SUFFIXES | ANYDOC_SUFFIXES
 
-# The page marker written into a PDF's markdown, and read back by `chunk` (which page a chunk is
-# on) and `render` (where to cut the document into pages). Written and parsed here so the three
-# modules share one contract.
+# The page marker written into a PDF's markdown. `segment` reads a marker as whitespace, `chunk`
+# reads which page a chunk is on and strips the markers from its text (`without_markers`), and
+# `render` cuts the document into pages at them. Written and parsed here so every module shares
+# one contract.
 PAGE_MARKER = re.compile(r"<!-- page (\d+)[^>]*-->")
+# A run of page markers and the whitespace around them, the whitespace either side captured
+MARKERS = re.compile(
+    rf"(?P<before>\s*){PAGE_MARKER.pattern}(?:\s*{PAGE_MARKER.pattern})*(?P<after>\s*)"
+)
+
+
+def without_markers(text: str) -> str:
+    """`text` with its page markers taken out, each run of them with the whitespace around it
+    made the larger of the whitespace before and after: a paragraph break stays a paragraph break
+    (`A.\n\n<!-- page 2 -->\n\nB.` is `A.\n\nB.`), and a line break or a space stays one."""
+    if "<!--" not in text:
+        return text
+    return MARKERS.sub(lambda m: max(m["before"], m["after"], key=_breaks), text)
+
+
+def _breaks(whitespace: str) -> tuple[int, int]:
+    """How much a run of whitespace separates: its line breaks first, then its length."""
+    return whitespace.count("\n"), len(whitespace)
 
 
 def page_marker(page: int, skipped: bool = False) -> str:
@@ -40,7 +59,11 @@ def page_marker(page: int, skipped: bool = False) -> str:
     return f"<!-- page {page}: needs OCR, skipped -->" if skipped else f"<!-- page {page} -->"
 
 
-PreviewKind = Literal["pdf", "image", "text", "html"]
+class PreviewKind(StrEnum):
+    PDF = "pdf"
+    IMAGE = "image"
+    TEXT = "text"
+    HTML = "html"
 
 
 class Preview(msgspec.Struct):
@@ -61,7 +84,7 @@ def to_markdown(path: Path, parser: Parser) -> str:
     suffix = path.suffix.lower()
     if suffix in IMAGE_SUFFIXES:
         return ""  # no extractable text without OCR; the preview shows the image itself
-    if parser == "plain" or suffix in TEXT_SUFFIXES | HTML_SUFFIXES:
+    if parser == Parser.PLAIN or suffix in TEXT_SUFFIXES | HTML_SUFFIXES:
         return path.read_text(encoding="utf-8", errors="replace")
     if suffix == ".pdf":
         raise ValueError(f"PDFs convert page-wise, through pdf_pages_markdown: {path.name}")
@@ -132,12 +155,12 @@ def build_preview(
         # before to_markdown: an image has no text, so the right pane stays empty
         home.atomic_write_sync(out_dir / "preview.md", "")
         home.atomic_write_sync(out_dir / "source", source.read_bytes())
-        return Preview(kind="image")
+        return Preview(kind=PreviewKind.IMAGE)
     full_markdown = to_markdown(source, parser)
     home.atomic_write_sync(out_dir / "preview.md", full_markdown)
     if suffix in TEXT_SUFFIXES:
         home.atomic_write_sync(out_dir / "source", source.read_bytes())
-        return Preview(kind="text")
+        return Preview(kind=PreviewKind.TEXT)
     # office/epub/rtf/odt: browsers cannot render these; show the markdown as HTML instead
     html = (
         source.read_text(errors="replace")
@@ -145,7 +168,7 @@ def build_preview(
         else pyromark.html(full_markdown)
     )
     home.atomic_write_sync(out_dir / "source", html)
-    return Preview(kind="html")
+    return Preview(kind=PreviewKind.HTML)
 
 
 def _pdf_preview(source: Path, out_dir: Path, skip_ocr_pages: bool) -> Preview:
@@ -166,4 +189,4 @@ def _pdf_preview(source: Path, out_dir: Path, skip_ocr_pages: bool) -> Preview:
 
     markdown, ocr_pages, _ = pdf_pages_markdown(source, list(range(shown)), skip_ocr_pages)
     home.atomic_write_sync(out_dir / "preview.md", markdown)
-    return Preview(kind="pdf", truncated=total > shown, pages=shown, ocr_pages=ocr_pages)
+    return Preview(kind=PreviewKind.PDF, truncated=total > shown, pages=shown, ocr_pages=ocr_pages)

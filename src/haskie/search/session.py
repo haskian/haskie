@@ -1,14 +1,15 @@
 """Agent sessions: which collections a session searches, and what it was seen doing.
 
-The search itself is `flow.chunks` over the collections a session selected, which is where
-it belongs: one document may sit in several collections, so the same passage can come back from
-more than one of them, and a search is about passages rather than about memberships.
+A session's selection is only the default scope of a search (`retrieval.scope`). The search
+itself runs over the collections, where it belongs: one document may sit in several of them, and
+the search counts its chunks once whichever collections hold them (`retrieval.fan_out`).
 """
 
 import sqlite3
 import time
 from collections.abc import Sequence
-from typing import Any, Literal, Protocol
+from enum import StrEnum
+from typing import Any, Protocol
 
 import msgspec
 
@@ -19,8 +20,16 @@ from haskie.errors import InvalidInput, NotFound
 MAX_SESSION_ID = 128
 MAX_COLLECTIONS = 100  # a session selects collections by hand; a longer list is a client mistake
 MAX_HISTORY = 100  # ponytail: the newest events only; page it when someone scrolls past 100
+
+
 # What a session can be seen doing. `collections` is the selection itself being set.
-type Action = Literal["search", "import", "attach", "detach", "describe", "collections"]
+class Action(StrEnum):
+    SEARCH = "search"
+    IMPORT = "import"
+    ATTACH = "attach"
+    DETACH = "detach"
+    DESCRIBE = "describe"
+    COLLECTIONS = "collections"
 
 
 async def load() -> dict[str, list[str]]:
@@ -48,7 +57,7 @@ async def set_collections(session: str, collections: list[str]) -> list[str]:
     if len(chosen) > MAX_COLLECTIONS:
         raise InvalidInput(f"at most {MAX_COLLECTIONS} collections per session, got {len(chosen)}")
     # fail fast on an unknown collection, in one query and with its name in the message
-    known = await Collection.load_settings(chosen)
+    known = await Collection.load_overrides(chosen)
     missing = [name for name in chosen if name not in known]
     if missing:
         raise NotFound(f"collection not found: {missing[0]}")
@@ -107,8 +116,8 @@ class EventDetail(msgspec.Struct, omit_defaults=True):
 
     # search: "explore", "excerpts", "sources", "text", or a collection name
     scope: str | None = None
-    hits: int | None = None  # search: how many passages came back
-    docs: list[str] | None = None  # search: the distinct documents among the hits, best first
+    hits: int | None = None  # search: how many results came back
+    documents: list[str] | None = None  # search: the distinct documents among the hits, best first
     collection: str | None = None  # attach, detach
     collections: list[str] | None = None  # collections: the selection that was set
 
@@ -116,7 +125,7 @@ class EventDetail(msgspec.Struct, omit_defaults=True):
 class SessionEvent(msgspec.Struct):
     """One thing a session did: what, to what, and what came of it in one line.
 
-    `detail` is whatever that action has to say: `hits`, `docs` and `scope` for a search,
+    `detail` is whatever that action has to say: `hits`, `documents` and `scope` for a search,
     `collections` for a selection. `operation_id` names the operation the action started, if any."""
 
     ts: float  # unix seconds
@@ -172,7 +181,7 @@ async def record(
 class Found(Protocol):
     """What every search result has in common, as far as its history event is concerned."""
 
-    doc: str
+    document: str
 
 
 async def record_search(
@@ -180,12 +189,12 @@ async def record_search(
 ) -> None:
     """A search as one event: the query, how many hits, which documents, and where it looked
     (the scopes `EventDetail` lists, or a collection's name). `started` is a `perf_counter`."""
-    docs = list(dict.fromkeys(hit.doc for hit in found))
+    documents = list(dict.fromkeys(hit.document for hit in found))
     await record(
         session,
-        "search",
+        Action.SEARCH,
         query,
-        detail=EventDetail(scope=scope, hits=len(found), docs=docs),
+        detail=EventDetail(scope=scope, hits=len(found), documents=documents),
         duration_ms=int((time.perf_counter() - started) * 1000),
     )
 
@@ -202,9 +211,8 @@ async def searches_since(cutoff: float) -> list[SearchAt]:
     buckets them by its own day boundaries, which the server does not know."""
     async with db.connect() as conn:
         cursor = await conn.execute(
-            "select ts, session_id from session_events "
-            "where action = 'search' and ts >= ? order by ts",
-            (cutoff,),
+            "select ts, session_id from session_events where action = ? and ts >= ? order by ts",
+            (Action.SEARCH, cutoff),
         )
         rows = await cursor.fetchall()
     return [SearchAt(ts, session_id) for ts, session_id in rows]

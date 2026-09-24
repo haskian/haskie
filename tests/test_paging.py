@@ -42,15 +42,22 @@ def _b64(raw: bytes) -> str:
     ],
 )
 def test_cursor_round_trip(name: str, key: list[Any]) -> None:
-    cursor = encode_cursor(key, "size", "asc")
+    cursor = encode_cursor(key, "size", Order.ASC)
     assert "=" not in cursor, "padding stripped for a URL"
-    assert decode_cursor(cursor, "size", "asc", len(key)) == key, name
+    assert decode_cursor(cursor, "size", Order.ASC, len(key)) == key, name
 
 
 @pytest.mark.parametrize(
     ("name", "cursor", "sort", "order", "width", "message"),
     [
-        ("truncated", encode_cursor(["doc-01"], "name", "asc")[:10], "name", "asc", 1, "invalid"),
+        (
+            "truncated",
+            encode_cursor(["doc-01"], "name", Order.ASC)[:10],
+            "name",
+            "asc",
+            1,
+            "invalid",
+        ),
         ("not base64", "!!!!", "name", "asc", 1, "invalid cursor"),
         ("base64 of a json array", _b64(b"[]"), "name", "asc", 1, "invalid cursor"),
         ("base64 of random bytes", _b64(b"\xff\xfe\x00"), "name", "asc", 1, "invalid cursor"),
@@ -64,7 +71,7 @@ def test_cursor_round_trip(name: str, key: list[Any]) -> None:
         ),
         (
             "wrong keyset width",
-            encode_cursor(["doc-01"], "name", "asc"),
+            encode_cursor(["doc-01"], "name", Order.ASC),
             "name",
             "asc",
             2,
@@ -72,7 +79,7 @@ def test_cursor_round_trip(name: str, key: list[Any]) -> None:
         ),
         (
             "built for another sort",
-            encode_cursor(["doc-01"], "name", "asc"),
+            encode_cursor(["doc-01"], "name", Order.ASC),
             "size",
             "asc",
             1,
@@ -80,7 +87,7 @@ def test_cursor_round_trip(name: str, key: list[Any]) -> None:
         ),
         (
             "built for the other order",
-            encode_cursor(["doc-01"], "name", "asc"),
+            encode_cursor(["doc-01"], "name", Order.ASC),
             "name",
             "desc",
             1,
@@ -270,8 +277,8 @@ def test_keyset_walk_reads_every_row_once(
 def test_look_ahead_sets_next_cursor_only_when_more_rows_exist(
     docs: sqlite3.Connection, name: str, page_size: int, expected_items: int, expects_cursor: bool
 ) -> None:
-    request = page_request(page_size=page_size, sort="size", order="asc")
-    keyset, key = _keyset("size", "asc", request)
+    request = page_request(page_size=page_size, sort="size", order=Order.ASC)
+    keyset, key = _keyset("size", Order.ASC, request)
     page = keyset.page(_fetch(docs, keyset), build=lambda row: row[0], key=key, total=ROWS)
     assert len(page.items) == expected_items, name
     assert (page.next_cursor is not None) == expects_cursor, name
@@ -279,6 +286,6 @@ def test_look_ahead_sets_next_cursor_only_when_more_rows_exist(
 
 
 def test_page_of_no_rows_is_empty_and_final() -> None:
-    keyset = Keyset("name", ["name"], "asc", page_request(page_size=4))
+    keyset = Keyset("name", ["name"], Order.ASC, page_request(page_size=4))
     page = keyset.page([], build=lambda row: row[0], key=lambda row: [row[0]])
     assert (page.items, page.next_cursor, page.total) == ([], None, None)

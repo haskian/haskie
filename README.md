@@ -82,8 +82,10 @@ authenticates a caller.
 
 A home written by a build with a different storage shape is not migrated: the app refuses to start
 against it and says so. Run `haskie destroy` and import the documents again. This release changes
-the shape — every chunk now carries its `seq` — so an existing home is refused, whichever build
-wrote it.
+the shape (Structure-Aware Chunking, see [Chunking](#chunking)), so an existing home is refused,
+whichever build wrote it. Then run `haskie install claude` again. The installed skill sits outside
+the home, and this release renames tool parameters and result fields it names (`doc` is now
+`document`).
 
 One haskie per home: the app takes an exclusive lock on the home directory as its first startup
 step, and a second one refuses, naming the process that has it. A home is one SQLite file and one
@@ -110,12 +112,13 @@ document is at `/schema/openapi.json`, and `web/src/schema.d.ts` is generated fr
 Twelve tools, in three groups:
 
 - **Search** — `search_excerpts` is the search, and what an agent answers from: passages merged
-  from adjacent chunks and widened to whole sentences, each with a `header` breadcrumb and a
-  `location` to cite. `search_sources` answers which documents, and which collections, cover
-  the topic, for a reading list or when `search_excerpts` came back empty or beside the point: one row per document with its best
-  passage, its hottest sections, and the smallest set of collections holding every row, which
-  `set_session_collections` records for the rest of the conversation. Every search takes an
-  optional comma-separated `collections`; without it, the session's selection; without that,
+  from adjacent chunks and widened to the line or the whole sentences around them. Each one
+  carries a `header` (its heading path) and a `location` to cite. `search_sources` answers which
+  documents, and which collections, cover the topic. Use it for a reading list, or when
+  `search_excerpts` came back empty or beside the point. It returns one row per document with its
+  best chunk and its hottest sections, plus the smallest set of collections holding every row.
+  `set_session_collections` records that set for the rest of the conversation. Every search takes
+  an optional comma-separated `collections`; without it, the session's selection; without that,
   everything.
 - **Catalogue** — `list_collections`, `get_collection`, `list_collection_documents`,
   `list_documents`, `get_document`. Paged, sortable, and each collection carries the description
@@ -172,7 +175,8 @@ A curated collection is only as good as the retrieval over it, so the retrieval 
 afterthought.
 
 User-level defaults with per-collection overrides (`limit`, `candidates`, `mode`, `fusion`,
-`rrf_k`, `vector_weight`, `bm25_weight`); a single-collection search
+`rrf_k`, `vector_weight`, `bm25_weight`, `nprobes`, `refine_factor`, `reranker`,
+`reranker_model`); a single-collection search
 (`GET /api/collections/{c}/search`) also accepts them per call. `mode`: `hybrid` (vector + BM25,
 fused), `vector`, `fts`; without an embedding profile everything is `fts`. `fusion`: `rrf`
 (reciprocal rank fusion, `rrf_k`) or `linear` (weighted sum of normalized scores; the two weights
@@ -185,7 +189,7 @@ comma-separated `collections`, with no embedding model and nothing to set up fir
 BM25 rather than fused ranks, because one lexical scorer with the same tokenizer answers
 everywhere, so two collections are on one scale; normalizing per collection would put every
 collection's rank-1 chunk on page one. A document that sits in several of the collections searched
-is reported once per passage, not once per collection. The result is paged (`page_size` up to 200,
+is reported once per chunk, not once per collection. The result is paged (`page_size` up to 200,
 `next_cursor` back in as `cursor`, at most 1000 results deep): the cursor is an opaque offset bound
 to the query, since a full-text query cannot be filtered by score. Every page recomputes the
 ranking, so a document indexed between two pages can move a hit across a page boundary, and a
@@ -205,13 +209,14 @@ collection deleted since the session chose it is skipped; a collection that fail
 the search, rather than leaving a hole that reads as "no match".
 
 What comes back is excerpts, not chunks. Every chunk carries `seq`, its 1-based position among its
-document's chunks, so hits that landed on consecutive chunks are one run rather than several
-overlapping quotes of the same paragraph. The run's text is read back out of the source markdown
-and widened both ways to whole sentences — it stops at a sentence end, a blank line, a heading or
-300 characters — and that is a passage. An excerpt is a passage with the irrelevant parts removed;
-today it is the passage unchanged, and the type is where that trimming will go. So an excerpt
-begins and ends on a sentence boundary, never repeats the overlap two chunks share, and carries the
-`header` breadcrumb and the `location` (`doc p.3-4 L10-20`) to cite it by.
+document's chunks. So hits that landed on consecutive chunks are one run, not several quotes of
+the same paragraph. The run's text is read back out of the source markdown and widened on each
+side: to the nearest line break, else to the outermost whole sentence within 300 characters, else
+to 300 characters. That is a passage. An excerpt is a passage with the irrelevant parts removed.
+Today it is the passage unchanged, and the type is where that trimming will go. So an excerpt
+usually begins and ends where a line or a sentence does. Where the 300-character cap stops the
+widening, it can begin or end mid-word. It carries the `header` (its heading path, joined) and the
+`location` (`doc p.3-4 L10-20`) to cite it by.
 
 `search_sources` (`GET /api/search/sources`) answers the question that comes first: which documents
 cover this, and which collections hold them. One row per distinct document, scored as the harmonic
@@ -224,12 +229,140 @@ be handed to `set_session_collections`, so the rest of the conversation searches
 on that subject rather than everything they own. The scope rule is the one above.
 
 `GET /api/search/explore` is the same retrieval with a `granularity` switch — `chunk`, `passage` or
-`excerpt` — for seeing what each stage produced. It is REST only; the UI's session scope calls it
-with `granularity=chunk`.
+`excerpt` — for seeing what each stage produced. It is REST only. The UI's Explore view calls it
+at the granularity picked there, and its chunk view shows a chunk as the models read it.
 
-Every setting has a title and definition (`msgspec.Meta` on the field; served as `/api/options` →
-`docs`, shown in the UI), so tuning is done in the UI rather than by reading this file. Chunk sizes
-are in characters.
+The four shapes a search answers with, from the finest:
+
+| shape | what it is | who asks for it |
+| --- | --- | --- |
+| chunk (`Hit`) | one indexed cut of the markdown, with its score | `explore?granularity=chunk`, `/api/search/text`, `/api/collections/{c}/search` |
+| passage | consecutive matched chunks of one document, widened to the line or whole sentences | `explore?granularity=passage` |
+| excerpt | a passage without the parts that do not answer (today: the passage itself) | `search_excerpts`, `explore?granularity=excerpt` |
+| source | one document: its score, best chunk, hot sections and the collections holding it | `search_sources` |
+
+Every setting has a title and a definition (`msgspec.Meta` on the field, served as
+`/api/options` → `docs` and shown in the UI). So you tune search in the UI, not by reading this
+file.
+
+## Chunking
+
+haskie cuts every document into chunks with Structure-Aware Chunking. A chunk follows the
+author's structure: it never spans two sections, and it cuts at a blank line before it cuts
+inside a paragraph. Every rule, with the code that applies it, is in
+[`src/haskie/indexing/chunking.md`](src/haskie/indexing/chunking.md).
+
+Four settings steer it, for all collections or per collection. Sizes are in characters.
+
+| setting | shown as | default | what it does |
+| --- | --- | --- | --- |
+| `chunker` | Chunker | `markdown` | `markdown` reads the structure: headings, lists, tables, code. `text` splits on blank lines and sentences only. |
+| `chunk_size` | Chunk size (characters) | 1200 | the most one chunk holds, its heading path included |
+| `chunk_merge_below` | Merge short paragraphs (% of chunk size) | 66 | a paragraph shorter than this share of `chunk_size` is merged with its neighbours |
+| `chunk_frame` | Prepend heading path | on | the models read each chunk with its heading path in front |
+
+### The steps
+
+`chunk.pipeline(settings)` builds the steps, and each one hands its output to the next. Chunking
+runs once per part: the whole document, or `batch_pages` pages of a PDF.
+
+```mermaid
+flowchart TD
+    part(["markdown of one part:<br/>a whole document, or batch_pages pages of a PDF"])
+
+    part -- "chunker = markdown" --> blocks["<b>blocks</b><br/>leaf blocks, as the parser reads them:<br/>paragraphs and list items as prose;<br/>headings, tables and code blocks whole"]
+    part -- "chunker = text" --> paragraphs["<b>paragraphs</b><br/>every run of non-blank lines, as prose"]
+
+    blocks --> sentences["<b>sentences</b><br/>prose cut into sentences (Unicode UAX #29).<br/>Pieces that tile the text, each typed<br/>and numbered with its paragraph"]
+    paragraphs --> sentences
+
+    sentences --> sections["<b>sections</b><br/>pieces grouped by section:<br/>every heading after content opens one"]
+
+    sections -- "chunk_frame on<br/>(markdown only)" --> frames["<b>frames</b><br/>each section framed with its heading path,<br/>shortened to at most half a chunk"]
+    sections -- "chunk_frame off,<br/>or text" --> pack
+    frames --> pack["<b>pack</b><br/>fit: a piece longer than the room cut at a line, then a word.<br/>Paragraphs packed into chunks of chunk_size less the frame,<br/>short ones merged (chunk_merge_below).<br/>Every cut named with its reason"]
+
+    pack --> locate["<b>locate</b><br/>offsets in chars, bytes and lines,<br/>pages, heading path"]
+    locate --> chunks(["Chunk list"])
+
+    classDef step fill:#eef2f5,stroke:#64748b,color:#111
+    classDef optional fill:#fde8d7,stroke:#c2410c,color:#111,stroke-dasharray: 4 3
+    class blocks,paragraphs,sentences,sections,pack,locate step
+    class frames optional
+```
+
+### Where a chunk is cut
+
+Every gap between two pieces either stays inside a chunk or becomes a cut. The step that cuts
+names the reason, and every chunk keeps the reason on each side (`start_reason`, `end_reason`).
+
+```mermaid
+flowchart TD
+    gap(["gap between piece X and piece Y"])
+
+    gap --> more{"Is there a Y?"}
+    more -- "no: the text ends" --> edge["<b>edge</b><br/>start or end of the text chunked:<br/>the document, or one part of it"]
+
+    more -- yes --> head{"Does Y open a new section?<br/>a heading after content,<br/>or one no deeper than the one before"}
+    head -- yes --> heading["<b>heading</b><br/>sections never share a chunk,<br/>and a heading is never in a chunk's text"]
+
+    head -- no --> blank{"X and Y in two paragraphs?<br/>a blank line between them,<br/>and not inside one list"}
+
+    blank -- "yes: two paragraphs" --> down{"X's paragraph short (under chunk_merge_below)<br/>and fits one chunk with Y's?"}
+    down -- yes --> nocut1(["no cut: the short one<br/>goes into the paragraph below"])
+    down -- no --> run{"Both short, and the run<br/>of short ones still fits?"}
+    run -- yes --> nocut2(["no cut: short ones merge"])
+    run -- no --> up{"Y's short, the one below won't take it,<br/>and the chunk above has room?"}
+    up -- yes --> nocut3(["no cut: the short one<br/>joins the chunk above"])
+    up -- no --> paragraph["<b>paragraph</b><br/>the author separated them,<br/>and no merge rule joined them"]
+
+    blank -- "no: one paragraph" --> fits{"Does the whole paragraph fit one chunk?<br/>chunk_size, less the frame"}
+    fits -- yes --> nocut4(["no cut"])
+    fits -- "no: the chunk is full" --> cont{"Is Y the rest of one piece<br/>longer than a chunk?"}
+    cont -- yes --> oversize["<b>length_oversize</b><br/>a sentence, table or code block<br/>longer than a chunk: cut at a line, then a word"]
+    cont -- no --> blocks{"Are X and Y different blocks,<br/>at the last block edge that fits?"}
+    blocks -- yes --> block["<b>length_block</b><br/>cut between list items,<br/>or a line and the table under it"]
+    blocks -- no --> sentence["<b>length_sentence</b><br/>no block edge fits:<br/>cut between two sentences"]
+
+    classDef reason fill:#fde8d7,stroke:#c2410c,color:#111
+    classDef keep fill:#eef2f5,stroke:#64748b,color:#111
+    class edge,heading,paragraph,oversize,block,sentence reason
+    class nocut1,nocut2,nocut3,nocut4 keep
+```
+
+- Every heading after content starts a new section, and sections never share a chunk. A heading
+  is never part of a chunk's text: it is the chunk's heading path (`headings`). A section of
+  headings alone is the one exception: its heading lines are its text.
+- Only a blank line separates two paragraphs. A line that leads straight into a table is one
+  paragraph with it, and a whole list is one paragraph.
+- With `chunk_frame` on, the heading path counts toward `chunk_size`. A path longer than half
+  a chunk loses its outermost headings first.
+- Chunks never overlap. The heading path in front gives each chunk the context a neighbour's
+  sentences would, as in Contextual Retrieval.
+- A page marker (`<!-- page 3 -->`) counts as whitespace. No cut falls on one, and no chunk text
+  holds one. Its offset still gives each chunk its pages.
+- Sentences follow the Unicode sentence rules (UAX #29), so no language setting is needed.
+
+### What is stored where
+
+```mermaid
+flowchart LR
+    chunk["<b>Chunk</b><br/>headings, frame,<br/>typed pieces, offsets,<br/>start and end reason"]
+    cache[("<b>embedding cache</b><br/>embeddings/&lt;id&gt;.parquet<br/>one row group per part:<br/>pieces, headings, frame, offsets,<br/>reasons, seq, vector")]
+    table[("<b>LanceDB row</b><br/>collection table chunks:<br/>text and layout (the pieces joined),<br/>headings, frame, offsets, reasons,<br/>document, part, seq, vector")]
+    hit["<b>Hit</b><br/>the row, plus score, collection,<br/>header, location and absolute paths"]
+    view["<b>UI chunk view</b><br/>frame on grey, typed pieces,<br/>cut reason on each side, sizes"]
+
+    chunk -- "embed: frame + text<br/>into the vector" --> cache
+    cache -- "index: chunk.record" --> table
+    table -- "search: FTS reads text,<br/>reranker reads frame + text" --> hit
+    hit -- "explore, granularity=chunk" --> view
+```
+
+The embedding cache keeps a chunk's pieces. A collection's LanceDB table keeps the text joined
+from them, plus `layout`: where each piece starts and its type. The vector was computed from the
+frame and the text together, and the reranker reads the same. The full-text index reads the text
+alone, so a heading's words do not match every chunk of its section.
 
 ## How it works
 
@@ -256,7 +389,7 @@ collection, then drops its folder.
 The **embedding cache** is what makes a document cheap to share. Every computed embedding is one
 parquet file under the document (`embeddings/<id>.parquet`, one row group per convert part) plus
 one `embeddings` row, keyed by a canonical URN of everything the rows depend on —
-`document:<doc>;model:<model>;chunk_size:<n>;chunk_overlap:<n>;chunker:<c>;chunk_version:<v>;parser:<p>;skip_ocr_pages:<b>`
+`document:<document>;model:<model>;chunk_size:<n>;chunk_merge_below:<n>;chunk_frame:<b>;chunker:<c>;chunk_version:<v>;parser:<p>;skip_ocr_pages:<b>`
 — hashed with sha256 to the id. Same inputs, same id, computed once; two collections asking for the
 same missing entry at the same moment share one run (DBOS deduplication on the id). The
 accelerator is not in the key: it selects where a model runs, not what it computes.
@@ -299,9 +432,9 @@ cache id so it runs once however many callers wait on it) and `index_collection_
 the embedding, then write it into one collection's table). Each plans its stage into micro-batches
 of `pipeline.batch_pages` pages and cuts convert and embed into at most
 `pipeline.document_parallelism` contiguous slices (0 = as many as that stage's share of the CPU
-budget). Every slice is one child `stage_parts` workflow with a durable step per micro-batch — so
+budget). Every slice is one child `stage_slice` workflow with a durable step per micro-batch — so
 one large document spreads over the available slots, while a document still costs a handful of
-workflows rather than one per micro-batch. The index stage is one `stage_parts` child on the
+workflows rather than one per micro-batch. The index stage is one `stage_slice` child on the
 collection's partition, so LanceDB has one writer per collection and the full-text index is
 rebuilt once, as that child's last step.
 

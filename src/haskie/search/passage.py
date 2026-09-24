@@ -1,17 +1,17 @@
 """Passages out of chunks: the pure shapes and algorithms behind the search tools.
 
-A chunk is a retrieval unit, not a readable one. It is cut to a size the embedding model likes,
-it overlaps its neighbours, and a match usually lands on two or three of them at once. What an
-agent wants back is one span of the document that starts and ends where a reader would stop: a
-passage.
+A chunk is a retrieval unit, not a readable one. It is cut to a size the embedding model likes, it
+ends where a paragraph or the size did, and a match usually lands on two or three of them at once.
+What an agent wants back is one span of the document that starts and ends where a reader would stop:
+a passage.
 
-Three foldings live here, all of them pure. `ranges` merges the chunks of one document that sit
-next to each other (`Hit.seq`) into one span. `expand` widens one such span to the nearest newline
-or sentence boundary of the markdown it was cut from, which is the only step that needs the text.
-`top_documents` and `fold_sources` answer the other question - which documents and which
-collections cover this - by folding the same hits per document instead of per span.
+Three folds live here, all of them pure. `ranges` merges the chunks of one document that sit
+next to each other (`Hit.seq`) into one span. `widen` widens one such span to the nearest newline
+or sentence end of the markdown it was cut from. It is the only step that needs the text.
+`top_documents` and `fold_sources` answer the other question: which documents and which
+collections cover this. They fold the same hits per document instead of per span.
 
-`expand` is given a `Window` rather than the document: the widening reaches at most `MAX_EXPAND`
+`widen` is given a `Window` rather than the document: the widening reaches at most `MAX_WIDEN`
 characters, so a few hundred bytes around the span are enough, and `retrieval.py` reads exactly
 those (the chunk rows carry the byte offsets to seek to). Line numbers come from the chunk rows
 too - each one stores the line its text starts on - so nothing here counts the newlines of a
@@ -27,6 +27,7 @@ import re
 import msgspec
 
 from haskie.collection.index import Hit, location
+from haskie.document.convert import without_markers
 
 # --- scoring ---------------------------------------------------------------------
 
@@ -75,12 +76,12 @@ def ranges(hits: list[Hit]) -> list[ChunkRange]:
     # for it.
     found: list[ChunkRange] = []
     run: list[Hit] = []
-    for hit in sorted(hits, key=lambda hit: (hit.collection, hit.doc, hit.seq)):
+    for hit in sorted(hits, key=lambda hit: (hit.collection, hit.document, hit.seq)):
         last = run[-1] if run else None
         # the run goes on only where this hit is the next chunk of the same table's same document
-        if last is not None and (hit.collection, hit.doc, hit.seq) != (
+        if last is not None and (hit.collection, hit.document, hit.seq) != (
             last.collection,
-            last.doc,
+            last.document,
             last.seq + 1,
         ):
             found.append(_range(run))
@@ -88,7 +89,9 @@ def ranges(hits: list[Hit]) -> list[ChunkRange]:
         run.append(hit)
     if run:
         found.append(_range(run))
-    return sorted(found, key=lambda found: (-found.score, found.chunks[0].doc, found.seq_start))
+    return sorted(
+        found, key=lambda found: (-found.score, found.chunks[0].document, found.seq_start)
+    )
 
 
 def _range(chunks: list[Hit]) -> ChunkRange:
@@ -116,8 +119,8 @@ class Passage(msgspec.Struct):
     answers with: `header` and `location` are what to cite it by."""
 
     collection: str  # the collection whose table matched; the document itself belongs to none
-    doc: str
-    header: str  # breadcrumb "parent > ... > heading", from the best chunk
+    document: str
+    header: str  # the heading path joined, "Part I > Chapter 2", from the best chunk
     location: str  # "doc p.3-4 L10-20", rebuilt for the widened lines
     seq_start: int  # the chunks it covers, 1-based within the document
     seq_end: int
@@ -137,7 +140,7 @@ class Excerpt(Passage):
     """A passage with its irrelevant parts removed. Today: the passage itself, unchanged."""
 
 
-MAX_EXPAND = 300  # chars per side; past this a passage stops being an excerpt
+MAX_WIDEN = 300  # chars a passage may grow on each side: past this it is a page, not a quote
 
 # A sentence ends at `.!?`, optionally through a closing quote or bracket, and is followed by
 # whitespace: the "e.g." case is accepted rather than special-cased, because stopping one clause
@@ -163,17 +166,20 @@ class Window(msgspec.Struct):
         return max(0, char - self.char_start)
 
 
-def expand[P: Passage](span: ChunkRange, window: Window, cls: type[P]) -> P:
+def widen[P: Passage](span: ChunkRange, window: Window, cls: type[P]) -> P:
     """Widen a span to the nearest boundary on each side and read it out of `window`, as `cls`.
 
-    The chunk splitter cuts on size, so a span starts and ends mid-sentence as often as not.
-    Widening stops at the first of three boundaries, in this order: a newline, because a line is
-    where the document itself stopped - a heading, a list item, a table row, the end of a
-    paragraph; the outermost whole sentence inside `MAX_EXPAND` characters, which is what a line
-    longer than the cap offers instead; and the cap, when the text offers neither.
+    A chunk is whole sentences, but a sentence longer than a chunk is cut on words. The text
+    around a span can also still be worth reading. Widening stops at the first of three
+    boundaries, in this order:
+
+    - a newline, because a line is where the document itself stopped: a heading, a list item, a
+      table row, the end of a paragraph;
+    - the outermost whole sentence inside `MAX_WIDEN` characters, for a line longer than that;
+    - the `MAX_WIDEN` cap, when the text offers neither.
 
     The line numbers are the span's own, corrected by the newlines the widening crossed: a chunk
-    row records the line its text starts on, and widening moves at most `MAX_EXPAND` characters,
+    row records the line its text starts on, and widening moves at most `MAX_WIDEN` characters,
     so counting inside that stretch answers what scanning the whole document used to.
 
     `cls` is the shape the caller wants its passages in (`Passage` or one of its kinds), so an
@@ -197,9 +203,9 @@ def expand[P: Passage](span: ChunkRange, window: Window, cls: type[P]) -> P:
     best = max(span.chunks, key=lambda hit: (hit.score, -hit.seq))
     return cls(
         collection=best.collection,
-        doc=best.doc,
+        document=best.document,
         header=best.header,
-        location=location(best.doc, best.page_start, best.page_end, line_start, line_end),
+        location=location(best.document, best.page_start, best.page_end, line_start, line_end),
         seq_start=span.seq_start,
         seq_end=span.seq_end,
         line_start=line_start,
@@ -208,7 +214,9 @@ def expand[P: Passage](span: ChunkRange, window: Window, cls: type[P]) -> P:
         char_end=char_end,
         page_start=best.page_start,
         page_end=best.page_end,
-        text=text,
+        # the offsets and lines above describe the source; the text a reader gets has no page
+        # markers, as a chunk's has none (`convert.without_markers`)
+        text=without_markers(text).strip(),
         score=span.score,
         source_file=best.source_file,
         markdown_file=best.markdown_file,
@@ -218,7 +226,7 @@ def expand[P: Passage](span: ChunkRange, window: Window, cls: type[P]) -> P:
 def _widen_back(markdown: str, char_start: int) -> int:
     """Where a passage starting at `char_start` begins once widened: after the nearest newline
     before it, else after the first whole sentence inside the cap, else at the cap."""
-    cap = max(0, char_start - MAX_EXPAND)
+    cap = max(0, char_start - MAX_WIDEN)
     line = markdown.rfind("\n", cap, char_start)
     if line != -1:
         return line + 1
@@ -229,7 +237,7 @@ def _widen_back(markdown: str, char_start: int) -> int:
 def _widen_forward(markdown: str, char_end: int) -> int:
     """Where a passage ending at `char_end` stops once widened: at the nearest newline after it,
     else after the last whole sentence inside the cap, else at the cap."""
-    cap = min(len(markdown), char_end + MAX_EXPAND)
+    cap = min(len(markdown), char_end + MAX_WIDEN)
     line = markdown.find("\n", char_end, cap)
     if line != -1:
         return line
@@ -275,11 +283,11 @@ class Source(msgspec.Struct):
     """
 
     collection: str  # the collection whose table held the best chunk; the document belongs to none
-    doc: str
+    document: str
     score: float
     chunks: int
     description: str
-    heading: str
+    header: str  # the best chunk's heading path joined, ready to cite
     location: str
     text: str  # the best chunk, so a caller can see why the document is on the list
     # Where the document is on disk, so a tool outside the app can open or grep it. The lines are
@@ -315,8 +323,8 @@ def top_documents(hits: list[Hit], limit: int) -> list[list[Hit]]:
     """
     by_doc: dict[str, list[Hit]] = {}
     for hit in hits:
-        by_doc.setdefault(hit.doc, []).append(hit)
-    ranked = sorted(by_doc.values(), key=lambda group: (-_document_score(group), group[0].doc))
+        by_doc.setdefault(hit.document, []).append(hit)
+    ranked = sorted(by_doc.values(), key=lambda group: (-_document_score(group), group[0].document))
     return ranked[:limit]
 
 
@@ -328,7 +336,7 @@ def fold_sources(
     documents = [_source(group, memberships, sections) for group in groups]
     return Sources(
         documents=documents,
-        collections=min_cover({source.doc: source.collections for source in documents}),
+        collections=min_cover({source.document: source.collections for source in documents}),
     )
 
 
@@ -339,11 +347,11 @@ def _source(hits: list[Hit], memberships: dict[str, list[str]], sections: int) -
     best = hits[0]
     return Source(
         collection=best.collection,
-        doc=best.doc,
+        document=best.document,
         score=_document_score(hits),
         chunks=len(hits),
         description="",
-        heading=best.heading,
+        header=best.header,
         location=best.location,
         text=best.text,
         source_file=best.source_file,
@@ -351,7 +359,7 @@ def _source(hits: list[Hit], memberships: dict[str, list[str]], sections: int) -
         line_start=best.line_start,
         line_end=best.line_end,
         # a document whose memberships were not looked up is credited to the table that matched it
-        collections=memberships.get(best.doc, [best.collection]),
+        collections=memberships.get(best.document, [best.collection]),
         sections=_sections(hits, sections),
     )
 
@@ -374,7 +382,9 @@ def _sections(hits: list[Hit], limit: int) -> list[HotSection]:
                 chunks=len(group),
                 line_start=line_start,
                 line_end=line_end,
-                location=location(best.doc, best.page_start, best.page_end, line_start, line_end),
+                location=location(
+                    best.document, best.page_start, best.page_end, line_start, line_end
+                ),
             )
         )
     return sorted(found, key=lambda section: (-section.score, section.header))[:limit]

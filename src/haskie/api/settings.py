@@ -1,16 +1,14 @@
 """Init, user settings and the option catalogue the UI renders its forms from."""
 
-from typing import get_args
-
 import msgspec
 from litestar import get, post, put
 
 from haskie import audit, home
 from haskie.collection.collection import ACTIVE_MEMBER_STATUSES, MEMBER_STATUSES, MemberStatus
-from haskie.document.document import ACTIVE_DOCUMENT_STATUSES, DOCUMENT_STATUSES, DocStatus
+from haskie.document.document import ACTIVE_DOCUMENT_STATUSES, DOCUMENT_STATUSES, DocumentStatus
 from haskie.errors import Conflict
 from haskie.indexing import models, operations, workflows
-from haskie.indexing.dbos_names import ACTIVE_STATUS
+from haskie.indexing.dbos_names import ACTIVE_STATUS, RunStatus
 from haskie.indexing.embed import device_name
 from haskie.settings import (
     PROFILES,
@@ -58,13 +56,14 @@ class Options(msgspec.Struct):
     fusions: tuple[Fusion, ...]
     rerankers: tuple[Reranker, ...]
     reranker_models: tuple[str, ...]
-    docs: dict[str, FieldDoc]  # title + definition per setting key, e.g. "defaults.chunk_size"
+    docs: dict[str, FieldDoc]  # title + definition per setting key, e.g. "conversion.chunk_size"
     embedding_profiles: dict[EmbeddingProfile, EmbeddingModel | None]
-    document_statuses: tuple[DocStatus, ...]
-    active_document_statuses: tuple[DocStatus, ...]  # in the import pipeline: a poll waits on them
+    document_statuses: tuple[DocumentStatus, ...]
+    # in the import pipeline: a poll waits on them
+    active_document_statuses: tuple[DocumentStatus, ...]
     member_statuses: tuple[MemberStatus, ...]
     active_member_statuses: tuple[MemberStatus, ...]
-    active_statuses: tuple[str, ...]  # run statuses that are still on their way
+    active_run_statuses: tuple[RunStatus, ...]  # run statuses that are still on their way
     operation_kinds: tuple[operations.OperationKind, ...]  # the order the Operations view shows
     bulk_kinds: tuple[operations.BulkKind, ...]  # the operations a 202 points at
 
@@ -130,12 +129,12 @@ async def put_settings(data: UserSettings) -> UserSettings:
 
 
 OPTIONS = Options(
-    parsers=get_args(Parser),
-    chunkers=get_args(Chunker),
-    accelerators=get_args(Accelerator),
-    search_modes=get_args(SearchMode),
-    fusions=get_args(Fusion),
-    rerankers=get_args(Reranker),
+    parsers=tuple(Parser),
+    chunkers=tuple(Chunker),
+    accelerators=tuple(Accelerator),
+    search_modes=tuple(SearchMode),
+    fusions=tuple(Fusion),
+    rerankers=tuple(Reranker),
     reranker_models=RERANKER_MODELS,
     docs=docs(),
     embedding_profiles=PROFILES,
@@ -143,7 +142,7 @@ OPTIONS = Options(
     active_document_statuses=ACTIVE_DOCUMENT_STATUSES,
     member_statuses=MEMBER_STATUSES,
     active_member_statuses=ACTIVE_MEMBER_STATUSES,
-    active_statuses=tuple(ACTIVE_STATUS),
+    active_run_statuses=tuple(RunStatus(status) for status in ACTIVE_STATUS),
     operation_kinds=operations.KIND_ORDER,
     bulk_kinds=operations.BULK_KINDS,
 )

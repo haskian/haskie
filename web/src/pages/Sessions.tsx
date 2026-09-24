@@ -214,7 +214,7 @@ function History({ id, version }: { id: string; version: number }) {
     <ul className="list">
       {loaded.events.map((event) => {
         const Icon = ACTION_ICONS[event.action]
-        const docs = event.detail.docs ?? []
+        const docs = event.detail.documents ?? []
         return (
           <li className="list-item" key={`${event.ts}-${event.action}-${event.subject}`}>
             <Icon className="icon" />

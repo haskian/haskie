@@ -26,7 +26,7 @@ async def list_operations(
 
 @get("/api/operations/kinds")
 async def list_operation_kinds() -> list[operations.OperationKindSummary]:
-    """Every kind of operation, in display order, with how many of each are running right now."""
+    """Every kind of operation, in display order, with how many of each are queued or running."""
     return await operations.list_kinds()
 
 

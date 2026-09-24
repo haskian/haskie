@@ -14,7 +14,8 @@ pure parts (paths, row decoding) stay sync.
 """
 
 import time
-from typing import Any, Literal, get_args
+from enum import StrEnum
+from typing import Any
 
 import aiosqlite
 import anyio
@@ -27,17 +28,25 @@ from haskie.errors import Conflict, NotFound
 from haskie.paging import Page, PageRequest, key_reader, keyset, resolve_sort
 from haskie.settings import (
     ChunkSettings,
-    CollectionSettings,
+    CollectionOverrides,
     EmbeddingModel,
     SearchOverrides,
     SearchSettings,
     load_user_settings,
 )
 
-MemberStatus = Literal["pending", "indexing", "indexed", "error", "cancelled"]
-MEMBER_STATUSES: tuple[MemberStatus, ...] = get_args(MemberStatus)
+
+class MemberStatus(StrEnum):
+    PENDING = "pending"
+    INDEXING = "indexing"
+    INDEXED = "indexed"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+
+
+MEMBER_STATUSES: tuple[MemberStatus, ...] = tuple(MemberStatus)
 # being written into the collection right now: the states a poll waits on
-ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = ("pending", "indexing")
+ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = (MemberStatus.PENDING, MemberStatus.INDEXING)
 
 # Public sort name -> SQL expression. The whitelist is the only source of column identifiers a
 # listing can order by, so a request can never name a column (see paging.resolve_sort).
@@ -54,7 +63,7 @@ MEMBER_SORTS = {
 
 class DocumentCounts(msgspec.Struct):
     """How a collection's memberships are spread over the lifecycle, counted in the database: the
-    listing that replaced it is paged, so a caller can no longer count the rows it received."""
+    member listing is paged, so a caller cannot count the rows it received."""
 
     total: int = 0
     indexed: int = 0
@@ -64,16 +73,16 @@ class DocumentCounts(msgspec.Struct):
 
 
 class MaintenanceState(msgspec.Struct):
-    """The maintenance columns of one collection row. `maintenance` decides what to do about
-    them; the row they live in belongs to `Collection`."""
+    """The maintenance columns of one collection row. `workflows` decides from them when a run is
+    due, and `maintenance` what it does; the row they live in belongs to `Collection`."""
 
-    pending_docs: int
+    pending_documents: int
     last_write_at: float | None
     last_maintained_at: float | None
     vector_index_rows: int
 
 
-MAINTENANCE_COLUMNS = "pending_docs, last_write_at, last_maintained_at, vector_index_rows"
+MAINTENANCE_COLUMNS = "pending_documents, last_write_at, last_maintained_at, vector_index_rows"
 
 
 class CollectionSummary(msgspec.Struct):
@@ -87,7 +96,7 @@ class CollectionSummary(msgspec.Struct):
 
 class CollectionInfo(msgspec.Struct):
     name: str
-    settings: CollectionSettings
+    overrides: CollectionOverrides
     effective: ChunkSettings
     search: SearchSettings
     description: str
@@ -129,9 +138,9 @@ def _counts(by_status: dict[str, int]) -> DocumentCounts:
     """Roll one `status -> count` mapping up into the shape every caller reads."""
     return DocumentCounts(
         total=sum(by_status.values()),
-        indexed=by_status.get("indexed", 0),
+        indexed=by_status.get(MemberStatus.INDEXED, 0),
         active=sum(by_status.get(status, 0) for status in ACTIVE_MEMBER_STATUSES),
-        error=by_status.get("error", 0),
+        error=by_status.get(MemberStatus.ERROR, 0),
         by_status=by_status,
     )
 
@@ -154,10 +163,12 @@ async def _counts_by_collection(
     return {name: _counts(by_status) for name, by_status in by_collection.items()}
 
 
-def _decode_settings(rows: list[Any]) -> dict[str, CollectionSettings]:
-    """Decode `(name, settings)` rows into the struct every caller reads. A row with unreadable
+def _decode_overrides(rows: list[Any]) -> dict[str, CollectionOverrides]:
+    """Decode `(name, overrides)` rows into the struct every caller reads. A row with unreadable
     JSON falls back to the defaults, which is what a collection that never set any has."""
-    return {name: (db.loads(raw, CollectionSettings) or CollectionSettings()) for name, raw in rows}
+    return {
+        name: (db.loads(raw, CollectionOverrides) or CollectionOverrides()) for name, raw in rows
+    }
 
 
 class Collection:
@@ -249,27 +260,27 @@ class Collection:
             await conn.execute("delete from collections where name = ?", (self.name,))
 
     async def remove_tree(self) -> None:
-        """The index table of the collection."""
+        """Delete the collection's folder, and with it the index table."""
         forget_schema(self.index_dir)
         await home.remove_tree(self.root)
 
-    # --- settings --------------------------------------------------------
+    # --- overrides -------------------------------------------------------
 
-    async def settings(self) -> CollectionSettings:
+    async def overrides(self) -> CollectionOverrides:
         """The defaults for a collection with no row: a caller that needs the absence to be
-        visible reads `load_settings` instead."""
-        found = await Collection.load_settings([self.name])
-        return found.get(self.name, CollectionSettings())
+        visible reads `load_overrides` instead."""
+        found = await Collection.load_overrides([self.name])
+        return found.get(self.name, CollectionOverrides())
 
-    async def set_settings(self, value: CollectionSettings) -> None:
+    async def set_overrides(self, value: CollectionOverrides) -> None:
         async with db.connect() as conn:
             await conn.execute(
-                "update collections set settings = ? where name = ?", (db.dumps(value), self.name)
+                "update collections set overrides = ? where name = ?", (db.dumps(value), self.name)
             )
 
     @staticmethod
-    async def load_settings(names: list[str]) -> dict[str, CollectionSettings]:
-        """The settings of several collections in one query, keyed by name. A name with no row
+    async def load_overrides(names: list[str]) -> dict[str, CollectionOverrides]:
+        """The overrides of several collections in one query, keyed by name. A name with no row
         is absent from the result, which is how a caller learns the collection is gone."""
         wanted = list(dict.fromkeys(names))
         if not wanted:
@@ -277,30 +288,30 @@ class Collection:
         marks = db.placeholders(len(wanted))
         async with db.connect() as conn:
             cursor = await conn.execute(
-                f"select name, settings from collections where name in ({marks})", wanted
+                f"select name, overrides from collections where name in ({marks})", wanted
             )
             rows: list[Any] = list(await cursor.fetchall())
-        return _decode_settings(rows)
+        return _decode_overrides(rows)
 
     @staticmethod
     async def reranker_overrides() -> list[str]:
         """Every reranker model a collection overrides, in name order and without duplicates.
 
-        One query over the `settings` column: the model downloads have to cover the overrides too,
+        One query over the `overrides` column: the model downloads have to cover the overrides too,
         and a search of that collection loads whichever model it names."""
         async with db.connect() as conn:
-            cursor = await conn.execute("select name, settings from collections order by name")
+            cursor = await conn.execute("select name, overrides from collections order by name")
             rows: list[Any] = list(await cursor.fetchall())
-        found = _decode_settings(rows)
+        found = _decode_overrides(rows)
         chosen = [v.search.reranker_model for v in found.values() if v.search.reranker_model]
         return list(dict.fromkeys(chosen))
 
     async def chunk_settings(self) -> ChunkSettings:
         """How this collection splits a document: what the embedding cache is keyed by."""
-        return (await self.settings()).resolve(await load_user_settings())
+        return (await self.overrides()).resolve(await load_user_settings())
 
     async def search_settings(self) -> SearchSettings:
-        return (await self.settings()).resolve_search(await load_user_settings())
+        return (await self.overrides()).resolve_search(await load_user_settings())
 
     async def info(self) -> CollectionInfo:
         """Everything the collection panel shows, off one connection: the whole `collections` row
@@ -309,7 +320,7 @@ class Collection:
         user = await load_user_settings()
         async with db.connect() as conn:
             cursor = await conn.execute(
-                f"select settings, description, {MAINTENANCE_COLUMNS} from collections "
+                f"select overrides, description, {MAINTENANCE_COLUMNS} from collections "
                 "where name = ?",
                 (self.name,),
             )
@@ -318,13 +329,13 @@ class Collection:
                 raise NotFound(f"collection not found: {self.name}")
             counts = (await _counts_by_collection(conn, [self.name]))[self.name]
         raw, description, *maintenance = row
-        settings = _decode_settings([(self.name, raw)])[self.name]
+        overrides = _decode_overrides([(self.name, raw)])[self.name]
         index = self.index_with(user.embedding_model)  # one handle: each opens its own connection
         return CollectionInfo(
             name=self.name,
-            settings=settings,
-            effective=settings.resolve(user),
-            search=settings.resolve_search(user),
+            overrides=overrides,
+            effective=overrides.resolve(user),
+            search=overrides.resolve_search(user),
             description=description,
             counts=counts,
             index_outdated=not await index.schema_current(),
@@ -340,8 +351,8 @@ class Collection:
             )
 
     # --- maintenance columns ---------------------------------------------
-    # `maintenance` decides when a run is due and what it does; these are the four columns of the
-    # collection row it decides from, so they are read and written here.
+    # `workflows` decides when a run is due and `maintenance` what it does; these are the four
+    # columns of the collection row they decide from, so they are read and written here.
 
     @staticmethod
     async def pending_names() -> list[str]:
@@ -349,7 +360,7 @@ class Collection:
         reschedules."""
         async with db.connect() as conn:
             cursor = await conn.execute(
-                "select name from collections where pending_docs > 0 order by name"
+                "select name from collections where pending_documents > 0 order by name"
             )
             rows = await cursor.fetchall()
         return [name for (name,) in rows]
@@ -369,8 +380,8 @@ class Collection:
         statement, so two documents finishing at the same moment both count."""
         async with db.connect() as conn:
             cursor = await conn.execute(
-                "update collections set pending_docs = pending_docs + 1, last_write_at = ? "
-                "where name = ? returning pending_docs",
+                "update collections set pending_documents = pending_documents + 1, "
+                "last_write_at = ? where name = ? returning pending_documents",
                 (time.time(), self.name),
             )
             row = await cursor.fetchone()
@@ -382,7 +393,7 @@ class Collection:
         collection would stay pending for ever and be rescheduled at every boot."""
         async with db.connect() as conn:
             await conn.execute(
-                "update collections set pending_docs = max(0, pending_docs - ?), "
+                "update collections set pending_documents = max(0, pending_documents - ?), "
                 "last_maintained_at = ?, "
                 "vector_index_rows = case when ? then ? else vector_index_rows end "
                 "where name = ?",
@@ -419,7 +430,7 @@ class Collection:
         not gain a membership the delete's snapshot missed.
         """
         row = await document.get(doc)  # NotFound before anything is written
-        if row.status != "imported":
+        if row.status != document.DocumentStatus.IMPORTED:
             raise Conflict(
                 f"document is {row.status}; only an imported document joins a collection: {doc}"
             )
@@ -465,7 +476,7 @@ class Collection:
     async def member_names(self, after: str | None = None, limit: int | None = None) -> list[str]:
         """Names alone, ordered by name: what a caller that only iterates members needs.
 
-        `after` resumes the walk past that name and `limit` caps the page, so a bulk job can walk
+        `after` resumes the walk past that name and `limit` caps the page, so a bulk index can walk
         a large collection one page at a time instead of holding every name at once."""
         filters: list[str] = ["collection = ?"]
         params: list[Any] = [self.name]

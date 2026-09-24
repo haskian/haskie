@@ -227,6 +227,20 @@ body:has(.modal[open]) { overflow: hidden; }
 .match-text::before { content: open-quote; }
 .match-text::after { content: close-quote; }
 .match-seq { position: absolute; right: 0; bottom: 0; font: 400 var(--fs-xs)/1.4 var(--font-mono); letter-spacing: var(--tracking-mono); color: var(--text-muted); }
+/* a chunk and what surrounds it on screen: its frame and its two cuts, close to the quote */
+.chunk { display: grid; gap: var(--sp-2); }
+.chunk-text { white-space: pre-wrap; } /* shown as it was embedded, line breaks included */
+.chunk-text::before, .chunk-text::after { content: none; } /* and with no quote marks of ours around it */
+.chunk-sizes { justify-self: start; border-collapse: collapse; font: 400 var(--fs-xs)/1.4 var(--font-mono); color: var(--text-muted); }
+.chunk-sizes th, .chunk-sizes td { padding: 0 var(--sp-4) 0 0; text-align: right; font-weight: 400; }
+.chunk-sizes tbody th { text-align: left; }
+.chunk-sizes td { color: var(--text); }
+.chunk-cut { font: 400 var(--fs-xs)/1.4 var(--font-mono); color: var(--text-muted); } /* why the chunk starts and ends where it does, hugging the quote */
+.chunk-cut-reason { color: var(--text); }
+.chunk-piece { position: relative; background: var(--paper); outline: 1px solid transparent; outline-offset: 1px; } /* an outline, not a border: hovering never reflows the text */
+.chunk-piece:hover { z-index: 1; outline-color: var(--text-faint); } /* above its neighbours, whose background would paint over its outline */
+.chunk-frame, .chunk-heading { color: var(--text-muted); background: var(--line-soft); } /* the heading path the models read ahead of the text, and the heading lines of a chunk of headings alone */
+.chunk-piece > .hint { white-space: normal; user-select: none; } /* the text is pre-wrap, the hint is not; copying the text leaves the hints out */
 /* a source as one block: the document once, then its hot sections indented, each a jump */
 .sections { display: grid; gap: var(--sp-1); }
 .sections-head { display: flex; justify-content: space-between; gap: var(--sp-4); padding-bottom: var(--sp-2); border-bottom: 1px solid var(--line); font-size: var(--fs-sm); }
@@ -237,7 +251,7 @@ body:has(.modal[open]) { overflow: hidden; }
 .pane { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; min-height: 0; } /* a long crumb or line shortens, never widens the pane */
 .pane + .pane { border-left: var(--border); }
 .pane-head { padding: var(--sp-2) var(--sp-3); display: flex; justify-content: space-between; gap: var(--sp-4); }
-.pane-head .crumb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 var(--fs-sm)/1.4 var(--font-sans); letter-spacing: 0; text-transform: none; } /* where the pane is scrolled to: `p 3/10 · parent › heading`, in the text's own case */
+.pane-head .crumb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 var(--fs-sm)/1.4 var(--font-sans); letter-spacing: 0; text-transform: none; } /* where the pane is scrolled to: `p. 3/10 · parent › heading`, in the text's own case */
 .pane-body { position: relative; border: var(--sp-4) solid transparent; overflow: auto; } /* a border, not padding: padding scrolls with the content and lets it run under the head */
 /* the source loads out of sight while its skeleton holds the room: hidden, not display: none,
    which would keep a PDF viewer from loading at all */
@@ -341,7 +355,7 @@ body.over .drop-overlay { opacity: 1; }
 .hit-foot > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } /* a long heading shortens; the position stays whole */
 .hit-foot > :last-child { flex-shrink: 0; }
 .hit-foot { font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--tracking-mono); text-transform: uppercase; color: var(--text-muted); }
-/* four lines whatever the passage says: a one-word hit and a long one make the same tile */
+/* four lines whatever the result says: a one-word hit and a long one make the same tile */
 .hit-text { margin: 0; font-size: var(--fs-sm); line-height: 1.5; height: calc(4 * 1.5em); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .hit-body::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: linear-gradient(var(--ok), var(--ok)) 0 0 / calc(var(--score, 0) * 100%) 100% no-repeat; }
 /* status bar: fixed strip summarising operations */

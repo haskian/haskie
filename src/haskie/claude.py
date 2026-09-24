@@ -22,9 +22,10 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from enum import StrEnum
 from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from haskie import home
 from haskie.errors import Conflict, InvalidInput
@@ -32,7 +33,11 @@ from haskie.errors import Conflict, InvalidInput
 if TYPE_CHECKING:
     from haskie.collection.collection import CollectionSummary
 
-Scope = Literal["user", "project"]  # where Claude Code keeps a setting: this user, or this project
+
+class Scope(StrEnum):  # where Claude Code keeps a setting: this user, or this project
+    USER = "user"
+    PROJECT = "project"
+
 
 SKILL_NAME = "haskie"
 USER_CLAUDE = Path.home() / ".claude"
@@ -71,7 +76,7 @@ def template(relative: str) -> str:
 
 def _claude_dir(scope: Scope) -> Path:
     """Claude Code's configuration directory for `scope`: the user's, or the working directory's."""
-    return USER_CLAUDE if scope == "user" else Path.cwd() / ".claude"
+    return USER_CLAUDE if scope == Scope.USER else Path.cwd() / ".claude"
 
 
 def skill_path(scope: Scope) -> Path:

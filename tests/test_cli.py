@@ -540,28 +540,28 @@ class InstallCase:
 
 INSTALL_CASES = {
     "records the argv claude needs": InstallCase(
-        scope="project",
+        scope=Scope.PROJECT,
         claude_on_path=True,
         collections=[("roasting", "Three books on coffee roasting."), ("adr", "")],
         expect_in_skill=["roasting: Three books on coffee roasting", "adr"],
         expect_in_output="registered the haskie MCP server",
     ),
     "still writes the skill without the claude cli": InstallCase(
-        scope="project",
+        scope=Scope.PROJECT,
         claude_on_path=False,
         collections=[("roasting", "Coffee.")],
         expect_in_skill=["roasting: Coffee"],
         expect_in_output="register the server by hand",
     ),
     "user scope writes to the user's skills": InstallCase(
-        scope="user",
+        scope=Scope.USER,
         claude_on_path=True,
         collections=[("adr", "Architecture decisions.")],
         expect_in_skill=["adr: Architecture decisions"],
         expect_in_output="registered the haskie MCP server",
     ),
     "an empty home still installs": InstallCase(
-        scope="project",
+        scope=Scope.PROJECT,
         claude_on_path=True,
         collections=[],
         expect_in_skill=["list_collections"],
@@ -626,10 +626,10 @@ def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
     again = runner.invoke(cli, arguments)
 
     assert again.exit_code == 0, again.output
-    written = claude.skill_path("project").read_text()
+    written = claude.skill_path(Scope.PROJECT).read_text()
     assert written.count("name: haskie") == 1, "rewritten, not appended to"
     assert "adr: Architecture decisions" in written, "the new collection reached the trigger"
-    rule = claude.rule_path("project").read_text()
+    rule = claude.rule_path(Scope.PROJECT).read_text()
     assert rule.count("Search the user's own") == 1, "rewritten, not appended to"
     assert "adr: Architecture decisions" in rule, "the new collection reached the rule"
 
@@ -669,12 +669,12 @@ HOOK_CASES = {
 
 @pytest.mark.parametrize("case", HOOK_CASES.values(), ids=list(HOOK_CASES))
 def test_install_hook(case: HookCase, claude_workspace: Path, tmp_path: Path) -> None:
-    settings_file = claude.settings_path("project")
+    settings_file = claude.settings_path(Scope.PROJECT)
     if case.before is not None:
         settings_file.parent.mkdir(parents=True)
         settings_file.write_text(case.before)
 
-    added = claude.install_hook("project", tmp_path / "home", "http://127.0.0.1:8000/mcp")
+    added = claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8000/mcp")
 
     assert added is case.added
     settings = json.loads(settings_file.read_text())
@@ -693,12 +693,12 @@ def test_install_hook_refuses_a_settings_file_it_cannot_parse(
     claude_workspace: Path, tmp_path: Path
 ) -> None:
     """Rewriting a file we could not read would throw the user's settings away."""
-    settings_file = claude.settings_path("project")
+    settings_file = claude.settings_path(Scope.PROJECT)
     settings_file.parent.mkdir(parents=True)
     settings_file.write_text("{not json")
 
     with pytest.raises(InvalidInput, match="not valid JSON"):
-        claude.install_hook("project", tmp_path / "home", "http://127.0.0.1:8000/mcp")
+        claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8000/mcp")
 
     assert settings_file.read_text() == "{not json", "left exactly as it was"
 

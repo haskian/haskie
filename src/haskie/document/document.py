@@ -3,7 +3,7 @@
 A document is first class and belongs to no collection: it is imported once, under a name that
 never changes, and any number of collections may then hold it (`collection/collection.py`). What a
 document owns lives in its folder — `original.<ext>` (the file as uploaded), `original.<ext>.md`
-(the markdown assembled from it once, at import), `parts/` (the per-micro-batch markdown that every
+(the markdown assembled from it once, at import), `parts/` (one markdown file per part, which every
 collection re-chunks from), `preview/` (built lazily on first open) and `embeddings/` (the cache
 `indexing/embed_cache.py` writes) — so deleting the folder deletes everything but the rows, and the
 rows cascade from the document's own.
@@ -26,8 +26,9 @@ import re
 import shutil
 import time
 from collections.abc import Iterable
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, Protocol, get_args
+from typing import Any, Protocol
 from uuid import uuid4
 
 import anyio
@@ -45,12 +46,24 @@ UPLOAD_MAX_BYTES = 512 * 1024 * 1024  # also the HTTP request body cap (see app.
 # What `stage` produces, and the only thing `staging_path` accepts: a path is built from it.
 STAGING_ID = re.compile(r"^[0-9a-f]{32}\.[a-z0-9]+\Z")
 
-DocStatus = Literal[
-    "queued", "converting", "embedding", "imported", "error", "cancelled", "deleting"
-]
-DOCUMENT_STATUSES: tuple[DocStatus, ...] = get_args(DocStatus)
+
+class DocumentStatus(StrEnum):
+    QUEUED = "queued"
+    CONVERTING = "converting"
+    EMBEDDING = "embedding"
+    IMPORTED = "imported"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+    DELETING = "deleting"
+
+
+DOCUMENT_STATUSES: tuple[DocumentStatus, ...] = tuple(DocumentStatus)
 # in the import pipeline right now: the states a poll waits on
-ACTIVE_DOCUMENT_STATUSES: tuple[DocStatus, ...] = ("queued", "converting", "embedding")
+ACTIVE_DOCUMENT_STATUSES: tuple[DocumentStatus, ...] = (
+    DocumentStatus.QUEUED,
+    DocumentStatus.CONVERTING,
+    DocumentStatus.EMBEDDING,
+)
 
 # Public sort name -> SQL expression. The whitelist is the only source of column identifiers a
 # listing can order by, so a request can never name a column (see paging.resolve_sort).
@@ -66,10 +79,10 @@ class Document(msgspec.Struct):
     name: str
     suffix: str  # of the original file, lower-case, with the dot: ".pdf"
     size: int
-    status: DocStatus
+    status: DocumentStatus
     error: str | None = None
     preview: convert.Preview | None = None
-    parser: Parser = "anydoc"
+    parser: Parser = Parser.ANYDOC
     skip_ocr_pages: bool = True
     created_at: float = 0.0  # unix seconds
     updated_at: float = 0.0
@@ -93,7 +106,7 @@ class Document(msgspec.Struct):
 
     @property
     def parts_dir(self) -> Path:
-        """The per-micro-batch markdown. Durable, not scratch: a collection that chunks the
+        """One markdown file per part. Durable, not scratch: a collection that chunks the
         document differently re-chunks from the same part boundaries (see `pipeline`)."""
         return self.root / "parts"
 
@@ -284,9 +297,19 @@ async def _create(name: str, size: int, options: ImportOptions) -> Document:
     async with db.connect() as conn:
         cursor = await conn.execute(
             "insert into documents (name, suffix, size, status, parser, skip_ocr_pages, "
-            "created_at, updated_at, description) values (?, ?, ?, 'queued', ?, ?, ?, ?, ?) "
+            "created_at, updated_at, description) values (?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "on conflict (name) do nothing",
-            (name, Path(name).suffix.lower(), size, parser, skip, now, now, options.description),
+            (
+                name,
+                Path(name).suffix.lower(),
+                size,
+                DocumentStatus.QUEUED,
+                parser,
+                skip,
+                now,
+                now,
+                options.description,
+            ),
         )
         created = cursor.rowcount == 1  # read on the open connection, before it is closed
     if not created:
@@ -358,7 +381,7 @@ async def import_path(path: str, options: ImportOptions | None = None) -> Docume
 # --- rows ---------------------------------------------------------------------
 
 
-async def page(request: PageRequest, status: DocStatus | None = None) -> Page[Document]:
+async def page(request: PageRequest, status: DocumentStatus | None = None) -> Page[Document]:
     """One page of every document, optionally of one status. `total` counts the filtered rows,
     so it is what the page is a page of."""
     sort, expression = resolve_sort(request.sort, DOCUMENT_SORTS, "name")
@@ -399,7 +422,7 @@ async def get(name: str) -> Document:
     return _document(row)
 
 
-async def set_status(name: str, status: DocStatus, error: str | None = None) -> None:
+async def set_status(name: str, status: DocumentStatus, error: str | None = None) -> None:
     """A lifecycle step is a change to the document, so it stamps `updated_at`: that is the
     column the "recently touched" listing sorts on. Building the preview is not (see
     `ensure_preview`), it only fills in what the row always described."""
@@ -426,7 +449,7 @@ async def describe(name: str, description: str) -> Document:
     return _document(row)
 
 
-async def describe_of(docs: set[str]) -> dict[str, str]:
+async def descriptions_of(docs: set[str]) -> dict[str, str]:
     """The descriptions of several documents in one query, keyed by name. A document with none
     is absent from the result. Batched because the caller is a search shortlist."""
     if not docs:
@@ -445,16 +468,16 @@ async def describe_of(docs: set[str]) -> dict[str, str]:
 class Described(Protocol):
     """A search row carrying the description of the document it points at."""
 
-    doc: str
+    document: str
     description: str
 
 
 def fill_descriptions(rows: Iterable[Described], described: dict[str, str]) -> None:
     """Put each row's description on it, empty for a document that has none. A description
     belongs to the document rather than to the row, so every search fills it the same way, from
-    one `describe_of` over its whole shortlist."""
+    one `descriptions_of` over its whole shortlist."""
     for row in rows:
-        row.description = described.get(row.doc, "")
+        row.description = described.get(row.document, "")
 
 
 async def collections_of(name: str) -> list[str]:
@@ -470,7 +493,7 @@ async def collections_of(name: str) -> list[str]:
 
 async def memberships(docs: set[str], collections: list[str]) -> dict[str, list[str]]:
     """Which of `collections` hold each of `docs`, in name order; a document none of them hold is
-    absent. One query for a whole search result, the way `describe_of` is one for its
+    absent. One query for a whole search result, the way `descriptions_of` is one for its
     descriptions: a search that folds hits to documents needs every membership at once."""
     if not docs or not collections:
         return {}
@@ -566,9 +589,9 @@ async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
 
 
 # --- removal ------------------------------------------------------------------
-# Two steps so a workflow can run each one durably; the row goes last, so a crash leaves a
-# document that can be removed again instead of orphaned files. The index rows in every
-# collection that held the document are removed by that collection first (see `workflows`).
+# Two steps so a delete operation can run each one as a durable step. The row goes last, so a
+# crash leaves a document that can be removed again instead of orphaned files. The index rows in
+# every collection that held the document are removed by that collection first (see `workflows`).
 
 
 async def remove_files(name: str) -> None:

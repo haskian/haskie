@@ -7,8 +7,9 @@ way to stop a step that is already running, which `collection_lock` below answer
 else here keeps state of its own.
 
 An operation is what a user asked for; a job is one stage of it (convert, embed, index); a task is
-one micro-batch below a job. Every one of them is a DBOS workflow, which is the word this module
-and the DBOS-facing ones beside it use; see `operations.py` for the read model that never does.
+one micro-batch below a job. Operations and their stage children are DBOS workflows, and a task is
+one DBOS step (`try_batch`). "Workflow" is the word this module and the DBOS-facing ones beside it
+use; see `operations.py` for the read model that never does.
 
 Layout:
 - `import_document` per imported document, on `operation.indexing`: convert, then pre-warm the
@@ -21,12 +22,13 @@ Layout:
 - `index_collection_document` per (collection, document), on `operation.indexing`: ensures the
   embedding the collection's chunk settings call for, then writes it from the cache into the
   collection's table. Moves the membership's status, never the document's.
-- Convert, embed and index are cut into at most `pipeline.document_parallelism` contiguous
-  slices, one `stage_slice` child each, with a durable step per micro-batch, so one large document
-  spreads over the slots instead of trickling through a single one. Each stage has a queue of its
-  own, capped by its share of `pipeline.cpu_budget`: `task.converting`, `task.embedding`, and
-  `task.indexing` (partitioned by collection, see `INDEX_QUEUE`). A slow stage backs up on its
-  own queue instead of taking every slot.
+- Convert and embed are cut into at most `resolve_parallelism` contiguous slices, one
+  `stage_slice` child each (`dbos_names.STAGE_WORKFLOW`), with a durable step per micro-batch. So
+  one large document spreads over the slots instead of trickling through a single one. The index
+  stage is never sliced: it runs as one child on the collection's partition. Each stage has a
+  queue of its own, capped by its share of `pipeline.cpu_budget`: `task.converting`,
+  `task.embedding`, and `task.indexing` (partitioned by collection, see `INDEX_QUEUE`). A slow
+  stage backs up on its own queue instead of taking every slot.
 - `remove_from_collection_index` per (collection, document) leaving a collection: on that
   collection's index partition, so rows are never deleted while a step of another document writes
   them. A detach runs one; `delete_document_workflow` runs one per collection the document is in,
@@ -59,7 +61,7 @@ Workflow ids, every one starting with a prefix that names its kind and the names
 convert or embed child and `{parent}:index` for the index child, `bulk-index:{collection}:{uuid}`
 and `bulk-delete:{collection}:{uuid}` for the two bulk operations, `del-doc:{doc}:{uuid}` for a
 document delete (and `{parent}:rm:{collection}` for each collection it leaves),
-`maint:{collection}:{run}` for a maintenance run, and `dl:{stage}:{model}` for a model download
+`maint:{collection}:{parent}` for a maintenance run, and `dl:{kind}:{model}` for a model download
 (see `models`). `document.safe_name` keeps `:` out of every name, so a prefix is unambiguous: one
 query finds a whole operation. Child ids are deterministic, so a replay after a crash re-attaches
 to the child that already exists instead of starting a second one. Every workflow is registered
@@ -71,8 +73,9 @@ import contextlib
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
+from enum import StrEnum
 from functools import partial
-from typing import Any, Literal, get_args
+from typing import Any
 from uuid import uuid4
 
 import anyio
@@ -93,11 +96,12 @@ from dbos._dbos import _get_dbos_instance
 from dbos._workflow_commands import garbage_collect
 
 from haskie import APP_VERSION, audit, db, home, logs, sysdb
+from haskie.audit import Actor, Outcome
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection, MemberStatus
 from haskie.cpu import configure_cpu_budget, shutdown_pool
 from haskie.document import document
-from haskie.document.document import DocStatus, Document, configure_preview_slots
+from haskie.document.document import Document, DocumentStatus, configure_preview_slots
 from haskie.errors import Conflict, InvalidInput, NotFound, PermanentError
 from haskie.indexing import embed_cache, models, pipeline
 from haskie.indexing.dbos_names import (
@@ -163,13 +167,19 @@ DELETE_DOCUMENT_PREFIX = "del-doc"
 MAINTAIN_PREFIX = "maint"  # `maint:{collection}:{parent}`: one collection's runs, one id prefix
 PROGRESS_EVENT = "progress"  # the DBOS event a bulk index publishes after every page
 
+
 # What a pipeline run does to its document: one per prefix above, and the word the Operations view
 # shows for an operation that belongs to no collection.
-PipelineAction = Literal["import", "embed", "index"]
+class PipelineAction(StrEnum):
+    IMPORT = "import"
+    EMBED = "embed"
+    INDEX = "index"
+
+
 _PIPELINE_ACTIONS: dict[str, PipelineAction] = {
-    IMPORT_PREFIX: "import",
-    EMBED_PREFIX: "embed",
-    COLLECTION_DOCUMENT_PREFIX: "index",
+    IMPORT_PREFIX: PipelineAction.IMPORT,
+    EMBED_PREFIX: PipelineAction.EMBED,
+    COLLECTION_DOCUMENT_PREFIX: PipelineAction.INDEX,
 }
 
 
@@ -185,8 +195,8 @@ def pipeline_names(workflow_id: str) -> tuple[PipelineAction, str | None, str] |
     action = _PIPELINE_ACTIONS.get(parts[0])
     if action is None:
         return None
-    if action == "index":
-        return ("index", parts[1], parts[2]) if len(parts) == 4 else None
+    if action == PipelineAction.INDEX:
+        return (action, parts[1], parts[2]) if len(parts) == 4 else None
     return (action, None, parts[1]) if len(parts) == 3 else None
 
 
@@ -200,13 +210,20 @@ def pipeline_names(workflow_id: str) -> tuple[PipelineAction, str | None, str] |
 OPERATION_POLL = 1.0
 TASK_POLL = 0.25
 
-Stage = Literal["convert", "embed", "index"]
-# The order a document moves through them, and the order the Operations view lists its tasks.
-STAGE_ORDER: tuple[Stage, ...] = get_args(Stage)
+
+# Declared in the order a document moves through them, which is also the order the Operations view
+# lists its tasks in.
+class Stage(StrEnum):
+    CONVERT = "convert"
+    EMBED = "embed"
+    INDEX = "index"
+
+
+STAGE_ORDER: tuple[Stage, ...] = tuple(Stage)
 STAGE_QUEUE: dict[Stage, str] = {
-    "convert": CONVERT_QUEUE,
-    "embed": EMBED_QUEUE,
-    "index": INDEX_QUEUE,
+    Stage.CONVERT: CONVERT_QUEUE,
+    Stage.EMBED: EMBED_QUEUE,
+    Stage.INDEX: INDEX_QUEUE,
 }
 
 
@@ -216,9 +233,8 @@ class Context(msgspec.Struct):
     `document` is the row at load time: its name, suffix, parser and OCR policy are immutable,
     and they are all a pipeline step reads out of it. `chunking` is the collection's when the
     workflow serves one, the user default otherwise. `pipeline` is carried whole rather than
-    field by field, so a step that needs another knob costs no new field here. `cache_id` and
-    `collection` are filled in by the workflow that reaches the stage needing them (embed,
-    index)."""
+    field by field, so a step that needs another knob costs no new field here. `cache_id` is
+    filled in by the workflow that reaches the stage needing it (embed, index)."""
 
     document: Document
     chunking: ChunkSettings
@@ -246,16 +262,14 @@ class BulkProgress(msgspec.Struct):
     the document the next page continues after (None once the collection is exhausted)."""
 
     done: int
-    skipped: int
     total: int = 0
     last: str | None = None
 
 
 class BulkResult(msgspec.Struct):
-    """Outcome of a bulk index: documents queued, and documents the walk passed over."""
+    """Outcome of a bulk index: the documents it queued."""
 
     done: int
-    skipped: int
 
 
 class PipelineError(RuntimeError):
@@ -307,9 +321,9 @@ def stage_caps(indexing: PipelineSettings) -> dict[Stage, int]:
     `cpu.cpu_slot` is for: the floors keep every stage alive, the semaphore keeps the total honest.
     """
     weights: dict[Stage, int] = {
-        "convert": indexing.converting_weight,
-        "embed": indexing.embedding_weight,
-        "index": indexing.indexing_weight,
+        Stage.CONVERT: indexing.converting_weight,
+        Stage.EMBED: indexing.embedding_weight,
+        Stage.INDEX: indexing.indexing_weight,
     }
     total = sum(weights.values())
     shares = {stage: indexing.cpu_budget * weight / total for stage, weight in weights.items()}
@@ -350,7 +364,7 @@ async def start() -> None:
     logs.adopt_dbos_logger()  # DBOS installs its own text handler while it initializes
     # In a worker thread on purpose: `launch` is sync SQLAlchemy, and it adopts the loop of the
     # thread that calls it as the one queued async workflows run on. From a thread there is none,
-    # so they run on DBOS's own background loop and never share ours (see the plan's "two loops").
+    # so they run on DBOS's own background loop and never share Litestar's.
     await anyio.to_thread.run_sync(DBOS.launch)
     _start_adoption()
     try:
@@ -460,9 +474,9 @@ _QUEUES: tuple[Queue, ...] = (
     Queue(COLLECTION_QUEUE, lambda indexing, caps: COLLECTION_CONCURRENCY),
     Queue(models.DOWNLOADS_QUEUE, lambda indexing, caps: DOWNLOAD_CONCURRENCY),
     Queue(MAINTENANCE_QUEUE, lambda indexing, caps: MAINTENANCE_CONCURRENCY),
-    Queue(CONVERT_QUEUE, lambda indexing, caps: caps["convert"]),
-    Queue(EMBED_QUEUE, lambda indexing, caps: caps["embed"]),
-    Queue(INDEX_QUEUE, lambda indexing, caps: caps["index"], partition_concurrency=1),
+    Queue(CONVERT_QUEUE, lambda indexing, caps: caps[Stage.CONVERT]),
+    Queue(EMBED_QUEUE, lambda indexing, caps: caps[Stage.EMBED]),
+    Queue(INDEX_QUEUE, lambda indexing, caps: caps[Stage.INDEX], partition_concurrency=1),
 )
 
 
@@ -534,7 +548,7 @@ def resolve_parallelism(indexing: PipelineSettings, stage: Stage) -> int:
 
 
 @retried_step
-async def set_status(doc: str, status: DocStatus, error: str | None = None) -> None:
+async def set_status(doc: str, status: DocumentStatus, error: str | None = None) -> None:
     await document.set_status(doc, status, error)
 
 
@@ -575,9 +589,9 @@ async def index_write(collection: str, doc: str) -> AsyncIterator[bool]:
 
 @retried_step
 async def plan(stage: Stage, ctx: Context) -> list[Batch]:
-    if stage == "convert":
+    if stage == Stage.CONVERT:
         return await pipeline.plan_convert(ctx.document, ctx.pipeline.batch_pages)
-    if stage == "embed":
+    if stage == Stage.EMBED:
         return await pipeline.plan_embed(ctx.document)
     return await pipeline.plan_index(ctx.document, ctx.cache_id, ctx.pipeline.index_group_parts)
 
@@ -614,9 +628,9 @@ async def try_batch(stage: Stage, batch: Batch, ctx: Context) -> BatchResult:
     """The CPU work of one micro-batch. The slot of the CPU budget is taken inside `cpu.on_cpu`,
     around the CPU work alone: the file reads, the file writes and the LanceDB commit of the same
     batch await without holding it, and neither does the bookkeeping DBOS does around the step."""
-    if stage == "convert":
+    if stage == Stage.CONVERT:
         return await _guarded(pipeline.convert_batch(ctx.document, batch))
-    if stage == "embed":
+    if stage == Stage.EMBED:
         return await _guarded(
             pipeline.embed_batch(ctx.document, batch, ctx.cache_id, ctx.chunking, ctx.embedding)
         )
@@ -644,7 +658,7 @@ async def forget_embeddings(doc: str) -> None:
 
 @retried_step
 async def finalize_embed(params: embed_cache.Params, ctx: Context) -> str:
-    """Merge every embed slice's rows into the cache file and publish it (see `embed_cache`)."""
+    """Merge the rows of every part into the cache file and publish it (see `embed_cache`)."""
     return await pipeline.finalize_embed(ctx.document, params, ctx.embedding)
 
 
@@ -673,7 +687,7 @@ async def finalize_index(collection: str, ctx: Context) -> None:
 async def note_indexed_step(collection: str, doc: str) -> int:
     """Count one more indexed document for the collection; returns how many await maintenance."""
     pending = await Collection(collection).note_indexed()
-    _log.debug("index_pending", collection=collection, doc=doc, pending=pending)
+    _log.debug("index_pending", collection=collection, document=doc, pending=pending)
     return pending
 
 
@@ -682,7 +696,7 @@ async def claim_pending(collection: str) -> int:
     # nothing is reset here: a run that crashes must leave the collection pending, and documents
     # indexed while it runs must still count towards the next one (see `settle_maintenance`)
     state = await Collection(collection).maintenance_state()
-    return state.pending_docs if state else 0
+    return state.pending_documents if state else 0
 
 
 @retried_step
@@ -718,7 +732,7 @@ async def stage_slice(stage: Stage, batches: list[Batch], ctx: Context) -> list[
     stage is never sliced and runs on the collection's write partition, so this is also where its
     once-per-document hooks belong: clear the document's rows before the first batch, build the
     full-text index after the last."""
-    indexed = ctx.collection if stage == "index" else None  # the index stage always names one
+    indexed = ctx.collection if stage == Stage.INDEX else None  # the index stage always names one
     if indexed is not None:
         await prepare_index(indexed, ctx)
     results = [await run_batch(stage, batch, ctx) for batch in batches]
@@ -746,14 +760,14 @@ def index_partition(collection: str) -> str:
 def _partition_key(stage: Stage, collection: str | None) -> str | None:
     """`index_partition` for an index child; None for a convert or embed slice, whose queues are
     capped globally and hold nothing a slice of the same document could corrupt."""
-    return index_partition(collection) if stage == "index" and collection else None
+    return index_partition(collection) if stage == Stage.INDEX and collection else None
 
 
 def _child_id(stage: Stage, slice_index: int) -> str:
     """Deterministic, so a replay after a crash re-attaches to the child that already exists. The
     index stage has exactly one child, and keeps the unsuffixed id it always had."""
-    if stage == "index":
-        return f"{DBOS.workflow_id}:index"
+    if stage == Stage.INDEX:
+        return f"{DBOS.workflow_id}:{stage}"
     return f"{DBOS.workflow_id}:{stage}:{slice_index}"
 
 
@@ -764,7 +778,7 @@ def run_id(workflow_id: str) -> str:
 
 def _slice_count(stage: Stage, ctx: Context) -> int:
     """Slices this stage may be cut into. The index stage is never sliced (see `INDEX_QUEUE`)."""
-    return 1 if stage == "index" else resolve_parallelism(ctx.pipeline, stage)
+    return 1 if stage == Stage.INDEX else resolve_parallelism(ctx.pipeline, stage)
 
 
 def _slices(batches: list[Batch], parts: int) -> list[list[Batch]]:
@@ -772,7 +786,8 @@ def _slices(batches: list[Batch], parts: int) -> list[list[Batch]]:
 
     Contiguous rather than round-robin: consecutive micro-batches are consecutive part files, so
     one worker walks one region of the document. Always at least one run, even for a stage that
-    planned no batches at all, because the run is also what carries the stage's finalizer."""
+    planned no batches at all: the index child still has to clear the document's rows and build
+    the full-text index (see `stage_slice`)."""
     count = max(1, min(len(batches), parts))
     size, extra = divmod(len(batches), count)
     out: list[list[Batch]] = []
@@ -812,7 +827,7 @@ async def _stage(stage: Stage, ctx: Context) -> list[int]:
         for handle in handles
         for result in await handle.get_result(polling_interval_sec=TASK_POLL)
     ]
-    if stage == "convert":
+    if stage == Stage.CONVERT:
         _value(await try_finalize_convert(batches, sum(results), ctx))
     return results
 
@@ -838,7 +853,8 @@ async def _ensure_embedding(ctx: Context) -> str:
 @contextlib.asynccontextmanager
 async def _outcome(
     set_state: Callable[..., Awaitable[None]],
-    done: str,
+    done: DocumentStatus | MemberStatus,
+    failed: DocumentStatus | MemberStatus,
     collection: str | None,
     doc: str,
     event: str,
@@ -853,7 +869,7 @@ async def _outcome(
         yield
     except Exception as exc:
         message = str(exc) if isinstance(exc, PermanentError) else root_cause(exc)
-        await set_state("error", message)
+        await set_state(failed, message)
         await _record(collection, doc, f"{event}.failed", started, message)
         raise PipelineError(message) from exc
     await set_state(done)
@@ -861,20 +877,23 @@ async def _outcome(
 
 
 @DBOS.workflow(name=IMPORT_WORKFLOW)
-async def import_document(doc: str) -> str:
+async def import_document(doc: str) -> DocumentStatus:
     """convert, then pre-warm the embedding cache under the user's default chunk settings;
     document status mirrors the stage. Collection-independent: nothing is written to any table."""
-    with logs.bound(workflow_id=DBOS.workflow_id, doc=doc):
+    with logs.bound(workflow_id=DBOS.workflow_id, document=doc):
         # first step, so a deduplicated submit changes nothing
-        await set_status(doc, "queued")
-        async with _outcome(partial(set_status, doc), "imported", None, doc, "import"):
+        await set_status(doc, DocumentStatus.QUEUED)
+        set_state = partial(set_status, doc)
+        async with _outcome(
+            set_state, DocumentStatus.IMPORTED, DocumentStatus.ERROR, None, doc, "import"
+        ):
             ctx = await load_context(doc, None)
-            await set_status(doc, "converting")
+            await set_status(doc, DocumentStatus.CONVERTING)
             await forget_embeddings(doc)
-            await _stage("convert", ctx)
-            await set_status(doc, "embedding")
+            await _stage(Stage.CONVERT, ctx)
+            await set_status(doc, DocumentStatus.EMBEDDING)
             await _ensure_embedding(ctx)
-        return "imported"
+        return DocumentStatus.IMPORTED
 
 
 @DBOS.workflow(name=EMBED_WORKFLOW)
@@ -885,7 +904,7 @@ async def ensure_embedding(doc: str, params: embed_cache.Params) -> str:
     change between the enqueue and the run, and what was asked for is what the id names. The
     embedding model is the global one, so a model changed meanwhile fails the run: the parent
     asks again under the new model."""
-    with logs.bound(workflow_id=DBOS.workflow_id, doc=doc):
+    with logs.bound(workflow_id=DBOS.workflow_id, document=doc):
         found = await cache_lookup(params)
         if found is not None:
             return found
@@ -895,32 +914,33 @@ async def ensure_embedding(doc: str, params: embed_cache.Params) -> str:
             raise PermanentError(f"embedding model changed: wanted {params.model}, have {current}")
         ctx = msgspec.structs.replace(
             ctx,
-            chunking=ChunkSettings(params.chunker, params.chunk_size, params.chunk_overlap),
+            chunking=ChunkSettings.of(params),
             cache_id=embed_cache.key(params),
         )
-        await _stage("embed", ctx)
+        await _stage(Stage.EMBED, ctx)
         return await finalize_embed(params, ctx)
 
 
 @DBOS.workflow(name=COLLECTION_DOCUMENT_WORKFLOW)
-async def index_collection_document(collection: str, doc: str) -> str:
+async def index_collection_document(collection: str, doc: str) -> MemberStatus:
     """Write one document into one collection's table from its embedding cache, computing the
     embedding first when the collection's chunk settings have none yet. Membership status mirrors
     the progress; the document's own status is the import's and is never touched here."""
-    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, doc=doc):
-        await set_member_status(collection, doc, "indexing")
+    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, document=doc):
+        await set_member_status(collection, doc, MemberStatus.INDEXING)
         set_state = partial(set_member_status, collection, doc)
-        async with _outcome(set_state, "indexed", collection, doc, "index"):
+        done, failed = MemberStatus.INDEXED, MemberStatus.ERROR
+        async with _outcome(set_state, done, failed, collection, doc, "index"):
             if not await member_present(collection, doc):
                 raise PermanentError("document is no longer in the collection")
             ctx = await load_context(doc, collection)
-            if ctx.document.status != "imported":
+            if ctx.document.status != DocumentStatus.IMPORTED:
                 raise PermanentError(f"document is not imported: {ctx.document.status}")
             ctx = msgspec.structs.replace(ctx, cache_id=await _ensure_embedding(ctx))
-            await _stage("index", ctx)
+            await _stage(Stage.INDEX, ctx)
             pending = await note_indexed_step(collection, doc)
             await request_maintenance(collection, pending, ctx.pipeline)
-        return "indexed"
+        return MemberStatus.INDEXED
 
 
 async def _record(
@@ -930,12 +950,12 @@ async def _record(
     which an append-only trail tolerates."""
     await audit.record(
         event,
-        actor="operation",
-        outcome="ok" if error is None else "error",
+        actor=Actor.OPERATION,
+        outcome=Outcome.OK if error is None else Outcome.ERROR,
         duration_ms=int((time.perf_counter() - started) * 1000),
         operation_id=DBOS.workflow_id,
         collection=collection,
-        doc=doc,
+        document=doc,
         error=error,
     )
 
@@ -973,25 +993,25 @@ async def maintain_collection(collection: str) -> maintenance.Report:
 
 
 # The debounce key is the collection name, so a burst of documents coalesces into one run: each
-# request pushes the delay out, and the run starts once the burst stops (or `maintenance_docs`
+# request pushes the delay out, and the run starts once the burst stops (or `maintenance_documents`
 # documents landed, which requests it with no delay at all).
 MAINTAIN = Debouncer.create_async(maintain_collection, queue=MAINTENANCE_QUEUE)
 
 
 async def request_maintenance(collection: str, pending: int, indexing: PipelineSettings) -> None:
-    """Ask for a maintenance run: now once `maintenance_docs` documents piled up, otherwise once
-    the collection has been idle for `maintenance_idle_seconds`.
+    """Ask for a maintenance run: now once `maintenance_documents` documents piled up, otherwise
+    once the collection has been idle for `maintenance_idle_seconds`.
 
     Must be called with no `SetEnqueueOptions` partition key in context: a debounce deduplicates,
     and DBOS rejects deduplication on a partitioned enqueue."""
     idle = float(indexing.maintenance_idle_seconds)
-    period = 0.0 if pending >= indexing.maintenance_docs else idle
+    period = 0.0 if pending >= indexing.maintenance_documents else idle
     await MAINTAIN.debounce_async(collection, period, collection)
 
 
 async def schedule_pending_maintenance(idle_seconds: int) -> None:
     """Reschedule every collection that has documents pending. A run lost to a crash or a shutdown
-    leaves `pending_docs` standing, so the next boot picks the collection up again."""
+    leaves `pending_documents` standing, so the next boot picks the collection up again."""
     for name in await Collection.pending_names():
         await MAINTAIN.debounce_async(name, float(idle_seconds), name)
 
@@ -1018,7 +1038,7 @@ async def remove_from_collection_index(collection: str, doc: str) -> None:
     Both steps under the collection's write lock, not only the first: an index step still in
     flight (its workflow was cancelled, which stops nothing already running) would otherwise take
     the lock between them, still find the membership, and write the rows back."""
-    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, doc=doc):
+    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, document=doc):
         async with collection_lock(collection):
             await remove_index_rows(collection, doc)
             await remove_member_row(collection, doc)
@@ -1058,8 +1078,8 @@ async def delete_document_workflow(doc: str) -> None:
 
     `deleting` is set first, so an attach that lands after the membership snapshot below is
     refused instead of leaving rows in a table no membership points at."""
-    with logs.bound(workflow_id=DBOS.workflow_id, doc=doc):
-        await set_status(doc, "deleting")
+    with logs.bound(workflow_id=DBOS.workflow_id, document=doc):
+        await set_status(doc, DocumentStatus.DELETING)
         await cancel_document_work(doc)
         handles: list[WorkflowHandleAsync[None]] = []
         for collection in await memberships(doc):
@@ -1115,7 +1135,7 @@ async def enqueue_page(collection: str, after: str | None, bulk_id: str) -> Bulk
             collection, doc, f"{COLLECTION_DOCUMENT_PREFIX}:{collection}:{doc}:{bulk_id[-32:]}"
         )
         done += 1
-    return BulkProgress(done=done, skipped=0, last=last)
+    return BulkProgress(done=done, last=last)
 
 
 @DBOS.workflow(name=INDEX_COLLECTION_WORKFLOW)
@@ -1125,17 +1145,15 @@ async def index_collection_workflow(collection: str) -> BulkResult:
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection):
         bulk_id = DBOS.workflow_id or ""
         total = await count_members(collection)
-        done = skipped = 0
+        done = 0
         after: str | None = None
         while True:
             page = await enqueue_page(collection, after, bulk_id)
-            done, skipped, after = done + page.done, skipped + page.skipped, page.last
-            await DBOS.set_event_async(PROGRESS_EVENT, BulkProgress(done, skipped, total, after))
+            done, after = done + page.done, page.last
+            await DBOS.set_event_async(PROGRESS_EVENT, BulkProgress(done, total, after))
             if after is None:
-                _log.info(
-                    "collection_index_queued", collection=collection, done=done, skipped=skipped
-                )
-                return BulkResult(done=done, skipped=skipped)
+                _log.info("collection_index_queued", collection=collection, done=done)
+                return BulkResult(done=done)
 
 
 @retried_step
@@ -1196,12 +1214,12 @@ async def purge_operation_history() -> int:
     stage children and step logs below it; returns the cutoff it purged before, as unix ms.
 
     That history is the whole Operations view, and DBOS removes none of it on its own: without this
-    system database grows with every document, forever. Retried: it is a long series of SQLite
+    the system database grows with every document, forever. Retried: it is a long series of SQLite
     writes, any of which can lose the file to another writer for a moment, and a second round over
     the same cutoff deletes nothing.
 
-    DBOS's own collection is sync SQLAlchemy over the same file and has no async twin, so it runs
-    in a worker thread."""
+    DBOS's garbage collector is sync SQLAlchemy over the same file and has no async twin, so it
+    runs in a worker thread."""
     days = (await load_user_settings()).retention.operation_days
     cutoff = int((time.time() - days * 86400) * 1000)
     await anyio.to_thread.run_sync(
@@ -1230,8 +1248,8 @@ async def sweep_staging() -> int:
 
 @DBOS.workflow(name=DAILY_MAINTENANCE_WORKFLOW)
 async def daily_maintenance(scheduled_time: datetime, context: Any) -> None:
-    """Nightly housekeeping: the job history, the audit trail and the staging folder. Takes the
-    two arguments every DBOS schedule passes."""
+    """Nightly housekeeping: the operation history, the audit trail and the staging folder.
+    Takes the two arguments every DBOS schedule passes."""
     purged_before_ms = await purge_operation_history()
     deleted = await prune_audit()
     swept = await sweep_staging()
@@ -1252,7 +1270,7 @@ async def _start(
     """Enqueue one workflow under an explicit id and return that id.
 
     Every operation here is deduplicated the same way: a second call made while the first is still
-    its way returns the run already in flight rather than starting a second one."""
+    queued or running returns the run already in flight rather than starting a second one."""
     with (
         SetWorkflowID(workflow_id),
         SetEnqueueOptions(deduplication_id=dedup_id, duplication_policy="return-existing"),
@@ -1264,7 +1282,11 @@ async def _start(
 # An import runs from a fresh document (`queued`) and from one whose import ended without its
 # markdown (`error`, `cancelled`). Any other status means a pipeline - or a delete - is writing
 # the same files right now, or that the markdown is already there.
-IMPORTABLE: tuple[DocStatus, ...] = ("queued", "error", "cancelled")
+IMPORTABLE: tuple[DocumentStatus, ...] = (
+    DocumentStatus.QUEUED,
+    DocumentStatus.ERROR,
+    DocumentStatus.CANCELLED,
+)
 
 
 async def start_import(doc: str) -> str:
@@ -1440,7 +1462,7 @@ async def cancel_operation(operation_id: str) -> None:
     if names is None:
         return
     action, collection, doc = names
-    if action == "import":
-        await document.set_status(doc, "cancelled")
+    if action == PipelineAction.IMPORT:
+        await document.set_status(doc, DocumentStatus.CANCELLED)
     elif collection is not None:
-        await Collection(collection).set_member_status(doc, "cancelled")
+        await Collection(collection).set_member_status(doc, MemberStatus.CANCELLED)

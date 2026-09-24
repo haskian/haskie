@@ -6,9 +6,9 @@ sort on the score itself. That is the difference with `flow.chunks`, which has t
 because a hybrid ranking has no scale to share. Normalizing per collection would be worse than
 either: it would put every collection's rank-1 chunk on page one, whatever it matched.
 
-A passage counts once. The same document may be a member of several collections, whose tables then
-hold the same chunk; the merge keeps the best-scoring copy and drops the rest (see `merge`), so a
-page is a page of passages rather than of memberships.
+A chunk counts once. The same document may be a member of several collections, whose tables then
+hold the same chunk. The merge keeps the best-scoring copy and drops the rest (see `merge`), so a
+page is a page of chunks rather than of memberships.
 
 Paging is an opaque offset bound to the query, not a keyset. A full-text query cannot be filtered
 by score, so resuming a walk means recomputing the same ranking and cutting it again; a keyset
@@ -41,7 +41,7 @@ MAX_DEPTH = 1000  # every page re-runs the whole ranking, so how deep a walk may
 # A cursor is bound to a sort name and direction (see paging.encode_cursor), so a cursor from a
 # listing can never be replayed here. The version lives in `paging`, which owns the wire format.
 SORT = "text"
-ORDER: Order = "desc"
+ORDER = Order.DESC
 CURSOR = OffsetCursor(SORT, ORDER)
 
 
@@ -81,7 +81,7 @@ async def checked_names(collections: list[str] | None) -> list[str]:
     order, or every collection when it named none.
 
     A name nobody owns is a mistake in the request, not an empty result — unlike a session's
-    stale name, which `flow.chunks` skips, because the caller did not choose it just now.
+    stale name, which `retrieval.plan` skips, because the caller did not choose it just now.
     """
     known = await Collection.names()
     if not collections:
@@ -103,8 +103,8 @@ def split_collections(raw: str | None) -> list[str] | None:
     return [name for name in names if name] or None
 
 
-def _rank_key(pair: tuple[CollectionIndex, dict]) -> tuple[float, str, int, int, str]:
-    """Best score first, then the identity of the passage — (doc, part, chunk_id) — and the
+def _rank_key(pair: tuple[CollectionIndex, dict]) -> tuple[float, str, int, str]:
+    """Best score first, then the identity of the chunk — (document, seq) — and the
     collection last, so two collections holding the same chunk sort next to each other and the
     ranking is the same every time it is recomputed."""
     index, row = pair
@@ -114,13 +114,13 @@ def _rank_key(pair: tuple[CollectionIndex, dict]) -> tuple[float, str, int, int,
 def merge(
     retrieved: list[tuple[CollectionIndex, list[dict]]],
 ) -> list[tuple[CollectionIndex, dict]]:
-    """One ranking out of the per-collection rankings, with each passage in it once.
+    """One ranking out of the per-collection rankings, with each chunk in it once.
 
     The identity tie-breaker is what makes paging work: two chunks that score the same must land
     in the same order every time the ranking is recomputed, or a page boundary would swap them and
     the walk would show one twice and the other never.
 
-    A document in two collections puts the same (doc, part, chunk_id) in both their rankings. The
+    A document in two collections puts the same (document, seq) in both their rankings. The
     sort puts those copies next to each other, best score first, so keeping the first of each
     identity (`first_per_key`) keeps the best-scoring copy and drops the rest deterministically.
     """

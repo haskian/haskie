@@ -12,7 +12,7 @@ import pytest
 
 from haskie.collection.index import Hit, location
 from haskie.search import retrieval
-from haskie.search.passage import Passage, Window, expand, ranges
+from haskie.search.passage import Passage, Window, ranges, widen
 
 # Multi-byte on purpose: a char offset is not a file position, and a window that started half a
 # character in would shift every offset it reports.
@@ -33,11 +33,10 @@ def _hit(markdown: str, path: Path, snippet: str) -> Hit:
     line_end = markdown.count("\n", 0, char_end - 1) + 1
     return Hit(
         collection="backend",
-        doc="doc.md",
+        document="doc.md",
         source_path="documents/doc.md",
         markdown_path="documents/doc.md",
         part=0,
-        chunk_id=0,
         seq=1,
         line_start=line_start,
         line_end=line_end,
@@ -47,8 +46,8 @@ def _hit(markdown: str, path: Path, snippet: str) -> Hit:
         byte_end=len(markdown[:char_end].encode()),
         page_start=None,
         page_end=None,
-        parents=[],
-        heading="Retries",
+        headings=["Retries"],
+        frame=["Retries"],
         header="Retries",
         location=location("doc.md", None, None, line_start, line_end),
         text=snippet,
@@ -81,7 +80,7 @@ def test_a_window_is_the_document_around_one_span(
     start = window.local(span.char_start)
     assert window.text[start : window.local(span.char_end)] == snippet, f"{name}: the span itself"
     assert markdown[window.char_start : window.char_start + len(window.text)] == window.text, name
-    assert expand(span, window, Passage) == expand(span, Window(markdown, 0), Passage), name
+    assert widen(span, window, Passage) == widen(span, Window(markdown, 0), Passage), name
 
 
 def test_a_window_reads_a_window_and_not_the_file(tmp_path: Path) -> None:

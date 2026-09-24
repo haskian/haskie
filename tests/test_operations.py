@@ -5,20 +5,21 @@ import pytest
 
 from haskie.indexing import operations
 from haskie.indexing.dbos_names import RunStatus
+from haskie.indexing.workflows import PipelineAction
 
 TAIL = "c3680a02207a41f89078486d1b3a4c90"
 DOC = "principles.pdf"
 
 
 def run(
-    action: operations.PipelineAction, status: RunStatus = "SUCCESS", **patch
+    action: operations.PipelineAction, status: RunStatus = RunStatus.SUCCESS, **patch
 ) -> operations._StageRun:
     prefix = {"import": "imp", "embed": "emb", "index": "idx-col:asd"}[action]
     base = operations._StageRun(
         id=f"{prefix}:{DOC}:{TAIL}",
         action=action,
         collection="asd" if action == "index" else None,
-        doc=DOC,
+        document=DOC,
         status=status,
         created_at=1_000.0,
         updated_at=1_009.0,
@@ -46,53 +47,65 @@ def shape(rows: list[operations.Operation]) -> list[tuple]:
         ("nothing", [], []),
         (
             "an import and its embed become one operation of two jobs, convert first",
-            [run("embed"), run("import")],
+            [run(PipelineAction.EMBED), run(PipelineAction.IMPORT)],
             [("imp", [("convert", "imp", "SUCCESS", 27), ("embed", "emb", "SUCCESS", 27)])],
         ),
         (
             "an index and its embed: embed first, index last",
-            [run("embed", tasks_total=0, tasks_done=0), run("index", tasks_total=2, tasks_done=2)],
+            [
+                run(PipelineAction.EMBED, tasks_total=0, tasks_done=0),
+                run(PipelineAction.INDEX, tasks_total=2, tasks_done=2),
+            ],
             [("idx-col", [("embed", "emb", "SUCCESS", 0), ("index", "idx-col", "SUCCESS", 2)])],
         ),
         (
             "an embed whose parent is not on the page keeps an operation of its own",
-            [run("embed")],
+            [run(PipelineAction.EMBED)],
             [("emb", [("embed", "emb", "SUCCESS", 27)])],
         ),
         (
             "an import without its embed on the page has one job",
-            [run("import", status="PENDING")],
+            [run(PipelineAction.IMPORT, status=RunStatus.PENDING)],
             [("imp", [("convert", "imp", "PENDING", 27)])],
         ),
         (
             "a running import whose embed exists has converted already",
-            [run("embed", status="PENDING", tasks_done=3), run("import", status="PENDING")],
+            [
+                run(PipelineAction.EMBED, status=RunStatus.PENDING, tasks_done=3),
+                run(PipelineAction.IMPORT, status=RunStatus.PENDING),
+            ],
             [("imp", [("convert", "imp", "SUCCESS", 27), ("embed", "emb", "PENDING", 27)])],
         ),
         (
             "a running index waits for its embed, then writes",
             [
-                run("embed", status="PENDING"),
-                run("index", status="PENDING", tasks_total=2, tasks_done=0),
+                run(PipelineAction.EMBED, status=RunStatus.PENDING),
+                run(PipelineAction.INDEX, status=RunStatus.PENDING, tasks_total=2, tasks_done=0),
             ],
             [("idx-col", [("embed", "emb", "PENDING", 27), ("index", "idx-col", "ENQUEUED", 2)])],
         ),
         (
             "a running index whose embed is done is writing",
-            [run("embed"), run("index", status="PENDING", tasks_total=2, tasks_done=1)],
+            [
+                run(PipelineAction.EMBED),
+                run(PipelineAction.INDEX, status=RunStatus.PENDING, tasks_total=2, tasks_done=1),
+            ],
             [("idx-col", [("embed", "emb", "SUCCESS", 27), ("index", "idx-col", "PENDING", 2)])],
         ),
         (
             "a failed import whose embed failed: convert was over, the embed carries the error",
             [
-                run("embed", status="ERROR", error="model gone"),
-                run("import", status="ERROR", error="model gone"),
+                run(PipelineAction.EMBED, status=RunStatus.ERROR, error="model gone"),
+                run(PipelineAction.IMPORT, status=RunStatus.ERROR, error="model gone"),
             ],
             [("imp", [("convert", "imp", "SUCCESS", 27), ("embed", "emb", "ERROR", 27)])],
         ),
         (
             "another document's embed is not this operation's",
-            [run("embed", id=f"emb:other.pdf:{TAIL}", doc="other.pdf"), run("import")],
+            [
+                run(PipelineAction.EMBED, id=f"emb:other.pdf:{TAIL}", document="other.pdf"),
+                run(PipelineAction.IMPORT),
+            ],
             [
                 ("emb", [("embed", "emb", "SUCCESS", 27)]),
                 ("imp", [("convert", "imp", "SUCCESS", 27)]),
@@ -107,8 +120,8 @@ def test_operations(name: str, page: list, expected: list[tuple]) -> None:
 def test_a_job_declared_done_carries_no_error() -> None:
     (row,) = operations.fold_operations(
         [
-            run("embed", status="ERROR", error="model gone"),
-            run("import", status="ERROR", error="model gone"),
+            run(PipelineAction.EMBED, status=RunStatus.ERROR, error="model gone"),
+            run(PipelineAction.IMPORT, status=RunStatus.ERROR, error="model gone"),
         ]
     )
     convert, embed = row.jobs
@@ -120,12 +133,12 @@ def test_a_job_declared_done_carries_no_error() -> None:
 def test_operations_sum_the_counters() -> None:
     (row,) = operations.fold_operations(
         [
-            run("embed", tasks_done=5, tasks_total=27, tasks_running=1),
-            run("import", tasks_done=3, tasks_total=3),
+            run(PipelineAction.EMBED, tasks_done=5, tasks_total=27, tasks_running=1),
+            run(PipelineAction.IMPORT, tasks_done=3, tasks_total=3),
         ]
     )
     assert row.detail == {"tasks_done": 8, "tasks_running": 1, "tasks_total": 30}
-    assert row.status == "SUCCESS" and row.title == f"import {DOC}"
+    assert row.status == "SUCCESS" and row.title == DOC
 
 
 @pytest.mark.parametrize(
@@ -134,28 +147,34 @@ def test_operations_sum_the_counters() -> None:
         (
             "an import converts until it spawns its embed, which runs on its own clock",
             [
-                run("embed", created_at=1_003.0, updated_at=1_020.0),
-                run("import", updated_at=1_021.0),
+                run(PipelineAction.EMBED, created_at=1_003.0, updated_at=1_020.0),
+                run(PipelineAction.IMPORT, updated_at=1_021.0),
             ],
             [3.0, 17.0],
         ),
         (
             "an index waits for its embed, then writes",
             [
-                run("embed", created_at=1_001.0, updated_at=1_004.0),
-                run("index", updated_at=1_009.0),
+                run(PipelineAction.EMBED, created_at=1_001.0, updated_at=1_004.0),
+                run(PipelineAction.INDEX, updated_at=1_009.0),
             ],
             [3.0, 5.0],
         ),
-        ("a job on its own is its whole run", [run("embed")], [9.0]),
+        ("a job on its own is its whole run", [run(PipelineAction.EMBED)], [9.0]),
         (
             "a running job has no duration yet",
-            [run("embed", status="PENDING"), run("import", status="PENDING")],
+            [
+                run(PipelineAction.EMBED, status=RunStatus.PENDING),
+                run(PipelineAction.IMPORT, status=RunStatus.PENDING),
+            ],
             [0.0, None],
         ),
         (
             "a clock that went backwards reads as zero, never negative",
-            [run("embed", created_at=999.0, updated_at=1_009.0), run("import")],
+            [
+                run(PipelineAction.EMBED, created_at=999.0, updated_at=1_009.0),
+                run(PipelineAction.IMPORT),
+            ],
             [0.0, 10.0],
         ),
     ],

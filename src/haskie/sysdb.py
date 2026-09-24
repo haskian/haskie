@@ -2,8 +2,8 @@
 
 DBOS's Python API answers one workflow (or one page of workflows) at a time. A read model over a
 whole page of operations needs aggregates: how many steps each stage slice recorded, how many
-children each one has in which status. One grouped query answers that for every row on the page,
-where the API would need a call per workflow.
+workflows of each name or queue are active. One grouped query answers that for every row on the
+page, where the API would need a call per workflow.
 
 Nothing here writes: DBOS owns every row in these tables. `db.connect()` opens the same file DBOS
 was configured with, so the reads see its committed state through WAL.

@@ -34,7 +34,10 @@ export function Modal({
     <dialog
       className="modal"
       ref={dialog}
-      onClose={() => {
+      onClose={(event) => {
+        // React bubbles `close` through the component tree, unlike the DOM: a nested modal closing
+        // must not close this one too.
+        if (event.target !== dialog.current) return
         if (open) onClose() // Escape and the close button end the dialog without telling the caller
       }}
       onClick={(event) => {

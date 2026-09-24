@@ -5,11 +5,10 @@ import { parseScope, scopeParams, type Scope } from './explore/scope'
 
 const HIT: Hit = {
   collection: 'A–E',
-  doc: 'area-lights.pdf',
+  document: 'area-lights.pdf',
   source_path: 'documents/area-lights.pdf',
   markdown_path: 'markdown/area-lights.md',
   part: 0,
-  chunk_id: 3,
   seq: 4,
   line_start: 41,
   line_end: 58,
@@ -19,11 +18,14 @@ const HIT: Hit = {
   byte_end: 1702,
   page_start: 2,
   page_end: 2,
-  parents: ['Lighting'],
-  heading: 'Lighting › Soft shadows',
-  header: 'Soft shadows',
+  headings: ['Lighting', 'Soft shadows'],
+  frame: ['Lighting', 'Soft shadows'],
+  header: 'Lighting > Soft shadows',
   location: 'p. 2',
   text: 'Area lights soften the shadow edge in proportion to their size.',
+  layout: [{ type: 'text', position: 0 }],
+  start_reason: 'paragraph',
+  end_reason: 'length_sentence',
   score: 0.91,
   source_file: '/Users/ada/.haskie/documents/area-lights.pdf',
   markdown_file: '/Users/ada/.haskie/markdown/area-lights.md',
@@ -31,11 +33,11 @@ const HIT: Hit = {
 
 const SOURCE: Source = {
   collection: 'A–E',
-  doc: 'area-lights.pdf',
+  document: 'area-lights.pdf',
   score: 0.91,
   chunks: 7,
   description: 'Notes on area lights and soft shadow falloff.',
-  heading: 'Lighting › Soft shadows',
+  header: 'Lighting > Soft shadows',
   location: 'lines 41–58',
   text: 'Area lights soften the shadow edge in proportion to their size.',
   source_file: '/Users/ada/.haskie/documents/area-lights.pdf',
@@ -48,7 +50,7 @@ const SOURCE: Source = {
 
 const PASSAGE: Passage = {
   collection: 'A–E',
-  doc: 'area-lights.pdf',
+  document: 'area-lights.pdf',
   header: 'Lighting > Soft shadows',
   location: 'area-lights.pdf p.2 L41-58',
   seq_start: 4,
@@ -95,9 +97,9 @@ describe('scopeParams', () => {
 
 describe('position', () => {
   const cases: Array<{ name: string; value: Match; expected: string }> = [
-    { name: 'a paged hit reads as page and chunk', value: HIT, expected: 'p. 2 · chunk 3' },
-    { name: 'page zero is a page, not a missing one', value: { ...HIT, page_start: 0 }, expected: 'p. 0 · chunk 3' },
-    { name: 'a hit with no pages falls back to lines', value: { ...HIT, page_start: null }, expected: 'lines 41–58' },
+    { name: 'a paged hit reads as page and chunk', value: HIT, expected: 'p. 2 · chunk 4' },
+    { name: 'page zero is a page, not a missing one', value: { ...HIT, page_start: 0 }, expected: 'p. 0 · chunk 4' },
+    { name: 'a hit with no pages names its chunk and lines', value: { ...HIT, page_start: null }, expected: 'chunk 4 · lines 41–58' },
     { name: 'a source has only lines', value: SOURCE, expected: 'lines 41–58' },
     { name: 'a passage names its page and chunk run', value: PASSAGE, expected: 'p. 2 · chunks 4–6' },
     { name: 'a passage of one chunk names it, and without pages falls back to lines', value: { ...PASSAGE, seq_end: 4, page_start: null }, expected: 'chunk 4 · lines 41–58' },

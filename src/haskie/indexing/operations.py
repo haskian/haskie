@@ -14,10 +14,10 @@ round bounds.
 Three workflows carry a document through the pipeline (`dbos_names.PIPELINE_WORKFLOWS`), and each
 runs a job of an operation: `import_document` converts it, `ensure_embedding` fills its embedding
 cache, `index_collection_document` writes one collection's table from that cache. Every one of them
-cuts its stage into `stage_slice` children with a durable step per micro-batch, so a job's tasks are
-those micro-batches: the batch list comes from each child's input, the finished count from its
-step log (`sysdb`, one grouped query for the whole page). Counts are summed over the children, so
-how a stage was sliced never shows here.
+runs its stage as `stage_slice` children with a durable step per micro-batch, so a job's tasks are
+those micro-batches. The batch list comes from each child's input, the finished count from its step
+log (`sysdb`, one grouped query for the whole page).
+Counts are summed over the children, so how a stage was sliced never shows here.
 
 Every other kind of operation this app runs is listed through one generic read model instead:
 `list_operations` returns a page of `Operation` for a whole-collection operation, a model download
@@ -39,7 +39,7 @@ awaited. The row builders below take what those reads returned and touch nothing
 """
 
 import asyncio
-from typing import Literal, get_args
+from enum import StrEnum
 
 import msgspec
 from dbos import DBOS
@@ -54,7 +54,6 @@ from haskie.indexing.dbos_names import (
     DAILY_MAINTENANCE_WORKFLOW,
     DOWNLOAD_WORKFLOW,
     MAINTAIN_PARTITION_WORKFLOW,
-    PENDING_STATUS,
     PIPELINE_WORKFLOWS,
     STAGE_STEP,
     STAGE_WORKFLOW,
@@ -76,7 +75,7 @@ from haskie.search import session
 # listing the next page continues in and the offset into it, which is all an ordered-by-created_at
 # listing of a run history can page on.
 SORT = "created_at"
-ORDER: Order = "desc"
+ORDER = Order.DESC
 # Both listings page on an offset: DBOS's history has one fixed order and no sort of its own.
 CURSOR = OffsetCursor(SORT, ORDER)
 
@@ -84,7 +83,7 @@ CURSOR = OffsetCursor(SORT, ORDER)
 class _StageRun(msgspec.Struct):
     """One run of one pipeline over one document, as DBOS's history holds it: the raw row
     `fold_operations` folds into an operation and its jobs. Internal on purpose - nothing outside
-    module sees it, and no route returns it.
+    this module sees it, and no route returns it.
 
     `collection` is None for an import and an embed: both are collection-independent, and only the
     index of a member belongs to a collection."""
@@ -92,7 +91,7 @@ class _StageRun(msgspec.Struct):
     id: str
     action: PipelineAction
     collection: str | None
-    doc: str
+    document: str
     status: RunStatus
     created_at: float
     updated_at: float
@@ -106,10 +105,11 @@ class _StageRun(msgspec.Struct):
 # the kind the API reports is the workflow name (`test_workflows` pins that against the registry).
 BulkKind = BulkWorkflow
 BULK_KINDS: tuple[BulkKind, ...] = BULK_WORKFLOWS
+# What a bulk operation works on. The verb is the row's tag in the UI, so the title leaves it out.
 BULK_TITLES: dict[BulkKind, str] = {
-    "index_collection": "index collection",
-    "delete_collection": "delete collection",
-    "delete_document": "delete document",
+    BulkKind.INDEX_COLLECTION: "collection",
+    BulkKind.DELETE_COLLECTION: "collection",
+    BulkKind.DELETE_DOCUMENT: "document",
 }
 
 
@@ -128,21 +128,27 @@ class OperationProgress(msgspec.Struct):
 
 
 # Declared in the order the Operations view shows the sections, so `KIND_ORDER` is the type itself.
-OperationKind = Literal["document", "collection", "download", "maintenance"]
-KIND_ORDER: tuple[OperationKind, ...] = get_args(OperationKind)
+# `DOCUMENT` is the one kind with a listing of its own, and its cursor.
+class OperationKind(StrEnum):
+    DOCUMENT = "document"
+    COLLECTION = "collection"
+    DOWNLOAD = "download"
+    MAINTENANCE = "maintenance"
+
+
+KIND_ORDER: tuple[OperationKind, ...] = tuple(OperationKind)
 KIND_LABELS: dict[OperationKind, str] = {
-    "document": "Documents",
-    "collection": "Collections",
-    "download": "Model downloads",
-    "maintenance": "Maintenance",
+    OperationKind.DOCUMENT: "Documents",
+    OperationKind.COLLECTION: "Collections",
+    OperationKind.DOWNLOAD: "Model downloads",
+    OperationKind.MAINTENANCE: "Maintenance",
 }
-DOCUMENT_KIND: OperationKind = "document"  # the one kind with a listing of its own, and its cursor
 
 
 class Job(msgspec.Struct):
     """One stage of an operation, and the run whose batches it is made of: the convert and index
     stages run in the operation's own run, the embed stage in the `ensure_embedding` child it
-    spawns (see `operations`)."""
+    spawns (see `fold_operations`)."""
 
     id: str  # pass it to `list_tasks` for this job's batches
     stage: Stage
@@ -166,7 +172,7 @@ class Operation(msgspec.Struct):
 
     id: str
     kind: OperationKind
-    title: str  # human text: "collection / doc", "index collection X", "download reranker Y"
+    title: str  # what it works on: "collection / document", "collection X", "reranker Y"
     status: RunStatus
     created_at: float
     updated_at: float
@@ -220,16 +226,16 @@ def _collection_of(operation_id: str) -> str | None:
 # Kind -> the DBOS workflow names it lists. `document` is missing on purpose: it has a listing of
 # its own (`_pipeline_page`), because it is the only kind whose rows carry micro-batch counts.
 KIND_NAMES: dict[OperationKind, list[str]] = {
-    "collection": list(BULK_KINDS),
-    "download": [DOWNLOAD_WORKFLOW],
+    OperationKind.COLLECTION: list(BULK_KINDS),
+    OperationKind.DOWNLOAD: [DOWNLOAD_WORKFLOW],
     # `maintain_collection` is only the debounced handle that waits: the run itself is the child
     # on the collection's partition, so that is the one worth a row.
-    "maintenance": [MAINTAIN_PARTITION_WORKFLOW, DAILY_MAINTENANCE_WORKFLOW],
+    OperationKind.MAINTENANCE: [MAINTAIN_PARTITION_WORKFLOW, DAILY_MAINTENANCE_WORKFLOW],
 }
 
 # The same table read the other way, for counting active runs by kind in one query.
 KIND_BY_NAME: dict[str, OperationKind] = {
-    **dict.fromkeys(PIPELINE_WORKFLOWS, "document"),
+    **dict.fromkeys(PIPELINE_WORKFLOWS, OperationKind.DOCUMENT),
     **{name: kind for kind, names in KIND_NAMES.items() for name in names},
 }
 
@@ -237,8 +243,11 @@ KIND_BY_NAME: dict[str, OperationKind] = {
 # belong to no collection, so a collection filter leaves the section holding them empty rather
 # than unfiltered.
 _COLLECTION_PREFIX: dict[OperationKind, list[str]] = {
-    "collection": [f"{workflows.BULK_INDEX_PREFIX}:", f"{workflows.BULK_DELETE_PREFIX}:"],
-    "maintenance": [f"{workflows.MAINTAIN_PREFIX}:"],
+    OperationKind.COLLECTION: [
+        f"{workflows.BULK_INDEX_PREFIX}:",
+        f"{workflows.BULK_DELETE_PREFIX}:",
+    ],
+    OperationKind.MAINTENANCE: [f"{workflows.MAINTAIN_PREFIX}:"],
 }
 
 
@@ -246,12 +255,12 @@ def _checked_kind(kind: str) -> OperationKind:
     """A kind is a trust boundary: an unknown one is a mistake in the request, not an empty page."""
     if kind not in KIND_ORDER:
         raise InvalidInput(f"unknown operation kind {kind!r}; allowed: {', '.join(KIND_ORDER)}")
-    return kind
+    return OperationKind(kind)
 
 
 def _bulk_kind(name: str | None) -> BulkKind | None:
     """The kind a whole-collection workflow name stands for; None for any other workflow."""
-    return name if name in BULK_KINDS else None
+    return BulkKind(name) if name in BULK_KINDS else None
 
 
 def _kind_prefix(kind: OperationKind, collection: str | None) -> list[str] | None:
@@ -289,7 +298,7 @@ async def list_operations(
     opaque offset cursor bound to the kind that issued it."""
     check_page_size(page_size)
     checked = _checked_kind(kind)
-    if checked == DOCUMENT_KIND:
+    if checked == OperationKind.DOCUMENT:
         page = await _pipeline_page(collection, page_size, cursor)
         return Page(
             items=await _with_origins(fold_operations(page.items)),
@@ -349,23 +358,23 @@ class Activity(msgspec.Struct):
 
 async def activity() -> Activity:
     # The embed job an import or an index spawned is waited for by the one that spawned it (see
-    # `operations`): counting both would read "2 operations" for one operation.
+    # `fold_operations`): counting both would read "2 operations" for one operation.
     by_family = await sysdb.queue_activity(skip=[workflows.EMBEDDING_QUEUE])
 
     def family(name: str) -> QueueActivity:
         counts = by_family.get(name, {})
-        running = counts.get(PENDING_STATUS, 0)
+        running = counts.get(RunStatus.PENDING, 0)
         return QueueActivity(queued=sum(counts.values()) - running, running=running)
 
     return Activity(operations=family("operation"), tasks=family("task"))
 
 
 def _document_title(run: _StageRun) -> str:
-    """What the operation is doing, in one line: an index names the collection it writes, an import
-    and an embed name what they do to the document instead."""
+    """What the operation works on, in one line: an index names the collection it writes and the
+    document, an import or an embed the document alone. The verb is the row's tag."""
     if run.collection is not None:
-        return f"{run.collection} / {run.doc}"
-    return f"{run.action} {run.doc}"
+        return f"{run.collection} / {run.document}"
+    return run.document
 
 
 def fold_operations(runs: list[_StageRun]) -> list[Operation]:
@@ -377,24 +386,25 @@ def fold_operations(runs: list[_StageRun]) -> list[Operation]:
     between them, or the parent is gone) stays an operation of its own, because hiding it would
     lose it.
     """
-    embeds = {run.id: run for run in runs if run.action == "embed"}
-    folded = {_embed_id(run) for run in runs if run.action != "embed"}
+    embeds = {run.id: run for run in runs if run.action == PipelineAction.EMBED}
+    folded = {_embed_id(run) for run in runs if run.action != PipelineAction.EMBED}
     out: list[Operation] = []
     for run in runs:
-        if run.action == "embed":
+        if run.action == PipelineAction.EMBED:
             if run.id not in folded:
-                out.append(_document_row(run, [_job("embed", run)]))
+                out.append(_document_row(run, [_job(Stage.EMBED, run)]))
             continue
         embed = embeds.get(_embed_id(run))
-        own = _job("convert" if run.action == "import" else "index", run, embed)
-        embed_job = [] if embed is None else [_job("embed", embed)]
-        jobs = [own, *embed_job] if run.action == "import" else [*embed_job, own]
+        imported = run.action == PipelineAction.IMPORT
+        own = _job(Stage.CONVERT if imported else Stage.INDEX, run, embed)
+        embed_job = [] if embed is None else [_job(Stage.EMBED, embed)]
+        jobs = [own, *embed_job] if imported else [*embed_job, own]
         out.append(_document_row(run, jobs))
     return out
 
 
 def _embed_id(run: _StageRun) -> str:
-    return f"{workflows.EMBED_PREFIX}:{run.doc}:{run.id.rsplit(':', 1)[-1]}"
+    return f"{workflows.EMBED_PREFIX}:{run.document}:{run.id.rsplit(':', 1)[-1]}"
 
 
 def _job(stage: Stage, run: _StageRun, embed: _StageRun | None = None) -> Job:
@@ -403,10 +413,10 @@ def _job(stage: Stage, run: _StageRun, embed: _StageRun | None = None) -> Job:
     beside it is over; an index writes after the embed, so an index job waits while the embed is
     not done and runs once it is. Without the child, the run's own status stands."""
     status = run.status
-    if embed is not None and stage == "convert":
-        status = "SUCCESS"
-    if embed is not None and stage == "index" and status in ACTIVE_STATUS:
-        status = "PENDING" if embed.status == "SUCCESS" else "ENQUEUED"
+    if embed is not None and stage == Stage.CONVERT:
+        status = RunStatus.SUCCESS
+    if embed is not None and stage == Stage.INDEX and status in ACTIVE_STATUS:
+        status = RunStatus.PENDING if embed.status == RunStatus.SUCCESS else RunStatus.ENQUEUED
     return Job(
         id=run.id,
         stage=stage,
@@ -414,7 +424,7 @@ def _job(stage: Stage, run: _StageRun, embed: _StageRun | None = None) -> Job:
         created_at=run.created_at,
         updated_at=run.updated_at,
         # a job this listing declared successful never failed, whatever the run around it did
-        error=None if status == "SUCCESS" else run.error,
+        error=None if status == RunStatus.SUCCESS else run.error,
         tasks_done=run.tasks_done,
         tasks_running=run.tasks_running,
         tasks_total=run.tasks_total,
@@ -434,9 +444,9 @@ def _job_seconds(stage: Stage, run: _StageRun, embed: _StageRun | None) -> float
     waits for the embed before it writes. The child's timestamps split the two."""
     if embed is None:
         return max(0.0, run.updated_at - run.created_at)
-    if stage == "convert":
+    if stage == Stage.CONVERT:
         return max(0.0, embed.created_at - run.created_at)
-    if stage == "index":
+    if stage == Stage.INDEX:
         return max(0.0, run.updated_at - embed.updated_at)
     return max(0.0, embed.updated_at - embed.created_at)
 
@@ -444,7 +454,7 @@ def _job_seconds(stage: Stage, run: _StageRun, embed: _StageRun | None) -> float
 def _document_row(run: _StageRun, jobs: list[Job]) -> Operation:
     return Operation(
         id=run.id,
-        kind="document",
+        kind=OperationKind.DOCUMENT,
         title=_document_title(run),
         status=run.status,
         created_at=run.created_at,
@@ -473,22 +483,22 @@ async def _kind_row(kind: OperationKind, status) -> Operation:
 
 
 def _title(kind: OperationKind, status) -> str:
-    """Human text for one row: what this operation is doing, read out of its id and the name DBOS
-    recorded it under.
+    """Human text for one row: what this operation works on, read out of its id and the name DBOS
+    recorded it under. The verb is the row's tag, so the title leaves it out.
 
     `document` never arrives here: it has a row builder of its own (see `list_operations`)."""
-    if kind == "collection":
+    if kind == OperationKind.COLLECTION:
         bulk = _bulk_kind(status.name)  # the listing selects exactly these three names
         # the second segment is a collection for the two bulk kinds, a document for a delete
         return (
             f"{BULK_TITLES[bulk]} {_named(status.workflow_id)}" if bulk else "collection operation"
         )
-    if kind == "download":
+    if kind == OperationKind.DOWNLOAD:
         download_kind, model = models.model_names(status.workflow_id)
-        return f"download {download_kind} {model}"
+        return f"{download_kind} {model}"
     if status.name == DAILY_MAINTENANCE_WORKFLOW:  # the rest are maintenance runs
         return "daily housekeeping"
-    return f"maintain {_named(status.workflow_id)}"
+    return _named(status.workflow_id)
 
 
 async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | None]:
@@ -496,28 +506,32 @@ async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | N
     is read without waiting: an operation that has not finished its first page yet simply has none.
 
     Async because that read is one, even with no wait: the event lives in the system database."""
-    if kind == "download":
+    if kind == OperationKind.DOWNLOAD:
         return {"warm": models.is_warm(status.workflow_id)}
-    if kind == "collection":
+    if kind == OperationKind.COLLECTION:
         progress = await DBOS.get_event_async(
             status.workflow_id, workflows.PROGRESS_EVENT, timeout_seconds=0
         )
         if isinstance(progress, workflows.BulkProgress):
-            return {"done": progress.done, "skipped": progress.skipped, "total": progress.total}
+            return {"done": progress.done, "total": progress.total}
     return {}
 
 
 def _stage_run(status, children: list, done_by_child: dict[str, int]) -> _StageRun:
     # a listing selects the three pipeline workflows by name, so every id parses; an id of an
     # older shape is listed as an import of an unknown document rather than failing the page
-    action, collection, doc = pipeline_names(status.workflow_id) or ("import", None, "?")
+    action, collection, doc = pipeline_names(status.workflow_id) or (
+        PipelineAction.IMPORT,
+        None,
+        "?",
+    )
     totals = [len(found[1]) if (found := workflows.stage_input(c)) else 0 for c in children]
     done = [done_by_child.get(c.workflow_id, 0) for c in children]
     return _StageRun(
         id=status.workflow_id,
         action=action,
         collection=collection,
-        doc=doc,
+        document=doc,
         status=status.status,
         created_at=(status.created_at or 0) / 1000,
         updated_at=(status.updated_at or 0) / 1000,
@@ -525,7 +539,8 @@ def _stage_run(status, children: list, done_by_child: dict[str, int]) -> _StageR
         tasks_done=sum(done),
         # a running child works on exactly one batch: its steps are sequential
         tasks_running=sum(
-            c.status == "PENDING" and d < t for c, d, t in zip(children, done, totals, strict=True)
+            c.status == RunStatus.PENDING and d < t
+            for c, d, t in zip(children, done, totals, strict=True)
         ),
         tasks_total=sum(totals),
     )
@@ -563,7 +578,7 @@ async def _pipeline_page(
     or be skipped across a page boundary - the same trade an offset cursor over a live history
     always makes."""
     check_page_size(page_size)
-    offset = _decode_cursor(cursor, DOCUMENT_KIND)
+    offset = _decode_cursor(cursor, OperationKind.DOCUMENT)
     # one row more than the page: its presence is what tells us another page exists
     statuses = await DBOS.list_workflows_async(
         name=PIPELINE_WORKFLOWS,
@@ -583,7 +598,9 @@ async def _pipeline_page(
     return Page(
         items=[_stage_run(s, children[s.workflow_id], done) for s in page],
         next_cursor=(
-            _cursor(DOCUMENT_KIND, offset + page_size) if len(statuses) > page_size else None
+            _cursor(OperationKind.DOCUMENT, offset + page_size)
+            if len(statuses) > page_size
+            else None
         ),
     )
 
@@ -619,7 +636,7 @@ async def chunks_since(cutoff: float) -> list[ChunksAt]:
     live = {
         s.workflow_id: s
         for s in await DBOS.list_workflows_async(
-            name=COLLECTION_DOCUMENT_WORKFLOW, status="SUCCESS", load_input=False
+            name=COLLECTION_DOCUMENT_WORKFLOW, status=RunStatus.SUCCESS, load_input=False
         )
         if s.completed_at is not None and s.completed_at >= since_ms
     }
@@ -629,16 +646,16 @@ async def chunks_since(cutoff: float) -> list[ChunksAt]:
         (parent, child)
         for parent, group in (await stage_children(list(live))).items()
         for child in group
-        if (found := workflows.stage_input(child)) and found[0] == "index"
+        if (found := workflows.stage_input(child)) and found[0] == Stage.INDEX
     ]
     written = await asyncio.gather(*(_stage_tasks(child) for _, child in indexes))
     chunks: dict[str, int] = dict.fromkeys(live, 0)
     for (parent, _), tasks in zip(indexes, written, strict=True):
-        chunks[parent] += sum(t.result or 0 for t in tasks if t.status == "SUCCESS")
+        chunks[parent] += sum(t.result or 0 for t in tasks if t.status == RunStatus.SUCCESS)
     points = [
         ChunksAt(
             (status.completed_at or 0) / 1000,
-            (pipeline_names(operation_id) or ("index", None, "?"))[1] or "?",
+            (pipeline_names(operation_id) or (PipelineAction.INDEX, None, "?"))[1] or "?",
             chunks[operation_id],
         )
         for operation_id, status in live.items()
@@ -692,10 +709,14 @@ async def _stage_tasks(child) -> list[Task]:
     for i, batch in enumerate(batches):
         if i < len(steps):
             output, error = _step_outcome(steps[i])
-            status = "ERROR" if error else "SUCCESS"
+            status = RunStatus.ERROR if error else RunStatus.SUCCESS
         else:
             output = error = None
-            status = "PENDING" if child.status == "PENDING" and i == len(steps) else "ENQUEUED"
+            status = (
+                RunStatus.PENDING
+                if child.status == RunStatus.PENDING and i == len(steps)
+                else RunStatus.ENQUEUED
+            )
         out.append(_task(child.workflow_id, stage, batch, status, output, error))
     return out
 
@@ -723,7 +744,7 @@ async def progress(operation_id: str) -> OperationProgress:
         id=operation_id,
         kind=kind,
         collection=_collection_of(operation_id),
-        status=status.status,
+        status=RunStatus(status.status),
         progress=found if isinstance(found, workflows.BulkProgress) else None,
         error=str(status.error) if status.error else None,
     )

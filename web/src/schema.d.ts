@@ -124,7 +124,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/documents/{doc}": {
+    "/api/documents/{document}": {
         parameters: {
             query?: never;
             header?: never;
@@ -142,7 +142,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/documents/{doc}/import": {
+    "/api/documents/{document}/import": {
         parameters: {
             query?: never;
             header?: never;
@@ -159,7 +159,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/documents/{doc}/collections": {
+    "/api/documents/{document}/collections": {
         parameters: {
             query?: never;
             header?: never;
@@ -176,7 +176,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/documents/{doc}/embeddings": {
+    "/api/documents/{document}/embeddings": {
         parameters: {
             query?: never;
             header?: never;
@@ -193,7 +193,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/documents/{doc}/source": {
+    "/api/documents/{document}/source": {
         parameters: {
             query?: never;
             header?: never;
@@ -210,7 +210,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/documents/{doc}/preview": {
+    "/api/documents/{document}/preview": {
         parameters: {
             query?: never;
             header?: never;
@@ -227,7 +227,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/documents/{doc}/markdown": {
+    "/api/documents/{document}/markdown": {
         parameters: {
             query?: never;
             header?: never;
@@ -244,7 +244,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/documents/{doc}/description": {
+    "/api/documents/{document}/description": {
         parameters: {
             query?: never;
             header?: never;
@@ -314,7 +314,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/collections/{collection}/settings": {
+    "/api/collections/{collection}/overrides": {
         parameters: {
             query?: never;
             header?: never;
@@ -322,8 +322,8 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** PutCollectionSettings */
-        put: operations["ApiCollectionsSettingsPutCollectionSettings"];
+        /** PutCollectionOverrides */
+        put: operations["ApiCollectionsOverridesPutCollectionOverrides"];
         post?: never;
         delete?: never;
         options?: never;
@@ -383,7 +383,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/collections/{collection}/documents/{doc}": {
+    "/api/collections/{collection}/documents/{document}": {
         parameters: {
             query?: never;
             header?: never;
@@ -400,7 +400,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/collections/{collection}/documents/{doc}/index": {
+    "/api/collections/{collection}/documents/{document}/index": {
         parameters: {
             query?: never;
             header?: never;
@@ -676,6 +676,18 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * Accelerator
+         * @description Device for the embedding and reranker models. auto: best available ONNX Runtime provider (CUDA, CoreML on Apple Silicon, else CPU). cpu: force CPU.
+         * @default auto
+         * @enum {string}
+         */
+        Accelerator: "auto" | "cpu";
+        /**
+         * Action
+         * @enum {string}
+         */
+        Action: "search" | "import" | "attach" | "detach" | "describe" | "collections";
         /** Activity */
         Activity: {
             operations: components["schemas"]["QueueActivity"];
@@ -688,7 +700,6 @@ export interface components {
         /** BulkProgress */
         BulkProgress: {
             done: number;
-            skipped: number;
             /** @default 0 */
             total: number;
             last?: string | null;
@@ -697,28 +708,40 @@ export interface components {
         BulkStarted: {
             operation_id: string;
         };
+        /**
+         * BulkWorkflow
+         * @enum {string}
+         */
+        BulkWorkflow: "index_collection" | "delete_collection" | "delete_document";
         /** ChunkSettings */
         ChunkSettings: {
-            /**
-             * Chunker
-             * @description How converted Markdown is split into indexed chunks. markdown: split on Markdown structure (headings, then paragraphs, sentences, words), filling each chunk up to Chunk size. text: ignore Markdown structure and split on paragraphs, sentences, words.
-             * @default markdown
-             * @enum {string}
-             */
-            chunker: "markdown" | "text";
+            chunker?: components["schemas"]["Chunker"];
             /**
              * Chunk size (characters)
-             * @description Maximum length of one chunk, counted in Unicode characters, not words or tokens (about 4 characters per English token). A chunk is also the unit that gets one embedding vector and one search result.
+             * @description Maximum length of one chunk, counted in Unicode characters, not words or tokens (about 4 characters per English token). A chunk is also the unit that gets one embedding vector and one search result. With Prepend heading path on, the size counts that path too: the path and the text together never exceed it.
              * @default 1200
              */
             chunk_size: number;
             /**
-             * Chunk overlap (characters)
-             * @description Characters repeated at the start of a chunk from the end of the previous one, so a sentence cut by a boundary stays searchable. Must be smaller than Chunk size.
-             * @default 150
+             * Merge short paragraphs (% of chunk size)
+             * @description A paragraph - text between blank lines, or a whole list - shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
+             * @default 66
              */
-            chunk_overlap: number;
+            chunk_merge_below: number;
+            /**
+             * Prepend heading path
+             * @description The embedding model and the reranker read every chunk with its heading path in front (Part I > Replication > Leaders). Chunk size counts the path. A path longer than half of it loses its outermost headings first. Off: the models read the chunk's text alone. Only the markdown chunker has a heading path to prepend.
+             * @default true
+             */
+            chunk_frame: boolean;
         };
+        /**
+         * Chunker
+         * @description How converted Markdown is split into chunks. Every paragraph (text between blank lines) is a chunk, and short ones are merged (see Merge short paragraphs). A paragraph longer than Chunk size is cut between list items or blocks, else between sentences. A sentence, table or code block longer than a chunk is cut at a line, then a word. markdown: every heading starts a new chunk and stays out of its text; code blocks and tables stay whole. text: ignore the Markdown structure and split on paragraphs and sentences only.
+         * @default markdown
+         * @enum {string}
+         */
+        Chunker: "markdown" | "text";
         /** ChunksAt */
         ChunksAt: {
             ts: number;
@@ -728,7 +751,7 @@ export interface components {
         /** CollectionInfo */
         CollectionInfo: {
             name: string;
-            settings: components["schemas"]["CollectionSettings"];
+            overrides: components["schemas"]["CollectionOverrides"];
             effective: components["schemas"]["ChunkSettings"];
             search: components["schemas"]["SearchSettings"];
             description: string;
@@ -738,24 +761,28 @@ export interface components {
             index_outdated: boolean;
             index?: components["schemas"]["IndexStats"] | null;
         };
-        /** CollectionSettings */
-        CollectionSettings: {
+        /** CollectionOverrides */
+        CollectionOverrides: {
             /**
              * Chunker
-             * @description How converted Markdown is split into indexed chunks. markdown: split on Markdown structure (headings, then paragraphs, sentences, words), filling each chunk up to Chunk size. text: ignore Markdown structure and split on paragraphs, sentences, words.
-             * @enum {null|string}
+             * @description How converted Markdown is split into chunks. Every paragraph (text between blank lines) is a chunk, and short ones are merged (see Merge short paragraphs). A paragraph longer than Chunk size is cut between list items or blocks, else between sentences. A sentence, table or code block longer than a chunk is cut at a line, then a word. markdown: every heading starts a new chunk and stays out of its text; code blocks and tables stay whole. text: ignore the Markdown structure and split on paragraphs and sentences only.
              */
-            chunker?: "markdown" | "text" | null;
+            chunker?: components["schemas"]["Chunker"] | null;
             /**
              * Chunk size (characters)
-             * @description Maximum length of one chunk, counted in Unicode characters, not words or tokens (about 4 characters per English token). A chunk is also the unit that gets one embedding vector and one search result.
+             * @description Maximum length of one chunk, counted in Unicode characters, not words or tokens (about 4 characters per English token). A chunk is also the unit that gets one embedding vector and one search result. With Prepend heading path on, the size counts that path too: the path and the text together never exceed it.
              */
             chunk_size?: number | null;
             /**
-             * Chunk overlap (characters)
-             * @description Characters repeated at the start of a chunk from the end of the previous one, so a sentence cut by a boundary stays searchable. Must be smaller than Chunk size.
+             * Merge short paragraphs (% of chunk size)
+             * @description A paragraph - text between blank lines, or a whole list - shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
              */
-            chunk_overlap?: number | null;
+            chunk_merge_below?: number | null;
+            /**
+             * Prepend heading path
+             * @description The embedding model and the reranker read every chunk with its heading path in front (Part I > Replication > Leaders). Chunk size counts the path. A path longer than half of it loses its outermost headings first. Off: the models read the chunk's text alone. Only the markdown chunker has a heading path to prepend.
+             */
+            chunk_frame?: boolean | null;
             search?: components["schemas"]["SearchOverrides"];
         };
         /** CollectionSummary */
@@ -768,32 +795,26 @@ export interface components {
         };
         /** ConversionSettings */
         ConversionSettings: {
-            /**
-             * Chunker
-             * @description How converted Markdown is split into indexed chunks. markdown: split on Markdown structure (headings, then paragraphs, sentences, words), filling each chunk up to Chunk size. text: ignore Markdown structure and split on paragraphs, sentences, words.
-             * @default markdown
-             * @enum {string}
-             */
-            chunker: "markdown" | "text";
+            chunker?: components["schemas"]["Chunker"];
             /**
              * Chunk size (characters)
-             * @description Maximum length of one chunk, counted in Unicode characters, not words or tokens (about 4 characters per English token). A chunk is also the unit that gets one embedding vector and one search result.
+             * @description Maximum length of one chunk, counted in Unicode characters, not words or tokens (about 4 characters per English token). A chunk is also the unit that gets one embedding vector and one search result. With Prepend heading path on, the size counts that path too: the path and the text together never exceed it.
              * @default 1200
              */
             chunk_size: number;
             /**
-             * Chunk overlap (characters)
-             * @description Characters repeated at the start of a chunk from the end of the previous one, so a sentence cut by a boundary stays searchable. Must be smaller than Chunk size.
-             * @default 150
+             * Merge short paragraphs (% of chunk size)
+             * @description A paragraph - text between blank lines, or a whole list - shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
+             * @default 66
              */
-            chunk_overlap: number;
+            chunk_merge_below: number;
             /**
-             * Parser
-             * @description Converter for non-PDF files, chosen when a document is imported. anydoc: Word, PowerPoint, Excel, OpenDocument, RTF, EPUB and CSV to Markdown. plain: read the file as UTF-8 text. PDFs always use pdf-inspector page by page, regardless of this setting.
-             * @default anydoc
-             * @enum {string}
+             * Prepend heading path
+             * @description The embedding model and the reranker read every chunk with its heading path in front (Part I > Replication > Leaders). Chunk size counts the path. A path longer than half of it loses its outermost headings first. Off: the models read the chunk's text alone. Only the markdown chunker has a heading path to prepend.
+             * @default true
              */
-            parser: "anydoc" | "plain";
+            chunk_frame: boolean;
+            parser?: components["schemas"]["Parser"];
             /**
              * Skip pages that need OCR
              * @description Chosen when a document is imported. PDF pages with no extractable text (scans, images) are dropped and replaced by a marker comment in the Markdown instead of failing the document. A document where every page needs OCR still fails. Off: any such page fails the document.
@@ -807,6 +828,12 @@ export interface components {
             /** @default  */
             description: string;
         };
+        /**
+         * CutReason
+         * @default edge
+         * @enum {string}
+         */
+        CutReason: "edge" | "heading" | "paragraph" | "length_block" | "length_sentence" | "length_oversize";
         /** Describe */
         Describe: {
             description: string;
@@ -816,15 +843,10 @@ export interface components {
             name: string;
             suffix: string;
             size: number;
-            /** @enum {string} */
-            status: "queued" | "converting" | "embedding" | "imported" | "error" | "cancelled" | "deleting";
+            status: components["schemas"]["DocumentStatus"];
             error?: string | null;
             preview?: components["schemas"]["Preview"] | null;
-            /**
-             * @default anydoc
-             * @enum {string}
-             */
-            parser: "anydoc" | "plain";
+            parser?: components["schemas"]["Parser"];
             /** @default true */
             skip_ocr_pages: boolean;
             /** @default 0 */
@@ -848,27 +870,34 @@ export interface components {
                 [key: string]: number;
             };
         };
+        /**
+         * DocumentStatus
+         * @enum {string}
+         */
+        DocumentStatus: "queued" | "converting" | "embedding" | "imported" | "error" | "cancelled" | "deleting";
         /** EmbeddingModel */
         EmbeddingModel: {
             name: string;
             dims: number;
-            /**
-             * @default auto
-             * @enum {string}
-             */
-            accelerator: "auto" | "cpu";
+            accelerator?: components["schemas"]["Accelerator"];
         };
+        /**
+         * EmbeddingProfile
+         * @description Text-embedding model that turns chunks into vectors for semantic search. Chosen at first run; changing it later requires "Index all" in every collection. none = full-text (BM25) search only; compact = bge-small (384 dims, English); quality = bge-large (1024 dims, English); multilingual = multilingual-e5-large (1024 dims).
+         * @default none
+         * @enum {string}
+         */
+        EmbeddingProfile: "none" | "compact" | "quality" | "multilingual";
         /** Entry */
         Entry: {
             document: string;
             model: string;
             chunk_size: number;
-            chunk_overlap: number;
-            /** @enum {string} */
-            chunker: "markdown" | "text";
+            chunk_merge_below: number;
+            chunk_frame: boolean;
+            chunker: components["schemas"]["Chunker"];
             chunk_version: number;
-            /** @enum {string} */
-            parser: "anydoc" | "plain";
+            parser: components["schemas"]["Parser"];
             skip_ocr_pages: boolean;
             id: string;
             urn: string;
@@ -880,14 +909,14 @@ export interface components {
         EventDetail: {
             scope?: string | null;
             hits?: number | null;
-            docs?: string[] | null;
+            documents?: string[] | null;
             collection?: string | null;
             collections?: string[] | null;
         };
         /** Excerpt */
         Excerpt: {
             collection: string;
-            doc: string;
+            document: string;
             header: string;
             location: string;
             seq_start: number;
@@ -908,14 +937,26 @@ export interface components {
             title: string;
             description: string;
         };
+        /**
+         * Fusion
+         * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
+         * @default rrf
+         * @enum {string}
+         */
+        Fusion: "rrf" | "linear";
+        /**
+         * Granularity
+         * @default chunk
+         * @enum {string}
+         */
+        Granularity: "chunk" | "passage" | "excerpt";
         /** Hit */
         Hit: {
             collection: string;
-            doc: string;
+            document: string;
             source_path: string;
             markdown_path: string;
             part: number;
-            chunk_id: number;
             seq: number;
             line_start: number;
             line_end: number;
@@ -925,12 +966,15 @@ export interface components {
             byte_end: number;
             page_start: number | null;
             page_end: number | null;
-            parents: string[];
-            heading: string;
+            headings: string[];
+            frame: string[];
             header: string;
             location: string;
             text: string;
             score: number;
+            layout?: components["schemas"]["Position"][];
+            start_reason?: components["schemas"]["CutReason"];
+            end_reason?: components["schemas"]["CutReason"];
             /** @default  */
             source_file: string;
             /** @default  */
@@ -950,8 +994,7 @@ export interface components {
             name?: string | null;
             /** @default  */
             description: string;
-            /** @enum {null|string} */
-            parser?: "anydoc" | "plain" | null;
+            parser?: components["schemas"]["Parser"] | null;
             skip_ocr_pages?: boolean | null;
             staging_id?: string | null;
             path?: string | null;
@@ -968,16 +1011,13 @@ export interface components {
         };
         /** Init */
         Init: {
-            /** @enum {string} */
-            profile: "none" | "compact" | "quality" | "multilingual";
+            profile: components["schemas"]["EmbeddingProfile"];
         };
         /** Job */
         Job: {
             id: string;
-            /** @enum {string} */
-            stage: "convert" | "embed" | "index";
-            /** @enum {string} */
-            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
+            stage: components["schemas"]["Stage"];
+            status: components["schemas"]["RunStatus"];
             created_at: number;
             updated_at: number;
             error: string | null;
@@ -994,15 +1034,10 @@ export interface components {
             name: string;
             suffix: string;
             size: number;
-            /** @enum {string} */
-            status: "queued" | "converting" | "embedding" | "imported" | "error" | "cancelled" | "deleting";
+            status: components["schemas"]["DocumentStatus"];
             error?: string | null;
             preview?: components["schemas"]["Preview"] | null;
-            /**
-             * @default anydoc
-             * @enum {string}
-             */
-            parser: "anydoc" | "plain";
+            parser?: components["schemas"]["Parser"];
             /** @default true */
             skip_ocr_pages: boolean;
             /** @default 0 */
@@ -1016,7 +1051,7 @@ export interface components {
         };
         /** MaintenanceState */
         MaintenanceState: {
-            pending_docs: number;
+            pending_documents: number;
             last_write_at: number | null;
             last_maintained_at: number | null;
             vector_index_rows: number;
@@ -1024,31 +1059,41 @@ export interface components {
         /** Member */
         Member: {
             document: components["schemas"]["Document"];
-            /** @enum {string} */
-            status: "pending" | "indexing" | "indexed" | "error" | "cancelled";
+            status: components["schemas"]["MemberStatus"];
             error?: string | null;
             /** @default 0 */
             added_at: number;
             /** @default 0 */
             updated_at: number;
         };
+        /**
+         * MemberStatus
+         * @enum {string}
+         */
+        MemberStatus: "pending" | "indexing" | "indexed" | "error" | "cancelled";
+        /**
+         * ModelKind
+         * @enum {string}
+         */
+        ModelKind: "embedding" | "reranker";
+        /**
+         * ModelState
+         * @enum {string}
+         */
+        ModelState: "pending" | "loading" | "ready" | "error";
         /** ModelStatus */
         ModelStatus: {
-            /** @enum {string} */
-            kind: "embedding" | "reranker";
+            kind: components["schemas"]["ModelKind"];
             name: string;
-            /** @enum {string} */
-            state: "pending" | "loading" | "ready" | "error";
+            state: components["schemas"]["ModelState"];
             error?: string | null;
         };
         /** Operation */
         Operation: {
             id: string;
-            /** @enum {string} */
-            kind: "document" | "collection" | "download" | "maintenance";
+            kind: components["schemas"]["OperationKind"];
             title: string;
-            /** @enum {string} */
-            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
+            status: components["schemas"]["RunStatus"];
             created_at: number;
             updated_at: number;
             error: string | null;
@@ -1058,32 +1103,34 @@ export interface components {
             };
             jobs?: components["schemas"]["Job"][];
         };
+        /**
+         * OperationKind
+         * @enum {string}
+         */
+        OperationKind: "document" | "collection" | "download" | "maintenance";
         /** OperationKindSummary */
         OperationKindSummary: {
-            /** @enum {string} */
-            kind: "document" | "collection" | "download" | "maintenance";
+            kind: components["schemas"]["OperationKind"];
             label: string;
             active: number;
         };
         /** OperationProgress */
         OperationProgress: {
             id: string;
-            /** @enum {string} */
-            kind: "index_collection" | "delete_collection" | "delete_document";
+            kind: components["schemas"]["BulkWorkflow"];
             collection: string | null;
-            /** @enum {string} */
-            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
+            status: components["schemas"]["RunStatus"];
             progress?: components["schemas"]["BulkProgress"] | null;
             error?: string | null;
         };
         /** Options */
         Options: {
-            parsers: ("anydoc" | "plain")[];
-            chunkers: ("markdown" | "text")[];
-            accelerators: ("auto" | "cpu")[];
-            search_modes: ("hybrid" | "vector" | "fts")[];
-            fusions: ("rrf" | "linear")[];
-            rerankers: ("none" | "cross-encoder")[];
+            parsers: components["schemas"]["Parser"][];
+            chunkers: components["schemas"]["Chunker"][];
+            accelerators: components["schemas"]["Accelerator"][];
+            search_modes: components["schemas"]["SearchMode"][];
+            fusions: components["schemas"]["Fusion"][];
+            rerankers: components["schemas"]["Reranker"][];
             reranker_models: string[];
             docs: {
                 [key: string]: components["schemas"]["FieldDoc"];
@@ -1091,14 +1138,21 @@ export interface components {
             embedding_profiles: {
                 [key: string]: components["schemas"]["EmbeddingModel"] | null;
             };
-            document_statuses: ("queued" | "converting" | "embedding" | "imported" | "error" | "cancelled" | "deleting")[];
-            active_document_statuses: ("queued" | "converting" | "embedding" | "imported" | "error" | "cancelled" | "deleting")[];
-            member_statuses: ("pending" | "indexing" | "indexed" | "error" | "cancelled")[];
-            active_member_statuses: ("pending" | "indexing" | "indexed" | "error" | "cancelled")[];
-            active_statuses: string[];
-            operation_kinds: ("document" | "collection" | "download" | "maintenance")[];
-            bulk_kinds: ("index_collection" | "delete_collection" | "delete_document")[];
+            document_statuses: components["schemas"]["DocumentStatus"][];
+            active_document_statuses: components["schemas"]["DocumentStatus"][];
+            member_statuses: components["schemas"]["MemberStatus"][];
+            active_member_statuses: components["schemas"]["MemberStatus"][];
+            active_run_statuses: components["schemas"]["RunStatus"][];
+            operation_kinds: components["schemas"]["OperationKind"][];
+            bulk_kinds: components["schemas"]["BulkWorkflow"][];
         };
+        /**
+         * Order
+         * @description One of: asc, desc.
+         * @default asc
+         * @enum {string}
+         */
+        Order: "asc" | "desc";
         /** Page[CollectionSummary] */
         "Page_haskie.collection.collection.CollectionSummary_": {
             items: components["schemas"]["CollectionSummary"][];
@@ -1129,10 +1183,17 @@ export interface components {
             next_cursor?: string | null;
             total?: number | null;
         };
+        /**
+         * Parser
+         * @description Converter for non-PDF files, chosen when a document is imported. anydoc: Word, PowerPoint, Excel, OpenDocument, RTF, EPUB and CSV to Markdown. plain: read the file as UTF-8 text. PDFs always use pdf-inspector page by page, regardless of this setting.
+         * @default anydoc
+         * @enum {string}
+         */
+        Parser: "anydoc" | "plain";
         /** Passage */
         Passage: {
             collection: string;
-            doc: string;
+            document: string;
             header: string;
             location: string;
             seq_start: number;
@@ -1148,6 +1209,11 @@ export interface components {
             source_file: string;
             markdown_file: string;
         };
+        /**
+         * PieceType
+         * @enum {string}
+         */
+        PieceType: "heading" | "text" | "list" | "quote" | "table" | "code" | "html" | "rule" | "metadata";
         /** PipelineSettings */
         PipelineSettings: {
             /**
@@ -1202,7 +1268,7 @@ export interface components {
              * @description Run collection maintenance (compaction, index update) once this many documents were indexed since the last run.
              * @default 25
              */
-            maintenance_docs: number;
+            maintenance_documents: number;
             /**
              * Maintenance when idle (seconds)
              * @description Also run maintenance once a collection has had no document indexed for this long.
@@ -1221,28 +1287,38 @@ export interface components {
              * @default 2
              */
             preview_workers: number;
-            /**
-             * Embedding hardware
-             * @description Device for the embedding and reranker models. auto: best available ONNX Runtime provider (CUDA, CoreML on Apple Silicon, else CPU). cpu: force CPU.
-             * @default auto
-             * @enum {string}
-             */
-            accelerator: "auto" | "cpu";
+            accelerator?: components["schemas"]["Accelerator"];
+        };
+        /** Position */
+        Position: {
+            type: components["schemas"]["PieceType"];
+            position: number;
         };
         /** Preview */
         Preview: {
-            /** @enum {string} */
-            kind: "pdf" | "image" | "text" | "html";
+            kind: components["schemas"]["PreviewKind"];
             /** @default false */
             truncated: boolean;
             pages?: number | null;
             ocr_pages?: number[];
         };
+        /**
+         * PreviewKind
+         * @enum {string}
+         */
+        PreviewKind: "pdf" | "image" | "text" | "html";
         /** QueueActivity */
         QueueActivity: {
             queued: number;
             running: number;
         };
+        /**
+         * Reranker
+         * @description Second-stage scoring applied to the Candidates of any mode (vector, fts or hybrid). cross-encoder: a model reads query and chunk together and rescores each pair; slower but more precise than embeddings. none: keep the retrieval order.
+         * @default none
+         * @enum {string}
+         */
+        Reranker: "none" | "cross-encoder";
         /** RetentionSettings */
         RetentionSettings: {
             /**
@@ -1258,11 +1334,23 @@ export interface components {
              */
             audit_days: number;
         };
+        /**
+         * RunStatus
+         * @enum {string}
+         */
+        RunStatus: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
         /** SearchAt */
         SearchAt: {
             ts: number;
             session_id: string;
         };
+        /**
+         * SearchMode
+         * @description hybrid: vector similarity and BM25 full-text, merged by Fusion. vector: semantic similarity only. fts: BM25 full-text only. Without an embedding profile every mode behaves as fts.
+         * @default hybrid
+         * @enum {string}
+         */
+        SearchMode: "hybrid" | "vector" | "fts";
         /** SearchOverrides */
         SearchOverrides: {
             /**
@@ -1278,15 +1366,13 @@ export interface components {
             /**
              * Search mode
              * @description hybrid: vector similarity and BM25 full-text, merged by Fusion. vector: semantic similarity only. fts: BM25 full-text only. Without an embedding profile every mode behaves as fts.
-             * @enum {null|string}
              */
-            mode?: "hybrid" | "vector" | "fts" | null;
+            mode?: components["schemas"]["SearchMode"] | null;
             /**
              * Fusion
              * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
-             * @enum {null|string}
              */
-            fusion?: "rrf" | "linear" | null;
+            fusion?: components["schemas"]["Fusion"] | null;
             /**
              * RRF k
              * @description Reciprocal rank fusion constant: score = sum of 1 / (k + rank). Higher k flattens the difference between top ranks. 60 is the usual value.
@@ -1315,9 +1401,8 @@ export interface components {
             /**
              * Reranker
              * @description Second-stage scoring applied to the Candidates of any mode (vector, fts or hybrid). cross-encoder: a model reads query and chunk together and rescores each pair; slower but more precise than embeddings. none: keep the retrieval order.
-             * @enum {null|string}
              */
-            reranker?: "none" | "cross-encoder" | null;
+            reranker?: components["schemas"]["Reranker"] | null;
             /**
              * Reranker model
              * @description Cross-encoder used when Reranker is cross-encoder. ms-marco-MiniLM-L-6 is fast and English; bge-reranker-base is stronger; jina-reranker-v2 is multilingual. Downloaded on first use.
@@ -1338,20 +1423,8 @@ export interface components {
              * @default 50
              */
             candidates: number;
-            /**
-             * Search mode
-             * @description hybrid: vector similarity and BM25 full-text, merged by Fusion. vector: semantic similarity only. fts: BM25 full-text only. Without an embedding profile every mode behaves as fts.
-             * @default hybrid
-             * @enum {string}
-             */
-            mode: "hybrid" | "vector" | "fts";
-            /**
-             * Fusion
-             * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
-             * @default rrf
-             * @enum {string}
-             */
-            fusion: "rrf" | "linear";
+            mode?: components["schemas"]["SearchMode"];
+            fusion?: components["schemas"]["Fusion"];
             /**
              * RRF k
              * @description Reciprocal rank fusion constant: score = sum of 1 / (k + rank). Higher k flattens the difference between top ranks. 60 is the usual value.
@@ -1382,13 +1455,7 @@ export interface components {
              * @default 10
              */
             refine_factor: number;
-            /**
-             * Reranker
-             * @description Second-stage scoring applied to the Candidates of any mode (vector, fts or hybrid). cross-encoder: a model reads query and chunk together and rescores each pair; slower but more precise than embeddings. none: keep the retrieval order.
-             * @default none
-             * @enum {string}
-             */
-            reranker: "none" | "cross-encoder";
+            reranker?: components["schemas"]["Reranker"];
             /**
              * Reranker model
              * @description Cross-encoder used when Reranker is cross-encoder. ms-marco-MiniLM-L-6 is fast and English; bge-reranker-base is stronger; jina-reranker-v2 is multilingual. Downloaded on first use.
@@ -1403,8 +1470,7 @@ export interface components {
         /** SessionEvent */
         SessionEvent: {
             ts: number;
-            /** @enum {string} */
-            action: "search" | "import" | "attach" | "detach" | "describe" | "collections";
+            action: components["schemas"]["Action"];
             subject: string;
             detail: components["schemas"]["EventDetail"];
             operation_id: string | null;
@@ -1419,11 +1485,11 @@ export interface components {
         /** Source */
         Source: {
             collection: string;
-            doc: string;
+            document: string;
             score: number;
             chunks: number;
             description: string;
-            heading: string;
+            header: string;
             location: string;
             text: string;
             source_file: string;
@@ -1438,6 +1504,11 @@ export interface components {
             documents: components["schemas"]["Source"][];
             collections: string[];
         };
+        /**
+         * Stage
+         * @enum {string}
+         */
+        Stage: "convert" | "embed" | "index";
         /** Staged */
         Staged: {
             staging_id: string;
@@ -1457,25 +1528,17 @@ export interface components {
         Task: {
             id: string;
             child_id: string;
-            /** @enum {string} */
-            stage: "convert" | "embed" | "index";
+            stage: components["schemas"]["Stage"];
             seq: number;
             page_start: number;
             page_end: number;
-            /** @enum {string} */
-            status: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
+            status: components["schemas"]["RunStatus"];
             result: number | null;
             error: string | null;
         };
         /** UserSettings */
         UserSettings: {
-            /**
-             * Embedding profile
-             * @description Text-embedding model that turns chunks into vectors for semantic search. Chosen at first run; changing it later requires "Index all" in every collection. none = full-text (BM25) search only; compact = bge-small (384 dims, English); quality = bge-large (1024 dims, English); multilingual = multilingual-e5-large (1024 dims).
-             * @default none
-             * @enum {string}
-             */
-            embedding: "none" | "compact" | "quality" | "multilingual";
+            embedding?: components["schemas"]["EmbeddingProfile"];
             conversion?: components["schemas"]["ConversionSettings"];
             pipeline?: components["schemas"]["PipelineSettings"];
             search?: components["schemas"]["SearchSettings"];
@@ -1717,8 +1780,10 @@ export interface operations {
                 cursor?: string | null;
                 page_size?: number;
                 sort?: string | null;
-                order?: "asc" | "desc";
-                status?: "queued" | "converting" | "embedding" | "imported" | "error" | "cancelled" | "deleting" | null;
+                /** @description One of: asc, desc. */
+                order?: components["schemas"]["Order"];
+                /** @description One of: queued, converting, embedding, imported, error, cancelled, deleting. */
+                status?: components["schemas"]["DocumentStatus"] | null;
             };
             header?: never;
             path?: never;
@@ -1757,7 +1822,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                doc: string;
+                document: string;
             };
             cookie?: never;
         };
@@ -1794,7 +1859,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                doc: string;
+                document: string;
             };
             cookie?: never;
         };
@@ -1831,7 +1896,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                doc: string;
+                document: string;
             };
             cookie?: never;
         };
@@ -1868,7 +1933,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                doc: string;
+                document: string;
             };
             cookie?: never;
         };
@@ -1905,7 +1970,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                doc: string;
+                document: string;
             };
             cookie?: never;
         };
@@ -1942,7 +2007,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                doc: string;
+                document: string;
             };
             cookie?: never;
         };
@@ -1985,7 +2050,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                doc: string;
+                document: string;
             };
             cookie?: never;
         };
@@ -2030,7 +2095,7 @@ export interface operations {
             };
             header?: never;
             path: {
-                doc: string;
+                document: string;
             };
             cookie?: never;
         };
@@ -2069,7 +2134,7 @@ export interface operations {
             };
             header?: never;
             path: {
-                doc: string;
+                document: string;
             };
             cookie?: never;
         };
@@ -2111,7 +2176,8 @@ export interface operations {
                 cursor?: string | null;
                 page_size?: number;
                 sort?: string | null;
-                order?: "asc" | "desc";
+                /** @description One of: asc, desc. */
+                order?: components["schemas"]["Order"];
             };
             header?: never;
             path?: never;
@@ -2263,11 +2329,11 @@ export interface operations {
             query: {
                 q: string;
                 limit?: number | null;
-                mode?: "hybrid" | "vector" | "fts" | null;
-                fusion?: "rrf" | "linear" | null;
+                mode?: components["schemas"]["SearchMode"] | null;
+                fusion?: components["schemas"]["Fusion"] | null;
                 vector_weight?: number | null;
                 bm25_weight?: number | null;
-                reranker?: "none" | "cross-encoder" | null;
+                reranker?: components["schemas"]["Reranker"] | null;
                 candidates?: number | null;
                 session_id?: string | null;
             };
@@ -2305,7 +2371,7 @@ export interface operations {
             };
         };
     };
-    ApiCollectionsSettingsPutCollectionSettings: {
+    ApiCollectionsOverridesPutCollectionOverrides: {
         parameters: {
             query?: never;
             header?: never;
@@ -2316,7 +2382,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CollectionSettings"];
+                "application/json": components["schemas"]["CollectionOverrides"];
             };
         };
         responses: {
@@ -2430,8 +2496,10 @@ export interface operations {
                 cursor?: string | null;
                 page_size?: number;
                 sort?: string | null;
-                order?: "asc" | "desc";
-                status?: "pending" | "indexing" | "indexed" | "error" | "cancelled" | null;
+                /** @description One of: asc, desc. */
+                order?: components["schemas"]["Order"];
+                /** @description One of: pending, indexing, indexed, error, cancelled. */
+                status?: components["schemas"]["MemberStatus"] | null;
             };
             header?: never;
             path: {
@@ -2518,7 +2586,7 @@ export interface operations {
             header?: never;
             path: {
                 collection: string;
-                doc: string;
+                document: string;
             };
             cookie?: never;
         };
@@ -2554,7 +2622,7 @@ export interface operations {
             header?: never;
             path: {
                 collection: string;
-                doc: string;
+                document: string;
             };
             cookie?: never;
         };
@@ -2840,7 +2908,7 @@ export interface operations {
         parameters: {
             query: {
                 q: string;
-                granularity?: "chunk" | "passage" | "excerpt";
+                granularity?: components["schemas"]["Granularity"];
                 session_id?: string | null;
                 collections?: string | null;
                 limit?: number | null;

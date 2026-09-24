@@ -15,14 +15,14 @@ SUCCESS record still has cold caches. `_ready` holds the ids this process has lo
 Loading a model is CPU work, not IO, so it goes through `cpu.on_cpu`: a worker thread, under one
 slot of the CPU budget, whichever event loop asked for it.
 
-Depends on `cpu`, `embed` and `settings` only: `index` and `pipeline` import this module, so it
-must not reach back into them or into `workflows`. `collection` is read through a function-local
-import for the same reason (see `_collection_rerankers`).
+Depends on leaf modules only (`cpu`, `embed`, `settings`, `dbos_names`): `index` and `pipeline`
+import this module, so it must not reach back into them or into `workflows`. `collection` is read
+through a function-local import for the same reason (see `_collection_rerankers`).
 """
 
 import asyncio
 import threading
-from typing import Literal
+from enum import StrEnum
 
 import msgspec
 from dbos import DBOS, SetWorkflowID
@@ -33,7 +33,7 @@ from haskie.errors import HaskieError, NotReady
 from haskie.indexing import embed
 from haskie.indexing.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, RunStatus, root_cause
 from haskie.logs import get_logger
-from haskie.settings import UserSettings, load_user_settings
+from haskie.settings import Reranker, UserSettings, load_user_settings
 
 _log = get_logger(__name__)
 
@@ -51,8 +51,17 @@ _warm_lock = threading.Lock()
 # nobody holds may be collected mid-load. Each discards itself when it finishes.
 _warm_tasks: set[asyncio.Task[None]] = set()
 
-ModelKind = Literal["embedding", "reranker"]
-ModelState = Literal["pending", "loading", "ready", "error"]
+
+class ModelKind(StrEnum):
+    EMBEDDING = "embedding"
+    RERANKER = "reranker"
+
+
+class ModelState(StrEnum):
+    PENDING = "pending"
+    LOADING = "loading"
+    READY = "ready"
+    ERROR = "error"
 
 
 class ModelStatus(msgspec.Struct):
@@ -73,7 +82,7 @@ async def warm_model(kind: ModelKind, name: str) -> None:
 
     The load itself is CPU (and, on a cold cache, a download inside fastembed), so it runs in a
     worker thread under one slot of the CPU budget rather than on the caller's loop."""
-    if kind == "reranker":  # always on CPU, so it needs no accelerator (see `embed`)
+    if kind == ModelKind.RERANKER:  # always on CPU, so it needs no accelerator (see `embed`)
         await cpu.on_cpu(embed.warm_reranker, name)
         return
     accelerator = (await load_user_settings()).pipeline.accelerator
@@ -92,14 +101,14 @@ async def load_model(kind: ModelKind, name: str) -> None:
 
 
 @DBOS.workflow(name=DOWNLOAD_WORKFLOW)
-async def ensure_model(kind: ModelKind, name: str) -> str:
+async def ensure_model(kind: ModelKind, name: str) -> ModelState:
     try:
         await load_model(kind, name)
     except Exception as exc:
         # flat message and a one-argument class: DBOS stores and rebuilds it without our traceback
         raise HaskieError(root_cause(exc)) from exc
     _mark_ready(_model_id(kind, name))  # the download ran here, so this process can search with it
-    return "ready"
+    return ModelState.READY
 
 
 async def _required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
@@ -109,10 +118,10 @@ async def _required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
     so the overrides count as required as much as the user-level pair does."""
     wanted: list[tuple[ModelKind, str]] = []
     if settings.embedding_model:
-        wanted.append(("embedding", settings.embedding_model.name))
-    if settings.search.reranker == "cross-encoder":
-        wanted.append(("reranker", settings.search.reranker_model))
-    wanted.extend(("reranker", name) for name in await _collection_rerankers())
+        wanted.append((ModelKind.EMBEDDING, settings.embedding_model.name))
+    if settings.search.reranker == Reranker.CROSS_ENCODER:
+        wanted.append((ModelKind.RERANKER, settings.search.reranker_model))
+    wanted.extend((ModelKind.RERANKER, name) for name in await _collection_rerankers())
     return list(dict.fromkeys(wanted))
 
 
@@ -165,7 +174,7 @@ async def ensure_models(settings: UserSettings) -> list[ModelStatus]:
         workflow_id = _model_id(kind, name)
         existing = records.get(workflow_id)
         status = existing.status if existing else None
-        if status == "SUCCESS":
+        if status == RunStatus.SUCCESS:
             _warm_in_background(kind, name)  # on disk already; this process's caches may be cold
             continue
         if status in ACTIVE_STATUS:
@@ -230,9 +239,9 @@ def is_warm(workflow_id: str) -> bool:
 
 
 _STATE: dict[RunStatus, ModelState] = {
-    "SUCCESS": "ready",
-    "ERROR": "error",
-    "CANCELLED": "error",
+    RunStatus.SUCCESS: ModelState.READY,
+    RunStatus.ERROR: ModelState.ERROR,
+    RunStatus.CANCELLED: ModelState.ERROR,
 }
 
 
@@ -242,9 +251,11 @@ def _model_status(kind: ModelKind, name: str, workflow) -> ModelStatus:
     A downloaded model this process has not loaded yet is `loading` with no error: it is warming
     up, which takes seconds rather than the minutes a download takes, but a search still cannot
     use it yet."""
-    state: ModelState = "pending" if workflow is None else _STATE.get(workflow.status, "loading")
-    if state == "ready" and not is_warm(_model_id(kind, name)):
-        state = "loading"
+    state = ModelState.PENDING
+    if workflow is not None:
+        state = _STATE.get(workflow.status, ModelState.LOADING)
+    if state == ModelState.READY and not is_warm(_model_id(kind, name)):
+        state = ModelState.LOADING
     error = str(workflow.error) if workflow is not None and workflow.error else None
     return ModelStatus(kind=kind, name=name, state=state, error=error)
 
@@ -267,11 +278,13 @@ async def require_ready(kind: ModelKind, name: str) -> None:
         return
     found = await DBOS.list_workflows_async(workflow_ids=[workflow_id])
     status = _model_status(kind, name, found[0] if found else None)
-    if status.state == "error":
+    if status.state == ModelState.ERROR:
         raise NotReady(f"{kind} model {name} failed to load: {status.error}")
-    if status.state == "pending":
+    if status.state == ModelState.PENDING:
         raise NotReady(f"{kind} model {name} is not loaded yet; check /api/status")
-    if found and found[0].status == "SUCCESS":  # downloaded, warming up (see `_model_status`)
+    if (
+        found and found[0].status == RunStatus.SUCCESS
+    ):  # downloaded, warming up (see `_model_status`)
         raise NotReady(f"{kind} model {name} is loading in this process; retry in a moment")
     raise NotReady(
         f"{kind} model {name} is downloading (operation {workflow_id}); "

@@ -1,7 +1,7 @@
 """Session selection and the searches that are not scoped to one collection."""
 
 import time
-from typing import Literal
+from enum import StrEnum
 
 import msgspec
 from litestar import get, put
@@ -15,9 +15,13 @@ from haskie.paging import DEFAULT_PAGE_SIZE, Page
 from haskie.search import flow, retrieval, session, text
 from haskie.search.passage import Excerpt, Passage, Sources
 
+
 # What one search returns: the chunks the index holds, the passages they merge into, or the
-# excerpt of a passage an agent quotes. Plain alias, like `SearchMode`: a query parameter.
-Granularity = Literal["chunk", "passage", "excerpt"]
+# excerpt of a passage an agent quotes.
+class Granularity(StrEnum):
+    CHUNK = "chunk"
+    PASSAGE = "passage"
+    EXCERPT = "excerpt"
 
 
 class SessionCollections(msgspec.Struct):
@@ -38,7 +42,10 @@ async def put_session(session_id: str, data: SessionCollections) -> list[str]:
     chosen = await session.set_collections(session_id, data.collections)
     audit.attach(collections=len(chosen))
     await session.record(
-        session_id, "collections", ", ".join(chosen), detail=session.EventDetail(collections=chosen)
+        session_id,
+        session.Action.COLLECTIONS,
+        ", ".join(chosen),
+        detail=session.EventDetail(collections=chosen),
     )
     return chosen
 
@@ -46,7 +53,7 @@ async def put_session(session_id: str, data: SessionCollections) -> list[str]:
 @get("/api/search/explore")
 async def explore(
     q: str,
-    granularity: Granularity = "chunk",
+    granularity: Granularity = Granularity.CHUNK,
     session_id: str | None = None,
     collections: str | None = None,
     limit: Limit = None,
@@ -56,15 +63,16 @@ async def explore(
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection. `limit` defaults to the user setting.
 
-    What comes back per granularity: `chunk`, the index rows themselves, overlapping as they were
-    stored; `passage`, the consecutive chunks of one document merged and widened to whole
-    sentences; `excerpt`, a passage with the parts that do not answer the query left out.
+    What comes back per granularity: `chunk`, the index rows themselves, as they were stored;
+    `passage`, the consecutive chunks of one document merged and widened to the line or the whole
+    sentences around them; `excerpt`, a passage with the parts that do not answer the query left
+    out (today the passage itself).
     """
     started = time.perf_counter()
     names = await retrieval.scope(session_id, collections)
-    if granularity == "passage":
+    if granularity == Granularity.PASSAGE:
         found: list[Hit] | list[Passage] | list[Excerpt] = await flow.passages(names, q, limit)
-    elif granularity == "excerpt":
+    elif granularity == Granularity.EXCERPT:
         found = await flow.excerpts(names, q, limit)
     else:
         found = await flow.chunks(names, q, limit)
@@ -79,10 +87,10 @@ async def search_excerpts(
     """What the sources say about a question, as passages ready to quote, best first.
 
     Each excerpt is what one document says in one place: the chunks that matched, merged where
-    they sit next to each other and widened to whole sentences, so it begins and ends where the
-    author did and never repeats the overlap between two chunks. Cite it by its `header` (the
-    heading path inside the document) and its `location` (document, pages, lines); `markdown_file`
-    is the whole document on disk when the excerpt is not enough.
+    they sit next to each other, and widened to the line or the whole sentences around them. So
+    it begins and ends where the author stopped. Cite it by its `header` (the heading path inside
+    the document) and its `location` (document, pages, lines). `markdown_file` is the whole
+    document on disk when the excerpt is not enough.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection. Run `search_sources` first when the question is which
@@ -166,7 +174,7 @@ async def search_text(
 ) -> Page[Hit]:
     """Full-text (BM25) search across all collections, or the comma-separated `collections`.
 
-    No embedding model and no session needed. A passage held by several collections is returned
+    No embedding model and no session needed. A chunk held by several collections is returned
     once. Pass the `next_cursor` of a response back as `cursor` for the next page; it is null on
     the last page. Every page recomputes the ranking, so a document indexed between two pages can
     move a result across a page boundary.

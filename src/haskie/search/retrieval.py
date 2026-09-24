@@ -34,7 +34,7 @@ from haskie.indexing.embed import embed_query
 from haskie.logs import get_logger
 from haskie.search import passage, session, text
 from haskie.search.passage import Passage, Sources
-from haskie.settings import SearchSettings, load_user_settings
+from haskie.settings import Reranker, SearchMode, SearchSettings, load_user_settings
 
 _log = get_logger(__name__)
 
@@ -68,7 +68,7 @@ async def plan(names: list[str], query: str) -> Plan | None:
     every search.
     """
     user = await load_user_settings()
-    found = await Collection.load_settings(names)
+    found = await Collection.load_overrides(names)
     for name in names:
         if name not in found:
             _log.warning("session_collection_missing", collection=name)
@@ -81,11 +81,12 @@ async def plan(names: list[str], query: str) -> Plan | None:
 
     embedding = user.embedding_model
     vector: list[float] | None = None
-    if embedding is not None and any(one.mode != "fts" for _, one in plans):
-        await models.require_ready("embedding", embedding.name)
+    if embedding is not None and any(one.mode != SearchMode.FTS for _, one in plans):
+        await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
         vector = await cpu.on_cpu(embed_query, embedding, query)
-    if settings.reranker != "none":
-        await models.require_ready("reranker", settings.reranker_model)  # before the fan-out
+    if settings.reranker != Reranker.NONE:
+        # before the fan-out
+        await models.require_ready(models.ModelKind.RERANKER, settings.reranker_model)
     return Plan(
         settings=settings,
         indexes=[(one.index_with(embedding), where) for one, where in plans],
@@ -109,14 +110,14 @@ class Pool(msgspec.Struct):
 
 
 async def fan_out(where: Plan, query: str, candidates: int) -> Pool:
-    """Read every collection concurrently and keep one row per passage.
+    """Read every collection concurrently and keep one row per chunk.
 
-    A passage counts once. The same document may be a member of several of the chosen
-    collections, and each of their tables then holds the same chunk; a caller searching them wants
-    one hit per passage, not one per collection that happens to hold it. So a chunk is credited to
-    the first collection in the caller's order that returned it, and the later copies are dropped
-    before the ranks are counted — otherwise a document in two collections would be fused with
-    itself and outrank an equally good one that sits in a single collection.
+    A chunk counts once. The same document may be a member of several of the chosen collections,
+    and each of their tables then holds the same chunk. A caller searching them wants one hit per
+    chunk, not one per collection that holds it. So the first collection in the caller's order
+    that returned a chunk gets the credit, and the later copies are dropped before the ranks are
+    counted. Otherwise a document in two collections would be fused with itself and outrank an
+    equally good one that sits in a single collection.
 
     A collection that fails to answer fails the search: a silent hole in a merged ranking reads as
     "no match".
@@ -125,7 +126,7 @@ async def fan_out(where: Plan, query: str, candidates: int) -> Pool:
 
     async def read(index: CollectionIndex) -> list[dict]:
         settings = chosen[index.collection]
-        wanted = None if settings.mode == "fts" else where.vector
+        wanted = None if settings.mode == SearchMode.FTS else where.vector
         try:
             return await index.search_rows(query, wanted, settings, candidates)
         except Exception:
@@ -176,7 +177,7 @@ async def rerank(pool: Pool, query: str, settings: SearchSettings) -> Pool:
     every collection returned, and its scores are the only ones comparable across them. The model
     is CPU work, so it runs in a worker thread under one slot of the CPU budget.
     """
-    if settings.reranker == "none":
+    if settings.reranker == Reranker.NONE:
         return pool
     rows = [pool.rows[key][1] for key, _ in pool.ranked]
     rescored = [(row_key(row), row_score(row)) for row in await cross_encode(query, rows, settings)]
@@ -195,19 +196,19 @@ async def widen[P: Passage](hits: list[Hit], limit: int, cls: type[P]) -> list[P
     """The `limit` best passages of these hits, as `cls`.
 
     A passage is what the chunks of one document that sit next to each other say together (see
-    `passage.ranges`), widened to whole sentences (`passage.expand`): the reader gets text that
-    begins and ends where the author did, and never the overlap between two chunks twice.
+    `passage.ranges`), widened to the line or the whole sentences around them (`passage.widen`).
+    So the reader gets text that begins and ends where the author stopped.
     """
     # cut before anything is read: the spans are already best first, and widening one keeps the
     # score it was ranked by
     spans = passage.ranges(hits)[:limit]
     windows = await _windows_of(spans)
-    return [passage.expand(span, window, cls) for span, window in zip(spans, windows, strict=True)]
+    return [passage.widen(span, window, cls) for span, window in zip(spans, windows, strict=True)]
 
 
-# Bytes read around a span, per side. `MAX_EXPAND` is a count of characters and a character is at
+# Bytes read around a span, per side. `MAX_WIDEN` is a count of characters and a character is at
 # most four bytes in UTF-8, so this much always covers what the widening may reach.
-WINDOW_BYTES = 4 * passage.MAX_EXPAND
+WINDOW_BYTES = 4 * passage.MAX_WIDEN
 
 
 async def _windows_of(spans: list[passage.ChunkRange]) -> list[passage.Window]:
@@ -264,9 +265,9 @@ async def shortlist(hits: list[Hit], names: list[str], limit: int, sections: int
     # the shortlist is cut first: only a document that made it is worth a membership and a
     # description, and both are one query for the whole of it
     kept = passage.top_documents(hits, limit)
-    docs = {group[0].doc for group in kept}
+    docs = {group[0].document for group in kept}
     memberships, described = await asyncio.gather(
-        document.memberships(docs, names), document.describe_of(docs)
+        document.memberships(docs, names), document.descriptions_of(docs)
     )
     found = passage.fold_sources(kept, memberships, sections)
     document.fill_descriptions(found.documents, described)

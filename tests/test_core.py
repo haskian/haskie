@@ -35,7 +35,7 @@ from conftest import (
 
 from haskie import audit, db, home, logs
 from haskie.collection import maintenance
-from haskie.collection.collection import Collection, DocumentCounts, Member
+from haskie.collection.collection import Collection, DocumentCounts, Member, MemberStatus
 from haskie.collection.index import (
     PLAIN_SCHEMA,
     CollectionIndex,
@@ -47,7 +47,7 @@ from haskie.collection.index import (
     row_score,
 )
 from haskie.document import convert, document
-from haskie.document.document import Document
+from haskie.document.document import Document, DocumentStatus
 from haskie.errors import (
     Conflict,
     HaskieError,
@@ -57,14 +57,22 @@ from haskie.errors import (
     PermanentError,
 )
 from haskie.indexing import chunk, embed, embed_cache, pipeline
-from haskie.indexing.chunk import Chunk
-from haskie.paging import PageRequest
+from haskie.indexing.chunk import Chunk, Piece, Position
+from haskie.indexing.segment import PieceType
+from haskie.paging import Order, PageRequest
 from haskie.settings import (
+    Accelerator,
+    Chunker,
     ChunkSettings,
-    CollectionSettings,
+    CollectionOverrides,
     ConversionSettings,
     EmbeddingModel,
+    EmbeddingProfile,
+    Fusion,
+    Parser,
     PipelineSettings,
+    Reranker,
+    SearchMode,
     SearchOverrides,
     SearchSettings,
     UserSettings,
@@ -75,7 +83,7 @@ from haskie.settings import (
     save_user_settings,
 )
 
-SMALL = ChunkSettings(chunk_size=40, chunk_overlap=0)
+SMALL = ChunkSettings(chunk_size=40)
 
 # A 1x1 transparent PNG: the smallest real image file, enough to exercise the preview branch.
 PNG_1X1 = base64.b64decode(
@@ -123,122 +131,8 @@ async def attachable(name: str, content: bytes | str = MD, **options) -> Documen
     """`imported`, moved on to the status the pipeline ends at: `Collection.add` takes only an
     imported document, so a test that attaches one has to get it there first."""
     doc = await import_row(name, content, **options)
-    await document.set_status(doc.name, "imported")
+    await document.set_status(doc.name, DocumentStatus.IMPORTED)
     return await document.get(doc.name)
-
-
-# --- chunking and table of contents ------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("name", "text", "settings", "expected"),
-    [
-        ("no headings -> one untitled chunk", "plain text", ChunkSettings(), [("", 1, 1, [])]),
-        (
-            "fits capacity -> one chunk, first heading",
-            MD,
-            ChunkSettings(),
-            [("Title", 1, 11, [])],
-        ),
-        (
-            "small capacity -> one chunk per section with lines and parents",
-            MD,
-            SMALL,
-            [("Title", 1, 3, []), ("Alpha", 5, 7, ["Title"]), ("Beta", 9, 11, ["Title"])],
-        ),
-        (
-            "oversize section -> split keeps heading",
-            "# H\n\n" + "word " * 20,
-            ChunkSettings(chunk_size=30, chunk_overlap=0),
-            [("H", 1, 1, [])] + [("H", 3, 3, [])] * 4,
-        ),
-        (
-            "text before first heading -> untitled",
-            "pre\n# H\nbody",
-            ChunkSettings(chunk_size=8, chunk_overlap=0),
-            [("", 1, 1, []), ("H", 2, 3, [])],
-        ),
-        (
-            "nested headings -> ancestry",
-            "# A\n## B\n### C\nc\n## D\nd\n",
-            ChunkSettings(chunk_size=6, chunk_overlap=0),
-            [
-                ("A", 1, 1, []),
-                ("B", 2, 2, ["A"]),
-                ("C", 3, 3, ["A", "B"]),
-                ("C", 4, 4, ["A", "B"]),
-                ("D", 5, 6, ["A"]),
-            ],
-        ),
-        (
-            "text splitter ignores structure",
-            MD,
-            ChunkSettings(chunker="text", chunk_size=1000, chunk_overlap=0),
-            [("Title", 1, 11, [])],
-        ),
-        ("empty text -> no chunks", "", ChunkSettings(), []),
-        (
-            "heading inside first chunk -> used",
-            "<!-- page 1 -->\n\n# H\nbody",
-            ChunkSettings(),
-            [("H", 1, 4, [])],
-        ),
-    ],
-)
-def test_chunk(name: str, text: str, settings: ChunkSettings, expected: list) -> None:
-    chunks = chunk.split(text, settings)
-    got = [(c.heading, c.line_start, c.line_end, c.parents) for c in chunks]
-    assert got == expected, name
-    assert all(text[c.char_start : c.char_end] == c.text for c in chunks), name
-    data = text.encode()
-    assert all(data[c.byte_start : c.byte_end].decode() == c.text for c in chunks), name
-
-
-@pytest.mark.parametrize(
-    ("name", "text", "offset"),
-    [
-        ("ascii: a byte offset is the char offset", "# H\n\nplain words here\n", 0),
-        ("two-byte characters push the bytes past the chars", "# Ü\n\ncafé näher dabei\n", 0),
-        ("three- and four-byte characters too", "# 見\n\n見出し 🌍 text after\n", 0),
-        ("a part of a batched document starts where the one before it ended", "# H\n\né\n", 97),
-    ],
-)
-def test_chunk_byte_offsets_index_the_encoded_markdown(name: str, text: str, offset: int) -> None:
-    """What a search seeks to. A char offset is not a file position once a document leaves ASCII,
-    so the byte range is carried beside it and has to cut the same text out of the bytes."""
-    chunks = chunk.split(text, ChunkSettings(chunk_size=12, chunk_overlap=0), byte_offset=offset)
-    data = text.encode()
-
-    assert chunks, name
-    cut = [data[c.byte_start - offset : c.byte_end - offset].decode() for c in chunks]
-    assert cut == [c.text for c in chunks], name
-    assert all(c.byte_start >= c.char_start for c in chunks), f"{name}: bytes never run short"
-    assert chunks[0].byte_start == offset + len(text[: chunks[0].char_start].encode()), name
-
-
-def test_chunk_pages_from_markers() -> None:
-    text = "<!-- page 3 -->\n\n# A\nbody a\n\n<!-- page 4 -->\n\n# B\nbody b\n"
-    small = [
-        (c.heading, c.page_start, c.page_end)
-        for c in chunk.split(text, ChunkSettings(chunk_size=30, chunk_overlap=0))
-    ]
-    assert small == [("A", 3, 3), ("B", 4, 4)]
-    (whole,) = chunk.split(text, ChunkSettings())
-    assert (whole.page_start, whole.page_end) == (3, 4), "chunk spanning pages reports the range"
-
-
-def test_chunk_version_is_part_of_the_cache_key() -> None:
-    """A change to the splitting logic has to retire the entries it would now produce
-    differently, so the version travels with the settings into `embed_cache.Params`."""
-    assert chunk.CHUNK_VERSION == embed_cache.CHUNK_VERSION
-
-
-def test_chunk_rejects_overlap_ge_size() -> None:
-    """The splitter itself rejects it; settings validation stops it one layer earlier."""
-    bad = ChunkSettings(chunk_size=10, chunk_overlap=9)
-    object.__setattr__(bad, "chunk_overlap", 10)  # past __post_init__, as a stored row could be
-    with pytest.raises(ValueError, match="overlap"):
-        chunk.split(MD, bad)
 
 
 # --- settings ----------------------------------------------------------------------
@@ -247,53 +141,75 @@ def test_chunk_rejects_overlap_ge_size() -> None:
 @pytest.mark.parametrize(
     ("name", "overrides", "user", "expected"),
     [
-        ("no overrides -> user defaults", CollectionSettings(), UserSettings(), (1200, 150, "m")),
+        (
+            "no overrides -> user defaults",
+            CollectionOverrides(),
+            UserSettings(),
+            (1200, 66, "m", True),
+        ),
         (
             "override size only",
-            CollectionSettings(chunk_size=990),
+            CollectionOverrides(chunk_size=990),
             UserSettings(),
-            (990, 150, "m"),
+            (990, 66, "m", True),
         ),
         (
             "override chunker only",
-            CollectionSettings(chunker="text"),
+            CollectionOverrides(chunker=Chunker.TEXT),
             UserSettings(),
-            (1200, 150, "t"),
+            (1200, 66, "t", True),
         ),
         (
             "override every field",
-            CollectionSettings(chunker="text", chunk_size=500, chunk_overlap=50),
+            CollectionOverrides(
+                chunker=Chunker.TEXT, chunk_size=500, chunk_merge_below=10, chunk_frame=False
+            ),
             UserSettings(),
-            (500, 50, "t"),
+            (500, 10, "t", False),
         ),
         (
             "an unset field follows the user value",
-            CollectionSettings(chunk_overlap=0),
-            UserSettings(conversion=ConversionSettings(chunk_size=300, chunk_overlap=30)),
-            (300, 0, "m"),
+            CollectionOverrides(chunk_merge_below=5),
+            UserSettings(conversion=ConversionSettings(chunk_size=300)),
+            (300, 5, "m", True),
+        ),
+        (
+            "the heading path switched off for the user, back on for one collection",
+            CollectionOverrides(chunk_frame=True),
+            UserSettings(conversion=ConversionSettings(chunk_frame=False)),
+            (1200, 66, "m", True),
+        ),
+        (
+            "switched off for the user, inherited",
+            CollectionOverrides(),
+            UserSettings(conversion=ConversionSettings(chunk_frame=False)),
+            (1200, 66, "m", False),
         ),
     ],
 )
 def test_collection_settings_resolve_into_chunk_settings(
-    name: str, overrides: CollectionSettings, user: UserSettings, expected: tuple
+    name: str, overrides: CollectionOverrides, user: UserSettings, expected: tuple
 ) -> None:
     """A collection only overrides how the shared markdown is split: `parser`/`skip_ocr_pages`
     belong to the document, chosen once at import."""
     effective = overrides.resolve(user)
 
     assert isinstance(effective, ChunkSettings), name
-    assert (effective.chunk_size, effective.chunk_overlap, effective.chunker[0]) == expected, name
+    merge, framed = effective.chunk_merge_below, effective.chunk_frame
+    assert (effective.chunk_size, merge, effective.chunker[0], framed) == expected, name
 
 
 def test_conversion_settings_carry_the_chunking_defaults() -> None:
-    user = ConversionSettings(chunker="text", chunk_size=700, chunk_overlap=70, parser="plain")
-    assert user.chunking == ChunkSettings(chunker="text", chunk_size=700, chunk_overlap=70)
-    assert CollectionSettings().resolve(UserSettings(conversion=user)) == user.chunking
+    user = ConversionSettings(
+        chunker=Chunker.TEXT, chunk_size=700, parser=Parser.PLAIN, chunk_frame=False
+    )
+    assert user.chunking == ChunkSettings(chunker=Chunker.TEXT, chunk_size=700, chunk_frame=False)
+    assert CollectionOverrides().resolve(UserSettings(conversion=user)) == user.chunking
 
 
 def test_search_overrides_resolve_per_field() -> None:
-    user = SearchSettings(limit=5, fusion="rrf", vector_weight=0.7)
-    merged = SearchOverrides(fusion="linear", bm25_weight=0.9).resolve(user)
+    user = SearchSettings(limit=5, fusion=Fusion.RRF, vector_weight=0.7)
+    merged = SearchOverrides(fusion=Fusion.LINEAR, bm25_weight=0.9).resolve(user)
     assert (merged.limit, merged.fusion, merged.vector_weight, merged.bm25_weight) == (
         5,
         "linear",
@@ -308,17 +224,18 @@ def test_every_setting_has_title_and_definition() -> None:
     assert set(user_docs) >= {
         "embedding", "conversion.parser", "conversion.chunk_size", "pipeline.cpu_budget",
         "pipeline.batch_pages", "search.limit", "search.reranker", "search.reranker_model",
-        "pipeline.maintenance_docs", "pipeline.maintenance_idle_seconds", "pipeline.ann_min_rows",
-        "search.nprobes", "search.refine_factor",
+        "pipeline.maintenance_documents", "pipeline.maintenance_idle_seconds",
+        "pipeline.ann_min_rows", "search.nprobes", "search.refine_factor",
     }  # fmt: skip
-    assert user_docs["pipeline.maintenance_docs"].title == "Maintenance after documents"
+    assert user_docs["pipeline.maintenance_documents"].title == "Maintenance after documents"
     assert user_docs["search.nprobes"].title == "Vector probes"
     assert user_docs["conversion.chunk_size"].title == "Chunk size (characters)"
     assert "characters" in user_docs["conversion.chunk_size"].description
+    assert user_docs["conversion.chunk_frame"].title == "Prepend heading path"
     assert all(d.title and d.description for d in user_docs.values())
     # collection overrides and the chunk settings reuse the same definitions
-    collection_docs = docs(CollectionSettings)
-    chunking = {"chunker", "chunk_size", "chunk_overlap"}
+    collection_docs = docs(CollectionOverrides)
+    chunking = {"chunker", "chunk_size", "chunk_merge_below", "chunk_frame"}
     search = {key for key in user_docs if key.startswith("search.")}
     assert set(collection_docs) == chunking | search, "chunking and search, and nothing else"
     assert collection_docs["chunk_size"] == user_docs["conversion.chunk_size"]
@@ -332,24 +249,28 @@ def test_docs_rejects_a_non_struct() -> None:
 
 
 def test_embedding_model_carries_accelerator() -> None:
-    user = UserSettings(embedding="compact", pipeline=PipelineSettings(accelerator="cpu"))
+    user = UserSettings(
+        embedding=EmbeddingProfile.COMPACT, pipeline=PipelineSettings(accelerator=Accelerator.CPU)
+    )
     assert user.embedding_model is not None and user.embedding_model.accelerator == "cpu"
-    assert UserSettings(embedding="none").embedding_model is None
+    assert UserSettings(embedding=EmbeddingProfile.NONE).embedding_model is None
 
 
 @pytest.mark.anyio
 async def test_user_settings_persist_in_db() -> None:
     assert await load_user_settings_or_none() is None, "not initialized yet"
     assert (await load_user_settings()).embedding == "none"
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
     assert await load_user_settings_or_none() is not None
     assert (await load_user_settings()).embedding == "compact"
 
 
 @pytest.mark.anyio
 async def test_init_user_settings_creates_the_row_once() -> None:
-    assert await init_user_settings(UserSettings(embedding="compact")) is True
-    assert await init_user_settings(UserSettings(embedding="quality")) is False, "second call loses"
+    assert await init_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT)) is True
+    assert await init_user_settings(UserSettings(embedding=EmbeddingProfile.QUALITY)) is False, (
+        "second call loses"
+    )
     assert (await load_user_settings()).embedding == "compact", "the first write stands"
 
 
@@ -384,7 +305,7 @@ def test_skip_ocr_pages(tmp_path: Path, name: str, pages: list, skip: bool, expe
             assert f"<!-- page {i}: needs OCR, skipped -->" in markdown, name
         else:
             assert text in markdown, name
-    preview = convert.build_preview(pdf, tmp_path / "prev", "anydoc")
+    preview = convert.build_preview(pdf, tmp_path / "prev", Parser.ANYDOC)
     assert preview.ocr_pages == [i for i, t in enumerate(pages, start=1) if t is None], name
 
 
@@ -422,7 +343,7 @@ def test_to_markdown_rejects_what_it_cannot_read(
     path = tmp_path / filename
     path.write_bytes(content)
     with pytest.raises(error, match=match):
-        convert.to_markdown(path, "anydoc")
+        convert.to_markdown(path, Parser.ANYDOC)
 
 
 def test_a_corrupt_pdf_is_a_conversion_error(tmp_path: Path) -> None:
@@ -449,7 +370,7 @@ def test_build_preview_writes_both_panes(
     path.write_bytes(docx_bytes() if content is None else content)
     out = tmp_path / "preview"
 
-    info = convert.build_preview(path, out, "anydoc")
+    info = convert.build_preview(path, out, Parser.ANYDOC)
 
     assert info.kind == kind, name
     assert (out / "source").read_bytes().startswith(source_starts), name
@@ -461,7 +382,7 @@ def test_build_preview_of_a_pdf_cuts_to_the_first_pages(tmp_path: Path) -> None:
     pdf = tmp_path / "long.pdf"
     pdf.write_bytes(text_pdf([f"page {i}" for i in range(convert.PREVIEW_PAGES + 3)]))
 
-    info = convert.build_preview(pdf, tmp_path / "p", "anydoc")
+    info = convert.build_preview(pdf, tmp_path / "p", Parser.ANYDOC)
 
     assert (info.kind, info.truncated, info.pages) == ("pdf", True, convert.PREVIEW_PAGES)
     assert "page 11" not in (tmp_path / "p" / "preview.md").read_text()
@@ -471,7 +392,7 @@ def test_build_preview_of_a_corrupt_pdf_raises_conversion_error(tmp_path: Path) 
     bad = tmp_path / "broken.pdf"
     bad.write_bytes(b"not a pdf at all")
     with pytest.raises(PermanentError, match="broken.pdf"):
-        convert.build_preview(bad, tmp_path / "p", "anydoc")
+        convert.build_preview(bad, tmp_path / "p", Parser.ANYDOC)
 
 
 def test_pdf_page_count_of_a_corrupt_file_raises_conversion_error(tmp_path: Path) -> None:
@@ -551,7 +472,7 @@ async def test_import_staged_moves_the_file_and_creates_the_row() -> None:
         document.ImportOptions(
             name="My Guide.md",
             description="the guide",
-            parser="plain",
+            parser=Parser.PLAIN,
             skip_ocr_pages=False,
         ),
     )
@@ -580,7 +501,7 @@ async def test_import_staged_without_a_name_keeps_the_uploaded_file_name() -> No
 @pytest.mark.anyio
 async def test_import_staged_defaults_conversion_to_the_user_settings() -> None:
     await save_user_settings(
-        UserSettings(conversion=ConversionSettings(parser="plain", skip_ocr_pages=False))
+        UserSettings(conversion=ConversionSettings(parser=Parser.PLAIN, skip_ocr_pages=False))
     )
     staged = await document.stage("g.md", MD.encode())
 
@@ -753,13 +674,13 @@ async def test_set_status_bumps_updated_at_and_the_preview_does_not() -> None:
     assert first.created_at > 0, "stamped on import"
     assert first.updated_at == first.created_at, "an import is the document's first change"
 
-    await document.set_status("a.md", "imported")
+    await document.set_status("a.md", DocumentStatus.IMPORTED)
     done = await document.get("a.md")
     assert done.updated_at > first.updated_at, "a lifecycle step is a change"
     assert (done.status, done.error) == ("imported", None)
     assert done.created_at == first.created_at, "the import moment never moves"
 
-    await document.set_status("a.md", "error", "boom")
+    await document.set_status("a.md", DocumentStatus.ERROR, "boom")
     failed = await document.get("a.md")
     assert (failed.status, failed.error) == ("error", "boom"), "the reason is stored with it"
 
@@ -777,10 +698,10 @@ async def test_describe_replaces_the_description_and_reads_in_batches() -> None:
     described = await document.describe("a.md", "the alpha guide")
 
     assert described.description == "the alpha guide"
-    assert await document.describe_of({"a.md", "b.md"}) == {"a.md": "the alpha guide"}, (
+    assert await document.descriptions_of({"a.md", "b.md"}) == {"a.md": "the alpha guide"}, (
         "a document without one is absent"
     )
-    assert await document.describe_of(set()) == {}
+    assert await document.descriptions_of(set()) == {}
     assert (await document.describe("a.md", "")).description == "", "empty clears it"
     with pytest.raises(NotFound, match="document not found"):
         await document.describe("ghost.md", "x")
@@ -791,8 +712,8 @@ async def test_document_page_sorts_filters_and_resumes_by_keyset() -> None:
     sizes = {"a.md": 30, "b.md": 10, "c.md": 20}
     for name, size in sizes.items():
         await import_row(name, "x" * size)
-    await document.set_status("a.md", "imported")
-    await document.set_status("b.md", "error", "boom")
+    await document.set_status("a.md", DocumentStatus.IMPORTED)
+    await document.set_status("b.md", DocumentStatus.ERROR, "boom")
 
     by_name = await document.page(PageRequest(page_size=2))
     assert [d.name for d in by_name.items] == ["a.md", "b.md"]
@@ -801,10 +722,10 @@ async def test_document_page_sorts_filters_and_resumes_by_keyset() -> None:
     assert [d.name for d in resumed.items] == ["c.md"], "the keyset resumes past the last row"
     assert resumed.next_cursor is None, "the last page says so"
 
-    by_size = await document.page(PageRequest(sort="size", order="desc"))
+    by_size = await document.page(PageRequest(sort="size", order=Order.DESC))
     assert [d.name for d in by_size.items] == ["a.md", "c.md", "b.md"]
 
-    filtered = await document.page(PageRequest(), status="imported")
+    filtered = await document.page(PageRequest(), status=DocumentStatus.IMPORTED)
     assert [d.name for d in filtered.items] == ["a.md"]
     assert filtered.total == 1, "total counts the filtered rows, not every document"
 
@@ -1065,32 +986,30 @@ async def test_collection_describe_replaces_the_description() -> None:
 @pytest.mark.anyio
 async def test_collection_settings_are_read_from_the_row_every_time() -> None:
     collection = await Collection.create("stored")
-    assert await collection.settings() == CollectionSettings(), "no overrides yet"
+    assert await collection.overrides() == CollectionOverrides(), "no overrides yet"
 
-    await collection.set_settings(CollectionSettings(chunker="text"))
-    assert (await (await Collection.get("stored")).settings()).chunker == "text"
+    await collection.set_overrides(CollectionOverrides(chunker=Chunker.TEXT))
+    assert (await (await Collection.get("stored")).overrides()).chunker == "text"
 
     async with db.connect() as conn:  # a write the setter never saw
         await conn.execute(
-            "update collections set settings = '{\"chunk_size\": 42}' where name = ?", ("stored",)
+            "update collections set overrides = '{\"chunk_size\": 42}' where name = ?", ("stored",)
         )
-    assert (await collection.settings()).chunk_size == 42, "the row owns the value"
+    assert (await collection.overrides()).chunk_size == 42, "the row owns the value"
 
     await collection.delete()
     await Collection.create("stored")
-    assert await (await Collection.get("stored")).settings() == CollectionSettings(), "clean"
-    assert await Collection("ghost").settings() == CollectionSettings(), "and one with no row"
+    assert await (await Collection.get("stored")).overrides() == CollectionOverrides(), "clean"
+    assert await Collection("ghost").overrides() == CollectionOverrides(), "and one with no row"
 
 
 @pytest.mark.anyio
 async def test_chunk_settings_of_a_collection_resolve_against_the_user_settings() -> None:
-    await save_user_settings(
-        UserSettings(conversion=ConversionSettings(chunk_size=800, chunk_overlap=80))
-    )
+    await save_user_settings(UserSettings(conversion=ConversionSettings(chunk_size=800)))
     collection = await Collection.create("chunky")
-    await collection.set_settings(CollectionSettings(chunker="text"))
+    await collection.set_overrides(CollectionOverrides(chunker=Chunker.TEXT))
 
-    assert await collection.chunk_settings() == ChunkSettings("text", 800, 80)
+    assert await collection.chunk_settings() == ChunkSettings(Chunker.TEXT, 800, 66)
     assert (await collection.search_settings()).limit == SearchSettings().limit
 
 
@@ -1102,8 +1021,8 @@ async def test_load_settings_reads_every_collection_it_was_asked_for_in_one_quer
     is one SELECT rather than one per collection. A name without a row stays out of the answer."""
     for name in ("alpha", "beta"):
         await Collection.create(name)
-    await Collection("alpha").set_settings(CollectionSettings(chunker="text"))
-    assert await Collection.load_settings([]) == {}, "nothing asked for, nothing read"
+    await Collection("alpha").set_overrides(CollectionOverrides(chunker=Chunker.TEXT))
+    assert await Collection.load_overrides([]) == {}, "nothing asked for, nothing read"
     statements: list[str] = []
     real_execute = aiosqlite.Connection.execute
 
@@ -1113,10 +1032,10 @@ async def test_load_settings_reads_every_collection_it_was_asked_for_in_one_quer
 
     monkeypatch.setattr(aiosqlite.Connection, "execute", counted)
 
-    found = await Collection.load_settings(["alpha", "beta", "ghost", "alpha"])
+    found = await Collection.load_overrides(["alpha", "beta", "ghost", "alpha"])
 
     assert set(found) == {"alpha", "beta"}, "a name with no row is absent from the result"
-    assert (found["alpha"].chunker, found["beta"]) == ("text", CollectionSettings())
+    assert (found["alpha"].chunker, found["beta"]) == ("text", CollectionOverrides())
     selects = [sql for sql in statements if sql.lstrip().lower().startswith("select")]
     assert len(selects) == 1, "one query for every name, duplicates included"
 
@@ -1128,11 +1047,11 @@ async def test_reranker_overrides_lists_every_model_a_collection_chose() -> None
 
     for name in ("a", "b", "c"):
         await Collection.create(name)
-    await Collection("b").set_settings(
-        CollectionSettings(search=SearchOverrides(reranker_model=RERANKER_MODELS[1]))
+    await Collection("b").set_overrides(
+        CollectionOverrides(search=SearchOverrides(reranker_model=RERANKER_MODELS[1]))
     )
-    await Collection("c").set_settings(
-        CollectionSettings(search=SearchOverrides(reranker_model=RERANKER_MODELS[1]))
+    await Collection("c").set_overrides(
+        CollectionOverrides(search=SearchOverrides(reranker_model=RERANKER_MODELS[1]))
     )
 
     assert await Collection.reranker_overrides() == [RERANKER_MODELS[1]], "no duplicates"
@@ -1144,7 +1063,7 @@ async def test_collection_page_lists_summaries_with_their_counts() -> None:
         await Collection.create(name, description=f"{name} notes")
     await attachable("a.md")
     await Collection("beta").add("a.md")
-    await Collection("beta").set_member_status("a.md", "indexed")
+    await Collection("beta").set_member_status("a.md", MemberStatus.INDEXED)
 
     first = await Collection.page(PageRequest(page_size=2))
 
@@ -1175,7 +1094,7 @@ async def test_add_is_idempotent_and_member_reads_the_document_with_it() -> None
     assert (again.status, again.added_at) == (first.status, first.added_at), "a no-op re-attach"
     assert await collection.member_names() == ["a.md"]
 
-    await collection.set_member_status(doc.name, "error", "boom")
+    await collection.set_member_status(doc.name, MemberStatus.ERROR, "boom")
     failed = await collection.member(doc.name)
     assert (failed.status, failed.error) == ("error", "boom")
     assert failed.updated_at >= failed.added_at
@@ -1217,9 +1136,9 @@ async def test_member_counts_group_by_status() -> None:
     collection = await Collection.create("counts")
     for name in ("a.md", "b.md", "c.md", "d.md"):
         await collection.add((await attachable(name)).name)
-    await collection.set_member_status("a.md", "indexed")
-    await collection.set_member_status("b.md", "indexing")
-    await collection.set_member_status("c.md", "error", "boom")
+    await collection.set_member_status("a.md", MemberStatus.INDEXED)
+    await collection.set_member_status("b.md", MemberStatus.INDEXING)
+    await collection.set_member_status("c.md", MemberStatus.ERROR, "boom")
 
     counts = await collection.counts()
 
@@ -1250,7 +1169,11 @@ async def test_members_page_sorts_on_the_document_and_on_the_membership(
     collection = await Collection.create("notes")
     for doc, size in (("a.md", 30), ("b.md", 10), ("c.md", 20)):
         await collection.add((await attachable(doc, "x" * size)).name)
-    for doc, status in (("a.md", "indexed"), ("b.md", "pending"), ("c.md", "error")):
+    for doc, status in (
+        ("a.md", MemberStatus.INDEXED),
+        ("b.md", MemberStatus.PENDING),
+        ("c.md", MemberStatus.ERROR),
+    ):
         await collection.set_member_status(doc, status)
 
     page = await collection.members_page(PageRequest(sort=sort, order=order))  # ty: ignore
@@ -1264,14 +1187,14 @@ async def test_members_page_filters_by_status_and_resumes_by_keyset() -> None:
     collection = await Collection.create("notes")
     for doc in ("a.md", "b.md", "c.md"):
         await collection.add((await attachable(doc)).name)
-    await collection.set_member_status("b.md", "indexed")
+    await collection.set_member_status("b.md", MemberStatus.INDEXED)
 
     first = await collection.members_page(PageRequest(page_size=2))
     assert [m.document.name for m in first.items] == ["a.md", "b.md"]
     resumed = await collection.members_page(PageRequest(cursor=first.next_cursor, page_size=2))
     assert [m.document.name for m in resumed.items] == ["c.md"]
 
-    indexed = await collection.members_page(PageRequest(), status="indexed")
+    indexed = await collection.members_page(PageRequest(), status=MemberStatus.INDEXED)
     assert [m.document.name for m in indexed.items] == ["b.md"]
     assert indexed.total == 1, "total counts the filtered rows"
 
@@ -1543,15 +1466,15 @@ TINY = EmbeddingModel("test/tiny", 32)  # 32 / 16 = 2 PQ sub-vectors, enough row
 def _row(text: str, vector: list[float] | None = None, seq: int = 1) -> Row:
     return Row(
         chunk=Chunk(
-            heading="H",
-            text=text,
+            headings=["H"],
+            frame=["H"],
+            pieces=[Piece(PieceType.TEXT, text)],
             line_start=1,
             line_end=1,
             char_start=0,
             char_end=len(text),
             byte_start=0,
             byte_end=len(text.encode()),
-            parents=[],
         ),
         vector=vector,
         seq=seq,
@@ -1606,7 +1529,7 @@ async def test_finish_builds_fts_once_and_later_rows_are_still_found(
     assert builds == ["text"], "one build across two documents"
     assert await index.has_index("text") is True
     assert [list(i.columns) for i in await table.list_indices()] == [["text"]], "and one index"
-    found = {hit.doc for hit in await index.search("lancedb", SearchSettings(limit=10))}
+    found = {hit.document for hit in await index.search("lancedb", SearchSettings(limit=10))}
     assert found == {"a.md", "b.md"}, "the rows added after the build are still found"
 
 
@@ -1693,7 +1616,7 @@ async def test_build_vector_index_and_search_with_probes(tmp_path: Path) -> None
     stats = await index.stats()
     assert stats is not None and stats.has_vector_index is True
     assert stats.vector_index_rows == 2000
-    settings = SearchSettings(mode="vector", limit=3, nprobes=4, refine_factor=2)
+    settings = SearchSettings(mode=SearchMode.VECTOR, limit=3, nprobes=4, refine_factor=2)
     rows = await index.search_rows("row7", _vector(7), settings, limit=3)
     assert rows and rows[0]["text"].endswith("row7 lancedb"), "the nearest row, through the index"
     assert "_distance" in rows[0], "a vector query scores by distance, which `row_score` maps"
@@ -1724,7 +1647,7 @@ async def test_search_applies_probes_without_a_vector_index(tmp_path: Path) -> N
         ("reciprocal rank fusion", SearchSettings(candidates=4, nprobes=4, refine_factor=2)),
         (
             "linear combination of the two rankings",
-            SearchSettings(fusion="linear", candidates=4, nprobes=4, refine_factor=2),
+            SearchSettings(fusion=Fusion.LINEAR, candidates=4, nprobes=4, refine_factor=2),
         ),
     ],
 )
@@ -1757,8 +1680,8 @@ async def test_run_maintenance_compacts_fragments_and_settles_the_counter() -> N
         await Collection("busy").note_indexed()
     before = await index.stats()
     assert before is not None and before.num_fragments == 20
-    assert (await maintenance_state("busy")).pending_docs == 20
-    claimed = (await maintenance_state("busy")).pending_docs
+    assert (await maintenance_state("busy")).pending_documents == 20
+    claimed = (await maintenance_state("busy")).pending_documents
 
     report = await maintenance.run(collection, None, PipelineSettings())
     await Collection("busy").settle_maintenance(claimed, report.ann_trained, report.num_rows)
@@ -1770,7 +1693,7 @@ async def test_run_maintenance_compacts_fragments_and_settles_the_counter() -> N
     after = await collection.index_with(None).stats()
     assert after is not None and (after.num_rows, after.num_fragments) == (40, 1)
     state = await maintenance_state("busy")
-    assert (state.pending_docs, state.vector_index_rows) == (0, 0)
+    assert (state.pending_documents, state.vector_index_rows) == (0, 0)
     assert state.last_maintained_at is not None and state.last_write_at is not None
     assert await Collection.pending_names() == [], "settled, so no boot reschedules it"
 
@@ -1841,7 +1764,7 @@ async def test_collection_info_reports_the_index_on_demand() -> None:
     collection = await Collection.create("info")
     info = await collection.info()
     assert info.index is None, "no table yet"
-    assert (info.settings, info.effective) == (CollectionSettings(), ChunkSettings())
+    assert (info.overrides, info.effective) == (CollectionOverrides(), ChunkSettings())
     assert info.counts == DocumentCounts() and info.index_outdated is False
 
     await _fill(collection.index_with(None), "a.md", 0, 3)
@@ -1851,7 +1774,7 @@ async def test_collection_info_reports_the_index_on_demand() -> None:
     assert info.index is not None
     assert (info.index.num_rows, info.index.num_fragments) == (3, 1)
     assert (info.index.has_fts_index, info.index.has_vector_index) == (False, False)
-    assert (info.maintenance.pending_docs, info.maintenance.last_maintained_at) == (1, None)
+    assert (info.maintenance.pending_documents, info.maintenance.last_maintained_at) == (1, None)
 
 
 @pytest.mark.anyio
@@ -1861,13 +1784,14 @@ async def test_search_falls_back_to_fts_without_an_embedding_model(tmp_path: Pat
     path = tmp_path / "index"
     schema = PLAIN_SCHEMA.append(pa.field("vector", pa.list_(pa.float32(), 2)))
     table = lancedb.connect(str(path)).create_table("chunks", schema=schema)
-    table.add([{"doc": "a.md", "chunk_id": 0, "heading": "H", "text": "hi", "vector": [0.1, 0.2]}])
+    row = {"document": "a.md", "seq": 1, "headings": ["H"], "text": "hi", "vector": [0.1, 0.2]}
+    table.add([row])
     index = CollectionIndex(path, "notes", tmp_path, None)
     await index.finish()  # build the full-text index the fallback needs
 
-    hits = await index.search("hi", SearchSettings(mode="vector"))
+    hits = await index.search("hi", SearchSettings(mode=SearchMode.VECTOR))
 
-    assert [h.doc for h in hits] == ["a.md"]
+    assert [h.document for h in hits] == ["a.md"]
 
 
 @pytest.mark.parametrize(
@@ -1887,7 +1811,6 @@ def test_score_prefers_the_most_specific_signal(name: str, row: dict, expected: 
 # heading, no ancestry and no pages reads as. `hit` reads every column, so none may be missing.
 PLAIN_ROW: dict = dict.fromkeys(PLAIN_SCHEMA.names, "") | {
     "part": 0,
-    "chunk_id": 0,
     "seq": 1,
     "line_start": 0,
     "line_end": 0,
@@ -1895,6 +1818,7 @@ PLAIN_ROW: dict = dict.fromkeys(PLAIN_SCHEMA.names, "") | {
     "char_end": 0,
     "page_start": None,
     "page_end": None,
+    "headings": [],
 }
 
 
@@ -1902,11 +1826,11 @@ def test_hit_of_a_row_with_nothing_optional_set(tmp_path: Path) -> None:
     """Every column of `PLAIN_SCHEMA` is present in any row this build can read, but a chunk may
     carry no heading, no ancestry and no pages: nothing is invented for those."""
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
-    hit = index.hit(PLAIN_ROW | {"doc": "a.md", "chunk_id": 3})
+    hit = index.hit(PLAIN_ROW | {"document": "a.md", "seq": 3})
     assert isinstance(hit, Hit)
     assert (hit.source_path, hit.markdown_path, hit.part) == ("", "", 0)
     assert (hit.source_file, hit.markdown_file) == ("", ""), "no path, so nothing to resolve"
-    assert (hit.page_start, hit.page_end, hit.parents) == (None, None, [])
+    assert (hit.page_start, hit.page_end, hit.headings) == (None, None, [])
     assert (hit.header, hit.location) == ("", "a.md L0-0")
 
 
@@ -1916,8 +1840,7 @@ def test_hit_names_the_collection_that_matched_and_builds_a_citation(tmp_path: P
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     hit = index.hit(
         {
-            "doc": "book.pdf",
-            "chunk_id": 1,
+            "document": "book.pdf",
             "part": 2,
             "seq": 7,
             "source_path": "documents/1f/book.pdf/original.pdf",
@@ -1930,16 +1853,32 @@ def test_hit_names_the_collection_that_matched_and_builds_a_citation(tmp_path: P
             "byte_end": 210,
             "page_start": 3,
             "page_end": 4,
-            "parents": "Part I > Chapter 2",
-            "heading": "Results",
-            "text": "body",
+            "headings": ["Part I", "Chapter 2", "Results"],
+            "frame": ["Chapter 2", "Results"],
+            "text": "Retries doubled. Latency held. The queue drained by noon.",
+            "layout": [
+                {"type": "text", "position": 0},
+                {"type": "text", "position": 17},
+                {"type": "text", "position": 32},
+            ],
+            "start_reason": "paragraph",
+            "end_reason": "length_sentence",
             "_score": 0.5,
         }
     )
     assert hit.collection == "notes"
-    assert (hit.chunk_id, hit.part, hit.seq) == (1, 2, 7), "where in the document it sits"
-    assert hit.parents == ["Part I", "Chapter 2"]
+    assert (hit.part, hit.seq) == (2, 7), "where in the document it sits"
+    assert (hit.headings, hit.frame) == (
+        ["Part I", "Chapter 2", "Results"],
+        ["Chapter 2", "Results"],
+    )
     assert hit.header == "Part I > Chapter 2 > Results"
+    assert hit.layout == [
+        Position(PieceType.TEXT, 0),
+        Position(PieceType.TEXT, 17),
+        Position(PieceType.TEXT, 32),
+    ]
+    assert (hit.start_reason, hit.end_reason) == ("paragraph", "length_sentence")
     assert hit.location == "book.pdf p.3-4 L10-20"
     assert (hit.byte_start, hit.byte_end) == (104, 210), "what a search seeks the markdown to"
     assert hit.score == 0.5
@@ -1949,10 +1888,14 @@ def test_hit_names_the_collection_that_matched_and_builds_a_citation(tmp_path: P
     ("name", "settings", "expected"),
     [
         ("rrf is the default fusion", SearchSettings(), "RRFReranker"),
-        ("linear weights the two rankings", SearchSettings(fusion="linear"), "LinearCombination"),
+        (
+            "linear weights the two rankings",
+            SearchSettings(fusion=Fusion.LINEAR),
+            "LinearCombination",
+        ),
         (
             "zero weights fall back to an even split",
-            SearchSettings(fusion="linear", vector_weight=0.0, bm25_weight=0.0),
+            SearchSettings(fusion=Fusion.LINEAR, vector_weight=0.0, bm25_weight=0.0),
             "LinearCombination",
         ),
     ],
@@ -1984,8 +1927,8 @@ async def test_cross_encode_rescores_candidates_best_first(
 
     monkeypatch.setattr(models, "require_ready", require_ready)
     monkeypatch.setattr(embed, "rerank_scores", lambda model, q, ts: [float(len(t)) for t in ts])
-    settings = SearchSettings(reranker="cross-encoder")
-    rows = [{"text": text, "_score": 9.0} for text in texts]
+    settings = SearchSettings(reranker=Reranker.CROSS_ENCODER)
+    rows = [{"text": text, "headings": [], "frame": [], "_score": 9.0} for text in texts]
 
     ranked = await cross_encode("q", rows, settings)
 
@@ -1996,7 +1939,7 @@ async def test_cross_encode_rescores_candidates_best_first(
 @pytest.mark.anyio
 async def test_an_index_with_an_embedding_stores_a_vector_column(tmp_path: Path) -> None:
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, EmbeddingModel("test/model", 2))
-    (chunk_,) = chunk.split("# H\n\nbody\n", ChunkSettings())
+    (chunk_,) = chunk.split("# H\n\n## Sub\n\nbody\n", ChunkSettings())
 
     row = Row(chunk=chunk_, vector=[0.1, 0.2], seq=1)
     await index.add_parts("g.md", "documents/g.md", "documents/g.md.md", _aparts([(0, [row])]))
@@ -2005,7 +1948,9 @@ async def test_an_index_with_an_embedding_stores_a_vector_column(tmp_path: Path)
     assert table is not None
     assert (await table.schema()).field("vector").type == pa.list_(pa.float32(), 2)
     (record,) = (await table.to_arrow()).to_pylist()
-    assert (record["doc"], record["heading"], record["part"]) == ("g.md", "H", 0)
+    assert (record["document"], record["headings"], record["part"]) == ("g.md", ["H", "Sub"], 0)
+    hit = index.hit(record)
+    assert (hit.headings, hit.header) == (["H", "Sub"], "H > Sub"), "the path read back whole"
     assert record["vector"] == pytest.approx([0.1, 0.2])
     assert await index.schema_current() is True
 
@@ -2032,7 +1977,7 @@ async def test_add_parts_writes_one_fragment_for_many_parts(tmp_path: Path) -> N
     assert await _fragments(index) == 1, "one commit, however many parts it carried"
     records = (await table.to_arrow()).to_pylist()
     assert sorted({r["part"] for r in records}) == [0, 2], "the empty part is skipped"
-    assert {r["chunk_id"] for r in records} == set(range(len(chunks))), "ids restart per part"
+    assert sorted(r["seq"] for r in records) == list(range(1, 2 * len(chunks) + 1)), "seq is whole"
     assert {r["markdown_path"] for r in records} == {"documents/g.md.md"}
 
 
@@ -2049,7 +1994,7 @@ async def test_delete_parts_removes_only_the_range(tmp_path: Path) -> None:
 
     table = await index._existing()
     assert table is not None
-    kept = {(r["doc"], r["part"]) for r in (await table.to_arrow()).to_pylist()}
+    kept = {(r["document"], r["part"]) for r in (await table.to_arrow()).to_pylist()}
     assert kept == {("a.md", 0), ("a.md", 3)} | {("b.md", part) for part in range(4)}
 
 
@@ -2076,8 +2021,34 @@ async def test_fts_rows_is_empty_without_an_fts_index(tmp_path: Path) -> None:
     await index.finish()
 
     (row,) = await index.fts_rows("lancedb", 10)
-    assert (row["doc"], row["chunk_id"]) == ("d.md", 0)
+    assert (row["document"], row["seq"]) == ("d.md", 1)
     assert row["_score"] > 0, "raw BM25, which is what the cross-collection merge sorts on"
+
+
+@pytest.mark.anyio
+async def test_a_hit_carries_what_the_models_read_and_its_pieces(tmp_path: Path) -> None:
+    """The UI shows a chunk as it was embedded: its frame, then its text piece by piece."""
+    rules = " ".join(f"Rule {i:02d} raised lancedb costs." for i in range(12))
+    text = "# Costs\n\n## Europe\n\n" + rules
+    chunks = chunk.split(text, ChunkSettings(chunk_size=120))
+    assert len(chunks) > 2
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
+    rows = [Row(chunk=c, seq=seq) for seq, c in enumerate(chunks, 1)]
+    await index.add_parts("d.md", "documents/d.md", "documents/d.md.md", _aparts([(0, rows)]))
+    await index.finish()
+
+    hits = {h.seq: h for h in await index.search("lancedb", SearchSettings(limit=20))}
+    middle = hits[2]
+    assert middle.header == "Costs > Europe", "the heading path the models read it after"
+    assert middle.layout == chunks[1].layout, "stored as the chunk has them"
+    starts = [*(p.position for p in middle.layout), len(middle.text)]
+    cut = [
+        Piece(p.type, middle.text[a:b])
+        for p, a, b in zip(middle.layout, starts, starts[1:], strict=False)
+    ]
+    assert cut == chunks[1].pieces, "they cut the text back into its pieces"
+    assert hits[1].text.startswith("Rule 00"), "the first chunk starts at its text"
+    assert hits[1].frame == ["Costs", "Europe"], "its headings are the frame"
 
 
 @pytest.mark.anyio
@@ -2098,7 +2069,7 @@ async def test_search_rows_returns_raw_rows_without_cutting(tmp_path: Path) -> N
 
     assert len(rows) == 4, "the fetch size wins over settings.limit"
     assert all("_score" in row and "_relevance_score" not in row for row in rows)
-    assert {row["doc"] for row in rows} == {"d.md"}
+    assert {row["document"] for row in rows} == {"d.md"}
     assert len(await index.search_rows("lancedb", None, settings, 100)) == 6, "no more than exist"
     assert len(await index.search("lancedb", settings)) == 2, "the composed search cuts to limit"
     missing = CollectionIndex(tmp_path / "missing", "notes", tmp_path, None)
@@ -2109,14 +2080,20 @@ async def test_search_rows_returns_raw_rows_without_cutting(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     ("name", "embedding", "settings", "vector_column", "expected"),
     [
-        ("mode fts never embeds", COMPACT, SearchSettings(mode="fts"), True, None),
-        ("no embedding profile", None, SearchSettings(mode="hybrid"), True, None),
-        ("no vector column", COMPACT, SearchSettings(mode="hybrid"), False, None),
-        ("hybrid over a vector table", COMPACT, SearchSettings(mode="hybrid"), True, [0.5] * 384),
+        ("mode fts never embeds", COMPACT, SearchSettings(mode=SearchMode.FTS), True, None),
+        ("no embedding profile", None, SearchSettings(mode=SearchMode.HYBRID), True, None),
+        ("no vector column", COMPACT, SearchSettings(mode=SearchMode.HYBRID), False, None),
+        (
+            "hybrid over a vector table",
+            COMPACT,
+            SearchSettings(mode=SearchMode.HYBRID),
+            True,
+            [0.5] * 384,
+        ),
         (
             "vector mode over a vector table",
             COMPACT,
-            SearchSettings(mode="vector"),
+            SearchSettings(mode=SearchMode.VECTOR),
             True,
             [0.5] * 384,
         ),
@@ -2154,8 +2131,8 @@ async def test_query_vector_is_none_for_fts_and_without_embedding(
 async def test_query_vector_of_a_never_indexed_collection_is_none(tmp_path: Path) -> None:
     """No table means no search, so the model is never asked for (it may not be loaded)."""
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, COMPACT)
-    assert await index.query_vector("q", SearchSettings(mode="hybrid")) is None
-    assert await index.search("q", SearchSettings(mode="hybrid")) == []
+    assert await index.query_vector("q", SearchSettings(mode=SearchMode.HYBRID)) is None
+    assert await index.search("q", SearchSettings(mode=SearchMode.HYBRID)) == []
 
 
 # --- pipeline ----------------------------------------------------------------------
@@ -2207,6 +2184,28 @@ async def _index(
         written += await pipeline.index_batch(collection, doc, cache_id, batch, embedding)
     await pipeline.finalize_index(collection, embedding)
     return written
+
+
+@pytest.mark.anyio
+async def test_a_part_is_embedded_under_the_headings_an_earlier_part_opened() -> None:
+    """A PDF converts ten pages a part: a chapter opened in one part still frames the chunks
+    of the next, both in the chunk's headings and in what the model embeds."""
+    doc = await import_row("g.md")
+    parts = ["# Replication\n\n## Leaders\n\nOne leader takes writes.", "Followers apply the log."]
+    doc.parts_dir.mkdir(parents=True, exist_ok=True)
+    for seq, text in enumerate(parts):
+        doc.part_path(seq).write_text(text)
+    doc.markdown.write_text(pipeline.JOINER.join(parts))
+
+    batches = await pipeline.plan_embed(doc)
+
+    assert [[text for _, text in b.opened] for b in batches] == [[], ["Replication", "Leaders"]]
+    await pipeline.embed_batch(doc, batches[1], "cache", SMALL, None)
+    rows = msgspec.json.decode(
+        embed_cache.rows_path(doc.name, "cache", 1).read_bytes(), type=list[Row]
+    )
+    assert [row.chunk.headings for row in rows] == [["Replication", "Leaders"]]
+    assert rows[0].chunk.char_start == len(parts[0]) + len(pipeline.JOINER)
 
 
 @pytest.mark.anyio
@@ -2295,7 +2294,7 @@ async def test_the_pipeline_indexes_a_markdown_document_into_a_collection() -> N
     (entry,) = await embed_cache.entries(doc.name)
     assert (entry.id, entry.rows) == (cache_id, written)
     (hit,) = await collection.search("lancedb")
-    assert (hit.collection, hit.doc) == ("notes", "guide.md")
+    assert (hit.collection, hit.document) == ("notes", "guide.md")
     assert hit.source_file == str(doc.original), "the hit points at the document's own files"
     assert hit.markdown_file == str(doc.markdown)
     assert Path(hit.markdown_file).read_text() == MD
@@ -2333,7 +2332,9 @@ async def test_two_collections_with_the_same_chunk_settings_share_one_cache_entr
     the first one left and writes its own table from it."""
     alpha = await Collection.create("alpha")
     beta = await Collection.create("beta")
-    await beta.set_settings(CollectionSettings(chunk_size=40, chunk_overlap=0))
+    # smaller than a section of `MD`: every heading starts a chunk anyway, so only a size below
+    # a section's length chunks the same markdown into more of them
+    await beta.set_overrides(CollectionOverrides(chunk_size=20))
     doc = await attachable("shared.md")
     await _convert(doc)
 
@@ -2445,7 +2446,7 @@ async def test_session_search_skips_a_collection_that_disappeared(caplog, monkey
 
     await Collection.create("ghost")
     await session.set_collections("s1", ["ghost"])
-    monkeypatch.setattr(Collection, "load_settings", staticmethod(nothing_found))
+    monkeypatch.setattr(Collection, "load_overrides", staticmethod(nothing_found))
 
     with caplog.at_level("WARNING"):
         assert await flow.chunks(await session.collections_for("s1"), "anything") == []
@@ -2495,8 +2496,8 @@ async def test_session_search_counts_a_passage_once_across_collections() -> None
     hits = await flow.chunks(await session.collections_for("s1"), "lancedb", limit=10)
 
     assert len(hits) == 3, "three chunks, not six: the copies are merged away"
-    passages = {(hit.doc, hit.part, hit.chunk_id) for hit in hits}
-    assert passages == {("shared.md", 0, i) for i in range(3)}
+    passages = {(hit.document, hit.seq) for hit in hits}
+    assert passages == {("shared.md", seq) for seq in range(1, 4)}
     assert {hit.collection for hit in hits} == {"alpha"}, "the first collection that held it"
 
 
@@ -2535,14 +2536,13 @@ def _retrieved(rows: list[tuple]) -> tuple[CollectionIndex, list[dict]]:
     name = rows[0][0] if rows else "empty"
     index = CollectionIndex(Path("/nowhere") / name, name, Path("/nowhere"), None)
     return index, [
-        {"doc": doc, "part": part, "chunk_id": chunk_id}
-        | ({"_score": score} if score is not None else {})
-        for _collection, doc, part, chunk_id, score in rows
+        {"document": document, "seq": seq} | ({"_score": score} if score is not None else {})
+        for _collection, document, seq, score in rows
     ]
 
 
-def _identity(pairs: list[tuple]) -> list[tuple[str, str, int, int]]:
-    return [(index.collection, row["doc"], row["part"], row["chunk_id"]) for index, row in pairs]
+def _identity(pairs: list[tuple]) -> list[tuple[str, str, int]]:
+    return [(index.collection, row["document"], row["seq"]) for index, row in pairs]
 
 
 @pytest.mark.parametrize(
@@ -2551,45 +2551,45 @@ def _identity(pairs: list[tuple]) -> list[tuple[str, str, int, int]]:
         ("nothing to merge", [], []),
         (
             "a collection that matched nothing contributes nothing",
-            [[], [("a", "d.md", 0, 0, 1.0)]],
-            [("a", "d.md", 0, 0)],
+            [[], [("a", "d.md", 1, 1.0)]],
+            [("a", "d.md", 1)],
         ),
         (
             "the better score wins, whichever collection it came from",
-            [[("b", "x.md", 0, 0, 9.0)], [("a", "y.md", 0, 0, 1.0)]],
-            [("b", "x.md", 0, 0), ("a", "y.md", 0, 0)],
+            [[("b", "x.md", 1, 9.0)], [("a", "y.md", 1, 1.0)]],
+            [("b", "x.md", 1), ("a", "y.md", 1)],
         ),
         (
             "the same passage from two collections is kept once, the better copy",
-            [[("b", "d.md", 0, 0, 1.0)], [("a", "d.md", 0, 0, 9.0)]],
-            [("a", "d.md", 0, 0)],
+            [[("b", "d.md", 1, 1.0)], [("a", "d.md", 1, 9.0)]],
+            [("a", "d.md", 1)],
         ),
         (
             "an equal score falls back to the collection name, and still counts once",
-            [[("b", "d.md", 0, 0, 1.0)], [("a", "d.md", 0, 0, 1.0)]],
-            [("a", "d.md", 0, 0)],
+            [[("b", "d.md", 1, 1.0)], [("a", "d.md", 1, 1.0)]],
+            [("a", "d.md", 1)],
         ),
         (
-            "inside one collection: doc, then part, then chunk",
+            "inside one collection: document, then seq",
             [
                 [
-                    ("a", "z.md", 0, 0, 1.0),
-                    ("a", "a.md", 1, 0, 1.0),
-                    ("a", "a.md", 0, 5, 1.0),
-                    ("a", "a.md", 0, 1, 1.0),
+                    ("a", "z.md", 1, 1.0),
+                    ("a", "a.md", 9, 1.0),
+                    ("a", "a.md", 6, 1.0),
+                    ("a", "a.md", 2, 1.0),
                 ]
             ],
-            [("a", "a.md", 0, 1), ("a", "a.md", 0, 5), ("a", "a.md", 1, 0), ("a", "z.md", 0, 0)],
+            [("a", "a.md", 2), ("a", "a.md", 6), ("a", "a.md", 9), ("a", "z.md", 1)],
         ),
         (
             "a row an older index wrote without a score sorts last",
-            [[("a", "d.md", 0, 1, None)], [("a", "d.md", 0, 0, 0.5)]],
-            [("a", "d.md", 0, 0), ("a", "d.md", 0, 1)],
+            [[("a", "d.md", 2, None)], [("a", "d.md", 1, 0.5)]],
+            [("a", "d.md", 1), ("a", "d.md", 2)],
         ),
     ],
 )
 def test_text_merge_orders_by_score_then_identity(
-    name: str, per_collection: list[list[tuple]], expected: list[tuple[str, str, int, int]]
+    name: str, per_collection: list[list[tuple]], expected: list[tuple[str, str, int]]
 ) -> None:
     # aliased: `text` is a chunk field and a parameter name all over this module
     from haskie.search import text as fulltext
@@ -2839,5 +2839,5 @@ def test_attach_outside_an_audited_call_is_a_no_op() -> None:
 
 def test_the_audit_record_names_a_collection_and_a_document() -> None:
     """A document belongs to no collection, so a document-scoped action carries `doc` alone."""
-    assert {"collection", "doc"} <= audit.RECORD_FIELDS
+    assert {"collection", "document"} <= audit.RECORD_FIELDS
     assert "library" not in audit.RECORD_FIELDS

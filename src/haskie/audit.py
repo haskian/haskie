@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import UTC, date, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -22,15 +23,29 @@ import structlog
 from haskie import APP_VERSION, home
 from haskie.logs import AUDIT
 
-DEFAULT_ACTOR = "web"  # no request context: a worker thread or a direct call
+
+class Actor(StrEnum):
+    """Who acted: a web request, an MCP call, or a pipeline operation."""
+
+    WEB = "web"
+    MCP = "mcp"
+    OPERATION = "operation"
+
+
+class Outcome(StrEnum):
+    OK = "ok"
+    ERROR = "error"
+
+
+DEFAULT_ACTOR = Actor.WEB  # no request context: a worker thread or a direct call
 LEVEL_NAME = "AUDIT"
 FILE_MODE = 0o600
 # The daily files `path` writes, and the only ones `prune` may delete.
 FILE_NAME = re.compile(r"^audit-(\d{4}-\d{2}-\d{2})\.jsonl\Z")
 # Names `attach` fills on the record itself; anything else it receives goes into `detail`.
 # `collection` is the one a request or an operation acted on; a document has no collection of its
-# own, so a document-scoped action carries `doc` alone.
-RECORD_FIELDS = frozenset({"collection", "doc", "session_id", "operation_id"})
+# own, so a document-scoped action carries `document` alone.
+RECORD_FIELDS = frozenset({"collection", "document", "session_id", "operation_id"})
 
 # A plain stdlib logger: structlog's BoundLogger only knows the five standard levels, and the
 # ProcessorFormatter's ExtraAdder renders `extra` into the same JSON fields anyway.
@@ -44,15 +59,15 @@ class AuditRecord(msgspec.Struct, omit_defaults=True):
     ts: str
     level: str
     event: str
-    actor: str
-    outcome: str
+    actor: Actor
+    outcome: Outcome
     duration_ms: int
     app_version: str
     request_id: str | None = None
     session_id: str | None = None
     operation_id: str | None = None
     collection: str | None = None
-    doc: str | None = None
+    document: str | None = None
     error: str | None = None
     detail: dict[str, str | int | bool] | None = None
 
@@ -98,7 +113,7 @@ async def _append(entry: AuditRecord) -> None:
 
 
 async def record(
-    event: str, *, actor: str, outcome: str, duration_ms: int, **fields: Any
+    event: str, *, actor: Actor, outcome: Outcome, duration_ms: int, **fields: Any
 ) -> AuditRecord:
     """Append one record and mirror it to the `haskie.audit` logger at level AUDIT."""
     entry = AuditRecord(
@@ -122,12 +137,12 @@ async def record(
     return entry
 
 
-def _context() -> tuple[str, str | None]:
+def _context() -> tuple[Actor, str | None]:
     """Actor and request id bound by the request middleware; defaults outside a request."""
     context = structlog.contextvars.get_contextvars()
     actor = context.get("actor", DEFAULT_ACTOR)
     request_id = context.get("request_id")
-    return str(actor), None if request_id is None else str(request_id)
+    return Actor(actor), None if request_id is None else str(request_id)
 
 
 # Fields the running handler added with `attach`; None outside an `audited` call.
@@ -155,7 +170,7 @@ async def _finish(
     await record(
         event,
         actor=actor,
-        outcome="ok" if exc is None else "error",
+        outcome=Outcome.OK if exc is None else Outcome.ERROR,
         duration_ms=int((time.perf_counter() - started) * 1000),
         request_id=request_id,
         error=None if exc is None else home.scrub(f"{type(exc).__name__}: {exc}"),
@@ -167,8 +182,8 @@ async def _finish(
 def audited(event: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorate an async handler so every call appends one audit record, then re-raise on failure.
 
-    A parameter named `collection`, `doc` or `session_id` is copied into the record field of the
-    same name; `attach` adds what the handler only knows once it runs. The wrapper keeps the
+    A parameter named `collection`, `document` or `session_id` is copied into the record field of
+    the same name; `attach` adds what the handler only knows once it runs. The wrapper keeps the
     wrapped signature because Litestar builds its dependency injection from `inspect.signature`,
     so it must take no parameter of its own.
     """
@@ -176,7 +191,9 @@ def audited(event: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     def decorate(func: Callable[..., Any]) -> Callable[..., Any]:
         signature = inspect.signature(func)
         fields_from = [
-            field for field in ("collection", "doc", "session_id") if field in signature.parameters
+            field
+            for field in ("collection", "document", "session_id")
+            if field in signature.parameters
         ]
 
         def fields(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, str]:

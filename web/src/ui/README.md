@@ -29,15 +29,19 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `Modal` | `<Modal open={open} onClose={close} title={doc} subtitle="collection">{panels}</Modal>` — native `<dialog>`. |
 | `Tile` | `<Tile icon={FileText} name={doc.name} sub={doc.description} hint={doc.description} onClick={open} />`. |
 | `GallerySection` | `<GallerySection label="A–E" large>{tiles}</GallerySection>`. |
+| `SearchBox` | `<SearchBox value={q} onChange={setQ} onSubmit={run} placeholder="Search" scope={<Picker … />} />` — the one search or filter box; a filter passes `onChange` alone. |
+| `SearchTook` | `<SearchTook counts="12 chunks · 3 sources" ms={took} />` — the line above the results. |
 | `HitGrid` | `<HitGrid results={hits} query={q} onOpen={open} />` — chunks, passages, excerpts or sources; one card shape. |
 | `SearchPanel` | `<SearchPanel run={(q) => api.searchCollection(name, q)} placeholder="Search this collection" />` — box, hits and match modal for one scope. |
-| `MatchModal` | `<MatchModal hit={open} query={q} onClose={close} />` — one result: the text (or a source's hot sections), and the document it came from. |
+| `MatchModal` | `<MatchModal match={open} query={q} onClose={close} />` — one result, and the document it came from. A chunk shows as the models read it: its frame, its typed pieces, the cut reason on each side and its sizes. A passage shows its text, a source its hot sections. |
 | `Jobs` | `<Jobs jobs={jobs} variant="glass" stripes />` — one weighted bar per job of an operation. |
 | `Kv` | `<Kv rows={[['Status', doc.status], ['Size', bytes.format(doc.size)]]} />`. |
 | `Field` | `<Field label="Chunk size" help={docs['conversion.chunk_size'].description}><input className="input" /></Field>`. |
 | `Toggle` / `Check` | `<Toggle label="Classic background" checked={on} onChange={setOn} />` — `Toggle` renders `role="switch"`. |
 | `Mark` | `<Mark text={hit.text} query={q} />` wraps the query's terms in `<mark>`. |
 | `DocumentPanes` | `<DocumentPanes doc={name} preview={doc.preview} />` — source pane plus streamed markdown. |
+| `Skeleton` | `<Skeleton />` — the shape of a document while it loads. |
+| `DescriptionBox` | `<DescriptionBox value={doc.description} placeholder="What is it about?" onSave={save} />` — saves on blur and on unmount, only what changed. |
 | `DropOverlay` | `<DropOverlay onFiles={upload} />` — window drag listeners plus the overlay. |
 
 ## Modules
@@ -49,7 +53,8 @@ component in.
 | --- | --- |
 | `documents` | `documentIcon(doc.suffix)`, `nameRange(name)`, `groupByRange(rows, (row) => row.name)` and `NAME_RANGES` — the icon and the gallery bands every listing uses. |
 | `searchFields` | `effectiveSearch(overrides, defaults)` and `visibleSearchFields(effective)` — what a search actually runs with, and which fields a form asks for. |
-| `match` | `position(hit)`, `headingOf(hit)`, the kind guards and the `Match` type — where a result sits in its document. |
+| `match` | `position(match)`, `headingOf(match)`, the kind guards and the `Match` type — where a result sits in its document. `piecesOf`, `frameOf`, `chunkSizes`, `CUT_REASONS` and `PIECE_NAMES` — a chunk as the chunk view draws it. `HEADING_SEP` joins a heading path, as the backend does. |
+| `anchor` | `headingPath(toc, index)` and `anchorIndex(toc, anchor)` — the headings above a table-of-contents entry, and the entry a result opens at. |
 | `markTerms` | `markTerms(text, query)` — the list `Mark` renders. |
 
 Icons come from `lucide-react` and always carry `className="icon"`; the design

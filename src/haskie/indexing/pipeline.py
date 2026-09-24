@@ -52,6 +52,8 @@ class Batch(msgspec.Struct):
     line_offset: int = 0  # embed: lines / chars / bytes preceding this part in the assembled file
     char_offset: int = 0
     byte_offset: int = 0
+    # embed: the headings still open where this part starts, opened in an earlier one
+    opened: list[chunk.Opened] = []
 
 
 # --- convert --------------------------------------------------------------------
@@ -123,12 +125,15 @@ async def _parts(doc: Document) -> list[Path]:
 
 
 async def plan_embed(doc: Document) -> list[Batch]:
-    """One batch per part, carrying the part's offsets inside the assembled file (one pass)."""
+    """One batch per part, carrying the part's offsets inside the assembled file and the headings
+    still open where it starts (one pass)."""
     batches: list[Batch] = []
     line_offset = char_offset = byte_offset = 0
+    opened: list[chunk.Opened] = []
     for i, part in enumerate(await _parts(doc)):
-        batches.append(Batch(i, i, i + 1, line_offset, char_offset, byte_offset))
+        batches.append(Batch(i, i, i + 1, line_offset, char_offset, byte_offset, opened))
         text = await anyio.Path(part).read_text(encoding="utf-8")
+        opened = await cpu.on_cpu(chunk.open_headings, text, opened)  # a parse: off the loop
         line_offset += text.count("\n") + JOINER.count("\n")
         char_offset += len(text) + len(JOINER)
         byte_offset += len(text.encode()) + len(JOINER.encode())
@@ -146,19 +151,20 @@ async def embed_batch(
     id being computed; returns the chunk count."""
     text = await anyio.Path(doc.part_path(batch.seq)).read_text(encoding="utf-8")
     if embedding is not None:
-        # before the CPU work rather than between chunking and embedding, so both share one slot
-        await models.require_ready("embedding", embedding.name)  # fail fast, not a stalled worker
+        # before the CPU work rather than between chunking and embedding, so both share one slot;
+        # fail fast, not a stalled worker
+        await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
 
     def chunk_and_embed() -> list[Row]:
-        # ponytail: heading ancestry is per part; headings opened in an earlier part are not parents
         chunks = chunk.split(
-            text, chunking, batch.line_offset, batch.char_offset, batch.byte_offset
+            text, chunking, batch.line_offset, batch.char_offset, batch.byte_offset, batch.opened
         )
         vectors: list[list[float] | None] = [None] * len(chunks)
         if embedding is not None and chunks:
             from haskie.indexing.embed import embed_texts
 
-            vectors = list(embed_texts(embedding, [c.text for c in chunks]))
+            read = [chunk.framed(c.frame, c.text) for c in chunks]
+            vectors = list(embed_texts(embedding, read))
         return [Row(chunk=c, vector=v) for c, v in zip(chunks, vectors, strict=True)]
 
     rows = await cpu.on_cpu(chunk_and_embed)

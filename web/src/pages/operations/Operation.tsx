@@ -1,7 +1,8 @@
 import { Check, CircleDashed, X } from 'lucide-react'
 import { memo, type CSSProperties } from 'react'
-import { ACTIVE_STATUSES, type Operation as OperationRow, type Task } from '../../api'
+import type { Operation as OperationRow, Task } from '../../api'
 import { dateTime, duration } from '../../format'
+import { useOptions } from '../../hooks/useOptions'
 import { Jobs, Kv } from '../../ui'
 import { bulkKind, count, endsOf, jobDefs, jobsFor, stageInfo, tagOf, taskState, taskText, type StageDef } from './jobs'
 
@@ -21,7 +22,8 @@ export const Operation = memo(function Operation({
   onToggle: (operation: OperationRow, open: boolean) => void
   onCancel: (operation: OperationRow) => void
 }) {
-  const active = ACTIVE_STATUSES.has(operation.status)
+  const { active_run_statuses: activeStatuses } = useOptions()
+  const active = activeStatuses.includes(operation.status)
   const rows = tasks ?? []
   const byTask = operation.kind === 'document' && rows.length > 0
 
@@ -40,7 +42,7 @@ export const Operation = memo(function Operation({
             {dateTime(operation.created_at)} · {duration(operation.updated_at - operation.created_at)}
           </span>
         </div>
-        <Jobs jobs={jobsFor(operation, tasks)} variant={active ? 'glass' : 'line'} stripes={active} />
+        <Jobs jobs={jobsFor(operation, tasks, activeStatuses)} variant={active ? 'glass' : 'line'} stripes={active} />
       </summary>
       <div className="operation-tasks">
         {byTask ? (
@@ -72,7 +74,7 @@ export const Operation = memo(function Operation({
 
 /**
  * What an operation that reports no tasks has to say: its status and whatever its kind counts. The
- * skipped documents and the loaded model are on the strip above, so they are not repeated here.
+ * loaded model is on the strip above, so it is not repeated here.
  */
 function summaryRows(operation: OperationRow): [string, string][] {
   const rows: [string, string][] = [['Status', operation.status.toLowerCase()]]

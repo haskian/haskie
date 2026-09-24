@@ -18,18 +18,18 @@ export interface OperationFollower {
 // keeps one interval for the life of the operation. Give `onDone` and `onError` a stable identity
 // (`useCallback`), or that interval is torn down and rebuilt on every tick.
 export function useOperation(onDone: (operation: OperationProgress) => void, onError: (message: string) => void): OperationFollower {
-  const { active_statuses } = useOptions()
+  const { active_run_statuses } = useOptions()
   const [operation, setOperation] = useState<OperationProgress | null>(null)
-  const running = operation !== null && active_statuses.includes(operation.status)
+  const running = operation !== null && active_run_statuses.includes(operation.status)
   const id = running ? operation.id : null
 
   // one answer from the operation, whoever asked for it: keep it on the page, and report the last
   const settle = useCallback(
     (next: OperationProgress) => {
       setOperation(next)
-      if (!active_statuses.includes(next.status)) onDone(next)
+      if (!active_run_statuses.includes(next.status)) onDone(next)
     },
-    [active_statuses, onDone],
+    [active_run_statuses, onDone],
   )
 
   const follow = useCallback(() => {

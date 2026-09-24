@@ -1,8 +1,9 @@
-import { ACTIVE_STATUSES, type BulkKind, type Operation, type OperationKind, type RunStatus, type Stage, type Task } from '../../api'
+import type { BulkKind, Operation, OperationKind, RunStatus, Stage, Task } from '../../api'
 import type { JobBar, JobState } from '../../ui'
 
-// A document runs the same three stages every time, and they cost different amounts of time:
-// embedding dominates, so its bar is the widest one.
+// A document operation runs some of three stages: an import converts and embeds, an index embeds
+// and writes. The stages cost different amounts of time. Embedding dominates, so its bar is the
+// widest one.
 export interface StageDef {
   stage: Stage
   label: string
@@ -47,16 +48,17 @@ export function jobDefs(operation: Operation): StageDef[] {
 /** One of an operation's own counters, or zero where it never reported it. */
 export const count = (operation: Operation, key: string): number => (typeof operation.detail[key] === 'number' ? operation.detail[key] : 0)
 
-/** How an operation or one of its jobs stands, read from its status alone. */
-export function runState(status: RunStatus): JobState {
+/** How an operation or one of its jobs stands, read from its status alone. `active` is the
+ *  backend's list of run statuses still on their way (`Options.active_run_statuses`). */
+export function runState(status: RunStatus, active: readonly RunStatus[]): JobState {
   if (status === 'SUCCESS') return 'done'
   if (status === 'ERROR') return 'error'
-  return ACTIVE_STATUSES.has(status) ? 'active' : 'todo'
+  return active.includes(status) ? 'active' : 'todo'
 }
 
-function stateFromTasks(rows: Task[], done: number): JobState {
+function stateFromTasks(rows: Task[], done: number, active: readonly RunStatus[]): JobState {
   if (rows.length > 0 && done === rows.length) return 'done'
-  if (rows.some((task) => ACTIVE_STATUSES.has(task.status))) return 'active'
+  if (rows.some((task) => active.includes(task.status))) return 'active'
   if (rows.some((task) => task.status === 'ERROR')) return 'error'
   return 'todo'
 }
@@ -65,24 +67,13 @@ function stateFromTasks(rows: Task[], done: number): JobState {
  * The bars in an operation's summary. `tasks` is null until they are fetched (and empty for an
  * operation that ran none), which is why a document also reads its coarse counters from `detail`.
  */
-export function jobsFor(operation: Operation, tasks: Task[] | null): JobBar[] {
-  if (operation.kind === 'document') return documentJobs(operation, tasks ?? [])
-  const state = runState(operation.status)
+export function jobsFor(operation: Operation, tasks: Task[] | null, active: readonly RunStatus[]): JobBar[] {
+  if (operation.kind === 'document') return documentJobs(operation, tasks ?? [], active)
+  const state = runState(operation.status, active)
   // An operation with no jobs of its own is one run, so the bar lasted as long as the operation.
   const seconds = state === 'done' || state === 'error' ? operation.updated_at - operation.created_at : undefined
   if (operation.kind === 'collection') {
-    const skipped = count(operation, 'skipped')
-    return [
-      {
-        label: BULK[bulkKind(operation)].label,
-        state,
-        seconds,
-        done: count(operation, 'done'),
-        total: count(operation, 'total'),
-        // Skipped documents are the only thing the queue has to say beyond its counts.
-        note: skipped > 0 ? `${skipped} skipped` : undefined,
-      },
-    ]
+    return [{ label: BULK[bulkKind(operation)].label, state, seconds, done: count(operation, 'done'), total: count(operation, 'total') }]
   }
   // one task is the whole operation: 1/1 once it is done, so the row reads like the others
   const row: JobBar = { label: SINGLE[operation.kind].label, state, seconds, done: state === 'done' ? 1 : 0, total: 1 }
@@ -94,18 +85,18 @@ export function jobsFor(operation: Operation, tasks: Task[] | null): JobBar[] {
  * One bar per job. Its tasks decide once they are fetched; until then, and for a job that ran none
  * (an embedding the cache already held), the job's own status and counters do.
  */
-function documentJobs(operation: Operation, tasks: Task[]): JobBar[] {
+function documentJobs(operation: Operation, tasks: Task[], active: readonly RunStatus[]): JobBar[] {
   return operation.jobs.map((job) => {
     const { label, weight } = DOCUMENT_STAGES[job.stage]
     const rows = tasks.filter((task) => task.stage === job.stage)
     const seconds = job.seconds ?? undefined
     if (rows.length === 0) {
-      const state = runState(job.status)
+      const state = runState(job.status, active)
       const note = job.stage === 'embed' && state === 'done' && job.tasks_total === 0 ? 'cached' : undefined
       return { label, weight, done: job.tasks_done, total: job.tasks_total, state, note, seconds }
     }
     const done = rows.filter((task) => task.status === 'SUCCESS').length
-    return { label, weight, done, total: rows.length, state: stateFromTasks(rows, done), seconds }
+    return { label, weight, done, total: rows.length, state: stateFromTasks(rows, done, active), seconds }
   })
 }
 

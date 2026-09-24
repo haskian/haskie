@@ -9,9 +9,8 @@ import {
   type ReactNode,
 } from "react";
 import {
-  ACTIVE_DOCUMENT_STATUSES,
   api,
-  type DocStatus,
+  type DocumentStatus,
   type Document,
   type EmbeddingEntry,
   type Staged,
@@ -19,6 +18,7 @@ import {
 import type { PageProps } from "../App";
 import { errorText, bytes, dateTime, day, matchesText, needleOf } from "../format";
 import { useOperation } from "../hooks/useOperation";
+import { useOptions } from "../hooks/useOptions";
 import { usePaged } from "../hooks/usePaged";
 import { usePoll } from "../hooks/usePoll";
 import { useRun } from "../hooks/useRun";
@@ -39,6 +39,7 @@ import {
   type TabDef,
 } from "../ui";
 import "./Documents.css";
+import { embeddingLabel } from "./documents/embedding";
 import { groupByDay, groupByStatus } from "./documents/group";
 
 type GroupBy = "status" | "name" | "day";
@@ -61,6 +62,7 @@ export function Documents({
   const [staged, setStaged] = useState<StagedFile[]>([]); // uploaded, named, not yet imported
   const fileInput = useRef<HTMLInputElement>(null);
 
+  const options = useOptions();
   const docs = usePaged(api.documents, { sort: "name", pageSize: 500 });
   const refresh = docs.refresh;
   const { run, busy, error } = useRun(refresh);
@@ -68,7 +70,7 @@ export function Documents({
   // Anything still in the pipeline keeps the listing fresh; so does a deletion until it is gone.
   const active = docs.items.some(
     (doc) =>
-      ACTIVE_DOCUMENT_STATUSES.includes(doc.status) ||
+      options.active_document_statuses.includes(doc.status) ||
       doc.status === "deleting",
   );
   usePoll(active, refresh);
@@ -127,10 +129,10 @@ export function Documents({
     const visible = docs.items.filter((doc) =>
       matchesText(needle, doc.name, doc.description),
     );
-    if (groupBy === "status") return groupByStatus(visible);
+    if (groupBy === "status") return groupByStatus(visible, options.document_statuses);
     if (groupBy === "day") return groupByDay(visible);
     return groupByRange(visible, (doc) => doc.name);
-  }, [docs.items, needle, groupBy]);
+  }, [docs.items, needle, groupBy, options]);
 
   const side = (
       <section>
@@ -183,7 +185,7 @@ export function Documents({
                 }
                 meta={day(doc.created_at)}
                 hint={doc.description || "No description"}
-                onClick={() => navigate({ name: "documents", doc: doc.name })}
+                onClick={() => navigate({ name: "documents", document: doc.name })}
               />
             ))}
           </GallerySection>
@@ -297,8 +299,8 @@ export function Documents({
       </Modal>
       {/* Keyed by name: another document starts its panels and its reads over. */}
       <DocumentModal
-        key={route.doc}
-        doc={route.doc ?? null}
+        key={route.document}
+        doc={route.document ?? null}
         onClose={closeModal}
         onChanged={refresh}
       />
@@ -307,7 +309,7 @@ export function Documents({
 }
 
 // An import can only be re-run from a state it stopped in; the backend refuses every other status.
-const RETRYABLE: readonly DocStatus[] = ["error", "cancelled"];
+const RETRYABLE: readonly DocumentStatus[] = ["error", "cancelled"];
 
 const CONTENT_TAB = "modal-content";
 const COLLECTIONS_TAB = "modal-collections";
@@ -396,10 +398,7 @@ function DocumentModal({
             embeddings.length === 0
               ? "none cached"
               : embeddings.map((entry) => (
-                  <div key={entry.id}>
-                    {entry.model} · {entry.chunker} {entry.chunk_size}/
-                    {entry.chunk_overlap} · {entry.rows} rows
-                  </div>
+                  <div key={entry.id}>{embeddingLabel(entry)}</div>
                 )),
           ],
         ];

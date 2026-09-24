@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ACTIVE_STATUSES, MAX_PAGE_SIZE, api, type Operation as OperationRow, type OperationKind, type OperationKindSummary, type Task } from '../api'
+import { MAX_PAGE_SIZE, api, type Operation as OperationRow, type OperationKind, type OperationKindSummary, type Task } from '../api'
 import type { PageProps } from '../App'
+import { useOptions } from '../hooks/useOptions'
 import { usePoll } from '../hooks/usePoll'
 import { Picker, Shell } from '../ui'
 import './Operations.css'
@@ -9,8 +10,8 @@ import { Operation } from './operations/Operation'
 import { errorText } from '../format'
 
 const PAGE_SIZE = 20 // one page per kind, as the backend lists them
-// The kinds whose operations belong to one collection; the others ignore the filter (a model
-// download and an archive round are no collection's work), so they stay listed while it is set.
+// The kinds whose operations belong to one collection. The others ignore the filter (a model
+// download is no collection's work), so they stay listed while it is set.
 const BY_COLLECTION: ReadonlySet<OperationKind> = new Set<OperationKind>(['document', 'collection', 'maintenance'])
 
 const GROUPS: { id: GroupBy; label: string }[] = [
@@ -25,9 +26,10 @@ const operationTasks = (operation: OperationRow): Promise<Task[]> =>
 
 /**
  * Every kind of background work in one list: merged, sorted newest first, and grouped by status,
- * kind or day. While anything is running the whole listing is re-read every two seconds.
+ * kind or day. While anything is running, every poll re-reads the whole listing.
  */
 export function Operations({ route, counts }: PageProps) {
+  const { active_run_statuses: active } = useOptions()
   const [kinds, setKinds] = useState<OperationKindSummary[]>([])
   const [operations, setOperations] = useState<OperationRow[]>([])
   const [tasks, setTasks] = useState<Record<string, Task[]>>({})
@@ -50,11 +52,11 @@ export function Operations({ route, counts }: PageProps) {
       ),
     )
     for (const operation of wanted) {
-      if (ACTIVE_STATUSES.has(operation.status)) stale.current.add(operation.id)
+      if (active.includes(operation.status)) stale.current.add(operation.id)
       else stale.current.delete(operation.id)
     }
     setTasks((current) => ({ ...current, ...Object.fromEntries(loaded) }))
-  }, [])
+  }, [active])
 
   // ponytail: no cursor bookkeeping. The backend's cursor is an offset, so asking for a wider
   // first page is the same request as paging into it, and one window size serves every kind.
@@ -75,12 +77,12 @@ export function Operations({ route, counts }: PageProps) {
           setHasMore(listings.some((listing) => listing.next_cursor !== null))
           setError(null)
           return loadTasks(
-            merged.filter((one) => one.kind === 'document' && (ACTIVE_STATUSES.has(one.status) || stale.current.has(one.id))),
+            merged.filter((one) => one.kind === 'document' && (active.includes(one.status) || stale.current.has(one.id))),
           )
         }),
       )
       .catch((failure: unknown) => setError(errorText(failure)))
-  }, [pages, collection, loadTasks])
+  }, [pages, collection, loadTasks, active])
 
   useEffect(() => {
     void load()
@@ -92,7 +94,7 @@ export function Operations({ route, counts }: PageProps) {
 
   // The backend's count sees operations no page holds yet; the rows on screen keep the poll going
   // while one of them finishes.
-  const running = kinds.reduce((n, summary) => n + summary.active, 0) + operations.filter((one) => ACTIVE_STATUSES.has(one.status)).length
+  const running = kinds.reduce((n, summary) => n + summary.active, 0) + operations.filter((one) => active.includes(one.status)).length
   usePoll(running > 0, load)
 
   // An active operation's tasks are read by every poll. A finished one's are read by the click

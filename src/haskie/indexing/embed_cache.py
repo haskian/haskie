@@ -51,14 +51,15 @@ from haskie.settings import Chunker, ChunkSettings, EmbeddingModel, Parser
 NO_MODEL = "none"  # the `model` of a profile without an embedding model: chunks only, no vectors
 
 
-class Params(msgspec.Struct, frozen=True, rename={"doc": "document"}):
-    """Everything the cached rows of one document depend on. Field order is the URN order; the
-    rename is the `embeddings` column `Entry` inherits."""
+class Params(msgspec.Struct, frozen=True):
+    """Everything the cached rows of one document depend on. Field order is the URN order, and
+    the `embeddings` columns `Entry` inherits."""
 
-    doc: str
+    document: str
     model: str  # EmbeddingModel.name, or NO_MODEL
     chunk_size: int
-    chunk_overlap: int
+    chunk_merge_below: int
+    chunk_frame: bool
     chunker: Chunker
     chunk_version: int
     parser: Parser
@@ -87,23 +88,22 @@ def params(
 ) -> Params:
     """The key of one document under one collection's chunk settings and the global model."""
     return Params(
-        doc=doc.name,
+        document=doc.name,
         model=embedding.name if embedding else NO_MODEL,
-        chunk_size=chunking.chunk_size,
-        chunk_overlap=chunking.chunk_overlap,
-        chunker=chunking.chunker,
         chunk_version=CHUNK_VERSION,
         parser=doc.parser,
         skip_ocr_pages=doc.skip_ocr_pages,
+        **msgspec.structs.asdict(chunking),
     )
 
 
 def urn(p: Params) -> str:
-    """Canonical form: fixed field order, so equal params always give equal text. `doc` is safe
+    """Canonical form: fixed field order, so equal params always give equal text. `document` is safe
     inside it because `document.safe_name` allows no `;` or `:`."""
     return (
-        f"document:{p.doc};model:{p.model};chunk_size:{p.chunk_size};"
-        f"chunk_overlap:{p.chunk_overlap};chunker:{p.chunker};"
+        f"document:{p.document};model:{p.model};chunk_size:{p.chunk_size};"
+        f"chunk_merge_below:{p.chunk_merge_below};"
+        f"chunk_frame:{'true' if p.chunk_frame else 'false'};chunker:{p.chunker};"
         f"chunk_version:{p.chunk_version};parser:{p.parser};"
         f"skip_ocr_pages:{'true' if p.skip_ocr_pages else 'false'}"
     )
@@ -137,17 +137,19 @@ _PLAIN = pa.schema(
     [
         ("part", pa.int32()),
         ("seq", pa.int32()),
-        ("heading", pa.string()),
-        ("text", pa.string()),
+        ("headings", pa.list_(pa.string())),
+        ("frame", pa.list_(pa.string())),
+        ("pieces", pa.list_(pa.struct([("type", pa.string()), ("text", pa.string())]))),
         ("line_start", pa.int32()),
         ("line_end", pa.int32()),
         ("char_start", pa.int32()),
         ("char_end", pa.int32()),
         ("byte_start", pa.int32()),
         ("byte_end", pa.int32()),
-        ("parents", pa.list_(pa.string())),
         ("page_start", pa.int32()),
         ("page_end", pa.int32()),
+        ("start_reason", pa.string()),
+        ("end_reason", pa.string()),
     ]
 )
 
@@ -200,7 +202,7 @@ async def lookup(p: Params) -> str | None:
     async with db.connect() as conn:
         cursor = await conn.execute("select 1 from embeddings where id = ?", (id,))
         row = await cursor.fetchone()
-    if row is None or not await anyio.Path(file_path(p.doc, id)).is_file():
+    if row is None or not await anyio.Path(file_path(p.document, id)).is_file():
         return None
     return id
 
@@ -209,7 +211,7 @@ async def write(p: Params, parts: list[Path], dims: int | None) -> str:
     """Merge the scratch rows of every part into the cache file, publish the row, then drop the
     scratch directory - last, so a retry before the row was written still finds its input."""
     id = key(p)
-    target = file_path(p.doc, id)
+    target = file_path(p.document, id)
     rows, size = await anyio.to_thread.run_sync(_merge, parts, target, dims)
     entry = Entry(
         **msgspec.structs.asdict(p),
@@ -226,7 +228,7 @@ async def write(p: Params, parts: list[Path], dims: int | None) -> str:
             f"values ({db.placeholders(len(ENTRY_COLUMNS))})",
             tuple(values[column] for column in ENTRY_COLUMNS),
         )
-    await home.remove_tree(scratch_dir(p.doc, id))
+    await home.remove_tree(scratch_dir(p.document, id))
     return id
 
 

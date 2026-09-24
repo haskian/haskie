@@ -7,6 +7,7 @@ import { Field } from './Field'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
 import { Kv } from './Kv'
+import { MatchModal } from './MatchModal'
 import { Mark } from './Mark'
 import { markTerms } from './markTerms'
 import { Picker } from './Picker'
@@ -36,11 +37,10 @@ const noop = (): void => {}
 
 const HIT: Hit = {
   collection: 'A–E',
-  doc: 'area.pdf',
+  document: 'area.pdf',
   source_path: 'sources/area.pdf',
   markdown_path: 'markdown/area.md',
   part: 0,
-  chunk_id: 3,
   seq: 4,
   line_start: 12,
   line_end: 18,
@@ -50,11 +50,14 @@ const HIT: Hit = {
   byte_end: 640,
   page_start: 2,
   page_end: 2,
-  parents: ['Lighting'],
-  heading: 'Soft shadows',
+  headings: ['Lighting', 'Soft shadows'],
+  frame: ['Lighting', 'Soft shadows'],
   header: 'Lighting › Soft shadows',
   location: 'p. 2',
   text: 'Area lights soften the shadow edge in proportion to their size.',
+  layout: [{ type: 'text', position: 0 }],
+  start_reason: 'paragraph',
+  end_reason: 'length_sentence',
   score: 0.9123,
   source_file: '/home/ada/.haskie/sources/area.pdf',
   markdown_file: '/home/ada/.haskie/markdown/area.md',
@@ -62,11 +65,11 @@ const HIT: Hit = {
 
 const SOURCE: Source = {
   collection: 'P–T',
-  doc: 'sun.pdf',
+  document: 'sun.pdf',
   score: 0.79,
   chunks: 6,
   description: 'Sun position by date, time and latitude.',
-  heading: 'Elevation tables',
+  header: 'Solar geometry > Elevation tables',
   location: 'p. 4',
   text: 'Sun position at 35° elevation casts a shadow 1.4× the object height.',
   source_file: '/home/ada/.haskie/sources/sun.pdf',
@@ -82,7 +85,7 @@ const SOURCE: Source = {
 
 const PASSAGE: Passage = {
   collection: 'A–E',
-  doc: 'area.pdf',
+  document: 'area.pdf',
   header: 'Lighting > Soft shadows',
   location: 'area.pdf p.2 L41-58',
   seq_start: 4,
@@ -271,8 +274,8 @@ describe('Jobs', () => {
     },
     {
       name: 'a note follows the counts when the job has both',
-      element: <Jobs jobs={[bar({ state: 'active', note: '1 skipped' })]} variant="glass" />,
-      contains: ['<span class="stage-meta"><span>9/22</span><span>1 skipped</span></span>'],
+      element: <Jobs jobs={[bar({ state: 'done', done: 22, note: 'cached' })]} variant="glass" />,
+      contains: ['<span class="stage-meta"><span>22/22</span><span>cached</span></span>'],
     },
     {
       name: 'a timed job says its note and its duration together',
@@ -378,7 +381,7 @@ describe('markTerms', () => {
 describe('HitGrid', () => {
   check([
     {
-      name: 'a section hit carries its collection, score, marked text and position',
+      name: 'a chunk hit carries its collection, score, marked text and position',
       element: <HitGrid results={[HIT]} query="shadow" />,
       contains: [
         '<div class="hits">',
@@ -393,7 +396,7 @@ describe('HitGrid', () => {
     },
     {
       name: 'a hit with no heading falls back to the header',
-      element: <HitGrid results={[{ ...HIT, heading: '' }]} query="shadow" />,
+      element: <HitGrid results={[{ ...HIT, headings: [] }]} query="shadow" />,
       contains: ['<span>Lighting › Soft shadows</span>'],
     },
     {
@@ -404,7 +407,7 @@ describe('HitGrid', () => {
     },
     {
       name: 'the bar ranks a hit among the others: best full, worst at the floor',
-      element: <HitGrid results={[HIT, { ...HIT, chunk_id: 4, score: 0.4 }]} query="shadow" />,
+      element: <HitGrid results={[HIT, { ...HIT, seq: 4, score: 0.4 }]} query="shadow" />,
       contains: ['style="--score:1"', 'style="--score:0.1"'],
     },
     {
@@ -434,5 +437,71 @@ describe('HitGrid', () => {
     },
     { name: 'no hits renders an empty grid', element: <HitGrid results={[] as Hit[]} query="" />, contains: ['<div class="hits"></div>'] },
     { name: 'no sources renders an empty grid', element: <HitGrid results={[] as Source[]} query="" />, contains: ['<div class="hits"></div>'] },
+  ])
+})
+
+describe('MatchModal', () => {
+  check([
+    {
+      name: 'the heading path it was embedded under is grey at the top, its pieces white, each with a hint',
+      element: (
+        <MatchModal
+          match={{
+            ...HIT,
+            text: '- Area lights soften it.\n\n| a |\n|---|',
+            layout: [
+              { type: 'list', position: 0 },
+              { type: 'table', position: 26 },
+            ],
+          }}
+          query=""
+          onClose={noop}
+        />
+      ),
+      contains: [
+        '<blockquote class="match-text chunk-text"><span class="chunk-piece chunk-frame">Lighting &gt; Soft shadows\n\n<span class="hint" role="tooltip"><strong>Heading path</strong><span class="sub mono">prepended to the chunk when it was embedded</span></span></span>',
+        '<span class="chunk-piece">- Area lights soften it.\n\n<span class="hint" role="tooltip"><strong>List item</strong><span class="sub mono">position 0 · 26 chars · 4 words</span></span></span>',
+        '<span class="chunk-piece">| a |\n|---|<span class="hint" role="tooltip"><strong>Table</strong>',
+      ],
+    },
+    {
+      name: 'a chunk of headings alone shows them grey, under the path above them',
+      element: (
+        <MatchModal
+          match={{ ...HIT, headings: ['Book', 'Index', 'Terms'], frame: ['Book'], text: '# Index\n\n## Terms', layout: [{ type: 'heading', position: 0 }, { type: 'heading', position: 9 }] }}
+          query=""
+          onClose={noop}
+        />
+      ),
+      contains: [
+        '<span class="chunk-piece chunk-frame">Book\n\n',
+        '<span class="chunk-piece chunk-heading"># Index\n\n<span class="hint" role="tooltip"><strong>Heading</strong><span class="sub mono">position 0 · 9 chars · 1 words</span></span></span>',
+        '<span class="chunk-piece chunk-heading">## Terms<span class="hint" role="tooltip"><strong>Heading</strong>',
+      ],
+    },
+    {
+      name: 'a chunk before any heading has no grey path',
+      element: <MatchModal match={{ ...HIT, headings: [], frame: [], header: '' }} query="" onClose={noop} />,
+      contains: ['<blockquote class="match-text chunk-text"><span class="chunk-piece">'],
+    },
+    {
+      name: 'a passage keeps its heading row, and has no heading path row',
+      element: <MatchModal match={PASSAGE} query="shadow" onClose={noop} />,
+      contains: ['<dt>Heading</dt><dd>Soft shadows</dd><dt>Query</dt>'],
+    },
+    {
+      name: 'a chunk names the rule that cut it on each side, above and below its text',
+      element: <MatchModal match={{ ...HIT, start_reason: 'heading', end_reason: 'length_sentence' }} query="shadow" onClose={noop} />,
+      contains: [
+        'cut before: <span class="chunk-cut-reason">heading</span> · a heading starts a new section',
+        'cut after: <span class="chunk-cut-reason">length_sentence</span> · chunk full, cut between two sentences',
+        '<blockquote class="match-text chunk-text">',
+        '<dt>Position</dt><dd>p. 2 · chunk 4</dd><dt>Query</dt><dd><span class="code">shadow</span></dd></dl>',
+        '<span class="chunk-piece">Area lights soften the <mark>shadow</mark> edge in proportion to their size.<span class="hint" role="tooltip"><strong>Text</strong><span class="sub mono">position 0 · 63 chars · 11 words</span></span></span>',
+        '<th>frame</th>',
+        '<th>text</th>',
+        '<th>total</th>',
+      ],
+    },
   ])
 })
