@@ -2,7 +2,7 @@ import type { SessionSummary } from '../../api'
 import { relative } from '../../format'
 import type { RangeGroup } from '../../ui'
 
-// ponytail: "active" is recent activity alone; a running operation the session started would
+// "active" is recent activity alone; a running operation the session started would
 // count too, but that needs the operations listing joined in. Add it when it misleads.
 const ACTIVE_WINDOW_SECONDS = 15 * 60
 

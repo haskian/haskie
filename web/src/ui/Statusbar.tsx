@@ -7,7 +7,7 @@ import { href, useRoute } from '../router'
 const BUSY_MS = 1500
 const IDLE_MS = 5000
 
-// ponytail: the design's statusbar hints list the running and queued work by name.
+// the design's statusbar hints list the running and queued work by name.
 // `/api/operations/activity` answers counts only, and the listing is a page away, so the hints
 // are dropped rather than faked.
 export function Statusbar({ status }: { status: Status }) {

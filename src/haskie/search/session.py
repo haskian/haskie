@@ -19,7 +19,7 @@ from haskie.errors import InvalidInput, NotFound
 
 MAX_SESSION_ID = 128
 MAX_COLLECTIONS = 100  # a session selects collections by hand; a longer list is a client mistake
-MAX_HISTORY = 100  # ponytail: the newest events only; page it when someone scrolls past 100
+MAX_HISTORY = 100  # the newest events only; page it when someone scrolls past 100
 
 
 # What a session can be seen doing. `collections` is the selection itself being set.
