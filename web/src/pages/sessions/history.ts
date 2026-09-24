@@ -1,8 +1,8 @@
 import type { SessionEvent } from '../../api'
 
-// The searches that span a whole selection say which tool ran them; any other scope is the name
-// of the one collection a collection search looked in.
-const TOOLS: ReadonlySet<string> = new Set(['explore', 'excerpts', 'sources', 'text', 'documents', 'passages'])
+// The scopes a search records when it spans a whole selection (`session.EventDetail.scope`), so
+// the row names the tool that ran it. Any other scope is the one collection a search looked in.
+const TOOLS: ReadonlySet<string> = new Set(['explore', 'excerpts', 'sources', 'text'])
 
 /** The line under a history row's subject: what the action came to, in the words of its kind. */
 export function historySub(event: SessionEvent): string {
@@ -12,7 +12,7 @@ export function historySub(event: SessionEvent): string {
       const scope = detail.scope
       const where = !scope ? '' : TOOLS.has(scope) ? ` via ${scope}` : ` in ${scope}`
       const hits = detail.hits ?? 0
-      const found = hits === 0 ? 'no hits' : `${hits} hits in ${detail.docs?.length ?? 0} documents`
+      const found = hits === 0 ? 'no hits' : `${hits} hits in ${detail.documents?.length ?? 0} documents`
       return `${found}${where} · ${event.duration_ms} ms`
     }
     case 'import':

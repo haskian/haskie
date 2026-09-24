@@ -34,7 +34,7 @@ class Page(msgspec.Struct):
 
     number: int | None  # the PDF page; None for a document that has no pages
     html: str
-    kind: Literal["page"] = "page"  # the frame tag of the markdown stream (see `api.documents`)
+    kind: Literal["page"] = "page"  # tags this line of the NDJSON stream (see `api.documents`)
 
 
 def headings(markdown: str) -> list[Heading]:
@@ -73,7 +73,7 @@ def _without_raw_html(markdown: str) -> str:
 
 
 def to_html(markdown: str, first_heading: int = 0) -> tuple[str, int]:
-    """Render one chunk of markdown, giving each heading the id its table of contents links to.
+    """Render one page of markdown, giving each heading the id its table of contents links to.
     Returns the HTML and how many headings it numbered.
 
     `first_heading` is how many headings the document has already rendered, because a page is

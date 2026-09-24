@@ -29,9 +29,12 @@ from litestar.testing import AsyncTestClient, RequestFactory
 
 from haskie import app as app_module
 from haskie import audit, errors, home, logs
-from haskie.collection.collection import Collection
+from haskie.collection.collection import Collection, MemberStatus
 from haskie.document import document
-from haskie.indexing.chunk import Chunk
+from haskie.document.document import DocumentStatus
+from haskie.indexing.chunk import Chunk, Piece
+from haskie.indexing.segment import PieceType
+from haskie.paging import Order
 
 from conftest import (  # isort: skip
     api_app,
@@ -94,13 +97,13 @@ async def ready(client: AsyncTestClient, tmp_path: Path) -> AsyncTestClient:
     source = tmp_path / "guide.md"
     source.write_text(MD)
     imported = await document.import_path(str(source))
-    await document.set_status(imported.name, "imported")
+    await document.set_status(imported.name, DocumentStatus.IMPORTED)
     (tmp_path / "pending.md").write_text("# pending\n")
     await document.import_path(str(tmp_path / "pending.md"))  # stays `queued`: nothing started it
 
     notes = await Collection.get("notes")
     await notes.add(imported.name)
-    await notes.set_member_status(imported.name, "indexed")
+    await notes.set_member_status(imported.name, MemberStatus.INDEXED)
     await seed_index("notes", imported.name, "alpha body about lancedb")
 
     await client.put("/api/sessions/s1", json={"collections": ["notes"]})
@@ -134,9 +137,9 @@ def _requested(lines: list[dict]) -> list[str]:
             422, "embedding_weight must be >= 1, got 0",
         ),
         (
-            "chunk overlap not smaller than chunk size -> unprocessable",
-            "PUT", "/api/settings", {"conversion": {"chunk_size": 10, "chunk_overlap": 10}}, None,
-            422, "chunk_overlap must be <",
+            "merge share past 100% -> unprocessable",
+            "PUT", "/api/settings", {"conversion": {"chunk_merge_below": 101}}, None,
+            422, "chunk_merge_below must be 0 to 100, got 101",
         ),
         (
             "duplicate collection -> conflict",
@@ -165,8 +168,8 @@ def _requested(lines: list[dict]) -> list[str]:
         ),
         (
             "collection override out of range -> unprocessable",
-            "PUT", "/api/collections/notes/settings", {"chunk_size": 10, "chunk_overlap": 10}, None,
-            422, "chunk_overlap must be <",
+            "PUT", "/api/collections/notes/overrides", {"chunk_size": 0}, None,
+            422, "chunk_size must be >= 1, got 0",
         ),
         (
             "search limit below one -> unprocessable",
@@ -405,7 +408,7 @@ async def test_collection_reranker_override_starts_its_download(
     override = "jinaai/jina-reranker-v1-turbo-en"
 
     saved = await ready.put(
-        "/api/collections/notes/settings",
+        "/api/collections/notes/overrides",
         json={"search": {"reranker": "cross-encoder", "reranker_model": override}},
     )
 
@@ -459,7 +462,7 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
             "indexing",
         ]
     )
-    assert options["active_statuses"] == ["ENQUEUED", "PENDING"]
+    assert options["active_run_statuses"] == ["ENQUEUED", "PENDING"]
     assert options["operation_kinds"][0] == "document"
     assert "index_collection" in options["bulk_kinds"]
 
@@ -539,7 +542,7 @@ async def test_import_by_path_copies_the_file(client: AsyncTestClient, tmp_path:
 async def test_a_failed_import_can_be_re_run(client: AsyncTestClient, tmp_path: Path) -> None:
     await client.post("/api/init", json={"profile": "none"})
     row = await stage_and_import(client, "guide.md", MD.encode())
-    await document.set_status(row["name"], "error", "converter fell over")
+    await document.set_status(row["name"], DocumentStatus.ERROR, "converter fell over")
 
     again = await client.post(f"/api/documents/{row['name']}/import")
 
@@ -568,7 +571,7 @@ async def test_attach_list_and_detach_a_member(client: AsyncTestClient) -> None:
     assert cached, "indexing the member filled the document's embedding cache"
 
     (hit,) = (await client.get("/api/collections/notes/search", params={"q": "lancedb"})).json()
-    assert (hit["collection"], hit["doc"]) == ("notes", "guide.md")
+    assert (hit["collection"], hit["document"]) == ("notes", "guide.md")
 
     detached = await client.delete("/api/collections/notes/documents/guide.md")
 
@@ -737,10 +740,10 @@ async def test_session_search_returns_each_passage_once(client: AsyncTestClient)
     ]
     hits = (await client.get("/api/search/explore", params=_explore("s1", "shared"))).json()
 
-    identity = [(h["doc"], h["part"], h["chunk_id"]) for h in hits]
+    identity = [(h["document"], h["seq"]) for h in hits]
     assert len(set(identity)) == len(identity), "no passage is returned twice"
-    assert {h["doc"] for h in hits} == {"shared.md", "only-beta.md"}
-    shared = next(h for h in hits if h["doc"] == "shared.md")
+    assert {h["document"] for h in hits} == {"shared.md", "only-beta.md"}
+    shared = next(h for h in hits if h["document"] == "shared.md")
     assert shared["collection"] == "alpha", "the first collection of the session is credited"
 
 
@@ -799,7 +802,9 @@ async def test_session_history_holds_every_action_newest_first(
     by_action = {(row["action"], row["detail"].get("scope")): row for row in history}
     session_search = by_action[("search", "explore")]
     assert session_search["detail"]["hits"] == len(hits) > 0
-    assert session_search["detail"]["docs"] == list(dict.fromkeys(hit["doc"] for hit in hits))
+    assert session_search["detail"]["documents"] == list(
+        dict.fromkeys(hit["document"] for hit in hits)
+    )
     assert by_action[("search", "text")]["detail"]["hits"] > 0
     assert by_action[("import", None)]["operation_id"] == history[-1]["operation_id"] is not None
     assert by_action[("attach", None)]["operation_id"] == attached.json()["operation_id"]
@@ -885,15 +890,15 @@ def _chunk(markdown: str, start: str, end: str, heading: str = "Retrieval") -> C
     char_start = markdown.index(start)
     char_end = markdown.index(end) + len(end)
     return Chunk(
-        heading=heading,
-        text=markdown[char_start:char_end],
+        headings=["Guide", heading],
+        frame=["Guide", heading],
+        pieces=[Piece(PieceType.TEXT, markdown[char_start:char_end])],
         line_start=markdown.count("\n", 0, char_start) + 1,
         line_end=markdown.count("\n", 0, char_end) + 1,
         char_start=char_start,
         char_end=char_end,
         byte_start=len(markdown[:char_start].encode()),
         byte_end=len(markdown[:char_end].encode()),
-        parents=["Guide"],
     )
 
 
@@ -902,7 +907,7 @@ async def _member(collection: str, doc: str) -> None:
     are seeded by hand right after (as the `ready` fixture does with `seed_index`)."""
     found = await Collection.get(collection)
     await found.add(doc)
-    await found.set_member_status(doc, "indexed")
+    await found.set_member_status(doc, MemberStatus.INDEXED)
 
 
 async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
@@ -946,7 +951,7 @@ async def test_explore_merges_consecutive_chunks_into_one_passage(
     assert (passage["line_start"], passage["line_end"]) == (5, 7), "lines recounted for the text"
     assert passage["header"] == "Guide > Retrieval"
     assert passage["location"] == "guide.md L5-7", "written to be cited"
-    assert passage["doc"] == "guide.md" and passage["collection"] == "notes"
+    assert passage["document"] == "guide.md" and passage["collection"] == "notes"
     assert passage["score"] > 0
 
 
@@ -1006,7 +1011,7 @@ async def test_sources_fold_hits_to_documents_and_cover_them_with_collections(
 
     assert response.status_code == 200, response.text
     found = response.json()
-    rows = {row["doc"]: row for row in found["documents"]}
+    rows = {row["document"]: row for row in found["documents"]}
     assert set(rows) == {"shared.md", "beta-only.md"}
     assert found["collections"] == ["beta"], "one collection holds both: the cover is one name"
     shared = rows["shared.md"]
@@ -1069,7 +1074,7 @@ async def test_the_search_scope_is_the_names_then_the_session_then_everything(
     response = await client.get("/api/search/explore", params={"q": "shared", **params})
 
     assert response.status_code == 200, response.text
-    assert sorted({hit["doc"] for hit in response.json()}) == expected, name
+    assert sorted({hit["document"] for hit in response.json()}) == expected, name
 
 
 @pytest.mark.parametrize(
@@ -1114,7 +1119,7 @@ async def test_every_audited_route_appends_one_record(client: AsyncTestClient) -
     await client.post("/api/init", json={"profile": "none"})
     await client.put("/api/settings", json={"search": {"limit": 7}})
     await client.post("/api/collections", json={"name": "notes"})
-    await client.put("/api/collections/notes/settings", json={"chunk_size": 400})
+    await client.put("/api/collections/notes/overrides", json={"chunk_size": 400})
     await client.put("/api/collections/notes/description", json={"description": "what I read"})
     await stage_and_import(client, "guide.md", MD.encode())
     await client.put("/api/documents/guide.md/description", json={"description": "the guide"})
@@ -1134,7 +1139,7 @@ async def test_every_audited_route_appends_one_record(client: AsyncTestClient) -
         "settings.init",
         "settings.update",
         "collection.create",
-        "collection.settings.update",
+        "collection.overrides.update",
         "collection.describe",
         "document.stage",
         "document.import",
@@ -1154,38 +1159,44 @@ async def test_every_audited_route_appends_one_record(client: AsyncTestClient) -
     assert by_event["settings.init"]["detail"] == {"profile": "none"}
     assert by_event["settings.update"]["detail"] == {"changed": "search.limit"}
     assert by_event["collection.create"]["collection"] == "notes"
-    assert "doc" not in by_event["collection.create"]
+    assert "document" not in by_event["collection.create"]
     assert by_event["document.stage"]["detail"] == {
         "name": "guide.md",
         "suffix": ".md",
         "size": len(MD),
     }
-    assert by_event["document.import"]["doc"] == "guide.md"
+    assert by_event["document.import"]["document"] == "guide.md"
     assert "collection" not in by_event["document.import"], "a document belongs to no collection"
-    assert (by_event["collection.attach"]["collection"], by_event["collection.attach"]["doc"]) == (
+    assert (
+        by_event["collection.attach"]["collection"],
+        by_event["collection.attach"]["document"],
+    ) == (
         "notes",
         "guide.md",
     )
     assert by_event["collection.attach"]["operation_id"] == attach_job
-    assert (by_event["collection.detach"]["collection"], by_event["collection.detach"]["doc"]) == (
+    assert (
+        by_event["collection.detach"]["collection"],
+        by_event["collection.detach"]["document"],
+    ) == (
         "notes",
         "guide.md",
     )
-    assert by_event["document.delete"]["doc"] == "guide.md"
+    assert by_event["document.delete"]["document"] == "guide.md"
     assert by_event["collection.reindex"]["operation_id"] == reindex
     assert by_event["operation.cancel"]["operation_id"] == attach_job, "a known field, not free"
     assert by_event["session.collections.set"]["session_id"] == "s1"
     assert by_event["collection.delete"]["operation_id"] == delete_collection
 
     indexed = next(line for line in lines if line["event"] == "index.completed")
-    assert (indexed["actor"], indexed["collection"], indexed["doc"]) == (
+    assert (indexed["actor"], indexed["collection"], indexed["document"]) == (
         "operation",
         "notes",
         "guide.md",
     )
     assert "request_id" not in indexed, "a worker has no request context"
     completed = next(line for line in lines if line["event"] == "import.completed")
-    assert completed["doc"] == "guide.md"
+    assert completed["document"] == "guide.md"
     assert "collection" not in completed, "an import is not a collection's business"
 
 
@@ -1215,7 +1226,7 @@ async def test_an_import_records_the_file_name_but_never_the_path(
     ).status_code == 201
 
     record = next(line for line in audit_lines() if line["event"] == "document.import")
-    assert record["doc"] == "salary.md"
+    assert record["document"] == "salary.md"
     assert record["detail"]["source"] == "salary.md"
     assert str(source.parent) not in json.dumps(record), "the source directory stays out of it"
 
@@ -1322,14 +1333,14 @@ async def test_bind_request_context_names_the_actor(name: str, path: str, actor:
         (
             "a collection route binds both names",
             "/api/collections/notes/documents/guide.md",
-            {"collection": "notes", "doc": "guide.md"},
-            {"collection": "notes", "doc": "guide.md"},
+            {"collection": "notes", "document": "guide.md"},
+            {"collection": "notes", "document": "guide.md"},
         ),
         (
             "a document route has no collection at all",
             "/api/documents/guide.md/source",
-            {"doc": "guide.md"},
-            {"doc": "guide.md"},
+            {"document": "guide.md"},
+            {"document": "guide.md"},
         ),
         ("a route with neither binds neither", "/api/status", {}, {}),
     ],
@@ -1343,7 +1354,7 @@ async def test_bind_request_context_scopes_the_names(
     try:
         await app_module.bind_request_context(request)
         context = dict(structlog.contextvars.get_contextvars())
-        assert {k: context[k] for k in ("collection", "doc") if k in context} == expected, name
+        assert {k: context[k] for k in ("collection", "document") if k in context} == expected, name
     finally:
         logs.clear()
 
@@ -1430,7 +1441,7 @@ async def _text_collections(client: AsyncTestClient, *names: str) -> None:
 
 def _text_identity(page: dict) -> list[tuple]:
     """What identifies every passage of a page, in the order the page listed them."""
-    return [(h["doc"], h["part"], h["chunk_id"]) for h in page["items"]]
+    return [(h["document"], h["seq"]) for h in page["items"]]
 
 
 def _text_cursor(
@@ -1449,7 +1460,7 @@ def _listing_cursor() -> str:
     """A cursor of the collection listing: another sort, so this route must not read it."""
     from haskie.paging import encode_cursor
 
-    return encode_cursor(["alpha"], "name", "asc")
+    return encode_cursor(["alpha"], "name", Order.ASC)
 
 
 async def test_text_search_spans_all_collections_by_default(client: AsyncTestClient) -> None:
@@ -1468,7 +1479,7 @@ async def test_text_search_spans_all_collections_by_default(client: AsyncTestCli
     assert scores == sorted(scores, reverse=True), "raw BM25, best first, across both collections"
 
     row = await document.get("alpha-0.md")
-    hit = next(h for h in page["items"] if h["doc"] == "alpha-0.md")
+    hit = next(h for h in page["items"] if h["document"] == "alpha-0.md")
     assert hit["markdown_path"] == row.relative(row.markdown), "the document's own file"
     assert hit["source_path"] == row.relative(row.original)
     assert hit["source_file"] == str(home.HOME / row.relative(row.original)), "absolute"
@@ -1488,7 +1499,7 @@ async def test_text_search_returns_a_shared_document_once(client: AsyncTestClien
 
     page = (await client.get("/api/search/text", params={"q": "haskell"})).json()
 
-    assert _text_identity(page) == [("shared.md", 0, 0)]
+    assert _text_identity(page) == [("shared.md", 1)]
 
 
 async def test_text_search_filters_collections_and_rejects_unknown(

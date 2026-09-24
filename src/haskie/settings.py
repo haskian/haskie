@@ -7,13 +7,16 @@ objects.
 What is settable where follows where the work happens. Conversion (`parser`, `skip_ocr_pages`)
 runs once per document, at import, so its values are chosen then and stored on the document;
 `UserSettings.conversion` only supplies the defaults an import falls back on. Chunking
-(`chunker`, `chunk_size`, `chunk_overlap`) splits the shared markdown per collection, so a
-collection may override it (`CollectionSettings`), and the embedding cache is keyed by it.
+(`chunker`, `chunk_size`, `chunk_merge_below`, `chunk_frame`) splits the shared markdown per
+collection, so a collection may override it (`CollectionOverrides`), and the embedding cache is
+keyed by it. Only `chunk_size` is in characters; `chunk_merge_below` is a percentage of it, so it
+still means the same thing when the size changes.
 """
 
 import os
 import threading
-from typing import Annotated, Any, Literal
+from enum import StrEnum
+from typing import Annotated, Any
 
 import msgspec
 from msgspec import Meta
@@ -24,13 +27,44 @@ from haskie.logs import get_logger
 
 _log = get_logger(__name__)
 
-Parser = Literal["anydoc", "plain"]  # PDFs always go page-wise through pdf-inspector
-Chunker = Literal["markdown", "text"]  # semantic-text-splitter MarkdownSplitter / TextSplitter
-EmbeddingProfile = Literal["none", "compact", "quality", "multilingual"]
-Accelerator = Literal["auto", "cpu"]  # auto = best ONNX Runtime provider (CUDA, CoreML, ...)
-SearchMode = Literal["hybrid", "vector", "fts"]
-Fusion = Literal["rrf", "linear"]
-Reranker = Literal["none", "cross-encoder"]
+
+class Parser(StrEnum):  # PDFs always go page-wise through pdf-inspector
+    ANYDOC = "anydoc"
+    PLAIN = "plain"
+
+
+class Chunker(StrEnum):  # the two pipelines of `indexing.chunk`
+    MARKDOWN = "markdown"
+    TEXT = "text"
+
+
+class EmbeddingProfile(StrEnum):
+    NONE = "none"
+    COMPACT = "compact"
+    QUALITY = "quality"
+    MULTILINGUAL = "multilingual"
+
+
+class Accelerator(StrEnum):
+    AUTO = "auto"  # the best ONNX Runtime provider (CUDA, CoreML, ...)
+    CPU = "cpu"
+
+
+class SearchMode(StrEnum):
+    HYBRID = "hybrid"
+    VECTOR = "vector"
+    FTS = "fts"
+
+
+class Fusion(StrEnum):
+    RRF = "rrf"
+    LINEAR = "linear"
+
+
+class Reranker(StrEnum):
+    NONE = "none"
+    CROSS_ENCODER = "cross-encoder"
+
 
 # fastembed cross-encoder ids (ONNX; downloaded on first use)
 RERANKER_MODELS: tuple[str, ...] = (
@@ -45,15 +79,15 @@ RERANKER_MODELS: tuple[str, ...] = (
 class EmbeddingModel(msgspec.Struct):
     name: str
     dims: int
-    accelerator: Accelerator = "auto"
+    accelerator: Accelerator = Accelerator.AUTO
 
 
 # fastembed model ids. "none" = full-text search only.
 PROFILES: dict[EmbeddingProfile, EmbeddingModel | None] = {
-    "none": None,
-    "compact": EmbeddingModel("BAAI/bge-small-en-v1.5", 384),
-    "quality": EmbeddingModel("BAAI/bge-large-en-v1.5", 1024),
-    "multilingual": EmbeddingModel("intfloat/multilingual-e5-large", 1024),
+    EmbeddingProfile.NONE: None,
+    EmbeddingProfile.COMPACT: EmbeddingModel("BAAI/bge-small-en-v1.5", 384),
+    EmbeddingProfile.QUALITY: EmbeddingModel("BAAI/bge-large-en-v1.5", 1024),
+    EmbeddingProfile.MULTILINGUAL: EmbeddingModel("intfloat/multilingual-e5-large", 1024),
 }
 
 
@@ -79,9 +113,13 @@ PARSER = Meta(
 CHUNKER = Meta(
     title="Chunker",
     description=(
-        "How converted Markdown is split into indexed chunks. markdown: split on Markdown "
-        "structure (headings, then paragraphs, sentences, words), filling each chunk up to Chunk "
-        "size. text: ignore Markdown structure and split on paragraphs, sentences, words."
+        "How converted Markdown is split into chunks. Every paragraph (text between blank lines) "
+        "is a chunk, and short ones are merged (see Merge short paragraphs). A paragraph longer "
+        "than Chunk size is cut between list items or blocks, else between sentences. A "
+        "sentence, table or code block longer than a chunk is cut at a line, then a word. "
+        "markdown: every heading starts a new chunk and stays out of its text; code blocks and "
+        "tables stay whole. text: ignore the Markdown structure and split on paragraphs and "
+        "sentences only."
     ),
 )
 CHUNK_SIZE = Meta(
@@ -89,14 +127,26 @@ CHUNK_SIZE = Meta(
     description=(
         "Maximum length of one chunk, counted in Unicode characters, not words or tokens "
         "(about 4 characters per English token). A chunk is also the unit that gets one "
-        "embedding vector and one search result."
+        "embedding vector and one search result. With Prepend heading path on, the size counts "
+        "that path too: the path and the text together never exceed it."
     ),
 )
-CHUNK_OVERLAP = Meta(
-    title="Chunk overlap (characters)",
+CHUNK_MERGE_BELOW = Meta(
+    title="Merge short paragraphs (% of chunk size)",
     description=(
-        "Characters repeated at the start of a chunk from the end of the previous one, so a "
-        "sentence cut by a boundary stays searchable. Must be smaller than Chunk size."
+        "A paragraph - text between blank lines, or a whole list - shorter than "
+        "this share of Chunk size is merged with the paragraphs around it: into the one below "
+        "when both fit one chunk, else with the short ones next to it. Longer paragraphs are "
+        "chunks of their own. 0 never merges; 100 merges every paragraph that fits."
+    ),
+)
+CHUNK_FRAME = Meta(
+    title="Prepend heading path",
+    description=(
+        "The embedding model and the reranker read every chunk with its heading path in front "
+        "(Part I > Replication > Leaders). Chunk size counts the path. A path longer than half "
+        "of it loses its outermost headings first. Off: the models read the chunk's text alone. "
+        "Only the markdown chunker has a heading path to prepend."
     ),
 )
 SKIP_OCR_PAGES = Meta(
@@ -156,7 +206,7 @@ INDEX_GROUP_PARTS = Meta(
         "commits, each resumable."
     ),
 )
-MAINTENANCE_DOCS = Meta(
+MAINTENANCE_DOCUMENTS = Meta(
     title="Maintenance after documents",
     description=(
         "Run collection maintenance (compaction, index update) once this many documents were "
@@ -304,61 +354,64 @@ def _at_least(minimum: int | float, **values: int | float) -> None:
             raise InvalidInput(f"{name} must be >= {minimum}, got {value}")
 
 
-def _check_chunking(chunk_size: int | None, chunk_overlap: int | None) -> None:
-    """Shared by the user-level settings and the per-collection overrides, where either half may
+def _check_chunking(chunk_size: int | None, chunk_merge_below: int | None) -> None:
+    """Shared by the user-level settings and the per-collection overrides, where any of them may
     be unset and inherit the user value."""
+    if chunk_merge_below is not None and not 0 <= chunk_merge_below <= 100:
+        raise InvalidInput(f"chunk_merge_below must be 0 to 100, got {chunk_merge_below}")
     if chunk_size is not None:
         _at_least(1, chunk_size=chunk_size)
-    if chunk_overlap is not None:
-        _at_least(0, chunk_overlap=chunk_overlap)
-    if chunk_size is not None and chunk_overlap is not None and chunk_overlap >= chunk_size:
-        raise InvalidInput(
-            f"chunk_overlap must be < chunk_size, got {chunk_overlap} >= {chunk_size}"
-        )
 
 
 # --- structs ----------------------------------------------------------------------
 
 
 class ChunkSettings(msgspec.Struct, frozen=True):
-    """How one collection splits a document's markdown into chunks: the three values the
-    embedding cache is keyed by (see `embed_cache.Params`), and nothing else."""
+    """How one collection splits a document's markdown into chunks: the values the embedding
+    cache is keyed by (see `embed_cache.Params`), and nothing else."""
 
-    chunker: Annotated[Chunker, CHUNKER] = "markdown"
+    chunker: Annotated[Chunker, CHUNKER] = Chunker.MARKDOWN
     chunk_size: Annotated[int, CHUNK_SIZE] = 1200
-    chunk_overlap: Annotated[int, CHUNK_OVERLAP] = 150
+    chunk_merge_below: Annotated[int, CHUNK_MERGE_BELOW] = 66  # percent of chunk_size
+    chunk_frame: Annotated[bool, CHUNK_FRAME] = True
 
     def __post_init__(self) -> None:
-        _check_chunking(self.chunk_size, self.chunk_overlap)
+        _check_chunking(self.chunk_size, self.chunk_merge_below)
+
+    @classmethod
+    def of(cls, source: object) -> "ChunkSettings":
+        """The chunk settings `source` carries under the same field names: the user defaults or an
+        embedding cache key. One copy, so a new chunk setting reaches every caller."""
+        return cls(**{name: getattr(source, name) for name in cls.__struct_fields__})
 
 
 class ConversionSettings(ChunkSettings, frozen=True):
     """The user-level defaults: how a document is converted when nothing else is said at import
     (`parser`, `skip_ocr_pages`), and how a collection chunks it when it overrides nothing.
 
-    The three chunk fields are inherited rather than restated, so their defaults, their `Meta` and
+    The chunk fields are inherited rather than restated, so their defaults, their `Meta` and
     their check have one home. msgspec puts inherited fields first, which is the order they were
     already written in, so the stored JSON is unchanged."""
 
-    parser: Annotated[Parser, PARSER] = "anydoc"
+    parser: Annotated[Parser, PARSER] = Parser.ANYDOC
     skip_ocr_pages: Annotated[bool, SKIP_OCR_PAGES] = True
 
     @property
     def chunking(self) -> ChunkSettings:
-        return ChunkSettings(self.chunker, self.chunk_size, self.chunk_overlap)
+        return ChunkSettings.of(self)
 
 
 class SearchSettings(msgspec.Struct):
     limit: Annotated[int, LIMIT] = 10
     candidates: Annotated[int, CANDIDATES] = 50
-    mode: Annotated[SearchMode, MODE] = "hybrid"
-    fusion: Annotated[Fusion, FUSION] = "rrf"
+    mode: Annotated[SearchMode, MODE] = SearchMode.HYBRID
+    fusion: Annotated[Fusion, FUSION] = Fusion.RRF
     rrf_k: Annotated[int, RRF_K] = 60
     vector_weight: Annotated[float, VECTOR_WEIGHT] = 0.7
     bm25_weight: Annotated[float, BM25_WEIGHT] = 0.3
     nprobes: Annotated[int, NPROBES] = 20
     refine_factor: Annotated[int, REFINE_FACTOR] = 10
-    reranker: Annotated[Reranker, RERANKER] = "none"
+    reranker: Annotated[Reranker, RERANKER] = Reranker.NONE
     reranker_model: Annotated[str, RERANKER_MODEL] = RERANKER_MODELS[0]
 
     def __post_init__(self) -> None:
@@ -419,11 +472,11 @@ class PipelineSettings(msgspec.Struct):
     batch_pages: Annotated[int, BATCH_PAGES] = 10
     index_group_parts: Annotated[int, INDEX_GROUP_PARTS] = 50
     task_timeout_seconds: Annotated[int, TASK_TIMEOUT] = 600
-    maintenance_docs: Annotated[int, MAINTENANCE_DOCS] = 25
+    maintenance_documents: Annotated[int, MAINTENANCE_DOCUMENTS] = 25
     maintenance_idle_seconds: Annotated[int, MAINTENANCE_IDLE] = 60
     ann_min_rows: Annotated[int, ANN_MIN_ROWS] = 50_000
     preview_workers: Annotated[int, PREVIEW_WORKERS] = 2
-    accelerator: Annotated[Accelerator, ACCELERATOR] = "auto"
+    accelerator: Annotated[Accelerator, ACCELERATOR] = Accelerator.AUTO
 
     def __post_init__(self) -> None:
         _at_least(
@@ -435,7 +488,7 @@ class PipelineSettings(msgspec.Struct):
             batch_pages=self.batch_pages,
             index_group_parts=self.index_group_parts,
             task_timeout_seconds=self.task_timeout_seconds,
-            maintenance_docs=self.maintenance_docs,
+            maintenance_documents=self.maintenance_documents,
             maintenance_idle_seconds=self.maintenance_idle_seconds,
             ann_min_rows=self.ann_min_rows,
             preview_workers=self.preview_workers,
@@ -458,7 +511,7 @@ class RetentionSettings(msgspec.Struct):
 
 
 class UserSettings(msgspec.Struct):
-    embedding: Annotated[EmbeddingProfile, EMBEDDING] = "none"
+    embedding: Annotated[EmbeddingProfile, EMBEDDING] = EmbeddingProfile.NONE
     conversion: ConversionSettings = msgspec.field(default_factory=ConversionSettings)
     pipeline: PipelineSettings = msgspec.field(default_factory=PipelineSettings)
     search: SearchSettings = msgspec.field(default_factory=SearchSettings)
@@ -472,7 +525,7 @@ class UserSettings(msgspec.Struct):
         return msgspec.structs.replace(model, accelerator=self.pipeline.accelerator)
 
 
-class CollectionSettings(msgspec.Struct):
+class CollectionOverrides(msgspec.Struct):
     """Per-collection overrides. None means "use user default".
 
     Only chunking and search: conversion happens once per document at import, so `parser` and
@@ -480,11 +533,12 @@ class CollectionSettings(msgspec.Struct):
 
     chunker: Annotated[Chunker | None, CHUNKER] = None
     chunk_size: Annotated[int | None, CHUNK_SIZE] = None
-    chunk_overlap: Annotated[int | None, CHUNK_OVERLAP] = None
+    chunk_merge_below: Annotated[int | None, CHUNK_MERGE_BELOW] = None
+    chunk_frame: Annotated[bool | None, CHUNK_FRAME] = None
     search: SearchOverrides = msgspec.field(default_factory=SearchOverrides)
 
     def __post_init__(self) -> None:
-        _check_chunking(self.chunk_size, self.chunk_overlap)
+        _check_chunking(self.chunk_size, self.chunk_merge_below)
 
     def resolve(self, user: UserSettings) -> ChunkSettings:
         overrides = {k: v for k, v in without_none(self).items() if k != "search"}

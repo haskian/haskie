@@ -11,8 +11,9 @@ import pytest
 from conftest import get_page, import_row, walk_pages
 from litestar.testing import AsyncTestClient
 
-from haskie.collection.collection import Collection
+from haskie.collection.collection import Collection, MemberStatus
 from haskie.document import document
+from haskie.document.document import DocumentStatus
 
 pytestmark = pytest.mark.anyio
 
@@ -41,7 +42,7 @@ async def _member(sources: Path, collection: str, name: str, content: bytes = DO
     """One membership, without the intake: only an imported document joins a collection, so the
     row is marked `imported` here rather than run through a pipeline."""
     row = await _import(sources, name, content)
-    await document.set_status(row.name, "imported")
+    await document.set_status(row.name, DocumentStatus.IMPORTED)
     await Collection(collection).add(row.name)
 
 
@@ -74,8 +75,8 @@ async def test_collection_info_has_counts_and_no_documents(
     await _create(api_client, "notes")
     for name in ("a.md", "b.md", "c.md"):
         await _member(sources, "notes", name)
-    await Collection("notes").set_member_status("a.md", "indexed")
-    await Collection("notes").set_member_status("b.md", "indexing")
+    await Collection("notes").set_member_status("a.md", MemberStatus.INDEXED)
+    await Collection("notes").set_member_status("b.md", MemberStatus.INDEXING)
 
     info = await get_page(api_client, "/api/collections/notes")
 
@@ -148,7 +149,7 @@ async def test_documents_status_filter_and_total(
 ) -> None:
     for name in ("a.md", "b.md", "c.md"):
         await _import(sources, name)
-    await document.set_status("b.md", "imported")
+    await document.set_status("b.md", DocumentStatus.IMPORTED)
 
     imported = await get_page(api_client, "/api/documents", status="imported")
 
@@ -170,8 +171,8 @@ async def test_documents_sorted_by_status_group_the_lifecycle(
     the ties inside each group."""
     for name in ("a.md", "b.md", "c.md"):
         await _import(sources, name)
-    await document.set_status("a.md", "imported")
-    await document.set_status("c.md", "error")
+    await document.set_status("a.md", DocumentStatus.IMPORTED)
+    await document.set_status("c.md", DocumentStatus.ERROR)
 
     items, _, _, _ = await walk_pages(api_client, "/api/documents", page_size=2, sort="status")
 
@@ -188,7 +189,7 @@ async def test_documents_sorted_by_updated_at_follow_the_lifecycle(
     """The timestamps themselves are covered in `test_core.py`; this is the sort reading them."""
     for name in ("a.md", "b.md", "c.md"):
         await _import(sources, name)
-    await document.set_status("a.md", "imported")  # touched last, so it sorts last
+    await document.set_status("a.md", DocumentStatus.IMPORTED)  # touched last, so it sorts last
 
     items, _, _, _ = await walk_pages(api_client, "/api/documents", page_size=2, sort="updated_at")
 
@@ -224,7 +225,7 @@ async def test_members_status_filter_and_total(api_client: AsyncTestClient, sour
     await _create(api_client, "notes")
     for name in ("a.md", "b.md", "c.md"):
         await _member(sources, "notes", name)
-    await Collection("notes").set_member_status("b.md", "indexed")
+    await Collection("notes").set_member_status("b.md", MemberStatus.INDEXED)
 
     indexed = await get_page(api_client, "/api/collections/notes/documents", status="indexed")
 
@@ -246,7 +247,9 @@ async def test_members_sorted_by_updated_at_follow_the_indexing(
     await _create(api_client, "notes")
     for name in ("a.md", "b.md", "c.md"):
         await _member(sources, "notes", name)
-    await Collection("notes").set_member_status("a.md", "indexed")  # touched last, sorts last
+    await Collection("notes").set_member_status(
+        "a.md", MemberStatus.INDEXED
+    )  # touched last, sorts last
 
     items, _, _, _ = await walk_pages(
         api_client, "/api/collections/notes/documents", page_size=2, sort="updated_at"
@@ -261,7 +264,9 @@ async def test_members_of_one_collection_only(api_client: AsyncTestClient, sourc
     for name in ("alpha", "beta", "empty"):
         await _create(api_client, name)
     row = await _import(sources, "shared.md")
-    await document.set_status(row.name, "imported")  # only an imported document joins a collection
+    await document.set_status(
+        row.name, DocumentStatus.IMPORTED
+    )  # only an imported document joins a collection
     for name in ("alpha", "beta"):
         await Collection(name).add(row.name)
 

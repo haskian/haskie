@@ -1,0 +1,130 @@
+# Structure-Aware Chunking: where a chunk is cut, and why
+
+This is the reference for `chunk.py` and `segment.py`. The README's
+[Chunking](../../../README.md#chunking) section gives the overview: the settings, the steps, and
+where a chunk is stored.
+
+## Gaps and cuts
+
+The pieces of a text tile it. A piece is a sentence, or a block kept whole: a heading, a table, a
+code block. Every gap between two neighbouring pieces is walked. **X** is the last piece before
+the gap, and **Y** is the first after it. A gap either stays inside one chunk or becomes a cut,
+and the step that makes a cut names its reason. A chunk's `end_reason` is the reason of the cut
+after it, and its `start_reason` is the reason of the cut before it. So a chunk's start reason
+always equals the previous chunk's end reason.
+
+Where each reason comes from:
+
+- `chunk.pack` ends every section but the last at `heading`, and the last at `edge`.
+- `segment.sentences` numbers each piece's paragraph. `segment.pack` ends a group of paragraphs
+  that `_merge` did not join at `paragraph`.
+- `segment.fit` cuts a piece longer than a chunk. `_fill` and `_cut` name the `length_*` cuts.
+
+```mermaid
+flowchart TD
+    gap(["gap between piece X and piece Y"])
+
+    gap --> more{"Is there a Y?"}
+    more -- "no: the text ends" --> edge["<b>edge</b><br/>start or end of the text chunked:<br/>the document, or one part of it"]
+
+    more -- yes --> head{"Does Y open a new section?<br/>a heading after content,<br/>or one no deeper than the one before"}
+    head -- yes --> heading["<b>heading</b><br/>sections never share a chunk,<br/>and a heading is never in a chunk's text"]
+
+    head -- no --> blank{"X and Y in two paragraphs?<br/>a blank line between them,<br/>and not inside one list"}
+
+    blank -- "yes: two paragraphs" --> down{"X's paragraph short (under chunk_merge_below)<br/>and fits one chunk with Y's?"}
+    down -- yes --> nocut1(["no cut: the short one<br/>goes into the paragraph below"])
+    down -- no --> run{"Both short, and the run<br/>of short ones still fits?"}
+    run -- yes --> nocut2(["no cut: short ones merge"])
+    run -- no --> up{"Y's short, the one below won't take it,<br/>and the chunk above has room?"}
+    up -- yes --> nocut3(["no cut: the short one<br/>joins the chunk above"])
+    up -- no --> paragraph["<b>paragraph</b><br/>the author separated them,<br/>and no merge rule joined them"]
+
+    blank -- "no: one paragraph" --> fits{"Does the whole paragraph fit one chunk?<br/>chunk_size, less the frame"}
+    fits -- yes --> nocut4(["no cut"])
+    fits -- "no: the chunk is full" --> cont{"Is Y the rest of one piece<br/>longer than a chunk?"}
+    cont -- yes --> oversize["<b>length_oversize</b><br/>a sentence, table or code block<br/>longer than a chunk: cut at a line, then a word"]
+    cont -- no --> blocks{"Are X and Y different blocks,<br/>at the last block edge that fits?"}
+    blocks -- yes --> block["<b>length_block</b><br/>cut between list items,<br/>or a line and the table under it"]
+    blocks -- no --> sentence["<b>length_sentence</b><br/>no block edge fits:<br/>cut between two sentences"]
+
+    classDef reason fill:#fde8d7,stroke:#c2410c,color:#111
+    classDef keep fill:#eef2f5,stroke:#64748b,color:#111
+    class edge,heading,paragraph,oversize,block,sentence reason
+    class nocut1,nocut2,nocut3,nocut4 keep
+```
+
+| reason | where the cut is | as `start_reason`, the chunk after | as `end_reason`, the chunk before |
+|---|---|---|---|
+| `edge` | the start or end of the text | the first chunk of the document or of a part | the last chunk |
+| `heading` | before a heading | it opens with its heading path | its section ends here |
+| `paragraph` | at a blank line | it starts a new paragraph | a paragraph ended here |
+| `length_block` | between two blocks of one paragraph | it begins at a block | it ends on a whole block |
+| `length_sentence` | between two sentences of one block | it begins at a sentence | it ends on a whole sentence |
+| `length_oversize` | inside a piece longer than a chunk | it continues a piece cut in two | it ends mid-piece |
+
+A part is one convert output file: the whole document, or `batch_pages` pages of a PDF. Each part
+is chunked on its own, so no chunk spans two parts. The headings still open at the end of one
+part carry over to the next (`chunk.open_headings`).
+
+## Sizes
+
+A chunk's length is its span in the source, without the whitespace after it. With the
+`frames` step, the frame counts too. Every chunk of a section gets `chunk_size` less the
+length of its frame: the heading path joined with ` > `, plus a blank line. So a deep path means
+smaller chunks. `chunk_merge_below` is a percentage of the whole `chunk_size`, whatever the frame.
+A paragraph shorter than that is short.
+
+## Paragraphs
+
+Only a blank line separates two paragraphs, whatever the markdown inside them. A line that leads
+straight into a table is one paragraph with the table. A whole list is one paragraph, with or
+without blank lines between its items. Every paragraph is a chunk of its own, apart from the
+merges the tree shows. Only a paragraph longer than a chunk is cut: between its blocks where one
+fits, else between sentences. Sentences follow the Unicode sentence rules (UAX #29), so no
+language setting is needed.
+
+## Page markers
+
+Page markers (`<!-- page 3 -->`, which the converter writes) are page metadata, not content.
+Every step reads one as whitespace. So a marker never decides a gap, and no piece or chunk starts
+or ends on one. Inside a chunk, `convert.without_markers` takes it out of the text. The text that
+is embedded, indexed and shown has no markers, and a blank line around a marker stays one blank
+line. The chunk's offsets still cover the source, markers included. A marker's offset is what
+gives the chunk its `page_start` and `page_end`.
+
+## Headings
+
+Headings are metadata, not content. A heading line over text is never in a chunk's text. The
+headings a section opens with are its heading path, kept on every chunk of the section
+(`Chunk.headings`) to cite it by. A section of headings alone is the one exception: stacked
+headings with nothing under them, a chapter title right before the next one, a document of
+titles. Its heading lines are all it has, so they are its chunk's text, as pieces of type
+`heading`. They are cut like any paragraph when they run past the size. Such a chunk's frame is
+the path above its own headings only, possibly empty, so the models never read a heading twice.
+
+The optional `frames` step (`chunk_frame`, on by default) also makes the path the chunk's
+frame. The models read every chunk of the section after it (`chunk.framed`). A path longer than
+half a chunk drops its outermost headings until it fits in half. A last heading that is still too
+long is cut (`chunk._shortened`). Without the step the frame is empty, and the text has the whole
+size. The `text` chunker cuts no sections at headings and never frames. It still files each chunk
+under its heading path for citing.
+
+Keyword search (the full-text index) reads a chunk's text alone: the heading path is not in it.
+This is deliberate. A heading's words would otherwise match every chunk of its section. The
+vector half of a search still reaches them through the frame each chunk was embedded with.
+
+## No overlap
+
+Chunks never overlap: every character is in at most one chunk. Heading lines over text, page
+markers and the whitespace between two chunks are in none. The context a neighbour's
+sentences would carry comes from the front of the chunk instead. The models read every chunk
+after its heading path, for example `Part II > Replication > Leaders` and then the text.
+
+This follows Contextual Retrieval ([Anthropic, 19 Sep 2024](https://www.anthropic.com/news/contextual-retrieval)).
+There, chunk-specific context is prepended to each chunk before it is embedded and before the
+BM25 index is built. Claude writes that context (50-100 tokens, from the whole document). Here
+it is the document's own heading path, which costs no model call. The article reports the drop
+in retrieval failures (1 - recall@20): contextual embeddings alone 35%, with contextual BM25
+49%, with a reranker on top 67%. It leaves chunk size, boundaries and overlap as a tuning choice
+and gives no overlap figure.

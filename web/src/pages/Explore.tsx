@@ -12,8 +12,8 @@ const SOURCES_TAB = 'tab-sources'
 // What each granularity is called on screen, and what its results are: the second picker's
 // options and the first tab's label come from here.
 const GRANULARITIES: Array<PickerOption<Granularity> & { plural: string }> = [
-  { value: 'chunk', label: 'Chunks', plural: 'chunks', sub: 'as indexed · may overlap' },
-  { value: 'passage', label: 'Passages', plural: 'passages', sub: 'adjacent chunks · whole sentences' },
+  { value: 'chunk', label: 'Chunks', plural: 'chunks', sub: 'as indexed' },
+  { value: 'passage', label: 'Passages', plural: 'passages', sub: 'adjacent chunks, widened' },
   { value: 'excerpt', label: 'Excerpts', plural: 'excerpts', sub: 'what an agent reads' },
 ]
 const granularityOf = (value: Granularity) => GRANULARITIES.find((one) => one.value === value) ?? GRANULARITIES[0]
@@ -122,7 +122,7 @@ export function Explore({ route, counts }: PageProps) {
           <HitGrid results={sources} query={ran} onOpen={setOpen} />
         </div>
       </div>
-      <MatchModal hit={open} query={ran} onClose={() => setOpen(null)} />
+      <MatchModal match={open} query={ran} onClose={() => setOpen(null)} />
     </Shell>
   )
 }

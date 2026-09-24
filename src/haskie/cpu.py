@@ -2,7 +2,7 @@
 
 Pipeline steps, preview builds, model loads and reranking are CPU work, not IO, so they run in a
 worker thread (`on_cpu`) and hold one slot of the budget for the length of that work. The number
-of them running at once is therefore never above `indexing.cpu_budget`, whichever queue, request
+of them running at once is therefore never above `pipeline.cpu_budget`, whichever queue, request
 or event loop they came from.
 
 The per-queue caps in `workflows.stage_caps` shape the *mix* of work; this budget is the ceiling,
@@ -64,7 +64,7 @@ def cpu_slot() -> Iterator[None]:
     """Hold one slot of the CPU budget for the length of one piece of CPU work.
 
     Sync, and taken inside the worker thread: the calling event loop never waits on it. The wait
-    is unbounded on purpose: the caller's turn comes as soon as another task finishes, and giving
+    is unbounded on purpose: the caller's turn comes as soon as other CPU work finishes, and giving
     up would fail a document for finding the machine busy.
     """
     slots = _cpu_slots.current  # the object to release, even if the pool is resized meanwhile
@@ -120,7 +120,8 @@ def _convert_pool() -> ProcessPoolExecutor | None:
             # forkserver, not the macOS default of spawn: a spawned child re-imports `__main__`,
             # which under `uvicorn`/`litestar` is the console script -- the child would try to
             # start a second server. A forkserver child is forked from a clean, thread-free
-            # process instead, so `__main__` is never re-run and plain `fork` stays unsafe-free.
+            # process instead, so `__main__` is never re-run. Plain `fork` is no option either: it
+            # would copy a process that runs threads, which is unsafe.
             context = multiprocessing.get_context("forkserver")
             # import once, not per child
             context.set_forkserver_preload(["haskie.document.convert"])

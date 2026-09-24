@@ -19,7 +19,7 @@ from haskie.settings import Accelerator, EmbeddingModel
 
 # a provider entry as ONNX Runtime takes it: a name, or a (name, options) pair
 Provider = str | tuple[str, dict[str, str]]
-RERANKER_ACCELERATOR: Accelerator = "cpu"
+RERANKER_ACCELERATOR = Accelerator.CPU
 
 # Construction (download, session setup) is serialized, using a model is not, and the lock is
 # outside the cache so the second caller of a model being built waits and then gets that one:
@@ -39,7 +39,7 @@ PREFERENCE = (
 
 def select_providers(available: list[str], accelerator: Accelerator) -> list[str]:
     """Ordered provider list for ONNX Runtime; CPU is always the final fallback."""
-    if accelerator == "cpu":
+    if accelerator == Accelerator.CPU:
         return ["CPUExecutionProvider"]
     chosen = [p for p in PREFERENCE if p in available]
     return chosen if "CPUExecutionProvider" in chosen else [*chosen, "CPUExecutionProvider"]
@@ -53,7 +53,7 @@ def with_options(names: list[str], model_cache: str) -> list[Provider]:
     ]
 
 
-def providers(accelerator: Accelerator = "auto") -> list[Provider]:
+def providers(accelerator: Accelerator = Accelerator.AUTO) -> list[Provider]:
     import onnxruntime
 
     names = select_providers(onnxruntime.get_available_providers(), accelerator)
@@ -65,7 +65,7 @@ def provider_name(provider: Provider) -> str:
 
 
 @lru_cache(maxsize=2)
-def device_name(accelerator: Accelerator = "auto") -> str:
+def device_name(accelerator: Accelerator = Accelerator.AUTO) -> str:
     return provider_name(providers(accelerator)[0]).removesuffix("ExecutionProvider")
 
 
@@ -107,7 +107,7 @@ def embed_query(model: EmbeddingModel, text: str) -> list[float]:
 
 
 def warm(name: str, accelerator: Accelerator) -> None:
-    """Download the model now so the first upload does not stall."""
+    """Load the model now, downloading it on a cold cache, so the first embed does not stall."""
     _model(name, accelerator)
 
 

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { fillOf, MIN_FILL } from './match'
+import type { Hit } from '../api'
+import { chunkSizes, fillOf, frameOf, headingOf, MIN_FILL, pieceMeta, piecesOf } from './match'
 
 describe('fillOf', () => {
   const cases: Array<{ name: string; score: number; scores: number[]; expected: number }> = [
@@ -15,4 +16,177 @@ describe('fillOf', () => {
       expect(fillOf(one.score, Math.max(...one.scores), Math.min(...one.scores))).toBeCloseTo(one.expected, 10)
     })
   }
+})
+
+// Three whole sentences, as the chunker packs them. The layout marks where each one starts.
+const CHUNK: Hit = {
+  collection: 'A–E',
+  document: 'area-lights.pdf',
+  source_path: 'documents/area-lights.pdf',
+  markdown_path: 'markdown/area-lights.md',
+  part: 0,
+  seq: 4,
+  line_start: 41,
+  line_end: 43,
+  char_start: 1204,
+  char_end: 1330,
+  byte_start: 1204,
+  byte_end: 1330,
+  page_start: 2,
+  page_end: 2,
+  headings: ['Lighting', 'Soft shadows'],
+  frame: ['Lighting', 'Soft shadows'],
+  header: 'Lighting > Soft shadows',
+  location: 'p. 2',
+  text: 'A point light casts a hard edge. Area lights soften it in proportion to their size. Sky light softens it most.',
+  layout: [
+    { type: 'text', position: 0 },
+    { type: 'text', position: 33 },
+    { type: 'text', position: 84 },
+  ],
+  start_reason: 'paragraph',
+  end_reason: 'length_sentence',
+  score: 0.91,
+  source_file: '/Users/ada/.haskie/documents/area-lights.pdf',
+  markdown_file: '/Users/ada/.haskie/markdown/area-lights.md',
+}
+
+const [FIRST, SECOND, THIRD] = ['A point light casts a hard edge. ', 'Area lights soften it in proportion to their size. ', 'Sky light softens it most.']
+
+describe('headingOf', () => {
+  const cases: Array<{ name: string; hit: Hit; expected: string }> = [
+    { name: 'a chunk sits under the last of its headings', hit: CHUNK, expected: 'Soft shadows' },
+    { name: 'a chunk before the first heading sits under none', hit: { ...CHUNK, headings: [] }, expected: '' },
+  ]
+  for (const one of cases) {
+    test(one.name, () => {
+      expect(headingOf(one.hit)).toBe(one.expected)
+    })
+  }
+})
+
+describe('piecesOf', () => {
+  const cases: Array<{ name: string; hit: Hit; expected: Array<[string, string, number]> }> = [
+    {
+      name: 'the layout cuts the text back into its typed pieces',
+      hit: CHUNK,
+      expected: [
+        ['text', FIRST, 0],
+        ['text', SECOND, 33],
+        ['text', THIRD, 84],
+      ],
+    },
+    {
+      name: 'a list item, then a code block',
+      hit: {
+        ...CHUNK,
+        text: '- Soften it.\n\n```\nlight()\n```',
+        layout: [
+          { type: 'list', position: 0 },
+          { type: 'code', position: 14 },
+        ],
+      },
+      expected: [
+        ['list', '- Soften it.\n\n', 0],
+        ['code', '```\nlight()\n```', 14],
+      ],
+    },
+    { name: 'no layout: the text is one piece of text', hit: { ...CHUNK, layout: [] }, expected: [['text', CHUNK.text, 0]] },
+    {
+      name: 'text ahead of the first position is plain text',
+      hit: { ...CHUNK, text: 'Lead. | a |', layout: [{ type: 'table', position: 6 }] },
+      expected: [
+        ['text', 'Lead. ', 0],
+        ['table', '| a |', 6],
+      ],
+    },
+    {
+      // counted in code points, as Python counts them: one emoji is one character, two UTF-16 units
+      name: 'characters outside the BMP count once',
+      hit: {
+        ...CHUNK,
+        text: '🔦 on. Soft. 🌤 off.',
+        layout: [
+          { type: 'list', position: 0 },
+          { type: 'list', position: 6 },
+          { type: 'quote', position: 12 },
+        ],
+      },
+      expected: [
+        ['list', '🔦 on. ', 0],
+        ['list', 'Soft. ', 6],
+        ['quote', '🌤 off.', 12],
+      ],
+    },
+    {
+      name: 'a position past the text is ignored, a stale row cannot cut outside it',
+      hit: {
+        ...CHUNK,
+        text: 'One. Two.',
+        layout: [
+          { type: 'text', position: 0 },
+          { type: 'text', position: 5 },
+          { type: 'code', position: 40 },
+        ],
+      },
+      expected: [
+        ['text', 'One. ', 0],
+        ['text', 'Two.', 5],
+      ],
+    },
+  ]
+  for (const one of cases) {
+    test(one.name, () => {
+      expect(piecesOf(one.hit).map((piece) => [piece.type, piece.text, piece.position])).toEqual(one.expected)
+    })
+  }
+  test('the hint under a piece says where it starts and how big it is', () => {
+    expect(pieceMeta({ type: 'text', text: 'Area lights soften it. ', position: 17 })).toBe('position 17 · 23 chars · 4 words')
+  })
+})
+
+describe('chunkSizes', () => {
+  const cases: Array<{ name: string; hit: Hit; expected: ReturnType<typeof chunkSizes> }> = [
+    {
+      name: 'the heading path and the text, and the two together as embedded',
+      hit: { ...CHUNK, frame: ['Lighting', 'Soft shadows'] },
+      expected: {
+        // "Lighting > Soft shadows\n\n": 25 characters, 3 words, one line
+        frame: { chars: 25, words: 3, pieces: 1 },
+        text: { chars: Array.from(CHUNK.text).length, words: 21, pieces: 3 },
+        total: { chars: 25 + Array.from(CHUNK.text).length, words: 24, pieces: 4 },
+      },
+    },
+    {
+      name: 'text before the first heading has no frame',
+      hit: { ...CHUNK, frame: [] },
+      expected: {
+        frame: { chars: 0, words: 0, pieces: 0 },
+        text: { chars: Array.from(CHUNK.text).length, words: 21, pieces: 3 },
+        total: { chars: Array.from(CHUNK.text).length, words: 21, pieces: 3 },
+      },
+    },
+    {
+      name: 'Chinese words are counted without spaces',
+      hit: { ...CHUNK, frame: [], text: '我們需要一個數據庫。', layout: [{ type: 'text', position: 0 }] },
+      expected: {
+        frame: { chars: 0, words: 0, pieces: 0 },
+        text: { chars: 10, words: expect.any(Number) as unknown as number, pieces: 1 },
+        total: { chars: 10, words: expect.any(Number) as unknown as number, pieces: 1 },
+      },
+    },
+  ]
+  for (const one of cases) {
+    test(one.name, () => {
+      expect(chunkSizes(one.hit)).toEqual(one.expected)
+    })
+  }
+  test('a Chinese sentence is more than one word', () => {
+    expect(chunkSizes({ ...CHUNK, frame: [], text: '我們需要一個數據庫。', layout: [{ type: 'text', position: 0 }] }).text.words).toBeGreaterThan(1)
+  })
+  test('the frame is the heading path it was embedded under and a blank line, or nothing', () => {
+    expect(frameOf({ ...CHUNK, frame: ['A', 'B'] })).toBe('A > B\n\n')
+    expect(frameOf({ ...CHUNK, headings: ['Book', 'A', 'B'], frame: ['A', 'B'] })).toBe('A > B\n\n')
+    expect(frameOf({ ...CHUNK, frame: [] })).toBe('')
+  })
 })

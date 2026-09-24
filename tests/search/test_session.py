@@ -24,7 +24,9 @@ from haskie.indexing import chunk, embed, models
 from haskie.search import flow, retrieval, session
 from haskie.settings import (
     ChunkSettings,
-    CollectionSettings,
+    CollectionOverrides,
+    EmbeddingProfile,
+    Reranker,
     SearchOverrides,
     SearchSettings,
     UserSettings,
@@ -37,14 +39,14 @@ pytestmark = pytest.mark.anyio
 async def test_search_limit_user_and_collection_level(dbos, tmp_path: Path) -> None:
     await save_user_settings(UserSettings(search=SearchSettings(limit=2)))
     collection = await Collection.create("lim")
-    await collection.set_settings(CollectionSettings(chunk_size=30, chunk_overlap=0))
+    await collection.set_overrides(CollectionOverrides(chunk_size=30))
     body = "".join(f"# H{i}\n\ncommon token {i}\n\n" for i in range(6))
     doc = await import_document(dbos, "m.md", body, tmp_path)
     await attach_document(dbos, "lim", doc.name)
 
     assert len(await collection.search("common")) == 2, "user default"
-    await collection.set_settings(
-        CollectionSettings(chunk_size=30, chunk_overlap=0, search=SearchOverrides(limit=4))
+    await collection.set_overrides(
+        CollectionOverrides(chunk_size=30, search=SearchOverrides(limit=4))
     )
     assert (await collection.info()).search.limit == 4
     assert len(await collection.search("common")) == 4, "collection override"
@@ -75,7 +77,7 @@ async def test_an_outdated_index_is_reported_and_rebuilt(dbos, tmp_path: Path) -
 
     assert (await collection.info()).index_outdated is False
     (hit,) = await collection.search("hello")
-    assert hit.source_path == doc.relative(doc.original) and hit.line_start == 1
+    assert hit.source_path == doc.relative(doc.original) and hit.line_start == 3
     assert hit.source_file == str(home.HOME / hit.source_path), "absolute, for a tool outside"
 
 
@@ -132,9 +134,9 @@ async def test_session_search_counts_a_shared_document_once(dbos, tmp_path: Path
 
     hits = await flow.chunks(await session.collections_for("s"), "shared", limit=10)
 
-    keys = [(h.doc, h.part, h.chunk_id) for h in hits]
+    keys = [(h.document, h.seq) for h in hits]
     assert len(keys) == len(set(keys)), f"one hit per passage, got {keys}"
-    assert sorted(h.doc for h in hits) == sorted([solo.name, shared.name])
+    assert sorted(h.document for h in hits) == sorted([solo.name, shared.name])
     assert {h.collection for h in hits} == {"first"}, "credited to the first that returned it"
     assert {h.collection for h in await Collection("second").search("shared")} == {"second"}
 
@@ -145,15 +147,15 @@ async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkey
     from haskie.collection.index import Row
     from haskie.settings import PROFILES
 
-    await save_user_settings(UserSettings(embedding="compact"))
-    compact = PROFILES["compact"]
+    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
+    compact = PROFILES[EmbeddingProfile.COMPACT]
     assert compact is not None
     for name in ("a", "b", "c"):
         collection = await Collection.create(name)
         (chunk_,) = chunk.split(f"# {name}\n\nshared token {name}\n", ChunkSettings())
         index = collection.index_with(compact)
         row = Row(chunk=chunk_, vector=[0.1] * compact.dims, seq=1)
-        # a document name per collection: the merge keys on (doc, part, chunk_id), so one name
+        # a document name per collection: the merge keys on (document, seq), so one name
         # shared by all three would be one passage and this test would see a single hit
         await index.add_parts(
             f"{name}.md", f"documents/{name}.md", f"documents/{name}.md.md", one_part(0, [row])
@@ -186,11 +188,11 @@ async def test_session_search_reranks_once_over_the_merge(
     """The cross-encoder sees the merged candidates of every collection once, and its score is
     the score of the returned hits."""
     await save_user_settings(
-        UserSettings(search=SearchSettings(limit=2, candidates=4, reranker="cross-encoder"))
+        UserSettings(search=SearchSettings(limit=2, candidates=4, reranker=Reranker.CROSS_ENCODER))
     )
     for name, token in (("a", "alpha"), ("b", "beta")):
         collection = await Collection.create(name)
-        await collection.set_settings(CollectionSettings(chunk_size=30, chunk_overlap=0))
+        await collection.set_overrides(CollectionOverrides(chunk_size=30))
         body = "".join(f"# H{i}\n\nshared {token} {i}\n\n" for i in range(3))
         doc = await import_document(dbos, f"{name}.md", body, tmp_path)
         await attach_document(dbos, name, doc.name)
@@ -215,7 +217,9 @@ async def test_session_search_reranks_once_over_the_merge(
     assert len(texts) == 4, "the merge is cut to `candidates` before it is rescored"
     assert any("alpha" in t for t in texts), "candidates from both collections"
     assert any("beta" in t for t in texts)
-    assert [h.text for h in hits] == [texts[-1], texts[-2]], "best cross-encoder score first"
+    # the cross-encoder reads each chunk under its heading path (`chunk.framed`)
+    read = [chunk.framed(h.frame, h.text) for h in hits]
+    assert read == [texts[-1], texts[-2]], "best cross-encoder score first"
     assert [h.score for h in hits] == [3.0, 2.0], "the hit carries the cross-encoder score"
 
 

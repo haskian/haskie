@@ -133,12 +133,12 @@ async def test_rename_at_import(
 
 
 async def test_descriptions_are_read_in_one_query(shelf: AsyncTestClient) -> None:
-    """`describe_of` is the batched read the shortlist uses; absent means no description. It is a
-    document read, not a collection one: a description belongs to the document."""
-    found = await document.describe_of({"compilers.md", "networks.md", "gone.md"})
+    """`descriptions_of` is the batched read the shortlist uses; absent means no description. It
+    is a document read, not a collection one: a description belongs to the document."""
+    found = await document.descriptions_of({"compilers.md", "networks.md", "gone.md"})
 
     assert found == {"compilers.md": "the dragon book"}, "no row for a blank or missing document"
-    assert await document.describe_of(set()) == {}, "nothing asked for, nothing queried"
+    assert await document.descriptions_of(set()) == {}, "nothing asked for, nothing queried"
 
 
 async def test_results_carry_an_absolute_path_and_position(shelf: AsyncTestClient) -> None:

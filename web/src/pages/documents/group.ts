@@ -1,12 +1,13 @@
-import { DOCUMENT_STATUSES, type Document } from '../../api'
+import type { Document, DocumentStatus } from '../../api'
 import { day } from '../../format'
 import type { RangeGroup } from '../../ui'
 
 const capitalise = (word: string): string => word.charAt(0).toUpperCase() + word.slice(1)
 
-/** One band per status that has documents, in the import pipeline's own order. */
-export function groupByStatus(docs: Document[]): RangeGroup<Document>[] {
-  return DOCUMENT_STATUSES.map((status) => ({
+/** One band per status that has documents, in the order of `statuses`: the backend's
+ *  `Options.document_statuses`, which is the import pipeline's own. */
+export function groupByStatus(docs: Document[], statuses: readonly DocumentStatus[]): RangeGroup<Document>[] {
+  return statuses.map((status) => ({
     label: capitalise(status),
     items: docs.filter((doc) => doc.status === status),
   })).filter((group) => group.items.length > 0)

@@ -15,6 +15,8 @@ import anyio.to_thread
 import pytest
 from dbos import WorkflowStatusString
 
+from haskie.indexing.segment import PieceType
+
 if TYPE_CHECKING:  # every helper below imports haskie when it runs, not when pytest collects
     from haskie.indexing.chunk import Chunk
 
@@ -369,22 +371,22 @@ async def import_row(name: str, content: bytes | str = MD, into: Path | None = N
 async def seed_index(collection: str, doc: str, text: str, heading: str = "Alpha") -> None:
     """One indexed chunk of an imported document in a collection's table: the common case of
     `seed_chunks`, for a test that only needs something to match."""
-    from haskie.indexing.chunk import Chunk
+    from haskie.indexing.chunk import Chunk, Piece
 
     await seed_chunks(
         collection,
         doc,
         [
             Chunk(
-                heading=heading,
-                text=text,
+                headings=["Title", heading],
+                frame=["Title", heading],
+                pieces=[Piece(PieceType.TEXT, text)],
                 line_start=5,
                 line_end=7,
                 char_start=0,
                 char_end=len(text),
                 byte_start=0,
                 byte_end=len(text.encode()),
-                parents=["Title"],
             )
         ],
     )

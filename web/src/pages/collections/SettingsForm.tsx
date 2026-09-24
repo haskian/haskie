@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import type { Chunker, ChunkSettings, CollectionSettings, Fusion, Options, Reranker, SearchMode, SearchSettings } from '../../api'
+import type { Chunker, ChunkSettings, CollectionOverrides, Fusion, Options, Reranker, SearchMode, SearchSettings } from '../../api'
 import { effectiveSearch, Field, Picker, SEARCH_BOUNDS, visibleSearchFields, type NumericKeys, type PickerOption } from '../../ui'
 
 type SearchField = keyof SearchSettings
@@ -9,20 +9,25 @@ type NumberField = NumericKeys<SearchSettings>
 interface NumberSpec {
   step: number
   min: number
+  max?: number
 }
 
 const DEFAULT_OPTION_LABEL = 'Default'
+// A switch a collection may override, or leave to the user settings: the picker's first option.
+const ON = 'on'
+const OFF = 'off'
+const onOff = (value: boolean): string => (value ? ON : OFF)
 
 /**
  * A collection's chunking and search overrides. Every field may be left empty, and an empty
  * field means "whatever the user settings say": the picker's first option and the number
  * placeholders show what that is right now.
  *
- * The draft is seeded from `settings` once and then left alone, so a poll landing behind the
+ * The draft is seeded from `overrides` once and then left alone, so a poll landing behind the
  * form cannot overwrite what is being typed.
  */
 export function SettingsForm({
-  settings,
+  overrides,
   effective,
   searchDefaults,
   options,
@@ -31,16 +36,16 @@ export function SettingsForm({
   onSave,
   children,
 }: {
-  settings: CollectionSettings
+  overrides: CollectionOverrides
   effective: ChunkSettings // what the chunking overrides resolve to
   searchDefaults: SearchSettings // what the search overrides resolve to
   options: Options
   outdated: boolean
   busy: boolean
-  onSave: (next: CollectionSettings) => void
+  onSave: (next: CollectionOverrides) => void
   children?: ReactNode // the actions that are not "Save": index, delete, and how they are going
 }) {
-  const [draft, setDraft] = useState<CollectionSettings>(settings)
+  const [draft, setDraft] = useState<CollectionOverrides>(overrides)
   const current = effectiveSearch(draft.search, searchDefaults)
 
   const label = (key: string, fallback: string): string => options.docs[key]?.title ?? fallback
@@ -63,6 +68,7 @@ export function SettingsForm({
         type="number"
         step={spec.step}
         min={spec.min}
+        max={spec.max}
         value={value ?? ''}
         placeholder={`default ${placeholder}`}
         onChange={(event) => onChange(event.target.value === '' ? null : Number(event.target.value))}
@@ -131,8 +137,16 @@ export function SettingsForm({
         {numberInput('chunk_size', 'conversion.chunk_size', draft.chunk_size, effective.chunk_size, { step: 1, min: 1 }, (next) =>
           setDraft({ ...draft, chunk_size: next }),
         )}
-        {numberInput('chunk_overlap', 'conversion.chunk_overlap', draft.chunk_overlap, effective.chunk_overlap, { step: 1, min: 0 }, (next) =>
-          setDraft({ ...draft, chunk_overlap: next }),
+        {numberInput('chunk_merge_below', 'conversion.chunk_merge_below', draft.chunk_merge_below, effective.chunk_merge_below, { step: 1, min: 0, max: 100 }, (next) =>
+          setDraft({ ...draft, chunk_merge_below: next }),
+        )}
+        {enumInput(
+          'chunk_frame',
+          'conversion.chunk_frame',
+          [ON, OFF],
+          draft.chunk_frame === null || draft.chunk_frame === undefined ? null : onOff(draft.chunk_frame),
+          onOff(effective.chunk_frame),
+          (next) => setDraft({ ...draft, chunk_frame: next === null ? null : next === ON }),
         )}
       </div>
       <span className="mono muted">Search</span>

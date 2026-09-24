@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Heading } from '../api'
-import { anchorIndex, breadcrumb, type Anchor } from './anchor'
+import { anchorIndex, headingPath, type Anchor } from './anchor'
 
 const toc: Heading[] = [
   { level: 1, text: 'Implementing Domain-Driven Design', offset: 0 },
@@ -10,7 +10,7 @@ const toc: Heading[] = [
   { level: 2, text: '286 Chapter 8 DOMAIN EVENTS', offset: 900_000 },
 ]
 
-describe('breadcrumb', () => {
+describe('headingPath', () => {
   const nested: Heading[] = [
     { level: 1, text: 'Book', offset: 0 },
     { level: 2, text: 'Part I', offset: 10 },
@@ -27,7 +27,7 @@ describe('breadcrumb', () => {
   ]
   for (const one of cases) {
     test(one.name, () => {
-      expect(breadcrumb(nested, one.index)).toEqual(one.expected)
+      expect(headingPath(nested, one.index)).toEqual(one.expected)
     })
   }
 })

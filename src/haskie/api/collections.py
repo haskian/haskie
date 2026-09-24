@@ -5,6 +5,7 @@ rows of this collection's index, never the document itself (see `collection/coll
 """
 
 import time
+from typing import Annotated
 
 import msgspec
 from litestar import delete, get, post, put
@@ -20,10 +21,10 @@ from haskie.collection.collection import (
 )
 from haskie.collection.index import Hit
 from haskie.indexing import models, workflows
-from haskie.paging import Page, PageRequest
+from haskie.paging import Page, PageRequest, one_of
 from haskie.search import session
 from haskie.settings import (
-    CollectionSettings,
+    CollectionOverrides,
     Fusion,
     Reranker,
     SearchMode,
@@ -121,13 +122,13 @@ async def search_collection(
     return hits
 
 
-@put("/api/collections/{collection:str}/settings")
-@audit.audited("collection.settings.update")
-async def put_collection_settings(collection: str, data: CollectionSettings) -> CollectionInfo:
+@put("/api/collections/{collection:str}/overrides")
+@audit.audited("collection.overrides.update")
+async def put_collection_overrides(collection: str, data: CollectionOverrides) -> CollectionInfo:
     """Saves, then downloads: a collection may override the reranker model, and a search of this
     collection would otherwise fail with "not loaded yet" for a model nothing ever fetched."""
     found = await Collection.get(collection)
-    await found.set_settings(data)
+    await found.set_overrides(data)
     await models.ensure_models(await load_user_settings())
     return await found.info()
 
@@ -160,7 +161,9 @@ async def index_collection(collection: str) -> BulkStarted:
     dependencies=PAGED,
 )
 async def list_collection_documents(
-    collection: str, page: PageRequest, status: MemberStatus | None = None
+    collection: str,
+    page: PageRequest,
+    status: Annotated[MemberStatus | None, one_of(MemberStatus)] = None,
 ) -> Page[Member]:
     """List the documents of one collection, one page at a time.
 
@@ -190,13 +193,13 @@ async def add_document(
     Args:
         session_id: The conversation's id; the attach and its operation then show in that session.
     """
-    audit.attach(doc=data.document)
-    logs.bind(doc=data.document)
+    audit.attach(document=data.document)
+    logs.bind(document=data.document)
     operation_id = await workflows.attach(collection, data.document)
     audit.attach(operation_id=operation_id)
     await session.record(
         session_id,
-        "attach",
+        session.Action.ATTACH,
         data.document,
         detail=session.EventDetail(collection=collection),
         operation_id=operation_id,
@@ -205,11 +208,11 @@ async def add_document(
 
 
 @delete(
-    "/api/collections/{collection:str}/documents/{doc:str}",
+    "/api/collections/{collection:str}/documents/{document:str}",
     mcp_tool="remove_document_from_collection",
 )
 @audit.audited("collection.detach")
-async def remove_document(collection: str, doc: str, session_id: str | None = None) -> None:
+async def remove_document(collection: str, document: str, session_id: str | None = None) -> None:
     """Take one document out of this collection: its rows here go, the document stays.
 
     Waited out rather than queued: a detach cancels one index and deletes that collection's rows,
@@ -218,17 +221,20 @@ async def remove_document(collection: str, doc: str, session_id: str | None = No
     Args:
         session_id: The conversation's id; the detach then shows in that session's history.
     """
-    await workflows.detach(collection, doc)
+    await workflows.detach(collection, document)
     await session.record(
-        session_id, "detach", doc, detail=session.EventDetail(collection=collection)
+        session_id,
+        session.Action.DETACH,
+        document,
+        detail=session.EventDetail(collection=collection),
     )
 
 
-@post("/api/collections/{collection:str}/documents/{doc:str}/index", status_code=202)
+@post("/api/collections/{collection:str}/documents/{document:str}/index", status_code=202)
 @audit.audited("collection.reindex")
-async def index_collection_document(collection: str, doc: str) -> BulkStarted:
+async def index_collection_document(collection: str, document: str) -> BulkStarted:
     """(Re)index one member: chunk and embed it if the cache misses, then write it into this
     collection's index. Poll the operation for the outcome."""
-    operation_id = await workflows.start_index_collection_document(collection, doc)
+    operation_id = await workflows.start_index_collection_document(collection, document)
     audit.attach(operation_id=operation_id)
     return BulkStarted(operation_id=operation_id)

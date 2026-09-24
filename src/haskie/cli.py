@@ -1,8 +1,8 @@
-"""The `haskie` command: set the home directory up, and serve the app.
+"""The `haskie` command: set the home directory up, serve the app, and install it into a client.
 
-Thin on purpose. Everything it does is something the app already does at startup — `init` is the
-migrations, `run` is uvicorn over `app:create_app` — so the CLI adds a way in, never a second way
-of doing the work.
+Thin on purpose. What the app already does at startup, the CLI calls rather than repeats — `init`
+creates the schema, `run` is uvicorn over `app:create_app` — so it adds a way in, never a second
+way of doing the work.
 """
 
 import os
@@ -78,13 +78,13 @@ def _use_home(path: Path | None) -> None:
 
 @cli.command()
 def init(home_dir: HomeOption = None) -> None:
-    """Create the home directory and bring its database up to date.
+    """Create the home directory and its database.
 
-    Safe to repeat: every step is idempotent, so this is also how an existing home is migrated
-    after an upgrade. `run` does the same thing at startup; this is for doing it first.
+    Safe to repeat: every step is idempotent, and a home already at this version is left as it is.
+    `run` does the same thing at startup; this is for doing it first.
 
-    A home written before documents became collection-independent cannot be migrated, so the
-    migration refuses it and says what to do instead (see `db.INCOMPATIBLE_HOME_MESSAGE`).
+    There is no upgrade path. A home written at another schema version is refused, and the message
+    says what to do instead (see `db.INCOMPATIBLE_HOME_MESSAGE`).
     """
     import asyncio
 
@@ -333,7 +333,7 @@ cli.add_typer(install)
 def install_claude(
     home_dir: HomeOption = None,
     url: Annotated[str, typer.Option(help="MCP endpoint of this haskie.")] = MCP_URL,
-    scope: Annotated[Scope, typer.Option(help="Where Claude Code records it.")] = "user",
+    scope: Annotated[Scope, typer.Option(help="Where Claude Code records it.")] = Scope.USER,
 ) -> None:
     """Register the MCP server with Claude Code and write the haskie skill and rule.
 

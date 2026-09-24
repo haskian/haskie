@@ -4,7 +4,7 @@ import { useMemo, useSyncExternalStore } from 'react'
 // modal is open, so a modal is a real address and closing it is a navigation back to the page.
 export type Route =
   | { name: 'explore' }
-  | { name: 'documents'; doc?: string }
+  | { name: 'documents'; document?: string }
   | { name: 'collections'; collection?: string }
   | { name: 'operations' }
   | { name: 'sessions'; session?: string }
@@ -22,7 +22,7 @@ export function parseRoute(hash: string): Route {
   const name = param === undefined || param === '' ? undefined : decodeURIComponent(param)
   switch (page) {
     case 'documents':
-      return { name: 'documents', doc: name }
+      return { name: 'documents', document: name }
     case 'collections':
       return { name: 'collections', collection: name }
     case 'operations':
@@ -41,7 +41,7 @@ export function parseRoute(hash: string): Route {
 export function formatRoute(route: Route): string {
   switch (route.name) {
     case 'documents':
-      return route.doc === undefined ? '#/documents' : `#/documents/${encodeURIComponent(route.doc)}`
+      return route.document === undefined ? '#/documents' : `#/documents/${encodeURIComponent(route.document)}`
     case 'collections':
       return route.collection === undefined ? '#/collections' : `#/collections/${encodeURIComponent(route.collection)}`
     case 'sessions':

@@ -8,22 +8,31 @@ import stat
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 import anyio
 import msgspec
 import pytest
 
 from haskie import audit, cpu, db, errors, home, settings
+from haskie.audit import Actor, Outcome
 from haskie.collection.collection import Collection
 from haskie.document import document
-from haskie.document.document import Document
+from haskie.document.document import Document, DocumentStatus
 from haskie.indexing import embed_cache
+from haskie.indexing.chunk import Chunk, Piece
+from haskie.indexing.segment import CutReason, PieceType
 from haskie.settings import (
+    Chunker,
     ChunkSettings,
-    CollectionSettings,
+    CollectionOverrides,
     ConversionSettings,
+    EmbeddingProfile,
+    Parser,
     PipelineSettings,
+    Reranker,
     RetentionSettings,
     SearchOverrides,
     SearchSettings,
@@ -89,7 +98,7 @@ def test_shard_spreads_names_over_the_whole_byte() -> None:
 def test_every_document_path_sits_under_the_same_shard() -> None:
     """A document owns one folder: the upload, the markdown, the parts, the preview and the
     embedding cache are all inside it, so one `remove_tree` deletes everything it owns."""
-    doc = Document(name=DOC, suffix=".md", size=1, status="imported")
+    doc = Document(name=DOC, suffix=".md", size=1, status=DocumentStatus.IMPORTED)
     root = home.DOCUMENT_ROOT / home.shard(DOC) / DOC
 
     assert document.root(DOC) == root
@@ -105,7 +114,7 @@ def test_every_document_path_sits_under_the_same_shard() -> None:
 
 
 def test_part_numbers_are_wide_enough_for_a_long_document() -> None:
-    doc = Document(name=DOC, suffix=".md", size=1, status="imported")
+    doc = Document(name=DOC, suffix=".md", size=1, status=DocumentStatus.IMPORTED)
 
     assert home.PART_DIGITS == 6, "four digits would cap a document at ten thousand parts"
     assert doc.part_path(0).name == "000000.md"
@@ -281,14 +290,14 @@ async def test_remove_tree_reports_a_file_it_cannot_delete(
     [
         ("chunk_size below 1", lambda: ConversionSettings(chunk_size=0), "chunk_size must be >= 1"),
         (
-            "chunk_overlap below 0",
-            lambda: ConversionSettings(chunk_overlap=-1),
-            "chunk_overlap must be >= 0",
+            "chunk_merge_below below 0",
+            lambda: ConversionSettings(chunk_merge_below=-1),
+            "chunk_merge_below must be 0 to 100",
         ),
         (
-            "chunk_overlap equal to chunk_size",
-            lambda: ConversionSettings(chunk_size=10, chunk_overlap=10),
-            "chunk_overlap must be <",
+            "collection override chunk_merge_below above 100",
+            lambda: CollectionOverrides(chunk_merge_below=101),
+            "chunk_merge_below must be 0 to 100",
         ),
         (
             "cpu budget below 1",
@@ -349,29 +358,14 @@ async def test_remove_tree_reports_a_file_it_cannot_delete(
             "unknown reranker model",
         ),
         (
-            "collection overrides both set, overlap wins",
-            lambda: CollectionSettings(chunk_size=10, chunk_overlap=10),
-            "chunk_overlap must be <",
-        ),
-        (
             "collection override size alone below 1",
-            lambda: CollectionSettings(chunk_size=0),
+            lambda: CollectionOverrides(chunk_size=0),
             "chunk_size must be >= 1",
-        ),
-        (
-            "chunk settings overlap equal to size",
-            lambda: ChunkSettings(chunk_size=10, chunk_overlap=10),
-            "chunk_overlap must be <",
         ),
         (
             "chunk settings size below 1",
             lambda: ChunkSettings(chunk_size=0),
             "chunk_size must be >= 1",
-        ),
-        (
-            "a collection override that resolves into an invalid pair",
-            lambda: CollectionSettings(chunk_size=10).resolve(UserSettings()),
-            "chunk_overlap must be <",
         ),
         (
             "search override resolves into an invalid value",
@@ -404,16 +398,15 @@ def test_settings_reject_out_of_bounds(name: str, build, match: str) -> None:
     ("name", "build"),
     [
         ("defaults", UserSettings),
-        ("overlap just below size", lambda: ConversionSettings(chunk_size=2, chunk_overlap=1)),
+        ("the smallest size", lambda: ChunkSettings(chunk_size=1)),
         ("zero weights allowed", lambda: SearchSettings(vector_weight=0.0, bm25_weight=0.0)),
         (
-            "collection override size alone, the user overlap still fits",
-            lambda: CollectionSettings(chunk_size=99).resolve(
-                UserSettings(conversion=ConversionSettings(chunk_overlap=0))
-            ),
+            "collection override size alone: the user merge share is of any size",
+            lambda: CollectionOverrides(chunk_size=1).resolve(UserSettings()),
         ),
-        ("collection override overlap alone", lambda: CollectionSettings(chunk_overlap=0)),
         ("chunk settings defaults", ChunkSettings),
+        ("merging turned off", lambda: ChunkSettings(chunk_merge_below=0)),
+        ("merging every paragraph that fits", lambda: ChunkSettings(chunk_merge_below=100)),
         ("the shortest operation history", lambda: RetentionSettings(operation_days=1)),
         ("audit retention of zero keeps everything", lambda: RetentionSettings(audit_days=0)),
         ("one preview builder", lambda: PipelineSettings(preview_workers=1)),
@@ -515,7 +508,7 @@ def test_maintenance_defaults_and_docs() -> None:
         ),
         (
             "nested struct is a value, not None",
-            CollectionSettings(chunker="text"),
+            CollectionOverrides(chunker=Chunker.TEXT),
             {"chunker": "text", "search": SearchOverrides()},
         ),
     ],
@@ -541,7 +534,7 @@ def test_without_none(name: str, struct: msgspec.Struct, expected: dict) -> None
     ],
 )
 async def test_unreadable_settings_fall_back_to_defaults(name: str, stored: str) -> None:
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
     async with db.connect() as conn:
         await conn.execute("update settings set json = ? where id = 1", (stored,))
     forget_settings()  # a direct write bypasses the process cache
@@ -555,8 +548,8 @@ async def test_unreadable_settings_fall_back_to_defaults(name: str, stored: str)
 
 @pytest.mark.anyio
 async def test_settings_problem_clears_after_a_good_load() -> None:
-    await save_user_settings(UserSettings(embedding="quality"))
-    assert await load_user_settings_or_none() == UserSettings(embedding="quality")
+    await save_user_settings(UserSettings(embedding=EmbeddingProfile.QUALITY))
+    assert await load_user_settings_or_none() == UserSettings(embedding=EmbeddingProfile.QUALITY)
     assert settings_problem() is None
 
 
@@ -586,42 +579,44 @@ def _count_connects(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 async def test_user_settings_are_read_once_and_refreshed_on_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
     forget_settings()
     connects = _count_connects(monkeypatch)
 
     first, second = await load_user_settings_or_none(), await load_user_settings_or_none()
 
-    assert first == second == UserSettings(embedding="compact")
+    assert first == second == UserSettings(embedding=EmbeddingProfile.COMPACT)
     assert len(connects) == 1, "the second load answers from the process cache"
 
-    await save_user_settings(UserSettings(embedding="quality"))
+    await save_user_settings(UserSettings(embedding=EmbeddingProfile.QUALITY))
 
     assert len(connects) == 2, "the write itself connects"
-    assert await settings.load_user_settings() == UserSettings(embedding="quality")
+    assert await settings.load_user_settings() == UserSettings(embedding=EmbeddingProfile.QUALITY)
     assert len(connects) == 2, "and refreshes the cache, so the read after it does not"
 
 
 @pytest.mark.anyio
 async def test_forgetting_the_cache_forces_a_reread() -> None:
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
     async with db.connect() as conn:
         await conn.execute(
             "update settings set json = ? where id = 1",
-            (db.dumps(UserSettings(embedding="quality")),),
+            (db.dumps(UserSettings(embedding=EmbeddingProfile.QUALITY)),),
         )
 
-    assert await settings.load_user_settings() == UserSettings(embedding="compact"), "still cached"
+    assert await settings.load_user_settings() == UserSettings(
+        embedding=EmbeddingProfile.COMPACT
+    ), "still cached"
 
     forget_settings()
 
-    assert await settings.load_user_settings() == UserSettings(embedding="quality")
+    assert await settings.load_user_settings() == UserSettings(embedding=EmbeddingProfile.QUALITY)
 
 
 @pytest.mark.anyio
 async def test_unreadable_settings_are_not_cached() -> None:
     """A broken row must stay live: the run that repairs it is seen without a second step."""
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
     async with db.connect() as conn:
         await conn.execute("update settings set json = '{not json' where id = 1")
     forget_settings()
@@ -634,10 +629,10 @@ async def test_unreadable_settings_are_not_cached() -> None:
     async with db.connect() as conn:  # nothing was cached, so nothing has to be forgotten
         await conn.execute(
             "update settings set json = ? where id = 1",
-            (db.dumps(UserSettings(embedding="quality")),),
+            (db.dumps(UserSettings(embedding=EmbeddingProfile.QUALITY)),),
         )
 
-    assert await load_user_settings_or_none() == UserSettings(embedding="quality")
+    assert await load_user_settings_or_none() == UserSettings(embedding=EmbeddingProfile.QUALITY)
     assert settings_problem() is None
 
 
@@ -648,10 +643,10 @@ async def test_the_missing_row_before_init_is_not_cached() -> None:
     async with db.connect() as conn:  # first run, straight into the row
         await conn.execute(
             "insert into settings (id, json) values (1, ?)",
-            (db.dumps(UserSettings(embedding="compact")),),
+            (db.dumps(UserSettings(embedding=EmbeddingProfile.COMPACT)),),
         )
 
-    assert await load_user_settings_or_none() == UserSettings(embedding="compact")
+    assert await load_user_settings_or_none() == UserSettings(embedding=EmbeddingProfile.COMPACT)
 
 
 @pytest.mark.anyio
@@ -680,8 +675,8 @@ async def test_connect_skips_ensure_home_after_the_first_success(
 async def test_the_settings_cache_ends_on_the_saved_value_under_concurrent_loads() -> None:
     """A load that misses reads the row before it publishes it, so it can still be in flight when
     a save commits. The saved row has to win: the load must not cache the row it read first."""
-    await save_user_settings(UserSettings(embedding="compact"))
-    saved = UserSettings(embedding="quality")
+    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
+    saved = UserSettings(embedding=EmbeddingProfile.QUALITY)
     loaders, loads = 8, 25
     forget_settings()  # so the first load of every task misses and really reads the row
 
@@ -858,14 +853,14 @@ async def test_every_event_loop_widens_its_own_thread_limiter() -> None:
 async def test_record_writes_one_private_json_line_with_every_field() -> None:
     entry = await audit.record(
         "collection.create",
-        actor="mcp",
-        outcome="ok",
+        actor=Actor.MCP,
+        outcome=Outcome.OK,
         duration_ms=7,
         request_id="r1",
         session_id="s1",
         operation_id="w1",
         collection="notes",
-        doc="a.md",
+        document="a.md",
         error=None,
         detail={"size": 12, "suffix": ".md", "cached": False},
     )
@@ -883,7 +878,7 @@ async def test_record_writes_one_private_json_line_with_every_field() -> None:
         "session_id": "s1",
         "operation_id": "w1",
         "collection": "notes",
-        "doc": "a.md",
+        "document": "a.md",
         "detail": {"size": 12, "suffix": ".md", "cached": False},
     }
     assert stat.S_IMODE(os.stat(audit.path()).st_mode) == audit.FILE_MODE
@@ -891,8 +886,8 @@ async def test_record_writes_one_private_json_line_with_every_field() -> None:
 
 @pytest.mark.anyio
 async def test_record_appends_rather_than_replacing() -> None:
-    await audit.record("a", actor="web", outcome="ok", duration_ms=0)
-    await audit.record("b", actor="web", outcome="ok", duration_ms=0)
+    await audit.record("a", actor=Actor.WEB, outcome=Outcome.OK, duration_ms=0)
+    await audit.record("b", actor=Actor.WEB, outcome=Outcome.OK, duration_ms=0)
     assert [line["event"] for line in audit_lines()] == ["a", "b"]
 
 
@@ -901,13 +896,13 @@ async def test_audited_handler_records_ok_and_reads_contextvars() -> None:
     from haskie import logs
 
     @audit.audited("collection.document.add")
-    async def handler(collection: str, doc: str, size: int = 0) -> str:
-        return f"{collection}/{doc}/{size}"
+    async def handler(collection: str, document: str, size: int = 0) -> str:
+        return f"{collection}/{document}/{size}"
 
     logs.clear()
     logs.bind(actor="mcp", request_id="req-1")
     try:
-        assert await handler("notes", doc="a.md") == "notes/a.md/0"
+        assert await handler("notes", document="a.md") == "notes/a.md/0"
     finally:
         logs.clear()
 
@@ -917,7 +912,7 @@ async def test_audited_handler_records_ok_and_reads_contextvars() -> None:
         "ok",
         "mcp",
     )
-    assert (line["request_id"], line["collection"], line["doc"]) == ("req-1", "notes", "a.md")
+    assert (line["request_id"], line["collection"], line["document"]) == ("req-1", "notes", "a.md")
     assert "error" not in line
 
 
@@ -1031,3 +1026,103 @@ async def test_audit_prune_does_nothing(name: str, retention_days: int, director
 
     assert await audit.prune(retention_days, now=AUDIT_NOW) == 0, name
     assert old.exists() is directory, name
+
+
+# --- enums on the wire ------------------------------------------------------------
+
+WIRE_CHUNK = Chunk(
+    headings=["Replication"],
+    frame=["Replication"],
+    pieces=[Piece(PieceType.LIST, "- leaders take writes\n")],
+    line_start=3,
+    line_end=3,
+    char_start=15,
+    char_end=37,
+    byte_start=15,
+    byte_end=37,
+    start_reason=CutReason.LENGTH_SENTENCE,
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "struct", "path", "value"),
+    [
+        (
+            "settings row: the chunker, also a cache key field",
+            ChunkSettings(chunker=Chunker.TEXT),
+            ["chunker"],
+            "text",
+        ),
+        (
+            "settings row: a value with a hyphen",
+            SearchSettings(reranker=Reranker.CROSS_ENCODER),
+            ["reranker"],
+            "cross-encoder",
+        ),
+        (
+            "settings row: the embedding profile",
+            UserSettings(embedding=EmbeddingProfile.COMPACT),
+            ["embedding"],
+            "compact",
+        ),
+        (
+            "documents row: the status column",
+            Document("guide.md", ".md", 29, DocumentStatus.IMPORTED, parser=Parser.PLAIN),
+            ["status"],
+            "imported",
+        ),
+        (
+            "embeddings row: the parser column",
+            embed_cache.params(
+                Document("guide.md", ".md", 29, DocumentStatus.IMPORTED, parser=Parser.PLAIN),
+                ChunkSettings(chunker=Chunker.TEXT),
+                None,
+            ),
+            ["parser"],
+            "plain",
+        ),
+        ("parquet and LanceDB: a boundary column", WIRE_CHUNK, ["start_reason"], "length_sentence"),
+        ("parquet: the type of a piece", WIRE_CHUNK, ["pieces", 0, "type"], "list"),
+        (
+            "audit line: the outcome",
+            audit.AuditRecord(
+                ts="2026-09-24T08:00:00+00:00",
+                level=audit.LEVEL_NAME,
+                event="document.import",
+                actor=Actor.MCP,
+                outcome=Outcome.ERROR,
+                duration_ms=12,
+                app_version="0.5.0",
+            ),
+            ["outcome"],
+            "error",
+        ),
+    ],
+)
+def test_an_enum_is_stored_and_sent_as_the_string_it_replaced(
+    name: str, struct: msgspec.Struct, path: list[str | int], value: str
+) -> None:
+    """JSON (settings, the API, audit lines), the builtins every parquet and LanceDB write starts
+    from, and a bound SQLite parameter all carry the plain value, and it decodes back to the
+    member. The cache URN stays pinned in `test_embed_cache`."""
+
+    def at(tree: Any) -> Any:
+        for step in path:
+            tree = (
+                tree[step]
+                if isinstance(step, int) or isinstance(tree, dict)
+                else getattr(tree, step)
+            )
+        return tree
+
+    member = at(struct)
+    assert isinstance(member, StrEnum), name
+    assert at(msgspec.json.decode(msgspec.json.encode(struct))) == value, name
+    built = at(msgspec.to_builtins(struct))
+    assert (type(built), built) == (str, value), name
+    assert at(msgspec.convert(msgspec.to_builtins(struct), type(struct))) is member, name
+    conn = sqlite3.connect(":memory:")
+    try:
+        assert conn.execute("select ?, typeof(?)", (member, member)).fetchone() == (value, "text")
+    finally:
+        conn.close()

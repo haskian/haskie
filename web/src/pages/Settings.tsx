@@ -45,7 +45,7 @@ const PIPELINE_FIELDS: NumberField<PipelineSettings>[] = [
 ]
 
 const MAINTENANCE_FIELDS: NumberField<PipelineSettings>[] = [
-  { key: 'maintenance_docs', min: 1 },
+  { key: 'maintenance_documents', min: 1 },
   { key: 'maintenance_idle_seconds', min: 1 },
   { key: 'ann_min_rows', min: 1 },
 ]
@@ -67,6 +67,7 @@ function Num({
   help,
   value,
   min,
+  max,
   step,
   onChange,
 }: {
@@ -74,12 +75,13 @@ function Num({
   help?: string
   value: number
   min?: number
+  max?: number
   step?: number
   onChange: (value: number) => void
 }) {
   return (
     <Field label={label} help={help}>
-      <input className="input" type="number" value={value} min={min} step={step} onChange={(event) => onChange(Number(event.target.value))} />
+      <input className="input" type="number" value={value} min={min} max={max} step={step} onChange={(event) => onChange(Number(event.target.value))} />
     </Field>
   )
 }
@@ -233,6 +235,7 @@ export function Settings({ route, counts }: PageProps) {
     sub: model === null ? 'full-text only' : `${model.name} · ${model.dims} dims`,
   }))
   const skipOcr = docFor(docs, 'conversion.skip_ocr_pages')
+  const frame = docFor(docs, 'conversion.chunk_frame')
 
   return (
     <Shell current={route.name} counts={counts} side={side}>
@@ -290,12 +293,21 @@ export function Settings({ route, counts }: PageProps) {
             onChange={(chunk_size) => update({ conversion: { ...settings.conversion, chunk_size } })}
           />
           <Num
-            label={docFor(docs, 'conversion.chunk_overlap').title}
-            help={docFor(docs, 'conversion.chunk_overlap').description}
-            value={settings.conversion.chunk_overlap}
+            label={docFor(docs, 'conversion.chunk_merge_below').title}
+            help={docFor(docs, 'conversion.chunk_merge_below').description}
+            value={settings.conversion.chunk_merge_below}
             min={0}
-            onChange={(chunk_overlap) => update({ conversion: { ...settings.conversion, chunk_overlap } })}
+            max={100}
+            onChange={(chunk_merge_below) => update({ conversion: { ...settings.conversion, chunk_merge_below } })}
           />
+          <div className="field">
+            <Toggle
+              label={frame.title}
+              checked={settings.conversion.chunk_frame}
+              onChange={(chunk_frame) => update({ conversion: { ...settings.conversion, chunk_frame } })}
+            />
+            <span className="faint">{frame.description}</span>
+          </div>
         </section>
 
         <section id="search">

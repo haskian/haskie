@@ -23,13 +23,21 @@ import msgspec
 from haskie import home
 from haskie.errors import HaskieError
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 15
 """`pragma user_version` of the schema below.
 
 A home stamped with it has exactly these tables and is opened as it is. Any other stamp is a
-shape this build cannot read, so the home is refused (see `migrate`). Bumped last when chunks
-gained the byte offsets a search seeks the markdown to: an embedding cache or a LanceDB table
-written without those columns must never be read by this build.
+shape this build cannot read, so the home is refused (see `migrate`). Against the last release
+(12), Structure-Aware Chunking changed what a chunk holds and how it is named:
+- A chunk is typed pieces with a heading path (`headings`), the path it is embedded after
+  (`frame`), and why it was cut (`start_reason`, `end_reason`).
+- A chunk row names its document `document`, not `doc`. `seq` alone numbers a chunk: `chunk_id`
+  is gone.
+- Chunk settings lost `chunk_overlap` and gained `chunk_merge_below` and `chunk_frame`, in the
+  `embeddings` table and in the cache id.
+- A collection row keeps its `overrides` and counts `pending_documents`.
+
+A cache file or LanceDB table written the old way must never be read by this build.
 
 Before 1.0.0 this is the only migration there is, and it covers the stores this version does not
 stamp as well. A change to what a chunk holds retires the embedding cache and every collection's
@@ -53,10 +61,10 @@ SCHEMA = """
 
     create table if not exists collections (
         name text primary key,
-        settings text not null default '{}',
+        overrides text not null default '{}',
         description text not null default '',
         created_at timestamp not null default 0,
-        pending_docs integer not null default 0,
+        pending_documents integer not null default 0,
         last_write_at timestamp,
         last_maintained_at timestamp,
         vector_index_rows integer not null default 0
@@ -102,7 +110,8 @@ SCHEMA = """
         urn text not null,
         model text not null,
         chunk_size integer not null,
-        chunk_overlap integer not null,
+        chunk_merge_below integer not null,
+        chunk_frame integer not null,
         chunker text not null,
         chunk_version integer not null,
         parser text not null,

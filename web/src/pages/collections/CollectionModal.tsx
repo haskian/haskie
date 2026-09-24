@@ -1,7 +1,6 @@
 import { Minus, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  ACTIVE_STATUSES,
   api,
   MAX_PAGE_SIZE,
   type BulkStarted,
@@ -13,6 +12,7 @@ import {
 } from '../../api'
 import { errorText, matchesText, needleOf } from '../../format'
 import { useOperation } from '../../hooks/useOperation'
+import { useOptions } from '../../hooks/useOptions'
 import { usePoll } from '../../hooks/usePoll'
 import { useRun } from '../../hooks/useRun'
 import { DescriptionBox, documentIcon, Kv, Modal, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
@@ -202,13 +202,13 @@ function CollectionBody({ name, onClose, onChanged }: { name: string; onClose: (
       <div id={TABS[2].id} role="tabpanel" className="collection-panel" hidden={tab !== TABS[2].id}>
         {options !== null && (
           <SettingsForm
-            settings={info.settings}
+            overrides={info.overrides}
             effective={info.effective}
             searchDefaults={info.search}
             options={options}
             outdated={info.index_outdated}
             busy={busy}
-            onSave={(next) => void run(() => api.saveCollectionSettings(name, next))}
+            onSave={(next) => void run(() => api.saveCollectionOverrides(name, next))}
           >
             <button className="btn" type="button" disabled={bulk.running} onClick={() => startBulk(() => api.indexCollection(name))}>
               <RefreshCw className="icon" />
@@ -262,7 +262,7 @@ function CollectionBody({ name, onClose, onChanged }: { name: string; onClose: (
 
 /** How a queued operation is going, beside the button that started it. */
 function BulkStatus({ operation }: { operation: OperationProgress }) {
-  const running = ACTIVE_STATUSES.has(operation.status)
+  const running = useOptions().active_run_statuses.includes(operation.status)
   const what = operation.kind === 'index_collection' ? 'queueing documents' : 'deleting'
   return (
     <span className="muted">

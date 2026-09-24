@@ -32,10 +32,10 @@ from lancedb.index import FTS, IvfPq
 
 from haskie import cpu
 from haskie.indexing import models
-from haskie.indexing.chunk import Chunk
+from haskie.indexing.chunk import HEADING_SEP, Chunk, CutReason, Position, framed
 from haskie.indexing.chunk import record as chunk_record
 from haskie.logs import get_logger
-from haskie.settings import EmbeddingModel, SearchSettings
+from haskie.settings import EmbeddingModel, Fusion, Reranker, SearchMode, SearchSettings
 
 
 class Row(msgspec.Struct):
@@ -53,11 +53,10 @@ _log = get_logger(__name__)
 
 PLAIN_SCHEMA = pa.schema(
     [
-        ("doc", pa.string()),
+        ("document", pa.string()),
         ("source_path", pa.string()),  # relative to the haskie home (portable)
         ("markdown_path", pa.string()),
         ("part", pa.int32()),
-        ("chunk_id", pa.int32()),
         ("seq", pa.int32()),
         ("line_start", pa.int32()),
         ("line_end", pa.int32()),
@@ -67,12 +66,15 @@ PLAIN_SCHEMA = pa.schema(
         ("byte_end", pa.int32()),
         ("page_start", pa.int32()),
         ("page_end", pa.int32()),
-        ("parents", pa.string()),
-        ("heading", pa.string()),
+        ("headings", pa.list_(pa.string())),  # `Chunk.headings`, outermost first
+        ("frame", pa.list_(pa.string())),  # `Chunk.frame`: what the models read ahead of `text`
         ("text", pa.string()),
+        # `Chunk.layout`: where each piece starts in `text`, and its type
+        ("layout", pa.list_(pa.struct([("type", pa.string()), ("position", pa.int32())]))),
+        ("start_reason", pa.string()),
+        ("end_reason", pa.string()),
     ]
 )
-PARENT_SEP = " > "
 
 
 class IndexStats(msgspec.Struct):
@@ -92,11 +94,10 @@ class Hit(msgspec.Struct):
     """One matching chunk with everything needed to cite or open it."""
 
     collection: str  # the collection whose table matched; the document itself belongs to none
-    doc: str
+    document: str
     source_path: str  # original upload, relative to home
     markdown_path: str  # full converted markdown, relative to home
     part: int  # micro-batch that produced the chunk
-    chunk_id: int
     seq: int  # 1-based position among the document's chunks
     line_start: int  # 1-based, in markdown_path
     line_end: int
@@ -106,12 +107,18 @@ class Hit(msgspec.Struct):
     byte_end: int
     page_start: int | None  # 1-based PDF pages; None for non-PDF
     page_end: int | None
-    parents: list[str]  # enclosing headings, outermost first
-    heading: str
-    header: str  # breadcrumb "parent > ... > heading", ready to cite
+    headings: list[str]  # the headings the chunk sits under, outermost first, its own last
+    frame: list[str]  # the headings the models read ahead of `text` (`Chunk.frame`)
+    header: str  # `headings` joined, "Part I > Chapter 2", ready to cite
     location: str  # human-readable "doc p.3-4 L10-20", ready to cite
     text: str
     score: float
+    # where each piece (a sentence, or a block kept whole) of `text` starts in it, in characters,
+    # and the markdown it came from: 0 first
+    layout: list[Position] = []
+    # why the chunk starts and ends where it does (`segment.CutReason`)
+    start_reason: CutReason = CutReason.EDGE
+    end_reason: CutReason = CutReason.EDGE
     # Absolute, built by `hit` from the index's own home rather than stored: the index keeps its
     # paths home-relative so a home stays portable. These are what a tool outside the app opens or
     # greps - `line_start`/`line_end` are lines in `markdown_file`.
@@ -124,8 +131,7 @@ def location(
 ) -> str:
     """The citation of one span of a document: "doc p.3-4 L10-20", pages only for a PDF.
 
-    Shared so a passage stitched out of several chunks (`passage.expand`) cites in exactly the
-    format a chunk does.
+    Shared so a passage (`passage.widen`) cites in exactly the format a chunk does.
     """
     pages = ""
     if page_start is not None:
@@ -159,7 +165,7 @@ def _fusion(settings: SearchSettings):
     """LanceDB "reranker" that merges the vector and BM25 rankings of a hybrid query."""
     from lancedb.rerankers import LinearCombinationReranker, RRFReranker
 
-    if settings.fusion == "linear":
+    if settings.fusion == Fusion.LINEAR:
         total = settings.vector_weight + settings.bm25_weight
         weight = settings.vector_weight / total if total > 0 else 0.5
         return LinearCombinationReranker(weight=weight)
@@ -273,13 +279,13 @@ class CollectionIndex:
     async def delete_document(self, doc: str) -> None:
         table = await self._deletable()
         if table is not None:
-            await table.delete(f"doc = '{doc}'")  # doc names sanitized in document/document.py
+            await table.delete(f"document = '{doc}'")  # doc names sanitized in document/document.py
 
     async def delete_parts(self, doc: str, start: int, end: int) -> None:
         """Drop the parts `[start, end)` of one document, leaving every other part alone."""
         table = await self._deletable()
         if table is not None:
-            await table.delete(f"doc = '{doc}' and part >= {int(start)} and part < {int(end)}")
+            await table.delete(f"document = '{doc}' and part >= {int(start)} and part < {int(end)}")
 
     async def add_parts(
         self,
@@ -315,8 +321,7 @@ class CollectionIndex:
         """One part as Arrow, or None when the part is empty (nothing to write for it).
 
         The chunk's own columns come from `chunk.record`, which the embedding cache writes its
-        parquet with too; this table adds the document's identity around them and flattens the
-        heading ancestry into one breadcrumb string."""
+        parquet with too; this table adds the document's identity around them."""
         if not rows:
             return None
         dims = self.embedding.dims if self.embedding else None
@@ -325,15 +330,13 @@ class CollectionIndex:
                 row.chunk,
                 row.vector,
                 dims,
-                doc=doc,
+                document=doc,
                 source_path=source_path,
                 markdown_path=markdown_path,
                 part=part,
-                chunk_id=chunk_id,  # unique with (doc, part)
                 seq=row.seq,
-                parents=PARENT_SEP.join(row.chunk.parents),
             )
-            for chunk_id, row in enumerate(rows)
+            for row in rows
         ]
         return pa.RecordBatch.from_pylist(records, schema=self._schema())
 
@@ -431,13 +434,13 @@ class CollectionIndex:
     async def query_vector(self, query: str, settings: SearchSettings) -> list[float] | None:
         """The query embedding, or None when this index can only answer lexically: mode `fts`, no
         embedding model, or a table written without a vector column."""
-        if settings.mode == "fts" or self.embedding is None:
+        if settings.mode == SearchMode.FTS or self.embedding is None:
             return None
         if not await self.has_vector_column():
             return None
         from haskie.indexing.embed import embed_query
 
-        await models.require_ready("embedding", self.embedding.name)
+        await models.require_ready(models.ModelKind.EMBEDDING, self.embedding.name)
         return await cpu.on_cpu(embed_query, self.embedding, query)
 
     async def _readable(self) -> lancedb.AsyncTable | None:
@@ -473,7 +476,7 @@ class CollectionIndex:
             return []
         if vector is None or not await self.has_vector_column():
             return await (await table.search(query, query_type="fts")).limit(limit).to_list()
-        if settings.mode == "vector":
+        if settings.mode == SearchMode.VECTOR:
             found = _tuned(await table.search(vector, query_type="vector"), settings)
             return await found.limit(limit).to_list()
         # the async API builds a hybrid query out of its two halves instead of `query_type=hybrid`
@@ -500,7 +503,7 @@ class CollectionIndex:
         return await (await table.search(query, query_type="fts")).limit(limit).to_list()
 
     async def search(self, query: str, settings: SearchSettings) -> list[Hit]:
-        rerank = settings.reranker != "none"
+        rerank = settings.reranker != Reranker.NONE
         fetch = max(settings.candidates, settings.limit) if rerank else settings.limit
         vector = await self.query_vector(query, settings)
         rows = await self.search_rows(query, vector, settings, fetch)
@@ -512,18 +515,15 @@ class CollectionIndex:
         """One result row as a `Hit`, with the file paths resolved against this index's home.
         `score` replaces the row's own signal: a merged ranking over several indexes scores its
         rows together, because per-index scores are not comparable (see search.flow)."""
-        parents = r["parents"].split(PARENT_SEP) if r["parents"] else []
-        heading = r["heading"]
         line_start, line_end = r["line_start"], r["line_end"]
         page_start, page_end = r["page_start"], r["page_end"]
         source_path, markdown_path = r["source_path"], r["markdown_path"]
         return Hit(
             collection=self.collection,
-            doc=r["doc"],
+            document=r["document"],
             source_path=source_path,
             markdown_path=markdown_path,
             part=r["part"],
-            chunk_id=r["chunk_id"],
             seq=r["seq"],
             line_start=line_start,
             line_end=line_end,
@@ -533,12 +533,15 @@ class CollectionIndex:
             byte_end=r["byte_end"],
             page_start=page_start,
             page_end=page_end,
-            parents=parents,
-            heading=heading,
-            header=PARENT_SEP.join([*parents, heading] if heading else parents),
-            location=location(r["doc"], page_start, page_end, line_start, line_end),
+            headings=r["headings"] or [],
+            frame=r["frame"] or [],
+            header=_header(r),
+            location=location(r["document"], page_start, page_end, line_start, line_end),
             text=r["text"],
             score=row_score(r) if score is None else score,
+            layout=[Position(p["type"], p["position"]) for p in r["layout"] or []],
+            start_reason=r["start_reason"],
+            end_reason=r["end_reason"],
             source_file=str(self.home / source_path) if source_path else "",
             markdown_file=str(self.home / markdown_path) if markdown_path else "",
         )
@@ -575,13 +578,17 @@ async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -
     """
     from haskie.indexing.embed import rerank_scores
 
-    await models.require_ready("reranker", settings.reranker_model)
-    scores = await cpu.on_cpu(
-        rerank_scores, settings.reranker_model, query, [r["text"] for r in rows]
-    )
+    await models.require_ready(models.ModelKind.RERANKER, settings.reranker_model)
+    read = [framed(r["frame"] or [], r["text"]) for r in rows]  # as they were embedded
+    scores = await cpu.on_cpu(rerank_scores, settings.reranker_model, query, read)
     for row, score in zip(rows, scores, strict=True):
         row["_relevance_score"] = score
     return sorted(rows, key=lambda r: r["_relevance_score"], reverse=True)
+
+
+def _header(r: dict) -> str:
+    """The header of a stored row, as `Chunk.header` builds it."""
+    return HEADING_SEP.join(r["headings"] or [])
 
 
 def row_score(r: dict) -> float:
@@ -599,15 +606,15 @@ def row_score(r: dict) -> float:
     return 0.0
 
 
-# What identifies one passage, wherever it is stored. The collection is deliberately not part of
-# it: the same chunk of the same document is the same answer, whichever collection's table it came
-# out of, so `search.flow.chunks` and `search.text.merge` both count it once.
-RowKey = tuple[str, int, int]
+# What identifies one chunk, wherever it is stored. The collection is deliberately not part of it:
+# the same chunk of the same document is the same answer, whichever collection's table it came out
+# of, so `search.retrieval.fan_out` and `search.text.merge` both count it once.
+RowKey = tuple[str, int]
 
 
 def row_key(row: dict) -> RowKey:
-    """(doc, part, chunk_id) of one result row."""
-    return (row["doc"], row["part"], row["chunk_id"])
+    """(document, seq) of one result row."""
+    return (row["document"], row["seq"])
 
 
 async def gather_rows(
@@ -637,8 +644,8 @@ def first_per_key(
     """One pair per `row_key`, keeping the first offered and the caller's order.
 
     The same document may be a member of several collections, whose tables then hold the same
-    chunk. A search is about passages, not memberships, so the copies are dropped; which copy is
-    "first" is the caller's ranking decision (see search.flow.chunks and search.text.merge).
+    chunk. A search is about chunks, not memberships, so the copies are dropped. The caller's
+    ranking decides which copy is "first" (see search.retrieval.fan_out and search.text.merge).
     """
     unique: dict[RowKey, tuple[CollectionIndex, dict]] = {}
     for index, row in pairs:

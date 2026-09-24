@@ -58,7 +58,7 @@ from haskie import audit, cpu, db, home, paging, settings
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection
 from haskie.document import convert, document
-from haskie.document.document import Document
+from haskie.document.document import Document, DocumentStatus
 from haskie.errors import (
     Conflict,
     InvalidInput,
@@ -67,10 +67,13 @@ from haskie.errors import (
 )
 from haskie.indexing import chunk, dbos_names, embed_cache, models, operations, pipeline, workflows
 from haskie.indexing.pipeline import Batch
+from haskie.indexing.workflows import Stage
+from haskie.paging import Order
 from haskie.settings import (
     ChunkSettings,
-    CollectionSettings,
+    CollectionOverrides,
     EmbeddingModel,
+    EmbeddingProfile,
     PipelineSettings,
     RetentionSettings,
     SearchOverrides,
@@ -136,7 +139,7 @@ async def _use(
     indexing_weight: int = 1,
     document_parallelism: int = PipelineSettings().document_parallelism,
     index_group_parts: int = GROUPED,
-    maintenance_docs: int = PipelineSettings().maintenance_docs,
+    maintenance_documents: int = PipelineSettings().maintenance_documents,
     maintenance_idle_seconds: int = PipelineSettings().maintenance_idle_seconds,
 ) -> None:
     """Store and apply pipeline settings, so the queues really carry the given limits.
@@ -147,7 +150,7 @@ async def _use(
     `cpu_budget` and the weights instead. `index_group_parts=1` gives the per-part index layout:
     one LanceDB commit, and one index task, per micro-batch. `document_parallelism=1` puts a whole
     stage back into a single child, which is what a test that reads one step log in order needs.
-    `maintenance_docs=1` makes every document ask for maintenance with no delay; the defaults
+    `maintenance_documents=1` makes every document ask for maintenance with no delay; the defaults
     leave it DELAYED for longer than any test runs."""
     budget = cpu_budget or (workers * STAGES if workers else PipelineSettings().cpu_budget)
     indexing = PipelineSettings(
@@ -158,7 +161,7 @@ async def _use(
         document_parallelism=document_parallelism,
         batch_pages=batch_pages,
         index_group_parts=index_group_parts,
-        maintenance_docs=maintenance_docs,
+        maintenance_documents=maintenance_documents,
         maintenance_idle_seconds=maintenance_idle_seconds,
     )
     await dbos.apply_settings(await save_user_settings(UserSettings(pipeline=indexing)))
@@ -224,7 +227,7 @@ async def _rows_of(collection: Collection, doc: str) -> int:
     """Rows one document has in a collection's table right now: what a detach or a delete has to
     leave none of, whichever way the write in flight was ordered against it."""
     table = await (await collection.index())._existing()
-    return 0 if table is None else await table.count_rows(f"doc = '{doc}'")
+    return 0 if table is None else await table.count_rows(f"document = '{doc}'")
 
 
 def _batch_of(args: tuple) -> Batch | None:
@@ -349,8 +352,8 @@ async def test_attach_indexes_the_document_into_the_collection(dbos, tmp_path: P
     never the document's own status."""
     collection = await Collection.create("Notes & Stuff")
     assert collection.name == "Notes-Stuff"
-    await collection.set_settings(CollectionSettings(chunk_size=40, chunk_overlap=0))
-    assert (await (await Collection.get("Notes-Stuff")).settings()).chunk_size == 40
+    await collection.set_overrides(CollectionOverrides(chunk_size=40))
+    assert (await (await Collection.get("Notes-Stuff")).overrides()).chunk_size == 40
     doc = await import_document(dbos, "guide.md", MD, tmp_path)
     previewed, preview = await document.ensure_preview(doc.name)
     assert preview.kind == "text"
@@ -363,14 +366,14 @@ async def test_attach_indexes_the_document_into_the_collection(dbos, tmp_path: P
     assert (await document.get(doc.name)).status == "imported", "the document's status is its own"
     assert await document.collections_of(doc.name) == ["Notes-Stuff"]
     hits = await collection.search("lancedb", SearchOverrides(limit=5))
-    assert hits and hits[0].heading == "Alpha" and hits[0].collection == "Notes-Stuff"
-    assert (hits[0].line_start, hits[0].line_end, hits[0].parents) == (5, 7, ["Title"])
+    assert hits and hits[0].headings == ["Title", "Alpha"] and hits[0].collection == "Notes-Stuff"
+    assert (hits[0].line_start, hits[0].line_end) == (7, 7), "the text, not its heading"
     assert hits[0].markdown_path == doc.relative(doc.markdown), "home-relative"
     assert hits[0].markdown_file == str(home.HOME / hits[0].markdown_path), "absolute"
     assert (home.HOME / hits[0].markdown_path).read_text() == MD
     assert MD[hits[0].char_start : hits[0].char_end] == hits[0].text
     assert (hits[0].page_start, hits[0].page_end) == (None, None), "no pages for markdown"
-    assert (hits[0].header, hits[0].location) == ("Title > Alpha", "guide.md L5-7")
+    assert (hits[0].header, hits[0].location) == ("Title > Alpha", "guide.md L7-7")
 
 
 async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> None:
@@ -379,7 +382,7 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
     refused instead, because the document's status has left `queued` by then."""
     await _use(dbos, workers=2, batch_pages=10, index_group_parts=1)
     collection = await Collection.create("q")
-    await collection.set_settings(CollectionSettings(chunk_size=60, chunk_overlap=0))
+    await collection.set_overrides(CollectionOverrides(chunk_size=60))
     pdf = await import_row(
         "book.pdf", text_pdf([f"Chapter {i} word{i}" for i in range(1, 26)]), tmp_path
     )
@@ -449,9 +452,9 @@ async def test_documents_of_one_collection_index_without_conflict(dbos, tmp_path
     assert [await wait_for(i) for i in ids] == ["indexed"] * len(ids)
     counts = await Collection("serial").counts()
     assert (counts.total, counts.indexed) == (4, 4)
-    assert {h.doc for h in await Collection("serial").search("D3P5", SearchOverrides(limit=1))} == {
-        "d3.pdf"
-    }
+    assert {
+        h.document for h in await Collection("serial").search("D3P5", SearchOverrides(limit=1))
+    } == {"d3.pdf"}
 
 
 async def test_workflow_ids_name_their_kind_and_their_names(dbos, tmp_path: Path) -> None:
@@ -710,13 +713,13 @@ async def test_stage_queues_cap_each_stage_separately(
     stage take a share of one pool."""
     await _use(dbos, cpu_budget=4, converting_weight=2, batch_pages=1)
     caps = workflows.stage_caps((await load_user_settings()).pipeline)
-    assert (caps["convert"], caps["embed"]) == (2, 1), "the split this test is about"
+    assert (caps[Stage.CONVERT], caps[Stage.EMBED]) == (2, 1), "the split this test is about"
     docs = [
         await import_row(f"c{i}.pdf", text_pdf([f"C{i}A tokc{i}", f"C{i}B"]), tmp_path)
         for i in range(3)
     ]
-    converting = Overlap(pipeline.convert_batch, wait_for=caps["convert"])
-    embedding = Overlap(pipeline.embed_batch, wait_for=caps["embed"])
+    converting = Overlap(pipeline.convert_batch, wait_for=caps[Stage.CONVERT])
+    embedding = Overlap(pipeline.embed_batch, wait_for=caps[Stage.EMBED])
     monkeypatch.setattr(pipeline, "convert_batch", converting)
     monkeypatch.setattr(pipeline, "embed_batch", embedding)
 
@@ -724,8 +727,8 @@ async def test_stage_queues_cap_each_stage_separately(
     assert [await wait_for(job_id) for job_id in ids] == ["imported"] * len(ids)
 
     assert converting.reached.is_set(), "the convert queue never ran two batches at once"
-    assert converting.peak == caps["convert"], f"convert peak {converting.peak}, cap {caps}"
-    assert embedding.peak == caps["embed"], f"embed peak {embedding.peak}, cap {caps}"
+    assert converting.peak == caps[Stage.CONVERT], f"convert peak {converting.peak}, cap {caps}"
+    assert embedding.peak == caps[Stage.EMBED], f"embed peak {embedding.peak}, cap {caps}"
     assert len(converting.order) == len(embedding.order) == 6, "three documents, two pages each"
 
 
@@ -910,7 +913,7 @@ async def test_index_groups_parts_into_one_write(dbos, tmp_path: Path) -> None:
     assert await _fragments(collection) == before + 1, "one commit for the document"
     table = await (await collection.index())._existing()
     assert table is not None
-    rows = [r for r in (await table.to_arrow()).to_pylist() if r["doc"] == doc.name]
+    rows = [r for r in (await table.to_arrow()).to_pylist() if r["document"] == doc.name]
     assert len(rows) == await _cached_rows(doc.name) > 0
     assert sorted({r["part"] for r in rows}) == [0, 1, 2], "every part landed in that one commit"
     assert (await Collection("grouped").search("gamma"))[0].page_start == 3
@@ -965,7 +968,8 @@ async def test_two_collections_with_different_chunk_size_get_their_own_cache(
     spy = _spy_embed(monkeypatch)
     await Collection.create("wide")
     narrow = await Collection.create("narrow")
-    await narrow.set_settings(CollectionSettings(chunk_size=60, chunk_overlap=0))
+    # below a section of `MD`: every heading starts a chunk at any size
+    await narrow.set_overrides(CollectionOverrides(chunk_size=20))
     doc = await import_document(dbos, "a.md", MD, tmp_path)
 
     await attach_document(dbos, "wide", doc.name)
@@ -973,15 +977,15 @@ async def test_two_collections_with_different_chunk_size_get_their_own_cache(
 
     entries = {entry.chunk_size: entry for entry in await embed_cache.entries(doc.name)}
     default = (await load_user_settings()).conversion.chunk_size
-    assert sorted(entries) == sorted({default, 60}), "one cache row per distinct chunk size"
+    assert sorted(entries) == sorted({default, 20}), "one cache row per distinct chunk size"
     assert len({entry.id for entry in entries.values()}) == 2, "distinct ids, so no collision"
     assert {p.name for p in doc.embeddings_dir.glob("*.parquet")} == {
         f"{entry.id}.parquet" for entry in entries.values()
     }
-    assert spy.calls == Counter({entries[default].id: 1, entries[60].id: 1}), "one run each"
-    assert entries[60].rows > entries[default].rows, "smaller chunks, more of them"
-    assert (await Collection("wide").search("lancedb"))[0].doc == doc.name
-    assert (await Collection("narrow").search("lancedb"))[0].doc == doc.name
+    assert spy.calls == Counter({entries[default].id: 1, entries[20].id: 1}), "one run each"
+    assert entries[20].rows > entries[default].rows, "smaller chunks, more of them"
+    assert (await Collection("wide").search("lancedb"))[0].document == doc.name
+    assert (await Collection("narrow").search("lancedb"))[0].document == doc.name
 
 
 async def test_reindexing_with_unchanged_settings_hits_the_cache(
@@ -1015,9 +1019,7 @@ async def test_concurrent_attaches_converge_on_one_embedding_run(
     await _use(dbos, workers=4, batch_pages=1)
     for name in ("one", "two"):
         # the same non-default chunk size in both, so neither can read the import's pre-warm
-        await (await Collection.create(name)).set_settings(
-            CollectionSettings(chunk_size=60, chunk_overlap=0)
-        )
+        await (await Collection.create(name)).set_overrides(CollectionOverrides(chunk_size=60))
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     gate = Gate()
     monkeypatch.setattr(pipeline, "embed_batch", gate.wrap(pipeline.embed_batch))
@@ -1065,13 +1067,13 @@ async def test_reimport_reconverts_and_drops_the_stale_cache(dbos, tmp_path: Pat
     """Re-importing rewrites the markdown every cached embedding was chunked from, so the whole
     cache of the document goes first - rows and files - and only the fresh pre-warm is left."""
     collection = await Collection.create("stale")
-    await collection.set_settings(CollectionSettings(chunk_size=60, chunk_overlap=0))
+    await collection.set_overrides(CollectionOverrides(chunk_size=60))
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     await attach_document(dbos, "stale", doc.name)
     before = await embed_cache.entries(doc.name)
     assert len(before) == 2, "the import's default params and the collection's"
     assert len(list(doc.embeddings_dir.glob("*.parquet"))) == 2
-    await document.set_status(doc.name, "error", "boom")
+    await document.set_status(doc.name, DocumentStatus.ERROR, "boom")
 
     assert await wait_for(await dbos.start_import(doc.name)) == "imported"
 
@@ -1082,9 +1084,7 @@ async def test_reimport_reconverts_and_drops_the_stale_cache(dbos, tmp_path: Pat
     assert (await document.get(doc.name)).status == "imported"
     assert (
         await embed_cache.lookup(
-            embed_cache.params(
-                await document.get(doc.name), ChunkSettings(chunk_size=60, chunk_overlap=0), None
-            )
+            embed_cache.params(await document.get(doc.name), ChunkSettings(chunk_size=60), None)
         )
         is None
     ), "the collection's entry is a miss until it is indexed again"
@@ -1098,7 +1098,7 @@ async def test_ensure_embedding_fails_permanently_under_another_model(dbos, tmp_
     row = await document.get(doc.name)
     wanted = embed_cache.params(
         row,
-        ChunkSettings(chunk_size=300, chunk_overlap=0),
+        ChunkSettings(chunk_size=300),
         EmbeddingModel("BAAI/bge-small-en-v1.5", 384),
     )
     assert (await load_user_settings()).embedding_model is None, "the profile has no model"
@@ -1145,21 +1145,23 @@ async def test_indexing_a_member_requests_maintenance_and_counts_pending(
     await attach_document(dbos, "kept", first.name)
 
     waiting = await maintenance_state("kept")
-    assert (waiting.pending_docs, waiting.last_maintained_at) == (1, None), "counted, not due"
+    assert (waiting.pending_documents, waiting.last_maintained_at) == (1, None), "counted, not due"
     assert waiting.last_write_at is not None
     assert await Collection.pending_names() == ["kept"]
 
-    await _use(dbos, workers=2, batch_pages=10, maintenance_docs=1)  # the next one is due at once
+    await _use(
+        dbos, workers=2, batch_pages=10, maintenance_documents=1
+    )  # the next one is due at once
     second = await import_document(dbos, "b.md", MD, tmp_path)
     await attach_document(dbos, "kept", second.name)
     await _drain_maintenance()
 
     settled = await maintenance_state("kept")
-    assert (settled.pending_docs, await Collection.pending_names()) == (0, [])
+    assert (settled.pending_documents, await Collection.pending_names()) == (0, [])
     assert settled.last_maintained_at is not None
     assert await _maintenance_runs(dbos_names.MAINTAIN_WORKFLOW) == ["SUCCESS"], "one run"
     info = await collection.info()
-    assert info.index is not None and info.maintenance.pending_docs == 0
+    assert info.index is not None and info.maintenance.pending_documents == 0
     assert info.index.num_rows > 0 and info.index.has_fts_index, "the run built the index"
     assert info.index.unindexed_rows == 0, "and folded every row written since into it"
 
@@ -1185,8 +1187,8 @@ async def test_maintenance_runs_on_the_collection_partition(
     job_id = await dbos.attach("onewriter", doc.name)
     assert await wait_event(gate.entered), "the index step never started"
 
-    # one pending document is already `maintenance_docs`, so the run is due with no delay
-    await workflows.request_maintenance("onewriter", 1, PipelineSettings(maintenance_docs=1))
+    # one pending document is already `maintenance_documents`, so the run is due with no delay
+    await workflows.request_maintenance("onewriter", 1, PipelineSettings(maintenance_documents=1))
 
     async def enqueued() -> list[str]:
         return await _maintenance_runs(dbos_names.MAINTAIN_PARTITION_WORKFLOW)
@@ -1218,7 +1220,7 @@ async def test_maintenance_skips_a_collection_without_a_table(dbos) -> None:
     )
 
     assert report.skipped == "no-table" and report.collection == "empty"
-    assert (await maintenance_state("empty")).pending_docs == 0
+    assert (await maintenance_state("empty")).pending_documents == 0
     assert await Collection.pending_names() == []
 
 
@@ -1241,7 +1243,7 @@ async def test_maintenance_skips_a_collection_deleted_while_it_waited(dbos, tmp_
 
 
 async def test_boot_schedules_pending_collections(dbos, tmp_path: Path) -> None:
-    """A run lost to a shutdown leaves `pending_docs` standing, so the next boot asks again."""
+    """A run lost to a shutdown leaves `pending_documents` standing, so the next boot asks again."""
     await _use(dbos, workers=2, batch_pages=10, maintenance_idle_seconds=NEVER)
     await Collection.create("left")
     doc = await import_document(dbos, "a.md", MD, tmp_path)
@@ -1252,7 +1254,7 @@ async def test_boot_schedules_pending_collections(dbos, tmp_path: Path) -> None:
 
     await _drain_maintenance()
     state = await maintenance_state("left")
-    assert (state.pending_docs, await Collection.pending_names()) == (0, [])
+    assert (state.pending_documents, await Collection.pending_names()) == (0, [])
     assert state.last_maintained_at is not None
 
 
@@ -1570,11 +1572,11 @@ async def test_delete_document_clears_every_collection_it_is_in(dbos, tmp_path: 
             name
         )
         assert {
-            h.doc for h in await Collection(name).search("lancedb", SearchOverrides(limit=5))
+            h.document for h in await Collection(name).search("lancedb", SearchOverrides(limit=5))
         } == set(), name
-    assert {h.doc for h in await Collection("left").search("beta", SearchOverrides(limit=5))} == {
-        other.name
-    }
+    assert {
+        h.document for h in await Collection("left").search("beta", SearchOverrides(limit=5))
+    } == {other.name}
 
 
 async def test_attaching_while_a_delete_runs_is_refused(dbos, tmp_path: Path, monkeypatch) -> None:
@@ -1633,7 +1635,7 @@ async def test_detach_leaves_the_document_and_the_other_collection(dbos, tmp_pat
     assert await Collection("drop").member_names() == []
     assert await Collection("drop").search("lancedb") == []
     assert await Collection("keep").member_names() == [doc.name]
-    assert (await Collection("keep").search("lancedb"))[0].doc == doc.name
+    assert (await Collection("keep").search("lancedb"))[0].document == doc.name
     assert (await document.get(doc.name)).status == "imported"
     assert await document.collections_of(doc.name) == ["keep"]
     assert [e.id for e in await embed_cache.entries(doc.name)] == [entry.id], "the cache stays"
@@ -1675,7 +1677,7 @@ async def test_detach_waits_for_the_index_write_in_flight(
     assert await collection.member_names() == [done.name]
     assert await _rows_of(collection, slow.name) == 0, "its rows went with the membership"
     assert await _rows_of(collection, done.name) > 0, "and the other member kept its own"
-    assert {h.doc for h in await collection.search("alpha", SearchOverrides(limit=5))} == {
+    assert {h.document for h in await collection.search("alpha", SearchOverrides(limit=5))} == {
         done.name
     }, "both documents carry 'alpha'; only the one still attached is found"
     with pytest.raises(NotFound, match="document not in collection part: slow.pdf"):
@@ -1763,7 +1765,7 @@ async def test_index_collection_workflow_enqueues_every_member_in_pages(
 
     job_id = await dbos.start_index_collection("b")
 
-    assert await wait_for(job_id) == workflows.BulkResult(done=5, skipped=0)
+    assert await wait_for(job_id) == workflows.BulkResult(done=5)
     queued = await _member_workflows("b")
     assert len(queued) == 5, "one index per member, and no second one for any of them"
     assert [await wait_for(i) for i in queued] == ["indexed"] * 5
@@ -1776,7 +1778,7 @@ async def test_index_collection_workflow_enqueues_every_member_in_pages(
         == names
     )
     progress = await DBOS.get_event_async(job_id, workflows.PROGRESS_EVENT, timeout_seconds=0)
-    assert (progress.done, progress.skipped, progress.total, progress.last) == (5, 0, 5, None)
+    assert (progress.done, progress.total, progress.last) == (5, 5, None)
     await _drain()
 
 
@@ -1808,7 +1810,7 @@ async def test_index_collection_workflow_is_idempotent_on_replay(
     release.set()
     await dbos.start()  # restart: same application_version, so recovery picks the workflow up
 
-    assert await wait_for(job_id) == workflows.BulkResult(done=5, skipped=0)
+    assert await wait_for(job_id) == workflows.BulkResult(done=5)
 
     queued = await _member_workflows("b")
     assert len(queued) == 5, "the replay re-attached instead of queueing the first page again"
@@ -1914,7 +1916,7 @@ async def test_the_pipeline_page_reports_the_action_collection_and_document(
 
     listed = (await operations._pipeline_page()).items
 
-    assert {(r.action, r.collection, r.doc) for r in listed} == {
+    assert {(r.action, r.collection, r.document) for r in listed} == {
         ("import", None, "a.md"),
         ("embed", None, "a.md"),
         ("index", "c", "a.md"),
@@ -1922,9 +1924,9 @@ async def test_the_pipeline_page_reports_the_action_collection_and_document(
     assert {r.status for r in listed} == {"SUCCESS"}
     rows = (await operations.list_operations("document")).items
     # the embed is folded into the import that spawned it: two operations, not three rows
-    assert {row.title for row in rows} == {"import a.md", "c / a.md"}
+    assert {row.title for row in rows} == {"a.md", "c / a.md"}
     assert {row.kind for row in rows} == {"document"}
-    assert [j.stage for row in rows if row.title == "import a.md" for j in row.jobs] == [
+    assert [j.stage for row in rows if row.title == "a.md" for j in row.jobs] == [
         "convert",
         "embed",
     ]
@@ -1945,7 +1947,7 @@ async def test_the_pipeline_page_filters_by_collection_before_it_cuts_the_window
 
     quiet = await operations._pipeline_page("quiet", page_size=2)
     (run,) = quiet.items
-    assert (run.action, run.collection, run.doc) == ("index", "quiet", "a.md")
+    assert (run.action, run.collection, run.document) == ("index", "quiet", "a.md")
     assert run.status == "SUCCESS"
     assert quiet.next_cursor is None, "the filtered listing has one page"
 
@@ -1963,11 +1965,11 @@ async def test_the_pipeline_page_rejects_a_bad_cursor(dbos) -> None:
     with pytest.raises(InvalidInput, match="invalid cursor"):
         await operations._pipeline_page(cursor="not-a-cursor")
     with pytest.raises(InvalidInput, match="cursor does not match"):
-        await operations._pipeline_page(cursor=encode(["a.md"], "name", "asc"))
+        await operations._pipeline_page(cursor=encode(["a.md"], "name", Order.ASC))
     with pytest.raises(InvalidInput, match="cursor does not match"):  # an older build's cursor
         await operations._pipeline_page(cursor=encode([0], sort, order))
     # an offset that is no offset, another listing's cursor, and an identity that is no name
-    for key in ([operations.DOCUMENT_KIND, -1], ["collection", 0], [7, 0]):
+    for key in ([operations.OperationKind.DOCUMENT, -1], ["collection", 0], [7, 0]):
         with pytest.raises(InvalidInput, match="invalid cursor"):
             await operations._pipeline_page(cursor=encode(key, sort, order))
     for limit in (0, paging.MAX_PAGE_SIZE + 1):
@@ -1988,7 +1990,7 @@ async def test_list_operations_pages_on_a_cursor_of_its_own(dbos) -> None:
     first = await operations.list_operations("collection", page_size=1)
 
     assert [row.id for row in first.items] == [newer], "newest first"
-    assert first.items[0].title == "index collection pager"
+    assert first.items[0].title == "collection pager"
     assert first.next_cursor is not None
     second = await operations.list_operations("collection", page_size=1, cursor=first.next_cursor)
     assert [row.id for row in second.items] == [older]
@@ -2012,7 +2014,7 @@ async def test_the_pipeline_page_never_loads_inputs(dbos, tmp_path: Path, monkey
 
     (run,) = (await operations._pipeline_page("lean")).items
 
-    assert (run.collection, run.doc) == ("lean", "a.md"), "read from the id"
+    assert (run.collection, run.document) == ("lean", "a.md"), "read from the id"
     parent, children = calls
     assert parent["load_input"] is False, "the parent listing never reads inputs"
     assert parent["workflow_id_prefix"] == "idx-col:lean:" and parent["sort_desc"] is True
@@ -2089,7 +2091,7 @@ async def test_the_pipeline_page_stays_fast_over_a_long_history(dbos, tmp_path: 
     page = await operations._pipeline_page("quiet", page_size=100)
     elapsed = time.perf_counter() - started
 
-    assert [(r.collection, r.doc) for r in page.items] == [("quiet", "a.md")]
+    assert [(r.collection, r.document) for r in page.items] == [("quiet", "a.md")]
     assert page.next_cursor is None
     busy = (await operations._pipeline_page("noisy", page_size=100)).items
     assert len(busy) == 100, "the busy collection really is in the history"
@@ -2209,7 +2211,7 @@ async def test_a_document_delete_is_listed_as_a_collection_operation_with_no_col
     assert (row.id, row.kind, row.title) == (
         operation_id,
         "collection",
-        f"delete document {doc.name}",
+        f"document {doc.name}",
     )
     filtered = await operations.list_operations("collection", collection="any", page_size=10)
     assert filtered.items == [], (
@@ -2227,9 +2229,6 @@ def test_the_names_the_operations_view_spells_out_are_the_ones_dbos_records() ->
     ]
     assert dbos_names.STAGE_WORKFLOW == get_dbos_func_name(workflows.stage_slice)
     assert dbos_names.STAGE_STEP == get_dbos_func_name(workflows.try_batch)
-    assert workflows.stage_slice.__name__ != dbos_names.STAGE_WORKFLOW, (
-        "the durable name is pinned, not derived from the function name"
-    )
     assert operations.KIND_NAMES == {
         "collection": [
             get_dbos_func_name(workflows.index_collection_workflow),
@@ -2253,7 +2252,7 @@ def test_the_names_the_operations_view_spells_out_are_the_ones_dbos_records() ->
 async def test_an_unreadable_settings_row_does_not_stop_the_boot(dbos, monkeypatch) -> None:
     """The loader already tolerates a row another build wrote, so `start()` applies defaults and
     `/api/status` reports the problem."""
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
     async with db.connect() as conn:
         await conn.execute(
             'update settings set json = \'{"pipeline": {"cpu_budget": 0}}\' where id = 1'
@@ -2277,7 +2276,7 @@ async def test_settings_rejected_while_applying_fall_back_to_defaults_at_boot(
     dbos, monkeypatch, caplog
 ) -> None:
     """The last line of defence: whatever `apply_settings` rejects, boot continues on defaults."""
-    stored = await save_user_settings(UserSettings(embedding="compact"))
+    stored = await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
     applied: list[UserSettings] = []
 
     async def apply_settings(value: UserSettings) -> None:
@@ -2311,7 +2310,7 @@ async def test_audit_records_carry_the_collection_and_the_document(dbos, tmp_pat
 
     lines = audit_lines()
 
-    assert {(r["event"], r.get("collection"), r.get("doc")) for r in lines} == {
+    assert {(r["event"], r.get("collection"), r.get("document")) for r in lines} == {
         ("import.completed", None, "a.md"),
         ("index.completed", "aud", "a.md"),
         ("index.failed", "aud", "b.md"),
@@ -2385,7 +2384,7 @@ async def test_daily_maintenance_purges_the_history_past_the_retention(
     await save_user_settings(UserSettings(retention=RetentionSettings(operation_days=1)))
     doc = await import_document(dbos, "old.md", MD, tmp_path)
     listed = (await operations._pipeline_page()).items
-    assert {run.doc for run in listed} == {doc.name}, "the import and the embedding it warmed"
+    assert {run.document for run in listed} == {doc.name}, "the import and the embedding it warmed"
     job_id = listed[0].id
     assert await operations.list_tasks(job_id), "the job has micro-batches while DBOS holds it"
     two_days_ago = int((time.time() - 2 * 86400) * 1000)
@@ -2416,7 +2415,7 @@ async def test_daily_maintenance_keeps_an_operation_inside_the_retention(
     await workflows.daily_maintenance(datetime.now(UTC), None)
 
     assert [run.id for run in (await operations._pipeline_page()).items] == before
-    assert {run.doc for run in (await operations._pipeline_page()).items} == {doc.name}
+    assert {run.document for run in (await operations._pipeline_page()).items} == {doc.name}
 
 
 async def test_daily_maintenance_sweeps_stale_staged_uploads(dbos) -> None:

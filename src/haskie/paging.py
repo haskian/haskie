@@ -9,14 +9,20 @@ only, the cursor contributes bound parameters.
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Callable
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Annotated, Any
 
 import msgspec
+from litestar.params import Parameter, ParameterKwarg
 
 from haskie import db
 from haskie.errors import InvalidInput
 
-Order = Literal["asc", "desc"]
+
+class Order(StrEnum):
+    ASC = "asc"
+    DESC = "desc"
+
 
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 1000
@@ -37,7 +43,7 @@ class PageRequest(msgspec.Struct, frozen=True):
     cursor: str | None = None
     page_size: int = DEFAULT_PAGE_SIZE
     sort: str | None = None
-    order: Order = "asc"
+    order: Order = Order.ASC
 
     def __post_init__(self) -> None:
         check_page_size(self.page_size)
@@ -61,11 +67,17 @@ class _Cursor(msgspec.Struct):
     v: int = CURSOR_VERSION
 
 
+def one_of(choices: type[StrEnum]) -> ParameterKwarg:
+    """A query argument over a closed set, with its values spelled out: litestar-mcp renders an
+    enum as an untyped object, so an agent would not learn them from the tool schema."""
+    return Parameter(description=f"One of: {', '.join(choices)}.")
+
+
 def page_request(
     cursor: str | None = None,
     page_size: int = DEFAULT_PAGE_SIZE,
     sort: str | None = None,
-    order: Order = "asc",
+    order: Annotated[Order, one_of(Order)] = Order.ASC,
 ) -> PageRequest:
     """The one place handler query arguments become a validated request.
 
@@ -157,7 +169,7 @@ class Keyset:
         """Condition and parameters for the first page boundary; empty without a cursor."""
         if self.key is None:
             return "", []
-        comparison = ">" if self.order == "asc" else "<"
+        comparison = ">" if self.order == Order.ASC else "<"
         columns = ", ".join(self.columns)
         return f"({columns}) {comparison} ({db.placeholders(len(self.columns))})", list(self.key)
 

@@ -12,23 +12,25 @@ type Wire<K extends keyof components['schemas']> = Complete<components['schemas'
 
 export type ChunkSettings = Wire<'ChunkSettings'>
 export type ConversionSettings = Wire<'ConversionSettings'>
-export type CollectionSettings = Wire<'CollectionSettings'>
+export type CollectionOverrides = Wire<'CollectionOverrides'>
 export type SearchSettings = Wire<'SearchSettings'>
 export type SearchOverrides = Wire<'SearchOverrides'>
 export type PipelineSettings = Wire<'PipelineSettings'>
 export type RetentionSettings = Wire<'RetentionSettings'>
 export type UserSettings = Wire<'UserSettings'>
 export type FieldDoc = Wire<'FieldDoc'>
-// Every choice the UI offers, including the status and kind vocabularies, so no enumeration is
-// spelled a second time here. One fetch per page load answers it (see `api.options`).
+// Every choice the UI offers, including the status and kind vocabularies. One fetch per page load
+// answers it (see `api.options`).
 export type Options = Wire<'Options'>
 export type ImportedDocument = Wire<'Document'>
 export type Document = Wire<'Listed'>
 export type CollectionInfo = Wire<'CollectionInfo'>
 export type EmbeddingEntry = Wire<'Entry'> // `embed_cache.Entry`: one cached embedding of a document
 export type Hit = Wire<'Hit'>
-// A passage: consecutive chunks read back from the markdown and widened to whole sentences.
-// `Excerpt` is a passage on the wire today; the type name is what a later trimming step keeps.
+// A passage: consecutive matched chunks of one document, read back from the markdown and widened
+// on each side (`passage.widen`). Widening stops at the nearest newline, else at the outermost
+// whole sentence within 300 characters, else at 300 characters. `Excerpt` is a passage on the
+// wire today; the type name is what a later trimming step keeps.
 export type Passage = Wire<'Passage'>
 export type Source = Wire<'Source'>
 export type Sources = Wire<'Sources'>
@@ -57,12 +59,13 @@ export type Member = Wire<'Member'>
 export type CollectionSummary = Wire<'CollectionSummary'>
 
 // The vocabularies the UI narrows on, each read off the field that carries it, so no member is
-// spelled out. `Options` lists the same values at runtime, for the dropdowns.
+// spelled out. `Options` lists the same values at runtime, for the dropdowns, and says which
+// statuses are still on their way.
 export type Parser = ConversionSettings['parser']
 export type Chunker = ChunkSettings['chunker']
 export type Accelerator = PipelineSettings['accelerator']
 export type EmbeddingProfile = UserSettings['embedding']
-export type DocStatus = Document['status']
+export type DocumentStatus = Document['status']
 export type Granularity = NonNullable<operations['ApiSearchExploreExplore']['parameters']['query']['granularity']>
 export type MemberStatus = Member['status']
 export type SearchMode = NonNullable<SearchSettings['mode']>
@@ -76,19 +79,14 @@ export type BulkKind = OperationProgress['kind']
 // What a session can be seen doing; `collections` is the selection itself being set.
 export type SessionAction = SessionEvent['action']
 
-// In lifecycle order, which is the order the Documents page bands them in.
-export const DOCUMENT_STATUSES: readonly DocStatus[] = ['queued', 'converting', 'embedding', 'imported', 'error', 'cancelled', 'deleting']
-// Still on its way: what the UI polls for and shows a spinner against.
-export const ACTIVE_DOCUMENT_STATUSES: readonly DocStatus[] = ['queued', 'converting', 'embedding']
-export const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(['ENQUEUED', 'PENDING'])
-
 // What a collection may override of the chunking defaults; null is "use the default".
-export type ChunkOverrides = Pick<CollectionSettings, keyof ChunkSettings>
+export type ChunkOverrides = Pick<CollectionOverrides, keyof ChunkSettings>
 
 // The viewer is streamed as NDJSON, so these frames are not a response body and the OpenAPI
-// document does not carry them; they mirror `render.Head`, `render.Heading` and `render.Page` by
-// hand. One `head`, then one `page` per page of rendered HTML. The HTML comes from the server
-// with raw HTML already removed, which is why the pane can insert it; see `haskie/render.py`.
+// document does not carry them; they mirror `api.documents.Head`, `render.Heading` and
+// `render.Page` by hand. One `head`, then one `page` per page of rendered HTML. The HTML comes
+// from the server with raw HTML already removed, which is why the pane can insert it; see
+// `haskie/document/render.py`.
 export interface Heading {
   level: number
   text: string
@@ -113,7 +111,7 @@ export const MAX_PAGE_SIZE = 1000 // the backend's cap; a bigger page_size is re
 // no name for a shared parameter set, so they are read off one listing that takes them.
 export type PageRequest = Omit<NonNullable<operations['ApiDocumentsListDocuments']['parameters']['query']>, 'status'>
 export type Order = NonNullable<PageRequest['order']>
-// Litestar names a paged response after its item type (`Page_haskie.document.document.Document_`),
+// Litestar names a paged response after its item type (`Page_haskie.document.document.Listed_`),
 // so the schema has no generic to alias. The envelope comes from one of them; the items stay open.
 export type Page<T> = Omit<Wire<'Page_haskie.document.document.Listed_'>, 'items'> & { items: T[] }
 // What an import may say about the document it creates. Everything is optional: the file name
@@ -194,8 +192,8 @@ export const api = {
   collection: (name: string) => request<CollectionInfo>(collectionPath(name)),
   deleteCollection: (name: string) => request<BulkStarted>(collectionPath(name), { method: 'DELETE' }),
   searchCollection: (name: string, q: string) => request<Hit[]>(`${collectionPath(name)}/search?q=${encodeURIComponent(q)}`),
-  saveCollectionSettings: (name: string, s: CollectionSettings) =>
-    request<CollectionInfo>(`${collectionPath(name)}/settings`, json('PUT', s)),
+  saveCollectionOverrides: (name: string, s: CollectionOverrides) =>
+    request<CollectionInfo>(`${collectionPath(name)}/overrides`, json('PUT', s)),
   indexCollection: (name: string) => request<BulkStarted>(`${collectionPath(name)}/index`, { method: 'POST' }),
 
   // The collection's members: one document row each, plus how far this collection indexed it.
@@ -210,7 +208,7 @@ export const api = {
   detachDocument: (name: string, doc: string) => request<void>(memberPath(name, doc), { method: 'DELETE' }),
   reindexMember: (name: string, doc: string) => request<BulkStarted>(`${memberPath(name, doc)}/index`, { method: 'POST' }),
 
-  documents: (q: PageRequest & { status?: DocStatus } = {}) => {
+  documents: (q: PageRequest & { status?: DocumentStatus } = {}) => {
     const { status, ...page } = q
     return request<Page<Document>>(`/api/documents${pageQuery(page, { status })}`)
   },

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, type Head, type Preview } from '../api'
 import { errorText } from '../format'
-import { anchorIndex, breadcrumb, type Anchor } from './anchor'
+import { anchorIndex, headingPath, type Anchor } from './anchor'
 import { Skeleton } from './Skeleton'
 
 // The server numbers heading ids by position (`render.to_html`), so the nth entry of the table of
@@ -124,7 +124,7 @@ export function DocumentPanes({
   const previewUrl = api.previewUrl(doc)
   const sourceReady = loadedSource === previewUrl // a new document starts over without an effect
   const loading = sourceReady ? undefined : 'loading'
-  const trail = head !== null && head.toc.length > 0 ? breadcrumb(head.toc, current.heading ?? 0) : []
+  const trail = head !== null && head.toc.length > 0 ? headingPath(head.toc, current.heading ?? 0) : []
   const crumb = [head !== null && head.pages > 1 ? `p. ${current.page}/${head.pages}` : '', trail.join(' › ')].filter(Boolean).join(' · ')
 
   return (

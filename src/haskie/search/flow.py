@@ -58,7 +58,7 @@ class Search(msgspec.Struct):
     limit: int  # answers the caller asked for; the last step cuts to it
     scan: int  # how deep the ranking goes; `hits` cuts to it
     candidates: int  # rows each collection returns, and the pool the reranker rescores
-    kind: type[Passage] = Passage  # which shape `widen` builds
+    shape: type[Passage] = Passage  # which passage type `widen` builds
     sections: int = DEFAULT_SECTIONS  # `sources` only
 
 
@@ -66,7 +66,7 @@ class Search(msgspec.Struct):
 
 
 async def retrieve(ctx: StepContext[Search, None, None]) -> retrieval.Pool:
-    """Every chosen collection, read at once, one row per passage."""
+    """Every chosen collection, read at once, one row per chunk."""
     return await retrieval.fan_out(ctx.state.plan, ctx.state.query, ctx.state.candidates)
 
 
@@ -86,12 +86,12 @@ async def hits(ctx: StepContext[Search, None, retrieval.Pool]) -> list[Hit]:
 
 
 async def widen(ctx: StepContext[Search, None, list[Hit]]) -> list[Passage]:
-    """Consecutive chunks of one document, merged and widened to whole sentences.
+    """Consecutive chunks of one document, merged and widened to where a reader stops.
 
-    `Search.kind` decides the shape: an excerpt is the whole passage today, and cutting the parts
+    `Search.shape` decides the type: an excerpt is the whole passage today, and cutting the parts
     of it that do not answer the query is a later step that would go here.
     """
-    return await retrieval.widen(ctx.inputs, ctx.state.limit, ctx.state.kind)
+    return await retrieval.widen(ctx.inputs, ctx.state.limit, ctx.state.shape)
 
 
 async def shortlist(ctx: StepContext[Search, None, list[Hit]]) -> Sources:
@@ -155,10 +155,10 @@ async def passages(names: list[str], query: str, limit: int | None = None) -> li
 
 async def excerpts(names: list[str], query: str, limit: int | None = None) -> list[Excerpt]:
     """The `limit` best passages of `names` as an agent quotes them, best first."""
-    state = await _search(names, query, limit, deeper=PASSAGE_SCAN, kind=Excerpt)
+    state = await _search(names, query, limit, deeper=PASSAGE_SCAN, shape=Excerpt)
     if state is None:
         return []
-    # the graph builds whatever `kind` says, and this one said `Excerpt`
+    # the graph builds whatever `shape` says, and this one said `Excerpt`
     return cast(list[Excerpt], await PASSAGES.run(state=state))
 
 
@@ -179,7 +179,7 @@ async def _search(
     query: str,
     limit: int | None,
     deeper: int = 1,
-    kind: type[Passage] = Passage,
+    shape: type[Passage] = Passage,
     sections: int | None = None,
 ) -> Search | None:
     """One search, planned but not yet run, or None when nothing is left to search.
@@ -201,7 +201,7 @@ async def _search(
         limit=limit,
         scan=scan,
         candidates=max(where.settings.candidates, scan),
-        kind=kind,
+        shape=shape,
         sections=check_page_size(
             DEFAULT_SECTIONS if sections is None else sections, MAX_SECTIONS, "sections"
         ),

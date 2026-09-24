@@ -15,7 +15,7 @@ topics no collection covers.
    vector and BM25, reranked), so a sentence with context outranks a bare keyword. Ask "how should
    a background job retry a failed HTTP call without duplicating the side effect", not "retry".
 2. `search_excerpts` with this conversation's haskie session id, announced at session start. Repeat
-   it for each follow-up. That is the search: it returns the passages to answer from.
+   it for each follow-up. That is the search: it returns the excerpts to answer from.
 3. `search_sources` when the question is which documents or collections cover a topic, not what
    they say, or when `search_excerpts` returned nothing relevant. It names the documents and
    collections. Call `set_session_collections` with the `collections` it returns, then

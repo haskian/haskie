@@ -44,7 +44,7 @@ describe('trend', () => {
       expected: { buckets: 7, series: [['A–E', [0, 0, 0, 0, 0, 0, 49]], ['K–O', [0, 0, 0, 0, 0, 12, 0]]], total: 61 },
     },
     {
-      name: 'sessions past the sixth fold into one',
+      name: 'past six sessions, the sixth and later fold into one',
       points: ['s1', 's2', 's3', 's4', 's5', 's6', 's7'].flatMap((id, i) => Array.from({ length: 8 - i }, () => point(at(21, 9), id))),
       days: 1,
       expected: {

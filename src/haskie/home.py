@@ -40,16 +40,16 @@ HOME = Path(os.environ.get("HASKIE_HOME", Path.home() / ".haskie"))
 _LAYOUT: dict[str, str] = {
     "COLLECTION_ROOT": "collections",  # one LanceDB index per collection
     "DOCUMENT_ROOT": "documents",  # one folder per imported document: original, markdown, cache
-    "STAGING_ROOT": "staging",  # uploads not yet imported; swept by the nightly maintenance
+    "STAGING_ROOT": "staging",  # uploads not yet imported; swept by the nightly housekeeping
     "AUDIT_DIR": "audit",
     "DB_FILE": "haskie.db",
-    "MODEL_CACHE": "cache/models",  # compiled CoreML models (see indexing/embed.py); ORT creates it
+    "MODEL_CACHE": "cache/models",  # compiled CoreML models; ONNX Runtime (ORT) makes it
     "LOCK_FILE": "haskie.lock",  # one running haskie per home (see `claim_home`)
 }
 _MADE = ("COLLECTION_ROOT", "DOCUMENT_ROOT", "STAGING_ROOT", "AUDIT_DIR")  # the rest are files
 
 DIR_MODE = 0o700  # documents and the audit trail are private to the user running the app
-PART_DIGITS = 6  # width of a micro-batch sequence number; four would cap a document at 10k parts
+PART_DIGITS = 6  # width of a part number; four would cap a document at 10k parts
 
 
 def __getattr__(name: str) -> Path:
@@ -77,7 +77,7 @@ def shard(name: str) -> str:
 
 
 def part_name(seq: int) -> str:
-    """The stem of one micro-batch file, zero-padded so a listing sorts in sequence order."""
+    """The stem of one part's files, zero-padded so a listing sorts in part order."""
     return f"{seq:0{PART_DIGITS}d}"
 
 
@@ -93,7 +93,7 @@ _holding: int | None = None  # the file descriptor whose flock this process hold
 def claim_home() -> None:
     """Claim this home for the calling process, or refuse: one haskie per home.
 
-    A home is one SQLite file and one durable job pipeline, and a boot is a DBOS executor that
+    A home is one SQLite file and one durable pipeline, and a boot is a DBOS executor that
     recovers in-flight workflows and starts polling the queues. Two of them on the same file take
     each other's tasks. The TCP port is not the guard it looks like: a server runs its whole
     startup - migrations, `DBOS.launch`, re-enqueuing orphans - before it binds.
@@ -237,7 +237,7 @@ async def atomic_write(path: Path, data: bytes | str, encoding: str = "utf-8") -
 async def remove_tree(path: Path) -> None:
     """Delete a directory and everything under it, in a worker thread. Best effort, but never
     silent: a file we cannot delete is logged, not swallowed."""
-    log = logs.get_logger(__name__)
+    log = logs.get_logger(__name__)  # at call time: `logs` imports this module
 
     def report(_function: Callable[..., Any], failed: str, error: BaseException) -> None:
         log.warning("remove_failed", path=scrub(str(failed)), error=f"{type(error).__name__}")

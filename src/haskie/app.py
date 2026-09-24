@@ -18,6 +18,7 @@ from litestar_mcp import LitestarMCP
 
 from haskie import APP_VERSION, home, logs
 from haskie.api import ROUTE_HANDLERS
+from haskie.audit import Actor
 from haskie.document.document import UPLOAD_MAX_BYTES
 from haskie.errors import HaskieError
 from haskie.indexing import workflows
@@ -48,14 +49,16 @@ async def bind_request_context(request: Request) -> None:
     request.scope["state"][REQUEST_ID_KEY] = request_id
     logs.clear()
     path = request.scope["path"]
-    # `collection` and `doc` are what every collection and document route is keyed by, so the
+    # `collection` and `document` are what every collection and document route is keyed by, so the
     # request context carries them for free instead of each handler binding them again. A document
     # route has no collection at all: the document belongs to none.
     routed = request.path_params
-    scoped: dict[str, str] = {key: routed[key] for key in ("collection", "doc") if routed.get(key)}
+    scoped: dict[str, str] = {
+        key: routed[key] for key in ("collection", "document") if routed.get(key)
+    }
     logs.bind(
         request_id=request_id,
-        actor="mcp" if path.startswith(MCP_PATH) else "web",
+        actor=Actor.MCP if path.startswith(MCP_PATH) else Actor.WEB,
         method=request.method,
         path=path,
         **scoped,

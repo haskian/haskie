@@ -16,11 +16,12 @@ from conftest import import_row
 from haskie import db
 from haskie.collection.index import Row
 from haskie.document import document
-from haskie.document.document import Document
+from haskie.document.document import Document, DocumentStatus
 from haskie.indexing import embed_cache
-from haskie.indexing.chunk import CHUNK_VERSION, Chunk
+from haskie.indexing.chunk import CHUNK_VERSION, Chunk, Piece
 from haskie.indexing.embed_cache import NO_MODEL, Params
-from haskie.settings import ChunkSettings, EmbeddingModel
+from haskie.indexing.segment import PieceType
+from haskie.settings import Chunker, ChunkSettings, EmbeddingModel, Parser
 
 pytestmark = pytest.mark.anyio  # most cases await; the pure ones ignore the marker
 
@@ -29,37 +30,39 @@ BODY = "# Title\n\nbody about lancedb\n"
 TINY = EmbeddingModel("test/tiny", 4)
 
 BASE = Params(
-    doc=DOC,
+    document=DOC,
     model="BAAI/bge-small-en-v1.5",
     chunk_size=1200,
-    chunk_overlap=150,
-    chunker="markdown",
+    chunk_merge_below=33,
+    chunk_frame=True,
+    chunker=Chunker.MARKDOWN,
     chunk_version=1,
-    parser="anydoc",
+    parser=Parser.ANYDOC,
     skip_ocr_pages=True,
 )
 # Pinned, not recomputed: the URN is the cache key, so a change to its shape must fail a test
 # rather than silently retire every entry on disk.
 BASE_URN = (
-    "document:guide.md;model:BAAI/bge-small-en-v1.5;chunk_size:1200;chunk_overlap:150;"
-    "chunker:markdown;chunk_version:1;parser:anydoc;skip_ocr_pages:true"
+    "document:guide.md;model:BAAI/bge-small-en-v1.5;chunk_size:1200;"
+    "chunk_merge_below:33;chunk_frame:true;chunker:markdown;chunk_version:1;parser:anydoc;"
+    "skip_ocr_pages:true"
 )
-BASE_ID = "5b753e61445f55f1c72657b07433c4f470c359deeb6057b6286fa9d6e1f89b46"
+BASE_ID = "a62894d5043251b553a18ba785281ca5e3ba8a28e58317a2f4207838f219e370"
 
 
 def _row(text: str, vector: list[float] | None = None) -> Row:
     """An embed slice's row: `seq` is left at 0, the way a slice writes it. `_merge` numbers it."""
     return Row(
         chunk=Chunk(
-            heading="Title",
-            text=text,
+            headings=["Book", "Part I", "Title"],
+            frame=["Book", "Part I", "Title"],
+            pieces=[Piece(PieceType.TEXT, text)],
             line_start=1,
             line_end=3,
             char_start=0,
             char_end=len(text),
             byte_start=0,
             byte_end=len(text.encode()),
-            parents=["Book", "Part I"],
             page_start=2,
             page_end=3,
         ),
@@ -94,10 +97,11 @@ def test_the_key_is_the_full_sha256_of_the_urn() -> None:
 @pytest.mark.parametrize(
     ("name", "field", "value"),
     [
-        ("another document", "doc", "other.md"),
+        ("another document", "document", "other.md"),
         ("another embedding model", "model", "BAAI/bge-large-en-v1.5"),
         ("another chunk size", "chunk_size", 900),
-        ("another chunk overlap", "chunk_overlap", 0),
+        ("another merge share", "chunk_merge_below", 50),
+        ("no heading path prepended", "chunk_frame", False),
         ("another chunker", "chunker", "text"),
         ("another chunking version", "chunk_version", 2),
         ("another parser", "parser", "plain"),
@@ -127,22 +131,25 @@ def test_params_reads_the_document_and_the_collections_chunk_settings(
         name="book.pdf",
         suffix=".pdf",
         size=10,
-        status="imported",
-        parser="plain",
+        status=DocumentStatus.IMPORTED,
+        parser=Parser.PLAIN,
         skip_ocr_pages=False,
     )
-    chunking = ChunkSettings(chunker="text", chunk_size=400, chunk_overlap=40)
+    chunking = ChunkSettings(
+        chunker=Chunker.TEXT, chunk_size=400, chunk_merge_below=25, chunk_frame=False
+    )
 
     params = embed_cache.params(doc, chunking, embedding)
 
     assert params == Params(
-        doc="book.pdf",
+        document="book.pdf",
         model=expected_model,
         chunk_size=400,
-        chunk_overlap=40,
-        chunker="text",
+        chunk_merge_below=25,
+        chunk_frame=False,
+        chunker=Chunker.TEXT,
         chunk_version=CHUNK_VERSION,
-        parser="plain",
+        parser=Parser.PLAIN,
         skip_ocr_pages=False,
     ), name
 
@@ -171,7 +178,7 @@ async def test_write_lookup_read_round_trip(
     """Three parts, the middle one empty: every part is a row group, so group `n` is always part
     `n`, and an empty group simply yields no rows."""
     doc = await import_row(DOC, BODY)
-    params = msgspec.structs.replace(BASE, doc=doc.name)
+    params = msgspec.structs.replace(BASE, document=doc.name)
     rows = [_row("alpha lancedb", vector), _row("beta lancedb", vector)]
     parts = _parts(tmp_path / "scratch", [rows, [], [_row("gamma lancedb", vector)]])
 
@@ -195,7 +202,7 @@ async def test_write_lookup_read_round_trip(
     else:
         assert first.vector == pytest.approx(vector), name
     (entry,) = await embed_cache.entries(doc.name)
-    assert (entry.id, entry.doc, entry.urn) == (cache_id, doc.name, embed_cache.urn(params))
+    assert (entry.id, entry.document, entry.urn) == (cache_id, doc.name, embed_cache.urn(params))
     assert (entry.rows, entry.chunk_size, entry.chunker) == (3, params.chunk_size, "markdown")
     assert entry.bytes == embed_cache.file_path(doc.name, cache_id).stat().st_size, name
     wire = msgspec.json.decode(msgspec.json.encode(entry))
@@ -206,7 +213,7 @@ async def test_seq_numbers_the_whole_document_across_its_parts(tmp_path: Path) -
     """The parts are chunked in parallel and each one numbers its chunks from zero, so `seq` is
     the merge's job: 1..N over every part in order, with an empty part consuming no number."""
     doc = await import_row(DOC, BODY)
-    params = msgspec.structs.replace(BASE, doc=doc.name)
+    params = msgspec.structs.replace(BASE, document=doc.name)
     groups = [
         [_row("alpha lancedb"), _row("beta lancedb")],
         [],
@@ -233,7 +240,7 @@ async def test_seq_numbers_the_whole_document_across_its_parts(tmp_path: Path) -
 
 async def test_read_of_a_range_returns_only_that_range(tmp_path: Path) -> None:
     doc = await import_row(DOC, BODY)
-    params = msgspec.structs.replace(BASE, doc=doc.name)
+    params = msgspec.structs.replace(BASE, document=doc.name)
     parts = _parts(tmp_path / "scratch", [[_row(f"part {i}")] for i in range(4)])
     cache_id = await embed_cache.write(params, parts, None)
 
@@ -248,7 +255,7 @@ async def test_write_consumes_the_scratch_directory_of_the_computation(tmp_path:
     """The scratch rows go last, after the file and the row: a retry before the row was written
     still finds its input."""
     doc = await import_row(DOC, BODY)
-    params = msgspec.structs.replace(BASE, doc=doc.name)
+    params = msgspec.structs.replace(BASE, document=doc.name)
     cache_id = embed_cache.key(params)
     parts = _parts(embed_cache.scratch_dir(doc.name, cache_id), [[_row("alpha")]])
     assert all(path.exists() for path in parts)
@@ -262,7 +269,7 @@ async def test_write_consumes_the_scratch_directory_of_the_computation(tmp_path:
 async def test_a_second_write_of_the_same_params_is_a_no_op_row(tmp_path: Path) -> None:
     """A retried write after a crash, or the loser of two concurrent writers, must not raise."""
     doc = await import_row(DOC, BODY)
-    params = msgspec.structs.replace(BASE, doc=doc.name)
+    params = msgspec.structs.replace(BASE, document=doc.name)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
 
     first = await embed_cache.write(params, parts, None)
@@ -284,10 +291,11 @@ async def test_entries_lists_every_cache_of_one_document_newest_first(
     monkeypatch.setattr(embed_cache.time, "time", itertools.count(1000.0).__next__)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
     wanted = [
-        msgspec.structs.replace(BASE, doc=doc.name, chunk_size=size) for size in (400, 800, 1200)
+        msgspec.structs.replace(BASE, document=doc.name, chunk_size=size)
+        for size in (400, 800, 1200)
     ]
     written = [await embed_cache.write(params, parts, None) for params in wanted]
-    await embed_cache.write(msgspec.structs.replace(BASE, doc=other.name), parts, None)
+    await embed_cache.write(msgspec.structs.replace(BASE, document=other.name), parts, None)
 
     entries = await embed_cache.entries(doc.name)
 
@@ -311,7 +319,7 @@ async def test_lookup_answers_a_hit_only_when_the_row_and_the_file_agree(
 ) -> None:
     """Either half alone is an interrupted write: a miss to recompute, never an error."""
     doc = await import_row(DOC, BODY)
-    params = msgspec.structs.replace(BASE, doc=doc.name)
+    params = msgspec.structs.replace(BASE, document=doc.name)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
     cache_id = await embed_cache.write(params, parts, None)
     if not keep_row:
@@ -333,7 +341,7 @@ async def test_a_failed_merge_leaves_no_partial_cache_file(tmp_path: Path) -> No
     """The parquet file is written through a `.tmp` and one replace, so a reader never sees a
     half-written cache — and a failure leaves nothing to mistake for one."""
     doc = await import_row(DOC, BODY)
-    params = msgspec.structs.replace(BASE, doc=doc.name)
+    params = msgspec.structs.replace(BASE, document=doc.name)
     missing = tmp_path / "scratch" / "000000.rows.json"  # never written by any embed slice
 
     with pytest.raises(FileNotFoundError):
@@ -348,7 +356,7 @@ async def test_a_failed_merge_leaves_no_partial_cache_file(tmp_path: Path) -> No
 
 async def test_writing_vectors_the_rows_do_not_carry_is_refused(tmp_path: Path) -> None:
     doc = await import_row(DOC, BODY)
-    params = msgspec.structs.replace(BASE, doc=doc.name)
+    params = msgspec.structs.replace(BASE, document=doc.name)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])  # no vector on the row
 
     with pytest.raises(ValueError, match="carries no vector"):
@@ -360,7 +368,7 @@ async def test_writing_vectors_the_rows_do_not_carry_is_refused(tmp_path: Path) 
 async def test_the_cache_row_goes_when_the_document_does(tmp_path: Path) -> None:
     """`embeddings.document` cascades: deleting the document takes its whole cache with it."""
     doc = await import_row(DOC, BODY)
-    params = msgspec.structs.replace(BASE, doc=doc.name)
+    params = msgspec.structs.replace(BASE, document=doc.name)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
     await embed_cache.write(params, parts, None)
     assert len(await embed_cache.entries(doc.name)) == 1
