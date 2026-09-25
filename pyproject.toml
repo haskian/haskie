@@ -1,6 +1,6 @@
 [project]
 name = "haskie"
-version = "0.9.2"
+version = "0.10.0"
 description = "Personal document collections: markdown conversion, LanceDB search, web UI and MCP server"
 readme = "README.md"
 requires-python = ">=3.13"
