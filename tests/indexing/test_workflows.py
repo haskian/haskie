@@ -18,9 +18,11 @@ the mechanism - how often the embed work ran, which workflow ran it - and not on
 """
 
 import os
+import signal
 import threading
 import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -56,7 +58,7 @@ from dbos._error import DBOSAwaitedWorkflowCancelledError
 from dbos._registrations import get_dbos_func_name
 from sqlalchemy import insert, update
 
-from haskie import audit, cpu, db, home, paging, settings
+from haskie import audit, cpu, db, home, paging, settings, shutdown
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import maintenance
@@ -2501,3 +2503,115 @@ async def test_a_slices_input_reads_back_after_its_context_changed_shape(
         (changed, doc.name, 7)
     }
     assert len(await operations.list_tasks(import_id)) == 2
+
+
+@dataclass
+class DestroyCase:
+    destroy: str  # how the fake `DBOS.destroy` behaves: "blocks", "finishes" or "raises"
+    second_signal: bool  # whether a SIGINT lands while shutdown waits on it
+    expect_stopped: bool | None  # what `_destroy_dbos` returns; None when it raises
+
+
+FINISH_SECONDS = 0.2  # how long a fake destroy that finishes takes to
+
+
+DESTROY_CASES = {
+    "a second signal ends a wait that would not end": DestroyCase(
+        destroy="blocks", second_signal=True, expect_stopped=False
+    ),
+    "without a signal destroy runs to its end": DestroyCase(
+        destroy="finishes", second_signal=False, expect_stopped=True
+    ),
+    "a failed destroy reaches the caller": DestroyCase(
+        destroy="raises", second_signal=False, expect_stopped=None
+    ),
+}
+
+
+@pytest.mark.parametrize("case", DESTROY_CASES.values(), ids=list(DESTROY_CASES))
+async def test_a_second_signal_cuts_the_shutdown_wait_short(
+    case: DestroyCase, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`DBOS.destroy` waits out running workflows in a sleep loop no signal interrupts, and the
+    server only notes a signal that lands during shutdown. The wait must still end on one, the
+    server's own handler must still see it, and without one the wait runs to its end."""
+    release = threading.Event()  # lets a blocked fake end once the test is done with it
+    grace: list[int] = []
+
+    def fake_destroy(*, workflow_completion_timeout_sec: int) -> None:
+        grace.append(workflow_completion_timeout_sec)
+        if case.destroy == "raises":
+            raise RuntimeError("system database gone")
+        release.wait(60 if case.destroy == "blocks" else FINISH_SECONDS)
+
+    seen: list[int] = []  # what reached the handler the server installed
+
+    def server_handler(number: int, _frame: object) -> None:
+        seen.append(number)
+
+    monkeypatch.setattr(workflows.DBOS, "destroy", fake_destroy)
+    installed = signal.signal(signal.SIGINT, server_handler)
+    shutdown.debounce_signals()  # what the app's startup does to the server's handlers
+    counted = signal.getsignal(signal.SIGINT)
+    if case.second_signal:
+        threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT)).start()
+    stopped: bool | None = None
+    started = time.monotonic()
+    try:
+        if case.expect_stopped is None:
+            with pytest.raises(RuntimeError, match="system database gone"):
+                await workflows._destroy_dbos()
+        else:
+            stopped = await workflows._destroy_dbos()
+        waited = time.monotonic() - started
+        assert signal.getsignal(signal.SIGINT) is counted, "shutdown leaves the handlers as found"
+    finally:
+        release.set()
+        signal.signal(signal.SIGINT, installed)
+
+    assert grace == [workflows.WORKFLOW_GRACE]
+    assert seen == ([signal.SIGINT] if case.second_signal else [])
+    assert stopped is case.expect_stopped
+    hurried = case.expect_stopped is False
+    assert ("shutdown_hurried" in events(caplog)) is hurried, "logged exactly when hurried"
+    if hurried:
+        assert waited < 5, "the signal ended a wait of a minute"
+    elif case.destroy == "finishes":
+        assert waited >= FINISH_SECONDS, "shutdown waited for destroy to finish"
+
+
+async def test_work_a_shutdown_takes_away_is_recovered_not_failed(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hurried shutdown closes the extraction pool while DBOS still runs steps. The step that
+    loses its extraction must record nothing: an error would be retried into a closed pool, three
+    times inside the exit grace, and fail the document. So it stays pending, and the next boot
+    finishes it."""
+    row = await import_row("cut.pdf", text_pdf(["cut short"]), tmp_path)
+    interrupted = threading.Event()
+    extract = convert.pdf_pages_markdown
+
+    def shut_down_once(*args, **kwargs):
+        if not interrupted.is_set():
+            interrupted.set()
+            raise shutdown.ShuttingDown("the extraction pool shut down under this call")
+        return extract(*args, **kwargs)
+
+    monkeypatch.setattr(convert, "pdf_pages_markdown", shut_down_once)
+    import_id = await dbos.start_import(row.name)
+    assert await wait_event(interrupted), "the extraction never ran"
+    await anyio.sleep(workflows.RETRY_INTERVAL_SECONDS * 2)  # past a first retry, were there one
+
+    [convert_task] = [
+        task for task in await operations.list_tasks(import_id) if task.stage == Stage.CONVERT
+    ]
+    run_ids = [import_id, convert_task.child_id]
+    runs = await DBOS.list_workflows_async(workflow_ids=run_ids, load_output=False)
+    steps = await DBOS.list_workflow_steps_async(convert_task.child_id)
+    assert [run.status for run in runs] == ["PENDING"] * 2, "not failed, and not cancelled either"
+    assert [step["error"] for step in steps] == [None] * len(steps), "no step recorded an error"
+    assert (await document.get(row.name)).status != DocumentStatus.ERROR
+
+    await restart_dbos()  # the boot recovers what the shutdown left pending
+
+    assert await wait_for(import_id) == "imported"

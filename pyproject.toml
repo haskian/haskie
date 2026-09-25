@@ -23,6 +23,7 @@ dependencies = [
     "typer>=0.15.0",
     "unicode-segmentation-rs>=0.3.3",
     "numpy>=2.0",
+    "pebble>=5.2.2",
 ]
 
 [project.scripts]

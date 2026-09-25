@@ -70,8 +70,10 @@ under an explicit name (see `dbos_names`).
 
 import asyncio
 import contextlib
+import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from concurrent.futures import Future
 from datetime import datetime
 from enum import StrEnum
 from functools import partial
@@ -95,13 +97,13 @@ from dbos import (
 from dbos._dbos import _get_dbos_instance
 from dbos._workflow_commands import garbage_collect
 
-from haskie import APP_VERSION, audit, db, home, logs, sysdb
+from haskie import APP_VERSION, audit, db, home, logs, shutdown, sysdb
 from haskie.audit import Actor, Outcome
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection, MemberStatus
-from haskie.cpu import configure_cpu_budget, shutdown_pool
+from haskie.cpu import configure_cpu_budget, open_pool, shutdown_pool
 from haskie.document import document
 from haskie.document.document import Document, DocumentStatus, configure_preview_slots
 from haskie.errors import Conflict, InvalidInput, NotFound, PermanentError
@@ -340,6 +342,7 @@ async def start() -> None:
     """Bring the runtime up: migrations, DBOS, the queues, the schedules. Awaited by Litestar's
     startup hook, and by the tests."""
     logs.configure()
+    open_pool()  # a runtime started again in the same process, after a `stop`
     await db.migrate_once()  # before DBOS opens the file: the one-time WAL switch needs exclusivity
     config: DBOSConfig = {
         "name": "haskie",
@@ -379,18 +382,59 @@ async def start() -> None:
     )
 
 
-async def stop() -> None:
-    """Litestar calls a shutdown hook with the app when the hook takes any parameter, so this one
-    takes none. In-flight steps get a grace period: a worker thread outliving DBOS blocks
-    interpreter exit."""
+async def stop() -> bool:
+    """Bring the runtime down. In-flight steps get a grace period (see `_destroy_dbos`).
+
+    True when DBOS stopped. False when a signal hurried the shutdown past it: DBOS is then still
+    running workflows on its own threads until the process exits.
+    """
     global _adoption
     if _adoption is not None:
         adopting, _adoption = _adoption, None
         adopting.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await adopting
-    await anyio.to_thread.run_sync(partial(DBOS.destroy, workflow_completion_timeout_sec=10))
-    shutdown_pool()  # after DBOS, so nothing is still submitting extraction work
+    stopped = await _destroy_dbos()
+    # After DBOS, so nothing is still submitting extraction work, unless the shutdown was
+    # hurried; then a step still asking for the pool finds it closed.
+    await anyio.to_thread.run_sync(shutdown_pool)
+    return stopped
+
+
+WORKFLOW_GRACE = 10  # seconds running workflows get to finish before DBOS cancels them
+
+
+async def _destroy_dbos() -> bool:
+    """`DBOS.destroy`, which a second SIGINT or SIGTERM cuts short. False when it was.
+
+    destroy waits out `WORKFLOW_GRACE` in a sleep loop nothing can interrupt, and uvicorn, which
+    owns the signals, only notes one that lands during shutdown. So destroy runs on a daemon
+    thread, and a signal during the wait stops the waiting (see `shutdown.listening`): shutdown
+    goes on, and the thread dies with the process. Operations are durable, so what it would have
+    finished runs at the next boot.
+    """
+    # The `Future` hands the outcome from the destroy thread to this loop under its own lock,
+    # and says whether there is one yet.
+    outcome: Future[None] = Future()
+
+    def destroy() -> None:
+        try:
+            DBOS.destroy(workflow_completion_timeout_sec=WORKFLOW_GRACE)
+        except BaseException as exc:  # raised again below, on the loop that awaits it
+            outcome.set_exception(exc)
+        else:
+            outcome.set_result(None)
+
+    hurried = threading.Event()
+    with shutdown.listening(hurried.set):
+        threading.Thread(target=destroy, name="dbos-destroy", daemon=True).start()
+        while not outcome.done() and not hurried.is_set():
+            await asyncio.sleep(TASK_POLL)
+    if outcome.done():  # finished, even if a signal came as well: DBOS is down either way
+        outcome.result()
+        return True
+    _log.warning("shutdown_hurried", abandoned="dbos destroy")
+    return False
 
 
 async def _register_schedule() -> None:

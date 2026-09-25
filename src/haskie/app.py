@@ -16,7 +16,7 @@ from litestar.static_files import create_static_files_router
 from litestar.types import ControllerRouterHandler, ExceptionHandlersMap, Message, Scope
 from litestar_mcp import LitestarMCP
 
-from haskie import APP_VERSION, home, logs
+from haskie import APP_VERSION, home, logs, shutdown
 from haskie.api import ROUTE_HANDLERS
 from haskie.audit import Actor
 from haskie.document.document import UPLOAD_MAX_BYTES
@@ -130,6 +130,15 @@ EXCEPTION_HANDLERS: ExceptionHandlersMap = {
 # --- app --------------------------------------------------------------------
 
 
+async def stop_runtime() -> None:
+    """Stop the pipeline, then give the home up. A hurried stop keeps the home: DBOS is still
+    running workflows until the process exits, and a second haskie claiming the home meanwhile
+    would run them too. The kernel drops the lock at the exit, which `shutdown.EXIT_GRACE`
+    bounds."""
+    if await workflows.stop():
+        home.release_home()
+
+
 def create_app() -> Litestar:
     """Factory so logging is configured before Litestar builds anything; `app` below keeps
     `litestar --app haskie.app:app` working."""
@@ -155,8 +164,15 @@ def create_app() -> Litestar:
         request_max_body_size=UPLOAD_MAX_BYTES,
         # `claim_home` first: everything after it migrates the database or launches DBOS, and a
         # second haskie on the same home must refuse before any of that, not after.
-        on_startup=[home.claim_home, home.ensure_home, workflows.start],
-        on_shutdown=[workflows.stop, home.release_home],
+        # `debounce_signals` needs the server's handlers in place, which they are by startup.
+        on_startup=[
+            home.claim_home,
+            shutdown.bound_exit,
+            shutdown.debounce_signals,
+            home.ensure_home,
+            workflows.start,
+        ],
+        on_shutdown=[stop_runtime],
     )
 
 
