@@ -19,9 +19,9 @@ from pebble import ProcessExpired
 from haskie import cpu, shutdown
 from haskie.document import convert
 
-from conftest import text_pdf  # isort: skip
+from conftest import text_pdf, until  # isort: skip
 
-pytestmark = pytest.mark.anyio
+pytestmark = [pytest.mark.anyio, pytest.mark.usefixtures("pooled")]
 
 PAGES: list[str | None] = ["page one text", "page two text", "page three text"]
 
@@ -49,7 +49,7 @@ def pooled(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     cpu.shutdown_pool()
 
 
-def _native_call() -> "asyncio.Task[bytes]":
+def _native_call() -> asyncio.Task[bytes]:
     return asyncio.create_task(
         cpu.off_interpreter(hashlib.pbkdf2_hmac, "sha256", b"key", b"salt", NATIVE_ROUNDS)
     )
@@ -57,25 +57,27 @@ def _native_call() -> "asyncio.Task[bytes]":
 
 async def _running(extractions: int) -> None:
     """Until the pool runs `extractions` calls: a cold forkserver imports the parsers first."""
-    with anyio.fail_after(30):
-        while sum(future.running() for future in list(cpu._in_flight)) < extractions:
-            await asyncio.sleep(0.05)
+
+    async def running() -> bool:
+        return sum(future.running() for future in list(cpu._in_flight)) >= extractions
+
+    await until(running, f"the pool never ran {extractions} calls at once")
 
 
-async def test_extraction_in_a_pool_matches_extraction_inline(pdf: Path, pooled: None) -> None:
+async def test_extraction_in_a_pool_matches_extraction_inline(pdf: Path) -> None:
     """Same answer either way: `off_interpreter` only changes where the work runs."""
-    pooled_result = await cpu.off_interpreter(convert.pdf_pages_markdown, pdf)
+    in_pool = await cpu.off_interpreter(convert.pdf_pages_markdown, pdf)
 
     cpu.CONVERT_WORKERS = 0  # the fixture's monkeypatch puts it back
     inline = await cpu.off_interpreter(convert.pdf_pages_markdown, pdf)
 
-    assert pooled_result == inline
-    markdown, ocr_pages, pages = pooled_result
+    assert in_pool == inline
+    markdown, ocr_pages, pages = in_pool
     assert (pages, ocr_pages) == (len(PAGES), [])
     assert "<!-- page 1 -->" in markdown, "the page markers the chunker reads survive the boundary"
 
 
-async def test_an_error_in_the_pool_reaches_the_caller(tmp_path: Path, pooled: None) -> None:
+async def test_an_error_in_the_pool_reaches_the_caller(tmp_path: Path) -> None:
     """A parser failure is a `PermanentError` whether or not it crossed a process boundary."""
     bad = tmp_path / "bad.pdf"
     bad.write_bytes(b"not a pdf at all")
@@ -84,7 +86,7 @@ async def test_an_error_in_the_pool_reaches_the_caller(tmp_path: Path, pooled: N
         await cpu.off_interpreter(convert.pdf_pages_markdown, bad)
 
 
-async def test_shutdown_kills_busy_workers_at_once(pooled: None) -> None:
+async def test_shutdown_kills_busy_workers_at_once() -> None:
     """A worker in C code cannot run its SIGTERM handler, and pebble's own stop waits 3 s for each
     worker in turn. Shutdown must not: it runs on the way out, and nothing hurries it.
 
@@ -108,7 +110,7 @@ async def test_shutdown_kills_busy_workers_at_once(pooled: None) -> None:
     assert not cpu._in_flight, "nothing is left for a later shutdown to wait on"
 
 
-async def test_a_closed_pool_refuses_work_until_it_opens(pooled: None) -> None:
+async def test_a_closed_pool_refuses_work_until_it_opens() -> None:
     """A step still running after a hurried shutdown must not build a fresh pool behind it: its
     workers would outlive the process. A runtime started again opens it."""
     cpu.shutdown_pool()
@@ -121,7 +123,7 @@ async def test_a_closed_pool_refuses_work_until_it_opens(pooled: None) -> None:
     assert await cpu.off_interpreter(sum, [1, 2]) == 3
 
 
-async def test_a_worker_that_dies_fails_only_its_own_extraction(pooled: None) -> None:
+async def test_a_worker_that_dies_fails_only_its_own_extraction() -> None:
     """A parser that crashes its process fails that one call. The call beside it finishes, and
     the pool takes the next call, where a broken stdlib pool would refuse every one until a
     restart. A crash is an error, not a shutdown: the pool is open."""

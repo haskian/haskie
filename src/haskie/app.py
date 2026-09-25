@@ -164,7 +164,6 @@ def create_app() -> Litestar:
         request_max_body_size=UPLOAD_MAX_BYTES,
         # `claim_home` first: everything after it migrates the database or launches DBOS, and a
         # second haskie on the same home must refuse before any of that, not after.
-        # `debounce_signals` needs the server's handlers in place, which they are by startup.
         on_startup=[
             home.claim_home,
             shutdown.bound_exit,

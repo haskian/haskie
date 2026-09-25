@@ -464,18 +464,12 @@ def test_stop_finds_the_process_holding_the_home(elsewhere: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "dbos_stopped", "expect_held"),
-    [
-        ("a runtime that stopped gives the home up", True, False),
-        ("a hurried stop keeps it until the process exits", False, True),
-    ],
+    "dbos_stopped",
+    [True, False],
+    ids=["a runtime that stopped gives the home up", "a hurried stop keeps it until the exit"],
 )
 def test_the_home_is_released_only_once_the_runtime_stopped(
-    name: str,
-    dbos_stopped: bool,
-    expect_held: bool,
-    elsewhere: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    dbos_stopped: bool, elsewhere: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A hurried stop leaves DBOS running workflows until the exit. A second haskie claiming the
     home meanwhile would run the same ones, so the lock waits for the kernel to drop it."""
@@ -490,7 +484,7 @@ def test_the_home_is_released_only_once_the_runtime_stopped(
     home.claim_home()
     try:
         asyncio.run(app.stop_runtime())
-        assert (home.running_pid() == os.getpid()) is expect_held, name
+        assert (home.running_pid() == os.getpid()) is not dbos_stopped
     finally:
         home.release_home()
 

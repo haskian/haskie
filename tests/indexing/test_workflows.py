@@ -22,7 +22,6 @@ import signal
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -2505,79 +2504,64 @@ async def test_a_slices_input_reads_back_after_its_context_changed_shape(
     assert len(await operations.list_tasks(import_id)) == 2
 
 
-@dataclass
-class DestroyCase:
-    destroy: str  # how the fake `DBOS.destroy` behaves: "blocks", "finishes" or "raises"
-    second_signal: bool  # whether a SIGINT lands while shutdown waits on it
-    expect_stopped: bool | None  # what `_destroy_dbos` returns; None when it raises
-
-
 FINISH_SECONDS = 0.2  # how long a fake destroy that finishes takes to
 
 
-DESTROY_CASES = {
-    "a second signal ends a wait that would not end": DestroyCase(
-        destroy="blocks", second_signal=True, expect_stopped=False
-    ),
-    "without a signal destroy runs to its end": DestroyCase(
-        destroy="finishes", second_signal=False, expect_stopped=True
-    ),
-    "a failed destroy reaches the caller": DestroyCase(
-        destroy="raises", second_signal=False, expect_stopped=None
-    ),
-}
-
-
-@pytest.mark.parametrize("case", DESTROY_CASES.values(), ids=list(DESTROY_CASES))
+@pytest.mark.parametrize(
+    "destroy",
+    ["blocks", "finishes"],
+    ids=["a second signal ends a wait that would not end", "without a signal it runs to its end"],
+)
 async def test_a_second_signal_cuts_the_shutdown_wait_short(
-    case: DestroyCase, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    destroy: str,
+    server_handler: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """`DBOS.destroy` waits out running workflows in a sleep loop no signal interrupts, and the
     server only notes a signal that lands during shutdown. The wait must still end on one, the
     server's own handler must still see it, and without one the wait runs to its end."""
+    hurried = destroy == "blocks"
     release = threading.Event()  # lets a blocked fake end once the test is done with it
     grace: list[int] = []
 
     def fake_destroy(*, workflow_completion_timeout_sec: int) -> None:
         grace.append(workflow_completion_timeout_sec)
-        if case.destroy == "raises":
-            raise RuntimeError("system database gone")
-        release.wait(60 if case.destroy == "blocks" else FINISH_SECONDS)
-
-    seen: list[int] = []  # what reached the handler the server installed
-
-    def server_handler(number: int, _frame: object) -> None:
-        seen.append(number)
+        if hurried:  # from inside destroy, so the listener is already there to hear it
+            os.kill(os.getpid(), signal.SIGINT)
+        release.wait(60 if hurried else FINISH_SECONDS)
 
     monkeypatch.setattr(workflows.DBOS, "destroy", fake_destroy)
-    installed = signal.signal(signal.SIGINT, server_handler)
     shutdown.debounce_signals()  # what the app's startup does to the server's handlers
     counted = signal.getsignal(signal.SIGINT)
-    if case.second_signal:
-        threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT)).start()
-    stopped: bool | None = None
     started = time.monotonic()
     try:
-        if case.expect_stopped is None:
-            with pytest.raises(RuntimeError, match="system database gone"):
-                await workflows._destroy_dbos()
-        else:
-            stopped = await workflows._destroy_dbos()
+        stopped = await workflows._destroy_dbos()
         waited = time.monotonic() - started
-        assert signal.getsignal(signal.SIGINT) is counted, "shutdown leaves the handlers as found"
     finally:
         release.set()
-        signal.signal(signal.SIGINT, installed)
 
-    assert grace == [workflows.WORKFLOW_GRACE]
-    assert seen == ([signal.SIGINT] if case.second_signal else [])
-    assert stopped is case.expect_stopped
-    hurried = case.expect_stopped is False
+    assert signal.getsignal(signal.SIGINT) is counted, "shutdown leaves the handlers as found"
+    assert grace == [shutdown.WORKFLOW_GRACE]
+    assert server_handler == ([signal.SIGINT] if hurried else [])
+    assert stopped is not hurried
     assert ("shutdown_hurried" in events(caplog)) is hurried, "logged exactly when hurried"
     if hurried:
         assert waited < 5, "the signal ended a wait of a minute"
-    elif case.destroy == "finishes":
+    else:
         assert waited >= FINISH_SECONDS, "shutdown waited for destroy to finish"
+
+
+async def test_a_failed_destroy_reaches_the_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The destroy thread's failure is raised again on the loop that awaits it."""
+
+    def fake_destroy(*, workflow_completion_timeout_sec: int) -> None:
+        raise RuntimeError("system database gone")
+
+    monkeypatch.setattr(workflows.DBOS, "destroy", fake_destroy)
+
+    with pytest.raises(RuntimeError, match="system database gone"):
+        await workflows._destroy_dbos()
 
 
 async def test_work_a_shutdown_takes_away_is_recovered_not_failed(

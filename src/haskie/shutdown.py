@@ -39,7 +39,7 @@ DUPLICATE_WINDOW = 0.5
 # `_listeners_lock` and swaps it in, and a handler reads whichever whole tuple is current. A
 # handler must not take the lock itself: it runs on the main thread, maybe while the main thread
 # already holds it, and a `Lock` is not reentrant.
-_listeners: tuple[Callable[[], None], ...] = ()
+_listeners: tuple[Callable[[], object], ...] = ()
 _listeners_lock = threading.Lock()
 
 
@@ -87,7 +87,7 @@ def _counted(
 
 
 @contextlib.contextmanager
-def listening(callback: Callable[[], None]) -> Iterator[None]:
+def listening(callback: Callable[[], object]) -> Iterator[None]:
     """Call `callback` on every shutdown signal that counts, for the length of the block. It runs
     inside a signal handler, so it must only set a flag."""
     global _listeners
@@ -97,10 +97,10 @@ def listening(callback: Callable[[], None]) -> Iterator[None]:
         yield
     finally:
         with _listeners_lock:
-            remaining = list(_listeners)
-            remaining.remove(callback)
-            _listeners = tuple(remaining)
+            _listeners = tuple(listener for listener in _listeners if listener is not callback)
 
+
+WORKFLOW_GRACE = 10  # seconds running workflows get to finish before DBOS cancels them
 
 # How long the interpreter may take to exit once the main thread is done. Before it exits, Python
 # joins every non-daemon thread, and it ignores Ctrl-C while it waits. Work a shutdown abandons -
@@ -119,18 +119,16 @@ def _exit_when_held() -> None:
     os._exit(1)
 
 
-_bounding: threading.Thread | None = None
-_bounding_lock = threading.Lock()
+_bounded = False
+_bounded_lock = threading.Lock()
 
 
 def bound_exit() -> None:
     """Make sure the process exits within `EXIT_GRACE` of its main thread finishing. Once per
     process, however many times an app starts in it. A daemon thread, so a clean exit ends it
     without waiting and never reaches `os._exit`."""
-    global _bounding
-    with _bounding_lock:  # `functools.cache` would not do: two first calls may both run
-        if _bounding is None:
-            _bounding = threading.Thread(
-                target=_exit_when_held, name="haskie-exit-bound", daemon=True
-            )
-            _bounding.start()
+    global _bounded
+    with _bounded_lock:  # `functools.cache` would not do: two first calls may both run
+        if not _bounded:
+            _bounded = True
+            threading.Thread(target=_exit_when_held, name="haskie-exit-bound", daemon=True).start()

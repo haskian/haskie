@@ -401,37 +401,39 @@ async def stop() -> bool:
     return stopped
 
 
-WORKFLOW_GRACE = 10  # seconds running workflows get to finish before DBOS cancels them
-
-
 async def _destroy_dbos() -> bool:
     """`DBOS.destroy`, which a second SIGINT or SIGTERM cuts short. False when it was.
 
-    destroy waits out `WORKFLOW_GRACE` in a sleep loop nothing can interrupt, and uvicorn, which
-    owns the signals, only notes one that lands during shutdown. So destroy runs on a daemon
-    thread, and a signal during the wait stops the waiting (see `shutdown.listening`): shutdown
-    goes on, and the thread dies with the process. Operations are durable, so what it would have
-    finished runs at the next boot.
+    destroy waits out `shutdown.WORKFLOW_GRACE` in a sleep loop nothing can interrupt, and
+    uvicorn, which owns the signals, only notes one that lands during shutdown. So destroy runs on
+    a daemon thread, and a signal during the wait stops the waiting (see `shutdown.listening`):
+    shutdown goes on, and the thread dies with the process. Operations are durable, so what it
+    would have finished runs at the next boot.
     """
-    # The `Future` hands the outcome from the destroy thread to this loop under its own lock,
-    # and says whether there is one yet.
+    # The `Future` hands the outcome from the destroy thread to this loop, which awaits it
+    # through `wrap_future` rather than polling.
     outcome: Future[None] = Future()
 
     def destroy() -> None:
         try:
-            DBOS.destroy(workflow_completion_timeout_sec=WORKFLOW_GRACE)
+            DBOS.destroy(workflow_completion_timeout_sec=shutdown.WORKFLOW_GRACE)
         except BaseException as exc:  # raised again below, on the loop that awaits it
             outcome.set_exception(exc)
         else:
             outcome.set_result(None)
 
-    hurried = threading.Event()
-    with shutdown.listening(hurried.set):
+    # The listener runs in a signal handler, on this loop's thread: `call_soon_threadsafe` is the
+    # one loop call safe from there.
+    hurried = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    with shutdown.listening(partial(loop.call_soon_threadsafe, hurried.set)):
         threading.Thread(target=destroy, name="dbos-destroy", daemon=True).start()
-        while not outcome.done() and not hurried.is_set():
-            await asyncio.sleep(TASK_POLL)
-    if outcome.done():  # finished, even if a signal came as well: DBOS is down either way
-        outcome.result()
+        destroyed = asyncio.wrap_future(outcome)
+        hurry = asyncio.ensure_future(hurried.wait())
+        await asyncio.wait({destroyed, hurry}, return_when=asyncio.FIRST_COMPLETED)
+        hurry.cancel()
+    if destroyed.done():  # finished, even if a signal came as well: DBOS is down either way
+        await destroyed  # its failure, if any, raised here rather than left unretrieved
         return True
     _log.warning("shutdown_hurried", abandoned="dbos destroy")
     return False
