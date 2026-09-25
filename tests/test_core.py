@@ -16,7 +16,6 @@ from collections.abc import AsyncIterator
 from datetime import timedelta
 from pathlib import Path
 
-import aiosqlite
 import anyio
 import lancedb
 import msgspec
@@ -33,8 +32,10 @@ from conftest import (
     maintenance_state,
     text_pdf,
 )
+from sqlalchemy import event, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
-from haskie import audit, db, home, logs
+from haskie import audit, db, home, logs, tables
 from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection, DocumentCounts, Member, MemberStatus
@@ -121,10 +122,12 @@ def docx_bytes() -> bytes:
 async def _staging_rows() -> list[tuple[str, str, int]]:
     """Every `staging` row as (id, filename, size): what `stage` commits beside the bytes."""
     async with db.connect() as conn:
-        rows = await conn.execute_fetchall(
-            "select staging_id, filename, size from staging order by staging_id"
+        rows = await conn.execute(
+            select(
+                tables.staging.c.staging_id, tables.staging.c.filename, tables.staging.c.size
+            ).order_by(tables.staging.c.staging_id)
         )
-    return [tuple(row) for row in rows]
+        return [tuple(row) for row in rows]
 
 
 async def attachable(name: str, content: bytes | str = MD, **options) -> Document:
@@ -548,7 +551,9 @@ async def test_sweep_staging_deletes_only_the_uploads_nobody_imported() -> None:
     stale = document.staging_path(old.staging_id)
     async with db.connect() as conn:
         await conn.execute(
-            "update staging set created_at = 0 where staging_id = ?", (old.staging_id,)
+            update(tables.staging)
+            .where(tables.staging.c.staging_id == old.staging_id)
+            .values(created_at=0)
         )
     orphan = home.STAGING_ROOT / f"{'0' * 32}.md"  # bytes written, the row never landed
     orphan.write_text("x")
@@ -983,7 +988,9 @@ async def test_collection_settings_are_read_from_the_row_every_time() -> None:
 
     async with db.connect() as conn:  # a write the setter never saw
         await conn.execute(
-            "update collections set overrides = '{\"chunk_size\": 42}' where name = ?", ("stored",)
+            update(tables.collections)
+            .where(tables.collections.c.name == "stored")
+            .values(overrides='{"chunk_size": 42}')
         )
     assert (await collection.overrides()).chunk_size == 42, "the row owns the value"
 
@@ -1014,15 +1021,15 @@ async def test_load_settings_reads_every_collection_it_was_asked_for_in_one_quer
     await Collection("alpha").set_overrides(CollectionOverrides(chunker=Chunker.TEXT))
     assert await Collection.load_overrides([]) == {}, "nothing asked for, nothing read"
     statements: list[str] = []
-    real_execute = aiosqlite.Connection.execute
 
-    async def counted(self, sql, parameters=None):
-        statements.append(sql)
-        return await real_execute(self, sql, parameters)
+    def counted(_conn, _cursor, statement: str, *_args) -> None:
+        statements.append(statement)
 
-    monkeypatch.setattr(aiosqlite.Connection, "execute", counted)
-
-    found = await Collection.load_overrides(["alpha", "beta", "ghost", "alpha"])
+    event.listen(db.engine().sync_engine, "before_cursor_execute", counted)
+    try:
+        found = await Collection.load_overrides(["alpha", "beta", "ghost", "alpha"])
+    finally:
+        event.remove(db.engine().sync_engine, "before_cursor_execute", counted)
 
     assert set(found) == {"alpha", "beta"}, "a name with no row is absent from the result"
     assert (found["alpha"].chunker, found["beta"]) == ("text", CollectionOverrides())
@@ -1261,17 +1268,20 @@ async def test_deleting_a_collection_drops_it_from_every_session() -> None:
     for name in ("keep", "drop"):
         await Collection.create(name)
     async with db.connect() as conn:
-        await conn.execute("insert into sessions (id) values ('s1')")
-        await conn.executemany(
-            "insert into session_collections (session_id, collection, position) values (?, ?, ?)",
-            [("s1", "keep", 0), ("s1", "drop", 1)],
+        await conn.execute(insert(tables.sessions).values(id="s1"))
+        await conn.execute(
+            insert(tables.session_collections),
+            [
+                {"session_id": "s1", "collection": "keep", "position": 0},
+                {"session_id": "s1", "collection": "drop", "position": 1},
+            ],
         )
 
     await (await Collection.get("drop")).delete()
 
     async with db.connect() as conn:
-        rows = await conn.execute_fetchall("select collection from session_collections")
-    assert list(rows) == [("keep",)]
+        rows = await conn.scalars(select(tables.session_collections.c.collection))
+        assert list(rows) == ["keep"]
     assert await Collection.names() == ["keep"]
 
 
@@ -2421,11 +2431,13 @@ async def test_session_collections_keep_their_order_and_survive_reorder() -> Non
     assert await session.set_collections("s1", ["b", "c"]) == ["b", "c"], "the selection is new"
     assert await session.load() == {"s1": ["b", "c"]}
     async with db.connect() as conn:
-        rows = await conn.execute_fetchall(
-            "select collection, position from session_collections where session_id = 's1' "
-            "order by position"
+        chosen = tables.session_collections.c
+        rows = await conn.execute(
+            select(chosen.collection, chosen.position)
+            .where(chosen.session_id == "s1")
+            .order_by(chosen.position)
         )
-    assert list(rows) == [("b", 0), ("c", 1)], "one row per collection, renumbered from zero"
+        assert list(rows) == [("b", 0), ("c", 1)], "one row per collection, renumbered from zero"
 
     await session.set_collections("s1", [])
     assert await session.load() == {"s1": []}, "an empty selection keeps the session itself"
@@ -2734,13 +2746,34 @@ def test_migrate_creates_the_schema_once_and_refuses_every_other_home(
     conn.close()
 
 
+def test_a_fresh_home_has_exactly_the_tables_indexes_and_columns_of_the_metadata(
+    tmp_path: Path,
+) -> None:
+    """The DDL is generated from `tables.metadata`, so the file and the declarations agree."""
+    conn = sqlite3.connect(str(tmp_path / "fresh.db"))
+    db.migrate(conn)
+    master = conn.execute("select type, name from sqlite_master where name not like 'sqlite_%'")
+    created = {(kind, name) for kind, name in master}
+    declared_tables = tables.metadata.sorted_tables
+    index_names = {str(index.name) for table in declared_tables for index in table.indexes}
+    declared = {("table", table.name) for table in declared_tables} | {
+        ("index", name) for name in index_names
+    }
+    assert created == declared, "every table and index, and nothing else"
+    assert all(name.startswith("idx_") for name in index_names), "every index has the prefix"
+    for table in declared_tables:
+        columns = [row[1] for row in conn.execute(f"pragma table_info({table.name})")]
+        assert columns == [column.name for column in table.columns], table.name
+    conn.close()
+
+
 @pytest.mark.anyio
 async def test_connect_rolls_back_a_failed_unit_of_work() -> None:
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(IntegrityError):
         async with db.connect() as conn:
-            await conn.execute("insert into collections (name) values ('half')")
+            await conn.execute(insert(tables.collections).values(name="half"))
             await conn.execute(
-                "insert into collection_documents (collection, document) values ('ghost', 'a.md')"
+                insert(tables.collection_documents).values(collection="ghost", document="a.md")
             )
     assert await Collection.names() == [], "the first insert of the failed block is gone too"
 

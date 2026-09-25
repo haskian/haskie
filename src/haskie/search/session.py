@@ -5,17 +5,20 @@ itself runs over the collections, where it belongs: one document may sit in seve
 the search counts its chunks once whichever collections hold them (`retrieval.fan_out`).
 """
 
-import sqlite3
 import time
 from collections.abc import Sequence
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Protocol
 
 import msgspec
+from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.sqlite import Insert, insert
+from sqlalchemy.exc import IntegrityError
 
 from haskie import db
 from haskie.collection.collection import Collection
 from haskie.errors import InvalidInput, NotFound
+from haskie.tables import session_collections, session_events, sessions
 
 MAX_SESSION_ID = 128
 MAX_COLLECTIONS = 100  # a session selects collections by hand; a longer list is a client mistake
@@ -35,18 +38,18 @@ class Action(StrEnum):
 async def load() -> dict[str, list[str]]:
     """Every session with its collections, in the order the session chose them. Two queries rather
     than a join: a session that selected nothing still has to be listed."""
-    sessions: dict[str, list[str]] = {}
+    chosen = session_collections.c
     async with db.connect() as conn:
-        cursor = await conn.execute("select id from sessions order by id")
-        for (session_id,) in await cursor.fetchall():
-            sessions[session_id] = []
-        cursor = await conn.execute(
-            "select session_id, collection from session_collections order by session_id, position"
+        ids = await conn.scalars(select(sessions.c.id).order_by(sessions.c.id))
+        loaded: dict[str, list[str]] = {session_id: [] for session_id in ids}
+        rows = await conn.execute(
+            select(chosen.session_id, chosen.collection).order_by(
+                chosen.session_id, chosen.position
+            )
         )
-        rows = await cursor.fetchall()
     for session_id, collection in rows:
-        sessions[session_id].append(collection)
-    return sessions
+        loaded[session_id].append(collection)
+    return loaded
 
 
 async def set_collections(session: str, collections: list[str]) -> list[str]:
@@ -62,17 +65,20 @@ async def set_collections(session: str, collections: list[str]) -> list[str]:
     if missing:
         raise NotFound(f"collection not found: {missing[0]}")
     async with db.connect() as conn:
+        await conn.execute(_create_session(session))
         await conn.execute(
-            "insert into sessions (id) values (?) on conflict (id) do nothing", (session,)
+            delete(session_collections).where(session_collections.c.session_id == session)
         )
-        await conn.execute("delete from session_collections where session_id = ?", (session,))
         try:
-            await conn.executemany(
-                "insert into session_collections (session_id, collection, position) "
-                "values (?, ?, ?)",
-                [(session, name, position) for position, name in enumerate(chosen)],
-            )
-        except sqlite3.IntegrityError as exc:
+            if chosen:
+                await conn.execute(
+                    insert(session_collections),
+                    [
+                        {"session_id": session, "collection": name, "position": position}
+                        for position, name in enumerate(chosen)
+                    ],
+                )
+        except IntegrityError as exc:
             # the foreign key, not a duplicate: a collection deleted since the check above
             raise NotFound("a chosen collection was deleted meanwhile; try again") from exc
     return chosen
@@ -80,12 +86,12 @@ async def set_collections(session: str, collections: list[str]) -> list[str]:
 
 async def collections_for(session: str) -> list[str]:
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            "select collection from session_collections where session_id = ? order by position",
-            (session,),
+        chosen = await conn.scalars(
+            select(session_collections.c.collection)
+            .where(session_collections.c.session_id == session)
+            .order_by(session_collections.c.position)
         )
-        rows = await cursor.fetchall()
-    return [collection for (collection,) in rows]
+        return list(chosen)
 
 
 class SessionSummary(msgspec.Struct):
@@ -101,11 +107,12 @@ async def summaries() -> list[SessionSummary]:
     """Every session with its collections and its latest event, in id order; the page sorts."""
     loaded = await load()
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            "select session_id, max(ts) from session_events group by session_id"
+        rows = await conn.execute(
+            select(session_events.c.session_id, func.max(session_events.c.ts)).group_by(
+                session_events.c.session_id
+            )
         )
-        rows: list[Any] = list(await cursor.fetchall())
-    last = dict(rows)
+        last = dict(rows.tuples().all())
     return [SessionSummary(id, collections, last.get(id)) for id, collections in loaded.items()]
 
 
@@ -136,6 +143,10 @@ class SessionEvent(msgspec.Struct):
     duration_ms: int
 
 
+def _create_session(session: str) -> Insert:
+    return insert(sessions).values(id=session).on_conflict_do_nothing()
+
+
 def _checked(session: str) -> str:
     if not session or len(session) > MAX_SESSION_ID:
         raise InvalidInput(f"session id must be 1..{MAX_SESSION_ID} characters")
@@ -159,22 +170,17 @@ async def record(
         return
     _checked(session)
     async with db.connect() as conn:
+        await conn.execute(_create_session(session))
         await conn.execute(
-            "insert into sessions (id) values (?) on conflict (id) do nothing", (session,)
-        )
-        await conn.execute(
-            "insert into session_events "
-            "(session_id, ts, action, subject, detail, operation_id, duration_ms) "
-            "values (?, ?, ?, ?, ?, ?, ?)",
-            (
-                session,
-                time.time(),
-                action,
-                subject,
-                msgspec.json.encode(detail or EventDetail()),
-                operation_id,
-                duration_ms,
-            ),
+            insert(session_events).values(
+                session_id=session,
+                ts=time.time(),
+                action=action,
+                subject=subject,
+                detail=db.dumps(detail or EventDetail()),
+                operation_id=operation_id,
+                duration_ms=duration_ms,
+            )
         )
 
 
@@ -210,34 +216,25 @@ async def searches_since(cutoff: float) -> list[SearchAt]:
     """Every search on or after `cutoff`, oldest first. Raw points, not buckets: the reader
     buckets them by its own day boundaries, which the server does not know."""
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            "select ts, session_id from session_events where action = ? and ts >= ? order by ts",
-            (Action.SEARCH, cutoff),
+        rows = await conn.execute(
+            select(session_events.c.ts, session_events.c.session_id)
+            .where(session_events.c.action == Action.SEARCH, session_events.c.ts >= cutoff)
+            .order_by(session_events.c.ts)
         )
-        rows = await cursor.fetchall()
-    return [SearchAt(ts, session_id) for ts, session_id in rows]
+        return [SearchAt(ts, session_id) for ts, session_id in rows]
 
 
 async def history(session: str, limit: int = MAX_HISTORY) -> list[SessionEvent]:
     """What the session did, newest first."""
+    event = session_events.c
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            "select ts, action, subject, detail, operation_id, duration_ms from session_events "
-            "where session_id = ? order by ts desc, id desc limit ?",
-            (session, limit),
+        rows = await conn.execute(
+            select(*db.columns_of(session_events, SessionEvent))
+            .where(event.session_id == session)
+            .order_by(event.ts.desc(), event.id.desc())
+            .limit(limit)
         )
-        rows = await cursor.fetchall()
-    return [
-        SessionEvent(
-            ts,
-            action,
-            subject,
-            msgspec.json.decode(detail, type=EventDetail),
-            operation_id,
-            duration_ms,
-        )
-        for ts, action, subject, detail, operation_id, duration_ms in rows
-    ]
+        return [db.row_to(SessionEvent, row, detail=EventDetail) for row in rows]
 
 
 async def origins(operation_ids: list[str]) -> dict[str, str]:
@@ -245,11 +242,10 @@ async def origins(operation_ids: list[str]) -> dict[str, str]:
     One query for a whole page of operations."""
     if not operation_ids:
         return {}
-    marks = db.placeholders(len(operation_ids))
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            f"select operation_id, session_id from session_events where operation_id in ({marks})",
-            operation_ids,
+        rows = await conn.execute(
+            select(session_events.c.operation_id, session_events.c.session_id).where(
+                session_events.c.operation_id.in_(operation_ids)
+            )
         )
-        rows = await cursor.fetchall()
-    return {operation_id: session_id for operation_id, session_id in rows}
+        return dict(rows.tuples().all())

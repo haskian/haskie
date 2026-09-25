@@ -5,15 +5,30 @@ whole page of operations needs aggregates: how many steps each stage slice recor
 workflows of each name or queue are active. One grouped query answers that for every row on the
 page, where the API would need a call per workflow.
 
-Nothing here writes: DBOS owns every row in these tables. `db.connect()` opens the same file DBOS
-was configured with, so the reads see its committed state through WAL.
+Nothing here writes: DBOS owns every row in these tables, and their schema too, so they are
+declared here as lightweight `table()` clauses with the columns read, outside `tables.metadata`,
+which creates only haskie's own. `db.connect()` opens the same file DBOS was configured with, so the
+reads see its committed state through WAL.
 """
 
 from collections.abc import Sequence
 from itertools import batched
 
+from sqlalchemy import column, func, select, table
+
 from haskie import db
 from haskie.indexing.dbos_names import ACTIVE_STATUS
+
+workflow_status = table(
+    "workflow_status",
+    column("workflow_uuid"),
+    column("name"),
+    column("status"),
+    column("queue_name"),
+    column("application_version"),
+    column("created_at"),
+)
+operation_outputs = table("operation_outputs", column("workflow_uuid"), column("function_name"))
 
 # SQLite allows 999 bound parameters by default; one query per page keeps every list under it.
 SYSDB_PAGE = 500
@@ -28,14 +43,14 @@ async def step_counts(workflow_ids: list[str], function_name: str) -> dict[str, 
         return {}
     counts: dict[str, int] = {}
     async with db.connect() as conn:
+        step = operation_outputs.c
         for chunk in batched(workflow_ids, SYSDB_PAGE, strict=False):
-            rows = await conn.execute_fetchall(
-                "select workflow_uuid, count(*) from operation_outputs "
-                f"where workflow_uuid in ({db.placeholders(len(chunk))}) and function_name = ? "
-                "group by workflow_uuid",
-                (*chunk, function_name),
+            rows = await conn.execute(
+                select(step.workflow_uuid, func.count())
+                .where(step.workflow_uuid.in_(chunk), step.function_name == function_name)
+                .group_by(step.workflow_uuid)
             )
-            counts.update({workflow_id: count for workflow_id, count in rows})
+            counts.update(rows.tuples().all())
     return counts
 
 
@@ -45,13 +60,13 @@ async def active_counts_by_name() -> dict[str, int]:
     One query for the whole app: the Operations view shows an active count per kind, and a kind is
     a set of workflow names, so counting through the API would cost a listing per name."""
     async with db.connect() as conn:
-        rows = await conn.execute_fetchall(
-            "select name, count(*) from workflow_status "
-            f"where status in ({db.placeholders(len(ACTIVE_STATUS))}) and name is not null "
-            "group by name",
-            ACTIVE_STATUS,
+        workflow = workflow_status.c
+        rows = await conn.execute(
+            select(workflow.name, func.count())
+            .where(workflow.status.in_(ACTIVE_STATUS), workflow.name.is_not(None))
+            .group_by(workflow.name)
         )
-    return {name: count for name, count in rows}
+        return dict(rows.tuples().all())
 
 
 async def operation_activity(skip: Sequence[str] = ()) -> dict[str, int]:
@@ -66,26 +81,29 @@ async def operation_activity(skip: Sequence[str] = ()) -> dict[str, int]:
     `maintenance_idle_seconds` after the last document, with nothing queued and the Operations
     view - which counts the same `ACTIVE_STATUS` - showing nothing."""
     async with db.connect() as conn:
-        rows = await conn.execute_fetchall(
-            "select status, count(*) from workflow_status "
-            f"where status in ({db.placeholders(len(ACTIVE_STATUS))}) "
-            "and queue_name like 'operation.%' "
-            + (f"and queue_name not in ({db.placeholders(len(skip))}) " if skip else "")
-            + "group by status",
-            [*ACTIVE_STATUS, *skip],
+        workflow = workflow_status.c
+        rows = await conn.execute(
+            select(workflow.status, func.count())
+            .where(
+                workflow.status.in_(ACTIVE_STATUS),
+                workflow.queue_name.like("operation.%"),
+                workflow.queue_name.not_in(skip),
+            )
+            .group_by(workflow.status)
         )
-    return {status: count for status, count in rows}
+        return dict(rows.tuples().all())
 
 
 async def stale_active_ids(app_version: str, limit: int, offset: int = 0) -> list[str]:
     """One page of ids of workflows that are still enqueued or running under another application
     version, oldest first. Ids only: a boot after a long outage must not load the whole backlog."""
     async with db.connect() as conn:
-        rows = await conn.execute_fetchall(
-            "select workflow_uuid from workflow_status "
-            f"where status in ({db.placeholders(len(ACTIVE_STATUS))}) "
-            "and application_version != ? "
-            "order by created_at limit ? offset ?",
-            (*ACTIVE_STATUS, app_version, limit, offset),
+        workflow = workflow_status.c
+        ids = await conn.scalars(
+            select(workflow.workflow_uuid)
+            .where(workflow.status.in_(ACTIVE_STATUS), workflow.application_version != app_version)
+            .order_by(workflow.created_at)
+            .limit(limit)
+            .offset(offset)
         )
-    return [workflow_id for (workflow_id,) in rows]
+        return list(ids)

@@ -95,22 +95,28 @@ and a reranker model by key, checked against these tables when settings are writ
 a model loads stays in code: the loaders and their pinned revisions in `indexing/`.
 
 Two more tables stand alone: `settings` (one row of JSON) and `staging` (uploads waiting for a
-name). DBOS keeps its own workflow and queue tables in the same file. `sysdb.py` reads them with
-raw SQL for the Operations view.
+name). DBOS keeps its own workflow and queue tables in the same file. `sysdb.py` reads them for
+the Operations view, through `table()` declarations of its own: DBOS owns their schema.
+
+Every table and index is a SQLAlchemy Core `Table` in `tables.py`, the one source of the schema.
+`db.migrate` generates the DDL from it on a fresh home, and every query is a Core statement over
+the same tables, so a column name is written once. Index names start with `idx_` (a home created before
+`tables.py` keeps its older, unprefixed names).
 
 ## How each store is written
 
 | store | how it is written | why |
 | --- | --- | --- |
-| SQLite | app code through `aiosqlite`, one connection per unit of work; DBOS through its own connections; WAL mode | a unit of work is one transaction. Writers that meet wait on the busy timeout |
+| SQLite | app code through SQLAlchemy Core on `aiosqlite`, one connection per unit of work (`NullPool`); DBOS through its own connections; WAL mode | a unit of work is one transaction. Writers that meet wait on the busy timeout |
 | LanceDB | async API, one writer per collection (`task.indexing`) | one writer per table keeps commits simple |
 | small files | `home.atomic_write`: a temp file, then `os.replace` | a crash leaves the old file or the new one, never half |
 | imported originals | moved or copied into place | removed again if the import raises |
 
 ## Schema changes
 
-Before 1.0 there are no migrations. A storage change bumps `SCHEMA_VERSION` in `db.py`, stored in
+Before 1.0 there are no migrations. A storage change edits `tables.py` and bumps `SCHEMA_VERSION` in
+`db.py`, stored in
 `PRAGMA user_version`. A home written with another version is refused at startup, with a message
 that says so. The fix is `haskie destroy` and a fresh import.
 
-Code: `db.py`, `home.py`, `sysdb.py`.
+Code: `tables.py`, `db.py`, `home.py`, `sysdb.py`.

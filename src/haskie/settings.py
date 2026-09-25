@@ -20,10 +20,13 @@ from typing import Annotated, Any
 
 import msgspec
 from msgspec import Meta
+from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert
 
 from haskie import db
 from haskie.errors import InvalidInput
 from haskie.logs import get_logger
+from haskie.tables import settings as settings_table
 
 _log = get_logger(__name__)
 
@@ -604,11 +607,10 @@ async def load_user_settings_or_none() -> UserSettings | None:
 
     loaded = _Loaded(None)
     async with db.connect() as conn:
-        cursor = await conn.execute("select json from settings where id = 1")
-        row = await cursor.fetchone()
-        if row is not None:
+        raw = await conn.scalar(select(settings_table.c.json).where(settings_table.c.id == 1))
+        if raw is not None:
             try:
-                decoded = _decode(row[0])
+                decoded = _decode(raw)
                 # the catalogue is in the database, so a decoded row may still name a lost model
                 problem = await catalogue.unknown(conn, decoded)
             except (msgspec.ValidationError, msgspec.DecodeError) as exc:
@@ -632,10 +634,11 @@ async def load_user_settings() -> UserSettings:
 
 async def save_user_settings(settings: UserSettings) -> UserSettings:
     async with db.connect() as conn:
+        written = insert(settings_table).values(id=1, json=db.dumps(settings))
         await conn.execute(
-            "insert into settings (id, json) values (1, ?) "
-            "on conflict (id) do update set json = excluded.json",
-            (db.dumps(settings),),
+            written.on_conflict_do_update(
+                index_elements=[settings_table.c.id], set_={"json": written.excluded.json}
+            )
         )
     _store(settings)  # after the commit, so a concurrent load cannot cache the previous row
     return settings
@@ -648,11 +651,10 @@ async def init_user_settings(settings: UserSettings) -> bool:
     pass an `initialized()` check, so the conflict clause decides instead.
     """
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            "insert into settings (id, json) values (1, ?) on conflict (id) do nothing",
-            (db.dumps(settings),),
+        result = await conn.execute(
+            insert(settings_table).values(id=1, json=db.dumps(settings)).on_conflict_do_nothing()
         )
-        created = cursor.rowcount == 1  # read on the open connection, before it is closed
+        created = result.rowcount == 1  # read on the open connection, before it is closed
     if created:  # the loser wrote nothing, so it must not cache what it tried to write
         _store(settings)
     return created

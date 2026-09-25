@@ -1,5 +1,5 @@
 -- The model catalogue a fresh home starts with: every model the runtimes can load, with its
--- metadata, and every embedding profile. Run once, right after `db.SCHEMA` (see `db.migrate`), so
+-- metadata, and every embedding profile. Run once, right after `db.schema_ddl()` (see `db.migrate`), so
 -- the database is where the catalogue lives from then on, not this file.
 --
 -- Parameter counts are the published weights' own totals. `context_tokens` is the longest input

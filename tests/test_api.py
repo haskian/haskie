@@ -453,10 +453,13 @@ async def test_collection_reranker_override_starts_its_download(
 
 
 async def test_status_reports_an_unreadable_settings_row(ready: AsyncTestClient) -> None:
+    from sqlalchemy import update
+
     from haskie import db
+    from haskie.tables import settings as settings_table
 
     async with db.connect() as conn:
-        await conn.execute("update settings set json = '{not json' where id = 1")
+        await conn.execute(update(settings_table).values(json="{not json"))
     forget_settings()  # a direct write bypasses the process cache
 
     status = (await ready.get("/api/status")).json()

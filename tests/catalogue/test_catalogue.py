@@ -8,6 +8,7 @@ from pathlib import Path
 
 import msgspec
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from haskie import db
 from haskie.catalogue import catalogue
@@ -113,12 +114,12 @@ async def test_the_seed_holds_to_its_own_references() -> None:
     """The seed runs on a connection without foreign keys switched on, so this is what checks
     that every profile names a model that is there, and an embedder at that."""
     async with db.connect() as conn:
-        broken = await (await conn.execute("pragma foreign_key_check")).fetchall()
-        kinds = await (
-            await conn.execute(
+        broken = (await conn.exec_driver_sql("pragma foreign_key_check")).all()
+        kinds = (
+            await conn.exec_driver_sql(
                 "select distinct m.kind from embedding_profiles p join models m on m.name = p.model"
             )
-        ).fetchall()
+        ).all()
 
     assert list(broken) == [] and list(kinds) == [("embedder",)]
 
@@ -129,7 +130,7 @@ def test_the_seed_replays_harmlessly(tmp_path: Path) -> None:
     conn = sqlite3.connect(tmp_path / "replay.db")
     try:
         for _ in range(2):
-            conn.executescript(db.SCHEMA)
+            conn.executescript(db.schema_ddl())
             conn.executescript(db.SEED.read_text(encoding="utf-8"))
         counts = [
             conn.execute(f"select count(*) from {t}").fetchone()[0]
@@ -158,7 +159,7 @@ _VALID = {
 async def test_the_schema_takes_a_valid_model() -> None:
     """The base the refusals below change one field of, so each refusal is that field's."""
     async with db.connect() as conn:
-        await conn.execute(_MODEL.format_map(_VALID))
+        await conn.exec_driver_sql(_MODEL.format_map(_VALID))
 
 
 @pytest.mark.parametrize(
@@ -186,9 +187,9 @@ async def test_the_schema_takes_a_valid_model() -> None:
     ],
 )
 async def test_the_schema_refuses_a_row_the_catalogue_cannot_mean(name: str, sql: str) -> None:
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(IntegrityError):
         async with db.connect() as conn:
-            await conn.execute(sql)
+            await conn.exec_driver_sql(sql)
 
 
 @pytest.mark.parametrize(

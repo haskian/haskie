@@ -12,6 +12,7 @@ from pathlib import Path
 import msgspec
 import pytest
 from conftest import import_row
+from sqlalchemy import delete
 
 from haskie import db
 from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
@@ -23,6 +24,7 @@ from haskie.indexing.chunk import CHUNK_VERSION, Chunk, Piece
 from haskie.indexing.embed_cache import NO_MODEL, Params
 from haskie.indexing.segment import PieceType
 from haskie.settings import Chunker, ChunkSettings, Parser
+from haskie.tables import embeddings
 
 pytestmark = pytest.mark.anyio  # most cases await; the pure ones ignore the marker
 
@@ -227,7 +229,9 @@ async def test_write_lookup_read_round_trip(
     assert (entry.rows, entry.chunk_size, entry.chunker) == (3, params.chunk_size, "markdown")
     assert entry.bytes == embed_cache.file_path(doc.name, cache_id).stat().st_size, name
     wire = msgspec.json.decode(msgspec.json.encode(entry))
-    assert set(wire) == set(embed_cache.ENTRY_COLUMNS), "the row is the wire shape, `doc` renamed"
+    assert set(wire) == {column.name for column in embed_cache.ENTRY_COLUMNS}, (
+        "the row is the wire shape, `doc` renamed"
+    )
 
 
 async def test_seq_numbers_the_whole_document_across_its_parts(tmp_path: Path) -> None:
@@ -345,7 +349,7 @@ async def test_lookup_answers_a_hit_only_when_the_row_and_the_file_agree(
     cache_id = await embed_cache.write(params, parts, None)
     if not keep_row:
         async with db.connect() as conn:
-            await conn.execute("delete from embeddings where id = ?", (cache_id,))
+            await conn.execute(delete(embeddings).where(embeddings.c.id == cache_id))
     if not keep_file:
         embed_cache.file_path(doc.name, cache_id).unlink()
 

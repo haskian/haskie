@@ -18,8 +18,8 @@ here serves one document's vectors as another's, so it is a correctness key, unl
 (spread) or `search.text.query_hash` (cursor validation).
 
 Visibility: `lookup` answers a hit only when both the row and the file exist. `write` puts the file
-in place (atomic replace) before it inserts the row (`insert or ignore`), so a reader never sees a
-row without a file, and a retried or a losing concurrent write is a no-op rather than an error.
+in place (atomic replace) before it inserts the row (`on conflict do nothing`), so a reader never
+sees a row without a file, and a retried or a losing concurrent write is a no-op, not an error.
 Two callers wanting the same missing entry are serialized above this module, by the DBOS
 deduplication of `workflows.ensure_embedding`; this module only makes the outcome idempotent.
 
@@ -34,13 +34,14 @@ import hashlib
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 
 import anyio
 import anyio.to_thread
 import msgspec
 import pyarrow as pa
 import pyarrow.parquet as pq
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.sqlite import insert
 
 from haskie import db, home
 from haskie.catalogue.catalogue import EmbeddingModel
@@ -49,6 +50,7 @@ from haskie.document import document
 from haskie.indexing import chunk
 from haskie.indexing.chunk import CHUNK_VERSION, Chunk
 from haskie.settings import Chunker, ChunkSettings, Parser
+from haskie.tables import embeddings
 
 NO_MODEL = "none"  # the `model` of a profile without an embedding model: chunks only, no vectors
 
@@ -79,10 +81,7 @@ class Entry(Params, frozen=True):
     created_at: float
 
 
-# The struct's field order is the column order, so the insert, the SELECT and the row decode
-# cannot drift apart (`document/document.py` does the same for `documents`).
-ENTRY_COLUMNS: tuple[str, ...] = tuple(f.encode_name for f in msgspec.structs.fields(Entry))
-ENTRY_SELECT = ", ".join(ENTRY_COLUMNS)
+ENTRY_COLUMNS = db.columns_of(embeddings, Entry)
 
 
 def params(
@@ -202,9 +201,8 @@ async def lookup(p: Params) -> str | None:
     """The cache id of a hit, else None: a row or a file on its own is an interrupted write."""
     id = key(p)
     async with db.connect() as conn:
-        cursor = await conn.execute("select 1 from embeddings where id = ?", (id,))
-        row = await cursor.fetchone()
-    if row is None or not await anyio.Path(file_path(p.document, id)).is_file():
+        found = await conn.scalar(select(embeddings.c.id).where(embeddings.c.id == id))
+    if found is None or not await anyio.Path(file_path(p.document, id)).is_file():
         return None
     return id
 
@@ -223,12 +221,9 @@ async def write(p: Params, parts: list[Path], dims: int | None) -> str:
         bytes=size,
         created_at=time.time(),
     )
-    values = msgspec.to_builtins(entry)
     async with db.connect() as conn:
         await conn.execute(
-            f"insert or ignore into embeddings ({ENTRY_SELECT}) "
-            f"values ({db.placeholders(len(ENTRY_COLUMNS))})",
-            tuple(values[column] for column in ENTRY_COLUMNS),
+            insert(embeddings).values(msgspec.to_builtins(entry)).on_conflict_do_nothing()
         )
     await home.remove_tree(scratch_dir(p.document, id))
     return id
@@ -271,16 +266,16 @@ async def forget(doc: str) -> None:
     """Drop every cached embedding of one document, rows and files. For a reconversion: the
     markdown the rows were chunked from is about to change, so none of them is reusable."""
     async with db.connect() as conn:
-        await conn.execute("delete from embeddings where document = ?", (doc,))
+        await conn.execute(delete(embeddings).where(embeddings.c.document == doc))
     await home.remove_tree(document.embeddings_dir(doc))
 
 
 async def entries(doc: str) -> list[Entry]:
     """Every cache row of one document, newest first."""
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            f"select {ENTRY_SELECT} from embeddings where document = ? order by created_at desc",
-            (doc,),
+        rows = await conn.execute(
+            select(*ENTRY_COLUMNS)
+            .where(embeddings.c.document == doc)
+            .order_by(embeddings.c.created_at.desc())
         )
-        rows: list[Any] = list(await cursor.fetchall())
-    return [db.row_to(Entry, ENTRY_COLUMNS, row) for row in rows]
+        return [db.row_to(Entry, row) for row in rows]

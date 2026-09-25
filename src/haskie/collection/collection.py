@@ -17,9 +17,11 @@ import time
 from enum import StrEnum
 from typing import Any
 
-import aiosqlite
 import anyio
 import msgspec
+from sqlalchemy import Row, delete, func, select, update
+from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from haskie import db, home
 from haskie.catalogue import catalogue
@@ -27,7 +29,7 @@ from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.index import CollectionIndex, Hit, IndexStats, forget_schema
 from haskie.document import document
 from haskie.errors import Conflict, NotFound
-from haskie.paging import Page, PageRequest, key_reader, keyset, resolve_sort
+from haskie.paging import Page, PageRequest, count_of, keyset, resolve_sort
 from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
@@ -35,6 +37,7 @@ from haskie.settings import (
     SearchSettings,
     load_user_settings,
 )
+from haskie.tables import collection_documents, collections, documents
 
 
 class MemberStatus(StrEnum):
@@ -49,16 +52,19 @@ MEMBER_STATUSES: tuple[MemberStatus, ...] = tuple(MemberStatus)
 # being written into the collection right now: the states a poll waits on
 ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = (MemberStatus.PENDING, MemberStatus.INDEXING)
 
-# Public sort name -> SQL expression. The whitelist is the only source of column identifiers a
-# listing can order by, so a request can never name a column (see paging.resolve_sort).
-COLLECTION_SORTS = {"name": "name", "created_at": "created_at"}
-# The member listing joins `documents d` with `collection_documents cd`: the sort expressions
-# name the table where a column exists in both, and `name` (documents only) breaks ties.
+# The member listing selects a document row and its membership, which share `status`, `error`
+# and `updated_at`: the membership's are labelled, so a row maps each name to one column.
+MEMBER_STATUS = collection_documents.c.status.label("member_status")
+MEMBER_UPDATED_AT = collection_documents.c.updated_at.label("member_updated_at")
+
+# Public sort name -> column. The whitelist is the only source of columns a listing can order by,
+# so a request can never name one (see paging.resolve_sort).
+COLLECTION_SORTS = {"name": collections.c.name, "created_at": collections.c.created_at}
 MEMBER_SORTS = {
-    "name": "d.name",
-    "size": "d.size",
-    "status": "cd.status",
-    "updated_at": "cd.updated_at",
+    "name": documents.c.name,
+    "size": documents.c.size,
+    "status": MEMBER_STATUS,
+    "updated_at": MEMBER_UPDATED_AT,
 }
 
 
@@ -83,7 +89,7 @@ class MaintenanceState(msgspec.Struct):
     vector_index_rows: int
 
 
-MAINTENANCE_COLUMNS = "pending_documents, last_write_at, last_maintained_at, vector_index_rows"
+MAINTENANCE_COLUMNS = db.columns_of(collections, MaintenanceState)
 
 
 class CollectionSummary(msgspec.Struct):
@@ -119,19 +125,22 @@ class Member(msgspec.Struct):
     updated_at: float = 0.0
 
 
-MEMBER_COLUMNS = "cd.status, cd.error, cd.added_at, cd.updated_at"
-_MEMBER_SELECTED = [*(f"d.{c}" for c in document.DOCUMENT_COLUMNS), *MEMBER_COLUMNS.split(", ")]
-_DOC_WIDTH = len(document.DOCUMENT_COLUMNS)
+_MEMBERS = select(
+    *document.DOCUMENT_COLUMNS,
+    MEMBER_STATUS,
+    collection_documents.c.error.label("member_error"),
+    collection_documents.c.added_at,
+    MEMBER_UPDATED_AT,
+).join_from(documents, collection_documents, collection_documents.c.document == documents.c.name)
 
 
-def _member(row: tuple) -> Member:
-    status, error, added_at, updated_at = row[_DOC_WIDTH:]
+def _member(row: Row[Any]) -> Member:
     return Member(
-        document=document._document(row[:_DOC_WIDTH]),
-        status=status,
-        error=error,
-        added_at=added_at,
-        updated_at=updated_at,
+        document=document.from_row(row),
+        status=row.member_status,
+        error=row.member_error,
+        added_at=row.added_at,
+        updated_at=row.member_updated_at,
     )
 
 
@@ -147,29 +156,27 @@ def _counts(by_status: dict[str, int]) -> DocumentCounts:
 
 
 async def _counts_by_collection(
-    conn: aiosqlite.Connection, names: list[str]
+    conn: AsyncConnection, names: list[str]
 ) -> dict[str, DocumentCounts]:
     """Counts for the names of one page in one grouped query, on the listing's connection."""
     if not names:
         return {}
     by_collection: dict[str, dict[str, int]] = {name: {} for name in names}
-    marks = db.placeholders(len(names))
-    cursor = await conn.execute(
-        "select collection, status, count(*) from collection_documents "
-        f"where collection in ({marks}) group by 1, 2",
-        names,
+    member = collection_documents.c
+    rows = await conn.execute(
+        select(member.collection, member.status, func.count())
+        .where(member.collection.in_(names))
+        .group_by(member.collection, member.status)
     )
-    for collection, status, count in await cursor.fetchall():
+    for collection, status, count in rows:
         by_collection[collection][status] = count
     return {name: _counts(by_status) for name, by_status in by_collection.items()}
 
 
-def _decode_overrides(rows: list[Any]) -> dict[str, CollectionOverrides]:
-    """Decode `(name, overrides)` rows into the struct every caller reads. A row with unreadable
-    JSON falls back to the defaults, which is what a collection that never set any has."""
-    return {
-        name: (db.loads(raw, CollectionOverrides) or CollectionOverrides()) for name, raw in rows
-    }
+def _overrides(raw: str) -> CollectionOverrides:
+    """One `overrides` column as the struct every caller reads. Unreadable JSON falls back to the
+    defaults, which is what a collection that never set any has."""
+    return db.loads(raw, CollectionOverrides) or CollectionOverrides()
 
 
 class Collection:
@@ -187,36 +194,29 @@ class Collection:
         """Every name, for callers inside the process (sessions, workflows). The API pages
         instead, through `page` below."""
         async with db.connect() as conn:
-            cursor = await conn.execute("select name from collections order by name")
-            return [row[0] for row in await cursor.fetchall()]
+            return list(await conn.scalars(select(collections.c.name).order_by(collections.c.name)))
 
     @staticmethod
     async def page(request: PageRequest) -> Page[CollectionSummary]:
         """One page of collections with their member counts: a keyset walk over `collections`,
         then a single grouped count for the names on the page."""
-        sort, expression = resolve_sort(request.sort, COLLECTION_SORTS, "name")
-        walk = keyset(sort, expression, request)
-        boundary, params = walk.where()
-        selected = ["name", "created_at", "description"]
+        sort, column = resolve_sort(request.sort, COLLECTION_SORTS, "name")
+        walk = keyset(sort, column, request, collections.c.name)
+        listed = select(collections.c.name, collections.c.created_at, collections.c.description)
         async with db.connect() as conn:
-            cursor = await conn.execute(
-                f"select {', '.join(selected)} from collections "
-                f"{f'where {boundary} ' if boundary else ''}"
-                f"{walk.order_by()} limit {walk.limit()}",
-                params,
-            )
-            rows: list[Any] = list(await cursor.fetchall())
-            cursor = await conn.execute("select count(*) from collections")
-            (total,) = await cursor.fetchone() or (0,)  # a count always returns its one row
+            rows = (await conn.execute(walk.apply(listed))).all()
+            total = await conn.scalar(count_of(listed))
             counts = await _counts_by_collection(
-                conn, [row[0] for row in rows[: request.page_size]]
+                conn, [row.name for row in rows[: request.page_size]]
             )
         return walk.page(
             rows,
             build=lambda row: CollectionSummary(
-                name=row[0], counts=counts[row[0]], created_at=row[1], description=row[2]
+                name=row.name,
+                counts=counts[row.name],
+                created_at=row.created_at,
+                description=row.description,
             ),
-            key=key_reader(sort, expression, selected),
             total=total,
         )
 
@@ -224,12 +224,12 @@ class Collection:
     async def create(cls, name: str, description: str = "") -> "Collection":
         collection = cls(document.safe_name(name))
         async with db.connect() as conn:
-            cursor = await conn.execute(
-                "insert into collections (name, created_at, description) values (?, ?, ?) "
-                "on conflict (name) do nothing",
-                (collection.name, time.time(), description),
+            result = await conn.execute(
+                insert(collections)
+                .values(name=collection.name, created_at=time.time(), description=description)
+                .on_conflict_do_nothing()
             )
-            created = cursor.rowcount == 1  # read on the open connection, before it is closed
+            created = result.rowcount == 1  # read on the open connection, before it is closed
         if not created:
             raise Conflict(f"collection already exists: {collection.name}")
         await anyio.Path(collection.root).mkdir(parents=True, exist_ok=True)
@@ -238,9 +238,8 @@ class Collection:
     @classmethod
     async def get(cls, name: str) -> "Collection":
         async with db.connect() as conn:
-            cursor = await conn.execute("select 1 from collections where name = ?", (name,))
-            row = await cursor.fetchone()
-        if row is None:
+            found = await conn.scalar(select(collections.c.name).where(collections.c.name == name))
+        if found is None:
             raise NotFound(f"collection not found: {name}")
         return cls(name)
 
@@ -258,7 +257,7 @@ class Collection:
         """Row delete cascades to the memberships and to every session that chose the collection
         (`session_collections`); `pragma foreign_keys = on` is set on every connection."""
         async with db.connect() as conn:
-            await conn.execute("delete from collections where name = ?", (self.name,))
+            await conn.execute(delete(collections).where(collections.c.name == self.name))
 
     async def remove_tree(self) -> None:
         """Delete the collection's folder, and with it the index table."""
@@ -276,7 +275,9 @@ class Collection:
     async def set_overrides(self, value: CollectionOverrides) -> None:
         async with db.connect() as conn:
             await conn.execute(
-                "update collections set overrides = ? where name = ?", (db.dumps(value), self.name)
+                update(collections)
+                .where(collections.c.name == self.name)
+                .values(overrides=db.dumps(value))
             )
 
     @staticmethod
@@ -286,13 +287,13 @@ class Collection:
         wanted = list(dict.fromkeys(names))
         if not wanted:
             return {}
-        marks = db.placeholders(len(wanted))
         async with db.connect() as conn:
-            cursor = await conn.execute(
-                f"select name, overrides from collections where name in ({marks})", wanted
+            rows = await conn.execute(
+                select(collections.c.name, collections.c.overrides).where(
+                    collections.c.name.in_(wanted)
+                )
             )
-            rows: list[Any] = list(await cursor.fetchall())
-        return _decode_overrides(rows)
+            return {name: _overrides(raw) for name, raw in rows}
 
     @staticmethod
     async def reranker_overrides() -> list[str]:
@@ -301,9 +302,10 @@ class Collection:
         One query over the `overrides` column: the model downloads have to cover the overrides too,
         and a search of that collection loads whichever model it names."""
         async with db.connect() as conn:
-            cursor = await conn.execute("select name, overrides from collections order by name")
-            rows: list[Any] = list(await cursor.fetchall())
-        found = _decode_overrides(rows)
+            rows = await conn.execute(
+                select(collections.c.name, collections.c.overrides).order_by(collections.c.name)
+            )
+        found = {name: _overrides(raw) for name, raw in rows}
         chosen = [v.search.reranker_model for v in found.values() if v.search.reranker_model]
         return list(dict.fromkeys(chosen))
 
@@ -320,17 +322,17 @@ class Collection:
         half of the answer and not the other."""
         user = await load_user_settings()
         async with db.connect() as conn:
-            cursor = await conn.execute(
-                f"select overrides, description, {MAINTENANCE_COLUMNS} from collections "
-                "where name = ?",
-                (self.name,),
-            )
-            row: Any = await cursor.fetchone()
+            row = (
+                await conn.execute(
+                    select(
+                        collections.c.overrides, collections.c.description, *MAINTENANCE_COLUMNS
+                    ).where(collections.c.name == self.name)
+                )
+            ).first()
             if row is None:
                 raise NotFound(f"collection not found: {self.name}")
             counts = (await _counts_by_collection(conn, [self.name]))[self.name]
-        raw, description, *maintenance = row
-        overrides = _decode_overrides([(self.name, raw)])[self.name]
+        overrides = _overrides(row.overrides)
         # one handle: each opens its own connection
         index = self.index_with(await catalogue.embedding_model(user))
         return CollectionInfo(
@@ -338,18 +340,20 @@ class Collection:
             overrides=overrides,
             effective=overrides.resolve(user),
             search=overrides.resolve_search(user),
-            description=description,
+            description=row.description,
             counts=counts,
             index_outdated=not await index.schema_current(),
             index=await index.stats(),
-            maintenance=MaintenanceState(*maintenance),
+            maintenance=db.row_to(MaintenanceState, row),
         )
 
     async def describe(self, description: str) -> None:
         """Replace the collection's description. Empty clears it."""
         async with db.connect() as conn:
             await conn.execute(
-                "update collections set description = ? where name = ?", (description, self.name)
+                update(collections)
+                .where(collections.c.name == self.name)
+                .values(description=description)
             )
 
     # --- maintenance columns ---------------------------------------------
@@ -361,33 +365,38 @@ class Collection:
         """Collections with documents indexed since their last finished run: what a boot
         reschedules."""
         async with db.connect() as conn:
-            cursor = await conn.execute(
-                "select name from collections where pending_documents > 0 order by name"
+            names = await conn.scalars(
+                select(collections.c.name)
+                .where(collections.c.pending_documents > 0)
+                .order_by(collections.c.name)
             )
-            rows = await cursor.fetchall()
-        return [name for (name,) in rows]
+            return list(names)
 
     async def maintenance_state(self) -> MaintenanceState | None:
         """None when the collection has no row: it was never created, or it was deleted while a
         run waited. A run treats that as a skip, so the absence has to stay visible."""
         async with db.connect() as conn:
-            cursor = await conn.execute(
-                f"select {MAINTENANCE_COLUMNS} from collections where name = ?", (self.name,)
-            )
-            row = await cursor.fetchone()
-        return MaintenanceState(*row) if row is not None else None
+            row = (
+                await conn.execute(
+                    select(*MAINTENANCE_COLUMNS).where(collections.c.name == self.name)
+                )
+            ).first()
+        return db.row_to(MaintenanceState, row) if row is not None else None
 
     async def note_indexed(self) -> int:
         """One more document indexed; returns how many are pending a run. Counted in one
         statement, so two documents finishing at the same moment both count."""
         async with db.connect() as conn:
-            cursor = await conn.execute(
-                "update collections set pending_documents = pending_documents + 1, "
-                "last_write_at = ? where name = ? returning pending_documents",
-                (time.time(), self.name),
+            pending = await conn.scalar(
+                update(collections)
+                .where(collections.c.name == self.name)
+                .values(
+                    pending_documents=collections.c.pending_documents + 1,
+                    last_write_at=time.time(),
+                )
+                .returning(collections.c.pending_documents)
             )
-            row = await cursor.fetchone()
-        return row[0] if row is not None else 0
+        return pending or 0
 
     async def settle_maintenance(self, claimed: int, retrained: bool, num_rows: int) -> None:
         """Record a finished run: subtract what it claimed, stamp it, and remember the rows the
@@ -395,11 +404,13 @@ class Collection:
         collection would stay pending for ever and be rescheduled at every boot."""
         async with db.connect() as conn:
             await conn.execute(
-                "update collections set pending_documents = max(0, pending_documents - ?), "
-                "last_maintained_at = ?, "
-                "vector_index_rows = case when ? then ? else vector_index_rows end "
-                "where name = ?",
-                (claimed, time.time(), retrained, num_rows, self.name),
+                update(collections)
+                .where(collections.c.name == self.name)
+                .values(
+                    pending_documents=func.max(0, collections.c.pending_documents - claimed),
+                    last_maintained_at=time.time(),
+                    vector_index_rows=num_rows if retrained else collections.c.vector_index_rows,
+                )
             )
 
     # --- search ----------------------------------------------------------
@@ -439,20 +450,20 @@ class Collection:
         now = time.time()
         async with db.connect() as conn:
             await conn.execute(
-                "insert into collection_documents (collection, document, added_at, updated_at) "
-                "values (?, ?, ?, ?) on conflict (collection, document) do nothing",
-                (self.name, doc, now, now),
+                insert(collection_documents)
+                .values(collection=self.name, document=doc, added_at=now, updated_at=now)
+                .on_conflict_do_nothing()
             )
 
     async def member(self, doc: str) -> Member:
         async with db.connect() as conn:
-            cursor = await conn.execute(
-                f"select {', '.join(_MEMBER_SELECTED)} from documents d "
-                "join collection_documents cd on cd.document = d.name "
-                "where cd.collection = ? and d.name = ?",
-                (self.name, doc),
-            )
-            row: Any = await cursor.fetchone()
+            row = (
+                await conn.execute(
+                    _MEMBERS.where(
+                        collection_documents.c.collection == self.name, documents.c.name == doc
+                    )
+                )
+            ).first()
         if row is None:
             raise NotFound(f"document not in collection {self.name}: {doc}")
         return _member(row)
@@ -462,17 +473,22 @@ class Collection:
     ) -> None:
         async with db.connect() as conn:
             await conn.execute(
-                "update collection_documents set status = ?, error = ?, updated_at = ? "
-                "where collection = ? and document = ?",
-                (status, error, time.time(), self.name, doc),
+                update(collection_documents)
+                .where(
+                    collection_documents.c.collection == self.name,
+                    collection_documents.c.document == doc,
+                )
+                .values(status=status, error=error, updated_at=time.time())
             )
 
     async def remove_member(self, doc: str) -> None:
         """Detach only: the document, its files and its embedding cache stay."""
         async with db.connect() as conn:
             await conn.execute(
-                "delete from collection_documents where collection = ? and document = ?",
-                (self.name, doc),
+                delete(collection_documents).where(
+                    collection_documents.c.collection == self.name,
+                    collection_documents.c.document == doc,
+                )
             )
 
     async def member_names(self, after: str | None = None, limit: int | None = None) -> list[str]:
@@ -480,22 +496,12 @@ class Collection:
 
         `after` resumes the walk past that name and `limit` caps the page, so a bulk index can walk
         a large collection one page at a time instead of holding every name at once."""
-        filters: list[str] = ["collection = ?"]
-        params: list[Any] = [self.name]
+        member = collection_documents.c
+        names = select(member.document).where(member.collection == self.name)
         if after is not None:
-            filters.append("document > ?")
-            params.append(after)
-        limited = " limit ?" if limit is not None else ""
-        if limit is not None:
-            params.append(limit)
+            names = names.where(member.document > after)
         async with db.connect() as conn:
-            cursor = await conn.execute(
-                f"select document from collection_documents where {' and '.join(filters)} "
-                f"order by document{limited}",
-                params,
-            )
-            rows = await cursor.fetchall()
-        return [row[0] for row in rows]
+            return list(await conn.scalars(names.order_by(member.document).limit(limit)))
 
     async def counts(self) -> DocumentCounts:
         async with db.connect() as conn:
@@ -506,30 +512,17 @@ class Collection:
     ) -> Page[Member]:
         """One page of the collection's members, optionally of one membership status. `total`
         counts the filtered rows, so it is what the page is a page of."""
-        sort, expression = resolve_sort(request.sort, MEMBER_SORTS, "name")
-        walk = keyset(sort, expression, request)
-        filters, params = ["cd.collection = ?"], [self.name]
+        sort, column = resolve_sort(request.sort, MEMBER_SORTS, "name")
+        walk = keyset(sort, column, request, documents.c.name)
+        filters = [collection_documents.c.collection == self.name]
         if status is not None:
-            filters.append("cd.status = ?")
-            params.append(status)
-        filtered = " and ".join(filters)
-        boundary, boundary_params = walk.where()
-        where = f"{filtered} and {boundary}" if boundary else filtered
+            filters.append(collection_documents.c.status == status)
         async with db.connect() as conn:
-            cursor = await conn.execute(
-                f"select {', '.join(_MEMBER_SELECTED)} from documents d "
-                "join collection_documents cd on cd.document = d.name "
-                f"where {where} {walk.order_by()} limit {walk.limit()}",
-                [*params, *boundary_params],
-            )
-            rows: list[Any] = list(await cursor.fetchall())
-            cursor = await conn.execute(
-                f"select count(*) from collection_documents cd where {filtered}", params
-            )
-            (total,) = await cursor.fetchone() or (0,)  # a count always returns its one row
+            members = _MEMBERS.where(*filters)
+            rows = (await conn.execute(walk.apply(members))).all()
+            total = await conn.scalar(count_of(members))
         return walk.page(
             rows,
             build=_member,
-            key=key_reader(sort, expression, _MEMBER_SELECTED, "d.name"),
             total=total,
         )
