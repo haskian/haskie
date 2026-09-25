@@ -2,6 +2,7 @@
 
 import functools
 import shutil
+import signal
 import sqlite3
 import threading
 import time
@@ -60,6 +61,21 @@ def fast_runtime() -> None:
     workflows.OPERATION_POLL = 0.02
     workflows.TASK_POLL = 0.02
     cpu.CONVERT_WORKERS = 0
+
+
+@pytest.fixture
+def server_handler() -> Iterator[list[int]]:
+    """Stand in for the server: a Python handler on SIGINT and SIGTERM that records each call, in
+    the order the calls came. Whatever a test installs over it is put back afterwards."""
+    from haskie import shutdown
+
+    seen: list[int] = []
+    found = {number: signal.getsignal(number) for number in shutdown.SHUTDOWN_SIGNALS}
+    for number in shutdown.SHUTDOWN_SIGNALS:
+        signal.signal(number, lambda n, _frame: seen.append(n))
+    yield seen
+    for number, handler in found.items():
+        signal.signal(number, handler)
 
 
 @pytest.fixture(scope="session")

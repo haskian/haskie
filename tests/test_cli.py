@@ -349,7 +349,7 @@ HELD_PID = 4242
 @dataclass
 class StopCase:
     running: bool  # whether the home is held when `stop` looks
-    dies_on: int | None  # the signal the server exits on; None for one that ignores both
+    dies_on: int | None  # the signal the server exits on; None for one that ignores every one
     kill: type[OSError] | None  # what signalling it raises, if anything
     exit_code: int
     expect_in_output: str
@@ -381,13 +381,21 @@ STOP_CASES = {
         expect_in_output="forcing it",
         expect_signals=[signal.SIGTERM, signal.SIGINT],
     ),
-    "a server that ignores both signals fails": StopCase(
+    "a server stuck past the force is killed": StopCase(
+        running=True,
+        dies_on=signal.SIGKILL,
+        kill=None,
+        exit_code=0,
+        expect_in_output="ignored the force; killing it",
+        expect_signals=[signal.SIGTERM, signal.SIGINT, signal.SIGKILL],
+    ),
+    "a server that outlives even SIGKILL fails": StopCase(
         running=True,
         dies_on=None,
         kill=None,
         exit_code=1,
         expect_in_output="did not stop; kill it by hand",
-        expect_signals=[signal.SIGTERM, signal.SIGINT],
+        expect_signals=[signal.SIGTERM, signal.SIGINT, signal.SIGKILL],
     ),
     "a server that died first is not an error": StopCase(
         running=True,
@@ -412,7 +420,8 @@ STOP_CASES = {
 def test_stop(case: StopCase, elsewhere: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`stop` reaches the server through the home lock and reads the lock back for the exit, so
     every case is a lock answer: no holder, one that goes on the graceful signal, one that only
-    goes on the forced one, one that never goes, one already gone, one this user may not signal.
+    goes on the forced one, one that only goes on the kill, one that never goes, one already gone,
+    one this user may not signal.
 
     The lock answers off the signals sent rather than off a clock, so no case turns on timing.
     """
@@ -434,6 +443,7 @@ def test_stop(case: StopCase, elsewhere: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(cli_module, "POLL_INTERVAL", 0.01)
     monkeypatch.setattr(cli_module, "STOP_DEADLINE", 0.05)
     monkeypatch.setattr(cli_module, "FORCE_DEADLINE", 0.05)
+    monkeypatch.setattr(cli_module, "KILL_DEADLINE", 0.05)
 
     result = runner.invoke(cli, ["stop", "--home", str(elsewhere)])
 
@@ -451,6 +461,32 @@ def test_stop_finds_the_process_holding_the_home(elsewhere: Path) -> None:
     with holding():
         assert home.running_pid() == os.getpid()
     assert home.running_pid() is None, "a released home holds no pid"
+
+
+@pytest.mark.parametrize(
+    "dbos_stopped",
+    [True, False],
+    ids=["a runtime that stopped gives the home up", "a hurried stop keeps it until the exit"],
+)
+def test_the_home_is_released_only_once_the_runtime_stopped(
+    dbos_stopped: bool, elsewhere: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hurried stop leaves DBOS running workflows until the exit. A second haskie claiming the
+    home meanwhile would run the same ones, so the lock waits for the kernel to drop it."""
+    from haskie import app
+    from haskie.indexing import workflows
+
+    async def stop() -> bool:
+        return dbos_stopped
+
+    monkeypatch.setattr(workflows, "stop", stop)
+    home.use(elsewhere)
+    home.claim_home()
+    try:
+        asyncio.run(app.stop_runtime())
+        assert (home.running_pid() == os.getpid()) is not dbos_stopped
+    finally:
+        home.release_home()
 
 
 @dataclass
