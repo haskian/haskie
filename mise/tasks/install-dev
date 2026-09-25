@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Install this checkout as the haskie-dev command, on ~/haskie-dev, beside any installed haskie"
+#MISE description="Install this checkout as the haskie-dev command, on ~/haskie-dev and port 8452, beside any installed haskie"
 #MISE depends=["build"]
 set -euo pipefail
 # Its own environment and a copy, not an editable link: the command outlives this checkout, and
@@ -11,7 +11,8 @@ mkdir -p "$bin_dir"
 cat >"$bin_dir/haskie-dev" <<SCRIPT
 #!/bin/sh
 export HASKIE_HOME="\$HOME/haskie-dev"
+export HASKIE_PORT=8452  # the installed haskie serves 8451
 exec "$env_dir/bin/haskie" "\$@"
 SCRIPT
 chmod +x "$bin_dir/haskie-dev"
-echo "installed $bin_dir/haskie-dev (home: ~/haskie-dev)"
+echo "installed $bin_dir/haskie-dev (home: ~/haskie-dev, port 8452)"

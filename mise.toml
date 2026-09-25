@@ -8,6 +8,7 @@ bun = "latest"
 _.python.venv = { path = ".venv", create = true }
 # Every task works on its own home, so development never touches the data of an installed haskie.
 HASKIE_HOME = "{{env.HOME}}/haskie-dev"
+HASKIE_PORT = "8452"  # the installed haskie serves 8451
 
 [task_config]
 includes = ["mise/tasks"]

@@ -16,6 +16,7 @@ import signal
 import sqlite3
 import stat
 import subprocess
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -662,9 +663,7 @@ def test_install_claude(
     if case.claude_on_path:
         recorded = argv_log.read_text().splitlines()
         assert recorded[0] == f"mcp remove -s {case.scope} haskie", "replaced, so re-running works"
-        assert recorded[1] == (
-            f"mcp add -s {case.scope} --transport http haskie http://127.0.0.1:8451/mcp"
-        )
+        assert recorded[1] == f"mcp add -s {case.scope} --transport http haskie {claude.MCP_URL}"
     else:
         assert not argv_log.exists()
 
@@ -801,3 +800,23 @@ def test_the_default_url_matches_where_mcp_is_mounted() -> None:
     from haskie import app
 
     assert cli_module.MCP_URL.endswith(app.MCP_PATH)
+
+
+@pytest.mark.parametrize(
+    ("port", "expected"),
+    [(None, "http://127.0.0.1:8451/mcp"), ("8452", "http://127.0.0.1:8452/mcp")],
+    ids=["unset: the installed haskie's 8451", "HASKIE_PORT: a development install beside it"],
+)
+def test_haskie_port_moves_the_default_url(port: str | None, expected: str) -> None:
+    """Read once at import, so only a fresh interpreter shows it."""
+    env = {key: value for key, value in os.environ.items() if key != "HASKIE_PORT"}
+    if port is not None:
+        env["HASKIE_PORT"] = port
+    printed = subprocess.run(
+        [sys.executable, "-c", "from haskie import claude; print(claude.MCP_URL)"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert printed == expected

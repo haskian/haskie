@@ -128,7 +128,8 @@ it later means running *Index all* in each one.
   run on the CPU there; the `coreml` hardware setting runs them through CoreML instead, which today
   is slower.
 - **Port:** 8451 by default, clear of the usual 8000 and 8080. For another, run
-  `haskie run --port <n>` and `haskie install claude --url http://127.0.0.1:<n>/mcp`.
+  `haskie run --port <n>` and `haskie install claude --url http://127.0.0.1:<n>/mcp`, or set
+  `HASKIE_PORT`, which moves the default of `run`, `ensure` and `install claude` at once.
 - **Other commands:** `haskie stop` stops the server. `haskie destroy` deletes `~/.haskie` after
   showing what would be lost. `--home` or `HASKIE_HOME` keeps the data elsewhere.
 
