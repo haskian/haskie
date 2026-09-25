@@ -67,11 +67,11 @@ export function SearchField({
         <Field label={doc.title} help={doc.description}>
           <Picker
             ariaLabel={doc.title}
-            options={rerankerOptions(options.reranker_models, options.reranker_cards)}
+            options={rerankerOptions(options.reranker_models, options.reranker_metadata)}
             value={search.reranker_model}
             onChange={(reranker_model) => onChange({ ...search, reranker_model })}
           />
-          <ModelFacts name={search.reranker_model} card={options.reranker_cards[search.reranker_model]} />
+          <ModelFacts name={search.reranker_model} metadata={options.reranker_metadata[search.reranker_model]} />
         </Field>
       )
     default: {

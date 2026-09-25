@@ -1,4 +1,5 @@
-import type { EmbeddingModel, EmbeddingProfile, FieldDoc, ModelCard } from '../api'
+import type { EmbedderMetadata, EmbeddingModel, EmbeddingProfile, FieldDoc, ModelMetadata, RerankerMetadata } from '../api'
+import { count } from '../format'
 import type { PickerOption } from './Picker'
 
 // Picker options and field texts, built from what `/api/options` offers.
@@ -10,31 +11,36 @@ export const docFor = (docs: Record<string, FieldDoc>, key: string): FieldDoc =>
 export const choices = <T extends string>(values: readonly T[]): PickerOption<T>[] => values.map((value) => ({ value, label: value }))
 
 /** A model as a picker names it: its name without the publisher, an embedder's vector size,
- *  and the parameter count its card gives. */
-export function modelLabel(name: string, card: ModelCard | null | undefined, dims?: number): string {
-  const params = card?.metadata.Parameters
-  return [name.split('/').at(-1), dims !== undefined && `Dim ${dims}`, params && `Param ${params}`].filter(Boolean).join(' · ')
+ *  and its parameter count. */
+export function modelLabel(name: string, metadata: ModelMetadata | undefined, dims?: number): string {
+  return [name.split('/').at(-1), dims !== undefined && `Dim ${dims}`, metadata && `Param ${count(metadata.parameters)}`]
+    .filter(Boolean)
+    .join(' · ')
 }
 
 /** An embedding profile as a picker names it: its model, or full-text only for none. The profile
  *  key itself is only what the settings store. */
-export const profileLabel = (model: EmbeddingModel | null | undefined): string =>
-  model ? modelLabel(model.name, model.card, model.dims) : 'full-text only'
+export const profileLabel = (model: EmbeddingModel | null | undefined, metadata: EmbedderMetadata | undefined): string =>
+  model ? modelLabel(model.name, metadata, model.dims) : 'full-text only'
 
-/** A reranker model as a picker option: labelled by `modelLabel`, described by its card. */
-export const rerankerOption = (name: string, cards: Record<string, ModelCard>): PickerOption<string> => ({
+/** A reranker model as a picker option: labelled by `modelLabel`, described by its metadata. */
+export const rerankerOption = (name: string, metadata: Record<string, RerankerMetadata>): PickerOption<string> => ({
   value: name,
-  label: modelLabel(name, cards[name]),
-  sub: cards[name]?.description,
+  label: modelLabel(name, metadata[name]),
+  sub: metadata[name]?.description,
 })
 
-export const rerankerOptions = (names: readonly string[], cards: Record<string, ModelCard>): PickerOption<string>[] =>
-  names.map((name) => rerankerOption(name, cards))
+export const rerankerOptions = (names: readonly string[], metadata: Record<string, RerankerMetadata>): PickerOption<string>[] =>
+  names.map((name) => rerankerOption(name, metadata))
 
-/** The embedding profiles as picker options, in the order the backend gives them. */
-export const profileOptions = (profiles: Record<string, EmbeddingModel | null>): PickerOption<EmbeddingProfile>[] =>
+/** The embedding profiles as picker options, in the order the backend gives them, each described
+ *  by its metadata (`Options.embedding_metadata`). */
+export const profileOptions = (
+  profiles: Record<string, EmbeddingModel | null>,
+  metadata: Record<string, EmbedderMetadata>,
+): PickerOption<EmbeddingProfile>[] =>
   Object.entries(profiles).map(([value, model]) => ({
-    value: value as EmbeddingProfile,
-    label: profileLabel(model),
-    sub: model?.card?.description ?? 'Full-text search only. No model download.',
+    value,
+    label: profileLabel(model, metadata[value]),
+    sub: model ? metadata[value]?.description : 'Full-text search only. No model download.',
   }))

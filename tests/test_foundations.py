@@ -29,7 +29,6 @@ from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
     ConversionSettings,
-    EmbeddingProfile,
     Parser,
     PipelineSettings,
     Reranker,
@@ -353,11 +352,6 @@ async def test_remove_tree_reports_a_file_it_cannot_delete(
             "bm25_weight must be >= 0",
         ),
         (
-            "unknown reranker model",
-            lambda: SearchSettings(reranker_model="nope/x"),
-            "unknown reranker model",
-        ),
-        (
             "collection override size alone below 1",
             lambda: CollectionOverrides(chunk_size=0),
             "chunk_size must be >= 1",
@@ -525,7 +519,8 @@ def test_without_none(name: str, struct: msgspec.Struct, expected: dict) -> None
     ("name", "stored"),
     [
         ("not json at all", "{not json"),
-        ("unknown enum value", '{"embedding": "bogus"}'),
+        ("a profile the catalogue does not hold", '{"embedding": "bogus"}'),
+        ("a reranker the catalogue does not hold", '{"search": {"reranker_model": "no/such"}}'),
         ("wrong field type", '{"pipeline": {"cpu_budget": "many"}}'),
         (
             "out of bounds, rejected by __post_init__",
@@ -534,7 +529,7 @@ def test_without_none(name: str, struct: msgspec.Struct, expected: dict) -> None
     ],
 )
 async def test_unreadable_settings_fall_back_to_defaults(name: str, stored: str) -> None:
-    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
+    await save_user_settings(UserSettings(embedding="compact"))
     async with db.connect() as conn:
         await conn.execute("update settings set json = ? where id = 1", (stored,))
     forget_settings()  # a direct write bypasses the process cache
@@ -548,8 +543,8 @@ async def test_unreadable_settings_fall_back_to_defaults(name: str, stored: str)
 
 @pytest.mark.anyio
 async def test_settings_problem_clears_after_a_good_load() -> None:
-    await save_user_settings(UserSettings(embedding=EmbeddingProfile.QUALITY))
-    assert await load_user_settings_or_none() == UserSettings(embedding=EmbeddingProfile.QUALITY)
+    await save_user_settings(UserSettings(embedding="quality"))
+    assert await load_user_settings_or_none() == UserSettings(embedding="quality")
     assert settings_problem() is None
 
 
@@ -579,44 +574,42 @@ def _count_connects(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 async def test_user_settings_are_read_once_and_refreshed_on_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
+    await save_user_settings(UserSettings(embedding="compact"))
     forget_settings()
     connects = _count_connects(monkeypatch)
 
     first, second = await load_user_settings_or_none(), await load_user_settings_or_none()
 
-    assert first == second == UserSettings(embedding=EmbeddingProfile.COMPACT)
+    assert first == second == UserSettings(embedding="compact")
     assert len(connects) == 1, "the second load answers from the process cache"
 
-    await save_user_settings(UserSettings(embedding=EmbeddingProfile.QUALITY))
+    await save_user_settings(UserSettings(embedding="quality"))
 
     assert len(connects) == 2, "the write itself connects"
-    assert await settings.load_user_settings() == UserSettings(embedding=EmbeddingProfile.QUALITY)
+    assert await settings.load_user_settings() == UserSettings(embedding="quality")
     assert len(connects) == 2, "and refreshes the cache, so the read after it does not"
 
 
 @pytest.mark.anyio
 async def test_forgetting_the_cache_forces_a_reread() -> None:
-    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
+    await save_user_settings(UserSettings(embedding="compact"))
     async with db.connect() as conn:
         await conn.execute(
             "update settings set json = ? where id = 1",
-            (db.dumps(UserSettings(embedding=EmbeddingProfile.QUALITY)),),
+            (db.dumps(UserSettings(embedding="quality")),),
         )
 
-    assert await settings.load_user_settings() == UserSettings(
-        embedding=EmbeddingProfile.COMPACT
-    ), "still cached"
+    assert await settings.load_user_settings() == UserSettings(embedding="compact"), "still cached"
 
     forget_settings()
 
-    assert await settings.load_user_settings() == UserSettings(embedding=EmbeddingProfile.QUALITY)
+    assert await settings.load_user_settings() == UserSettings(embedding="quality")
 
 
 @pytest.mark.anyio
 async def test_unreadable_settings_are_not_cached() -> None:
     """A broken row must stay live: the run that repairs it is seen without a second step."""
-    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
+    await save_user_settings(UserSettings(embedding="compact"))
     async with db.connect() as conn:
         await conn.execute("update settings set json = '{not json' where id = 1")
     forget_settings()
@@ -629,10 +622,10 @@ async def test_unreadable_settings_are_not_cached() -> None:
     async with db.connect() as conn:  # nothing was cached, so nothing has to be forgotten
         await conn.execute(
             "update settings set json = ? where id = 1",
-            (db.dumps(UserSettings(embedding=EmbeddingProfile.QUALITY)),),
+            (db.dumps(UserSettings(embedding="quality")),),
         )
 
-    assert await load_user_settings_or_none() == UserSettings(embedding=EmbeddingProfile.QUALITY)
+    assert await load_user_settings_or_none() == UserSettings(embedding="quality")
     assert settings_problem() is None
 
 
@@ -643,10 +636,10 @@ async def test_the_missing_row_before_init_is_not_cached() -> None:
     async with db.connect() as conn:  # first run, straight into the row
         await conn.execute(
             "insert into settings (id, json) values (1, ?)",
-            (db.dumps(UserSettings(embedding=EmbeddingProfile.COMPACT)),),
+            (db.dumps(UserSettings(embedding="compact")),),
         )
 
-    assert await load_user_settings_or_none() == UserSettings(embedding=EmbeddingProfile.COMPACT)
+    assert await load_user_settings_or_none() == UserSettings(embedding="compact")
 
 
 @pytest.mark.anyio
@@ -675,8 +668,8 @@ async def test_connect_skips_ensure_home_after_the_first_success(
 async def test_the_settings_cache_ends_on_the_saved_value_under_concurrent_loads() -> None:
     """A load that misses reads the row before it publishes it, so it can still be in flight when
     a save commits. The saved row has to win: the load must not cache the row it read first."""
-    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
-    saved = UserSettings(embedding=EmbeddingProfile.QUALITY)
+    await save_user_settings(UserSettings(embedding="compact"))
+    saved = UserSettings(embedding="quality")
     loaders, loads = 8, 25
     forget_settings()  # so the first load of every task misses and really reads the row
 
@@ -1058,12 +1051,6 @@ WIRE_CHUNK = Chunk(
             SearchSettings(reranker=Reranker.CROSS_ENCODER),
             ["reranker"],
             "cross-encoder",
-        ),
-        (
-            "settings row: the embedding profile",
-            UserSettings(embedding=EmbeddingProfile.COMPACT),
-            ["embedding"],
-            "compact",
         ),
         (
             "documents row: the status column",

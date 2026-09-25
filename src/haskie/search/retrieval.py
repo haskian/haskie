@@ -17,6 +17,8 @@ import anyio.to_thread
 import msgspec
 
 from haskie import cpu
+from haskie.catalogue import catalogue
+from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.collection import Collection
 from haskie.collection.index import (
     CollectionIndex,
@@ -34,13 +36,7 @@ from haskie.indexing.embed import embed_query
 from haskie.logs import get_logger
 from haskie.search import collapse, passage, session, text
 from haskie.search.passage import Passage, Sources
-from haskie.settings import (
-    EmbeddingModel,
-    Reranker,
-    SearchMode,
-    SearchSettings,
-    load_user_settings,
-)
+from haskie.settings import Reranker, SearchMode, SearchSettings, load_user_settings
 
 _log = get_logger(__name__)
 
@@ -86,7 +82,7 @@ async def plan(names: list[str], query: str) -> Plan | None:
         return None
     settings = plans[0][1] if len(plans) == 1 else user.search
 
-    embedding = user.embedding_model
+    embedding = await catalogue.embedding_model(user)
     vector: list[float] | None = None
     if embedding is not None and any(one.mode != SearchMode.FTS for _, one in plans):
         await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
@@ -216,35 +212,43 @@ def scan(pool: Pool, limit: int) -> Scanned:
 # --- what the hits are folded into ------------------------------------------------
 
 
-def _fold_hits(scanned: Scanned, model: EmbeddingModel | None, limit: int) -> list[Hit]:
-    where = collapse.spaces([hit.text for hit in scanned.hits], scanned.vectors, model)
-    kept = collapse.hits(scanned.hits, where, limit)
-    _log_collapse(where[0].kind, len(scanned.hits), kept, limit)
+def _spaces(scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode) -> collapse.Scan:
+    return collapse.spaces([hit.text for hit in scanned.hits], scanned.vectors, model, mode)
+
+
+def _fold_hits(
+    scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode, limit: int
+) -> list[Hit]:
+    scan = _spaces(scanned, model, mode)
+    kept = collapse.hits(scanned.hits, scan, limit)
+    _log_collapse(scan.deciding[0].kind, len(scanned.hits), kept, limit)
     return kept
 
 
 def _fold_ranges(
-    scanned: Scanned, model: EmbeddingModel | None, limit: int
+    scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode, limit: int
 ) -> list[passage.HitRange]:
-    where = collapse.spaces([hit.text for hit in scanned.hits], scanned.vectors, model)
+    scan = _spaces(scanned, model, mode)
     hit_ranges = passage.ranges(scanned.hits)
-    kept = collapse.ranges(hit_ranges, scanned.hits, where, limit)
-    _log_collapse(where[0].kind, len(hit_ranges), kept, limit)
+    kept = collapse.ranges(hit_ranges, scanned.hits, scan, limit)
+    _log_collapse(scan.deciding[0].kind, len(hit_ranges), kept, limit)
     return kept
 
 
-async def collapse_hits(scanned: Scanned, model: EmbeddingModel | None, limit: int) -> list[Hit]:
+async def collapse_hits(
+    scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode, limit: int
+) -> list[Hit]:
     """The `limit` best hits, each with the near-duplicates it stands for (see `collapse`).
 
     CPU work that grows with the square of the scan - tens of milliseconds at the default depth -
     so it runs in a worker thread rather than on the event loop the search came in on, the
     comparison spaces included.
     """
-    return await cpu.on_cpu(_fold_hits, scanned, model, limit)
+    return await cpu.on_cpu(_fold_hits, scanned, model, mode, limit)
 
 
 async def collapse_ranges(
-    scanned: Scanned, model: EmbeddingModel | None, limit: int
+    scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode, limit: int
 ) -> list[passage.HitRange]:
     """The `limit` best hit ranges, each with the near-duplicates it stands for.
 
@@ -252,7 +256,7 @@ async def collapse_ranges(
     other and read alike, and folding them would split the passage they make up. A worker thread
     runs the fold, as `collapse_hits` says.
     """
-    return await cpu.on_cpu(_fold_ranges, scanned, model, limit)
+    return await cpu.on_cpu(_fold_ranges, scanned, model, mode, limit)
 
 
 def _log_collapse(
@@ -264,7 +268,7 @@ def _log_collapse(
         space=space,
         candidates=candidates,
         kept=len(kept),
-        folded=sum(len(item.also_in) for item in kept),
+        folded=sum(collapse.places(item.also_in) for item in kept),
         short=len(kept) < limit,
     )
 

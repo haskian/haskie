@@ -35,12 +35,13 @@ import anyio.to_thread
 import msgspec
 
 from haskie import cpu, home
+from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.collection import Collection
 from haskie.collection.index import Row
 from haskie.document import convert
 from haskie.document.document import Document
 from haskie.indexing import chunk, embed_cache, models
-from haskie.settings import ChunkSettings, EmbeddingModel
+from haskie.settings import ChunkSettings
 
 JOINER = "\n\n"  # between parts in the assembled markdown
 

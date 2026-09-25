@@ -67,21 +67,29 @@ Each new result is compared with each kept result in turn:
 flowchart TD
     pair(["new result vs one kept result"]) --> same{"same document and<br/>collection, touching?"}
     same -- yes --> skip["not a repeat of this one:<br/>one passage cut in two"]
-    same -- no --> doc{"same document,<br/>other collection,<br/>overlapping characters?"}
-    doc -- "over half the smaller span" --> span["repeat: <b>same_span</b>"]
-    doc -- "half or less" --> skip2["not a repeat of this one"]
-    doc -- "no overlap" --> contain{"containment,<br/>each way"}
-    contain -- "kept one inside new one" --> swap["repeat: <b>contained</b>;<br/>the fuller new one takes the slot"]
-    contain -- "new one inside kept one" --> cont["repeat: <b>contained</b>"]
-    contain -- "both ways" --> dup["repeat: <b>duplicate</b>"]
+    same -- no --> text{"the same text,<br/>whitespace aside?"}
+    text -- yes --> dup["repeat: <b>duplicate</b>"]
+    text -- no --> doc{"same document,<br/>other collection,<br/>one span inside the other?"}
+    doc -- "kept one inside new one" --> swap["repeat: <b>contained</b>;<br/>the fuller new one takes the slot"]
+    doc -- "new one inside kept one" --> cont["repeat: <b>contained</b>"]
+    doc -- "no" --> contain{"containment,<br/>each way"}
+    contain -- "kept one inside new one" --> swap
+    contain -- "new one inside kept one" --> cont
+    contain -- "both ways" --> eq["repeat: <b>equivalent</b>"]
     contain -- "neither" --> alike{"alike as a whole?"}
-    alike -- yes --> dup
-    alike -- no --> skip3["not a repeat of this one"]
+    alike -- yes --> eq
+    alike -- no --> skip2["not a repeat of this one"]
 ```
+
+A duplicate is an exact character match, in any document. Both texts need at least 7 words, so
+two equal headings are not a point. Equivalent means the same meaning in other words: a nearly
+identical vector, or nearly the same words where words decide.
 
 A new result that repeats no kept result takes a new slot, while fewer than `limit` are taken.
 
-The tests run in up to two spaces, and the first space that finds a repeat decides:
+The containment and alike tests run in up to two spaces, and the first space that finds a repeat
+decides. A `vector` search decides by the embedding space alone, as it ranks by vectors alone.
+Hybrid and full-text searches use both:
 
 - **Embedding space**, used when every result has a vector and the model has duplicate
   thresholds. Containment is the mean of each chunk's best cosine against the other result.
@@ -92,11 +100,15 @@ The tests run in up to two spaces, and the first space that finds a repeat decid
 
 Cosine thresholds are set per embedding model (`EmbeddingModel.duplicate`), because a raw cosine
 means different things for different models. The current values are placeholders, not
-calibrated. A model without thresholds folds by words alone. The containment and span thresholds
-are judgement calls, and the code says so.
+calibrated. A model without thresholds folds by words alone. The containment threshold is a
+judgement call, and the code says so.
 
-A folded result becomes an `also_in` entry on the one it repeats, with its `relation` and a
-`via` when it was measured against another folded place.
+A folded result becomes an `also_in` entry under the result it repeats, and `also_in` is a tree.
+When a fuller result takes a slot (the superset swap), the old one moves under it with everything
+folded into it. Each place stays under the place it was measured against. Each entry carries its
+`relation` to its parent. It also carries `to_parent` and `to_root`, measured by words and by
+embedding: `contained`, `contains`, `alike`, and `score`, the harmonic mean of the two directions.
+That score is the Dice coefficient for words and the F1 of the best chunk matches for embeddings.
 
 ## Full-text search
 

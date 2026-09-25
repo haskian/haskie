@@ -38,7 +38,7 @@ export function Init({ onDone }: { onDone: () => void }) {
     }
   }
 
-  const profiles = profileOptions(options?.embedding_profiles ?? {})
+  const profiles = profileOptions(options?.embedding_profiles ?? {}, options?.embedding_metadata ?? {})
   const doc = (key: string) => docFor(options?.docs ?? {}, key)
 
   return (
@@ -55,7 +55,7 @@ export function Init({ onDone }: { onDone: () => void }) {
           </h1>
           <Field label={doc('embedding').title}>
             <Picker options={profiles} value={profile} onChange={setProfile} ariaLabel="Embedding profile" />
-            <EmbedderFacts model={options?.embedding_profiles[profile]} />
+            <EmbedderFacts model={options?.embedding_profiles[profile]} metadata={options?.embedding_metadata[profile]} />
           </Field>
           {options !== null && search !== null && (
             <>

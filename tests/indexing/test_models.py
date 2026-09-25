@@ -15,6 +15,7 @@ from conftest import (
     WAIT,
     attach_document,
     await_terminal,
+    compact_model,
     counted_list_workflows,
     import_document,
     restart_dbos,
@@ -24,14 +25,12 @@ from conftest import (
 )
 from dbos import DBOS
 
-from haskie import settings
 from haskie.collection.collection import Collection
 from haskie.errors import HaskieError, NotReady
 from haskie.indexing import dbos_names, embed, models, operations, workflows
 from haskie.indexing.models import ModelKind
 from haskie.settings import (
     CollectionOverrides,
-    EmbeddingProfile,
     Fusion,
     Reranker,
     SearchMode,
@@ -45,14 +44,8 @@ pytestmark = pytest.mark.anyio
 
 
 async def test_no_model_is_required_for_full_text_only(dbos) -> None:
-    assert await models.ensure_models(UserSettings(embedding=EmbeddingProfile.NONE)) == []
+    assert await models.ensure_models(UserSettings(embedding="none")) == []
     assert await models.model_statuses() == [], "and the stored settings ask for none either"
-
-
-def _compact_model_name() -> str:
-    model = UserSettings(embedding=EmbeddingProfile.COMPACT).embedding_model
-    assert model is not None
-    return model.name
 
 
 @pytest.mark.parametrize(
@@ -83,8 +76,8 @@ async def test_model_state_decides_whether_search_may_run(
             assert await wait_event(blocked)
 
     monkeypatch.setattr(models, "load_model", load_model)
-    user = await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
-    model_name = _compact_model_name()
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    model_name = (await compact_model()).name
 
     if outcome != "missing":
         await models.ensure_models(user)
@@ -115,8 +108,8 @@ async def test_ensure_models_retries_a_model_that_failed(dbos, monkeypatch) -> N
             raise RuntimeError("connection reset")
 
     monkeypatch.setattr(models, "load_model", load_model)
-    user = await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
-    model_name = _compact_model_name()
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    model_name = (await compact_model()).name
 
     await models.ensure_models(user)
     await await_terminal([models._model_id(ModelKind.EMBEDDING, model_name)])
@@ -145,8 +138,8 @@ async def test_require_ready_answers_from_the_process_that_loaded_the_model(
             raise RuntimeError("connection reset")
 
     monkeypatch.setattr(models, "load_model", load_model)
-    user = await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
-    model_name = _compact_model_name()
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    model_name = (await compact_model()).name
     await models.ensure_models(user)
     await await_terminal([models._model_id(ModelKind.EMBEDDING, model_name)])
     with pytest.raises(NotReady, match="failed to load"):
@@ -173,7 +166,7 @@ async def test_embed_stage_precomputes_vectors_and_hybrid_search_uses_them(
 ) -> None:
     user = await save_user_settings(
         UserSettings(
-            embedding=EmbeddingProfile.COMPACT,
+            embedding="compact",
             search=SearchSettings(reranker=Reranker.CROSS_ENCODER),
         )
     )
@@ -227,12 +220,12 @@ async def test_embed_stage_precomputes_vectors_and_hybrid_search_uses_them(
 
 @pytest.mark.network
 async def test_models_are_idempotent_and_fail_fast_when_missing(dbos, monkeypatch) -> None:
-    plain = UserSettings(embedding=EmbeddingProfile.NONE)
+    plain = UserSettings(embedding="none")
     assert await models.ensure_models(plain) == [], "nothing required for full-text only"
     with pytest.raises(NotReady, match="not loaded yet"):
         await models.require_ready(ModelKind.EMBEDDING, "BAAI/bge-small-en-v1.5")
 
-    wanted = await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
+    wanted = await save_user_settings(UserSettings(embedding="compact"))
     (status,) = await models.ensure_models(wanted)
     assert status.state in ("loading", "ready")
     await wait_for(models._model_id(ModelKind.EMBEDDING, status.name))
@@ -243,11 +236,10 @@ async def test_models_are_idempotent_and_fail_fast_when_missing(dbos, monkeypatc
         "no second load"
     )
 
-    # SearchSettings only accepts known reranker ids, so add the missing one to the allowed set
-    monkeypatch.setattr(settings, "RERANKER_MODELS", (*settings.RERANKER_MODELS, "nope/x"))
+    # saved past the API, which would refuse a model the catalogue does not hold
     broken = await save_user_settings(
         UserSettings(
-            embedding=EmbeddingProfile.NONE,
+            embedding="none",
             search=SearchSettings(reranker=Reranker.CROSS_ENCODER, reranker_model="nope/x"),
         )
     )
@@ -266,9 +258,9 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
 ) -> None:
     """The index has vectors, so a hybrid query needs the model; a request must fail fast with
     503 semantics rather than block on a download."""
-    user = await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
+    user = await save_user_settings(UserSettings(embedding="compact"))
     await models.ensure_models(user)
-    await await_terminal([models._model_id(ModelKind.EMBEDDING, _compact_model_name())])
+    await await_terminal([models._model_id(ModelKind.EMBEDDING, (await compact_model()).name)])
     collection = await Collection.create("busy")
     doc = await import_document(dbos, "g.md", MD, tmp_path)
     await attach_document(dbos, "busy", doc.name)
@@ -283,17 +275,17 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
 @pytest.mark.parametrize(
     ("name", "user", "collection_rerankers", "expected"),
     [
-        ("full text only", UserSettings(embedding=EmbeddingProfile.NONE), [], []),
+        ("full text only", UserSettings(embedding="none"), [], []),
         (
             "an embedding profile",
-            UserSettings(embedding=EmbeddingProfile.COMPACT),
+            UserSettings(embedding="compact"),
             [],
             [("embedding", "BAAI/bge-small-en-v1.5")],
         ),
         (
             "an embedding profile and a cross-encoder",
             UserSettings(
-                embedding=EmbeddingProfile.COMPACT,
+                embedding="compact",
                 search=SearchSettings(reranker=Reranker.CROSS_ENCODER),
             ),
             [],
@@ -304,14 +296,14 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
         ),
         (
             "a collection override nobody else asks for",
-            UserSettings(embedding=EmbeddingProfile.NONE),
+            UserSettings(embedding="none"),
             ["BAAI/bge-reranker-base"],
             [("reranker", "BAAI/bge-reranker-base")],
         ),
         (
             "the same model at both levels is wanted once",
             UserSettings(
-                embedding=EmbeddingProfile.NONE,
+                embedding="none",
                 search=SearchSettings(reranker=Reranker.CROSS_ENCODER),
             ),
             ["Xenova/ms-marco-MiniLM-L-6-v2", "BAAI/bge-reranker-base"],
@@ -350,7 +342,7 @@ async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> 
             search=SearchOverrides(reranker=Reranker.CROSS_ENCODER, reranker_model=override)
         )
     )
-    user = await save_user_settings(UserSettings(embedding=EmbeddingProfile.NONE))
+    user = await save_user_settings(UserSettings(embedding="none"))
 
     assert await Collection.reranker_overrides() == [override]
     (status,) = await models.ensure_models(user)
@@ -376,7 +368,7 @@ async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> N
     monkeypatch.setattr(embed, "warm_reranker", lambda name: None)
     user = await save_user_settings(
         UserSettings(
-            embedding=EmbeddingProfile.COMPACT,
+            embedding="compact",
             search=SearchSettings(reranker=Reranker.CROSS_ENCODER),
         )
     )
@@ -388,7 +380,7 @@ async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> N
 
     downloads = (await operations.list_operations("download")).items
     assert {d.title for d in downloads} == {
-        f"embedding {_compact_model_name()}",
+        f"embedding {(await compact_model()).name}",
         "reranker Xenova/ms-marco-MiniLM-L-6-v2",
     }, "one row per required model, kind and name read out of the workflow id"
     assert {d.status for d in downloads} == {"SUCCESS"}
@@ -403,8 +395,8 @@ async def test_restart_does_not_create_a_second_download_record(dbos, monkeypatc
     """The files stay on disk and the record is durable, so a restart reuses both: one row per
     model, however often the dev server reloads."""
     monkeypatch.setattr(embed, "warm", lambda name, accelerator: None)
-    user = await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
-    workflow_id = models._model_id(ModelKind.EMBEDDING, _compact_model_name())
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    workflow_id = models._model_id(ModelKind.EMBEDDING, (await compact_model()).name)
     await models.ensure_models(user)
     await await_terminal([workflow_id])
 
@@ -440,8 +432,8 @@ async def test_a_downloaded_model_is_warmed_after_restart_before_search_uses_it(
 
     monkeypatch.setattr(models, "load_model", load_model)
     monkeypatch.setattr(embed, "warm", warm)
-    user = await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
-    model_name = _compact_model_name()
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    model_name = (await compact_model()).name
     await models.ensure_models(user)
     await await_terminal([models._model_id(ModelKind.EMBEDDING, model_name)])
 

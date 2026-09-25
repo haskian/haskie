@@ -40,11 +40,17 @@ sentences around them within 300 characters. So it usually starts and ends where
   `markdown_file`), `char_start`/`char_end` (0-based), `page_start`/`page_end` (PDF only, else
   null), `seq_start`/`seq_end` (chunk positions in the document)
 - repeats: `also_in` lists every other place that says the same thing, folded into this excerpt.
-  Each has `document`, `header`, `location`, `score`, `similarity` and `relation`. `duplicate`
-  says the same as a whole. `contained` sits inside this excerpt, which says more. `same_span` is
-  the same lines, chunked another way. A `via` names the place in the same list the relation was
-  measured against, when that is not this excerpt. A place may be elsewhere in the same document,
-  so cite it as a second source only when its `document` differs.
+  It is a tree. Each place sits under what it repeats: this excerpt, or a place above it. Each
+  place has its own `also_in`. Each has `document`, `header`, `location`, `score` (its own match
+  to the query) and `relation` to its parent. `duplicate` is an exact character match: the same
+  text, whitespace aside, in any document. `contained` sits inside its parent, which says more.
+  `equivalent` is the same meaning in other words, so a nearly identical vector. Hybrid and
+  full-text searches also count nearly the same words. `to_parent` and `to_root` measure the place
+  against its parent and against this excerpt, by `words` and by `embedding` (null without
+  vectors). `contained` is how much of it is in the other. `contains` is how much of the other is
+  in it. `alike` is how alike the two are as a whole. `score` is the harmonic mean of `contained`
+  and `contains`. `chars` compares two spans of one document. A place may be elsewhere in the same
+  document, so cite it as a second source only when its `document` differs.
 
 **`search_sources(q, session_id?, collections?, limit?, sections?)`** → `documents`, best first
 (`limit` 1-100, default 10), and `collections`: a small set of collections that together hold every

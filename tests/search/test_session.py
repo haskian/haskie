@@ -18,6 +18,7 @@ from conftest import (
 )
 
 from haskie import db, home
+from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection
 from haskie.errors import NotFound
 from haskie.indexing import chunk, embed, models
@@ -25,7 +26,6 @@ from haskie.search import flow, retrieval, session
 from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
-    EmbeddingProfile,
     Reranker,
     SearchOverrides,
     SearchSettings,
@@ -145,10 +145,9 @@ async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkey
     """Three collections, one embedding: the query used to be embedded (and the model checked)
     once per collection."""
     from haskie.collection.index import Row
-    from haskie.settings import PROFILES
 
-    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
-    compact = PROFILES[EmbeddingProfile.COMPACT]
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    compact = await catalogue.embedding_model(user)
     assert compact is not None
     for name in ("a", "b", "c"):
         collection = await Collection.create(name)
@@ -190,10 +189,9 @@ async def test_session_search_folds_a_near_duplicate_by_its_vector(dbos, monkeyp
     come back as one hit that names the other, though their words have little in common. If the
     rows lost their vectors, the search would fall back to words and keep both."""
     from haskie.collection.index import Row
-    from haskie.settings import PROFILES
 
-    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
-    compact = PROFILES[EmbeddingProfile.COMPACT]
+    user = await save_user_settings(UserSettings(embedding="compact"))
+    compact = await catalogue.embedding_model(user)
     assert compact is not None
     vector = [0.1] * compact.dims  # one point, embedded twice
     bodies = {
@@ -225,7 +223,10 @@ async def test_session_search_folds_a_near_duplicate_by_its_vector(dbos, monkeyp
         "the other document, folded in"
     )
     assert len(hit.also_in) == 1
-    assert hit.also_in[0].similarity == pytest.approx(1.0), "by its vector: the words differ"
+    (folded,) = hit.also_in
+    assert folded.to_parent.embedding is not None
+    assert folded.to_parent.embedding.alike == pytest.approx(1.0), "by its vector"
+    assert folded.to_parent.words.alike < 0.5, "the words differ"
 
 
 async def test_session_search_reranks_once_over_the_merge(

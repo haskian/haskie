@@ -139,7 +139,7 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
       .catch((failure: unknown) => setError(errorText(failure)))
   }
 
-  const profiles = profileOptions(options.embedding_profiles)
+  const profiles = profileOptions(options.embedding_profiles, options.embedding_metadata)
   const skipOcr = docFor(docs, 'conversion.skip_ocr_pages')
   const frame = docFor(docs, 'conversion.chunk_frame')
 
@@ -150,7 +150,7 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
           <span className="mono muted">Embedding</span>
           <Field label={docFor(docs, 'embedding').title} help={docFor(docs, 'embedding').description}>
             <Picker ariaLabel="Embedding profile" options={profiles} value={settings.embedding} onChange={(embedding) => update({ embedding })} />
-            <EmbedderFacts model={options.embedding_profiles[settings.embedding]} />
+            <EmbedderFacts model={options.embedding_profiles[settings.embedding]} metadata={options.embedding_metadata[settings.embedding]} />
           </Field>
           <Field label={docFor(docs, 'pipeline.accelerator').title} help={docFor(docs, 'pipeline.accelerator').description}>
             <Picker

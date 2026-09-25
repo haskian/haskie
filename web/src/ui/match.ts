@@ -103,21 +103,43 @@ export const pieceMeta = (piece: ChunkPiece): string =>
 /** Another place that says what a chunk or passage says, folded into it by the search. */
 export type Reference = Hit['also_in'][number] | Passage['also_in'][number]
 
-/** How a place overlaps the match it is listed under, as a reader names it. Typed by the API's
- *  own enum, so a new relation fails the build until it is named. */
+/** How a place overlaps its parent (the match, or the place it sits under), as a reader names
+ *  it. Typed by the API's own enum, so a new relation fails the build until it is named. */
 export const RELATIONS: Record<Reference['relation'], string> = {
-  duplicate: 'same',
+  duplicate: 'same text',
   contained: 'inside',
-  same_span: 'same lines',
+  equivalent: 'same meaning',
 }
 
-/** Every place a match stands for besides itself; a source folds none. */
+/** The places folded straight into a match; each holds the ones folded into it. A source folds
+ *  none. */
 export const alsoOf = (match: Match): Reference[] => (isSource(match) ? [] : match.also_in)
 
-/** How many other documents those places are in: the independent sources, a repeat within the
- *  match's own document not among them. */
+/** Every place of a tree, depth first: what a count or a set of documents reads. */
+export const everyPlace = (places: Reference[]): Reference[] => places.flatMap((place) => [place, ...everyPlace(place.also_in)])
+
+/** How many other documents those places are in, at every level: the independent sources, a
+ *  repeat within the match's own document not among them. */
 export const alsoDocuments = (match: Match): number =>
-  new Set(alsoOf(match).map((place) => place.document).filter((document) => document !== match.document)).size
+  new Set(everyPlace(alsoOf(match)).map((place) => place.document).filter((document) => document !== match.document)).size
+
+type Overlaps = Reference['to_parent']
+type Overlap = Overlaps['words']
+
+const measured = (label: string, overlap: Overlap): string =>
+  `${label}: ${overlap.score.toFixed(2)} (in ${overlap.contained.toFixed(2)}, holds ${overlap.contains.toFixed(2)}, alike ${overlap.alike.toFixed(2)})`
+
+const overlapLines = (against: string, overlaps: Overlaps): string[] => [
+  `to ${against}`,
+  measured('  words', overlaps.words),
+  ...(overlaps.embedding ? [measured('  embedding', overlaps.embedding)] : []),
+  ...(overlaps.chars === null ? [] : [`  chars: ${overlaps.chars.toFixed(2)}`]),
+]
+
+/** Every measure a place carries, one per line, for its hover hint: its own match to the query,
+ *  then how it overlaps its parent and the match at the top. */
+export const overlapHint = (place: Reference): string =>
+  [`${place.relation}, query ${place.score.toFixed(2)}`, ...overlapLines('parent', place.to_parent), ...overlapLines('match', place.to_root)].join('\n')
 
 /** A hot section's citation without the document name it repeats: "p.3 L7-43" out of
  *  "doc.pdf p.3 L7-43". The block naming the section already names the document once. */

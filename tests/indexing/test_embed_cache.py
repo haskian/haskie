@@ -14,6 +14,7 @@ import pytest
 from conftest import import_row
 
 from haskie import db
+from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
 from haskie.collection.index import Row
 from haskie.document import document
 from haskie.document.document import Document, DocumentStatus
@@ -21,7 +22,7 @@ from haskie.indexing import embed_cache
 from haskie.indexing.chunk import CHUNK_VERSION, Chunk, Piece
 from haskie.indexing.embed_cache import NO_MODEL, Params
 from haskie.indexing.segment import PieceType
-from haskie.settings import Chunker, ChunkSettings, EmbeddingModel, Matryoshka, Parser
+from haskie.settings import Chunker, ChunkSettings, Parser
 
 pytestmark = pytest.mark.anyio  # most cases await; the pure ones ignore the marker
 
@@ -118,14 +119,29 @@ def test_every_field_of_params_changes_the_id(name: str, field: str, value) -> N
 
 
 @pytest.mark.parametrize(
+    ("name", "change"),
+    [
+        ("another document prefix", {"document_prefix": "passage: "}),
+        ("a Matryoshka cut", {"matryoshka": Matryoshka()}),
+        ("another vector size", {"dims": 2}),
+    ],
+)
+def test_a_model_that_embeds_differently_is_another_cache_entry(name: str, change: dict) -> None:
+    """The entry id is what a collection reads vectors back by: one model embedding another way
+    must not be served the vectors the first way wrote."""
+    doc = Document(name=DOC, suffix=".md", size=10, status=DocumentStatus.IMPORTED)
+    other = msgspec.structs.replace(TINY, **change)
+
+    before = embed_cache.params(doc, ChunkSettings(), TINY)
+    after = embed_cache.params(doc, ChunkSettings(), other)
+
+    assert embed_cache.key(after) != embed_cache.key(before), name
+
+
+@pytest.mark.parametrize(
     ("name", "embedding", "expected_model"),
     [
-        ("a profile with an embedding model", TINY, "test/tiny"),
-        (
-            "a model cut to fewer dimensions is keyed apart from it whole",
-            EmbeddingModel("test/tiny", 2, matryoshka=Matryoshka()),
-            "test/tiny@2",
-        ),
+        ("a profile with an embedding model", TINY, TINY.cache_name),
         ("a profile without one indexes text only", None, NO_MODEL),
     ],
 )

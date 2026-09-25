@@ -6,17 +6,19 @@ document. The word space is the one a search without embeddings compares in; the
 hand in unit vectors built so the cosines are the ones each case is about.
 """
 
+from collections.abc import Callable
+
 import msgspec
 import numpy as np
 import pytest
+from conftest import compact_model
 
-from haskie.collection.index import Hit, Relation, location
-from haskie.indexing.chunk import Position
-from haskie.indexing.segment import PieceType
+from haskie.catalogue.catalogue import EmbeddingModel
+from haskie.collection.index import Hit, Overlap, Relation, location
+from haskie.indexing import chunk
 from haskie.search import collapse
-from haskie.search.collapse import Space, Worded
 from haskie.search.passage import HitRange, ranges
-from haskie.settings import PROFILES, EmbeddingModel, EmbeddingProfile
+from haskie.settings import Chunker, ChunkSettings, SearchMode
 
 RETRY = "A background job retries a failed HTTP call, so the call has to be idempotent."
 REWORDED = "Make the side effect safe to repeat, because the job may run the request twice."
@@ -34,8 +36,11 @@ MENTIONS = (
 HEADING = "## <u>APPENDIX D</u>"
 # RETRY and BACKOFF in one chunk: a fuller passage that holds two results kept apart
 BOTH = f"{RETRY} {BACKOFF}"
-
-BGE_SMALL = PROFILES[EmbeddingProfile.COMPACT]
+# RETRY with one word changed: 10 of its 13 word 3-grams either way, 12 of 14 distinct words
+NEAR = RETRY.replace("failed", "broken")
+# a span of one document around RETRY's, cut by another collection, whose words share nothing
+# with it: only the spans can say that one holds the other
+AROUND = f"{OUTBOX} {CLOCKS}"
 
 
 def _hit(
@@ -75,21 +80,32 @@ def _hit(
     )
 
 
-def _words(hits: list[Hit]) -> list[Space]:
+def _words(hits: list[Hit]) -> collapse.Scan:
     """The spaces of a search without embeddings."""
-    return [Worded([hit.text for hit in hits])]
+    return collapse.spaces([hit.text for hit in hits], [None] * len(hits), None)
 
 
-def _embedded(hits: list[Hit], vectors: np.ndarray) -> list[Space]:
-    """The spaces of a bge search whose rows carry `vectors`."""
-    return collapse.spaces([hit.text for hit in hits], vectors.tolist(), BGE_SMALL)
+@pytest.fixture
+async def bge_small() -> EmbeddingModel:
+    return await compact_model()
+
+
+def _embedded(
+    hits: list[Hit],
+    vectors: np.ndarray,
+    model: EmbeddingModel,
+    mode: SearchMode = SearchMode.HYBRID,
+) -> collapse.Scan:
+    """The spaces of a `mode` search under `model` whose rows carry `vectors`."""
+    return collapse.spaces([hit.text for hit in hits], vectors.tolist(), model, mode)
 
 
 def _heading(text: str, score: float, **fields) -> Hit:
-    """A chunk of heading lines alone, as the chunker cuts a section with no text of its own."""
-    return msgspec.structs.replace(
-        _hit(text, score, **fields), layout=[Position(PieceType.HEADING, 0)]
-    )
+    """A chunk of one heading line and nothing else, as the chunker really cuts it. Only the text
+    chunker does: the markdown one reads the line as a heading and makes no chunk of a section
+    without text (`segment.pack`), so a heading reaches the fold as text of its own."""
+    (alone,) = chunk.split(text, ChunkSettings(chunker=Chunker.TEXT))
+    return msgspec.structs.replace(_hit(alone.text, score, **fields), layout=alone.layout)
 
 
 def _unit(*rows: list[float]) -> np.ndarray:
@@ -149,13 +165,13 @@ def _shape(kept: list[Hit]) -> list[tuple[str, int, float, list[str]]]:
             [("patterns.md", 4, 0.9, ["patterns.md"])],
         ),
         (
-            "one document chunked two ways folds on the characters the two spans share",
+            "one document chunked two ways: a partial overlap is no fold on its own",
             [
                 _hit(RETRY, 0.9, collection="backend", seq=3, char_start=200),
                 _hit(BACKOFF, 0.8, collection="ops", seq=2, char_start=230),
             ],
             2,
-            [("patterns.md", 3, 0.9, ["patterns.md"])],
+            [("patterns.md", 3, 0.9, []), ("patterns.md", 2, 0.8, [])],
         ),
         (
             "one document chunked two ways stays apart where the spans barely touch",
@@ -228,82 +244,222 @@ def test_a_fold_records_where_the_repeat_is_and_how_close_it_was() -> None:
     assert (reference.header, reference.location) == (found[1].header, found[1].location)
     assert (reference.line_start, reference.line_end) == (found[1].line_start, found[1].line_end)
     assert reference.score == 0.8, "its own score, before it was folded"
-    assert reference.similarity == 1.0, "every word of it is in the kept hit"
+    assert reference.to_parent.words.contained == 1.0, "every word of it is in the kept hit"
+    assert reference.to_root == reference.to_parent, "listed under the hit, its parent is the root"
+    assert (reference.to_parent.embedding, reference.to_parent.chars) == (None, None), (
+        "no vectors in a words-only scan, and no shared characters across two documents"
+    )
     assert kept.score == 0.9, "agreement does not raise the kept hit's score"
+
+
+def _tree(references: list) -> list:
+    """What a tree case asserts: each place's document and relation to its parent, and what sits
+    under it."""
+    return [(r.document, r.relation, _tree(r.also_in)) for r in references]
 
 
 @pytest.mark.parametrize(
     ("name", "found", "expected"),
     [
         (
-            "a copy is a duplicate",
+            "a copy in another document is a duplicate: the same text",
             [_hit(RETRY, 0.9, document="a.md"), _hit(RETRY, 0.8, document="copy.md")],
-            [("a.md", [("copy.md", Relation.DUPLICATE, 1.0)])],
+            [("a.md", [("copy.md", Relation.DUPLICATE, [])])],
+        ),
+        (
+            "a copy laid out another way is still a duplicate: whitespace is not text",
+            [
+                _hit(RETRY, 0.9, document="a.md"),
+                _hit(RETRY.replace(", so ", ",\n  so "), 0.8, document="copy.md"),
+            ],
+            [("a.md", [("copy.md", Relation.DUPLICATE, [])])],
+        ),
+        (
+            "one word changed is equivalent: the same point, other wording",
+            [_hit(RETRY, 0.9, document="a.md"), _hit(NEAR, 0.8, document="near.md")],
+            [("a.md", [("near.md", Relation.EQUIVALENT, [])])],
         ),
         (
             "a hit inside a fuller one ranked above it is contained",
             [_hit(FULLER, 0.9, document="book.md"), _hit(RETRY, 0.8, document="a.md")],
-            [("book.md", [("a.md", Relation.CONTAINED, 1.0)])],
+            [("book.md", [("a.md", Relation.CONTAINED, [])])],
         ),
         (
             "a hit a fuller one below it swapped out is contained in it",
             [_hit(RETRY, 0.9, document="a.md"), _hit(FULLER, 0.8, document="book.md")],
-            [("book.md", [("a.md", Relation.CONTAINED, 1.0)])],
+            [("book.md", [("a.md", Relation.CONTAINED, [])])],
         ),
         (
-            "after a swap, what the old hit held is compared with the new one again",
+            "after a swap, what the old hit held stays under it",
             [
                 _hit(RETRY, 0.9, document="a.md"),
                 _hit(RETRY, 0.85, document="copy.md"),
                 _hit(FULLER, 0.8, document="book.md"),
             ],
+            [("book.md", [("a.md", Relation.CONTAINED, [("copy.md", Relation.DUPLICATE, [])])])],
+        ),
+        (
+            "two swaps nest two levels: each old hit under the one that took its slot",
+            [
+                _hit(RETRY, 0.9, document="a.md"),
+                _hit(FULLER, 0.85, document="book.md"),
+                _hit(f"{FULLER} {OUTBOX}", 0.8, document="guide.md"),
+            ],
             [
                 (
-                    "book.md",
-                    [("a.md", Relation.CONTAINED, 1.0), ("copy.md", Relation.CONTAINED, 1.0)],
+                    "guide.md",
+                    [("book.md", Relation.CONTAINED, [("a.md", Relation.CONTAINED, [])])],
                 )
             ],
         ),
         (
-            "one document chunked two ways shares its lines",
+            "one document chunked two ways: a span inside another is contained, by the spans alone",
             [
                 _hit(RETRY, 0.9, collection="backend", seq=3, char_start=200),
-                _hit(BACKOFF, 0.8, collection="ops", seq=2, char_start=230),
+                _hit(AROUND, 0.8, collection="ops", seq=2, char_start=150),
             ],
-            [("patterns.md", [("patterns.md", Relation.SAME_SPAN, pytest.approx(48 / 78))])],
+            [("patterns.md", [("patterns.md", Relation.CONTAINED, [])])],
         ),
     ],
 )
-def test_a_reference_names_how_it_overlaps_the_hit_it_is_listed_under(
-    name: str, found: list[Hit], expected: list[tuple[str, list[tuple[str, Relation, float]]]]
+def test_a_place_sits_under_the_result_it_was_folded_into(
+    name: str, found: list[Hit], expected: list[tuple[str, list]]
 ) -> None:
     kept = collapse.hits(found, _words(found), 3)
 
-    shape = [
-        (h.document, [(r.document, r.relation, r.similarity) for r in h.also_in]) for h in kept
-    ]
-    assert shape == expected, name
+    assert [(h.document, _tree(h.also_in)) for h in kept] == expected, name
 
 
-def test_a_repeat_the_new_leader_does_not_place_says_whom_it_was_measured_against() -> None:
+@pytest.mark.parametrize(
+    ("name", "found", "expected"),
+    [
+        (
+            "a sentence inside a fuller paragraph: all of it in there, under half of that in it",
+            [_hit(FULLER, 0.9, document="book.md"), _hit(RETRY, 0.8, document="a.md")],
+            # 13 of RETRY's 13 word 3-grams, 13 of FULLER's 28; 13 of 26 distinct words shared;
+            # the score is the Dice coefficient of the 3-grams, 2 * 13 / (13 + 28)
+            (Overlap(1.0, 13 / 28, 0.5, score=26 / 41), None),
+        ),
+        (
+            "a copy: each wholly in the other",
+            [_hit(RETRY, 0.9, document="a.md"), _hit(RETRY, 0.8, document="copy.md")],
+            (Overlap(contained=1.0, contains=1.0, alike=1.0, score=1.0), None),
+        ),
+        (
+            "one document chunked two ways: the characters both spans cover",
+            [
+                _hit(RETRY, 0.9, collection="backend", seq=3, char_start=200),
+                _hit(AROUND, 0.8, collection="ops", seq=2, char_start=150),
+            ],
+            # no word 3-gram in common, 2 of 34 distinct words, so a score of 0; RETRY's 78
+            # characters all lie in AROUND's span
+            (Overlap(contained=0.0, contains=0.0, alike=2 / 34, score=0.0), 1.0),
+        ),
+    ],
+)
+def test_a_place_measures_itself_against_its_parent_both_ways_and_as_a_whole(
+    name: str, found: list[Hit], expected: tuple[Overlap, float | None]
+) -> None:
+    (kept,) = collapse.hits(found, _words(found), 2)
+
+    (reference,) = kept.also_in
+    words, chars = expected
+    measured = msgspec.structs.astuple(reference.to_parent.words)
+    assert measured == pytest.approx(msgspec.structs.astuple(words)), name
+    assert reference.to_parent.chars == chars, name
+
+
+@pytest.mark.parametrize(
+    ("name", "mode", "expected"),
+    [
+        ("a hybrid search folds a near copy on its words", SearchMode.HYBRID, ["near.md"]),
+        ("a full-text search does the same", SearchMode.FTS, ["near.md"]),
+        ("a vector search folds by its vectors alone: apart, so both stay", SearchMode.VECTOR, []),
+    ],
+)
+@pytest.mark.anyio
+async def test_words_decide_a_fold_as_they_rank_the_search(
+    name: str, mode: SearchMode, expected: list[str], bge_small: EmbeddingModel
+) -> None:
+    """NEAR is RETRY with one word changed, and its vector is set far from RETRY's: only the words
+    can fold it. An exact copy would fold in every mode: a duplicate needs no space."""
+    found = [_hit(RETRY, 0.9, document="a.md"), _hit(NEAR, 0.8, document="near.md")]
+
+    kept = collapse.hits(found, _embedded(found, _unit([1.0, 0.0], [0.0, 1.0]), bge_small, mode), 2)
+
+    assert [ref.document for ref in kept[0].also_in] == expected, name
+    assert kept[0].also_in == [] or kept[0].also_in[0].to_parent.embedding is not None, (
+        "measured by vectors in every mode"
+    )
+
+
+@pytest.mark.anyio
+async def test_a_repeat_the_new_leader_does_not_place_stays_under_the_one_it_repeats(
+    bge_small: EmbeddingModel,
+) -> None:
     """REWORDED shares no words with RETRY, but the model embeds the two alike, so it folds under
-    RETRY as a duplicate. FULLER then holds RETRY word for word and takes the slot, yet neither
-    space places REWORDED against FULLER: its 0.99 is to RETRY, and `via` names where that is."""
+    RETRY as equivalent. FULLER then holds RETRY word for word and takes the slot. REWORDED stays
+    under RETRY, the place it repeats, and says how far it is from FULLER as well."""
     found = [
         _hit(RETRY, 0.9, document="a.md"),
         _hit(REWORDED, 0.85, document="reworded.md"),
         _hit(FULLER, 0.8, document="book.md"),
     ]
-    spaces = _embedded(found, _unit([1.0, 0.0, 0.0], [0.99, 0.14, 0.0], [0.0, 0.0, 1.0]))
+    spaces = _embedded(found, _unit([1.0, 0.0, 0.0], [0.99, 0.14, 0.0], [0.0, 0.0, 1.0]), bge_small)
 
     (kept,) = collapse.hits(found, spaces, 3)
 
     assert kept.document == "book.md"
-    assert [(r.document, r.relation, r.via) for r in kept.also_in] == [
-        ("a.md", Relation.CONTAINED, None),
-        ("reworded.md", Relation.DUPLICATE, found[0].location),
+    assert _tree(kept.also_in) == [
+        ("a.md", Relation.CONTAINED, [("reworded.md", Relation.EQUIVALENT, [])])
     ]
-    assert kept.also_in[1].similarity == pytest.approx(0.99, abs=0.01)
+    (retry,) = kept.also_in
+    (reworded,) = retry.also_in
+    assert reworded.to_parent.embedding is not None and reworded.to_root.embedding is not None
+    assert reworded.to_parent.embedding.alike == pytest.approx(0.99, abs=0.01), "to RETRY"
+    assert reworded.to_root.embedding.alike == pytest.approx(0.0, abs=0.01), "to FULLER"
+    assert reworded.to_root.words.contained == 0.0, "no three words of it in FULLER"
+    assert retry.to_parent == retry.to_root, "RETRY sits right under the root"
+    assert collapse.places(kept.also_in) == 2, "every place, at every level"
+
+
+@pytest.mark.parametrize(
+    ("name", "fold"),
+    [
+        ("hits", lambda found, spaces: collapse.hits(found, spaces, 3)),
+        ("ranges", lambda found, spaces: collapse.ranges(ranges(found), found, spaces, 3)),
+    ],
+)
+@pytest.mark.anyio
+async def test_a_place_stays_under_the_chunk_it_repeats_though_another_cites_the_same_lines(
+    name: str, fold: Callable, bge_small: EmbeddingModel
+) -> None:
+    """Chunks cut from one long line all cite that line. RETRY is found twice on line 1 of a.md,
+    and REWORDED folds under the first by its vector before FULLER takes the slot: the tree keeps
+    it under that chunk, where a citation of the line could not say which."""
+    first_chunk = _hit(RETRY, 0.9, document="a.md", seq=1)
+    # the same sentence again further along the same line: other characters, the same citation
+    later_chunk = msgspec.structs.replace(
+        _hit(RETRY, 0.88, document="a.md", seq=40, char_start=400),
+        line_start=first_chunk.line_start,
+        line_end=first_chunk.line_end,
+        location=first_chunk.location,
+    )
+    found = [
+        first_chunk,
+        later_chunk,
+        _hit(REWORDED, 0.85, document="reworded.md"),
+        _hit(FULLER, 0.8, document="book.md"),
+    ]
+    vectors = _unit([1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.99, 0.14, 0.0], [0.0, 0.0, 1.0])
+
+    (kept,) = fold(found, _embedded(found, vectors, bge_small))
+
+    (first,) = kept.also_in
+    second, reworded = first.also_in
+    assert first.location == second.location, f"{name}: two places, one citation"
+    assert (reworded.document, reworded.relation) == ("reworded.md", Relation.EQUIVALENT), name
+    assert second.to_parent.chars == 0.0, f"{name}: one document, spans apart"
 
 
 def test_every_repeat_is_listed_in_the_same_document_or_another() -> None:
@@ -341,16 +497,22 @@ def test_also_in_lists_every_repeat_uncapped() -> None:
         ("a cosine below the bar stays", 0.80, False),
     ],
 )
-def test_hits_fold_near_duplicates_in_embeddings(name: str, cosine: float, folds: bool) -> None:
+@pytest.mark.anyio
+async def test_hits_fold_near_duplicates_in_embeddings(
+    name: str, cosine: float, folds: bool, bge_small: EmbeddingModel
+) -> None:
     found = [_hit(RETRY, 0.9, document="a.md"), _hit(REWORDED, 0.8, document="b.md")]
     vectors = _unit([1.0, 0.0], [cosine, float(np.sqrt(1 - cosine**2))])
 
-    kept = collapse.hits(found, _embedded(found, vectors), 2)
+    kept = collapse.hits(found, _embedded(found, vectors, bge_small), 2)
 
     assert len(kept) == (1 if folds else 2), name
 
 
-def test_identical_text_under_other_headings_folds_though_its_cosine_misses() -> None:
+@pytest.mark.anyio
+async def test_identical_text_under_other_headings_folds_though_its_cosine_misses(
+    bge_small: EmbeddingModel,
+) -> None:
     """Each chunk is embedded under its heading path, so one paragraph in two books embeds apart:
     0.927 was measured with bge-small. The words still say it is a copy."""
     found = [
@@ -359,9 +521,12 @@ def test_identical_text_under_other_headings_folds_though_its_cosine_misses() ->
     ]
     vectors = _unit([1.0, 0.0], [0.90, float(np.sqrt(1 - 0.90**2))])
 
-    (kept,) = collapse.hits(found, _embedded(found, vectors), 2)
+    (kept,) = collapse.hits(found, _embedded(found, vectors, bge_small), 2)
 
-    assert [(ref.document, ref.similarity) for ref in kept.also_in] == [("notes.md", 1.0)]
+    (reference,) = kept.also_in
+    assert (reference.document, reference.to_parent.words.contained) == ("notes.md", 1.0)
+    assert reference.to_parent.embedding is not None
+    assert reference.to_parent.embedding.alike == pytest.approx(0.90), "under the model's bar"
 
 
 # --- ranges ---------------------------------------------------------------------------
@@ -375,8 +540,10 @@ def _passage(texts: list[str], document: str, first_seq: int, score: float) -> l
     ]
 
 
-def _ranges(scanned: list[Hit], vectors: np.ndarray, limit: int) -> list[HitRange]:
-    return collapse.ranges(ranges(scanned), scanned, _embedded(scanned, vectors), limit)
+def _ranges(
+    scanned: list[Hit], vectors: np.ndarray, limit: int, model: EmbeddingModel
+) -> list[HitRange]:
+    return collapse.ranges(ranges(scanned), scanned, _embedded(scanned, vectors, model), limit)
 
 
 E1, E2, E3, E4 = (list(row) for row in np.eye(4))
@@ -407,7 +574,7 @@ E1, E2, E3, E4 = (list(row) for row in np.eye(4))
             0.5,
             [REWORDED, OUTBOX],
             [[1.0, 1.0, 0.9, 0.0], [1.0, 1.0, 1.1, 0.0]],
-            [("book.md", 1, 3, [("note.md", "duplicate")])],
+            [("book.md", 1, 3, [("note.md", "equivalent")])],
         ),
         (
             "a passage on something else stays",
@@ -419,13 +586,15 @@ E1, E2, E3, E4 = (list(row) for row in np.eye(4))
         ),
     ],
 )
-def test_ranges_fold_by_containment_or_by_their_mean_vectors(
+@pytest.mark.anyio
+async def test_ranges_fold_by_containment_or_by_their_mean_vectors(
     name: str,
     big_score: float,
     small_score: float,
     small: list[str],
     small_vectors: list[list[float]],
     expected: list[tuple[str, int, int, list[tuple[str, str]]]],
+    bge_small: EmbeddingModel,
 ) -> None:
     """The case from the design session: a mean vector of three chunks sits far from any one of
     them, so the passage-level cosine alone would keep a copy of its middle chunk."""
@@ -433,7 +602,7 @@ def test_ranges_fold_by_containment_or_by_their_mean_vectors(
     scanned = big + _passage(small, "note.md", 10, small_score)
     vectors = _unit(E1, E2, E3, *small_vectors)
 
-    kept = _ranges(scanned, vectors, 2)
+    kept = _ranges(scanned, vectors, 2, bge_small)
 
     shape = [
         (
@@ -447,12 +616,13 @@ def test_ranges_fold_by_containment_or_by_their_mean_vectors(
     assert shape == expected, name
 
 
-def test_a_folded_range_points_at_its_own_lines() -> None:
+@pytest.mark.anyio
+async def test_a_folded_range_points_at_its_own_lines(bge_small: EmbeddingModel) -> None:
     big = _passage([BACKOFF, RETRY, CLOCKS], "book.md", 1, 0.9)
     small = _passage([RETRY], "note.md", 10, 0.5)
     scanned = big + small
 
-    (kept,) = _ranges(scanned, _unit(E1, E2, E3, E2), 2)
+    (kept,) = _ranges(scanned, _unit(E1, E2, E3, E2), 2, bge_small)
 
     (reference,) = kept.also_in
     (small_range,) = ranges(small)
@@ -464,7 +634,11 @@ def test_a_folded_range_points_at_its_own_lines() -> None:
     assert reference.location == location(
         "note.md", None, None, small_range.line_start, small_range.line_end
     )
-    assert reference.similarity == pytest.approx(1.0), "its one chunk is the passage's middle"
+    assert reference.to_parent.embedding is not None
+    assert reference.to_parent.embedding.contained == pytest.approx(1.0), (
+        "its one chunk is the passage's middle"
+    )
+    assert reference.to_parent.embedding.contains == pytest.approx(1 / 3), "one of three chunks"
     assert len(kept.also_in) == 1
 
 
@@ -472,32 +646,75 @@ def test_a_folded_range_points_at_its_own_lines() -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "vectors", "model", "expected"),
+    ("name", "vectors", "model", "mode", "deciding", "measured"),
     [
         (
             "every row carries a vector under a model with thresholds",
             [E1, E2],
-            BGE_SMALL,
-            "embedding",
+            lambda bge: bge,
+            SearchMode.HYBRID,
+            ["embedding", "words"],
+            ["embedding", "words"],
         ),
         (
-            "one row without a vector sends the whole scan to words",
-            [E1, None],
-            BGE_SMALL,
-            "words",
+            "a vector search decides by vectors alone, and still measures the words",
+            [E1, E2],
+            lambda bge: bge,
+            SearchMode.VECTOR,
+            ["embedding"],
+            ["embedding", "words"],
         ),
-        ("no embedding model at all", [None, None], None, "words"),
-        ("a model without thresholds", [E1, E2], EmbeddingModel("test/tiny", 2), "words"),
-        ("nothing scanned", [], BGE_SMALL, "words"),
+        (
+            "a full-text search decides by both, vectors first",
+            [E1, E2],
+            lambda bge: bge,
+            SearchMode.FTS,
+            ["embedding", "words"],
+            ["embedding", "words"],
+        ),
+        (
+            "one row without a vector sends the whole scan to words, whatever the mode",
+            [E1, None],
+            lambda bge: bge,
+            SearchMode.VECTOR,
+            ["words"],
+            ["words"],
+        ),
+        (
+            "no embedding model at all",
+            [None, None],
+            lambda bge: None,
+            SearchMode.HYBRID,
+            ["words"],
+            ["words"],
+        ),
+        (
+            "a model without thresholds",
+            [E1, E2],
+            lambda bge: EmbeddingModel("test/tiny", 2),
+            SearchMode.VECTOR,
+            ["words"],
+            ["words"],
+        ),
+        ("nothing scanned", [], lambda bge: bge, SearchMode.HYBRID, ["words"], ["words"]),
     ],
 )
-def test_the_space_is_embeddings_only_when_every_row_can_be_compared(
-    name: str, vectors: list, model: EmbeddingModel | None, expected: str
+@pytest.mark.anyio
+async def test_the_spaces_follow_the_rows_the_model_and_the_mode(
+    name: str,
+    vectors: list,
+    model: Callable[[EmbeddingModel], EmbeddingModel | None],
+    mode: SearchMode,
+    deciding: list[str],
+    measured: list[str],
+    bge_small: EmbeddingModel,
 ) -> None:
     texts = [RETRY, BACKOFF][: len(vectors)]
 
-    first, *_ = collapse.spaces(texts, vectors, model)
-    assert first.kind == expected, f"{name}: compared first by {expected}"
+    scan = collapse.spaces(texts, vectors, model(bge_small), mode)
+
+    assert [space.kind for space in scan.deciding] == deciding, f"{name}: decided by"
+    assert [space.kind for space in scan.measured] == measured, f"{name}: measured in"
 
 
 def test_folding_leaves_the_hits_it_was_given_alone() -> None:

@@ -26,20 +26,24 @@ import re
 
 import msgspec
 
-from haskie.collection.index import Hit, Relation, location
+from haskie.collection.index import Hit, Overlaps, Relation, location
 from haskie.document.convert import without_markers
 
 # --- scoring ---------------------------------------------------------------------
 
 
-def harmonic(best: float, total: float) -> float:
-    """How strongly a document matches: the harmonic mean of its best chunk and the sum of all
-    its matched chunks. A document matched once scores its one chunk. Every further chunk lifts
-    it, but the mean stays under twice the best, so many weak chunks never outrank one strong one,
-    and a document with a few strong chunks is not held back for having few."""
-    if best <= 0 or total <= 0:
+def harmonic(a: float, b: float) -> float:
+    """The harmonic mean of `a` and `b`: pulled toward the smaller, so one weak value holds the
+    whole down, and 0 when either is 0 or less.
+
+    Two uses. How strongly a range or a document matches is harmonic(best chunk, sum of all its
+    matched chunks): a document matched once scores its one chunk, every further chunk lifts it,
+    but the mean stays under twice the best, so many weak chunks never outrank one strong one, and
+    a document with a few strong chunks is not held back for having few. How strongly two results
+    overlap is harmonic(contained, contains) (`collapse`): high only when each holds the other."""
+    if a <= 0 or b <= 0:
         return 0.0
-    return 2 * best * total / (best + total)
+    return 2 * a * b / (a + b)
 
 
 # --- chunk ranges ----------------------------------------------------------------
@@ -47,7 +51,8 @@ def harmonic(best: float, total: float) -> float:
 
 class PassageReference(msgspec.Struct):
     """Another passage that says what a passage says, folded into it rather than listed on its
-    own: where else to cite the same point, not something to read again."""
+    own: where else to cite the same point, not something to read again. A tree, as
+    `HitReference` is."""
 
     collection: str
     document: str
@@ -57,10 +62,12 @@ class PassageReference(msgspec.Struct):
     location: str
     line_start: int  # 1-based, in the document's markdown: what `/lines` reads it back by
     line_end: int
-    score: float  # its own score, before it was folded
-    relation: Relation
-    similarity: float  # how strongly `relation` holds: a cosine, a word share or a span share
-    via: str | None = None  # as `HitReference.via`
+    score: float  # how well it matched the query on its own, before it was folded
+    relation: Relation  # how it overlaps `to_parent`'s result
+    similarity: float  # how strongly `relation` holds, as the fold decided it
+    to_parent: Overlaps  # the passage or place it is listed under
+    to_root: Overlaps  # the passage at the top of the tree
+    also_in: list["PassageReference"] = []  # the places folded into this one, best first
 
 
 class HitRange(msgspec.Struct):
@@ -75,8 +82,10 @@ class HitRange(msgspec.Struct):
     char_end: int
     byte_start: int  # the same span in bytes, which is what the markdown file is seeked to
     byte_end: int
+    page_start: int | None  # 1-based PDF pages, every member's (see `pages`); None for non-PDF
+    page_end: int | None
     score: float  # harmonic(best, sum) over the members
-    also_in: list[PassageReference] = []  # every near-duplicate folded in (`collapse`), best first
+    also_in: list[PassageReference] = []  # the near-duplicates folded in (`collapse`), a tree
 
     @property
     def best(self) -> Hit:
@@ -127,6 +136,7 @@ def ranges(hits: list[Hit]) -> list[HitRange]:
 def _range(hits: list[Hit]) -> HitRange:
     """One range out of an ascending run of hits of one document."""
     best = max(hit.score for hit in hits)
+    page_start, page_end = pages(hits)
     return HitRange(
         hits=hits,
         seq_start=hits[0].seq,
@@ -137,6 +147,8 @@ def _range(hits: list[Hit]) -> HitRange:
         char_end=max(hit.char_end for hit in hits),
         byte_start=min(hit.byte_start for hit in hits),
         byte_end=max(hit.byte_end for hit in hits),
+        page_start=page_start,
+        page_end=page_end,
         score=harmonic(best, sum(hit.score for hit in hits)),
     )
 
@@ -164,7 +176,7 @@ class Passage(msgspec.Struct):
     score: float
     source_file: str  # absolute, for a tool outside the app
     markdown_file: str
-    also_in: list[PassageReference] = []  # every near-duplicate folded in, best first
+    also_in: list[PassageReference] = []  # the near-duplicates folded in, a tree
 
 
 class Excerpt(Passage):
@@ -232,7 +244,7 @@ def widen[P: Passage](hit_range: HitRange, window: Window, cls: type[P]) -> P:
         markdown, hit_range.line_end, max(from_start, from_end - 1), max(local_start, local_end - 1)
     )
     best = hit_range.best
-    page_start, page_end = pages(hit_range.hits)
+    page_start, page_end = hit_range.page_start, hit_range.page_end
     return cls(
         collection=best.collection,
         document=best.document,

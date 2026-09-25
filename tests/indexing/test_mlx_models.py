@@ -8,10 +8,9 @@ import threading
 
 import pytest
 
-from haskie.api.settings import OPTIONS
 from haskie.indexing import embed, mlx_models
 from haskie.indexing.mlx_models import ListwiseReranker
-from haskie.settings import PROFILES, RERANKER_MODELS, Accelerator
+from haskie.settings import Accelerator
 
 TEXTS = [
     "Basketball is one of the most popular sports in the United States.",
@@ -56,9 +55,9 @@ def test_without_mlx_the_model_says_what_it_needs(monkeypatch: pytest.MonkeyPatc
         mlx_models.reranker("jinaai/jina-reranker-v3-mlx")
 
 
-def test_every_mlx_model_is_a_choice_and_routed_to_mlx(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A pinned MLX reranker is a reranker model the settings accept, and a pinned MLX embedder
-    one a profile names; building either takes the MLX path rather than fastembed's."""
+def test_every_mlx_model_is_routed_to_mlx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Building a pinned MLX reranker or embedder takes the MLX path rather than fastembed's.
+    That every pin is in the catalogue is `test_catalogue`'s to say."""
     built: list[str] = []
     monkeypatch.setattr(mlx_models, "reranker", lambda name: built.append(name) or name)
     monkeypatch.setattr(mlx_models, "embedder", lambda name: built.append(name) or name)
@@ -66,28 +65,15 @@ def test_every_mlx_model_is_a_choice_and_routed_to_mlx(monkeypatch: pytest.Monke
     embed._build_model.cache_clear()
     rerankers = [*mlx_models.LISTWISE, *mlx_models.PAIRWISE]
     embedders = list(mlx_models.EMBEDDERS)
-    profile_models = {model.name for model in PROFILES.values() if model is not None}
 
     for name in rerankers:
-        assert name in RERANKER_MODELS
         assert embed._build_cross_encoder(name) == name
     for name in embedders:
-        assert name in profile_models
         assert embed._build_model(name, Accelerator.AUTO) == name
     embed._build_cross_encoder.cache_clear()
     embed._build_model.cache_clear()
 
     assert built == rerankers + embedders
-
-
-def test_the_options_offer_mlx_models_only_where_mlx_is_installed() -> None:
-    rerankers = set(OPTIONS.reranker_models) & set(mlx_models.REVISIONS)
-    embedders = {
-        model.name for model in OPTIONS.embedding_profiles.values() if model is not None
-    } & set(mlx_models.EMBEDDERS)
-    expected = mlx_models.available()
-    assert rerankers == ({*mlx_models.LISTWISE, *mlx_models.PAIRWISE} if expected else set())
-    assert embedders == (set(mlx_models.EMBEDDERS) if expected else set())
 
 
 @pytest.mark.skipif(not mlx_models.available(), reason="MLX installs on Apple Silicon only")

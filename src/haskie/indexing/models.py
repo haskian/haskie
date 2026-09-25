@@ -15,9 +15,10 @@ SUCCESS record still has cold caches. `_ready` holds the ids this process has lo
 Loading a model is CPU work, not IO, so it goes through `cpu.on_cpu`: a worker thread, under one
 slot of the CPU budget, whichever event loop asked for it.
 
-Depends on leaf modules only (`cpu`, `embed`, `settings`, `dbos_names`): `index` and `pipeline`
-import this module, so it must not reach back into them or into `workflows`. `collection` is read
-through a function-local import for the same reason (see `_collection_rerankers`).
+Depends on leaf modules only (`cpu`, `embed`, `settings`, `catalogue`, `dbos_names`): `index`
+and `pipeline` import this module, so it must not reach back into them or into `workflows`.
+`collection` is read through a function-local import for the same reason (see
+`_collection_rerankers`).
 """
 
 import asyncio
@@ -29,6 +30,7 @@ from dbos import DBOS, SetWorkflowID
 from dbos import WorkflowStatus as DbosWorkflowStatus
 
 from haskie import cpu
+from haskie.catalogue import catalogue
 from haskie.errors import HaskieError, NotReady
 from haskie.indexing import embed
 from haskie.indexing.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, RunStatus, root_cause
@@ -117,8 +119,9 @@ async def _required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
     A collection may override the reranker model, and a search of that collection then loads it,
     so the overrides count as required as much as the user-level pair does."""
     wanted: list[tuple[ModelKind, str]] = []
-    if settings.embedding_model:
-        wanted.append((ModelKind.EMBEDDING, settings.embedding_model.name))
+    embedding = await catalogue.embedding_model(settings)
+    if embedding:
+        wanted.append((ModelKind.EMBEDDING, embedding.name))
     if settings.search.reranker == Reranker.CROSS_ENCODER:
         wanted.append((ModelKind.RERANKER, settings.search.reranker_model))
     wanted.extend((ModelKind.RERANKER, name) for name in await _collection_rerankers())

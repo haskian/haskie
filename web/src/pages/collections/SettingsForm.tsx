@@ -120,7 +120,7 @@ export function SettingsForm({
       draft.search.reranker_model,
       searchDefaults.reranker_model,
       (next) => setSearch('reranker_model', next),
-      (item) => rerankerOption(item, options.reranker_cards),
+      (item) => rerankerOption(item, options.reranker_metadata),
     ),
     candidates: searchNumber('candidates'),
   }

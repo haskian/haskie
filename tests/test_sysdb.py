@@ -72,7 +72,7 @@ async def test_step_counts_group_by_workflow(dbos, tmp_path) -> None:
     assert await sysdb.step_counts([], dbos_names.STAGE_STEP) == {}, "no ids, no query"
 
 
-async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) -> None:
+async def test_operation_activity_counts_the_operation_queues_by_status(dbos, tmp_path) -> None:
     """Once a document is imported and indexed, its operation and task workflows are all SUCCESS
     and drop out.
 
@@ -102,7 +102,9 @@ async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) 
             )
         )
     assert delayed[0][0] >= 1, "there is a debounced run to ignore"
-    assert await sysdb.queue_activity() == {}, "a debounce waiting out its period is not activity"
+    assert await sysdb.operation_activity() == {}, (
+        "a debounce waiting out its period is not activity"
+    )
 
     async with db.connect() as conn:  # a slice still waiting for a slot, and one running
         # The queue this slice waits on is one the app never registered, because DBOS is up: a row
@@ -121,13 +123,12 @@ async def test_queue_activity_groups_by_queue_family_and_status(dbos, tmp_path) 
             "update workflow_status set status = 'PENDING' where queue_name = ?",
             (workflows.EMBEDDING_QUEUE,),
         )
-    assert await sysdb.queue_activity() == {
-        "task": {"ENQUEUED": 1, "PENDING": 1},
-        "operation": {"PENDING": 2},
-    }, "the prefix of the queue name is the family; the status is kept for the caller to fold"
-    assert await sysdb.queue_activity(skip=[workflows.EMBEDDING_QUEUE]) == {
-        "task": {"ENQUEUED": 1, "PENDING": 1},
-    }, "a skipped queue drops out of its family, and an empty family is absent"
+    assert await sysdb.operation_activity() == {"PENDING": 2}, (
+        "the operations by status; the task rows waiting and running beside them are not counted"
+    )
+    assert await sysdb.operation_activity(skip=[workflows.EMBEDDING_QUEUE]) == {}, (
+        "a skipped queue drops out, and no status is left"
+    )
 
 
 async def test_stale_active_ids_pages_over_another_versions_workflows(

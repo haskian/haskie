@@ -19,12 +19,13 @@ from typing import Any
 import numpy as np
 
 from haskie import home
+from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.indexing import mlx_models, onnx_rerank
-from haskie.settings import Accelerator, EmbeddingModel
+from haskie.indexing.hardware import COREML_TOO_LARGE, RERANKER_ACCELERATOR
+from haskie.settings import Accelerator
 
 # a provider entry as ONNX Runtime takes it: a name, or a (name, options) pair
 Provider = str | tuple[str, dict[str, str]]
-RERANKER_ACCELERATOR = Accelerator.CPU
 
 # Construction (download, session setup) is serialized, using a model is not, and the lock is
 # outside the cache so the second caller of a model being built waits and then gets that one:
@@ -95,12 +96,6 @@ def _build_model(name: str, accelerator: Accelerator):
         providers=chosen,
         **({"specific_model_path": str(local)} if local else {}),
     )
-
-
-# CoreML compiles a whole model into one protobuf, which caps at 2 GB: a model past that fails to
-# build on Apple Silicon ("CoreML.Specification.Model exceeded maximum protobuf size of 2GB") and
-# runs on the CPU instead. bge-m3 and e5-large pass, because CoreML takes only part of their graph.
-COREML_TOO_LARGE = {"jinaai/jina-embeddings-v3"}
 
 
 # Embedders fastembed does not list, each from an ONNX export of its own, pinned to a revision.

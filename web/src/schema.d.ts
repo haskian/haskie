@@ -856,6 +856,11 @@ export interface components {
         Describe: {
             description: string;
         };
+        /**
+         * Device
+         * @enum {string}
+         */
+        Device: "cpu" | "apple_silicon" | "gpu";
         /** Document */
         Document: {
             name: string;
@@ -898,26 +903,32 @@ export interface components {
             chunk: number;
             passage: number;
         };
+        /** EmbedderMetadata */
+        EmbedderMetadata: {
+            description: string;
+            parameters: number;
+            context_tokens: number;
+            languages: string;
+            license: string;
+            /** Format: date */
+            released: string;
+            model_card_url: string;
+            runtime: components["schemas"]["Runtime"];
+            devices: components["schemas"]["Device"][];
+            dimensions: number;
+        };
         /** EmbeddingModel */
         EmbeddingModel: {
             name: string;
             dims: number;
             accelerator?: components["schemas"]["Accelerator"];
             duplicate?: components["schemas"]["DuplicateCosine"] | null;
-            card?: components["schemas"]["ModelCard"] | null;
             /** @default  */
             query_prefix: string;
             /** @default  */
             document_prefix: string;
             matryoshka?: components["schemas"]["Matryoshka"] | null;
         };
-        /**
-         * EmbeddingProfile
-         * @description Text-embedding model that turns chunks into vectors for semantic search. Chosen at first run; changing it later requires "Index all" in every collection. none = full-text (BM25) search only. Each profile lists its model, size, languages, license and the hardware it runs well on.
-         * @default none
-         * @enum {string}
-         */
-        EmbeddingProfile: "none" | "compact" | "balanced" | "gte-base" | "arctic-m" | "nomic-v1.5" | "nomic-v1.5-512" | "jina-v2-small" | "jina-v2-base" | "modernbert-mlx" | "jina-v5-nano-mlx" | "quality" | "multilingual" | "bge-m3" | "jina-v3";
         /** Entry */
         Entry: {
             document: string;
@@ -1024,7 +1035,9 @@ export interface components {
             score: number;
             relation: components["schemas"]["Relation"];
             similarity: number;
-            via?: string | null;
+            to_parent: components["schemas"]["Overlaps"];
+            to_root: components["schemas"]["Overlaps"];
+            also_in?: components["schemas"]["HitReference"][];
         };
         /** HotSection */
         HotSection: {
@@ -1057,7 +1070,7 @@ export interface components {
         };
         /** Init */
         Init: {
-            profile: components["schemas"]["EmbeddingProfile"];
+            profile: string;
             search?: components["schemas"]["SearchSettings"];
         };
         /** Job */
@@ -1127,14 +1140,6 @@ export interface components {
          * @enum {string}
          */
         MemberStatus: "pending" | "indexing" | "indexed" | "error" | "cancelled";
-        /** ModelCard */
-        ModelCard: {
-            description: string;
-            params: number;
-            metadata: {
-                [key: string]: string;
-            };
-        };
         /**
          * ModelKind
          * @enum {string}
@@ -1196,14 +1201,17 @@ export interface components {
             fusions: components["schemas"]["Fusion"][];
             rerankers: components["schemas"]["Reranker"][];
             reranker_models: string[];
-            reranker_cards: {
-                [key: string]: components["schemas"]["ModelCard"];
+            reranker_metadata: {
+                [key: string]: components["schemas"]["RerankerMetadata"];
             };
             docs: {
                 [key: string]: components["schemas"]["FieldDoc"];
             };
             embedding_profiles: {
                 [key: string]: components["schemas"]["EmbeddingModel"] | null;
+            };
+            embedding_metadata: {
+                [key: string]: components["schemas"]["EmbedderMetadata"];
             };
             document_statuses: components["schemas"]["DocumentStatus"][];
             active_document_statuses: components["schemas"]["DocumentStatus"][];
@@ -1220,6 +1228,19 @@ export interface components {
          * @enum {string}
          */
         Order: "asc" | "desc";
+        /** Overlap */
+        Overlap: {
+            contained: number;
+            contains: number;
+            alike: number;
+            score: number;
+        };
+        /** Overlaps */
+        Overlaps: {
+            words: components["schemas"]["Overlap"];
+            embedding: components["schemas"]["Overlap"] | null;
+            chars: number | null;
+        };
         /** Page[CollectionSummary] */
         "Page_haskie.collection.collection.CollectionSummary_": {
             items: components["schemas"]["CollectionSummary"][];
@@ -1290,7 +1311,9 @@ export interface components {
             score: number;
             relation: components["schemas"]["Relation"];
             similarity: number;
-            via?: string | null;
+            to_parent: components["schemas"]["Overlaps"];
+            to_root: components["schemas"]["Overlaps"];
+            also_in?: components["schemas"]["PassageReference"][];
         };
         /**
          * PieceType
@@ -1397,11 +1420,11 @@ export interface components {
         };
         /**
          * Relation
-         * @description How a folded result overlaps the result it was measured against (`search.collapse`): the
-         *     one it is listed under, or its reference's `via`.
+         * @description How a folded result overlaps its parent in `also_in` (`search.collapse`): the result it
+         *     is listed under, or the place above it in the tree.
          * @enum {string}
          */
-        Relation: "duplicate" | "contained" | "same_span";
+        Relation: "duplicate" | "contained" | "equivalent";
         /**
          * Reranker
          * @description Second-stage scoring applied to the Candidates of any mode (vector, fts or hybrid). cross-encoder: a model reads query and chunk together and rescores each pair; slower but more precise than embeddings. none: keep the retrieval order.
@@ -1409,6 +1432,19 @@ export interface components {
          * @enum {string}
          */
         Reranker: "none" | "cross-encoder";
+        /** RerankerMetadata */
+        RerankerMetadata: {
+            description: string;
+            parameters: number;
+            context_tokens: number;
+            languages: string;
+            license: string;
+            /** Format: date */
+            released: string;
+            model_card_url: string;
+            runtime: components["schemas"]["Runtime"];
+            devices: components["schemas"]["Device"][];
+        };
         /** RetentionSettings */
         RetentionSettings: {
             /**
@@ -1429,6 +1465,11 @@ export interface components {
          * @enum {string}
          */
         RunStatus: "ENQUEUED" | "PENDING" | "SUCCESS" | "ERROR" | "CANCELLED" | "MAX_RECOVERY_ATTEMPTS_EXCEEDED" | "DELAYED";
+        /**
+         * Runtime
+         * @enum {string}
+         */
+        Runtime: "onnx" | "mlx";
         /** SearchAt */
         SearchAt: {
             ts: number;
@@ -1628,7 +1669,12 @@ export interface components {
         };
         /** UserSettings */
         UserSettings: {
-            embedding?: components["schemas"]["EmbeddingProfile"];
+            /**
+             * Embedding profile
+             * @description Text-embedding model that turns chunks into vectors for semantic search. Chosen at first run; changing it later requires "Index all" in every collection. none = full-text (BM25) search only. Each profile lists its model, size, languages, license and the hardware it runs well on.
+             * @default none
+             */
+            embedding: string;
             conversion?: components["schemas"]["ConversionSettings"];
             pipeline?: components["schemas"]["PipelineSettings"];
             search?: components["schemas"]["SearchSettings"];

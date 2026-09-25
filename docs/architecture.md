@@ -17,6 +17,7 @@ flowchart TB
         api --> collection["<b>collection/</b><br/>membership, LanceDB index"]
         api --> search["<b>search/</b><br/>retrieval, passages,<br/>fold repeats, sessions"]
         api --> indexing["<b>indexing/</b><br/>DBOS pipeline: chunk,<br/>embed, cache, write"]
+        api --> catalogue["<b>catalogue/</b><br/>models, their metadata,<br/>embedding profiles"]
     end
 
     subgraph home["~/.haskie"]
@@ -35,6 +36,7 @@ flowchart TB
     search --> lance
     search --> sqlite
     search --> files
+    catalogue --> sqlite
 ```
 
 The code is packaged by feature. The HTTP layer is thin. Handlers parse the request, call the domain

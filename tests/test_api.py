@@ -29,12 +29,15 @@ from litestar.testing import AsyncTestClient, RequestFactory
 
 from haskie import app as app_module
 from haskie import audit, errors, home, logs
+from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection, MemberStatus
 from haskie.document import document
 from haskie.document.document import DocumentStatus
+from haskie.indexing import mlx_models
 from haskie.indexing.chunk import Chunk, Piece
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order
+from haskie.settings import DEFAULT_RERANKER
 
 from conftest import (  # isort: skip
     api_app,
@@ -129,7 +132,7 @@ def _requested(lines: list[dict]) -> list[str]:
         (
             "unknown embedding profile -> unprocessable",
             "POST", "/api/init", {"profile": "bogus"}, None,
-            422, "Invalid enum value 'bogus'",
+            422, "unknown embedding profile: bogus",
         ),
         (
             "unknown reranker model at init -> unprocessable",
@@ -141,6 +144,21 @@ def _requested(lines: list[dict]) -> list[str]:
             "settings out of range -> unprocessable",
             "PUT", "/api/settings", {"pipeline": {"embedding_weight": 0}}, None,
             422, "embedding_weight must be >= 1, got 0",
+        ),
+        (
+            "settings naming a profile the catalogue does not hold -> unprocessable",
+            "PUT", "/api/settings", {"embedding": "bogus"}, None,
+            422, "unknown embedding profile: bogus",
+        ),
+        (
+            "settings naming a reranker the catalogue does not hold -> unprocessable",
+            "PUT", "/api/settings", {"search": {"reranker_model": "no/such-model"}}, None,
+            422, "unknown reranker model: no/such-model",
+        ),
+        (
+            "an embedder is no reranker -> unprocessable",
+            "PUT", "/api/settings", {"search": {"reranker_model": "BAAI/bge-small-en-v1.5"}}, None,
+            422, "unknown reranker model: BAAI/bge-small-en-v1.5",
         ),
         (
             "merge share past 100% -> unprocessable",
@@ -176,6 +194,12 @@ def _requested(lines: list[dict]) -> list[str]:
             "collection override out of range -> unprocessable",
             "PUT", "/api/collections/notes/overrides", {"chunk_size": 0}, None,
             422, "chunk_size must be >= 1, got 0",
+        ),
+        (
+            "collection override naming an unknown reranker -> unprocessable",
+            "PUT", "/api/collections/notes/overrides",
+            {"search": {"reranker_model": "no/such-model"}}, None,
+            422, "unknown reranker model: no/such-model",
         ),
         (
             "search limit below one -> unprocessable",
@@ -450,6 +474,31 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     assert "anydoc" in options["parsers"] and "hybrid" in options["search_modes"]
     assert options["docs"]["conversion.chunk_size"]["title"] == "Chunk size (characters)"
     assert options["embedding_profiles"]["compact"]["dims"] == 384
+    # the catalogue, read from the database: full-text only first, then the models by size
+    profiles = options["embedding_profiles"]
+    assert list(profiles)[:2] == ["none", "compact"] and profiles["none"] is None
+    metadata = options["embedding_metadata"]
+    assert set(metadata) == set(await catalogue.embedders()), "every profile's, offered or not"
+    assert set(profiles) - {"none"} <= set(metadata), "metadata for every offered model"
+    assert metadata["compact"] == {
+        "description": "Small and fast; a good default (~130 MB).",
+        "parameters": 33360512,
+        "context_tokens": 512,
+        "languages": "English",
+        "license": "MIT",
+        "released": "2023-09-12",
+        "model_card_url": "https://huggingface.co/BAAI/bge-small-en-v1.5",
+        "runtime": "onnx",
+        "devices": ["cpu", "apple_silicon", "gpu"],
+        "dimensions": 384,
+    }
+    assert metadata["nomic-v1.5-512"]["description"] != metadata["nomic-v1.5"]["description"]
+    assert metadata["nomic-v1.5-512"]["parameters"] == metadata["nomic-v1.5"]["parameters"]
+    reranker = options["reranker_metadata"][DEFAULT_RERANKER]
+    assert (reranker["parameters"], reranker["context_tokens"]) == (22714113, 512)
+    assert (reranker["runtime"], reranker["devices"]) == ("onnx", ["cpu"])
+    assert "dimensions" not in reranker, "a reranker has no vectors"
+    assert options["reranker_models"][0] == DEFAULT_RERANKER, "the default is the smallest"
     # the vocabularies the UI renders rows with, so it never spells a status out for itself
     assert (
         options["document_statuses"][:3]
@@ -471,6 +520,52 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     assert options["active_run_statuses"] == ["ENQUEUED", "PENDING"]
     assert options["operation_kinds"][0] == "document"
     assert "index_collection" in options["bulk_kinds"]
+
+
+@pytest.mark.parametrize(("name", "installed"), [("MLX installed", True), ("no MLX", False)])
+async def test_the_options_offer_mlx_models_only_where_mlx_is_installed(
+    client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch, name: str, installed: bool
+) -> None:
+    monkeypatch.setattr(mlx_models, "available", lambda: installed)
+    mlx_rerankers = {*mlx_models.LISTWISE, *mlx_models.PAIRWISE}
+
+    options = (await client.get("/api/options")).json()
+
+    profiles = options["embedding_profiles"].values()
+    embedders = {model["name"] for model in profiles if model} & set(mlx_models.EMBEDDERS)
+    assert embedders == (set(mlx_models.EMBEDDERS) if installed else set()), name
+    rerankers = set(options["reranker_models"]) & mlx_rerankers
+    assert rerankers == (mlx_rerankers if installed else set()), name
+    assert mlx_rerankers <= set(options["reranker_metadata"]), "metadata, offered or not"
+
+
+@pytest.mark.parametrize(
+    ("name", "path", "body", "read"),
+    [
+        ("an unknown profile", "/api/settings", {"embedding": "bogus"}, "/api/settings"),
+        (
+            "an unknown reranker",
+            "/api/settings",
+            {"search": {"reranker_model": "no/such-model"}},
+            "/api/settings",
+        ),
+        (
+            "an unknown reranker for one collection",
+            "/api/collections/notes/overrides",
+            {"search": {"reranker_model": "no/such-model"}},
+            "/api/collections/notes",
+        ),
+    ],
+)
+async def test_a_write_naming_a_model_the_catalogue_lacks_stores_nothing(
+    ready: AsyncTestClient, name: str, path: str, body: dict, read: str
+) -> None:
+    before = (await ready.get(read)).json()
+
+    response = await ready.put(path, json=body)
+
+    assert response.status_code == 422, name
+    assert (await ready.get(read)).json() == before, name
 
 
 @pytest.mark.parametrize(

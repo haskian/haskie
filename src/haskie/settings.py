@@ -15,7 +15,6 @@ still means the same thing when the size changes.
 
 import os
 import threading
-from collections.abc import Callable, Iterable
 from enum import StrEnum
 from typing import Annotated, Any
 
@@ -39,24 +38,6 @@ class Chunker(StrEnum):  # the two pipelines of `indexing.chunk`
     TEXT = "text"
 
 
-class EmbeddingProfile(StrEnum):
-    NONE = "none"
-    COMPACT = "compact"
-    BALANCED = "balanced"
-    GTE_BASE = "gte-base"
-    ARCTIC_M = "arctic-m"
-    NOMIC_V15 = "nomic-v1.5"
-    NOMIC_V15_512 = "nomic-v1.5-512"
-    JINA_V2_SMALL = "jina-v2-small"
-    JINA_V2_BASE = "jina-v2-base"
-    MODERNBERT_MLX = "modernbert-mlx"
-    JINA_V5_NANO_MLX = "jina-v5-nano-mlx"
-    QUALITY = "quality"
-    MULTILINGUAL = "multilingual"
-    BGE_M3 = "bge-m3"
-    JINA_V3 = "jina-v3"
-
-
 class Accelerator(StrEnum):
     AUTO = "auto"  # the best ONNX Runtime provider (CUDA, CoreML, ...)
     CPU = "cpu"
@@ -78,413 +59,9 @@ class Reranker(StrEnum):
     CROSS_ENCODER = "cross-encoder"
 
 
-class ModelCard(msgspec.Struct, frozen=True):
-    """What the settings say about one model, so it can be chosen without looking it up: a line of
-    what it is for, its size, and facts as key-value pairs, shown in the order given. An
-    embedder's vector size is not among them: `EmbeddingModel.dims` says it."""
-
-    description: str
-    params: int  # the published weights' own total: what the pickers sort by
-    metadata: dict[str, str]
-
-
-def _card(
-    description: str, params: int, languages: str, license: str, device: str, context: str = ""
-) -> ModelCard:
-    """A card with the facts every model has, in one order; `context` where the model states it.
-    The parameter count is shown rounded, and kept exact for ordering."""
-    shown = f"{params / 1e9:.1f}B" if params >= 1e9 else f"{round(params / 1e6)}M"
-    metadata = {"Parameters": shown, "Languages": languages, "License": license, "Device": device}
-    if context:
-        metadata["Context"] = context
-    return ModelCard(description, params, metadata)
-
-
-def sort_by[T](items: Iterable[T], *keys: Callable[[T], Any]) -> list[T]:
-    """`items` ordered by each key ascending, the first key first, ties to the next. Stable: items
-    equal on every key keep the order they came in."""
-    return sorted(items, key=lambda item: tuple(key(item) for key in keys))
-
-
-# How each runtime uses the hardware. ONNX embedders run on CPU, CoreML or CUDA (`embed.providers`);
-# ONNX rerankers always on CPU (`embed.RERANKER_ACCELERATOR`); MLX needs Apple Silicon.
-ONNX_EMBEDDER = "any: CPU; faster on Apple Silicon (CoreML) or NVIDIA (the gpu extra)"
-ONNX_RERANKER = "any: runs on CPU"
-MLX = "Apple Silicon only (MLX; the mlx extra)"
-NON_COMMERCIAL = "CC BY-NC 4.0 (non-commercial)"
-
-# fastembed cross-encoders (ONNX), then MLX rerankers (`indexing/mlx_models.py`); each downloaded
-# on first use. Parameter counts are the published weights' own totals.
-_RERANKERS: dict[str, ModelCard] = {
-    "Xenova/ms-marco-MiniLM-L-6-v2": _card(
-        "Small and fast; a good first reranker.",
-        22_714_113,
-        "English",
-        "Apache-2.0",
-        ONNX_RERANKER,
-        "512 tokens",
-    ),
-    "Xenova/ms-marco-MiniLM-L-12-v2": _card(
-        "Twice the layers of L-6: a little better, a little slower.",
-        33_360_897,
-        "English",
-        "Apache-2.0",
-        ONNX_RERANKER,
-        "512 tokens",
-    ),
-    "BAAI/bge-reranker-base": _card(
-        "Stronger than MiniLM, and much larger.",
-        278_044_931,
-        "English, Chinese",
-        "MIT",
-        ONNX_RERANKER,
-        "512 tokens",
-    ),
-    "jinaai/jina-reranker-v1-turbo-en": _card(
-        "Distilled for speed; reads long passages.",
-        37_771_777,
-        "English",
-        "Apache-2.0",
-        ONNX_RERANKER,
-        "8K tokens",
-    ),
-    "cross-encoder/ettin-reranker-68m-v1": _card(
-        "Modern and small (2026, ModernBERT-style encoder); reads long passages.",
-        68_144_640,
-        "English",
-        "Apache-2.0",
-        ONNX_RERANKER,
-        "8K tokens (read at 512)",
-    ),
-    "mixedbread-ai/mxbai-rerank-xsmall-v1": _card(
-        "mixedbread's smallest reranker (2024), strong for its size.",
-        70_830_337,
-        "English",
-        "Apache-2.0",
-        ONNX_RERANKER,
-        "512 tokens",
-    ),
-    "jinaai/jina-reranker-v2-base-multilingual": _card(
-        "Multilingual cross-encoder.",
-        278_437_633,
-        "multilingual",
-        NON_COMMERCIAL,
-        ONNX_RERANKER,
-        "1K tokens",
-    ),
-    "jinaai/jina-reranker-v3-mlx": _card(
-        "Listwise: reads every candidate together and ranks them against each other.",
-        596_836_352,
-        "multilingual",
-        NON_COMMERCIAL,
-        MLX,
-        "131K tokens, all candidates together",
-    ),
-    "jinaai/jina-reranker-v3.5-mlx": _card(
-        "Jina's newest listwise reranker, v3's successor.",
-        596_836_352,
-        "multilingual",
-        NON_COMMERCIAL,
-        MLX,
-        "131K tokens, all candidates together",
-    ),
-    "soichisumi/bge-reranker-v2-m3-mlx-affine8": _card(
-        "BAAI's multilingual reranker, 8-bit (near lossless, 607 MB).",
-        567_755_777,
-        "multilingual (100+)",
-        "Apache-2.0",
-        MLX,
-        "8K tokens (read at 512)",
-    ),
-    "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1": _card(
-        "Multilingual MiniLM trained on mMARCO; the fastest multilingual reranker here.",
-        117_641_603,
-        "multilingual (mMARCO: 14 languages)",
-        "Apache-2.0",
-        MLX,
-        "512 tokens",
-    ),
-    "afanjul/gte-reranker-modernbert-base-mlx": _card(
-        "Fast modern cross-encoder; reads long passages.",
-        149_605_633,
-        "English",
-        "Apache-2.0",
-        MLX,
-        "8K tokens (read at 512)",
-    ),
-}
-# smallest first, as every picker lists them; the first is the default reranker model
-RERANKERS = dict(sort_by(_RERANKERS.items(), lambda item: item[1].params))
-RERANKER_MODELS: tuple[str, ...] = tuple(RERANKERS)
-
-
-class DuplicateCosine(msgspec.Struct, frozen=True):
-    """The raw cosines two search results must exceed to count as the same point
-    (`search.collapse`). Exceeded, not reached: Set-Encoder's near-duplicate is Jaccard > 0.5."""
-
-    chunk: float  # chunk to chunk, and containment
-    passage: float  # mean vector to mean vector: means are smoother, so they run higher
-
-
-class Matryoshka(msgspec.Struct, frozen=True):
-    """A model trained so that the first values of its vector are a vector of their own
-    (Matryoshka Representation Learning): its vectors are cut to `EmbeddingModel.dims`, then
-    normalized again, which makes the index and every comparison smaller for a small loss."""
-
-    layer_norm: bool = False  # nomic's recipe: layer-normalize the whole vector before the cut
-
-
-class EmbeddingModel(msgspec.Struct):
-    name: str
-    dims: int  # of the vectors stored and searched: the model's own, or its Matryoshka cut
-    accelerator: Accelerator = Accelerator.AUTO
-    duplicate: DuplicateCosine | None = None  # None: search results are compared by words alone
-    card: ModelCard | None = None
-    # What the model was trained to read ahead of a query and of a passage (e5's "query: ",
-    # nomic's "search_query: "); empty for models that need none. They shape every vector, so
-    # changing one is changing the model: every cached embedding of it is wrong after, and
-    # `chunk.CHUNK_VERSION` has to move with it.
-    query_prefix: str = ""
-    document_prefix: str = ""
-    matryoshka: Matryoshka | None = None
-
-    @property
-    def cache_name(self) -> str:
-        """What the embedding cache keys this model's vectors by: its name, and the cut where it
-        has one, since one model cut two ways gives two sets of vectors."""
-        return f"{self.name}@{self.dims}" if self.matryoshka else self.name
-
-
-# The `duplicate` cosines are placeholders, not calibrated. No source gives a portable value:
-# SemDeDup tunes its threshold "for each dataset manually" [1], and the BGE card says to pick one
-# from your own score distribution [3]. Calibrate on ~50 labelled pairs per model and per level,
-# keeping precision near 1, so a wrong value folds too little rather than too much.
-#
-# - bge chunk 0.92: just under the 0.93 NeMo Curator uses in its examples (its default is 0.99,
-#   with another model) [2]. Measured once, with bge-small: the same paragraph under two different
-#   heading paths scored 0.927, which is why a copy the words find folds anyway
-#   (`search.collapse.Embedded`).
-# - passage above chunk: a mean vector is smoother than its chunks, so means of related spans sit
-#   closer together (inference, redundancy-diversity-coverage.md §3.4).
-# - e5 above bge: unrelated pairs average a raw cosine of 0.707 for multilingual-e5-large against
-#   0.308 for bge-large [4], and the e5 card puts its scores "around 0.7 to 1.0" [5]. The size of
-#   the step (0.97, 0.98) is judgement, not a formula. bge-small and bge-base were not measured
-#   in [4] and borrow bge-large's values.
-#
-# [1] Abbas et al. 2023, SemDeDup, https://arxiv.org/abs/2303.09540
-# [2] NVIDIA NeMo Curator, semantic dedup, https://docs.nvidia.com/nemo/curator/latest/curate-text/process-data/deduplication/semdedup.html
-# [3] https://huggingface.co/BAAI/bge-large-en-v1.5 (FAQ on similarity scores)
-# [4] Parupudi 2026, Table 1 (preprint, single author), https://arxiv.org/abs/2606.29571
-# [5] https://huggingface.co/intfloat/multilingual-e5-large (FAQ)
-BGE_DUPLICATE = DuplicateCosine(chunk=0.92, passage=0.95)
-_NOMIC_V15_CARD = _card(
-    "Long passages, open training data (~520 MB).",
-    136_731_648,
-    "English",
-    "Apache-2.0",
-    ONNX_EMBEDDER,
-    "8K tokens",
-)
-_NOMIC_V15 = EmbeddingModel(
-    "nomic-ai/nomic-embed-text-v1.5",
-    768,
-    card=_NOMIC_V15_CARD,
-    query_prefix="search_query: ",
-    document_prefix="search_document: ",
-)
-_PROFILES: dict[EmbeddingProfile, EmbeddingModel | None] = {
-    EmbeddingProfile.NONE: None,  # full-text search only
-    EmbeddingProfile.COMPACT: EmbeddingModel(
-        "BAAI/bge-small-en-v1.5",
-        384,
-        duplicate=BGE_DUPLICATE,
-        card=_card(
-            "Small and fast; a good default (~130 MB).",
-            33_360_512,
-            "English",
-            "MIT",
-            ONNX_EMBEDDER,
-            "512 tokens",
-        ),
-    ),
-    EmbeddingProfile.BALANCED: EmbeddingModel(
-        "BAAI/bge-base-en-v1.5",
-        768,
-        duplicate=BGE_DUPLICATE,
-        card=_card(
-            "Between bge-small and bge-large: 768-dimension vectors at a third of bge-large's "
-            "size (~210 MB).",
-            109_482_752,
-            "English",
-            "MIT",
-            ONNX_EMBEDDER,
-            "512 tokens",
-        ),
-    ),
-    # 768 dimensions, 100-140M parameters: between bge-small and bge-large. No duplicate
-    # cosines measured for the four below, so their search results fold by words alone.
-    EmbeddingProfile.GTE_BASE: EmbeddingModel(
-        "thenlper/gte-base",
-        768,
-        card=_card(
-            "General text embeddings from Alibaba; no prefixes needed (~440 MB).",
-            109_482_752,
-            "English",
-            "MIT",
-            ONNX_EMBEDDER,
-            "512 tokens",
-        ),
-    ),
-    EmbeddingProfile.ARCTIC_M: EmbeddingModel(
-        "snowflake/snowflake-arctic-embed-m",
-        768,
-        card=_card(
-            "Snowflake's retrieval model, tuned for search queries (~430 MB).",
-            108_891_648,
-            "English",
-            "Apache-2.0",
-            ONNX_EMBEDDER,
-            "512 tokens",
-        ),
-        query_prefix="Represent this sentence for searching relevant passages: ",
-    ),
-    EmbeddingProfile.NOMIC_V15: _NOMIC_V15,
-    # 512 dimensions: a third less index than the 768 above
-    EmbeddingProfile.JINA_V2_SMALL: EmbeddingModel(
-        "jinaai/jina-embeddings-v2-small-en",
-        512,
-        card=_card(
-            "Small, with long passages and no prefixes (~120 MB).",
-            32_690_688,
-            "English",
-            "Apache-2.0",
-            ONNX_EMBEDDER,
-            "8K tokens",
-        ),
-    ),
-    # nomic v1.5 cut to 512 of its 768: 61.96 on MTEB against 62.28 whole, by its card
-    EmbeddingProfile.NOMIC_V15_512: msgspec.structs.replace(
-        _NOMIC_V15,
-        dims=512,
-        matryoshka=Matryoshka(layer_norm=True),
-        card=msgspec.structs.replace(
-            _NOMIC_V15_CARD,
-            description="nomic v1.5 with its vectors cut to 512 (Matryoshka): a third less index "
-            "for a small loss (~520 MB).",
-        ),
-    ),
-    EmbeddingProfile.JINA_V2_BASE: EmbeddingModel(
-        "jinaai/jina-embeddings-v2-base-en",
-        768,
-        card=_card(
-            "Long passages without prefixes (~520 MB).",
-            137_368_320,
-            "English",
-            "Apache-2.0",
-            ONNX_EMBEDDER,
-            "8K tokens",
-        ),
-    ),
-    # MLX, Apple Silicon only (`indexing/mlx_models.py`)
-    EmbeddingProfile.MODERNBERT_MLX: EmbeddingModel(
-        "mlx-community/nomicai-modernbert-embed-base-bf16",
-        768,
-        card=_card(
-            "nomic's ModernBERT embedder on the Apple GPU; long passages (~300 MB).",
-            149_014_272,
-            "English",
-            "Apache-2.0",
-            MLX,
-            "8K tokens (read at 1K)",
-        ),
-        query_prefix="search_query: ",
-        document_prefix="search_document: ",
-    ),
-    EmbeddingProfile.JINA_V5_NANO_MLX: EmbeddingModel(
-        "jinaai/jina-embeddings-v5-text-nano-retrieval-mlx",
-        768,
-        card=_card(
-            "Jina's newest small embedder, for retrieval, on the Apple GPU (~420 MB). Adds its "
-            "own query and document prefixes.",
-            211_766_016,
-            "multilingual",
-            NON_COMMERCIAL,
-            MLX,
-            "8K tokens (read at 1K)",
-        ),
-    ),
-    EmbeddingProfile.QUALITY: EmbeddingModel(
-        "BAAI/bge-large-en-v1.5",
-        1024,
-        duplicate=BGE_DUPLICATE,
-        card=_card(
-            "Better recall than bge-small, slower (~1.3 GB).",
-            335_142_400,
-            "English",
-            "MIT",
-            ONNX_EMBEDDER,
-            "512 tokens",
-        ),
-    ),
-    EmbeddingProfile.MULTILINGUAL: EmbeddingModel(
-        "intfloat/multilingual-e5-large",
-        1024,
-        duplicate=DuplicateCosine(chunk=0.97, passage=0.98),
-        card=_card(
-            "Multilingual (~2.2 GB).",
-            559_890_946,
-            "multilingual (~94)",
-            "MIT",
-            ONNX_EMBEDDER,
-            "512 tokens",
-        ),
-        query_prefix="query: ",
-        document_prefix="passage: ",
-    ),
-    # No duplicate cosines for the two below yet: none were measured, so their search results
-    # fold by words alone (`search.collapse`) until they are calibrated.
-    EmbeddingProfile.BGE_M3: EmbeddingModel(
-        "BAAI/bge-m3",
-        1024,
-        card=_card(
-            "Strong multilingual retrieval; dense vectors only (~2.3 GB).",
-            # its weights ship as a .bin, which the Hub does not count: XLM-RoBERTa large with
-            # 8194 positions, as bge-reranker-v2-m3's 567_755_777 is with its head in place of
-            # the pooler
-            567_754_752,
-            "multilingual (100+)",
-            "MIT",
-            ONNX_EMBEDDER,
-            "8K tokens",
-        ),
-    ),
-    EmbeddingProfile.JINA_V3: EmbeddingModel(
-        "jinaai/jina-embeddings-v3",
-        1024,
-        card=_card(
-            "Multilingual, with task adapters for queries and passages (~2.3 GB).",
-            572_310_396,
-            "multilingual (~94)",
-            NON_COMMERCIAL,
-            "any: CPU (too large for CoreML); NVIDIA with the gpu extra",
-            "8K tokens",
-        ),
-    ),
-}
-
-
-# full-text only first, then the shorter vectors first, and at one vector size the smaller model
-# first: the order every picker lists them in
-PROFILES: dict[EmbeddingProfile, EmbeddingModel | None] = {
-    EmbeddingProfile.NONE: None,
-    **dict(
-        sort_by(
-            ((profile, model) for profile, model in _PROFILES.items() if model is not None),
-            lambda item: item[1].dims,
-            lambda item: item[1].card.params if item[1].card else 0,
-        )
-    ),
-}
+NO_EMBEDDING = "none"  # the embedding profile of full-text search only: no model at all
+# the smallest reranker in the catalogue (`catalogue.rerankers`), so the default costs least
+DEFAULT_RERANKER = "Xenova/ms-marco-MiniLM-L-6-v2"
 
 
 # --- definitions ------------------------------------------------------------------
@@ -807,7 +384,7 @@ class SearchSettings(msgspec.Struct):
     nprobes: Annotated[int, NPROBES] = 20
     refine_factor: Annotated[int, REFINE_FACTOR] = 10
     reranker: Annotated[Reranker, RERANKER] = Reranker.NONE
-    reranker_model: Annotated[str, RERANKER_MODEL] = RERANKER_MODELS[0]
+    reranker_model: Annotated[str, RERANKER_MODEL] = DEFAULT_RERANKER
 
     def __post_init__(self) -> None:
         _at_least(
@@ -818,9 +395,9 @@ class SearchSettings(msgspec.Struct):
             nprobes=self.nprobes,
             refine_factor=self.refine_factor,
         )
+        # `reranker_model` is checked against the catalogue where settings are written
+        # (`catalogue.check`): the catalogue is in the database, and decoding reads none
         _at_least(0, vector_weight=self.vector_weight, bm25_weight=self.bm25_weight)
-        if self.reranker_model not in RERANKER_MODELS:
-            raise InvalidInput(f"unknown reranker model: {self.reranker_model}")
 
 
 class SearchOverrides(msgspec.Struct):
@@ -906,18 +483,12 @@ class RetentionSettings(msgspec.Struct):
 
 
 class UserSettings(msgspec.Struct):
-    embedding: Annotated[EmbeddingProfile, EMBEDDING] = EmbeddingProfile.NONE
+    # a profile key of the catalogue, checked where settings are written (`catalogue.check`)
+    embedding: Annotated[str, EMBEDDING] = NO_EMBEDDING
     conversion: ConversionSettings = msgspec.field(default_factory=ConversionSettings)
     pipeline: PipelineSettings = msgspec.field(default_factory=PipelineSettings)
     search: SearchSettings = msgspec.field(default_factory=SearchSettings)
     retention: RetentionSettings = msgspec.field(default_factory=RetentionSettings)
-
-    @property
-    def embedding_model(self) -> EmbeddingModel | None:
-        model = PROFILES[self.embedding]
-        if model is None:
-            return None
-        return msgspec.structs.replace(model, accelerator=self.pipeline.accelerator)
 
 
 class CollectionOverrides(msgspec.Struct):
@@ -1017,8 +588,9 @@ def _decode(raw: str) -> UserSettings:
 
 
 async def load_user_settings_or_none() -> UserSettings | None:
-    """None until the first run picked an embedding profile. A stored row that no longer decodes
-    must not break boot, so it falls back to defaults and is reported by `settings_problem()`.
+    """None until the first run picked an embedding profile. A stored row that no longer decodes,
+    or names a model the catalogue does not hold, must not break boot, so it falls back to
+    defaults and is reported by `settings_problem()`.
 
     Only a decoded row ends the reading: the pre-init state and an unreadable row are read again
     on the next call, so the run that fixes either one is seen at once.
@@ -1027,16 +599,25 @@ async def load_user_settings_or_none() -> UserSettings | None:
     found = _state
     if found is not None and found.settings is not None:
         return found.settings
+    # imported here: the catalogue reads the settings types, so it cannot be imported first
+    from haskie.catalogue import catalogue
+
+    loaded = _Loaded(None)
     async with db.connect() as conn:
         cursor = await conn.execute("select json from settings where id = 1")
         row = await cursor.fetchone()
-    loaded = _Loaded(None)
-    if row is not None:
-        try:
-            loaded = _Loaded(_decode(row[0]))
-        except (msgspec.ValidationError, msgspec.DecodeError) as exc:
-            _log.error("settings_unreadable", error=str(exc))
-            loaded = _Loaded(None, f"stored settings unreadable, using defaults: {exc}")
+        if row is not None:
+            try:
+                decoded = _decode(row[0])
+                # the catalogue is in the database, so a decoded row may still name a lost model
+                problem = await catalogue.unknown(conn, decoded)
+            except (msgspec.ValidationError, msgspec.DecodeError) as exc:
+                decoded, problem = None, str(exc)
+            if problem:
+                _log.error("settings_unreadable", error=problem)
+                loaded = _Loaded(None, f"stored settings unreadable, using defaults: {problem}")
+            else:
+                loaded = _Loaded(decoded)
     with _cache_lock:  # re-check and rebind together, so a save mid-read is not overwritten
         found = _state
         if found is not None and found.settings is not None:

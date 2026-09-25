@@ -251,6 +251,8 @@ body:has(.modal[open]) { overflow: hidden; }
 .section-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: var(--sp-3); padding: var(--sp-2) 0 var(--sp-2) var(--sp-4); border-bottom: 1px solid var(--line-soft); font-size: var(--fs-sm); cursor: pointer; }
 .section-row:hover { background: var(--line-soft); }
 .section-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the places folded into an `also_in` place, indented under it: the tree the search built */
+.also-nested { display: grid; gap: var(--sp-1); margin-left: var(--sp-4); }
 /* an `also_in` place, opened: its own lines under its row, the row's indent kept */
 .also-text { margin: var(--sp-2) 0 var(--sp-3) var(--sp-4); white-space: pre-wrap; font-size: var(--fs-md); }
 .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 0; height: 100%; } /* fills its panel, so each pane scrolls on its own */

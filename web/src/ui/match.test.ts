@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Hit } from '../api'
-import { chunkSizes, fillOf, frameOf, headingOf, MIN_FILL, pieceMeta, piecesOf } from './match'
+import { chunkSizes, everyPlace, fillOf, frameOf, headingOf, MIN_FILL, overlapHint, pieceMeta, piecesOf, type Reference } from './match'
 
 describe('fillOf', () => {
   const cases: Array<{ name: string; score: number; scores: number[]; expected: number }> = [
@@ -189,5 +189,44 @@ describe('chunkSizes', () => {
     expect(frameOf({ ...CHUNK, frame: ['A', 'B'] })).toBe('A > B\n\n')
     expect(frameOf({ ...CHUNK, headings: ['Book', 'A', 'B'], frame: ['A', 'B'] })).toBe('A > B\n\n')
     expect(frameOf({ ...CHUNK, frame: [] })).toBe('')
+  })
+})
+
+describe('also_in trees', () => {
+  // the score as the backend computes it (`passage.harmonic` of the two directions)
+  const overlap = (contained: number, contains: number, alike: number) => ({ contained, contains, alike, score: (2 * contained * contains) / (contained + contains) })
+  // a place as `/api/search/chunks` sends it, measured by words and by vectors
+  const PLACE: Reference = {
+    collection: 'A–E',
+    document: 'notes.md',
+    seq: 3,
+    header: 'Delivery',
+    location: 'notes.md L4-5',
+    line_start: 4,
+    line_end: 5,
+    score: 0.74,
+    relation: 'contained',
+    similarity: 0.97,
+    to_parent: { words: overlap(0.97, 0.41, 0.38), embedding: overlap(0.9, 0.85, 0.88), chars: null },
+    to_root: { words: overlap(0.5, 0.2, 0.2), embedding: null, chars: null },
+    also_in: [],
+  }
+
+  test('the hint carries every measure, to the parent and to the match, and skips what is absent', () => {
+    expect(overlapHint({ ...PLACE, to_parent: { ...PLACE.to_parent, chars: 0.5 } }).split('\n')).toEqual([
+      'contained, query 0.74',
+      'to parent',
+      '  words: 0.58 (in 0.97, holds 0.41, alike 0.38)',
+      '  embedding: 0.87 (in 0.90, holds 0.85, alike 0.88)',
+      '  chars: 0.50',
+      'to match',
+      '  words: 0.29 (in 0.50, holds 0.20, alike 0.20)',
+    ])
+  })
+
+  test('every place of a tree is counted once, depth first', () => {
+    const tree = [{ ...PLACE, seq: 1, also_in: [{ ...PLACE, seq: 2, also_in: [{ ...PLACE, seq: 3 }] }] }, { ...PLACE, seq: 4 }]
+    expect(everyPlace(tree).map((place) => ('seq' in place ? place.seq : 0))).toEqual([1, 2, 3, 4])
+    expect(everyPlace([])).toEqual([])
   })
 })

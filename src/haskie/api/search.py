@@ -94,11 +94,17 @@ async def search_excerpts(
     the document) and its `location` (document, pages, lines). `markdown_file` is the whole
     document on disk when the excerpt is not enough.
     An excerpt that says what other places say lists every one of them in `also_in`
-    rather than returning each on its own. Its `relation` says how: `duplicate` says the
-    same as a whole, `contained` sits inside this excerpt, which says more, and `same_span` is
-    these very lines, chunked another way. A `via` names the place in the same `also_in` the
-    relation was measured against, when that is not this excerpt. A place may be elsewhere in the
-    same document: check its `document` before citing it as a second source.
+    rather than returning each on its own. `also_in` is a tree: each place sits under what it
+    repeats, this excerpt or a place above it, and has its own `also_in`. Its `relation` to that
+    parent says how. `duplicate` is an exact character match: the same text, whitespace aside,
+    in any document. `contained` sits inside its parent, which says more. `equivalent` is a
+    semantic equivalent: other wording, the same meaning, so a nearly identical vector (a
+    hybrid or full-text search also counts nearly the same words; a vector search does not).
+    `to_parent` and `to_root` measure it against its parent and against this excerpt: how much
+    of it is in the other (`contained`), how much of the other is in it (`contains`), how alike
+    the two are (`alike`), by `words` and by `embedding`, and by `chars` within one document.
+    A place may be
+    elsewhere in the same document: check its `document` before citing it as a second source.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection. Run `search_sources` first when the question is which

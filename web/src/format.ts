@@ -7,6 +7,11 @@ export const bytes = new Intl.NumberFormat(undefined, {
   unitDisplay: 'narrow',
 })
 
+const compact = new Intl.NumberFormat('en', { notation: 'compact' })
+
+/** A count as the model facts show it: 33360512 as "33M", 8192 as "8.2K". */
+export const count = (value: number): string => compact.format(value)
+
 const SECONDS_PER_MINUTE = 60
 const SECONDS_PER_HOUR = 3600
 

@@ -2,12 +2,13 @@ import { describe, expect, test } from 'bun:test'
 import { FileText } from 'lucide-react'
 import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { Hit, Passage, Source, Status } from '../api'
+import type { EmbedderMetadata, Hit, Passage, RerankerMetadata, Source, Status } from '../api'
 import { Field } from './Field'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
 import { Kv } from './Kv'
 import { MatchModal } from './MatchModal'
+import { ModelFacts } from './ModelFacts'
 import { Mark } from './Mark'
 import { markTerms } from './markTerms'
 import { Picker } from './Picker'
@@ -312,6 +313,63 @@ describe('Kv', () => {
   ])
 })
 
+// as `/api/options` sends them: bge-small under `embedding_metadata`, jina v3 under `reranker_metadata`
+const EMBEDDER: EmbedderMetadata = {
+  description: 'Small and fast; a good default (~130 MB).',
+  parameters: 33360512,
+  context_tokens: 512,
+  languages: 'English',
+  license: 'MIT',
+  released: '2023-09-12',
+  model_card_url: 'https://huggingface.co/BAAI/bge-small-en-v1.5',
+  runtime: 'onnx',
+  devices: ['cpu', 'apple_silicon', 'gpu'],
+  dimensions: 384,
+}
+const RERANKER: RerankerMetadata = {
+  description: 'Listwise: reads every candidate together and ranks them against each other.',
+  parameters: 596836352,
+  context_tokens: 131072,
+  languages: 'multilingual',
+  license: 'CC BY-NC 4.0 (non-commercial)',
+  released: '2025-09-18',
+  model_card_url: 'https://huggingface.co/jinaai/jina-reranker-v3',
+  runtime: 'mlx',
+  devices: ['apple_silicon'],
+}
+
+describe('ModelFacts', () => {
+  check([
+    {
+      name: 'an embedder: its vector size first, then every fact in order',
+      element: <ModelFacts name="BAAI/bge-small-en-v1.5" metadata={EMBEDDER} />,
+      contains: [
+        '<dt>Model</dt><dd>BAAI/bge-small-en-v1.5</dd><dt>Dimensions</dt><dd>384</dd><dt>Parameters</dt><dd>33M</dd>' +
+          '<dt>Context</dt><dd>512 tokens</dd><dt>Released</dt><dd>2023-09-12</dd>' +
+          '<dt>Languages</dt><dd>English</dd><dt>License</dt><dd>MIT</dd><dt>Runtime</dt><dd>ONNX</dd>' +
+          '<dt>Devices</dt><dd>CPU, Apple Silicon, GPU (the gpu extra)</dd>' +
+          '<dt>Model card</dt><dd><a href="https://huggingface.co/BAAI/bge-small-en-v1.5" target="_blank" rel="noreferrer">' +
+          'huggingface.co/BAAI/bge-small-en-v1.5</a></dd>',
+      ],
+    },
+    {
+      name: 'an MLX reranker: no vector size, the extra it needs, and the card it was made from',
+      element: <ModelFacts name="jinaai/jina-reranker-v3-mlx" metadata={RERANKER} />,
+      contains: [
+        '<dt>Parameters</dt><dd>597M</dd><dt>Context</dt><dd>131K tokens</dd>',
+        '<dt>Runtime</dt><dd>MLX (the mlx extra)</dd><dt>Devices</dt><dd>Apple Silicon</dd>',
+        'href="https://huggingface.co/jinaai/jina-reranker-v3"',
+      ],
+      missing: ['Dimensions'],
+    },
+    {
+      name: 'metadata missing: the name alone',
+      element: <ModelFacts name="x/gone" metadata={undefined} />,
+      contains: ['<dl class="kv"><dt>Model</dt><dd>x/gone</dd></dl>'],
+    },
+  ])
+})
+
 describe('Field', () => {
   check([
     {
@@ -510,7 +568,18 @@ describe('also_in', () => {
     score: 0.74,
     relation: 'contained' as const,
     similarity: 0.97,
-    via: null,
+    // measured as `/api/search/excerpts` sends it: by words, by vectors, no shared characters
+    to_parent: {
+      words: { contained: 0.97, contains: 0.41, alike: 0.38, score: 0.5764 },
+      embedding: { contained: 0.95, contains: 0.9, alike: 0.93, score: 0.9243 },
+      chars: null,
+    },
+    to_root: {
+      words: { contained: 0.97, contains: 0.41, alike: 0.38, score: 0.5764 },
+      embedding: { contained: 0.95, contains: 0.9, alike: 0.93, score: 0.9243 },
+      chars: null,
+    },
+    also_in: [],
   }
   check([
     {
@@ -544,21 +613,46 @@ describe('also_in', () => {
       element: <MatchModal match={{ ...HIT, also_in: [{ ...REFERENCE, seq: 3 }, { ...REFERENCE, seq: 8, location: 'lighting-notes.md L30-31' }] }} query="shadow" onClose={noop} />,
       contains: [
         '<div class="sections-head"><span>Also in</span><span class="mono muted">2 places</span></div>',
-        '<span class="mono muted" title="contained, 0.97">inside 0.97</span>',
+        'inside 0.97</span>',
         '<span class="section-title">lighting-notes.md · Shadows &gt; Area lights</span>',
         '<span class="mono muted">L12-14</span>',
       ],
     },
     {
-      name: 'a place measured against another in the list names it',
+      name: 'a place folded into another sits indented under it, and the count takes every level',
       element: (
         <MatchModal
-          match={{ ...HIT, also_in: [{ ...REFERENCE, seq: 3 }, { ...REFERENCE, seq: 8, location: 'lighting-notes.md L30-31', relation: 'duplicate' as const, via: REFERENCE.location }] }}
+          match={{
+            ...HIT,
+            also_in: [
+              {
+                ...REFERENCE,
+                seq: 3,
+                also_in: [
+                  {
+                    ...REFERENCE,
+                    seq: 8,
+                    document: 'notes.md',
+                    header: 'Delivery',
+                    location: 'notes.md L4-5',
+                    relation: 'equivalent' as const,
+                    similarity: 0.99,
+                  },
+                ],
+              },
+              { ...REFERENCE, seq: 9, header: 'Shadows › Second cut' },
+            ],
+          }}
           query="shadow"
           onClose={noop}
         />
       ),
-      contains: ['<span class="mono muted">L30-31 · via lighting-notes.md L12-14</span>', '<span class="mono muted">L12-14</span>'],
+      contains: [
+        '<span class="mono muted">3 places</span>',
+        '<div class="also-nested"><details><summary class="section-row"><span class="mono muted" title="equivalent, query 0.74',
+        'same meaning 0.99</span><span class="section-title">notes.md · Delivery</span>',
+        '</div><details><summary class="section-row"><span class="mono muted" title="contained, query 0.74',
+      ],
     },
     {
       name: 'each place is a closed disclosure: its lines are read only when it is opened',

@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react'
 import { Mark } from './Mark'
-import { alsoDocuments, alsoOf, fillOf, headingOf, isSource, placeOf, type Match } from './match'
+import { alsoDocuments, alsoOf, everyPlace, fillOf, headingOf, isSource, placeOf, type Match } from './match'
 
 // `--score` drives the bar under a tile: the result's place among the others, not its raw score.
 const scoreStyle = (fill: number): CSSProperties => ({ '--score': fill }) as CSSProperties
@@ -12,7 +12,7 @@ const scoreStyle = (fill: number): CSSProperties => ({ '--score': fill }) as CSS
 const textOf = (match: Match): string => (isSource(match) ? match.description || match.text : match.text)
 // How many other places say the same, and how many other documents they are in: "also in 4 / 2".
 const alsoIn = (match: Match): string => {
-  const places = alsoOf(match).length
+  const places = everyPlace(alsoOf(match)).length
   return places > 0 ? ` · also in ${places} / ${alsoDocuments(match)}` : ''
 }
 const count = (n: number, unit: string): string => `${n} ${unit}${n === 1 ? '' : 's'}`

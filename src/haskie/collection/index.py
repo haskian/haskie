@@ -32,11 +32,12 @@ import pyarrow as pa
 from lancedb.index import FTS, IvfPq
 
 from haskie import cpu
+from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.indexing import models
 from haskie.indexing.chunk import HEADING_SEP, Chunk, CutReason, Position, framed
 from haskie.indexing.chunk import record as chunk_record
 from haskie.logs import get_logger
-from haskie.settings import EmbeddingModel, Fusion, Reranker, SearchMode, SearchSettings
+from haskie.settings import Fusion, Reranker, SearchMode, SearchSettings
 
 
 class Row(msgspec.Struct):
@@ -96,17 +97,47 @@ class IndexStats(msgspec.Struct):
 
 
 class Relation(StrEnum):
-    """How a folded result overlaps the result it was measured against (`search.collapse`): the
-    one it is listed under, or its reference's `via`."""
+    """How a folded result overlaps its parent in `also_in` (`search.collapse`): the result it
+    is listed under, or the place above it in the tree."""
 
-    DUPLICATE = "duplicate"  # the two say the same as a whole, or each holds the other
-    CONTAINED = "contained"  # it sits inside the result it was folded into, which says more
-    SAME_SPAN = "same_span"  # the same lines of one document, cut into chunks two ways
+    # an exact character match: the same text once whitespace is collapsed, in any document
+    DUPLICATE = "duplicate"
+    # it sits inside its parent, which says more: by its text, or by its span of one document
+    CONTAINED = "contained"
+    # a semantic equivalent: other wording, the same meaning, so nearly the same vector (or,
+    # where words decide too, nearly the same words)
+    EQUIVALENT = "equivalent"
+
+
+class Overlap(msgspec.Struct):
+    """How two results overlap in one space (`search.collapse`): embedding vectors or words."""
+
+    contained: float  # how much of this place is found in the other
+    contains: float  # how much of the other is found in this place
+    alike: float  # the two as a whole: cosine of their mean vectors, or Jaccard of their words
+    # the harmonic mean of `contained` and `contains` (`passage.harmonic`): the Dice coefficient of
+    # the word 3-grams, the F1 of the chunks' best matches. High only when each holds the other,
+    # so a small piece of a larger text scores low however fully it is inside
+    score: float
+
+
+class Overlaps(msgspec.Struct):
+    """How a place overlaps one other result, measured every way the fold compares."""
+
+    words: Overlap  # word 3-grams for containment, word sets for alike
+    embedding: Overlap | None  # None unless every scanned row has a vector under a model with
+    # thresholds (`collapse.spaces`)
+    chars: float | None  # one document only: the share of the smaller span both cover, measured
+    # but no longer what decides: a partial overlap is no duplicate
 
 
 class HitReference(msgspec.Struct):
     """Another hit that says what a hit says, folded into it rather than listed on its own:
-    where else to cite the same point, not something to read again."""
+    where else to cite the same point, not something to read again.
+
+    Places form a tree. A place sits under the result it was folded into when the fold met it:
+    the hit itself, or a place that held the slot until a fuller one took it (the superset swap)
+    and moved under it with everything folded into it."""
 
     collection: str
     document: str
@@ -115,13 +146,12 @@ class HitReference(msgspec.Struct):
     location: str
     line_start: int  # 1-based, in the document's markdown: what `/lines` reads it back by
     line_end: int
-    score: float  # its own score, before it was folded
-    relation: Relation
-    similarity: float  # how strongly `relation` holds: a cosine, a word share or a span share
-    # set when `relation` and `similarity` were measured against another place in the same
-    # `also_in`, not the result it is listed under: the place it folded into first, whose slot a
-    # fuller result took later (the superset swap). That place's `location`.
-    via: str | None = None
+    score: float  # how well it matched the query on its own, before it was folded
+    relation: Relation  # how it overlaps `to_parent`'s result
+    similarity: float  # how strongly `relation` holds, as the fold decided it
+    to_parent: Overlaps  # the result or place it is listed under
+    to_root: Overlaps  # the hit at the top of the tree
+    also_in: list["HitReference"] = []  # the places folded into this one, best first
 
 
 class Hit(msgspec.Struct):
@@ -158,7 +188,7 @@ class Hit(msgspec.Struct):
     # greps - `line_start`/`line_end` are lines in `markdown_file`.
     source_file: str = ""
     markdown_file: str = ""
-    also_in: list[HitReference] = []  # every near-duplicate folded into this hit, best first
+    also_in: list[HitReference] = []  # the near-duplicates folded into this hit, a tree
 
 
 def location(

@@ -227,7 +227,7 @@ duplicate thresholds, by vector. The best result of each group keeps its place, 
 intact, where diversity rerankers such as maximal marginal relevance (MMR) reorder it. Comparing
 only with kept results stops chains, so A close to B and B close to C never merges A with C. The
 same input always gives the same output. A repeat stays citable as an `also_in` entry (`duplicate`,
-`contained` or `same_span`), and its slot goes to the next distinct result. Repeated passages do not
+`contained` or `equivalent`), and its slot goes to the next distinct result. Repeated passages do not
 significantly improve answer correctness, while different documents improve it by 17–47% [19]. Each
 result then widens to whole lines or sentences, within 300 characters.
 
