@@ -14,13 +14,14 @@ from haskie import db
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import DuplicateCosine, EmbeddingModel, Matryoshka
 from haskie.errors import InvalidInput
-from haskie.indexing import embed, mlx_models, onnx_rerank
+from haskie.indexing import embed, gguf_models, mlx_models, onnx_rerank
 from haskie.indexing.hardware import Device, Runtime
 from haskie.settings import (
     DEFAULT_RERANKER,
     Accelerator,
     CollectionOverrides,
     PipelineSettings,
+    Reranker,
     SearchOverrides,
     SearchSettings,
     UserSettings,
@@ -36,7 +37,7 @@ async def test_every_model_says_what_it_is() -> None:
     embedders = await catalogue.embedding_metadata()
     rerankers = await catalogue.rerankers()
 
-    assert (len(embedders), len(rerankers)) == (14, 12), "every profile and reranker of the seed"
+    assert (len(embedders), len(rerankers)) == (18, 12), "every profile and reranker of the seed"
     assert all(isinstance(one, catalogue.EmbedderMetadata) for one in embedders.values())
     assert all(isinstance(one, catalogue.RerankerMetadata) for one in rerankers.values())
     for name, metadata in [*embedders.items(), *rerankers.items()]:
@@ -97,7 +98,9 @@ async def test_every_model_has_a_loader_and_every_pin_a_model() -> None:
     rerankers = set(await catalogue.rerankers())
     listed_embedders = {one["model"] for one in TextEmbedding.list_supported_models()}
     listed_rerankers = {one["model"] for one in TextCrossEncoder.list_supported_models()}
-    pinned_embedders = set(embed.CUSTOM_EMBEDDERS) | set(mlx_models.EMBEDDERS)
+    pinned_embedders = (
+        set(embed.CUSTOM_EMBEDDERS) | set(mlx_models.EMBEDDERS) | set(gguf_models.PINS)
+    )
     pinned_rerankers = (
         set(embed.CUSTOM_RERANKERS)
         | set(onnx_rerank.REVISIONS)
@@ -108,6 +111,15 @@ async def test_every_model_has_a_loader_and_every_pin_a_model() -> None:
     assert embedders - listed_embedders - pinned_embedders == set()
     assert rerankers - listed_rerankers - pinned_rerankers == set()
     assert pinned_embedders <= embedders and pinned_rerankers <= rerankers
+    # a GGUF file holds no positions past its model's context, which the catalogue also states
+    metadata = await catalogue.embedding_metadata()
+    contexts = {
+        model.name: metadata[profile].context_tokens
+        for profile, model in (await catalogue.embedders()).items()
+    }
+    assert {name: pin.tokens for name, pin in gguf_models.PINS.items()} == {
+        name: contexts[name] for name in gguf_models.PINS
+    }
 
 
 async def test_the_seed_holds_to_its_own_references() -> None:
@@ -139,7 +151,7 @@ def test_the_seed_replays_harmlessly(tmp_path: Path) -> None:
     finally:
         conn.close()
 
-    assert counts == [25, 14], "13 embedders and 12 rerankers, 14 profiles: once each"
+    assert counts == [29, 18], "17 embedders and 12 rerankers, 18 profiles: once each"
 
 
 _MODEL = (
@@ -250,6 +262,61 @@ async def test_one_model_cut_two_ways_is_two_profiles() -> None:
     assert msgspec.structs.replace(cut, **unshared) == msgspec.structs.replace(whole, **unshared), (
         "one model's facts"
     )
+
+
+MLX_RERANKER = "jinaai/jina-reranker-v3-mlx"
+ON_CPU = PipelineSettings(accelerator=Accelerator.CPU)
+
+
+@pytest.mark.parametrize(
+    ("name", "settings", "error"),
+    [
+        (
+            "an ONNX profile on the CPU runs",
+            UserSettings(embedding="compact", pipeline=ON_CPU),
+            None,
+        ),
+        (
+            "a GGUF profile on the CPU: nowhere to run",
+            UserSettings(embedding="bge-small-gguf", pipeline=ON_CPU),
+            "ggml-org/bge-small-en-v1.5-Q8_0-GGUF runs on gguf on the Apple GPU",
+        ),
+        (
+            "a GGUF profile where llama.cpp runs",
+            UserSettings(embedding="bge-small-gguf"),
+            None,
+        ),
+        (
+            "an MLX reranker on the CPU: nowhere to run",
+            UserSettings(
+                search=SearchSettings(reranker=Reranker.CROSS_ENCODER, reranker_model=MLX_RERANKER),
+                pipeline=ON_CPU,
+            ),
+            "jinaai/jina-reranker-v3-mlx runs on mlx on the Apple GPU",
+        ),
+        (
+            "the same reranker switched off: nothing uses it",
+            UserSettings(search=SearchSettings(reranker_model=MLX_RERANKER), pipeline=ON_CPU),
+            None,
+        ),
+        (
+            "a collection's reranker is not checked against the hardware",
+            CollectionOverrides(search=SearchOverrides(reranker_model=MLX_RERANKER)),
+            None,
+        ),
+    ],
+)
+async def test_check_refuses_settings_that_leave_a_model_nowhere_to_run(
+    name: str, settings: UserSettings | CollectionOverrides, error: str | None, monkeypatch
+) -> None:
+    monkeypatch.setattr(gguf_models, "available", lambda: True)
+    monkeypatch.setattr(mlx_models, "available", lambda: True)
+
+    if error is None:
+        assert await catalogue.check(settings) is None, name
+    else:
+        with pytest.raises(InvalidInput, match=error):
+            await catalogue.check(settings)
 
 
 @pytest.mark.parametrize(

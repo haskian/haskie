@@ -32,8 +32,9 @@ from dbos import WorkflowStatus as DbosWorkflowStatus
 from haskie import cpu
 from haskie.catalogue import catalogue
 from haskie.errors import HaskieError, NotReady
-from haskie.indexing import embed
+from haskie.indexing import embed, hardware
 from haskie.indexing.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, RunStatus, root_cause
+from haskie.indexing.hardware import Device
 from haskie.logs import get_logger
 from haskie.settings import Reranker, UserSettings, load_user_settings
 
@@ -71,6 +72,8 @@ class ModelStatus(msgspec.Struct):
     name: str
     state: ModelState
     error: str | None = None
+    # where it runs under the hardware setting (`hardware.device`); None where it cannot
+    device: Device | None = None
 
 
 # A download is retried with longer waits than a local step (see
@@ -84,11 +87,9 @@ async def warm_model(kind: ModelKind, name: str) -> None:
 
     The load itself is CPU (and, on a cold cache, a download inside fastembed), so it runs in a
     worker thread under one slot of the CPU budget rather than on the caller's loop."""
-    if kind == ModelKind.RERANKER:  # always on CPU, so it needs no accelerator (see `embed`)
-        await cpu.on_cpu(embed.warm_reranker, name)
-        return
     accelerator = (await load_user_settings()).pipeline.accelerator
-    await cpu.on_cpu(embed.warm, name, accelerator)
+    warm = embed.warm_reranker if kind == ModelKind.RERANKER else embed.warm
+    await cpu.on_cpu(warm, name, accelerator)
 
 
 @DBOS.step(
@@ -191,7 +192,7 @@ async def ensure_models(settings: UserSettings) -> list[ModelStatus]:
         with SetWorkflowID(workflow_id):
             handle = await DBOS.enqueue_workflow_async(DOWNLOADS_QUEUE, ensure_model, kind, name)
         records[workflow_id] = await handle.get_status()  # the record this call just wrote
-    return [_model_status(k, n, records.get(_model_id(k, n))) for k, n in wanted]
+    return _statuses(wanted, records, settings)
 
 
 def _warm_in_background(kind: ModelKind, name: str) -> None:
@@ -266,9 +267,24 @@ def _model_status(kind: ModelKind, name: str, workflow) -> ModelStatus:
 async def model_statuses() -> list[ModelStatus]:
     """One status per required model. `ensure_models` builds the same list off the records it
     just read, rather than reading them again."""
-    wanted = await _required(await load_user_settings())
-    records = await _download_records(wanted)
-    return [_model_status(k, n, records.get(_model_id(k, n))) for k, n in wanted]
+    settings = await load_user_settings()
+    wanted = await _required(settings)
+    return _statuses(wanted, await _download_records(wanted), settings)
+
+
+def _statuses(
+    wanted: list[tuple[ModelKind, str]],
+    records: dict[str, DbosWorkflowStatus],
+    settings: UserSettings,
+) -> list[ModelStatus]:
+    accelerator = settings.pipeline.accelerator
+    return [
+        msgspec.structs.replace(
+            _model_status(kind, name, records.get(_model_id(kind, name))),
+            device=hardware.device(name, accelerator),
+        )
+        for kind, name in wanted
+    ]
 
 
 async def require_ready(kind: ModelKind, name: str) -> None:

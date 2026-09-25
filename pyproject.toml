@@ -30,8 +30,8 @@ dependencies = [
 haskie = "haskie.cli:cli"
 
 [project.optional-dependencies]
-# CUDA for embeddings, opted into with `uv sync --extra gpu`; Apple Silicon (CoreML) needs nothing
-# extra, and onnxruntime-gpu ships no macOS wheel, so the marker makes the extra a no-op there.
+# CUDA for embeddings and rerankers, opted into with `uv sync --extra gpu`; onnxruntime-gpu ships no macOS
+# wheel, so the marker makes the extra a no-op there.
 gpu = ["onnxruntime-gpu>=1.17.0; sys_platform != 'darwin'"]
 # Jina's listwise rerankers on Apple Silicon (`indexing/mlx_models.py`), opted into with
 # `uv sync --extra mlx`; the marker makes the extra a no-op anywhere MLX has no Metal to run on.
@@ -39,6 +39,10 @@ mlx = [
     "mlx-embeddings>=0.1 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
     "mlx-lm>=0.31 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
+# The GGUF embedders on the Apple GPU (`indexing/gguf_models.py`), opted into with
+# `uv sync --extra gguf`. PyPI ships llama-cpp-python as source only, so installing it compiles
+# llama.cpp with Metal (about 30 s; needs the Xcode command-line tools and cmake).
+gguf = ["llama-cpp-python>=0.3.35 ; platform_machine == 'arm64' and sys_platform == 'darwin'"]
 
 [dependency-groups]
 dev = [
@@ -68,9 +72,15 @@ select = ["E", "F", "I", "UP", "B"]
 include = ["src", "tests"]
 
 [tool.ty.analysis]
-# The mlx extra installs these on Apple Silicon only, so CI and Linux have none of them. Typed as
-# Any everywhere, installed or not, so the check says the same on every machine.
-replace-imports-with-any = ["mlx.**", "mlx_lm.**", "mlx_embeddings.**", "transformers.**"]
+# The mlx and gguf extras install these on Apple Silicon only, so CI and Linux have none of them.
+# Typed as Any everywhere, installed or not, so the check says the same on every machine.
+replace-imports-with-any = [
+    "mlx.**",
+    "mlx_lm.**",
+    "mlx_embeddings.**",
+    "transformers.**",
+    "llama_cpp.**",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

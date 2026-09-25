@@ -30,16 +30,13 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from haskie import home, tables
 from haskie.errors import HaskieError
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 """`pragma user_version` of the schema in `tables.py`.
 
 A home stamped with it has these tables and columns and is opened as it is. Any other stamp is a
-shape this build cannot read, so the home is refused (see `migrate`). A home stamped 17 before the
-DDL came from `tables.py` keeps the index names and declared column types it was made with; no
-query depends on either, so it is not refused for them. Against the last release
-(16), the model catalogue lives in the database (`models`, `embedding_profiles`, seeded from
-`catalogue/seed.sql`), and the embedding cache keys every model by its size and the document
-prefix it embeds with (`EmbeddingModel.cache_name`).
+shape this build cannot read, so the home is refused (see `migrate`). Against the last release
+(17), the catalogue holds the GGUF embedders and their profiles (`gguf_models`): a seed edit
+reaches a home only through this stamp.
 
 A cache file or LanceDB table written the old way must never be read by this build.
 

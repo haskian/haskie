@@ -695,11 +695,11 @@ export interface components {
     schemas: {
         /**
          * Accelerator
-         * @description Device for the embedding and reranker models. auto: best available ONNX Runtime provider (CUDA, CoreML on Apple Silicon, else CPU). cpu: force CPU.
+         * @description Device for the embedding and reranker models. auto: CUDA with the gpu extra, else CPU. On Apple Silicon, the MLX and GGUF models run on the GPU, and auto runs the rest on the CPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. coreml: run ONNX models through CoreML on Apple Silicon; today that is slower than the CPU for them.
          * @default auto
          * @enum {string}
          */
-        Accelerator: "auto" | "cpu";
+        Accelerator: "auto" | "cpu" | "coreml";
         /**
          * Action
          * @enum {string}
@@ -1156,6 +1156,7 @@ export interface components {
             name: string;
             state: components["schemas"]["ModelState"];
             error?: string | null;
+            device?: components["schemas"]["Device"] | null;
         };
         /** Operation */
         Operation: {
@@ -1469,7 +1470,7 @@ export interface components {
          * Runtime
          * @enum {string}
          */
-        Runtime: "onnx" | "mlx";
+        Runtime: "onnx" | "mlx" | "gguf";
         /** SearchAt */
         SearchAt: {
             ts: number;
@@ -1651,7 +1652,6 @@ export interface components {
             initialized: boolean;
             home: string;
             embedding: components["schemas"]["EmbeddingModel"] | null;
-            device: string;
             models: components["schemas"]["ModelStatus"][];
             settings_error?: string | null;
         };

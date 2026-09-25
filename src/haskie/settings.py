@@ -42,8 +42,9 @@ class Chunker(StrEnum):  # the two pipelines of `indexing.chunk`
 
 
 class Accelerator(StrEnum):
-    AUTO = "auto"  # the best ONNX Runtime provider (CUDA, CoreML, ...)
+    AUTO = "auto"  # the best ONNX Runtime provider: CUDA where installed, else the CPU
     CPU = "cpu"
+    COREML = "coreml"  # ONNX Runtime's CoreML on Apple Silicon, only when asked for (`embed`)
 
 
 class SearchMode(StrEnum):
@@ -210,10 +211,13 @@ TASK_TIMEOUT = Meta(
     ),
 )
 ACCELERATOR = Meta(
-    title="Embedding hardware",
+    title="Model hardware",
     description=(
-        "Device for the embedding and reranker models. auto: best available ONNX Runtime "
-        "provider (CUDA, CoreML on Apple Silicon, else CPU). cpu: force CPU."
+        "Device for the embedding and reranker models. auto: CUDA with the gpu extra, else "
+        "CPU. On Apple Silicon, the MLX and GGUF models run on the GPU, and auto runs the rest "
+        "on the CPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. "
+        "coreml: run ONNX models through CoreML on Apple Silicon; today that is slower than the "
+        "CPU for them."
     ),
 )
 LIMIT = Meta(title="Results", description="Number of results a search returns.")

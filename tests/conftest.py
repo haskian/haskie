@@ -51,13 +51,16 @@ def fast_runtime() -> None:
     `workflows.start` reads them when it registers the queues, so assigning here is enough.
     `CONVERT_WORKERS = 0` extracts PDFs inline: a process pool per xdist worker costs more to
     start than the tests would save. `test_cpu_pool` is the one module that puts that back.
+    ONNX Runtime's telemetry goes off as the app turns it off (`embed.onnx_runtime`): some tests
+    import fastembed without passing through the app, and a worker exiting mid-upload crashes.
 
     The step retry intervals are not here: DBOS copies them into the decorator at import, so the
     two retry tests pay the real wait. `-n auto` absorbs it.
     """
     from haskie import cpu
-    from haskie.indexing import workflows
+    from haskie.indexing import embed, workflows
 
+    embed.onnx_runtime()
     workflows.OPERATION_POLL = 0.02
     workflows.TASK_POLL = 0.02
     cpu.CONVERT_WORKERS = 0
