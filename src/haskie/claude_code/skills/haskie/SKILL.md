@@ -41,8 +41,9 @@ sentences around them within 300 characters. So it usually starts and ends where
   null), `seq_start`/`seq_end` (chunk positions in the document)
 - repeats: `also_in` lists every other place that says the same thing, folded into this excerpt.
   It is a tree. Each place sits under what it repeats: this excerpt, or a place above it. Each
-  place has its own `also_in`. Each has `document`, `header`, `location`, `score` (its own match
-  to the query) and `relation` to its parent. `duplicate` is an exact character match: the same
+  place has its own `also_in`. Each has `collection`, `document`, `header`, `location`,
+  `line_start`/`line_end`, `score` (its own match to the query), `relation` to its parent and
+  `similarity` (how strongly that relation holds). `duplicate` is an exact character match: the same
   text, whitespace aside, in any document. `contained` sits inside its parent, which says more.
   `equivalent` is the same meaning in other words, so a nearly identical vector. Hybrid and
   full-text searches also count nearly the same words. `to_parent` and `to_root` measure the place

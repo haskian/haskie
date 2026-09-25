@@ -111,10 +111,14 @@ names everything the rows depend on:
 document:<name>;model:<model>;chunk_size:<n>;chunk_merge_below:<n>;chunk_frame:<b>;chunker:<c>;chunk_version:<v>;parser:<p>;skip_ocr_pages:<b>
 ```
 
+`<model>` is `EmbeddingModel.cache_name`: the model's name and vector size, plus a hash of its
+document prefix and Matryoshka recipe. Those are everything that shapes a stored vector, so a
+change to any of them misses the cache and needs no `chunk_version` bump.
+
 Same inputs give the same id, so the work runs once, until a re-import clears it. Two collections
 that ask for the same missing entry at the same moment share one DBOS run. A collection with other
-chunk settings gets its own entry. The accelerator is not in the key: it decides where a model
-runs, not what it computes.
+chunk settings gets its own entry. The accelerator, the query prefix and the duplicate
+thresholds are not in the key: they shape no stored vector.
 
 ```mermaid
 flowchart LR

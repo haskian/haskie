@@ -17,6 +17,7 @@ system prompt of every session, which is how Context7 gets consulted "even when 
 the answer". The rule says *when*; the skill says *how*.
 """
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -47,7 +48,9 @@ TEMPLATES = files("haskie") / "claude_code"
 HOOK_MARKER = " ensure --home "  # what identifies a hook of ours, whatever path invoked it
 HOOK_TIMEOUT_SECONDS = 90
 DEFAULT_HOST = "127.0.0.1"  # loopback: one user's documents, and nothing authenticates a caller
-DEFAULT_PORT = 8451
+# An environment variable, so a development install (`haskie-dev`, the mise tasks) can serve
+# beside the installed haskie on 8451 without a `--port` on every command.
+DEFAULT_PORT = int(os.environ.get("HASKIE_PORT", "8451"))
 # Spelled out rather than imported from `app`: importing the Litestar app would cost every
 # `haskie` invocation the whole web stack. `test_the_default_url_matches_where_mcp_is_mounted`
 # is what keeps this in step with `app.MCP_PATH`.
@@ -147,10 +150,12 @@ def write_rule(scope: Scope, collections: "list[CollectionSummary]") -> Path:
 
 
 def own_command() -> list[str]:
-    """How to invoke haskie from somewhere else: absolute, because a hook and an MCP client both
-    run with a PATH of their own. Falls back to this interpreter, which `__main__` makes work."""
-    found = shutil.which("haskie")
-    return [found] if found else [sys.executable, "-m", "haskie"]
+    """How to invoke this haskie from somewhere else: absolute, because a hook and an MCP client
+    both run with a PATH of their own. The script beside this interpreter, not the first `haskie`
+    on PATH, which may be another install (`haskie-dev` beside the system tool). Falls back to
+    this interpreter, which `__main__` makes work."""
+    script = Path(sys.executable).with_name("haskie")
+    return [str(script)] if script.is_file() else [sys.executable, "-m", "haskie"]
 
 
 def register_mcp(url: str, scope: Scope) -> str | None:

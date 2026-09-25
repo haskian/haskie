@@ -81,7 +81,7 @@ flowchart TD
     alike -- no --> skip2["not a repeat of this one"]
 ```
 
-A duplicate is an exact character match, in any document. Both texts need at least 7 words, so
+A duplicate is an exact character match once whitespace is collapsed, in any document. Both texts need at least 7 words, so
 two equal headings are not a point. Equivalent means the same meaning in other words: a nearly
 identical vector, or nearly the same words where words decide.
 
@@ -98,9 +98,10 @@ Hybrid and full-text searches use both:
   in the other (threshold 0.8). Alike is the Jaccard of their words (threshold 0.5, a common
   near-duplicate line [1]). A result with fewer than 5 shingles never matches here.
 
-Cosine thresholds are set per embedding model (`EmbeddingModel.duplicate`), because a raw cosine
-means different things for different models. The current values are placeholders, not
-calibrated. A model without thresholds folds by words alone. The containment threshold is a
+Cosine thresholds are set per embedding profile (`duplicate_chunk` and `duplicate_passage` in
+`catalogue/seed.sql`), because a raw cosine means different things for different models. The
+current values are placeholders, not calibrated, and the seed file names their sources. A profile
+without thresholds folds by words alone. The containment threshold is a
 judgement call, and the code says so.
 
 A folded result becomes an `also_in` entry under the result it repeats, and `also_in` is a tree.

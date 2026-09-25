@@ -106,7 +106,9 @@ you need the machine back.
 - A slice that runs past `task_timeout_seconds` per batch is cancelled, not retried.
 - A **model download** gets 5 attempts. Its durable id is `dl:{kind}:{model}`, so a restart
   reuses the files already on disk.
-- On **restart**, DBOS resumes each workflow at its first unfinished step. The DBOS application
+- On **restart**, DBOS resumes each workflow at its first unfinished step. It reads the
+  recorded inputs back through `indexing/serializer.py`, which keeps each `msgspec.Struct` by
+  field name. So a field added or removed since does not garble an old record. The DBOS application
   version is the package version, so work recorded under another version is enqueued again.
 - **Deduplication:** one active import per document, one active index per membership, one
   embedding run per cache id.

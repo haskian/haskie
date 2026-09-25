@@ -57,7 +57,10 @@ Apple Silicon the GPU is reached through MLX (`indexing/mlx_models.py`) and llam
 the GIL while they compute. llama.cpp's first load on a machine also compiles its Metal shaders,
 once, in about 8 s. CoreML runs ONNX models only when the hardware setting says `coreml`.
 It keeps compiled models under `cache/models`, so a model compiles once per home. Embedders and
-rerankers follow the same hardware setting (`indexing/hardware.py`).
+rerankers follow the same hardware setting. `indexing/hardware.py` decides the device of each
+model. A model with no device here, such as an MLX model without Apple Silicon, is refused by its
+loader and left out of `/api/options`. Settings that would strand a model are rejected. Each model
+in `/api/status` reports its device.
 
 A downloaded model still has to load into the process. A boot that finds a finished download warms
 it in a background task and reports it ready only after that. A search that needs a model still

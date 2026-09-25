@@ -29,7 +29,7 @@ Every place is measured in both spaces all the same (`Overlaps`).
 
 The cosine is raw, not centred on a corpus mean: for a yes-or-no threshold, centring bge or e5
 vectors amounts to a shift of the threshold per model, so the threshold is set per model instead
-(`EmbeddingModel.duplicate`, where the sources for its values are).
+(`EmbeddingModel.duplicate`; `catalogue/seed.sql` names the sources for its values).
 
 No IO: `retrieval` hands in the texts and vectors of the rows it read.
 """
