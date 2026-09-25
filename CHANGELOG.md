@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.9.1 - 2026-09-25
+#### Refactoring
+- (**db**) SQLAlchemy Core tables as the one schema source (#16) - (6efeb62) - Črtomir Majer
+
+- - -
+
 ## v0.9.0 - 2026-09-25
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>model catalogue in SQLite and also_in as a tree of places (#15) - (c8ed29c) - Črtomir Majer
