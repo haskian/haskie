@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#MISE description="Install this checkout as the haskie-dev command, on ~/haskie-dev, beside any installed haskie"
+#MISE depends=["build"]
+set -euo pipefail
+# Its own environment and a copy, not an editable link: the command outlives this checkout, and
+# a `uv tool install` would put a second `haskie` on PATH over the system one.
+env_dir="$HOME/.local/share/haskie-dev"
+bin_dir="$HOME/.local/bin"
+UV_PROJECT_ENVIRONMENT="$env_dir" uv sync --frozen --no-dev --no-editable --extra mlx  # mlx: a no-op off Apple Silicon
+mkdir -p "$bin_dir"
+cat >"$bin_dir/haskie-dev" <<SCRIPT
+#!/bin/sh
+export HASKIE_HOME="\$HOME/haskie-dev"
+exec "$env_dir/bin/haskie" "\$@"
+SCRIPT
+chmod +x "$bin_dir/haskie-dev"
+echo "installed $bin_dir/haskie-dev (home: ~/haskie-dev)"

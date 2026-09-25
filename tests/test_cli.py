@@ -343,6 +343,27 @@ def test_ensure(case: EnsureCase, elsewhere: Path, monkeypatch: pytest.MonkeyPat
         assert str(elsewhere / "server.log") in result.stderr, "names the log to read"
 
 
+@pytest.mark.parametrize(
+    "has_script", [True, False], ids=["the script beside the interpreter", "no script: -m"]
+)
+def test_own_command_is_this_install_not_the_first_on_path(
+    has_script: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`haskie-dev` and an installed `haskie` sit on one PATH. Whichever runs `ensure` must spawn
+    itself, never the other one's code on its own home."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python = bin_dir / "python"
+    if has_script:
+        (bin_dir / "haskie").touch()
+    (tmp_path / "haskie").touch()  # a PATH `haskie` from another install
+    monkeypatch.setattr(claude.sys, "executable", str(python))
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    expected = [str(bin_dir / "haskie")] if has_script else [str(python), "-m", "haskie"]
+    assert claude.own_command() == expected
+
+
 HELD_PID = 4242
 
 

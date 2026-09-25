@@ -31,7 +31,8 @@ mise run dev     # API and MCP on :8451 with reload, Vite on :5173
 | `build` | build the web UI into `src/haskie/web`, where the wheel ships it |
 | `dist` | `build`, then the wheel and sdist into `dist/` |
 | `smoke` | install the built wheel in a fresh venv, check the CLI and the bundled UI |
-| `clean-run` | destroy `~/.haskie` (asks first), reinstall the fresh build, run it on a clean home |
+| `clean-run` | destroy `~/haskie-dev` (asks first), reinstall the fresh build, run it on a clean home |
+| `install-dev` | build, then install this checkout as the `haskie-dev` command, which always uses `~/haskie-dev` |
 | `bump` | version bump from the commit subjects (CI only) |
 
 A change is done when `mise run check` and `mise run test` pass. Tests that download models carry
@@ -41,7 +42,7 @@ Environment variables. Each has a working default:
 
 | variable | default | purpose |
 | --- | --- | --- |
-| `HASKIE_HOME` | `~/.haskie` | the home directory, same as `--home` |
+| `HASKIE_HOME` | `~/.haskie` | the home directory, same as `--home`. `mise.toml` sets `~/haskie-dev`, so development never touches an installed haskie's data |
 | `HASKIE_LOG_LEVEL` | `INFO` | level for every logger, DBOS included |
 | `HASKIE_LOG_FORMAT` | `json` | `console` for readable logs |
 | `HASKIE_ADDRESS` | unset | set by `run` itself, so a second start can name the server that holds the home |
