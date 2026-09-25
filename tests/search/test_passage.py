@@ -8,7 +8,7 @@ snippets and reads its text, lines and char range out of the document, the way t
 import msgspec
 import pytest
 
-from haskie.collection.index import Hit, Relation, location
+from haskie.collection.index import Hit, Overlap, Overlaps, Relation, location
 from haskie.search.passage import (
     MAX_WIDEN,
     Excerpt,
@@ -168,7 +168,27 @@ OTHER_ONE = _hit(OPENING, 1, 4.0, document=OTHER, collection="ops", header="Retr
 def test_harmonic_folds_the_best_chunk_with_the_sum(
     name: str, best: float, total: float, expected: float
 ) -> None:
-    assert harmonic(best, total) == expected, name
+    assert harmonic(best, total) == pytest.approx(expected), name
+
+
+@pytest.mark.parametrize(
+    ("name", "shares", "expected"),
+    [
+        ("a copy: whole both ways", (1.0, 1.0), 1.0),
+        # RETRY in FULLER, by word 3-grams: 13 of RETRY's 13, 13 of FULLER's 28. The harmonic mean
+        # of the two shares is their Dice coefficient: 2 * 13 / (13 + 28)
+        (
+            "a sentence inside a paragraph: held down by the side that is not",
+            (1.0, 13 / 28),
+            26 / 41,
+        ),
+        ("one side at zero zeroes the whole", (0.99, 0.0), 0.0),
+    ],
+)
+def test_harmonic_of_an_overlap_is_pulled_toward_its_weakest_measure(
+    name: str, shares: tuple[float, float], expected: float
+) -> None:
+    assert harmonic(*shares) == pytest.approx(expected), name
 
 
 # --- ranges ---------------------------------------------------------------------------
@@ -241,6 +261,11 @@ def _range(char_start: int, char_end: int, **fields) -> HitRange:
         ("chunks over several pages: the first to the last", [(1, 1), (2, 3), (4, 4)], (1, 4)),
         ("one chunk across a page break", [(2, 3)], (2, 3)),
         ("a document without pages", [(None, None), (None, None)], (None, None)),
+        (
+            "a chunk without a page marker keeps the pages the others know",
+            [(None, None), (2, 3), (None, None)],
+            (2, 3),
+        ),
     ],
 )
 def test_a_passage_cites_every_page_its_chunks_cover(
@@ -257,9 +282,18 @@ def test_a_passage_cites_every_page_its_chunks_cover(
 
     widened = widen(hit_range, WHOLE, Passage)
 
+    assert (hit_range.page_start, hit_range.page_end) == expected, f"{name}: set once, on the range"
     assert (widened.page_start, widened.page_end) == expected, name
     cited = "" if expected[0] is None else f" p.{expected[0]}-{expected[1]} "
     assert cited in widened.location, f"{name}: the citation names the same pages"
+
+
+# a place measured close to the passage it folded into, in words and in its vectors
+CLOSE = Overlaps(
+    words=Overlap(contained=0.9, contains=0.6, alike=0.55, score=harmonic(0.9, 0.6)),
+    embedding=Overlap(contained=0.97, contains=0.93, alike=0.95, score=harmonic(0.97, 0.93)),
+    chars=None,
+)
 
 
 def test_widening_a_range_keeps_what_was_folded_into_it() -> None:
@@ -275,8 +309,27 @@ def test_widening_a_range_keeps_what_was_folded_into_it() -> None:
         line_start=OTHER_ONE.line_start,
         line_end=OTHER_ONE.line_end,
         score=4.0,
-        relation=Relation.DUPLICATE,
-        similarity=0.97,
+        relation=Relation.EQUIVALENT,
+        similarity=0.95,
+        to_parent=CLOSE,
+        to_root=CLOSE,
+        also_in=[
+            PassageReference(
+                collection="notes",
+                document="notes.md",
+                seq_start=4,
+                seq_end=4,
+                header="Delivery",
+                location="notes.md L7-7",
+                line_start=7,
+                line_end=7,
+                score=3.0,
+                relation=Relation.CONTAINED,
+                similarity=0.9,
+                to_parent=CLOSE,
+                to_root=CLOSE,
+            )
+        ],
     )
     (hit_range,) = ranges([ONE, TWO])
     hit_range = msgspec.structs.replace(hit_range, also_in=[folded])

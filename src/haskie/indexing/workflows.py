@@ -97,13 +97,15 @@ from dbos._workflow_commands import garbage_collect
 
 from haskie import APP_VERSION, audit, db, home, logs, sysdb
 from haskie.audit import Actor, Outcome
+from haskie.catalogue import catalogue
+from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection, MemberStatus
 from haskie.cpu import configure_cpu_budget, shutdown_pool
 from haskie.document import document
 from haskie.document.document import Document, DocumentStatus, configure_preview_slots
 from haskie.errors import Conflict, InvalidInput, NotFound, PermanentError
-from haskie.indexing import embed_cache, models, pipeline
+from haskie.indexing import embed_cache, models, pipeline, serializer
 from haskie.indexing.dbos_names import (
     ACTIVE_STATUS,
     COLLECTION_DOCUMENT_WORKFLOW,
@@ -120,13 +122,7 @@ from haskie.indexing.dbos_names import (
     root_cause,
 )
 from haskie.indexing.pipeline import Batch
-from haskie.settings import (
-    ChunkSettings,
-    EmbeddingModel,
-    PipelineSettings,
-    UserSettings,
-    load_user_settings,
-)
+from haskie.settings import ChunkSettings, PipelineSettings, UserSettings, load_user_settings
 
 _log = logs.get_logger(__name__)
 
@@ -359,6 +355,7 @@ async def start() -> None:
         # also how long `DBOS.destroy` takes to join that thread, which the tests feel most.
         "notification_listener_polling_interval_sec": TASK_POLL,
         "log_level": logs.level(),
+        "serializer": serializer.SERIALIZER,
     }
     DBOS(config=config)
     logs.adopt_dbos_logger()  # DBOS installs its own text handler while it initializes
@@ -461,7 +458,7 @@ def _start_adoption() -> None:
 class Queue(msgspec.Struct, frozen=True):
     """One registered DBOS queue: its name, how wide it is under the current settings, and
     whether it admits one workflow per partition. The `operation.`/`task.` prefix picks the polling
-    interval and is the family `sysdb.queue_activity` groups by."""
+    interval, and `sysdb.operation_activity` counts the `operation.` family."""
 
     name: str
     concurrency: Callable[[PipelineSettings, dict[Stage, int]], int]
@@ -531,7 +528,7 @@ async def load_context(doc: str, collection: str | None) -> Context:
     return Context(
         document=row,
         chunking=chunking,
-        embedding=user.embedding_model,
+        embedding=await catalogue.embedding_model(user),
         pipeline=user.pipeline,
         collection=collection,
     )
@@ -708,7 +705,9 @@ async def run_maintenance(collection: str) -> maintenance.Report:
     but they run inside LanceDB's own runtime rather than in a worker thread of ours, so there is
     nothing for `cpu.cpu_slot` to hold. `task.indexing` bounds them instead."""
     user = await load_user_settings()
-    return await maintenance.run(Collection(collection), user.embedding_model, user.pipeline)
+    return await maintenance.run(
+        Collection(collection), await catalogue.embedding_model(user), user.pipeline
+    )
 
 
 @retried_step
@@ -748,7 +747,8 @@ def stage_input(child) -> tuple[Stage, list[Batch]] | None:
     Here rather than in `operations`, so the argument positions and the signature they index into
     are edited in one place."""
     # an input DBOS can no longer unpickle comes back as its raw text, with a warning: one recorded
-    # before a struct inside `Context` changed shape. Its batches are unknown, as if not kept.
+    # by DBOS's own pickle before a struct inside `Context` changed shape, or one missing a field
+    # added since without a default (`serializer`). Its batches are unknown, as if not kept.
     if not isinstance(child.input, dict):
         return None
     args = child.input["args"]

@@ -18,6 +18,7 @@ from dbos import WorkflowStatusString
 from haskie.indexing.segment import PieceType
 
 if TYPE_CHECKING:  # every helper below imports haskie when it runs, not when pytest collects
+    from haskie.catalogue.catalogue import EmbeddingModel
     from haskie.indexing.chunk import Chunk
 
 TEARDOWN_GRACE_SECONDS = 2.0  # how long a cancelled step may still be running at teardown
@@ -86,9 +87,11 @@ def _use_home(path: Path) -> Path:
 def _drop_caches(patch: pytest.MonkeyPatch) -> None:
     """Drop the process caches that would otherwise answer from another home."""
     from haskie import db, settings
+    from haskie.catalogue import catalogue
     from haskie.indexing import models
 
     patch.setattr(db, "_migrated", set())
+    patch.setattr(catalogue, "_embedders", {})
     patch.setattr(settings, "_state", None)
     # a loaded model is process state, and the process outlives the test that loaded it
     patch.setattr(models, "_ready", set())
@@ -366,6 +369,17 @@ async def import_row(name: str, content: bytes | str = MD, into: Path | None = N
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(content.encode() if isinstance(content, str) else content)
     return await document.import_path(str(source), document.ImportOptions(**options))
+
+
+async def compact_model() -> "EmbeddingModel":
+    """The "compact" profile's model as the catalogue holds it: bge-small, with the seed's own
+    thresholds."""
+    from haskie.catalogue import catalogue
+    from haskie.settings import UserSettings
+
+    model = await catalogue.embedding_model(UserSettings(embedding="compact"))
+    assert model is not None
+    return model
 
 
 async def seed_index(collection: str, doc: str, text: str, heading: str = "Alpha") -> None:

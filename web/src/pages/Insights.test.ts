@@ -70,3 +70,38 @@ test('stacked columns run from the whole stack down to the last series', () => {
   const found = trend([point(at(21, 9), 'a'), point(at(21, 9), 'b'), point(at(21, 10), 'b')], 2, NOW, OTHER)
   expect(stacked(found)).toEqual([found.buckets, [0, 3], [0, 1]])
 })
+
+describe('trend details', () => {
+  // an indexing point as `loadChunks` builds it: chunks of one document, and where they were written
+  const indexed = (ts: number, key: string, detail: string, n = 10): Point => ({ ts, key, n, detail })
+  const cases: Array<{ name: string; points: Point[]; expected: Array<[string, string[]]> }> = [
+    {
+      name: 'one document imported, then indexed into two collections: each place once, sorted',
+      points: [indexed(at(20, 9), 'guide.md', 'import'), indexed(at(20, 10), 'guide.md', 'notes'), indexed(at(21, 9), 'guide.md', 'backend'), indexed(at(21, 10), 'guide.md', 'notes')],
+      expected: [['guide.md', ['backend', 'import', 'notes']]],
+    },
+    {
+      name: 'a point outside the window says nothing about the bars',
+      points: [indexed(at(14, 9), 'guide.md', 'archive'), indexed(at(21, 9), 'guide.md', 'notes')],
+      expected: [['guide.md', ['notes']]],
+    },
+    { name: 'points without a detail: searches', points: [point(at(21, 9))], expected: [['claude-code a3f9', []]] },
+    {
+      name: 'the folded series carries every detail of what it folds',
+      points: ['d1', 'd2', 'd3', 'd4', 'd5', 'd6', 'd7'].map((key, i) => indexed(at(21, 9), key, `c${i % 3}`, 20 - i)),
+      expected: [
+        ['d1', ['c0']],
+        ['d2', ['c1']],
+        ['d3', ['c2']],
+        ['d4', ['c0']],
+        ['d5', ['c1']],
+        [OTHER, ['c0', 'c2']],
+      ],
+    },
+  ]
+  for (const one of cases) {
+    test(one.name, () => {
+      expect(trend(one.points, 7, NOW, OTHER).series.map((s) => [s.id, s.details])).toEqual(one.expected)
+    })
+  }
+})

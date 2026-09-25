@@ -22,7 +22,11 @@ export type FieldDoc = Wire<'FieldDoc'>
 // Every choice the UI offers, including the status and kind vocabularies. One fetch per page load
 // answers it (see `api.options`).
 export type Options = Wire<'Options'>
-export type ModelCard = Wire<'ModelCard'>
+export type EmbedderMetadata = Wire<'EmbedderMetadata'>
+export type RerankerMetadata = Wire<'RerankerMetadata'>
+export type ModelMetadata = EmbedderMetadata | RerankerMetadata
+export type Runtime = Wire<'Runtime'>
+export type Device = Wire<'Device'>
 export type EmbeddingModel = Wire<'EmbeddingModel'>
 export type InitChoices = Wire<'Init'> // what the first run picks: the profile and the search
 export type ImportedDocument = Wire<'Document'>

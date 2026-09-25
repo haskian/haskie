@@ -18,10 +18,11 @@ from enum import StrEnum
 
 import msgspec
 
+from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.collection import Collection
 from haskie.collection.index import IndexStats
 from haskie.logs import get_logger
-from haskie.settings import EmbeddingModel, PipelineSettings
+from haskie.settings import PipelineSettings
 
 _log = get_logger(__name__)
 

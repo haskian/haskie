@@ -30,7 +30,10 @@ const bucketLabel = (unixSeconds: number, byHour: boolean): string =>
 const loadSearches = (days: number): Promise<Point[]> =>
   api.searchTrend(days).then((points) => points.map((one) => ({ ts: one.ts, key: one.session_id, n: 1 })))
 const loadChunks = (days: number): Promise<Point[]> =>
-  api.chunkTrend(days).then((points) => points.map((one) => ({ ts: one.ts, key: one.document, n: one.chunks })))
+  api
+    .chunkTrend(days)
+    // an import writes to no collection: it embeds the document for the ones that index it later
+    .then((points) => points.map((one) => ({ ts: one.ts, key: one.document, n: one.chunks, detail: one.collection ?? 'import' })))
 
 /** Two trends over the same ranges: searches stacked by session, and indexed chunks stacked by
  *  document, an import and every index of it alike: how much the agents use the shelf, and how
@@ -81,7 +84,7 @@ function TrendChart({ what, other, load }: { what: string; other: string; load: 
       {found !== null && (
         <div className="legend">
           {found.series.map((one, j) => (
-            <span key={one.id} className="legend-item">
+            <span key={one.id} className="legend-item" title={one.details.length > 0 ? one.details.join(', ') : undefined}>
               <i style={{ background: GREYS[j] }} />
               {one.id}
               <b>{at === null ? one.total : one.counts[at]}</b>

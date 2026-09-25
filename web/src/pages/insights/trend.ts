@@ -3,17 +3,20 @@ export const DAY = 24 * HOUR
 /** The chart has six greys. Past six series, the sixth and later fold into one "other" series. */
 export const MAX_SERIES = 6
 
-/** One thing that happened: when, under which series, and how much of it (one search, n chunks). */
+/** One thing that happened: when, under which series, and how much of it (one search, n chunks).
+ *  `detail` says more about it than its series does: where an indexing wrote its chunks. */
 export interface Point {
   ts: number // unix seconds
   key: string
   n: number
+  detail?: string
 }
 
 export interface Series {
   id: string
   counts: number[] // one per bucket
   total: number
+  details: string[] // every detail of its points in the window, sorted, each once
 }
 
 export interface Trend {
@@ -53,26 +56,28 @@ export function trend(points: Point[], days: number, now: number, other: string)
     start = nextBucket(start, byHour)
   }
 
-  const perKey = new Map<string, number[]>()
+  const perKey = new Map<string, { counts: number[]; details: Set<string> }>()
   for (const point of points) {
     const index = indexOf.get(bucketStart(point.ts, byHour))
     if (index === undefined) continue // outside the window
-    let counts = perKey.get(point.key)
-    if (!counts) {
-      counts = new Array<number>(count).fill(0)
-      perKey.set(point.key, counts)
+    let found = perKey.get(point.key)
+    if (!found) {
+      found = { counts: new Array<number>(count).fill(0), details: new Set() }
+      perKey.set(point.key, found)
     }
-    counts[index] += point.n
+    found.counts[index] += point.n
+    if (point.detail !== undefined) found.details.add(point.detail)
   }
 
+  const sorted = (details: Iterable<string>): string[] => [...new Set(details)].sort((a, b) => a.localeCompare(b))
   const ranked = [...perKey]
-    .map(([id, counts]) => ({ id, counts, total: counts.reduce((sum, n) => sum + n, 0) }))
+    .map(([id, { counts, details }]) => ({ id, counts, total: counts.reduce((sum, n) => sum + n, 0), details: sorted(details) }))
     .sort((a, b) => b.total - a.total || a.id.localeCompare(b.id))
   const series = ranked.slice(0, ranked.length > MAX_SERIES ? MAX_SERIES - 1 : MAX_SERIES)
   const rest = ranked.slice(series.length)
   if (rest.length > 0) {
     const counts = buckets.map((_, i) => rest.reduce((sum, one) => sum + one.counts[i], 0))
-    series.push({ id: other, counts, total: counts.reduce((sum, n) => sum + n, 0) })
+    series.push({ id: other, counts, total: counts.reduce((sum, n) => sum + n, 0), details: sorted(rest.flatMap((one) => one.details)) })
   }
   return { byHour, buckets, series, total: series.reduce((sum, one) => sum + one.total, 0) }
 }

@@ -22,6 +22,7 @@ import hashlib
 
 import msgspec
 
+from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection
 from haskie.collection.index import (
     CollectionIndex,
@@ -149,7 +150,8 @@ async def search(
     if not chosen:
         return Page(items=[], next_cursor=None, total=None)
 
-    embedding = (await load_user_settings()).embedding_model  # read once, not once per collection
+    # read once, not once per collection
+    embedding = await catalogue.embedding_model(await load_user_settings())
     retrieved = await gather_rows(
         [collection.index_with(embedding) for collection in chosen],
         lambda index: index.fts_rows(q, depth),

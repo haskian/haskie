@@ -35,6 +35,7 @@ from conftest import (
 )
 
 from haskie import audit, db, home, logs
+from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection, DocumentCounts, Member, MemberStatus
 from haskie.collection.index import (
@@ -63,19 +64,11 @@ from haskie.indexing.chunk import Chunk, Piece, Position
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order, PageRequest
 from haskie.settings import (
-    PROFILES,
-    RERANKER_MODELS,
-    RERANKERS,
-    Accelerator,
     Chunker,
     ChunkSettings,
     CollectionOverrides,
     ConversionSettings,
-    EmbeddingModel,
-    EmbeddingProfile,
     Fusion,
-    Matryoshka,
-    ModelCard,
     Parser,
     PipelineSettings,
     Reranker,
@@ -88,7 +81,6 @@ from haskie.settings import (
     load_user_settings,
     load_user_settings_or_none,
     save_user_settings,
-    sort_by,
 )
 
 SMALL = ChunkSettings(chunk_size=40)
@@ -227,46 +219,6 @@ def test_search_overrides_resolve_per_field() -> None:
     assert SearchOverrides().resolve(user) == user
 
 
-@pytest.mark.parametrize(
-    ("name", "card"),
-    [(model.name, model.card) for model in PROFILES.values() if model is not None]
-    + list(RERANKERS.items()),
-)
-def test_every_model_says_what_it_is(name: str, card: ModelCard | None) -> None:
-    """An embedder or reranker is chosen by what its card says, so none may go without one."""
-    assert card is not None and card.description, name
-    assert list(card.metadata)[:4] == ["Parameters", "Languages", "License", "Device"], name
-    assert all(card.metadata.values()), f"{name}: no empty fact"
-
-
-@pytest.mark.parametrize(
-    ("name", "keys", "expected"),
-    [
-        ("one key, ascending", [lambda x: x[0]], [(1, "b"), (1, "a"), (2, "a")]),
-        (
-            "a tie goes to the next key",
-            [lambda x: x[0], lambda x: x[1]],
-            [(1, "a"), (1, "b"), (2, "a")],
-        ),
-        ("no keys: the order given", [], [(2, "a"), (1, "b"), (1, "a")]),
-    ],
-)
-def test_sort_by_orders_by_each_key_in_turn(name: str, keys: list, expected: list) -> None:
-    assert sort_by([(2, "a"), (1, "b"), (1, "a")], *keys) == expected, name
-
-
-def test_models_are_listed_smallest_first() -> None:
-    """Every picker lists them in this order: full-text only first, then embedders by vector size
-    and, at one size, by parameters; rerankers by parameters, the smallest the default."""
-    embedders = [(m.dims, m.card.params if m.card else 0) for m in PROFILES.values() if m]
-    rerankers = [card.params for card in RERANKERS.values()]
-
-    assert next(iter(PROFILES.values())) is None, "full-text only first"
-    assert embedders == sorted(embedders)
-    assert rerankers == sorted(rerankers)
-    assert RERANKER_MODELS[0] == "Xenova/ms-marco-MiniLM-L-6-v2", "the default stays the smallest"
-
-
 def test_every_setting_has_title_and_definition() -> None:
     user_docs = docs()
     assert set(user_docs) >= {
@@ -296,29 +248,19 @@ def test_docs_rejects_a_non_struct() -> None:
         docs(int)  # ty: ignore[invalid-argument-type]
 
 
-def test_embedding_model_carries_accelerator() -> None:
-    user = UserSettings(
-        embedding=EmbeddingProfile.COMPACT, pipeline=PipelineSettings(accelerator=Accelerator.CPU)
-    )
-    assert user.embedding_model is not None and user.embedding_model.accelerator == "cpu"
-    assert UserSettings(embedding=EmbeddingProfile.NONE).embedding_model is None
-
-
 @pytest.mark.anyio
 async def test_user_settings_persist_in_db() -> None:
     assert await load_user_settings_or_none() is None, "not initialized yet"
     assert (await load_user_settings()).embedding == "none"
-    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
+    await save_user_settings(UserSettings(embedding="compact"))
     assert await load_user_settings_or_none() is not None
     assert (await load_user_settings()).embedding == "compact"
 
 
 @pytest.mark.anyio
 async def test_init_user_settings_creates_the_row_once() -> None:
-    assert await init_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT)) is True
-    assert await init_user_settings(UserSettings(embedding=EmbeddingProfile.QUALITY)) is False, (
-        "second call loses"
-    )
+    assert await init_user_settings(UserSettings(embedding="compact")) is True
+    assert await init_user_settings(UserSettings(embedding="quality")) is False, "second call loses"
     assert (await load_user_settings()).embedding == "compact", "the first write stands"
 
 
@@ -1091,18 +1033,17 @@ async def test_load_settings_reads_every_collection_it_was_asked_for_in_one_quer
 @pytest.mark.anyio
 async def test_reranker_overrides_lists_every_model_a_collection_chose() -> None:
     """The model downloads have to cover the overrides too, so they are read in one query."""
-    from haskie.settings import RERANKER_MODELS
-
+    chosen = "Xenova/ms-marco-MiniLM-L-12-v2"
     for name in ("a", "b", "c"):
         await Collection.create(name)
     await Collection("b").set_overrides(
-        CollectionOverrides(search=SearchOverrides(reranker_model=RERANKER_MODELS[1]))
+        CollectionOverrides(search=SearchOverrides(reranker_model=chosen))
     )
     await Collection("c").set_overrides(
-        CollectionOverrides(search=SearchOverrides(reranker_model=RERANKER_MODELS[1]))
+        CollectionOverrides(search=SearchOverrides(reranker_model=chosen))
     )
 
-    assert await Collection.reranker_overrides() == [RERANKER_MODELS[1]], "no duplicates"
+    assert await Collection.reranker_overrides() == [chosen], "no duplicates"
 
 
 @pytest.mark.anyio
@@ -1511,7 +1452,7 @@ async def test_finish_on_an_empty_index_is_a_no_op(tmp_path: Path) -> None:
 TINY = EmbeddingModel("test/tiny", 32)  # 32 / 16 = 2 PQ sub-vectors, enough rows per codebook
 
 
-def _row(text: str, vector: list[float] | None = None, seq: int = 1) -> Row:
+def _row(text: str, vector: list[float] | None = None, seq: int = 1, char_start: int = 0) -> Row:
     return Row(
         chunk=Chunk(
             headings=["H"],
@@ -1519,10 +1460,10 @@ def _row(text: str, vector: list[float] | None = None, seq: int = 1) -> Row:
             pieces=[Piece(PieceType.TEXT, text)],
             line_start=1,
             line_end=1,
-            char_start=0,
-            char_end=len(text),
-            byte_start=0,
-            byte_end=len(text.encode()),
+            char_start=char_start,
+            char_end=char_start + len(text),
+            byte_start=char_start,
+            byte_end=char_start + len(text.encode()),
         ),
         vector=vector,
         seq=seq,
@@ -2546,16 +2487,16 @@ async def test_session_search_counts_a_passage_once_across_collections() -> None
         index = collection.index_with(None)
         # three chunks that say different things: the copies across the two collections are what
         # merges here, not three chunks near-duplicating one another
+        texts = [
+            "LanceDB keeps each collection as one table of chunks.",
+            "A hybrid lancedb query fuses BM25 with the vector ranking.",
+            "Compaction merges the small fragments lancedb writes leave behind.",
+        ]
+        # each chunk at its own offset, one line after the other, as the chunker cuts them
+        starts = [sum(len(before) + 1 for before in texts[:at]) for at in range(len(texts))]
         rows = [
-            _row(text, None, seq=seq)
-            for seq, text in enumerate(
-                [
-                    "LanceDB keeps each collection as one table of chunks.",
-                    "A hybrid lancedb query fuses BM25 with the vector ranking.",
-                    "Compaction merges the small fragments lancedb writes leave behind.",
-                ],
-                start=1,
-            )
+            _row(text, None, seq=seq, char_start=start)
+            for seq, (text, start) in enumerate(zip(texts, starts, strict=True), start=1)
         ]
         await index.add_parts(
             "shared.md", "documents/shared.md", "documents/shared.md.md", _aparts([(0, rows)])

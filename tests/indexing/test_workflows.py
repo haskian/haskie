@@ -27,6 +27,7 @@ from uuid import uuid4
 
 import anyio
 import anyio.to_thread
+import msgspec
 import pytest
 from conftest import (
     MD,
@@ -55,6 +56,8 @@ from dbos._error import DBOSAwaitedWorkflowCancelledError
 from dbos._registrations import get_dbos_func_name
 
 from haskie import audit, cpu, db, home, paging, settings
+from haskie.catalogue import catalogue
+from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection
 from haskie.document import convert, document
@@ -72,8 +75,6 @@ from haskie.paging import Order
 from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
-    EmbeddingModel,
-    EmbeddingProfile,
     PipelineSettings,
     RetentionSettings,
     SearchOverrides,
@@ -1101,7 +1102,8 @@ async def test_ensure_embedding_fails_permanently_under_another_model(dbos, tmp_
         ChunkSettings(chunk_size=300),
         EmbeddingModel("BAAI/bge-small-en-v1.5", 384),
     )
-    assert (await load_user_settings()).embedding_model is None, "the profile has no model"
+    user = await load_user_settings()
+    assert await catalogue.embedding_model(user) is None, "the profile has no model"
 
     with SetWorkflowID(f"{workflows.EMBED_PREFIX}:{row.name}:{uuid4().hex}"):
         handle = await DBOS.enqueue_workflow_async(
@@ -2252,7 +2254,7 @@ def test_the_names_the_operations_view_spells_out_are_the_ones_dbos_records() ->
 async def test_an_unreadable_settings_row_does_not_stop_the_boot(dbos, monkeypatch) -> None:
     """The loader already tolerates a row another build wrote, so `start()` applies defaults and
     `/api/status` reports the problem."""
-    await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
+    await save_user_settings(UserSettings(embedding="compact"))
     async with db.connect() as conn:
         await conn.execute(
             'update settings set json = \'{"pipeline": {"cpu_budget": 0}}\' where id = 1'
@@ -2276,7 +2278,7 @@ async def test_settings_rejected_while_applying_fall_back_to_defaults_at_boot(
     dbos, monkeypatch, caplog
 ) -> None:
     """The last line of defence: whatever `apply_settings` rejects, boot continues on defaults."""
-    stored = await save_user_settings(UserSettings(embedding=EmbeddingProfile.COMPACT))
+    stored = await save_user_settings(UserSettings(embedding="compact"))
     applied: list[UserSettings] = []
 
     async def apply_settings(value: UserSettings) -> None:
@@ -2462,3 +2464,37 @@ def test_stage_input_reads_the_batches_a_child_was_given(
     child.input = recorded  # ty: ignore[invalid-assignment]
 
     assert workflows.stage_input(child) == expected, name
+
+
+async def test_a_slices_input_reads_back_after_its_context_changed_shape(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """A real import records its slices' inputs by field name (`serializer`), so the Operations
+    view still reads their batches after a release drops a `Context` field and adds another.
+    DBOS's own pickle kept them by position: the same change made them unreadable."""
+    await _use(dbos, workers=2, batch_pages=1)
+    doc = await import_row("p.pdf", text_pdf(["alpha", "beta"]), tmp_path)
+    import_id = await dbos.start_import(doc.name)
+    assert await wait_for(import_id) == "imported"
+    async with db.connect() as conn:
+        formats = await conn.execute_fetchall(
+            "select distinct serialization from workflow_status where name = ?",
+            (dbos_names.STAGE_WORKFLOW,),
+        )
+    assert formats == [("haskie_pickle",)]
+
+    fields = [
+        (field, object, None)
+        for field in workflows.Context.__struct_fields__
+        if field != "cache_id"
+    ]
+    changed = msgspec.defstruct("Context", [*fields, ("added", int, 7)], module=workflows.__name__)
+    monkeypatch.setattr(workflows, "Context", changed)
+    children = await DBOS.list_workflows_async(workflow_id_prefix=f"{import_id}:convert")
+    inputs = [child.input["args"] for child in children if child.input]
+
+    assert [(stage, len(batches)) for stage, batches, _ in inputs] == [(Stage.CONVERT, 1)] * 2
+    assert {(type(ctx), ctx.document.name, ctx.added) for *_, ctx in inputs} == {
+        (changed, doc.name, 7)
+    }
+    assert len(await operations.list_tasks(import_id)) == 2

@@ -54,13 +54,12 @@ async def active_counts_by_name() -> dict[str, int]:
     return {name: count for name, count in rows}
 
 
-async def queue_activity(skip: Sequence[str] = ()) -> dict[str, dict[str, int]]:
-    """Enqueued/running workflows per queue family ("operation" or "task"), by status.
-
-    The queue name carries the family as its prefix (`operation.indexing`, `task.embedding`), so one
-    grouped query over the prefix answers the whole indicator; a workflow started outside a queue
-    has no name and is not counted. `skip` names queues left out: a child that its parent waits
-    for is the same work as the parent, not a second one.
+async def operation_activity(skip: Sequence[str] = ()) -> dict[str, int]:
+    """Enqueued/running workflows on the `operation.*` queues, by status. The tasks under them are
+    counted from the slice listing (`operations.batch_activity`), batch by batch, so they are not
+    counted here. A workflow started outside a queue has no queue name and is not counted. `skip`
+    names queues left out: a child that its parent waits for is the same work as the parent, not
+    a second one.
 
     `ACTIVE_STATUS` only: a DELAYED workflow is a debounce waiting out its period, not work
     waiting for a slot. Counting it made the indicator read "1 queued" for a whole
@@ -68,18 +67,14 @@ async def queue_activity(skip: Sequence[str] = ()) -> dict[str, dict[str, int]]:
     view - which counts the same `ACTIVE_STATUS` - showing nothing."""
     async with db.connect() as conn:
         rows = await conn.execute_fetchall(
-            "select substr(queue_name, 1, instr(queue_name, '.') - 1), status, count(*) "
-            "from workflow_status "
+            "select status, count(*) from workflow_status "
             f"where status in ({db.placeholders(len(ACTIVE_STATUS))}) "
-            "and queue_name like '%.%' "
+            "and queue_name like 'operation.%' "
             + (f"and queue_name not in ({db.placeholders(len(skip))}) " if skip else "")
-            + "group by 1, 2",
+            + "group by status",
             [*ACTIVE_STATUS, *skip],
         )
-    activity: dict[str, dict[str, int]] = {}
-    for family, status, count in rows:
-        activity.setdefault(family, {})[status] = count
-    return activity
+    return {status: count for status, count in rows}
 
 
 async def stale_active_ids(app_version: str, limit: int, offset: int = 0) -> list[str]:

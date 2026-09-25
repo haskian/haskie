@@ -9,9 +9,10 @@ and computes nothing when the file already exists. The parquet file has one row 
 convert part, in part order, so the index stage can stream it a group at a time.
 
 `Params` is the whole key. Its fields are always serialized in the same order (`urn`), so the same
-inputs hash to the same id; `accelerator` is left out because it selects an execution provider,
-not a model, and embedding dims are left out because `settings.PROFILES` fixes them per model
-name. `chunk.CHUNK_VERSION` is in, so a change to the splitting code retires every entry it would
+inputs hash to the same id. The model is keyed by `EmbeddingModel.cache_name`: its name, its
+vector size and the document prefix it embeds with, everything that shapes a stored vector; the
+accelerator is left out because it selects an execution provider, not a model.
+`chunk.CHUNK_VERSION` is in, so a change to the splitting code retires every entry it would
 have produced differently. The id is the full sha256 of the URN, not a truncated one: a collision
 here serves one document's vectors as another's, so it is a correctness key, unlike `home.shard`
 (spread) or `search.text.query_hash` (cursor validation).
@@ -42,11 +43,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from haskie import db, home
+from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.index import Row
 from haskie.document import document
 from haskie.indexing import chunk
 from haskie.indexing.chunk import CHUNK_VERSION, Chunk
-from haskie.settings import Chunker, ChunkSettings, EmbeddingModel, Parser
+from haskie.settings import Chunker, ChunkSettings, Parser
 
 NO_MODEL = "none"  # the `model` of a profile without an embedding model: chunks only, no vectors
 

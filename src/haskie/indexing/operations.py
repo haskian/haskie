@@ -344,7 +344,7 @@ class QueueActivity(msgspec.Struct):
     """One kind of work right now: `running` is under way, `queued` waits its turn.
 
     A debounced run waiting out its period (DELAYED) is neither: it is not work anyone is waiting
-    on, so it stays out of the indicator (see `sysdb.queue_activity`)."""
+    on, so it stays out of the indicator (see `sysdb.operation_activity`)."""
 
     queued: int
     running: int
@@ -362,13 +362,12 @@ async def activity() -> Activity:
     # The embed job an import or an index spawned is waited for by the one that spawned it (see
     # `fold_operations`): counting both would read "2 operations" for one operation.
     # every slice on a `task.*` queue; its batches are in its input, the finished ones in its steps
-    by_family, slices = await asyncio.gather(
-        sysdb.queue_activity(skip=[workflows.EMBEDDING_QUEUE]),
+    counts, slices = await asyncio.gather(
+        sysdb.operation_activity(skip=[workflows.EMBEDDING_QUEUE]),
         DBOS.list_workflows_async(
             name=STAGE_WORKFLOW, status=list(ACTIVE_STATUS), load_output=False
         ),
     )
-    counts = by_family.get("operation", {})
     running = counts.get(RunStatus.PENDING, 0)
     operations = QueueActivity(queued=sum(counts.values()) - running, running=running)
     done = await sysdb.step_counts([one.workflow_id for one in slices], STAGE_STEP)

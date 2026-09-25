@@ -162,7 +162,10 @@ async def hits(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Scan
 
 async def collapse_hits(ctx: StepContext[Search, None, retrieval.Scanned]) -> list[Hit]:
     """The best hits, each near-duplicate folded into the hit it repeats."""
-    return await retrieval.collapse_hits(ctx.inputs, ctx.state.plan.embedding, ctx.state.limit)
+    plan = ctx.state.plan
+    return await retrieval.collapse_hits(
+        ctx.inputs, plan.embedding, plan.settings.mode, ctx.state.limit
+    )
 
 
 async def collapse_ranges(
@@ -170,7 +173,10 @@ async def collapse_ranges(
 ) -> list[HitRange]:
     """Consecutive chunks of one document merged into one range, and each near-duplicate range
     folded into the range it repeats."""
-    return await retrieval.collapse_ranges(ctx.inputs, ctx.state.plan.embedding, ctx.state.limit)
+    plan = ctx.state.plan
+    return await retrieval.collapse_ranges(
+        ctx.inputs, plan.embedding, plan.settings.mode, ctx.state.limit
+    )
 
 
 async def widen(ctx: StepContext[Search, None, list[HitRange]]) -> list[Passage]:

@@ -22,6 +22,8 @@ import anyio
 import msgspec
 
 from haskie import db, home
+from haskie.catalogue import catalogue
+from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.index import CollectionIndex, Hit, IndexStats, forget_schema
 from haskie.document import document
 from haskie.errors import Conflict, NotFound
@@ -29,7 +31,6 @@ from haskie.paging import Page, PageRequest, key_reader, keyset, resolve_sort
 from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
-    EmbeddingModel,
     SearchOverrides,
     SearchSettings,
     load_user_settings,
@@ -330,7 +331,8 @@ class Collection:
             counts = (await _counts_by_collection(conn, [self.name]))[self.name]
         raw, description, *maintenance = row
         overrides = _decode_overrides([(self.name, raw)])[self.name]
-        index = self.index_with(user.embedding_model)  # one handle: each opens its own connection
+        # one handle: each opens its own connection
+        index = self.index_with(await catalogue.embedding_model(user))
         return CollectionInfo(
             name=self.name,
             overrides=overrides,
@@ -412,7 +414,7 @@ class Collection:
         return await index.search(query, settings)
 
     async def index(self) -> CollectionIndex:
-        return self.index_with((await load_user_settings()).embedding_model)
+        return self.index_with(await catalogue.embedding_model(await load_user_settings()))
 
     def index_with(self, embedding: EmbeddingModel | None) -> CollectionIndex:
         """Variant without the settings read, for steps that already hold the embedding model.

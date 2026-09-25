@@ -12,6 +12,7 @@ from litestar import delete, get, post, put
 
 from haskie import audit, logs
 from haskie.api.common import PAGED, BulkStarted, Describe, Limit
+from haskie.catalogue import catalogue
 from haskie.collection.collection import (
     Collection,
     CollectionInfo,
@@ -127,6 +128,7 @@ async def search_collection(
 async def put_collection_overrides(collection: str, data: CollectionOverrides) -> CollectionInfo:
     """Saves, then downloads: a collection may override the reranker model, and a search of this
     collection would otherwise fail with "not loaded yet" for a model nothing ever fetched."""
+    await catalogue.check(data)
     found = await Collection.get(collection)
     await found.set_overrides(data)
     await models.ensure_models(await load_user_settings())

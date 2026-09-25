@@ -13,6 +13,7 @@ import sqlite3
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -23,15 +24,14 @@ import msgspec
 from haskie import home
 from haskie.errors import HaskieError
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 """`pragma user_version` of the schema below.
 
 A home stamped with it has exactly these tables and is opened as it is. Any other stamp is a
 shape this build cannot read, so the home is refused (see `migrate`). Against the last release
-(15), a collection's LanceDB table holds `framed`, each chunk's heading path and text as the
-models read them, and full-text search reads that column instead of `text`. A section of headings
-alone no longer makes a chunk (`chunk.CHUNK_VERSION` 2), so its headings are found through the
-chunks under them.
+(16), the model catalogue lives in the database (`models`, `embedding_profiles`, seeded from
+`catalogue/seed.sql`), and the embedding cache keys every model by its size and the document
+prefix it embeds with (`EmbeddingModel.cache_name`).
 
 A cache file or LanceDB table written the old way must never be read by this build.
 
@@ -142,6 +142,33 @@ SCHEMA = """
     create index if not exists session_events_session on session_events (session_id, ts);
     create index if not exists session_events_operation on session_events (operation_id);
 
+    -- the model catalogue (see catalogue/catalogue.py): every model the runtimes can load, with
+    -- its metadata, and every embedding profile. Seeded once from `catalogue/seed.sql`
+    create table if not exists models (
+        name text primary key,
+        kind text not null check (kind in ('embedder', 'reranker')),
+        description text not null,
+        parameters integer not null check (parameters > 0),
+        context_tokens integer not null check (context_tokens > 0),
+        languages text not null,
+        license text not null,
+        released text not null check (released is date(released)),
+        model_card_url text not null check (model_card_url like 'https://huggingface.co/%')
+    );
+
+    create table if not exists embedding_profiles (
+        profile text primary key check (profile != 'none'),
+        model text not null references models (name),
+        dims integer not null check (dims > 0),
+        description text,
+        query_prefix text not null default '',
+        document_prefix text not null default '',
+        matryoshka_layer_norm integer check (matryoshka_layer_norm in (0, 1)),
+        duplicate_chunk real,
+        duplicate_passage real,
+        check ((duplicate_chunk is null) = (duplicate_passage is null))
+    );
+
     -- an upload waiting in `staging/`, before any name is taken
     create table if not exists staging (
         staging_id text primary key,
@@ -151,6 +178,10 @@ SCHEMA = """
     );
     """
 
+
+# The rows a fresh home starts with. A data file of the `catalogue` feature, read rather than
+# imported, so this module stays a leaf.
+SEED = files("haskie.catalogue") / "seed.sql"
 
 INCOMPATIBLE_HOME_MESSAGE = (
     "This version of haskie changed how documents are stored; the existing home is incompatible. "
@@ -176,6 +207,7 @@ def migrate(conn: sqlite3.Connection) -> int:
         raise HaskieError(INCOMPATIBLE_HOME_MESSAGE)
     conn.execute("pragma journal_mode = wal")  # persistent; needs an exclusive lock, so once
     conn.executescript(SCHEMA)
+    conn.executescript(SEED.read_text(encoding="utf-8"))
     conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
     conn.commit()
     return SCHEMA_VERSION

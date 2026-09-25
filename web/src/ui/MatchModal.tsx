@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api, type Document, type Hit, type HotSection } from '../api'
 import type { Anchor } from './anchor'
 import { DocumentPanes } from './DocumentPanes'
 import { Kv } from './Kv'
 import { Mark } from './Mark'
-import { CUT_REASONS, PIECE_NAMES, RELATIONS, alsoOf, chunkSizes, cite, frameOf, headingOf, isHit, isSource, lastHeading, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Reference, type Size } from './match'
+import { CUT_REASONS, PIECE_NAMES, RELATIONS, alsoOf, chunkSizes, cite, everyPlace, overlapHint, frameOf, headingOf, isHit, isSource, lastHeading, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Reference, type Size } from './match'
 import { errorText } from '../format'
 import { Modal } from './Modal'
 import { Tabs, type TabDef } from './Tabs'
@@ -134,44 +134,61 @@ function ChunkSizes({ hit }: { hit: Hit }) {
   )
 }
 
+/** What a row has read of its lines: nothing yet, a read on its way, the text, or why it failed. */
+type Read = null | 'loading' | { text: string } | { error: string }
+
 /** One place in `also_in`: a row naming it, which opens on click to the lines it points at,
  *  read from the document the first time rather than carried by every search result. */
 function AlsoRow({ reference, query }: { reference: Reference; query: string }) {
-  const [text, setText] = useState<string | null>(null)
-  const [failed, setFailed] = useState<string | null>(null)
-  const asked = useRef(false) // one read per row, however often it is opened before it answers
+  const [read, setRead] = useState<Read>(null)
   const opened = (open: boolean) => {
-    if (!open || asked.current) return
-    asked.current = true
+    if (!open || read !== null) return // one read per row, however often it is opened
+    setRead('loading')
     api
       .lines(reference.document, reference.line_start, reference.line_end)
-      .then((read) => setText(read.text))
-      .catch((cause: unknown) => setFailed(errorText(cause)))
+      .then((found) => setRead({ text: found.text }))
+      .catch((cause: unknown) => setRead({ error: errorText(cause) }))
   }
   return (
     <details onToggle={(event) => opened(event.currentTarget.open)}>
       <summary className="section-row">
-        <span className="mono muted" title={`${reference.relation}, ${reference.similarity.toFixed(2)}`}>
+        <span className="mono muted" title={overlapHint(reference)}>
           {RELATIONS[reference.relation]} {reference.similarity.toFixed(2)}
         </span>
         <span className="section-title">
           {reference.document} · {reference.header || '—'}
         </span>
-        <span className="mono muted">
-          {cite(reference.location, reference.document)}
-          {/* the relation is to that place in this list, not to the match */}
-          {reference.via && ` · via ${reference.via}`}
-        </span>
+        <span className="mono muted">{cite(reference.location, reference.document)}</span>
       </summary>
-      <blockquote className="match-text also-text">{failed ?? (text === null ? 'Loading…' : <Mark text={text} query={query} />)}</blockquote>
+      <blockquote className="match-text also-text">
+        {read === null || read === 'loading' ? 'Loading…' : 'error' in read ? read.error : <Mark text={read.text} query={query} />}
+      </blockquote>
     </details>
   )
 }
 
+/** A place and, indented under it, the places folded into it: the tree the search built. Keyed
+ *  by position, since two places may cite the same lines and the order is fixed. */
+function AlsoPlace({ reference, query }: { reference: Reference; query: string }) {
+  return (
+    <>
+      <AlsoRow reference={reference} query={query} />
+      {reference.also_in.length > 0 && (
+        <div className="also-nested">
+          {reference.also_in.map((child, at) => (
+            <AlsoPlace key={at} reference={child} query={query} />
+          ))}
+        </div>
+      )}
+    </>
+  )
+}
+
 /** The other places that say what the match says, folded into it by the search: how close each
- *  one is, where it sits, and how many there are. */
+ *  one is, where it sits, what it repeats, and how many there are at every level. */
 function AlsoIn({ match, query }: { match: Match; query: string }) {
-  const count = alsoOf(match).length
+  const places = alsoOf(match)
+  const count = everyPlace(places).length
   if (count === 0) return null
   return (
     <div className="sections">
@@ -181,8 +198,8 @@ function AlsoIn({ match, query }: { match: Match; query: string }) {
           {count} {count === 1 ? 'place' : 'places'}
         </span>
       </div>
-      {alsoOf(match).map((reference) => (
-        <AlsoRow key={`${reference.collection}:${reference.location}`} reference={reference} query={query} />
+      {places.map((reference, at) => (
+        <AlsoPlace key={at} reference={reference} query={query} />
       ))}
     </div>
   )
