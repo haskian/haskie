@@ -1,16 +1,12 @@
 """Models that run on Apple Silicon through MLX, for models fastembed cannot run.
 
-fastembed runs ONNX models only. These are published as MLX builds. Rerankers, in two kinds:
+fastembed runs ONNX models only. These are published as MLX builds.
 
-- Listwise (Jina v3, v3.5): the query and every candidate go into one prompt, and a candidate
-  scores the cosine of two projected hidden states. Each repository ships its own inference code
-  (`rerank.py`, and for v3.5 a `modeling.py`), which is run as published rather than ported: it is
-  the regime Jina's scores were measured under. The weights are CC BY-NC 4.0, non-commercial only.
-- Pairwise (bge-reranker-v2-m3, gte-reranker-modernbert, mMiniLM): ordinary cross-encoders, one
-  (query, text) pair a pass, run through mlx-embeddings. Its XLM-RoBERTa has no classification
-  head, so one is added here (`_with_head`): the standard one, dense, tanh, then one logit, over
-  the first token. It loads an MLX conversion and transformers' own checkpoint alike, so an
-  XLM-RoBERTa cross-encoder needs no conversion. All Apache-2.0.
+Rerankers (`RERANKERS`: bge-reranker-v2-m3, gte-reranker-modernbert, mMiniLM): ordinary
+cross-encoders, one (query, text) pair a pass, run through mlx-embeddings. Its XLM-RoBERTa has no
+classification head, so one is added here (`_with_head`): the standard one, dense, tanh, then one
+logit, over the first token. It loads an MLX conversion and transformers' own checkpoint alike, so
+an XLM-RoBERTa cross-encoder needs no conversion. All Apache-2.0.
 
 Embedders (`EMBEDDERS`), each answering `embed(texts)` and `query_embed(text)` the way fastembed's
 `TextEmbedding` does, so `embed` calls them the same way:
@@ -21,24 +17,20 @@ Embedders (`EMBEDDERS`), each answering `embed(texts)` and `query_embed(text)` t
   prefixes itself. CC BY-NC 4.0, non-commercial only.
 
 Every repository is pinned to a revision, so the code and weights that run are the ones reviewed.
-Needs the `mlx` extra (mlx-lm and mlx-embeddings), which only installs on Apple Silicon.
+Every load and every forward pass runs on one thread (`_on_mlx_thread`), a batch at a time.
+Needs the `mlx` extra (mlx-embeddings), which only installs on Apple Silicon.
 """
 
 import functools
 import importlib.util
-import sys
-import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from itertools import batched
 from pathlib import Path
 from typing import Any
 
 # Hugging Face repository -> the revision its code and weights are read at
-LISTWISE: dict[str, str] = {
-    "jinaai/jina-reranker-v3-mlx": "1d19fe38ae4e6658221479747c1152d6136dd6ab",
-    "jinaai/jina-reranker-v3.5-mlx": "3dd4ac901ccdcac85abe3815df0a0aaaf44e4a21",
-}
-PAIRWISE: dict[str, str] = {
+RERANKERS: dict[str, str] = {
     "soichisumi/bge-reranker-v2-m3-mlx-affine8": "512d2c5984b21da2b134c7f169a9f4176735287c",
     "afanjul/gte-reranker-modernbert-base-mlx": "0b1cfb9141dd1452e07a328a0dec430f2324da12",
     # not an MLX conversion: transformers' own checkpoint, loaded by `_with_head` as it stands
@@ -51,31 +43,44 @@ JINA_V5: dict[str, str] = {
     "jinaai/jina-embeddings-v5-text-nano-retrieval-mlx": "cb07521719bddd48f5647b5531358a8ca2d1b8d0",
 }
 EMBEDDERS = MODERNBERT | JINA_V5
-REVISIONS = LISTWISE | PAIRWISE | EMBEDDERS
+REVISIONS = RERANKERS | EMBEDDERS
 EMBED_BATCH = 16  # texts a forward pass
 
 PAIR_BATCH = 16  # pairs a forward pass: the candidates of one search in a few passes
 MAX_PAIR_TOKENS = 512  # what bge-reranker-v2-m3 was tuned at; a chunk and a query fit well inside
 MAX_EMBED_TOKENS = 1024  # a chunk with its heading path fits well inside; both models read 8K
 
+# MLX keeps its streams per thread: an array still lazy on one thread aborts the process when
+# another evaluates it ("There is no Stream(cpu, 1) in current thread", a C++ exception nothing
+# catches). Jina v5's weights stay lazy after loading, and the pipeline loads a model on one worker
+# thread and embeds on others, so every MLX call goes to this one thread instead. A job is one
+# batch, so a search waits behind at most one batch of indexing, not a whole part.
+_MLX_THREAD = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
+
+
+def _on_mlx_thread[T](call: Callable[..., T], /, *args: Any) -> T:
+    """`call(*args)`, run on the MLX thread; the caller waits for it."""
+    return _MLX_THREAD.submit(call, *args).result()
+
 
 @functools.cache
 def available() -> bool:
-    """Whether MLX and both runtimes are installed here, so the models above can load at all."""
-    return all(
-        importlib.util.find_spec(module) is not None
-        for module in ("mlx", "mlx_lm", "mlx_embeddings")
-    )
+    """Whether MLX and mlx-embeddings are installed here, so the models above can load at all."""
+    return all(importlib.util.find_spec(module) is not None for module in ("mlx", "mlx_embeddings"))
 
 
-def reranker(name: str) -> "ListwiseReranker | PairwiseReranker":
+def reranker(name: str) -> "Reranker":
     """The MLX reranker `name` is, loaded (and downloaded on first use)."""
-    return ListwiseReranker(name) if name in LISTWISE else PairwiseReranker(name)
+    path = _download(name)  # off the MLX thread: a download must not hold up the other models
+    return _on_mlx_thread(Reranker, path)
 
 
 def embedder(name: str) -> "ModernBertEmbedder | JinaV5Embedder":
     """The MLX embedder `name` is, loaded (and downloaded on first use)."""
-    return JinaV5Embedder(name) if name in JINA_V5 else ModernBertEmbedder(name)
+    path = _download(name)  # see `reranker`
+    if name in JINA_V5:
+        return _on_mlx_thread(JinaV5Embedder, path)
+    return _on_mlx_thread(ModernBertEmbedder, path)
 
 
 def _download(name: str) -> Path:
@@ -90,69 +95,23 @@ def _download(name: str) -> Path:
     return Path(snapshot_download(name, revision=REVISIONS[name]))
 
 
-def _load(name: str, **classes: Any) -> tuple[Any, Any]:
-    """mlx-embeddings' model for `name`, with its transformers tokenizer."""
+def _load(path: Path, **classes: Any) -> tuple[Any, Any]:
+    """mlx-embeddings' model downloaded at `path`, with its transformers tokenizer."""
     from mlx_embeddings.utils import load_model
     from transformers import AutoTokenizer
 
-    path = _download(name)
     # transformers types the tokenizer as maybe None; a downloaded repository always has one
     return load_model(path, **classes), AutoTokenizer.from_pretrained(path)
 
 
-class ListwiseReranker:
-    """One of Jina's listwise rerankers, shaped like fastembed's cross-encoder: `rerank` answers
-    one score per text, in the order given. A score is a cosine, so it lies in [-1, 1]."""
-
-    def __init__(self, name: str) -> None:
-        path = _download(name)
-        self._model = _published(path, name).MLXReranker(
-            model_path=str(path), projector_path=str(path / "projector.safetensors")
-        )
-        # one Metal command queue per model: two searches scoring at once would interleave on it
-        self._lock = threading.Lock()
-
-    def rerank(self, query: str, texts: Sequence[str]) -> list[float]:
-        with self._lock:
-            ranked = self._model.rerank(query, list(texts))
-        scores = [0.0] * len(texts)
-        for found in ranked:  # best first, each with the index it had in `texts`
-            scores[found["index"]] = float(found["relevance_score"])
-        return scores
-
-
-def _published(path: Path, name: str, module: str = "rerank") -> Any:
-    """The repository's own `rerank.py` (or `module`), imported from where it was downloaded.
-
-    Under a name of its own, so two models' `rerank` never share a module. Its directory is on the
-    path while it runs, because v3.5's `rerank.py` imports the `modeling.py` beside it.
-    """
-    spec = importlib.util.spec_from_file_location(
-        f"haskie_mlx_{name.replace('/', '_').replace('.', '_').replace('-', '_')}",
-        path / f"{module}.py",
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"{name} ships no {module}.py at {path}")
-    loaded = importlib.util.module_from_spec(spec)
-    sys.path.insert(0, str(path))
-    try:
-        spec.loader.exec_module(loaded)
-    finally:
-        sys.path.remove(str(path))
-    return loaded
-
-
-class PairwiseReranker:
+class Reranker:
     """A cross-encoder converted to MLX: one score per (query, text) pair, in the order given,
     as the model's own head answers it (bge a logit, gte a probability)."""
 
-    def __init__(self, name: str) -> None:
-        self._model, self._tokenizer = _load(name, get_model_classes=_with_head)
-        self._lock = threading.Lock()  # see `ListwiseReranker`
+    def __init__(self, path: Path) -> None:
+        self._model, self._tokenizer = _load(path, get_model_classes=_with_head)
 
     def rerank(self, query: str, texts: Sequence[str]) -> list[float]:
-        import mlx.core as mx
-
         scores: list[float] = []
         for batch in batched(texts, PAIR_BATCH, strict=False):
             encoded = self._tokenizer(
@@ -163,13 +122,16 @@ class PairwiseReranker:
                 max_length=MAX_PAIR_TOKENS,
                 return_tensors="np",
             )
-            with self._lock:
-                out = self._model(
-                    mx.array(encoded["input_ids"]),
-                    attention_mask=mx.array(encoded["attention_mask"]),
-                )
-                scores += out.pooler_output.reshape(-1).tolist()
+            scores += _on_mlx_thread(self._forward, encoded)
         return scores
+
+    def _forward(self, encoded: dict[str, Any]) -> list[float]:
+        import mlx.core as mx
+
+        out = self._model(
+            mx.array(encoded["input_ids"]), attention_mask=mx.array(encoded["attention_mask"])
+        )
+        return out.pooler_output.reshape(-1).tolist()
 
 
 def _with_head(config: dict) -> tuple[Any, ...]:
@@ -220,14 +182,10 @@ class ModernBertEmbedder:
     """A sentence-transformers ModernBERT converted to MLX: pooled and normalized by
     mlx-embeddings, as its config asks."""
 
-    def __init__(self, name: str) -> None:
-        self._model, self._tokenizer = _load(name)
-        self._lock = threading.Lock()  # see `ListwiseReranker`
+    def __init__(self, path: Path) -> None:
+        self._model, self._tokenizer = _load(path)
 
     def embed(self, texts: Sequence[str]) -> Iterator[Any]:
-        import mlx.core as mx
-        import numpy as np
-
         for batch in batched(texts, EMBED_BATCH, strict=False):
             encoded = self._tokenizer(
                 list(batch),
@@ -236,13 +194,16 @@ class ModernBertEmbedder:
                 max_length=MAX_EMBED_TOKENS,
                 return_tensors="np",
             )
-            with self._lock:
-                out = self._model(
-                    mx.array(encoded["input_ids"]),
-                    attention_mask=mx.array(encoded["attention_mask"]),
-                )
-                vectors = np.array(out.text_embeds.astype(mx.float32))
-            yield from vectors
+            yield from _on_mlx_thread(self._forward, encoded)
+
+    def _forward(self, encoded: dict[str, Any]) -> Any:
+        import mlx.core as mx
+        import numpy as np
+
+        out = self._model(
+            mx.array(encoded["input_ids"]), attention_mask=mx.array(encoded["attention_mask"])
+        )
+        return np.array(out.text_embeds.astype(mx.float32))
 
     def query_embed(self, text: str) -> Iterator[Any]:
         return self.embed([text])
@@ -252,33 +213,35 @@ class JinaV5Embedder:
     """Jina v5 text nano, through the repository's own `model.py`: it adds the task's prefix
     ("Query: ", "Document: ") and pools the last token itself."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, path: Path) -> None:
         import json
 
         import mlx.core as mx
         from tokenizers import Tokenizer
 
-        path = _download(name)
-        self._model = _published(path, name, "model").JinaEmbeddingModel(
-            json.loads((path / "config.json").read_text())
-        )
+        spec = importlib.util.spec_from_file_location("haskie_mlx_jina_v5", path / "model.py")
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"no model.py at {path}")
+        published = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(published)
+        self._model = published.JinaEmbeddingModel(json.loads((path / "config.json").read_text()))
         # a .safetensors file always loads as one dict of arrays
         weights: dict[str, Any] = mx.load(str(path / "model.safetensors"))
         self._model.load_weights(list(weights.items()))
         self._tokenizer = Tokenizer.from_file(str(path / "tokenizer.json"))
-        self._lock = threading.Lock()  # see `ListwiseReranker`
 
     def _encode(self, texts: Sequence[str], task: str) -> Iterator[Any]:
+        for batch in batched(texts, EMBED_BATCH, strict=False):
+            yield from _on_mlx_thread(self._forward, list(batch), task)
+
+    def _forward(self, texts: list[str], task: str) -> Any:
         import mlx.core as mx
         import numpy as np
 
-        for batch in batched(texts, EMBED_BATCH, strict=False):
-            with self._lock:
-                out = self._model.encode(
-                    list(batch), self._tokenizer, max_length=MAX_EMBED_TOKENS, task_type=task
-                )
-                vectors = np.array(out.astype(mx.float32))
-            yield from vectors
+        out = self._model.encode(
+            texts, self._tokenizer, max_length=MAX_EMBED_TOKENS, task_type=task
+        )
+        return np.array(out.astype(mx.float32))
 
     def embed(self, texts: Sequence[str]) -> Iterator[Any]:
         return self._encode(texts, "retrieval.passage")

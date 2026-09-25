@@ -37,7 +37,7 @@ async def test_every_model_says_what_it_is() -> None:
     embedders = await catalogue.embedding_metadata()
     rerankers = await catalogue.rerankers()
 
-    assert (len(embedders), len(rerankers)) == (18, 12), "every profile and reranker of the seed"
+    assert (len(embedders), len(rerankers)) == (18, 11), "every profile and reranker of the seed"
     assert all(isinstance(one, catalogue.EmbedderMetadata) for one in embedders.values())
     assert all(isinstance(one, catalogue.RerankerMetadata) for one in rerankers.values())
     for name, metadata in [*embedders.items(), *rerankers.items()]:
@@ -102,10 +102,7 @@ async def test_every_model_has_a_loader_and_every_pin_a_model() -> None:
         set(embed.CUSTOM_EMBEDDERS) | set(mlx_models.EMBEDDERS) | set(gguf_models.PINS)
     )
     pinned_rerankers = (
-        set(embed.CUSTOM_RERANKERS)
-        | set(onnx_rerank.REVISIONS)
-        | set(mlx_models.LISTWISE)
-        | set(mlx_models.PAIRWISE)
+        set(embed.CUSTOM_RERANKERS) | set(onnx_rerank.REVISIONS) | set(mlx_models.RERANKERS)
     )
 
     assert embedders - listed_embedders - pinned_embedders == set()
@@ -151,7 +148,7 @@ def test_the_seed_replays_harmlessly(tmp_path: Path) -> None:
     finally:
         conn.close()
 
-    assert counts == [29, 18], "17 embedders and 12 rerankers, 18 profiles: once each"
+    assert counts == [28, 18], "17 embedders and 11 rerankers, 18 profiles: once each"
 
 
 _MODEL = (
@@ -264,7 +261,7 @@ async def test_one_model_cut_two_ways_is_two_profiles() -> None:
     )
 
 
-MLX_RERANKER = "jinaai/jina-reranker-v3-mlx"
+MLX_RERANKER = "soichisumi/bge-reranker-v2-m3-mlx-affine8"
 ON_CPU = PipelineSettings(accelerator=Accelerator.CPU)
 
 
@@ -292,7 +289,7 @@ ON_CPU = PipelineSettings(accelerator=Accelerator.CPU)
                 search=SearchSettings(reranker=Reranker.CROSS_ENCODER, reranker_model=MLX_RERANKER),
                 pipeline=ON_CPU,
             ),
-            "jinaai/jina-reranker-v3-mlx runs on mlx on the Apple GPU",
+            f"{MLX_RERANKER} runs on mlx on the Apple GPU",
         ),
         (
             "the same reranker switched off: nothing uses it",

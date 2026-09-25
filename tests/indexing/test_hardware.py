@@ -36,7 +36,7 @@ EVERYWHERE = (Device.CPU, Device.APPLE_SILICON, Device.GPU)
         ),
         (
             "an MLX reranker the same",
-            "jinaai/jina-reranker-v3-mlx",
+            "soichisumi/bge-reranker-v2-m3-mlx-affine8",
             Runtime.MLX,
             (Device.APPLE_SILICON,),
         ),
@@ -54,7 +54,8 @@ def test_where_a_model_runs(
     assert (hardware.runtime(model), hardware.devices(model)) == (runtime, expected), name
 
 
-MLX_RERANKER, GGUF_EMBEDDER = "jinaai/jina-reranker-v3-mlx", "ggml-org/bge-m3-Q8_0-GGUF"
+MLX_RERANKER = "soichisumi/bge-reranker-v2-m3-mlx-affine8"
+GGUF_EMBEDDER = "ggml-org/bge-m3-Q8_0-GGUF"
 ONNX_EMBEDDER, TOO_LARGE = "BAAI/bge-small-en-v1.5", "jinaai/jina-embeddings-v3"
 CPU, CUDA, COREML = "CPUExecutionProvider", "CUDAExecutionProvider", "CoreMLExecutionProvider"
 
