@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.10.1 - 2026-09-25
+#### Build system
+- (**dev**) ~/haskie-dev home for mise tasks and a haskie-dev command (#19) - (1c87745) - Črtomir Majer
+
+- - -
+
 ## v0.10.0 - 2026-09-25
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>GGUF embedders on the Apple GPU and one hardware rule per model (#18) - (8a14a11) - Črtomir Majer
