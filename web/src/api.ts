@@ -19,8 +19,8 @@ export type PipelineSettings = Wire<'PipelineSettings'>
 export type RetentionSettings = Wire<'RetentionSettings'>
 export type UserSettings = Wire<'UserSettings'>
 export type FieldDoc = Wire<'FieldDoc'>
-// Every choice the UI offers, including the status and kind vocabularies. One fetch per page load
-// answers it (see `api.options`).
+// Every choice the UI offers, including the status and kind vocabularies. One fetch answers it
+// until the settings are saved (see `api.options`).
 export type Options = Wire<'Options'>
 export type EmbedderMetadata = Wire<'EmbedderMetadata'>
 export type RerankerMetadata = Wire<'RerankerMetadata'>
@@ -218,11 +218,16 @@ let optionsOnce: Promise<Options> | undefined
 export const api = {
   status: () => request<Status>('/api/status'),
   init: (choices: InitChoices) => request<UserSettings>('/api/init', json('POST', choices)),
-  // The server answers a module-level constant, so one fetch per page load is enough. The promise
-  // is the cache: `useOptions` reads it with React's `use`, so every view sees the same object.
+  // The models offered follow the hardware setting, and nothing else changes while the server
+  // runs, so one fetch lasts until the settings are saved. The promise is the cache: `useOptions`
+  // reads it with React's `use`, so every view sees the same object.
   options: () => (optionsOnce ??= request<Options>('/api/options')),
   settings: () => request<UserSettings>('/api/settings'),
-  saveSettings: (s: UserSettings) => request<UserSettings>('/api/settings', json('PUT', s)),
+  saveSettings: async (s: UserSettings) => {
+    const stored = await request<UserSettings>('/api/settings', json('PUT', s))
+    optionsOnce = undefined
+    return stored
+  },
 
   collections: (q: PageRequest = {}) => request<Page<CollectionSummary>>(`/api/collections${pageQuery(q)}`),
   // Names alone, for a picker: one request, and the cap is the backend's largest page.

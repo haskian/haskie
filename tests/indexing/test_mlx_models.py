@@ -39,7 +39,6 @@ def _reranker() -> ListwiseReranker:
     ("name", "texts", "expected"),
     [
         ("scores come back in the order the texts went in", TEXTS, [-0.17, 0.298, 0.104]),
-        ("no texts, no model call", [], []),
     ],
 )
 def test_scores_follow_the_texts_not_the_ranking(
@@ -67,7 +66,7 @@ def test_every_mlx_model_is_routed_to_mlx(monkeypatch: pytest.MonkeyPatch) -> No
     embedders = list(mlx_models.EMBEDDERS)
 
     for name in rerankers:
-        assert embed._build_cross_encoder(name) == name
+        assert embed._build_cross_encoder(name, Accelerator.AUTO) == name
     for name in embedders:
         assert embed._build_model(name, Accelerator.AUTO) == name
     embed._build_cross_encoder.cache_clear()

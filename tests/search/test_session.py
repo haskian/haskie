@@ -251,7 +251,7 @@ async def test_session_search_reranks_once_over_the_merge(
 
     monkeypatch.setattr(models, "require_ready", require_ready)
 
-    def fake_rerank(model: str, query: str, texts: list[str]) -> list[float]:
+    def fake_rerank(model: str, accelerator: str, query: str, texts: list[str]) -> list[float]:
         calls.append(texts)
         return [float(i) for i in range(len(texts))]
 

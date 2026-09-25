@@ -50,11 +50,14 @@ Sync IO runs in worker threads wherever a library has no async form. The main ca
 
 ## Model loads
 
-ONNX Runtime holds the GIL while it builds a session, and the CoreML provider compiles the model
-inside that build. Every request waits for as long as the build takes, which can be seconds. Two
-things bound it. CoreML keeps compiled models under `cache/models`, so a model compiles once per
-home. ONNX cross-encoders always build on CPU, where scoring a few dozen candidates takes
-milliseconds. MLX rerankers run on Metal instead.
+ONNX Runtime holds the GIL while it builds a session. Every request waits for as long as the build
+takes, which can be seconds. ONNX models run on CUDA with the `gpu` extra, else on the CPU. On
+Apple Silicon the GPU is reached through MLX (`indexing/mlx_models.py`) and llama.cpp
+(`indexing/gguf_models.py`, the `-gguf` profiles), which load a model in under a second and release
+the GIL while they compute. llama.cpp's first load on a machine also compiles its Metal shaders,
+once, in about 8 s. CoreML runs ONNX models only when the hardware setting says `coreml`.
+It keeps compiled models under `cache/models`, so a model compiles once per home. Embedders and
+rerankers follow the same hardware setting (`indexing/hardware.py`).
 
 A downloaded model still has to load into the process. A boot that finds a finished download warms
 it in a background task and reports it ready only after that. A search that needs a model still

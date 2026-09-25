@@ -68,11 +68,6 @@ def available() -> bool:
     )
 
 
-def loadable(name: str) -> bool:
-    """Whether model `name` can load here: any model that is not MLX's, or MLX's where it runs."""
-    return name not in REVISIONS or available()
-
-
 def reranker(name: str) -> "ListwiseReranker | PairwiseReranker":
     """The MLX reranker `name` is, loaded (and downloaded on first use)."""
     return ListwiseReranker(name) if name in LISTWISE else PairwiseReranker(name)
@@ -118,8 +113,6 @@ class ListwiseReranker:
         self._lock = threading.Lock()
 
     def rerank(self, query: str, texts: Sequence[str]) -> list[float]:
-        if not texts:
-            return []
         with self._lock:
             ranked = self._model.rerank(query, list(texts))
         scores = [0.0] * len(texts)

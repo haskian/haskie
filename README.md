@@ -121,9 +121,12 @@ The default model is bge-small (English, about 130 MB). Pick a multilingual one 
 languages, or none for keyword search only. The model applies to every collection, and changing
 it later means running *Index all* in each one.
 
-- **Extras:** install `"haskie[gpu] @ ./haskie-<version>-py3-none-any.whl"` to run embeddings on
-  CUDA, or `haskie[mlx]` for MLX rerankers and embedding models on Apple Silicon. Embeddings run on
-  CoreML there without any extra.
+- **Extras:** install `"haskie[gpu] @ ./haskie-<version>-py3-none-any.whl"` to run embeddings and
+  rerankers on CUDA. On Apple Silicon, `haskie[mlx]` adds the MLX rerankers and embedding models, and
+  `haskie[gguf]` the `-gguf` embedding profiles, which run on the GPU through llama.cpp (installing
+  it compiles llama.cpp, which needs the Xcode command-line tools and cmake). Other ONNX embeddings
+  run on the CPU there; the `coreml` hardware setting runs them through CoreML instead, which today
+  is slower.
 - **Port:** 8451 by default, clear of the usual 8000 and 8080. For another, run
   `haskie run --port <n>` and `haskie install claude --url http://127.0.0.1:<n>/mcp`.
 - **Other commands:** `haskie stop` stops the server. `haskie destroy` deletes `~/.haskie` after

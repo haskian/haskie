@@ -37,7 +37,7 @@ from haskie.indexing import models
 from haskie.indexing.chunk import HEADING_SEP, Chunk, CutReason, Position, framed
 from haskie.indexing.chunk import record as chunk_record
 from haskie.logs import get_logger
-from haskie.settings import Fusion, Reranker, SearchMode, SearchSettings
+from haskie.settings import Fusion, Reranker, SearchMode, SearchSettings, load_user_settings
 
 
 class Row(msgspec.Struct):
@@ -646,7 +646,8 @@ async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -
 
     await models.require_ready(models.ModelKind.RERANKER, settings.reranker_model)
     read = [r[FTS_COLUMN] for r in rows]  # as they were embedded
-    scores = await cpu.on_cpu(rerank_scores, settings.reranker_model, query, read)
+    accelerator = (await load_user_settings()).pipeline.accelerator
+    scores = await cpu.on_cpu(rerank_scores, settings.reranker_model, accelerator, query, read)
     for row, score in zip(rows, scores, strict=True):
         row["_relevance_score"] = score
     return sorted(rows, key=lambda r: r["_relevance_score"], reverse=True)

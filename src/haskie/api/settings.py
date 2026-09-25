@@ -9,9 +9,8 @@ from haskie.catalogue.catalogue import EmbedderMetadata, EmbeddingModel, Reranke
 from haskie.collection.collection import ACTIVE_MEMBER_STATUSES, MEMBER_STATUSES, MemberStatus
 from haskie.document.document import ACTIVE_DOCUMENT_STATUSES, DOCUMENT_STATUSES, DocumentStatus
 from haskie.errors import Conflict
-from haskie.indexing import mlx_models, models, operations, workflows
+from haskie.indexing import hardware, models, operations, workflows
 from haskie.indexing.dbos_names import ACTIVE_STATUS, RunStatus
-from haskie.indexing.embed import device_name
 from haskie.settings import (
     NO_EMBEDDING,
     Accelerator,
@@ -36,7 +35,6 @@ class Status(msgspec.Struct):
     initialized: bool
     home: str
     embedding: EmbeddingModel | None
-    device: str  # ONNX Runtime provider models run on (e.g. CoreML, CUDA, CPU)
     models: list[models.ModelStatus]  # download/load state of every model the settings need
     settings_error: str | None = None  # stored settings unreadable; defaults are in use
 
@@ -98,7 +96,6 @@ async def get_status() -> Status:
         initialized=saved is not None,
         home=str(home.HOME),
         embedding=(await catalogue.embedding_model(current)) if saved else None,
-        device=device_name(current.pipeline.accelerator),
         models=(await models.model_statuses()) if saved else [],
         settings_error=settings_problem(),
     )
@@ -142,6 +139,7 @@ async def put_settings(data: UserSettings) -> UserSettings:
 async def get_options() -> Options:
     embedders = await catalogue.embedders()
     rerankers = await catalogue.rerankers()
+    accelerator = (await load_user_settings()).pipeline.accelerator
     return Options(
         parsers=tuple(Parser),
         chunkers=tuple(Chunker),
@@ -149,13 +147,20 @@ async def get_options() -> Options:
         search_modes=tuple(SearchMode),
         fusions=tuple(Fusion),
         rerankers=tuple(Reranker),
-        # an MLX model is offered only where it can load; one already chosen still validates
-        reranker_models=tuple(name for name in rerankers if mlx_models.loadable(name)),
+        # a model is offered only where it runs under the hardware setting; one already chosen
+        # still validates, and fails to load with the reason (`hardware.device`)
+        reranker_models=tuple(
+            name for name in rerankers if hardware.device(name, accelerator) is not None
+        ),
         reranker_metadata=rerankers,
         docs=docs(),
         embedding_profiles={
             NO_EMBEDDING: None,
-            **{p: model for p, model in embedders.items() if mlx_models.loadable(model.name)},
+            **{
+                p: model
+                for p, model in embedders.items()
+                if hardware.device(model.name, accelerator) is not None
+            },
         },
         embedding_metadata=await catalogue.embedding_metadata(),
         document_statuses=DOCUMENT_STATUSES,
