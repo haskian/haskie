@@ -1,8 +1,8 @@
 """Structure-Aware Chunking: markdown cut into chunks of whole sentences, with its blocks whole.
 
 This file says what chunking does and in what order. `segment.py` holds the pure folds the steps
-hand their work to, and `chunking.md` draws why a chunk starts and ends where it does. Every step
-is one function of the same shape. `pipeline` composes them from the settings, so a step can be
+hand their work to, and `docs/chunking.md` draws why a chunk starts and ends where it does. Every
+step is one function of the same shape. `pipeline` composes them from the settings, so a step can be
 added, dropped or moved there alone:
 
     markdown   blocks     -> sentences -> sections -> [frames] -> pack -> locate

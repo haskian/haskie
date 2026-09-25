@@ -1,0 +1,63 @@
+# Runtime
+
+The UI stays responsive while the machine indexes. Two rules make that work: every IO is awaited,
+and every piece of CPU work holds a slot of one budget.
+
+```mermaid
+flowchart TB
+    subgraph process["one process"]
+        subgraph litestar["Litestar event loop"]
+            req["requests"]
+        end
+        subgraph dbos["DBOS event loop"]
+            wf["queued workflows<br/>and their steps"]
+        end
+        pool["worker threads"]
+        sem{{"cpu_budget semaphore<br/>(threading)"}}
+    end
+    req -- "await" --> io["SQLite (aiosqlite),<br/>LanceDB (async API),<br/>files (anyio)"]
+    wf -- "await" --> io
+    req -- "cpu.on_cpu" --> sem
+    wf -- "cpu.on_cpu" --> sem
+    sem --> pool
+    pool --> cpu["chunk, embed, rerank,<br/>previews, load a model"]
+    pool -- "off_interpreter" --> procs["process pool:<br/>PDF page conversion"]
+```
+
+- **IO is async.** Every handler is `async def`. SQLite goes through `aiosqlite`, one connection
+  per unit of work. LanceDB goes through its async API. Files go through `anyio`, with
+  `os.replace` and `shutil.rmtree` in a worker thread because they have no async form.
+- **CPU work is sync, in a thread.** `cpu.on_cpu` runs it in a worker thread and holds one slot of
+  the `pipeline.cpu_budget` semaphore for as long as it runs. PDF page conversion goes one step
+  further, to a process pool (`cpu.off_interpreter`), while the thread holds the slot. A pipeline
+  step holds a slot for its CPU part only, never for the IO around it.
+- **Two loops, nothing shared.** Litestar and DBOS each run an event loop. They share no
+  loop-bound primitive, so the budget is a `threading` semaphore, each loop has its own thread
+  limiter, and the search fan-out builds its semaphore per call.
+
+## Where blocking IO remains
+
+Sync IO runs in worker threads wherever a library has no async form. The main cases:
+
+- `document/convert.py`: the parsers take a path and read it themselves.
+- `home.atomic_write_sync`, `home.remove_tree`, and the move or copy of an imported original.
+- `indexing/embed_cache.py`: pyarrow reads and writes parquet synchronously.
+- Reading line windows of a document's markdown, for search and the line view.
+- DBOS launch, destroy and garbage collection, through sync SQLAlchemy.
+- `db._migrate_sync`: the schema script and the one-time WAL switch, before anything else opens
+  the file.
+
+## Model loads
+
+ONNX Runtime holds the GIL while it builds a session, and the CoreML provider compiles the model
+inside that build. Every request waits for as long as the build takes, which can be seconds. Two
+things bound it. CoreML keeps compiled models under `cache/models`, so a model compiles once per
+home. ONNX cross-encoders always build on CPU, where scoring a few dozen candidates takes
+milliseconds. MLX rerankers run on Metal instead.
+
+A downloaded model still has to load into the process. A boot that finds a finished download warms
+it in a background task and reports it ready only after that. A search that needs a model still
+downloading, warming or failed fails fast with a 503. While it downloads, the message names the
+download operation.
+
+Code: `cpu.py`, `db.py`, `home.py`, `indexing/embed.py`, `indexing/models.py`.

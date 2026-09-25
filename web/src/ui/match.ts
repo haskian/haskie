@@ -19,7 +19,7 @@ export function headingOf(match: Match): string {
   return isHit(match) ? (match.headings.at(-1) ?? '') : lastHeading(match.header)
 }
 
-/** What each of the chunker's cut rules means (see `indexing/chunking.md`), for the edges of a
+/** What each of the chunker's cut rules means (see `docs/chunking.md`), for the edges of a
  *  chunk on screen. Typed by the API's own enum, so a new rule fails the build until it is named. */
 export const CUT_REASONS: Record<Hit['start_reason'], string> = {
   edge: 'start or end of the text',
