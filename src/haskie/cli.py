@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 import typer
 
-from haskie import APP_VERSION, claude, home
+from haskie import APP_VERSION, claude, home, shutdown
 from haskie.claude import DEFAULT_HOST, DEFAULT_PORT, MCP_URL, Scope
 from haskie.errors import HaskieError
 
@@ -182,8 +182,12 @@ def _serving(url: str) -> bool:
 # The graceful budget `run` gives uvicorn, and what `stop` allows on top of it: the app's own
 # shutdown hook waits for DBOS as well (see `workflows.stop`), which uvicorn's timeout does not
 # cover, so the deadline here is the drain plus that wait plus a little slack.
-STOP_DEADLINE = SHUTDOWN_DRAIN + 15.0
-FORCE_DEADLINE = 5.0  # after the force signal there is nothing left to wait for but the exit
+STOP_DEADLINE = SHUTDOWN_DRAIN + shutdown.WORKFLOW_GRACE + 5.0
+# By the time `stop` hurries a server, the drain is long over and the hooks are waiting on DBOS.
+# The hurry ends that wait at once, so what is left is the interpreter's exit, which
+# `shutdown.EXIT_GRACE` bounds, plus slack for the pool shutdown and the process teardown.
+FORCE_DEADLINE = shutdown.EXIT_GRACE + 5.0
+KILL_DEADLINE = 5.0  # SIGKILL cannot be refused; this is only the kernel tearing the process down
 
 
 def _signal(pid: int, number: int) -> bool:
@@ -200,10 +204,12 @@ def stop(home_dir: HomeOption = None) -> None:
     """Stop the haskie serving this home.
 
     SIGTERM first, so uvicorn's graceful shutdown runs the app's shutdown hooks: they stop the
-    pipeline and hand the home lock back. A server still there after `STOP_DEADLINE` gets a SIGINT,
-    which is what uvicorn force-quits on once it is already shutting down - the hooks themselves
-    are unbounded, and DBOS can outlast the drain `run` bounds. In-flight operations are durable,
-    so a forced exit costs a recovery at the next boot rather than the work.
+    pipeline and hand the home lock back. A server still there after `STOP_DEADLINE` gets a SIGINT.
+    By then the drain `run` bounds is over and the hooks are waiting for DBOS to finish running
+    workflows, so the SIGINT hurries that wait (see `workflows._destroy_dbos`) rather than skipping
+    any hook. A server still there after that is stuck somewhere no signal handler runs, and gets
+    a SIGKILL. In-flight operations are durable, so a forced exit costs a recovery at the next
+    boot rather than the work.
 
     The lock is both how this finds the server and how it knows the server is gone; nothing else
     is left behind to clean up (see `home.running_pid`).
@@ -221,11 +227,16 @@ def stop(home_dir: HomeOption = None) -> None:
         if pid is None or not _signal(pid, signal.SIGTERM):
             typer.echo(f"no haskie is running for {home.HOME}")
             return
-        if not _poll_until(released, STOP_DEADLINE):
+        gone = _poll_until(released, STOP_DEADLINE)
+        if not gone:
             typer.echo(f"haskie (pid {pid}) is still finishing; forcing it")
-            if _signal(pid, signal.SIGINT) and not _poll_until(released, FORCE_DEADLINE):
-                typer.echo(f"haskie (pid {pid}) did not stop; kill it by hand", err=True)
-                raise typer.Exit(code=1)
+            gone = not _signal(pid, signal.SIGINT) or _poll_until(released, FORCE_DEADLINE)
+        if not gone:
+            typer.echo(f"haskie (pid {pid}) ignored the force; killing it")
+            gone = not _signal(pid, signal.SIGKILL) or _poll_until(released, KILL_DEADLINE)
+        if not gone:
+            typer.echo(f"haskie (pid {pid}) did not stop; kill it by hand", err=True)
+            raise typer.Exit(code=1)
     except PermissionError as exc:  # another user's process: no later signal can go through either
         typer.echo(f"cannot stop pid {pid}: {exc}", err=True)
         raise typer.Exit(code=1) from exc

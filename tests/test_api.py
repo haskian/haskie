@@ -33,11 +33,17 @@ from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection, MemberStatus
 from haskie.document import document
 from haskie.document.document import DocumentStatus
-from haskie.indexing import mlx_models
+from haskie.indexing import gguf_models, mlx_models
 from haskie.indexing.chunk import Chunk, Piece
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order
-from haskie.settings import DEFAULT_RERANKER
+from haskie.settings import (
+    DEFAULT_RERANKER,
+    Accelerator,
+    PipelineSettings,
+    UserSettings,
+    save_user_settings,
+)
 
 from conftest import (  # isort: skip
     api_app,
@@ -434,7 +440,7 @@ async def test_collection_reranker_override_starts_its_download(
     from haskie.indexing import embed
 
     loaded: list[str] = []
-    monkeypatch.setattr(embed, "warm_reranker", loaded.append)
+    monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: loaded.append(name))
     override = "jinaai/jina-reranker-v1-turbo-en"
 
     saved = await ready.put(
@@ -447,9 +453,9 @@ async def test_collection_reranker_override_starts_its_download(
     await wait_for(f"dl:reranker:{override}")
     assert loaded == [override], "the PUT started the download"
     listed = (await ready.get("/api/status")).json()["models"]
-    assert [(m["kind"], m["name"], m["state"]) for m in listed] == [
-        ("reranker", override, "ready")
-    ], "and /api/status reports it like any other required model"
+    assert [(m["kind"], m["name"], m["state"], m["device"]) for m in listed] == [
+        ("reranker", override, "ready", "cpu")
+    ], "and /api/status reports it like any other required model, with where it runs"
 
 
 async def test_status_reports_an_unreadable_settings_row(ready: AsyncTestClient) -> None:
@@ -471,7 +477,7 @@ async def test_status_reports_an_unreadable_settings_row(ready: AsyncTestClient)
 async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     status = (await client.get("/api/status")).json()
     assert (status["initialized"], status["embedding"], status["models"]) == (False, None, [])
-    assert status["home"] == str(home.HOME) and status["device"]
+    assert status["home"] == str(home.HOME)
 
     options = (await client.get("/api/options")).json()
     assert "anydoc" in options["parsers"] and "hybrid" in options["search_modes"]
@@ -479,7 +485,9 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     assert options["embedding_profiles"]["compact"]["dims"] == 384
     # the catalogue, read from the database: full-text only first, then the models by size
     profiles = options["embedding_profiles"]
-    assert list(profiles)[:2] == ["none", "compact"] and profiles["none"] is None
+    assert next(iter(profiles)) == "none" and profiles["none"] is None
+    sizes = [model["dims"] for model in profiles.values() if model]
+    assert "compact" in profiles and sizes == sorted(sizes), "the smaller vectors first"
     metadata = options["embedding_metadata"]
     assert set(metadata) == set(await catalogue.embedders()), "every profile's, offered or not"
     assert set(profiles) - {"none"} <= set(metadata), "metadata for every offered model"
@@ -499,7 +507,7 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     assert metadata["nomic-v1.5-512"]["parameters"] == metadata["nomic-v1.5"]["parameters"]
     reranker = options["reranker_metadata"][DEFAULT_RERANKER]
     assert (reranker["parameters"], reranker["context_tokens"]) == (22714113, 512)
-    assert (reranker["runtime"], reranker["devices"]) == ("onnx", ["cpu"])
+    assert (reranker["runtime"], reranker["devices"]) == ("onnx", ["cpu", "apple_silicon", "gpu"])
     assert "dimensions" not in reranker, "a reranker has no vectors"
     assert options["reranker_models"][0] == DEFAULT_RERANKER, "the default is the smallest"
     # the vocabularies the UI renders rows with, so it never spells a status out for itself
@@ -540,6 +548,35 @@ async def test_the_options_offer_mlx_models_only_where_mlx_is_installed(
     rerankers = set(options["reranker_models"]) & mlx_rerankers
     assert rerankers == (mlx_rerankers if installed else set()), name
     assert mlx_rerankers <= set(options["reranker_metadata"]), "metadata, offered or not"
+
+
+@pytest.mark.parametrize(
+    ("name", "installed", "accelerator", "offer"),
+    [
+        ("llama.cpp installed", True, "auto", True),
+        ("no llama.cpp", False, "auto", False),
+        ("the settings ask for the CPU, which llama.cpp is not run on", True, "cpu", False),
+    ],
+)
+async def test_the_options_offer_gguf_profiles_only_where_they_run(
+    client: AsyncTestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    installed: bool,
+    accelerator: Accelerator,
+    offer: bool,
+) -> None:
+    monkeypatch.setattr(gguf_models, "available", lambda: installed)
+    await save_user_settings(UserSettings(pipeline=PipelineSettings(accelerator=accelerator)))
+    embedders = await catalogue.embedders()
+    gguf = {profile for profile, model in embedders.items() if model.name in gguf_models.PINS}
+
+    options = (await client.get("/api/options")).json()
+
+    assert {embedders[profile].name for profile in gguf} == set(gguf_models.PINS)
+    offered = set(options["embedding_profiles"]) & gguf
+    assert offered == (gguf if offer else set()), name
+    assert gguf <= set(options["embedding_metadata"]), "metadata, offered or not"
 
 
 @pytest.mark.parametrize(

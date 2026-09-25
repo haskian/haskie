@@ -2,6 +2,7 @@
 
 import functools
 import shutil
+import signal
 import sqlite3
 import threading
 import time
@@ -50,16 +51,34 @@ def fast_runtime() -> None:
     `workflows.start` reads them when it registers the queues, so assigning here is enough.
     `CONVERT_WORKERS = 0` extracts PDFs inline: a process pool per xdist worker costs more to
     start than the tests would save. `test_cpu_pool` is the one module that puts that back.
+    ONNX Runtime's telemetry goes off as the app turns it off (`embed.onnx_runtime`): some tests
+    import fastembed without passing through the app, and a worker exiting mid-upload crashes.
 
     The step retry intervals are not here: DBOS copies them into the decorator at import, so the
     two retry tests pay the real wait. `-n auto` absorbs it.
     """
     from haskie import cpu
-    from haskie.indexing import workflows
+    from haskie.indexing import embed, workflows
 
+    embed.onnx_runtime()
     workflows.OPERATION_POLL = 0.02
     workflows.TASK_POLL = 0.02
     cpu.CONVERT_WORKERS = 0
+
+
+@pytest.fixture
+def server_handler() -> Iterator[list[int]]:
+    """Stand in for the server: a Python handler on SIGINT and SIGTERM that records each call, in
+    the order the calls came. Whatever a test installs over it is put back afterwards."""
+    from haskie import shutdown
+
+    seen: list[int] = []
+    found = {number: signal.getsignal(number) for number in shutdown.SHUTDOWN_SIGNALS}
+    for number in shutdown.SHUTDOWN_SIGNALS:
+        signal.signal(number, lambda n, _frame: seen.append(n))
+    yield seen
+    for number, handler in found.items():
+        signal.signal(number, handler)
 
 
 @pytest.fixture(scope="session")

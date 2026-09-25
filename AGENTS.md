@@ -16,6 +16,7 @@ src/haskie/
   claude_code/  skill and rule files installed into Claude Code
   app.py        Litestar app; cli.py the CLI; claude.py the Claude Code install
   settings.py   settings; db.py SQLite; tables.py its schema (Core); home.py ~/.haskie; cpu.py CPU
+  shutdown.py   which shutdown signals count, and how long the exit may take
 tests/          by area: flat test_*.py plus document/, indexing/, search/
 docs/           one page per topic, with diagrams; update it when behavior changes
 web/            React + TypeScript UI (Bun)

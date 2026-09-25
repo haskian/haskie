@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.9.2 - 2026-09-25
+#### Bug Fixes
+- bound every stage of shutdown so Ctrl-C and stop always end the server (#17) - (4551ca0) - Črtomir Majer
+
+- - -
+
 ## v0.9.1 - 2026-09-25
 #### Refactoring
 - (**db**) SQLAlchemy Core tables as the one schema source (#16) - (6efeb62) - Črtomir Majer

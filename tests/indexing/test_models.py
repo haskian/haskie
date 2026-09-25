@@ -334,7 +334,7 @@ async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> 
     """A reranker chosen for one collection is a model the installation needs: nothing else would
     ever fetch it, and the first search of that collection would fail with "not loaded yet"."""
     loaded: list[str] = []
-    monkeypatch.setattr(embed, "warm_reranker", loaded.append)
+    monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: loaded.append(name))
     override = "jinaai/jina-reranker-v1-turbo-en"
     collection = await Collection.create("picky")
     await collection.set_overrides(
@@ -365,7 +365,7 @@ async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> N
     """The list is the read model of the `ensure_model` workflows, so it has one row per model
     the settings ask for, whatever state it is in."""
     monkeypatch.setattr(embed, "warm", lambda name, accelerator: None)
-    monkeypatch.setattr(embed, "warm_reranker", lambda name: None)
+    monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: None)
     user = await save_user_settings(
         UserSettings(
             embedding="compact",

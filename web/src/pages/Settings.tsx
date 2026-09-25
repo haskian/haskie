@@ -135,6 +135,7 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
         setSaved(true)
         setError(null)
         void refreshStatus() // the profile or the reranker may need a model the status bar lacks
+        api.options().then(setOptions).catch(() => undefined) // the models offered follow the hardware
       })
       .catch((failure: unknown) => setError(errorText(failure)))
   }
@@ -154,7 +155,7 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
           </Field>
           <Field label={docFor(docs, 'pipeline.accelerator').title} help={docFor(docs, 'pipeline.accelerator').description}>
             <Picker
-              ariaLabel="Embedding hardware"
+              ariaLabel={docFor(docs, 'pipeline.accelerator').title}
               options={choices(options.accelerators)}
               value={settings.pipeline.accelerator}
               onChange={(accelerator) => pipeline({ accelerator })}

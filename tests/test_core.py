@@ -10,9 +10,11 @@ import base64
 import io
 import random
 import sqlite3
+import sys
 import threading
+import types
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
 from pathlib import Path
 
@@ -65,6 +67,7 @@ from haskie.indexing.chunk import Chunk, Piece, Position
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order, PageRequest
 from haskie.settings import (
+    Accelerator,
     Chunker,
     ChunkSettings,
     CollectionOverrides,
@@ -1932,7 +1935,14 @@ async def test_cross_encode_rescores_candidates_best_first(
         checked.append((kind, model))
 
     monkeypatch.setattr(models, "require_ready", require_ready)
-    monkeypatch.setattr(embed, "rerank_scores", lambda model, q, ts: [float(len(t)) for t in ts])
+    hardware: list[Accelerator] = []
+
+    def rerank_scores(model: str, accelerator: Accelerator, q: str, ts: list[str]) -> list[float]:
+        hardware.append(accelerator)
+        return [float(len(t)) for t in ts]
+
+    monkeypatch.setattr(embed, "rerank_scores", rerank_scores)
+    await save_user_settings(UserSettings(pipeline=PipelineSettings(accelerator=Accelerator.CPU)))
     settings = SearchSettings(reranker=Reranker.CROSS_ENCODER)
     rows = [{"text": text, FTS_COLUMN: text, "frame": [], "_score": 9.0} for text in texts]
 
@@ -1940,6 +1950,7 @@ async def test_cross_encode_rescores_candidates_best_first(
 
     assert [row_score(row) for row in ranked] == expected, name
     assert checked == [("reranker", settings.reranker_model)], name
+    assert hardware == [Accelerator.CPU], f"{name}: on the hardware the settings choose"
 
 
 @pytest.mark.anyio
@@ -2785,16 +2796,28 @@ async def test_connect_rolls_back_a_failed_unit_of_work() -> None:
     ("name", "available", "accelerator", "expected"),
     [
         (
-            "cuda wins over coreml",
+            "cuda first; auto never takes coreml",
             ["CPUExecutionProvider", "CoreMLExecutionProvider", "CUDAExecutionProvider"],
             "auto",
-            ["CUDAExecutionProvider", "CoreMLExecutionProvider", "CPUExecutionProvider"],
+            ["CUDAExecutionProvider", "CPUExecutionProvider"],
         ),
         (
-            "apple silicon -> coreml then cpu",
+            "apple silicon on auto: the cpu, coreml available or not",
             ["CoreMLExecutionProvider", "AzureExecutionProvider", "CPUExecutionProvider"],
             "auto",
+            ["CPUExecutionProvider"],
+        ),
+        (
+            "coreml when asked for, then cpu",
+            ["CoreMLExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
+            "coreml",
             ["CoreMLExecutionProvider", "CPUExecutionProvider"],
+        ),
+        (
+            "coreml asked for where there is none: the cpu",
+            ["CUDAExecutionProvider", "CPUExecutionProvider"],
+            "coreml",
+            ["CPUExecutionProvider"],
         ),
         ("cpu only", ["CPUExecutionProvider"], "auto", ["CPUExecutionProvider"]),
         (
@@ -2817,8 +2840,48 @@ def test_select_providers(
     assert embed.select_providers(available, accelerator) == expected, name
 
 
-def test_device_name_is_the_first_provider_without_its_suffix() -> None:
-    assert embed.device_name("cpu") == "CPU"
+def test_onnx_runtime_comes_with_its_telemetry_off_once(monkeypatch) -> None:
+    """Its telemetry thread crashed processes exiting mid-upload (`embed.onnx_runtime`)."""
+    calls: list[str] = []
+    stand_in = types.SimpleNamespace(disable_telemetry_events=lambda: calls.append("off"))
+    monkeypatch.setitem(sys.modules, "onnxruntime", stand_in)
+    embed.onnx_runtime.cache_clear()
+    try:
+        assert embed.onnx_runtime() is stand_in
+        assert embed.onnx_runtime() is stand_in
+    finally:
+        embed.onnx_runtime.cache_clear()
+
+    assert calls == ["off"], "once per process"
+
+
+@pytest.mark.parametrize(
+    ("name", "length", "multiple", "expected"),
+    [
+        ("a fixed length shorter than a row: padded to the longest", 2, None, [5, 5]),
+        ("already padding to the longest: unchanged", None, None, [5, 5]),
+        ("a fixed length with a multiple: the multiple stays", 2, 4, [8, 8]),
+    ],
+)
+def test_every_batch_pads_to_its_own_longest_row(
+    name: str, length: int | None, multiple: int | None, expected: list[int]
+) -> None:
+    """On a real `tokenizers.Tokenizer`, padded as a model's `tokenizer.json` may ship it."""
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+
+    words = ["[PAD]", "[UNK]", "a", "job", "retries", "the", "call"]
+    tokenizer = Tokenizer(WordLevel({word: i for i, word in enumerate(words)}, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+    tokenizer.enable_padding(pad_token="[PAD]", length=length, pad_to_multiple_of=multiple)
+
+    embed.pad_to_longest(tokenizer)
+
+    rows = tokenizer.encode_batch(["a job retries the call", "a call"])
+    assert [len(row.ids) for row in rows] == expected, name
+    padding = tokenizer.padding
+    assert padding is not None and (padding["pad_token"], padding["length"]) == ("[PAD]", None)
 
 
 @pytest.mark.parametrize(
@@ -2838,29 +2901,79 @@ def test_with_options_attaches_the_coreml_cache_only(name, names, expected) -> N
     assert [embed.provider_name(p) for p in got] == names, name
 
 
-def test_cross_encoders_build_on_cpu_whatever_the_accelerator(monkeypatch) -> None:
-    """The CoreML build of a reranker stalled the app for seconds; CPU scores `candidates` texts
-    in milliseconds, so the accelerator setting does not reach it."""
-    import fastembed.rerank.cross_encoder as module
+CPU, CUDA = "CPUExecutionProvider", "CUDAExecutionProvider"
+MINILM = "Xenova/ms-marco-MiniLM-L-6-v2"
+ON_COREML = [embed.COREML, CPU]
+RERANK, EMBED = embed._cross_encoder, embed._model
+ETTIN, BGE, JINA_V3 = (
+    "cross-encoder/ettin-reranker-68m-v1",
+    "BAAI/bge-small-en-v1.5",
+    "jinaai/jina-embeddings-v3",
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "build", "model", "accelerator", "available", "expected"),
+    [
+        ("auto: CUDA if installed", RERANK, MINILM, "auto", [CUDA, CPU], [CUDA, CPU]),
+        ("cpu: the CPU, CUDA or not", RERANK, MINILM, "cpu", [CUDA, CPU], [CPU]),
+        ("coreml: CoreML, with its cache", RERANK, MINILM, "coreml", ON_COREML, ON_COREML),
+        ("a headed cross-encoder the same", RERANK, ETTIN, "coreml", ON_COREML, ON_COREML),
+        ("an embedder the same", EMBED, BGE, "coreml", ON_COREML, ON_COREML),
+        ("too large for CoreML: without it", EMBED, JINA_V3, "coreml", ON_COREML, [CPU]),
+    ],
+)
+def test_every_onnx_model_runs_on_the_hardware_the_settings_choose(
+    name: str,
+    build: Callable[[str, Accelerator], object],
+    model: str,
+    accelerator: Accelerator,
+    available: list[str],
+    expected: list,
+    monkeypatch,
+) -> None:
+    """Rerankers once ran on the CPU whatever the setting, on the claim that they score in
+    milliseconds: measured, 50 candidates take 0.6 s (MiniLM-L6) to 3.3 s (bge-reranker-base)."""
+    import fastembed
+    import fastembed.rerank.cross_encoder as cross_encoder
+
+    from haskie.indexing import onnx_rerank
 
     seen: list[list] = []
 
     class Recorder:
-        def __init__(self, model_name: str, providers: list) -> None:
+        model = None  # no ONNX model inside: nothing to pad
+
+        def __init__(self, *args: object, providers: list, **_: object) -> None:
             seen.append(providers)
 
         @classmethod
         def add_custom_model(cls, **_: object) -> None:  # the registration of mxbai and the like
             pass
 
-    monkeypatch.setattr(module, "TextCrossEncoder", Recorder)
+        @staticmethod
+        def _list_supported_models() -> list:
+            return [types.SimpleNamespace(model=model, additional_files=[])]
+
+    stand_in = types.SimpleNamespace(get_available_providers=lambda: available)
+    monkeypatch.setattr(embed, "onnx_runtime", lambda: stand_in)
+    monkeypatch.setattr(cross_encoder, "TextCrossEncoder", Recorder)
+    headed = lambda model, providers: seen.append(providers)  # noqa: E731
+    monkeypatch.setattr(onnx_rerank, "HeadedCrossEncoder", headed)
+    monkeypatch.setattr(fastembed, "TextEmbedding", Recorder)
+    monkeypatch.setattr(embed, "_register_custom", lambda: None)
+    monkeypatch.setattr(embed, "_register_custom_rerankers", lambda: None)
     embed._build_cross_encoder.cache_clear()
-    embed._register_custom_rerankers.cache_clear()
+    embed._build_model.cache_clear()
     try:
-        embed._cross_encoder("Xenova/ms-marco-MiniLM-L-6-v2")
+        build(model, accelerator)
     finally:
         embed._build_cross_encoder.cache_clear()
-    assert seen == [["CPUExecutionProvider"]]
+        embed._build_model.cache_clear()
+
+    # CoreML comes with its compiled-model cache, in this test's home
+    cache = {"ModelCacheDirectory": str(home.MODEL_CACHE)}
+    assert seen == [[(one, cache) if one == embed.COREML else one for one in expected]], name
 
 
 @pytest.mark.parametrize(
@@ -2891,7 +3004,7 @@ def test_a_vector_is_stored_whole_or_cut_as_the_profile_says(
 def test_embedding_helpers_short_circuit_on_empty_input() -> None:
     """No text means no model, so neither call may download anything."""
     assert embed.embed_texts(COMPACT, []) == []
-    assert embed.rerank_scores("Xenova/ms-marco-MiniLM-L-6-v2", "q", []) == []
+    assert embed.rerank_scores("Xenova/ms-marco-MiniLM-L-6-v2", Accelerator.AUTO, "q", []) == []
 
 
 @pytest.mark.parametrize(

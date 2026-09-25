@@ -18,6 +18,7 @@ the mechanism - how often the embed work ran, which workflow ran it - and not on
 """
 
 import os
+import signal
 import threading
 import time
 from collections import Counter
@@ -56,7 +57,7 @@ from dbos._error import DBOSAwaitedWorkflowCancelledError
 from dbos._registrations import get_dbos_func_name
 from sqlalchemy import insert, update
 
-from haskie import audit, cpu, db, home, paging, settings
+from haskie import audit, cpu, db, home, paging, settings, shutdown
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import maintenance
@@ -2501,3 +2502,100 @@ async def test_a_slices_input_reads_back_after_its_context_changed_shape(
         (changed, doc.name, 7)
     }
     assert len(await operations.list_tasks(import_id)) == 2
+
+
+FINISH_SECONDS = 0.2  # how long a fake destroy that finishes takes to
+
+
+@pytest.mark.parametrize(
+    "destroy",
+    ["blocks", "finishes"],
+    ids=["a second signal ends a wait that would not end", "without a signal it runs to its end"],
+)
+async def test_a_second_signal_cuts_the_shutdown_wait_short(
+    destroy: str,
+    server_handler: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`DBOS.destroy` waits out running workflows in a sleep loop no signal interrupts, and the
+    server only notes a signal that lands during shutdown. The wait must still end on one, the
+    server's own handler must still see it, and without one the wait runs to its end."""
+    hurried = destroy == "blocks"
+    release = threading.Event()  # lets a blocked fake end once the test is done with it
+    grace: list[int] = []
+
+    def fake_destroy(*, workflow_completion_timeout_sec: int) -> None:
+        grace.append(workflow_completion_timeout_sec)
+        if hurried:  # from inside destroy, so the listener is already there to hear it
+            os.kill(os.getpid(), signal.SIGINT)
+        release.wait(60 if hurried else FINISH_SECONDS)
+
+    monkeypatch.setattr(workflows.DBOS, "destroy", fake_destroy)
+    shutdown.debounce_signals()  # what the app's startup does to the server's handlers
+    counted = signal.getsignal(signal.SIGINT)
+    started = time.monotonic()
+    try:
+        stopped = await workflows._destroy_dbos()
+        waited = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert signal.getsignal(signal.SIGINT) is counted, "shutdown leaves the handlers as found"
+    assert grace == [shutdown.WORKFLOW_GRACE]
+    assert server_handler == ([signal.SIGINT] if hurried else [])
+    assert stopped is not hurried
+    assert ("shutdown_hurried" in events(caplog)) is hurried, "logged exactly when hurried"
+    if hurried:
+        assert waited < 5, "the signal ended a wait of a minute"
+    else:
+        assert waited >= FINISH_SECONDS, "shutdown waited for destroy to finish"
+
+
+async def test_a_failed_destroy_reaches_the_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The destroy thread's failure is raised again on the loop that awaits it."""
+
+    def fake_destroy(*, workflow_completion_timeout_sec: int) -> None:
+        raise RuntimeError("system database gone")
+
+    monkeypatch.setattr(workflows.DBOS, "destroy", fake_destroy)
+
+    with pytest.raises(RuntimeError, match="system database gone"):
+        await workflows._destroy_dbos()
+
+
+async def test_work_a_shutdown_takes_away_is_recovered_not_failed(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hurried shutdown closes the extraction pool while DBOS still runs steps. The step that
+    loses its extraction must record nothing: an error would be retried into a closed pool, three
+    times inside the exit grace, and fail the document. So it stays pending, and the next boot
+    finishes it."""
+    row = await import_row("cut.pdf", text_pdf(["cut short"]), tmp_path)
+    interrupted = threading.Event()
+    extract = convert.pdf_pages_markdown
+
+    def shut_down_once(*args, **kwargs):
+        if not interrupted.is_set():
+            interrupted.set()
+            raise shutdown.ShuttingDown("the extraction pool shut down under this call")
+        return extract(*args, **kwargs)
+
+    monkeypatch.setattr(convert, "pdf_pages_markdown", shut_down_once)
+    import_id = await dbos.start_import(row.name)
+    assert await wait_event(interrupted), "the extraction never ran"
+    await anyio.sleep(workflows.RETRY_INTERVAL_SECONDS * 2)  # past a first retry, were there one
+
+    [convert_task] = [
+        task for task in await operations.list_tasks(import_id) if task.stage == Stage.CONVERT
+    ]
+    run_ids = [import_id, convert_task.child_id]
+    runs = await DBOS.list_workflows_async(workflow_ids=run_ids, load_output=False)
+    steps = await DBOS.list_workflow_steps_async(convert_task.child_id)
+    assert [run.status for run in runs] == ["PENDING"] * 2, "not failed, and not cancelled either"
+    assert [step["error"] for step in steps] == [None] * len(steps), "no step recorded an error"
+    assert (await document.get(row.name)).status != DocumentStatus.ERROR
+
+    await restart_dbos()  # the boot recovers what the shutdown left pending
+
+    assert await wait_for(import_id) == "imported"

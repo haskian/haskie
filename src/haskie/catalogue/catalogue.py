@@ -2,14 +2,14 @@
 profiles a user picks from. It lives in the database (`models`, `embedding_profiles`), seeded once
 from `seed.sql`, so this module reads it and holds none of it.
 
-How a model loads stays in code: the pinned revisions in `embed`, `onnx_rerank` and `mlx_models`
-name reviewed code and weights, and a row cannot add a loader. Settings name a profile and a
-reranker model by key, and those keys are checked here, because a settings struct decodes without
-the database: at the write boundaries (`check`), and when the stored row is read (`unknown`).
+How a model loads stays in code: the pinned revisions in `embed`, `onnx_rerank`, `mlx_models` and
+`gguf_models` name reviewed code and weights, and a row cannot add a loader. Settings name a
+profile and a reranker model by key, and those keys are checked here, because a settings struct
+decodes without the database: at the write boundaries (`check`), and when the stored row is read
+(`unknown`).
 """
 
 import hashlib
-from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -22,7 +22,7 @@ from haskie import db, home
 from haskie.errors import InvalidInput
 from haskie.indexing import hardware
 from haskie.indexing.hardware import Device, Runtime
-from haskie.settings import NO_EMBEDDING, Accelerator, CollectionOverrides, UserSettings
+from haskie.settings import NO_EMBEDDING, Accelerator, CollectionOverrides, Reranker, UserSettings
 from haskie.tables import embedding_profiles, models
 
 
@@ -155,13 +155,11 @@ async def embedders() -> dict[str, EmbeddingModel]:
     return cached
 
 
-def _metadata[M: ModelMetadata](
-    record: dict[str, Any], kind: type[M], devices: Callable[[str], tuple[Device, ...]]
-) -> M:
+def _metadata[M: ModelMetadata](record: dict[str, Any], kind: type[M]) -> M:
     """A record of `_METADATA`, with what the loaders say about its model. The conversion checks
     each column's type, so a malformed `released` fails here, not in a client."""
     name = record["name"]
-    hosting = {"runtime": hardware.runtime(name), "devices": devices(name)}
+    hosting = {"runtime": hardware.runtime(name), "devices": hardware.devices(name)}
     return msgspec.convert(record | hosting, kind)
 
 
@@ -178,10 +176,7 @@ async def embedding_metadata() -> dict[str, EmbedderMetadata]:
             embedding_profiles.c.dims.label("dimensions"),
         )
     )
-    return {
-        record["profile"]: _metadata(record, EmbedderMetadata, hardware.embedder_devices)
-        for record in records
-    }
+    return {record["profile"]: _metadata(record, EmbedderMetadata) for record in records}
 
 
 async def rerankers() -> dict[str, RerankerMetadata]:
@@ -191,10 +186,7 @@ async def rerankers() -> dict[str, RerankerMetadata]:
         .where(models.c.kind == "reranker")
         .order_by(models.c.parameters, models.c.name)
     )
-    return {
-        record["name"]: _metadata(record, RerankerMetadata, hardware.reranker_devices)
-        for record in records
-    }
+    return {record["name"]: _metadata(record, RerankerMetadata) for record in records}
 
 
 async def embedding_model(settings: UserSettings) -> EmbeddingModel | None:
@@ -229,8 +221,26 @@ async def _exists(conn: AsyncConnection, statement: Select[Any]) -> bool:
 
 
 async def check(settings: UserSettings | CollectionOverrides) -> None:
-    """Reject settings that name a profile or a reranker model the catalogue does not hold."""
+    """Reject settings that name a profile or a reranker model the catalogue does not hold, or
+    user settings whose hardware setting leaves a model they use nowhere to run. Only here, where
+    settings are written: a stored row that no longer runs still loads, and its model reports why.
+    """
     async with db.connect() as conn:
         problem = await unknown(conn, settings)
+    if not problem and isinstance(settings, UserSettings):
+        problem = await _stranded(settings)
     if problem:
         raise InvalidInput(problem)
+
+
+async def _stranded(settings: UserSettings) -> str:
+    """The models `settings` use that `hardware.device` finds no device for, as one message."""
+    accelerator = settings.pipeline.accelerator
+    used = []
+    if settings.embedding != NO_EMBEDDING:
+        used.append((await embedders())[settings.embedding].name)
+    if settings.search.reranker != Reranker.NONE:
+        used.append(settings.search.reranker_model)
+    return "; ".join(
+        hardware.nowhere(name) for name in used if hardware.device(name, accelerator) is None
+    )
