@@ -119,4 +119,4 @@ Before 1.0 there are no migrations. A storage change edits `tables.py` and bumps
 `PRAGMA user_version`. A home written with another version is refused at startup, with a message
 that says so. The fix is `haskie destroy` and a fresh import.
 
-Code: `tables.py`, `db.py`, `home.py`, `sysdb.py`.
+Code: `tables.py`, `db.py`, `catalogue/catalogue.py`, `catalogue/seed.sql`, `home.py`, `sysdb.py`.
