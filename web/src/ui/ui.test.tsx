@@ -327,13 +327,13 @@ const EMBEDDER: EmbedderMetadata = {
   dimensions: 384,
 }
 const RERANKER: RerankerMetadata = {
-  description: 'Listwise: reads every candidate together and ranks them against each other.',
-  parameters: 596836352,
-  context_tokens: 131072,
-  languages: 'multilingual',
-  license: 'CC BY-NC 4.0 (non-commercial)',
-  released: '2025-09-18',
-  model_card_url: 'https://huggingface.co/jinaai/jina-reranker-v3',
+  description: "BAAI's multilingual reranker, 8-bit (near lossless, 607 MB).",
+  parameters: 567755777,
+  context_tokens: 8192,
+  languages: 'multilingual (100+)',
+  license: 'Apache-2.0',
+  released: '2024-03-15',
+  model_card_url: 'https://huggingface.co/BAAI/bge-reranker-v2-m3',
   runtime: 'mlx',
   devices: ['apple_silicon'],
 }
@@ -354,11 +354,11 @@ describe('ModelFacts', () => {
     },
     {
       name: 'an MLX reranker: no vector size, the extra it needs, and the card it was made from',
-      element: <ModelFacts name="jinaai/jina-reranker-v3-mlx" metadata={RERANKER} />,
+      element: <ModelFacts name="soichisumi/bge-reranker-v2-m3-mlx-affine8" metadata={RERANKER} />,
       contains: [
-        '<dt>Parameters</dt><dd>597M</dd><dt>Context</dt><dd>131K tokens</dd>',
+        '<dt>Parameters</dt><dd>568M</dd><dt>Context</dt><dd>8.2K tokens</dd>',
         '<dt>Runtime</dt><dd>MLX (the mlx extra)</dd><dt>Devices</dt><dd>Apple Silicon</dd>',
-        'href="https://huggingface.co/jinaai/jina-reranker-v3"',
+        'href="https://huggingface.co/BAAI/bge-reranker-v2-m3"',
       ],
       missing: ['Dimensions'],
     },

@@ -538,7 +538,7 @@ async def test_the_options_offer_mlx_models_only_where_mlx_is_installed(
     client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch, name: str, installed: bool
 ) -> None:
     monkeypatch.setattr(mlx_models, "available", lambda: installed)
-    mlx_rerankers = {*mlx_models.LISTWISE, *mlx_models.PAIRWISE}
+    mlx_rerankers = set(mlx_models.RERANKERS)
 
     options = (await client.get("/api/options")).json()
 

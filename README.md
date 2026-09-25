@@ -126,7 +126,13 @@ it later means running *Index all* in each one.
   `haskie[gguf]` the `-gguf` embedding profiles, which run on the GPU through llama.cpp (installing
   it compiles llama.cpp, which needs the Xcode command-line tools and cmake). Other ONNX embeddings
   run on the CPU there; the `coreml` hardware setting runs them through CoreML instead, which today
-  is slower.
+  is slower. To install both Apple Silicon extras, run this in the folder that holds the wheel, and
+  drop the one you do not need:
+
+  ```sh
+  uv tool install "haskie[mlx,gguf] @ ./haskie-<version>-py3-none-any.whl"
+  ```
+
 - **Port:** 8451 by default, clear of the usual 8000 and 8080. For another, run
   `haskie run --port <n>` and `haskie install claude --url http://127.0.0.1:<n>/mcp`, or set
   `HASKIE_PORT`, which moves the default of `run`, `ensure` and `install claude` at once.

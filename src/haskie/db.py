@@ -30,13 +30,14 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from haskie import home, tables
 from haskie.errors import HaskieError
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 """`pragma user_version` of the schema in `tables.py`.
 
 A home stamped with it has these tables and columns and is opened as it is. Any other stamp is a
 shape this build cannot read, so the home is refused (see `migrate`). Against the last release
-(17), the catalogue holds the GGUF embedders and their profiles (`gguf_models`): a seed edit
-reaches a home only through this stamp.
+(18), the catalogue drops Jina's listwise MLX rerankers (v3, v3.5) and adds mxbai-rerank-base:
+a seed edit reaches a home only through this stamp, and a home that picked a dropped one would
+name a model this build cannot load.
 
 A cache file or LanceDB table written the old way must never be read by this build.
 

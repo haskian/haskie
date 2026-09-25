@@ -223,7 +223,7 @@ def _build_cross_encoder(name: str, accelerator: Accelerator):
 
 
 # Cross-encoders fastembed does not list whose ONNX export is the whole classifier, head and all.
-CUSTOM_RERANKERS = ["mixedbread-ai/mxbai-rerank-xsmall-v1"]
+CUSTOM_RERANKERS = ["mixedbread-ai/mxbai-rerank-xsmall-v1", "mixedbread-ai/mxbai-rerank-base-v1"]
 
 
 @cache
