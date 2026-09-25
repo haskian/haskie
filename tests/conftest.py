@@ -338,11 +338,13 @@ def text_pdf(pages: list[str | None]) -> bytes:
 
 async def document_names() -> list[str]:
     """Every document name, in name order: what a test that asserts on the whole store reads."""
+    from sqlalchemy import select
+
     from haskie import db
+    from haskie.tables import documents
 
     async with db.connect() as conn:
-        rows = await conn.execute_fetchall("select name from documents order by name")
-    return [name for (name,) in rows]
+        return list(await conn.scalars(select(documents.c.name).order_by(documents.c.name)))
 
 
 async def maintenance_state(collection: str):

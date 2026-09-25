@@ -34,12 +34,15 @@ from uuid import uuid4
 import anyio
 import anyio.to_thread
 import msgspec
+from sqlalchemy import Row, delete, func, select, update
+from sqlalchemy.dialects.sqlite import insert
 
 from haskie import cpu, db, home
 from haskie.document import convert
 from haskie.errors import Conflict, InvalidInput, NotFound, NotReady, PermanentError
-from haskie.paging import Page, PageRequest, key_reader, keyset, resolve_sort
+from haskie.paging import Page, PageRequest, count_of, keyset, resolve_sort
 from haskie.settings import Parser, load_user_settings
+from haskie.tables import collection_documents, documents, staging
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 UPLOAD_MAX_BYTES = 512 * 1024 * 1024  # also the HTTP request body cap (see app.create_app)
@@ -65,9 +68,14 @@ ACTIVE_DOCUMENT_STATUSES: tuple[DocumentStatus, ...] = (
     DocumentStatus.EMBEDDING,
 )
 
-# Public sort name -> SQL expression. The whitelist is the only source of column identifiers a
-# listing can order by, so a request can never name a column (see paging.resolve_sort).
-DOCUMENT_SORTS = {"name": "name", "size": "size", "status": "status", "updated_at": "updated_at"}
+# Public sort name -> column. The whitelist is the only source of columns a listing can order by,
+# so a request can never name one (see paging.resolve_sort).
+DOCUMENT_SORTS = {
+    "name": documents.c.name,
+    "size": documents.c.size,
+    "status": documents.c.status,
+    "updated_at": documents.c.updated_at,
+}
 
 
 class Document(msgspec.Struct):
@@ -130,10 +138,7 @@ class Document(msgspec.Struct):
         return path.relative_to(home.HOME).as_posix()
 
 
-# The struct's field order is the column order, so the SELECT, the row unpack and the keyset key
-# reader cannot drift apart.
-DOCUMENT_COLUMNS: tuple[str, ...] = tuple(f.encode_name for f in msgspec.structs.fields(Document))
-DOCUMENT_SELECT = ", ".join(DOCUMENT_COLUMNS)
+DOCUMENT_COLUMNS = db.columns_of(documents, Document)
 
 
 class Listed(Document):
@@ -149,13 +154,12 @@ async def listed(docs: list[Document]) -> list[Listed]:
     counts: dict[str, int] = {}
     if names_:
         async with db.connect() as conn:
-            cursor = await conn.execute(
-                "select document, count(*) from collection_documents "
-                f"where document in ({db.placeholders(len(names_))}) group by document",
-                names_,
+            rows = await conn.execute(
+                select(collection_documents.c.document, func.count())
+                .where(collection_documents.c.document.in_(names_))
+                .group_by(collection_documents.c.document)
             )
-            rows: list[Any] = list(await cursor.fetchall())
-        counts = dict(rows)
+            counts = dict(rows.tuples().all())
     return [
         Listed(**msgspec.structs.asdict(doc), collections=counts.get(doc.name, 0)) for doc in docs
     ]
@@ -203,8 +207,9 @@ def stored_name(filename: str, rename_to: str | None = None) -> str:
     return name
 
 
-def _document(row: tuple) -> Document:
-    return db.row_to(Document, DOCUMENT_COLUMNS, row, preview=convert.Preview)
+def from_row(row: Row[Any]) -> Document:
+    """A row that selected `DOCUMENT_COLUMNS`, and maybe more, as a `Document`."""
+    return db.row_to(Document, row, preview=convert.Preview)
 
 
 # --- staging ------------------------------------------------------------------
@@ -234,8 +239,9 @@ async def stage(filename: str, content: bytes) -> Staged:
     await home.atomic_write(home.STAGING_ROOT / staging_id, content)
     async with db.connect() as conn:
         await conn.execute(
-            "insert into staging (staging_id, filename, size, created_at) values (?, ?, ?, ?)",
-            (staging_id, name, len(content), time.time()),
+            insert(staging).values(
+                staging_id=staging_id, filename=name, size=len(content), created_at=time.time()
+            )
         )
     return Staged(staging_id=staging_id, filename=name, size=len(content))
 
@@ -249,18 +255,14 @@ async def sweep_staging(max_age_seconds: float) -> int:
     """
     cutoff = time.time() - max_age_seconds
     async with db.connect() as conn:
-        cursor = await conn.execute("select staging_id, created_at from staging")
-        rows = await cursor.fetchall()
+        rows = (await conn.execute(select(staging.c.staging_id, staging.c.created_at))).all()
     staged = {staging_id for staging_id, _ in rows}
     expired = [staging_id for staging_id, created_at in rows if created_at < cutoff]
     for staging_id in expired:
         await anyio.Path(staging_path(staging_id)).unlink(missing_ok=True)
     if expired:
         async with db.connect() as conn:
-            await conn.execute(
-                f"delete from staging where staging_id in ({db.placeholders(len(expired))})",
-                expired,
-            )
+            await conn.execute(delete(staging).where(staging.c.staging_id.in_(expired)))
     deleted = len(expired)
     directory = anyio.Path(home.STAGING_ROOT)
     if not await directory.is_dir():
@@ -295,23 +297,22 @@ async def _create(name: str, size: int, options: ImportOptions) -> Document:
     )
     now = time.time()
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            "insert into documents (name, suffix, size, status, parser, skip_ocr_pages, "
-            "created_at, updated_at, description) values (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "on conflict (name) do nothing",
-            (
-                name,
-                Path(name).suffix.lower(),
-                size,
-                DocumentStatus.QUEUED,
-                parser,
-                skip,
-                now,
-                now,
-                options.description,
-            ),
+        result = await conn.execute(
+            insert(documents)
+            .values(
+                name=name,
+                suffix=Path(name).suffix.lower(),
+                size=size,
+                status=DocumentStatus.QUEUED,
+                parser=parser,
+                skip_ocr_pages=skip,
+                created_at=now,
+                updated_at=now,
+                description=options.description,
+            )
+            .on_conflict_do_nothing()
         )
-        created = cursor.rowcount == 1  # read on the open connection, before it is closed
+        created = result.rowcount == 1  # read on the open connection, before it is closed
     if not created:
         raise Conflict(f"document already exists: {name}")
     return await get(name)
@@ -343,18 +344,17 @@ async def import_staged(staging_id: str, options: ImportOptions | None = None) -
     options = options or ImportOptions()
     source = staging_path(staging_id)  # a trust boundary: the id is validated into a path here
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            "select filename from staging where staging_id = ?", (staging_id,)
+        filename = await conn.scalar(
+            select(staging.c.filename).where(staging.c.staging_id == staging_id)
         )
-        row = await cursor.fetchone()
-    if row is None or not await anyio.Path(source).is_file():
+    if filename is None or not await anyio.Path(source).is_file():
         raise NotFound(f"staged upload not found: {staging_id}")
-    final = stored_name(row[0], options.name)
+    final = stored_name(filename, options.name)
     size = (await anyio.Path(source).stat()).st_size
     document = await _create(final, size, options)
     placed = await _place(document, True, source)
     async with db.connect() as conn:
-        await conn.execute("delete from staging where staging_id = ?", (staging_id,))
+        await conn.execute(delete(staging).where(staging.c.staging_id == staging_id))
     return placed
 
 
@@ -384,42 +384,24 @@ async def import_path(path: str, options: ImportOptions | None = None) -> Docume
 async def page(request: PageRequest, status: DocumentStatus | None = None) -> Page[Document]:
     """One page of every document, optionally of one status. `total` counts the filtered rows,
     so it is what the page is a page of."""
-    sort, expression = resolve_sort(request.sort, DOCUMENT_SORTS, "name")
-    walk = keyset(sort, expression, request)
-    filters, params = [], []
-    if status is not None:
-        filters.append("status = ?")
-        params.append(status)
-    boundary, boundary_params = walk.where()
-    clauses = [*filters, *([boundary] if boundary else [])]
-    where = f"where {' and '.join(clauses)} " if clauses else ""
-    filtered = f"where {' and '.join(filters)}" if filters else ""
+    sort, column = resolve_sort(request.sort, DOCUMENT_SORTS, "name")
+    walk = keyset(sort, column, request, documents.c.name)
+    filters = [documents.c.status == status] if status is not None else []
+    listing = select(*DOCUMENT_COLUMNS).where(*filters)
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            f"select {DOCUMENT_SELECT} from documents {where}"
-            f"{walk.order_by()} limit {walk.limit()}",
-            [*params, *boundary_params],
-        )
-        rows: list[Any] = list(await cursor.fetchall())
-        cursor = await conn.execute(f"select count(*) from documents {filtered}", params)
-        (total,) = await cursor.fetchone() or (0,)  # a count always returns its one row
-    return walk.page(
-        rows,
-        build=_document,
-        key=key_reader(sort, expression, list(DOCUMENT_COLUMNS)),
-        total=total,
-    )
+        rows = (await conn.execute(walk.apply(listing))).all()
+        total = await conn.scalar(count_of(listing))
+    return walk.page(rows, build=from_row, total=total)
 
 
 async def get(name: str) -> Document:
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            f"select {DOCUMENT_SELECT} from documents where name = ?", (name,)
-        )
-        row: Any = await cursor.fetchone()
+        row = (
+            await conn.execute(select(*DOCUMENT_COLUMNS).where(documents.c.name == name))
+        ).first()
     if row is None:
         raise NotFound(f"document not found: {name}")
-    return _document(row)
+    return from_row(row)
 
 
 async def set_status(name: str, status: DocumentStatus, error: str | None = None) -> None:
@@ -428,8 +410,9 @@ async def set_status(name: str, status: DocumentStatus, error: str | None = None
     `ensure_preview`), it only fills in what the row always described."""
     async with db.connect() as conn:
         await conn.execute(
-            "update documents set status = ?, error = ?, updated_at = ? where name = ?",
-            (status, error, time.time(), name),
+            update(documents)
+            .where(documents.c.name == name)
+            .values(status=status, error=error, updated_at=time.time())
         )
 
 
@@ -439,14 +422,17 @@ async def describe(name: str, description: str) -> Document:
     One statement: `returning` gives back the updated row, so the write and the read a caller
     needs cannot see two different versions of it."""
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            f"update documents set description = ? where name = ? returning {DOCUMENT_SELECT}",
-            (description, name),
-        )
-        row: Any = await cursor.fetchone()
+        row = (
+            await conn.execute(
+                update(documents)
+                .where(documents.c.name == name)
+                .values(description=description)
+                .returning(*DOCUMENT_COLUMNS)
+            )
+        ).first()
     if row is None:
         raise NotFound(f"document not found: {name}")
-    return _document(row)
+    return from_row(row)
 
 
 async def descriptions_of(docs: set[str]) -> dict[str, str]:
@@ -456,13 +442,12 @@ async def descriptions_of(docs: set[str]) -> dict[str, str]:
         return {}
     wanted = sorted(docs)
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            "select name, description from documents "
-            f"where name in ({db.placeholders(len(wanted))}) and description != ''",
-            wanted,
+        rows = await conn.execute(
+            select(documents.c.name, documents.c.description).where(
+                documents.c.name.in_(wanted), documents.c.description != ""
+            )
         )
-        rows = await cursor.fetchall()
-    return {name: description for name, description in rows}
+        return dict(rows.tuples().all())
 
 
 class Described(Protocol):
@@ -483,12 +468,12 @@ def fill_descriptions(rows: Iterable[Described], described: dict[str, str]) -> N
 async def collections_of(name: str) -> list[str]:
     """Every collection holding the document, in name order."""
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            "select collection from collection_documents where document = ? order by collection",
-            (name,),
+        held = await conn.scalars(
+            select(collection_documents.c.collection)
+            .where(collection_documents.c.document == name)
+            .order_by(collection_documents.c.collection)
         )
-        rows = await cursor.fetchall()
-    return [collection for (collection,) in rows]
+        return list(held)
 
 
 async def memberships(docs: set[str], collections: list[str]) -> dict[str, list[str]]:
@@ -500,14 +485,12 @@ async def memberships(docs: set[str], collections: list[str]) -> dict[str, list[
     wanted = list(docs)
     names = list(set(collections))
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            "select document, collection from collection_documents "
-            f"where document in ({db.placeholders(len(wanted))}) "
-            f"and collection in ({db.placeholders(len(names))}) "
-            "order by document, collection",
-            [*wanted, *names],
+        member = collection_documents.c
+        rows = await conn.execute(
+            select(member.document, member.collection)
+            .where(member.document.in_(wanted), member.collection.in_(names))
+            .order_by(member.document, member.collection)
         )
-        rows = await cursor.fetchall()
     held: dict[str, list[str]] = {}
     for name, collection in rows:
         held.setdefault(name, []).append(collection)
@@ -574,8 +557,9 @@ async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
                 )
                 async with db.connect() as conn:
                     await conn.execute(
-                        "update documents set preview = ? where name = ?",
-                        (db.dumps(preview), name),
+                        update(documents)
+                        .where(documents.c.name == name)
+                        .values(preview=db.dumps(preview))
                     )
             finally:
                 slots.release()
@@ -602,4 +586,4 @@ async def remove_row(name: str) -> None:
     """Cascades to `collection_documents` and `embeddings`; `pragma foreign_keys = on` is set on
     every connection."""
     async with db.connect() as conn:
-        await conn.execute("delete from documents where name = ?", (name,))
+        await conn.execute(delete(documents).where(documents.c.name == name))

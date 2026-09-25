@@ -1,11 +1,27 @@
 """Pagination: page request validation, opaque cursors, sort whitelist, keyset walks over sqlite."""
 
-import sqlite3
 from base64 import urlsafe_b64encode
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
+from sqlalchemy import (
+    Column,
+    ColumnElement,
+    Connection,
+    Integer,
+    MetaData,
+    Row,
+    Table,
+    Text,
+    asc,
+    create_engine,
+    desc,
+    insert,
+    literal_column,
+    select,
+)
+from sqlalchemy.dialects import sqlite
 
 from haskie.errors import InvalidInput
 from haskie.paging import (
@@ -16,11 +32,21 @@ from haskie.paging import (
     PageRequest,
     decode_cursor,
     encode_cursor,
+    keyset,
     page_request,
     resolve_sort,
 )
 
-SORTS = {"name": "name", "size": "size"}  # public name -> SQL expression
+METADATA = MetaData()
+DOCS = Table(
+    "docs",
+    METADATA,
+    Column("name", Text, primary_key=True),
+    Column("size", Integer, nullable=False),
+)
+SORTS = {"name": DOCS.c.name, "size": DOCS.c.size}  # public name -> column
+ROWID = literal_column("rowid")
+ALLOWED = {**SORTS, "added": ROWID}
 ROWS = 25
 SIZES = (10, 20, 30, 40, 50)
 
@@ -136,57 +162,53 @@ def test_page_request_accepts_page_size(name: str, page_size: int | None, expect
 @pytest.mark.parametrize(
     ("name", "requested", "expected"),
     [
-        ("requested name maps to its expression", "added", ("added", "rowid")),
-        ("unset falls back to the default", None, ("name", "name")),
+        ("requested name maps to its column", "added", ("added", ROWID)),
+        ("unset falls back to the default", None, ("name", DOCS.c.name)),
     ],
 )
-def test_resolve_sort(name: str, requested: str | None, expected: tuple[str, str]) -> None:
-    allowed = {"name": "name", "size": "size", "added": "rowid"}
-    assert resolve_sort(requested, allowed, "name") == expected, name
+def test_resolve_sort(
+    name: str, requested: str | None, expected: tuple[str, ColumnElement[Any]]
+) -> None:
+    public, column = resolve_sort(requested, ALLOWED, "name")
+    assert public == expected[0], name
+    assert column is expected[1], f"{name}: the whitelisted column itself, never one from input"
 
 
 def test_resolve_sort_rejects_unknown_name() -> None:
-    allowed = {"name": "name", "size": "size", "added": "rowid"}
     with pytest.raises(InvalidInput, match="unknown sort 'title'; allowed: added, name, size"):
-        resolve_sort("title", allowed, "name")
+        resolve_sort("title", ALLOWED, "name")
 
 
 # --- keyset -----------------------------------------------------------------------
 
 
 @pytest.fixture
-def docs() -> Iterator[sqlite3.Connection]:
+def docs() -> Iterator[Connection]:
     """25 documents over 5 distinct sizes, so every sort by size has ties to break."""
-    conn = sqlite3.connect(":memory:")
-    conn.execute("create table docs (name text primary key, size integer not null)")
-    conn.executemany(
-        "insert into docs (name, size) values (?, ?)",
-        [(f"doc-{i:02d}", SIZES[i % len(SIZES)]) for i in range(ROWS)],
-    )
-    yield conn
-    conn.close()
+    engine = create_engine("sqlite://")
+    with engine.begin() as conn:
+        METADATA.create_all(conn)
+        conn.execute(
+            insert(DOCS),
+            [{"name": f"doc-{i:02d}", "size": SIZES[i % len(SIZES)]} for i in range(ROWS)],
+        )
+        yield conn
+    engine.dispose()
 
 
-def _keyset(
-    sort: str, order: Order, request: PageRequest
-) -> tuple[Keyset, Callable[[tuple], list[Any]]]:
-    """Keyset plus the matching key reader; `name` is the primary key, so it is the tie-breaker
-    and needs no second column when it is also the sort."""
-    public, expression = resolve_sort(sort, SORTS, "name")
-    if public == "name":
-        return Keyset(public, [expression], order, request), lambda row: [row[0]]
-    return Keyset(public, [expression, "name"], order, request), lambda row: [row[1], row[0]]
+def _keyset(sort: str, request: PageRequest) -> Keyset:
+    """`name` is the primary key, so it is the tie-breaker, and needs no second column when it
+    is also the sort."""
+    public, column = resolve_sort(sort, SORTS, "name")
+    return keyset(public, column, request, DOCS.c.name)
 
 
-def _fetch(conn: sqlite3.Connection, keyset: Keyset) -> list[tuple]:
-    where, params = keyset.where()
-    clause = f"where {where} " if where else ""
-    sql = f"select name, size from docs {clause}{keyset.order_by()} limit {keyset.limit()}"
-    return conn.execute(sql, params).fetchall()
+def _fetch(conn: Connection, walk: Keyset) -> list[Row[Any]]:
+    return list(conn.execute(walk.apply(select(DOCS.c.name, DOCS.c.size))))
 
 
 def _walk(
-    conn: sqlite3.Connection, sort: str, order: Order, page_size: int
+    conn: Connection, sort: str, order: Order, page_size: int
 ) -> tuple[list[str], list[str | None]]:
     """Follow next_cursor to the last page; returns the names collected and every page's cursor."""
     names: list[str] = []
@@ -194,8 +216,8 @@ def _walk(
     cursor: str | None = None
     while True:
         request = page_request(cursor=cursor, page_size=page_size, sort=sort, order=order)
-        keyset, key = _keyset(sort, order, request)
-        page = keyset.page(_fetch(conn, keyset), build=lambda row: row[0], key=key)
+        walk = _keyset(sort, request)
+        page = walk.page(_fetch(conn, walk), build=lambda row: row.name)
         names.extend(page.items)
         cursors.append(page.next_cursor)
         cursor = page.next_cursor
@@ -206,24 +228,24 @@ def _walk(
 @pytest.mark.parametrize(
     ("name", "order", "cursor_key", "expected_where", "expected_params"),
     [
-        ("no cursor leaves the query unfiltered", "asc", None, "", []),
+        ("no cursor leaves the query unfiltered", "asc", None, "", [5, 0]),
         (
             "ascending compares greater than",
             "asc",
             [10, "doc-01"],
-            "(size, name) > (?, ?)",
-            [10, "doc-01"],
+            "WHERE (docs.size, docs.name) > (?, ?) ",
+            [10, "doc-01", 5, 0],
         ),
         (
             "descending compares less than",
             "desc",
             [10, "doc-01"],
-            "(size, name) < (?, ?)",
-            [10, "doc-01"],
+            "WHERE (docs.size, docs.name) < (?, ?) ",
+            [10, "doc-01", 5, 0],
         ),
     ],
 )
-def test_keyset_where(
+def test_keyset_apply(
     name: str,
     order: Order,
     cursor_key: list[Any] | None,
@@ -232,12 +254,15 @@ def test_keyset_where(
 ) -> None:
     cursor = encode_cursor(cursor_key, "size", order) if cursor_key else None
     request = page_request(cursor=cursor, page_size=4, sort="size", order=order)
-    keyset = Keyset("size", ["size", "name"], order, request)
-    assert keyset.where() == (expected_where, expected_params), name
-    assert keyset.order_by() == f"order by size {order}, name {order}", (
-        "both columns, one direction"
-    )
-    assert keyset.limit() == 5, "page size plus the look-ahead row"
+    walk = Keyset("size", [DOCS.c.size, DOCS.c.name], order, request)
+    compiled = walk.apply(select(DOCS.c.name)).compile(dialect=sqlite.dialect())
+    direction = order.upper()
+    assert " ".join(str(compiled).split()) == " ".join(
+        f"SELECT docs.name FROM docs {expected_where}"
+        f"ORDER BY docs.size {direction}, docs.name {direction} LIMIT ? OFFSET ?".split()
+    ), f"{name}: both columns, one direction"
+    params = [compiled.params[bound] for bound in compiled.positiontup or ()]
+    assert params == expected_params, f"{name}: the page size plus the look-ahead row is the limit"
 
 
 @pytest.mark.parametrize(
@@ -250,14 +275,12 @@ def test_keyset_where(
     ],
 )
 def test_keyset_walk_reads_every_row_once(
-    docs: sqlite3.Connection, name: str, sort: str, order: Order
+    docs: Connection, name: str, sort: str, order: Order
 ) -> None:
-    expected = [
-        row[0]
-        for row in docs.execute(
-            f"select name from docs order by {SORTS[sort]} {order}, name {order}"
-        )
-    ]
+    direction = asc if order == Order.ASC else desc
+    expected = list(
+        docs.scalars(select(DOCS.c.name).order_by(direction(SORTS[sort]), direction(DOCS.c.name)))
+    )
     names, cursors = _walk(docs, sort, order, page_size=4)
     assert names == expected, name
     assert len(set(names)) == ROWS, "no row is returned twice"
@@ -275,17 +298,17 @@ def test_keyset_walk_reads_every_row_once(
     ],
 )
 def test_look_ahead_sets_next_cursor_only_when_more_rows_exist(
-    docs: sqlite3.Connection, name: str, page_size: int, expected_items: int, expects_cursor: bool
+    docs: Connection, name: str, page_size: int, expected_items: int, expects_cursor: bool
 ) -> None:
     request = page_request(page_size=page_size, sort="size", order=Order.ASC)
-    keyset, key = _keyset("size", Order.ASC, request)
-    page = keyset.page(_fetch(docs, keyset), build=lambda row: row[0], key=key, total=ROWS)
+    walk = _keyset("size", request)
+    page = walk.page(_fetch(docs, walk), build=lambda row: row.name, total=ROWS)
     assert len(page.items) == expected_items, name
     assert (page.next_cursor is not None) == expects_cursor, name
     assert page.total == ROWS, "total passes through untouched"
 
 
 def test_page_of_no_rows_is_empty_and_final() -> None:
-    keyset = Keyset("name", ["name"], Order.ASC, page_request(page_size=4))
-    page = keyset.page([], build=lambda row: row[0], key=lambda row: [row[0]])
+    walk = Keyset("name", [DOCS.c.name], Order.ASC, page_request(page_size=4))
+    page = walk.page([], build=lambda row: row.name)
     assert (page.items, page.next_cursor, page.total) == ([], None, None)

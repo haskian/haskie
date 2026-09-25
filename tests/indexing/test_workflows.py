@@ -54,6 +54,7 @@ from conftest import (
 from dbos import DBOS, SetWorkflowID
 from dbos._error import DBOSAwaitedWorkflowCancelledError
 from dbos._registrations import get_dbos_func_name
+from sqlalchemy import insert, update
 
 from haskie import audit, cpu, db, home, paging, settings
 from haskie.catalogue import catalogue
@@ -82,6 +83,8 @@ from haskie.settings import (
     load_user_settings,
     save_user_settings,
 )
+from haskie.tables import collection_documents, staging
+from haskie.tables import settings as settings_table
 
 pytestmark = pytest.mark.anyio
 
@@ -94,9 +97,9 @@ async def _add_member(collection: Collection, doc: str) -> None:
     now = time.time()
     async with db.connect() as conn:
         await conn.execute(
-            "insert into collection_documents (collection, document, added_at, updated_at) "
-            "values (?, ?, ?, ?)",
-            (collection.name, doc, now, now),
+            insert(collection_documents).values(
+                collection=collection.name, document=doc, added_at=now, updated_at=now
+            )
         )
 
 
@@ -109,12 +112,12 @@ async def _steps(workflow_id: str) -> list[str]:
     """The step names one workflow recorded, in order. DBOS writes the row when a step finishes,
     so this is what really ran rather than what the body would have run."""
     async with db.connect() as conn:
-        rows = await conn.execute_fetchall(
+        rows = await conn.exec_driver_sql(
             "select function_name from operation_outputs where workflow_uuid = ? "
             "order by function_id",
             (workflow_id,),
         )
-    return [name for (name,) in rows]
+        return [name for (name,) in rows]
 
 
 async def _workflow_ids(name: str) -> list[str]:
@@ -1419,7 +1422,7 @@ async def test_adopt_orphans_resumes_only_stale_in_flight_workflows(
     assert await wait_event(gate.entered)
 
     async with db.connect() as conn:  # pretend everything so far ran under an older build
-        await conn.execute("update workflow_status set application_version = 'old-build'")
+        await conn.exec_driver_sql("update workflow_status set application_version = 'old-build'")
     resumed: list[str] = []
 
     async def resume_workflows(ids, **kwargs) -> None:
@@ -2052,13 +2055,14 @@ async def _seed_operations(operation_id: str, collection: str, count: int) -> No
     """`count` more collection-index rows in the DBOS history, copied from a real one: only the id
     and the timestamp differ, so every column holds what DBOS itself writes."""
     async with db.connect() as conn:
-        cursor = await conn.execute(
-            "select * from workflow_status where workflow_uuid = ?", (operation_id,)
-        )
-        columns = [description[0] for description in cursor.description]
-        seed = await cursor.fetchone()
+        seed = (
+            await conn.exec_driver_sql(
+                "select * from workflow_status where workflow_uuid = ?", (operation_id,)
+            )
+        ).first()
         assert seed is not None, "the workflow row to copy is there"
-        row = dict(zip(columns, seed, strict=True))
+        row = dict(seed._mapping)
+        columns = list(row)
     row["deduplication_id"] = None  # unique per queue; a copy may not claim the original's
     copies = [
         tuple(
@@ -2072,7 +2076,7 @@ async def _seed_operations(operation_id: str, collection: str, count: int) -> No
         for i in range(count)
     ]
     async with db.connect() as conn:
-        await conn.executemany(
+        await conn.exec_driver_sql(
             f"insert into workflow_status ({','.join(columns)}) "
             f"values ({','.join('?' * len(columns))})",
             copies,
@@ -2256,9 +2260,7 @@ async def test_an_unreadable_settings_row_does_not_stop_the_boot(dbos, monkeypat
     `/api/status` reports the problem."""
     await save_user_settings(UserSettings(embedding="compact"))
     async with db.connect() as conn:
-        await conn.execute(
-            'update settings set json = \'{"pipeline": {"cpu_budget": 0}}\' where id = 1'
-        )
+        await conn.execute(update(settings_table).values(json='{"pipeline": {"cpu_budget": 0}}'))
     forget_settings()  # the row was written behind the loader's back, as another build would
     applied: list[UserSettings] = []
 
@@ -2391,7 +2393,7 @@ async def test_daily_maintenance_purges_the_history_past_the_retention(
     assert await operations.list_tasks(job_id), "the job has micro-batches while DBOS holds it"
     two_days_ago = int((time.time() - 2 * 86400) * 1000)
     async with db.connect() as conn:  # the only way to age a row: DBOS stamps its own clock
-        await conn.execute(
+        await conn.exec_driver_sql(
             "update workflow_status set completed_at = ? where completed_at is not null",
             (two_days_ago,),
         )
@@ -2429,8 +2431,7 @@ async def test_daily_maintenance_sweeps_stale_staged_uploads(dbos) -> None:
     os.utime(document.staging_path(stale.staging_id), (aged, aged))
     async with db.connect() as conn:  # the row carries the age; the file only does for an orphan
         await conn.execute(
-            "update staging set created_at = ? where staging_id = ?",
-            (aged, stale.staging_id),
+            update(staging).where(staging.c.staging_id == stale.staging_id).values(created_at=aged)
         )
 
     await workflows.daily_maintenance(datetime.now(UTC), None)
@@ -2477,10 +2478,12 @@ async def test_a_slices_input_reads_back_after_its_context_changed_shape(
     import_id = await dbos.start_import(doc.name)
     assert await wait_for(import_id) == "imported"
     async with db.connect() as conn:
-        formats = await conn.execute_fetchall(
-            "select distinct serialization from workflow_status where name = ?",
-            (dbos_names.STAGE_WORKFLOW,),
-        )
+        formats = (
+            await conn.exec_driver_sql(
+                "select distinct serialization from workflow_status where name = ?",
+                (dbos_names.STAGE_WORKFLOW,),
+            )
+        ).all()
     assert formats == [("haskie_pickle",)]
 
     fields = [

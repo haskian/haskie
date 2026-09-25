@@ -14,14 +14,16 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
 import msgspec
+from sqlalchemy import Row, Select, func, select
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from haskie import db, home
 from haskie.errors import InvalidInput
 from haskie.indexing import hardware
 from haskie.indexing.hardware import Device, Runtime
 from haskie.settings import NO_EMBEDDING, Accelerator, CollectionOverrides, UserSettings
+from haskie.tables import embedding_profiles, models
 
 
 class ModelMetadata(msgspec.Struct, frozen=True):
@@ -88,19 +90,38 @@ class EmbeddingModel(msgspec.Struct):
 
 # the columns of `models` a `ModelMetadata` reads but the description, which a profile may override
 _METADATA = (
-    "m.name, m.parameters, m.context_tokens, m.languages, m.license, m.released, m.model_card_url"
+    models.c.name,
+    models.c.parameters,
+    models.c.context_tokens,
+    models.c.languages,
+    models.c.license,
+    models.c.released,
+    models.c.model_card_url,
 )
 _PROFILE = (
-    "p.profile, p.model, p.dims, p.query_prefix, p.document_prefix, p.matryoshka_layer_norm, "
-    "p.duplicate_chunk, p.duplicate_passage"
+    embedding_profiles.c.profile,
+    embedding_profiles.c.model,
+    embedding_profiles.c.dims,
+    embedding_profiles.c.query_prefix,
+    embedding_profiles.c.document_prefix,
+    embedding_profiles.c.matryoshka_layer_norm,
+    embedding_profiles.c.duplicate_chunk,
+    embedding_profiles.c.duplicate_passage,
 )
-# the order every picker lists them in: the shorter vectors first, and at one size the smaller
-# model first; the profile key breaks a tie, so the order never depends on the insert order
-_PROFILE_ORDER = "order by p.dims, m.parameters, p.profile"
-_PROFILES_FROM = "from embedding_profiles p join models m on m.name = p.model "
 
 
-def _model(row: Any) -> tuple[str, EmbeddingModel]:
+def _profiles(*columns: Any) -> Select[Any]:
+    """`columns` of every profile joined to its model, in the order every picker lists them: the
+    shorter vectors first, and at one size the smaller model first. The profile key breaks a tie,
+    so the order never depends on the insert order."""
+    return (
+        select(*columns)
+        .join_from(embedding_profiles, models, models.c.name == embedding_profiles.c.model)
+        .order_by(embedding_profiles.c.dims, models.c.parameters, embedding_profiles.c.profile)
+    )
+
+
+def _model(row: Row[Any]) -> tuple[str, EmbeddingModel]:
     profile, name, dims, query_prefix, document_prefix, layer_norm, chunk, passage = row
     return profile, EmbeddingModel(
         name,
@@ -112,12 +133,10 @@ def _model(row: Any) -> tuple[str, EmbeddingModel]:
     )
 
 
-async def _records(sql: str) -> list[dict[str, Any]]:
-    """The rows of `sql` keyed by column name, so they convert to a struct by field name."""
+async def _records(statement: Select[Any]) -> list[dict[str, Any]]:
+    """The rows of `statement` keyed by column name, so they convert to a struct by field name."""
     async with db.connect() as conn:
-        cursor = await conn.execute(sql)
-        names = [column[0] for column in cursor.description]
-        return [dict(zip(names, row, strict=True)) for row in await cursor.fetchall()]
+        return [db.record(row) for row in await conn.execute(statement)]
 
 
 # nothing writes the catalogue after the seed, so each database file's profiles are read once:
@@ -131,8 +150,8 @@ async def embedders() -> dict[str, EmbeddingModel]:
     cached = _embedders.get(home.DB_FILE)
     if cached is None:
         async with db.connect() as conn:
-            cursor = await conn.execute(f"select {_PROFILE} {_PROFILES_FROM}{_PROFILE_ORDER}")
-            cached = _embedders[home.DB_FILE] = dict(map(_model, await cursor.fetchall()))
+            rows = await conn.execute(_profiles(*_PROFILE))
+            cached = _embedders[home.DB_FILE] = dict(map(_model, rows))
     return cached
 
 
@@ -150,8 +169,14 @@ async def embedding_metadata() -> dict[str, EmbedderMetadata]:
     """Every embedding profile's metadata, in picker order: its model's, under the profile's own
     description where it has one (one model cut two ways is two profiles)."""
     records = await _records(
-        f"select p.profile, coalesce(p.description, m.description) as description, {_METADATA}, "
-        f"p.dims as dimensions {_PROFILES_FROM}{_PROFILE_ORDER}"
+        _profiles(
+            embedding_profiles.c.profile,
+            func.coalesce(embedding_profiles.c.description, models.c.description).label(
+                "description"
+            ),
+            *_METADATA,
+            embedding_profiles.c.dims.label("dimensions"),
+        )
     )
     return {
         record["profile"]: _metadata(record, EmbedderMetadata, hardware.embedder_devices)
@@ -162,8 +187,9 @@ async def embedding_metadata() -> dict[str, EmbedderMetadata]:
 async def rerankers() -> dict[str, RerankerMetadata]:
     """Every reranker model's metadata, smallest first: the first is the smallest there is."""
     records = await _records(
-        f"select m.description, {_METADATA} from models m where m.kind = 'reranker' "
-        "order by m.parameters, m.name"
+        select(models.c.description, *_METADATA)
+        .where(models.c.kind == "reranker")
+        .order_by(models.c.parameters, models.c.name)
     )
     return {
         record["name"]: _metadata(record, RerankerMetadata, hardware.reranker_devices)
@@ -181,26 +207,25 @@ async def embedding_model(settings: UserSettings) -> EmbeddingModel | None:
     return msgspec.structs.replace(model, accelerator=settings.pipeline.accelerator)
 
 
-async def unknown(conn: aiosqlite.Connection, settings: UserSettings | CollectionOverrides) -> str:
+async def unknown(conn: AsyncConnection, settings: UserSettings | CollectionOverrides) -> str:
     """What `settings` name that the catalogue does not hold, as one message; empty when nothing.
     On the caller's connection: the settings load runs it with the read it checks."""
     missing: list[str] = []
     profile = settings.embedding if isinstance(settings, UserSettings) else NO_EMBEDDING
     if profile != NO_EMBEDDING and not await _exists(
-        conn, "select 1 from embedding_profiles where profile = ?", profile
+        conn, select(embedding_profiles.c.profile).where(embedding_profiles.c.profile == profile)
     ):
         missing.append(f"unknown embedding profile: {profile}")
     reranker = settings.search.reranker_model
     if reranker is not None and not await _exists(
-        conn, "select 1 from models where name = ? and kind = 'reranker'", reranker
+        conn, select(models.c.name).where(models.c.name == reranker, models.c.kind == "reranker")
     ):
         missing.append(f"unknown reranker model: {reranker}")
     return "; ".join(missing)
 
 
-async def _exists(conn: aiosqlite.Connection, sql: str, key: str) -> bool:
-    cursor = await conn.execute(sql, (key,))
-    return await cursor.fetchone() is not None
+async def _exists(conn: AsyncConnection, statement: Select[Any]) -> bool:
+    return await conn.scalar(statement) is not None
 
 
 async def check(settings: UserSettings | CollectionOverrides) -> None:

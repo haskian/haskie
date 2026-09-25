@@ -3,19 +3,19 @@
 Keyset (not offset): the cursor carries the sort key of the last row of the previous page, so a
 page boundary stays exact while rows are inserted or deleted, and sqlite never counts rows it
 skips. The cursor is not signed: this is a single-user local app, the cursor never leaves the
-machine, and nothing inside it reaches SQL — column identifiers come from the caller's whitelist
-only, the cursor contributes bound parameters.
+machine, and nothing inside it reaches SQL — columns come from the caller's whitelist only, the
+cursor contributes bound parameters.
 """
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from enum import StrEnum
 from typing import Annotated, Any
 
 import msgspec
 from litestar.params import Parameter, ParameterKwarg
+from sqlalchemy import ColumnElement, Row, Select, asc, desc, func, tuple_
 
-from haskie import db
 from haskie.errors import InvalidInput
 
 
@@ -137,14 +137,16 @@ class OffsetCursor:
         return identity, offset
 
 
-def resolve_sort(requested: str | None, allowed: dict[str, str], default: str) -> tuple[str, str]:
-    """Map a public sort name to its SQL expression. The whitelist is the only source of column
-    identifiers, so a request can never name a column."""
+def resolve_sort[C: ColumnElement[Any]](
+    requested: str | None, allowed: dict[str, C], default: str
+) -> tuple[str, C]:
+    """Map a public sort name to its column. The whitelist is the only source of columns, so a
+    request can never name one."""
     name = requested or default
-    expression = allowed.get(name)
-    if expression is None:
+    column = allowed.get(name)
+    if column is None:
         raise InvalidInput(f"unknown sort {name!r}; allowed: {', '.join(sorted(allowed))}")
-    return name, expression
+    return name, column
 
 
 class Keyset:
@@ -155,8 +157,10 @@ class Keyset:
     column is NOT NULL: SQL's three-valued logic would otherwise drop rows at the boundary.
     """
 
-    def __init__(self, sort: str, columns: list[str], order: Order, request: PageRequest) -> None:
-        """`columns` is [sort expression, *tie-breakers], each a whitelisted SQL expression."""
+    def __init__(
+        self, sort: str, columns: list[ColumnElement[Any]], order: Order, request: PageRequest
+    ) -> None:
+        """`columns` is [sort column, *tie-breakers], each whitelisted."""
         self.sort = sort
         self.columns = columns
         self.order = order
@@ -165,54 +169,44 @@ class Keyset:
             decode_cursor(request.cursor, sort, order, len(columns)) if request.cursor else None
         )
 
-    def where(self) -> tuple[str, list[Any]]:
-        """Condition and parameters for the first page boundary; empty without a cursor."""
-        if self.key is None:
-            return "", []
-        comparison = ">" if self.order == Order.ASC else "<"
-        columns = ", ".join(self.columns)
-        return f"({columns}) {comparison} ({db.placeholders(len(self.columns))})", list(self.key)
-
-    def order_by(self) -> str:
-        return "order by " + ", ".join(f"{column} {self.order}" for column in self.columns)
-
-    def limit(self) -> int:
-        """One row more than the page: its presence is what tells us another page exists."""
-        return self.request.page_size + 1
-
-    def page[T](
-        self,
-        rows: list[tuple],
-        build: Callable[[tuple], T],
-        key: Callable[[tuple], list[Any]],
-        total: int | None = None,
-    ) -> Page[T]:
-        """Cut the look-ahead row off and turn the rest into a page. `key` reads the keyset
-        columns of a row, in the order given to the constructor."""
-        size = self.request.page_size
-        visible = rows[:size]
-        more = len(rows) > size
-        return Page(
-            items=[build(row) for row in visible],
-            next_cursor=encode_cursor(key(visible[-1]), self.sort, self.order) if more else None,
-            total=total,
+    def apply[S: Select[Any]](self, statement: S) -> S:
+        """`statement` cut to this page: past the cursor's boundary, in keyset order, and one row
+        longer than the page, because that row's presence is what tells us another page
+        exists."""
+        if self.key is not None:
+            columns = tuple_(*self.columns)
+            boundary = tuple_(*self.key)
+            statement = statement.where(
+                columns > boundary if self.order == Order.ASC else columns < boundary
+            )
+        direction = asc if self.order == Order.ASC else desc
+        return statement.order_by(*(direction(column) for column in self.columns)).limit(
+            self.request.page_size + 1
         )
 
+    def page[T](
+        self, rows: Sequence[Row[Any]], build: Callable[[Row[Any]], T], total: int | None = None
+    ) -> Page[T]:
+        """Cut the look-ahead row off and turn the rest into a page. The next cursor is the
+        keyset columns of the last row, which the statement has to select."""
+        visible = rows[: self.request.page_size]
+        next_cursor = None
+        if len(rows) > len(visible):
+            key = [visible[-1]._mapping[column] for column in self.columns]
+            next_cursor = encode_cursor(key, self.sort, self.order)
+        return Page(items=[build(row) for row in visible], next_cursor=next_cursor, total=total)
 
-def keyset(sort: str, expression: str, request: PageRequest) -> Keyset:
+
+def keyset(
+    sort: str, column: ColumnElement[Any], request: PageRequest, name: ColumnElement[Any]
+) -> Keyset:
     """The keyset of a listing whose rows are unique by `name`, so `name` breaks every tie; when
     it is also the sort column it is the whole keyset rather than a column repeated twice."""
-    columns = [expression] if sort == "name" else [expression, "name"]
+    columns = [column] if column is name else [column, name]
     return Keyset(sort, columns, request.order, request)
 
 
-def key_reader(
-    sort: str, expression: str, selected: list[str], name_column: str = "name"
-) -> Callable[[tuple], list[Any]]:
-    """Reads the keyset columns out of a row of `selected`, in the order `keyset` built them.
-    `name_column` is how the name is spelled in `selected`, which a joined listing qualifies."""
-    name = selected.index(name_column)
-    if sort == "name":
-        return lambda row: [row[name]]
-    value = selected.index(expression)
-    return lambda row: [row[value], row[name]]
+def count_of(listing: Select[Any]) -> Select[Any]:
+    """How many rows `listing` holds before any page cuts it: the same FROM and filters, so a
+    page's `total` counts what the page is a page of."""
+    return listing.with_only_columns(func.count(), maintain_column_froms=True)

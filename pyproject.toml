@@ -17,6 +17,7 @@ dependencies = [
     "fastembed>=0.8.0",
     "semantic-text-splitter>=0.32.0",
     "aiosqlite>=0.21.0",
+    "sqlalchemy[asyncio]>=2.0.43",
     "dbos>=3.0.0",
     "structlog>=25.1.0",
     "typer>=0.15.0",

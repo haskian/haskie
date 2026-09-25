@@ -24,8 +24,8 @@ flowchart TB
     pool -- "off_interpreter" --> procs["process pool:<br/>PDF page conversion"]
 ```
 
-- **IO is async.** Every handler is `async def`. SQLite goes through `aiosqlite`, one connection
-  per unit of work. LanceDB goes through its async API. Files go through `anyio`, with
+- **IO is async.** Every handler is `async def`. SQLite goes through SQLAlchemy Core's async engine
+  on `aiosqlite`, one connection per unit of work. LanceDB goes through its async API. Files go through `anyio`, with
   `os.replace` and `shutil.rmtree` in a worker thread because they have no async form.
 - **CPU work is sync, in a thread.** `cpu.on_cpu` runs it in a worker thread and holds one slot of
   the `pipeline.cpu_budget` semaphore for as long as it runs. PDF page conversion goes one step

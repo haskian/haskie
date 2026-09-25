@@ -1,14 +1,16 @@
 """Metadata store: SQLite (WAL mode) at ~/.haskie/haskie.db.
 
-Reads and writes go through `aiosqlite`, one connection per unit of work, so no unit ever blocks
-the event loop it runs on. Creating the schema is the exception: it stays on stdlib `sqlite3` in a
+The tables are SQLAlchemy Core (`tables.py`), and every query is a Core statement run on an
+`AsyncConnection` over `aiosqlite`, one connection per unit of work, so no unit ever blocks the
+event loop it runs on. Creating the schema is the exception: it stays on stdlib `sqlite3` in a
 worker thread, because the one-time switch to WAL needs an exclusive lock on the file.
 
-Schema evolution: edit `SCHEMA` and bump `SCHEMA_VERSION`. There is no upgrade path, so a home at
-any other version is refused and has to be destroyed (see `migrate`). A deliberate choice while the
-storage shape is still moving: one readable schema is worth more than a history of scripts.
+Schema evolution: edit `tables.py` and bump `SCHEMA_VERSION`. There is no upgrade path, so a home
+at any other version is refused and has to be destroyed (see `migrate`). A deliberate choice while
+the storage shape is still moving: one readable schema is worth more than a history of scripts.
 """
 
+import asyncio
 import sqlite3
 import threading
 from collections.abc import AsyncIterator
@@ -17,18 +19,24 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
 import anyio.to_thread
 import msgspec
+from sqlalchemy import Column, Row, Table, event
+from sqlalchemy.dialects import sqlite
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
+from sqlalchemy.schema import CreateIndex, CreateTable
 
-from haskie import home
+from haskie import home, tables
 from haskie.errors import HaskieError
 
 SCHEMA_VERSION = 17
-"""`pragma user_version` of the schema below.
+"""`pragma user_version` of the schema in `tables.py`.
 
-A home stamped with it has exactly these tables and is opened as it is. Any other stamp is a
-shape this build cannot read, so the home is refused (see `migrate`). Against the last release
+A home stamped with it has these tables and columns and is opened as it is. Any other stamp is a
+shape this build cannot read, so the home is refused (see `migrate`). A home stamped 17 before the
+DDL came from `tables.py` keeps the index names and declared column types it was made with; no
+query depends on either, so it is not refused for them. Against the last release
 (16), the model catalogue lives in the database (`models`, `embedding_profiles`, seeded from
 `catalogue/seed.sql`), and the embedding cache keys every model by its size and the document
 prefix it embeds with (`EmbeddingModel.cache_name`).
@@ -40,143 +48,20 @@ stamp as well. A change to what a chunk holds retires the embedding cache and ev
 table, and rather than version each of them, the home is refused and rebuilt from the sources.
 """
 
-# Every statement is `if not exists`, so a crash partway through leaves `user_version` at 0 and
-# the next boot replays the script harmlessly.
-#
-# SQLite has no date type: a `timestamp` column documents what the value means, and its NUMERIC
-# affinity stores the unix seconds `time.time()` returns as the float they are.
-SCHEMA = """
-    create table if not exists settings (
-        id integer primary key check (id = 1),
-        json text not null
-    );
 
-    create table if not exists sessions (
-        id text primary key
-    );
+def schema_ddl() -> str:
+    """The DDL of every table and index in `tables.metadata`, as one script.
 
-    create table if not exists collections (
-        name text primary key,
-        overrides text not null default '{}',
-        description text not null default '',
-        created_at timestamp not null default 0,
-        pending_documents integer not null default 0,
-        last_write_at timestamp,
-        last_maintained_at timestamp,
-        vector_index_rows integer not null default 0
-    );
-
-    -- a document belongs to no collection: `collection_documents` is the many-to-many, and each
-    -- membership carries the status of writing that document into that collection's table
-    create table if not exists documents (
-        name text primary key,
-        suffix text not null,
-        size integer not null,
-        status text not null default 'queued',
-        error text,
-        preview text,
-        parser text not null default 'anydoc',
-        skip_ocr_pages integer not null default 1,
-        created_at timestamp not null default 0,
-        updated_at timestamp not null default 0,
-        description text not null default ''
-    );
-    create index if not exists documents_status  on documents (status, name);
-    create index if not exists documents_updated on documents (updated_at, name);
-    create index if not exists documents_size    on documents (size, name);
-
-    create table if not exists collection_documents (
-        collection text not null references collections (name) on delete cascade,
-        document text not null references documents (name) on delete cascade,
-        status text not null default 'pending',
-        error text,
-        added_at timestamp not null default 0,
-        updated_at timestamp not null default 0,
-        primary key (collection, document)
-    );
-    create index if not exists collection_documents_document
-        on collection_documents (document);
-    create index if not exists collection_documents_status
-        on collection_documents (collection, status, document);
-
-    -- the durable, content-addressed embedding cache (see indexing/embed_cache.py)
-    create table if not exists embeddings (
-        id text primary key,
-        document text not null references documents (name) on delete cascade,
-        urn text not null,
-        model text not null,
-        chunk_size integer not null,
-        chunk_merge_below integer not null,
-        chunk_frame integer not null,
-        chunker text not null,
-        chunk_version integer not null,
-        parser text not null,
-        skip_ocr_pages integer not null,
-        rows integer not null default 0,
-        bytes integer not null default 0,
-        created_at timestamp not null default 0
-    );
-    create index if not exists embeddings_document on embeddings (document);
-
-    create table if not exists session_collections (
-        session_id text not null references sessions (id) on delete cascade,
-        collection text not null references collections (name) on delete cascade,
-        position integer not null,
-        primary key (session_id, collection)
-    );
-    create index if not exists session_collections_collection
-        on session_collections (collection);
-
-    -- what a session did, so its history can be shown and an operation can name the session that
-    -- started it; the rows go with the session
-    create table if not exists session_events (
-        id integer primary key,
-        session_id text not null references sessions (id) on delete cascade,
-        ts timestamp not null,
-        action text not null,
-        subject text not null,
-        detail text not null default '{}',
-        operation_id text,
-        duration_ms integer not null default 0
-    );
-    create index if not exists session_events_session on session_events (session_id, ts);
-    create index if not exists session_events_operation on session_events (operation_id);
-
-    -- the model catalogue (see catalogue/catalogue.py): every model the runtimes can load, with
-    -- its metadata, and every embedding profile. Seeded once from `catalogue/seed.sql`
-    create table if not exists models (
-        name text primary key,
-        kind text not null check (kind in ('embedder', 'reranker')),
-        description text not null,
-        parameters integer not null check (parameters > 0),
-        context_tokens integer not null check (context_tokens > 0),
-        languages text not null,
-        license text not null,
-        released text not null check (released is date(released)),
-        model_card_url text not null check (model_card_url like 'https://huggingface.co/%')
-    );
-
-    create table if not exists embedding_profiles (
-        profile text primary key check (profile != 'none'),
-        model text not null references models (name),
-        dims integer not null check (dims > 0),
-        description text,
-        query_prefix text not null default '',
-        document_prefix text not null default '',
-        matryoshka_layer_norm integer check (matryoshka_layer_norm in (0, 1)),
-        duplicate_chunk real,
-        duplicate_passage real,
-        check ((duplicate_chunk is null) = (duplicate_passage is null))
-    );
-
-    -- an upload waiting in `staging/`, before any name is taken
-    create table if not exists staging (
-        staging_id text primary key,
-        filename text not null,
-        size integer not null,
-        created_at timestamp not null default 0
-    );
-    """
+    Every statement is `if not exists`, so a crash partway through leaves `user_version` at 0 and
+    the next boot replays the script harmlessly."""
+    dialect = sqlite.dialect()
+    statements: list[Any] = []
+    for table in tables.metadata.sorted_tables:
+        statements.append(CreateTable(table, if_not_exists=True))
+        statements += [CreateIndex(index, if_not_exists=True) for index in table.indexes]
+    return "".join(
+        f"{str(statement.compile(dialect=dialect)).strip()};\n" for statement in statements
+    )
 
 
 # The rows a fresh home starts with. A data file of the `catalogue` feature, read rather than
@@ -206,7 +91,7 @@ def migrate(conn: sqlite3.Connection) -> int:
     if version != 0:
         raise HaskieError(INCOMPATIBLE_HOME_MESSAGE)
     conn.execute("pragma journal_mode = wal")  # persistent; needs an exclusive lock, so once
-    conn.executescript(SCHEMA)
+    conn.executescript(schema_ddl())
     conn.executescript(SEED.read_text(encoding="utf-8"))
     conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
     conn.commit()
@@ -225,6 +110,7 @@ def _migrate_sync() -> None:
             migrate(conn)
         finally:
             conn.close()
+        _engines[home.DB_FILE] = asyncio.run(_first_connected_engine())
         _migrated.add(home.DB_FILE)
 
 
@@ -236,6 +122,7 @@ def invalidate_migrations() -> None:
     """
     with _migrate_lock:
         _migrated.clear()
+        _engines.clear()
 
 
 async def migrate_once() -> None:
@@ -249,42 +136,73 @@ async def migrate_once() -> None:
     await anyio.to_thread.run_sync(_migrate_sync)
 
 
+def _set_pragmas(dbapi_connection: Any, _record: Any) -> None:
+    # the adapter's own `execute`: one round trip to the driver thread, where a cursor takes three
+    dbapi_connection.execute("pragma synchronous = normal")  # durable across crashes in WAL mode
+    dbapi_connection.execute("pragma foreign_keys = on")  # per connection
+
+
+# One engine per database file, made by `_migrate_sync`: tests switch homes, and `haskie destroy`
+# deletes the file.
+_engines: dict[Path, AsyncEngine] = {}
+
+
+async def _first_connected_engine() -> AsyncEngine:
+    """A new engine for the current home, connected once already.
+
+    `NullPool` opens a connection per unit of work and closes it after, so no connection is ever
+    shared between the two event loops (Litestar's and DBOS's), and one engine serves both.
+    `timeout` makes concurrent writers (DBOS, requests) wait instead of raising "database is
+    locked"; WAL (set when the schema is created) lets readers proceed.
+
+    SQLAlchemy guards an engine's first connection with an asyncio lock, which binds to the loop
+    that waits on it. The two loops racing for that first connection fail with "bound to a
+    different event loop", so it happens here, on a private loop, before either can reach it."""
+    made = create_async_engine(
+        f"sqlite+aiosqlite:///{home.DB_FILE}",
+        poolclass=NullPool,
+        connect_args={"timeout": BUSY_TIMEOUT_SECONDS},
+    )
+    event.listen(made.sync_engine, "connect", _set_pragmas)
+    async with made.connect():
+        pass
+    return made
+
+
+def engine() -> AsyncEngine:
+    """The engine of the current home's database file; `migrate_once` has made it."""
+    return _engines[home.DB_FILE]
+
+
 @asynccontextmanager
-async def connect() -> AsyncIterator[aiosqlite.Connection]:
-    """One connection per unit of work; commits on success, rolls back on error.
-
-    A connection is never shared between the two event loops, because it never outlives the unit
-    of work that opened it. `timeout` makes concurrent writers (DBOS, requests) wait instead of
-    raising "database is locked"; WAL (set when the schema is created) lets readers proceed.
-
-    The default row factory is left alone, so every fetched row is a plain tuple; `aiosqlite`
-    types it as `sqlite3.Row` anyway, which is why the reads elsewhere say `Any`.
-    """
+async def connect() -> AsyncIterator[AsyncConnection]:
+    """One connection and one transaction per unit of work; commits on success, rolls back on
+    error."""
     await migrate_once()
-    async with aiosqlite.connect(home.DB_FILE, timeout=BUSY_TIMEOUT_SECONDS) as conn:
-        await conn.execute("pragma synchronous = normal")  # durable across crashes in WAL mode
-        await conn.execute("pragma foreign_keys = on")  # per connection
-        try:
-            yield conn
-            await conn.commit()
-        except BaseException:
-            await conn.rollback()
-            raise
+    async with engine().begin() as conn:
+        yield conn
 
 
-def placeholders(count: int) -> str:
-    """`?, ?, ?` for a SQL `in (...)` list or a `values (...)` row."""
-    return ", ".join(["?"] * count)
+def record(row: Row[Any]) -> dict[str, Any]:
+    """A row as a dict keyed by column name. The names SQLAlchemy returns are a `str` subclass,
+    which msgspec refuses as a key, so each one is turned back into a plain `str`."""
+    return {str(name): value for name, value in row._mapping.items()}
 
 
-def row_to[T](struct: type[T], columns: tuple[str, ...], row: tuple, **json_columns: type) -> T:
-    """One selected row as a struct, `columns` naming what the row holds in its order.
+def columns_of(table: Table, struct: type[msgspec.Struct]) -> tuple[Column[Any], ...]:
+    """The columns of `table` that `struct` reads, one per field, so a SELECT of them and the
+    struct cannot drift apart."""
+    return tuple(table.c[field.encode_name] for field in msgspec.structs.fields(struct))
+
+
+def row_to[T](struct: type[T], row: Row[Any], **json_columns: type) -> T:
+    """One selected row as a struct, its columns matched to the fields by name.
 
     `strict=False` so the integers sqlite stores for booleans arrive as the bools the struct
     declares. A column named in `json_columns` holds JSON text (sqlite has no struct type) and is
     decoded into that type first.
     """
-    values: dict[str, Any] = dict(zip(columns, row, strict=True))
+    values = record(row)
     for name, type_ in json_columns.items():
         values[name] = loads(values[name], type_)
     return msgspec.convert(values, struct, strict=False)

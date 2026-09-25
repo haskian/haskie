@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from dbos import DBOS
+from sqlalchemy import text
 
 from haskie import sysdb
 from haskie.collection.collection import Collection
@@ -91,17 +92,15 @@ async def test_operation_activity_counts_the_operation_queues_by_status(dbos, tm
     # debounce every 50 ms, so "is the maintenance run still DELAYED" is a race, not a fact. The
     # wake time goes with it, an hour out, because the sweep promotes on that column alone.
     async with db.connect() as conn:
-        await conn.execute(
+        await conn.exec_driver_sql(
             "update workflow_status set status = 'DELAYED', delay_until_epoch_ms = ? "
             "where queue_name = ?",
             (int((time.time() + 3600) * 1000), workflows.MAINTENANCE_QUEUE),
         )
-        delayed = list(
-            await conn.execute_fetchall(
-                "select count(*) from workflow_status where status = 'DELAYED'"
-            )
+        delayed = await conn.scalar(
+            text("select count(*) from workflow_status where status = 'DELAYED'")
         )
-    assert delayed[0][0] >= 1, "there is a debounced run to ignore"
+    assert delayed is not None and delayed >= 1, "there is a debounced run to ignore"
     assert await sysdb.operation_activity() == {}, (
         "a debounce waiting out its period is not activity"
     )
@@ -110,16 +109,16 @@ async def test_operation_activity_counts_the_operation_queues_by_status(dbos, tm
         # The queue this slice waits on is one the app never registered, because DBOS is up: a row
         # left ENQUEUED on a real queue with a free slot is dequeued within a poll, and the status
         # this line is asserting on is gone before the read. The family still reads off the prefix.
-        await conn.execute(
+        await conn.exec_driver_sql(
             "update workflow_status set status = 'ENQUEUED', queue_name = 'task.parked' "
             "where name = ? and workflow_uuid like '%:convert:%'",
             (dbos_names.STAGE_WORKFLOW,),
         )
-        await conn.execute(
+        await conn.exec_driver_sql(
             "update workflow_status set status = 'PENDING' where workflow_uuid like '%:index'"
         )
         # the embedding of the import and the one the collection index asked for
-        await conn.execute(
+        await conn.exec_driver_sql(
             "update workflow_status set status = 'PENDING' where queue_name = ?",
             (workflows.EMBEDDING_QUEUE,),
         )
@@ -140,7 +139,7 @@ async def test_stale_active_ids_pages_over_another_versions_workflows(
     await _imported(dbos, tmp_path, pages=1)
     import_id = await _run_id("import")
     async with db.connect() as conn:  # pretend the work is still running under an older build
-        await conn.execute(
+        await conn.exec_driver_sql(
             "update workflow_status set status = 'ENQUEUED', application_version = 'old-build'"
         )
 

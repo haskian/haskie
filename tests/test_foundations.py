@@ -15,8 +15,9 @@ from typing import Any
 import anyio
 import msgspec
 import pytest
+from sqlalchemy import func, insert, select, text, update
 
-from haskie import audit, cpu, db, errors, home, settings
+from haskie import audit, cpu, db, errors, home, settings, tables
 from haskie.audit import Actor, Outcome
 from haskie.collection.collection import Collection
 from haskie.document import document
@@ -531,7 +532,7 @@ def test_without_none(name: str, struct: msgspec.Struct, expected: dict) -> None
 async def test_unreadable_settings_fall_back_to_defaults(name: str, stored: str) -> None:
     await save_user_settings(UserSettings(embedding="compact"))
     async with db.connect() as conn:
-        await conn.execute("update settings set json = ? where id = 1", (stored,))
+        await conn.execute(update(tables.settings).values(json=stored))
     forget_settings()  # a direct write bypasses the process cache
 
     loaded = await load_user_settings_or_none()
@@ -595,8 +596,7 @@ async def test_forgetting_the_cache_forces_a_reread() -> None:
     await save_user_settings(UserSettings(embedding="compact"))
     async with db.connect() as conn:
         await conn.execute(
-            "update settings set json = ? where id = 1",
-            (db.dumps(UserSettings(embedding="quality")),),
+            update(tables.settings).values(json=db.dumps(UserSettings(embedding="quality")))
         )
 
     assert await settings.load_user_settings() == UserSettings(embedding="compact"), "still cached"
@@ -611,7 +611,7 @@ async def test_unreadable_settings_are_not_cached() -> None:
     """A broken row must stay live: the run that repairs it is seen without a second step."""
     await save_user_settings(UserSettings(embedding="compact"))
     async with db.connect() as conn:
-        await conn.execute("update settings set json = '{not json' where id = 1")
+        await conn.execute(update(tables.settings).values(json="{not json"))
     forget_settings()
 
     loaded = await load_user_settings_or_none()
@@ -621,8 +621,7 @@ async def test_unreadable_settings_are_not_cached() -> None:
 
     async with db.connect() as conn:  # nothing was cached, so nothing has to be forgotten
         await conn.execute(
-            "update settings set json = ? where id = 1",
-            (db.dumps(UserSettings(embedding="quality")),),
+            update(tables.settings).values(json=db.dumps(UserSettings(embedding="quality")))
         )
 
     assert await load_user_settings_or_none() == UserSettings(embedding="quality")
@@ -635,8 +634,7 @@ async def test_the_missing_row_before_init_is_not_cached() -> None:
 
     async with db.connect() as conn:  # first run, straight into the row
         await conn.execute(
-            "insert into settings (id, json) values (1, ?)",
-            (db.dumps(UserSettings(embedding="compact")),),
+            insert(tables.settings).values(id=1, json=db.dumps(UserSettings(embedding="compact")))
         )
 
     assert await load_user_settings_or_none() == UserSettings(embedding="compact")
@@ -710,7 +708,7 @@ async def test_connect_commits_or_rolls_back_the_whole_unit_of_work(
 ) -> None:
     async def unit() -> None:
         async with db.connect() as conn:
-            await conn.execute("insert into collections (name, created_at) values ('notes', 1.0)")
+            await conn.execute(insert(tables.collections).values(name="notes", created_at=1.0))
             if fails:
                 raise _UnitFailed(name)
 
@@ -721,8 +719,8 @@ async def test_connect_commits_or_rolls_back_the_whole_unit_of_work(
         await unit()
 
     async with db.connect() as conn:  # a connection of its own: only committed rows are visible
-        rows = await conn.execute_fetchall("select name from collections")
-    assert list(rows) == expected, name
+        rows = await conn.execute(select(tables.collections.c.name))
+        assert list(rows) == expected, name
 
 
 @pytest.mark.anyio
@@ -754,10 +752,38 @@ async def test_migrate_once_creates_the_schema_exactly_once(
     assert len(applied) == 1, name
     assert applied[0] != threading.get_ident(), "sqlite3 and executescript block: not on the loop"
     async with db.connect() as conn:
-        version = await conn.execute_fetchall("pragma user_version")
-        collections = await conn.execute_fetchall("select count(*) from collections")
-    assert list(version) == [(db.SCHEMA_VERSION,)], name
-    assert list(collections) == [(0,)], name
+        version = await conn.scalar(text("pragma user_version"))
+        collections = await conn.scalar(select(func.count()).select_from(tables.collections))
+    assert version == db.SCHEMA_VERSION, name
+    assert collections == 0, name
+
+
+def test_two_event_loops_can_open_the_first_connections_at_once() -> None:
+    """Litestar's loop and DBOS's both reach a fresh home at boot. SQLAlchemy guards an engine's
+    first connection with an asyncio lock bound to one loop, so the loser of that race raised
+    "bound to a different event loop" before `migrate_once` made that connection itself."""
+    failures: list[BaseException] = []
+
+    async def units_of_work() -> None:
+        async def one() -> None:
+            async with db.connect() as conn:
+                await conn.scalar(select(tables.collections.c.name))
+
+        await asyncio.wait_for(asyncio.gather(*(one() for _ in range(4))), 10)
+
+    def run_loop() -> None:
+        try:
+            asyncio.run(units_of_work())
+        except BaseException as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=run_loop) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == [], "every unit of work on both loops got its connection"
 
 
 # --- the CPU budget ---------------------------------------------------------------
