@@ -238,6 +238,16 @@ class Excerpt(msgspec.Struct):
     aspects: list[str] = []
 
 
+class Answer(msgspec.Struct):
+    """What an excerpts search answers with: the excerpts, and what they leave out."""
+
+    excerpts: list[Excerpt]  # best first
+    # the questions no excerpt answers, when several were asked at once; else empty
+    uncovered: list[str]
+    # the words of the questions no excerpt's text or headings hold (`probe`), in the order asked
+    missing_terms: list[str]
+
+
 def span(hit_range: HitRange) -> Span:
     """Where a hit range is and how it matched, as an excerpt lists it."""
     return Span(**_cited(hit_range))

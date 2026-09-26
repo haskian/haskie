@@ -164,7 +164,9 @@ async def test_the_tools_an_agent_is_offered(client: AsyncTestClient) -> None:
             "search_excerpts",
             {"q": [BY_RETRY], "session_id": SESSION},
             lambda found: (
-                [one["document"] for one in found] == ["retries.md"] and found[0]["aspects"] == []
+                [one["document"] for one in found["excerpts"]] == ["retries.md"]
+                and found["excerpts"][0]["aspects"] == []
+                and found["uncovered"] == []
             ),
         ),
         (
@@ -172,8 +174,9 @@ async def test_the_tools_an_agent_is_offered(client: AsyncTestClient) -> None:
             "search_excerpts",
             {"q": [BY_RETRY, BY_CLOCK], "session_id": SESSION, "limit": 4},
             lambda found: (
-                {one["document"]: one["aspects"] for one in found}
+                {one["document"]: one["aspects"] for one in found["excerpts"]}
                 == {"retries.md": [BY_RETRY], "ordering.md": [BY_CLOCK]}
+                and found["uncovered"] == []
             ),
         ),
         (
@@ -294,7 +297,7 @@ async def test_an_agent_imports_attaches_finds_and_detaches_a_document(
     error, found = await _call(
         library, "search_excerpts", {"q": ["What lets a consumer drop a message it already saw?"]}
     )
-    assert not error and found[0]["document"] == "keys.md", found
+    assert not error and found["excerpts"][0]["document"] == "keys.md", found
 
     error, removed = await _call(
         library,
@@ -305,7 +308,7 @@ async def test_an_agent_imports_attaches_finds_and_detaches_a_document(
     error, after = await _call(
         library, "search_excerpts", {"q": ["What lets a consumer drop a message it already saw?"]}
     )
-    assert not error and "keys.md" not in {one["document"] for one in after}, after
+    assert not error and "keys.md" not in {one["document"] for one in after["excerpts"]}, after
 
     history = (await library.get(f"/api/sessions/{SESSION}/history")).json()
     assert [event["action"] for event in history] == ["detach", "attach", "import"]

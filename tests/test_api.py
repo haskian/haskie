@@ -1138,6 +1138,7 @@ async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
                 "fill_thin",
                 "collapse_all",
                 "group",
+                "probe_gaps",
                 "fill",
                 "quote",
             ],
@@ -1225,9 +1226,13 @@ async def test_an_excerpt_is_the_section_its_passages_share(client: AsyncTestCli
         passage["line_end"],
     )
     assert route.status_code == 200, route.text
-    assert route.json() == excerpts
+    assert route.json() == {"excerpts": excerpts, "uncovered": [], "missing_terms": []}
     nothing = await client.get("/api/search/excerpts", params={"q": "nothingmatchesthis"})
-    assert nothing.json() == [], "no hits is an answer, not an error"
+    assert nothing.json() == {
+        "excerpts": [],
+        "uncovered": [],
+        "missing_terms": ["nothingmatchesthis"],
+    }, "no hits is an answer, not an error, and it says which words the sources lack"
 
 
 # One section with two paragraphs on "lancedb" and one between them that is not, then a second
@@ -1265,7 +1270,7 @@ async def test_the_passages_of_one_section_come_back_as_one_excerpt(
 
     assert response.status_code == 200, response.text
     assert len(passages) == 2, "a passage each for the two best"
-    by_header = {one["header"]: one for one in response.json()}
+    by_header = {one["header"]: one for one in response.json()["excerpts"]}
     assert set(by_header) == {"Guide > Storage", "Guide > Search"}, "the limit counts sections"
     storage = by_header["Guide > Storage"]
     assert [(span["seq_start"], span["seq_end"]) for span in storage["spans"]] == [(1, 1), (3, 3)]
@@ -1307,10 +1312,49 @@ async def test_the_text_between_and_around_kept_passages_is_filled_when_it_answe
 
     assert len(chunks) == 6, "a chunk per paragraph"
     assert len(scanned) == 1 and response.status_code == 200, response.text
-    (excerpt,) = response.json()
+    (excerpt,) = response.json()["excerpts"]
     assert [(span["seq_start"], span["seq_end"]) for span in excerpt["spans"]] == [(1, 6)]
     assert "[…]" not in excerpt["text"]
     assert excerpt["text"] == "\n\n".join(chunk.text for chunk in chunks)
+
+
+# Orders, section after section, and one note on stock: a question about both ranks the order
+# sections first, and "inventory" is in none of them.
+ORDERS_MD = "# Orders\n\n" + "\n\n".join(
+    f"## Step {step}\n\nAn order keeps its lines consistent at step {step}, and the order total "
+    "follows the lines." + (" Reconciliation against the ledger runs here." if step == 5 else "")
+    for step in range(1, 9)
+)
+STOCK_MD = "# Stock\n\n## Counts\n\nInventory counts drop when stock ships to a customer.\n"
+
+
+async def test_a_word_no_excerpt_holds_is_searched_for_once_more(
+    client: AsyncTestClient, caplog
+) -> None:
+    """The ranking fills the one slot with the order section on reconciliation, and "inventory"
+    is not in it.
+    The probe searches that word alone, and its best passage joins as one excerpt past the limit;
+    the answer then lacks no word of the question."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "shop"})
+    for name, body in (("orders.md", ORDERS_MD), ("stock.md", STOCK_MD)):
+        await stage_and_import(client, name, body.encode())
+        await attach_via_api(client, "shop", name)
+    question = "How does order reconciliation against the ledger keep inventory consistent?"
+    params = {"q": question, "limit": 1}
+
+    with caplog.at_level(logging.INFO):
+        response = await client.get("/api/search/excerpts", params=params)
+
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    probed = [r.msg for r in caplog.records if isinstance(r.msg, dict)]
+    (logged,) = [msg for msg in probed if msg["event"] == "search_probe"]
+    assert logged["terms"] == ["inventory"], "the only word the order sections lack"
+    assert logged["placed"] == "added", "one excerpt past the limit, the ranked one kept"
+    assert [one["document"] for one in answer["excerpts"]] == ["orders.md", "stock.md"]
+    assert answer["excerpts"][0]["header"] == "Orders > Step 5"
+    assert answer["missing_terms"] == []
 
 
 # A section that answers, and a lead-in of another whose table below it says nothing on the query:
@@ -1380,7 +1424,7 @@ async def test_an_excerpt_too_short_to_stand_alone_goes_when_nothing_around_it_m
 
     assert response.status_code == 200, response.text
     assert lead_in in {hit["seq"] for hit in chunk_hits}, "the lead-in did match"
-    assert [(one["seq_start"], one["seq_end"]) for one in response.json()] == [(1, 1)]
+    assert [(one["seq_start"], one["seq_end"]) for one in response.json()["excerpts"]] == [(1, 1)]
 
 
 # Three short notes on aggregates: one on references, one on events, and a copy of the first under
@@ -1420,7 +1464,9 @@ async def test_several_questions_take_turns_and_say_which_they_answer(
     )
 
     assert response.status_code == 200, response.text
-    found = response.json()
+    answer = response.json()
+    found = answer["excerpts"]
+    assert (answer["uncovered"], answer["missing_terms"]) == ([], [])
     tagged = {one["document"]: one["aspects"] for one in found}
     kept_note = "references.md" if "references.md" in tagged else "pasted.md"
     assert tagged == {kept_note: [BY_IDENTITY], "events.md": [BY_EVENT]}
@@ -1433,7 +1479,7 @@ async def test_several_questions_take_turns_and_say_which_they_answer(
     assert sorted(steps) == sorted(
         ["plan"]
         + ["retrieve", "merge", "rerank", "hits", "fill_thin"] * 2
-        + ["cover", "group", "fill", "quote"]
+        + ["cover", "group", "probe_gaps", "fill", "quote"]
     ), "one plan for every question, the ranking once per question, then the turns, the sections"
     (event,) = (await client.get("/api/sessions/s1/history")).json()
     assert event["subject"] == f"{BY_IDENTITY} | {BY_EVENT}"
@@ -1466,15 +1512,23 @@ async def test_one_question_with_a_context_is_the_single_search(client: AsyncTes
     repeated = await client.get("/api/search/excerpts", params={"q": [BY_EVENT, f" {BY_EVENT} "]})
     framed = await client.get(
         "/api/search/excerpts",
-        params={"q": "Which change?", "context": "Domain events, keeping consistency loose."},
+        params={
+            "q": "Which change reaches the warehouse?",
+            "context": "Domain events, keeping consistency loose.",
+        },
     )
 
     assert plain.status_code == repeated.status_code == framed.status_code == 200
-    assert [one["document"] for one in plain.json()] == ["events.md"]
-    assert all(one["aspects"] == [] for one in plain.json())
+    assert [one["document"] for one in plain.json()["excerpts"]] == ["events.md"]
+    assert all(one["aspects"] == [] for one in plain.json()["excerpts"])
     assert repeated.json() == plain.json(), "a repeated question is asked once"
     assert "cover" not in plain.headers["server-timing"]
-    assert "events.md" in {one["document"] for one in framed.json()}, "found by its context"
+    found = framed.json()["excerpts"]
+    assert "events.md" in {one["document"] for one in found}, "found by its context"
+    missing = framed.json()["missing_terms"]
+    assert missing == ["reaches", "warehouse"], (
+        "the question's words no note has, not the context's"
+    )
 
 
 async def test_several_questions_over_collections_since_deleted_find_nothing(
@@ -1492,7 +1546,15 @@ async def test_several_questions_over_collections_since_deleted_find_nothing(
     )
 
     assert response.status_code == 200, response.text
-    assert response.json() == []
+    answer = response.json()
+    assert answer["excerpts"] == []
+    assert answer["uncovered"] == [BY_IDENTITY, BY_EVENT], "every question, unanswered"
+    one = await client.get("/api/search/excerpts", params={"q": BY_EVENT, "session_id": "s1"})
+    assert one.json() == {
+        "excerpts": [],
+        "uncovered": [],
+        "missing_terms": ["domain", "events", "carry", "change"],
+    }, "one question: no excerpts, and every word of it missing"
 
 
 @pytest.mark.parametrize(
@@ -1632,7 +1694,7 @@ async def test_the_search_scope_is_the_names_then_the_session_then_everything(
     ("path", "key"),
     [
         ("/api/search/explore", None),
-        ("/api/search/excerpts", None),
+        ("/api/search/excerpts", "excerpts"),
         ("/api/search/sources", "documents"),
     ],
 )

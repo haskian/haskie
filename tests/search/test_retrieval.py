@@ -11,7 +11,7 @@ import msgspec
 import pytest
 
 from haskie.collection.index import Hit, location
-from haskie.search import retrieval
+from haskie.search import probe, retrieval
 from haskie.search.passage import ranges
 from haskie.search.retrieval import Plan, Scanned
 from haskie.settings import Reranker, SearchSettings
@@ -220,7 +220,7 @@ NEAR = [("backend", "doc.md", 3), ("backend", "doc.md", 4)]
     [
         (
             "by the vector: 0 at the median kept chunk, 1 at the best",
-            [retrieval.Question("retries idempotent", [1.0, 0.0])],
+            [probe.Question("retries idempotent", [1.0, 0.0], "retries idempotent")],
             WEIGHED,
             "vector",
             [0.5, -1.0],
@@ -228,7 +228,7 @@ NEAR = [("backend", "doc.md", 3), ("backend", "doc.md", 4)]
         ),
         (
             "without a query vector, by the question's words",
-            [retrieval.Question("idempotent retries", None)],
+            [probe.Question("idempotent retries", None, "idempotent retries")],
             WEIGHED,
             "words",
             [1.0, -1.0],
@@ -237,8 +237,8 @@ NEAR = [("backend", "doc.md", 3), ("backend", "doc.md", 4)]
         (
             "each chunk takes its best question, which tags it",
             [
-                retrieval.Question("idempotent retries", None, label="a"),
-                retrieval.Question("jitter load", None, label="b"),
+                probe.Question("idempotent retries", None, "idempotent retries", label="a"),
+                probe.Question("jitter load", None, "jitter load", label="b"),
             ],
             WEIGHED,
             "words",
@@ -249,7 +249,7 @@ NEAR = [("backend", "doc.md", 3), ("backend", "doc.md", 4)]
 )
 def test_a_chunk_near_a_passage_is_weighed_against_the_kept_chunks(
     name: str,
-    questions: list[retrieval.Question],
+    questions: list[probe.Question],
     rows: dict,
     signal: str,
     values: list[float],
@@ -263,7 +263,7 @@ def test_a_chunk_near_a_passage_is_weighed_against_the_kept_chunks(
 
 
 def test_nothing_near_or_nothing_held_weighs_nothing() -> None:
-    question = [retrieval.Question("retries", None)]
+    question = [probe.Question("retries", None, "retries")]
 
     assert retrieval._weigh(HELD, [], WEIGHED, question) == ({}, "none")
     assert retrieval._weigh([], NEAR, WEIGHED, question) == ({}, "none")

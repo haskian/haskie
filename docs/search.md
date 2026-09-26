@@ -14,7 +14,7 @@ flowchart LR
     rerank --> hits["<b>hits</b><br/>cut to scan depth"]
     hits --> fchunks["collapse hits"] --> chunks(["chunks"])
     hits --> franges["merge neighbours,<br/>grow or drop short ones,<br/>collapse ranges"] --> read["read the spans"] --> passages(["passages"])
-    franges --> group["group by section"] --> fill["fill around<br/>and between"] --> excerpts(["excerpts"])
+    franges --> group["group by section"] --> probe["search again for<br/>missing words"] --> fill["fill around<br/>and between"] --> excerpts(["excerpts"])
     hits --> shortlist["group by document"] --> sources(["sources"])
 ```
 
@@ -69,6 +69,25 @@ the one before it did not, below the section's own `header`, as markdown heading
 each with its own `header`, `location`, lines, offsets, score, `aspects` and `also_in`. The
 excerpt's own offsets and lines run from the first passage to the last, and its `score` is the best
 passage's.
+
+## Words the answer never mentions
+
+A search ranks by the whole question, so the part most of it is about can fill every slot while a
+word the rest hangs on goes missing: "keep inventory consistent when an order is placed",
+answered by five passages on orders and none on inventory. `search/probe.py` looks for each word
+of the question (stopwords and words under three letters aside) in the kept sections' text and
+headings. A text holds a word when one of its words starts with the word's stem, the word less
+two letters but at least four, so "keeps" holds "keep" and "consistency" holds "consistent". The
+words none of them holds are searched for once more by BM25 alone, and the best passage that
+search finds that no section holds yet joins the answer. It joins the kept section it belongs to,
+or comes after the others as one excerpt past `limit`. Taking the last ranked section's slot
+instead would trade one gap for another, and a search of one excerpt would lose its whole answer.
+It is tagged with the questions whose words it holds.
+
+`search_excerpts` answers with `excerpts`, `uncovered` (the questions no excerpt names, when
+several were asked) and `missing_terms` (the words still missing after the probe). A synonym
+defeats the probe: it asks only for the words the question used. Each search that probes logs
+`search_probe` with the words and where its passage went.
 
 ## Filling around and between passages
 
@@ -199,7 +218,7 @@ flowchart LR
     ranges --> turns["<b>take turns</b><br/>round-robin<br/>over the parts"]
     turns --> fold["collapse ranges<br/>across all parts"]
     fold --> tag["tag each passage<br/>with its parts"]
-    tag --> group["group by section"] --> fill["fill"] --> excerpts(["excerpts"])
+    tag --> group["group by section"] --> probe["probe"] --> fill["fill"] --> excerpts(["excerpts"])
 ```
 
 Each part runs the shared ranking on its own, as deep as one search of that `limit` would go.
@@ -218,7 +237,8 @@ part that joined it or ranks it among its own owed ranges, and those of every pl
 An excerpt's `aspects` joins its spans'.
 The tags come from ranks alone, with no relevance floor. A vector or hybrid search finds nearest
 passages for any part, even one the sources say nothing about, so a tag is not proof of an
-answer. A part no excerpt lists found nothing at all. One question, or a list that deduplicates
+answer. A part no excerpt lists found nothing at all, and the answer's `uncovered` names it. One
+question, or a list that deduplicates
 to one, is the single search with the context in front of it, and its `aspects` is empty. A `limit` below the number of
 parts is refused (422).
 
@@ -242,7 +262,7 @@ the collection's overrides, and also takes `limit`, `mode`, `fusion`, `vector_we
 `bm25_weight`, `reranker` and `candidates` per call.
 
 Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/collapse.py`,
-`search/aspects.py`, `search/thin.py`, `search/section.py`, `search/fill.py`.
+`search/aspects.py`, `search/thin.py`, `search/section.py`, `search/fill.py`, `search/probe.py`.
 
 ## References
 

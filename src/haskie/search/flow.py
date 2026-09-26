@@ -9,14 +9,14 @@ Four pipelines over one set of steps:
 
     chunks     retrieve -> merge -> rerank -> hits -> collapse_hits
     passages   retrieve -> merge -> rerank -> hits -> fill_thin -> collapse_ranges -> read
-    excerpts   retrieve -> merge -> rerank -> hits -> fill_thin -> collapse_all -> group -> fill
-               -> quote
+    excerpts   retrieve -> merge -> rerank -> hits -> fill_thin -> collapse_all -> group
+               -> probe_gaps -> fill -> quote
     sources    retrieve -> merge -> rerank -> hits -> shortlist
 
 and one that runs the shared ranking once per question, when several are asked at once:
 
     answers    (retrieve -> merge -> rerank -> hits -> fill_thin) per question -> cover -> group
-               -> fill -> quote
+               -> probe_gaps -> fill -> quote
 
 The first four steps are the search every answer shares; what follows is the fold that answer is
 made of, and it is a step rather than something every search pays for. `chunks` folds each
@@ -24,8 +24,9 @@ near-duplicate hit into the hit it repeats (`collapse`). `passages` and `excerpt
 of one section that sit next to each other into one readable span, grow a span too short to stand
 alone by the neighbours that match the question or drop it (`thin`), fold near-duplicate spans the
 same way, and read only the spans they answer with. `excerpts` then groups the spans by the section
-they sit in, so `limit` counts sections, adds the text around and between them that answers
-too (`fill`), and writes each section out as one excerpt. `sources`
+they sit in, so `limit` counts sections, searches once more for the words of the question no
+section holds (`probe`), adds the text around and between the passages that answers too (`fill`),
+and writes each section out as one excerpt. `sources`
 folds the same hits per document instead.
 
 Two numbers steer that. `scan` is how deep the ranking goes and is what `hits` cuts to; `limit`
@@ -48,8 +49,8 @@ from pydantic_graph.step import StepFunction
 
 from haskie.collection.index import Hit
 from haskie.paging import check_page_size
-from haskie.search import aspects, retrieval, section
-from haskie.search.passage import Excerpt, HitRange, Passage, Sources
+from haskie.search import aspects, probe, retrieval, section
+from haskie.search.passage import Answer, Excerpt, HitRange, Passage, Sources
 from haskie.settings import load_user_settings
 
 # How deep any of these searches reads. A passage or a document row is folded from several chunks,
@@ -77,6 +78,8 @@ class Search(msgspec.Struct):
     scan: int  # how deep the ranking goes; `hits` cuts to it
     candidates: int  # rows each collection returns, and the pool the reranker rescores
     sections: int = DEFAULT_SECTIONS  # `sources` only
+    # the question alone, when `query` carries a context in front of it; else `query` itself
+    asked: str | None = None
 
 
 # --- the trace --------------------------------------------------------------------
@@ -103,6 +106,7 @@ STEP_LABELS: dict[str, str] = {
     "collapse_ranges": "Fold passages",
     "collapse_all": "Fold passages",
     "group": "Group passages by section",
+    "probe_gaps": "Search for missing words",
     "fill": "Fill in around passages",
     "quote": "Read excerpts",
     "read": "Read passages",
@@ -216,11 +220,25 @@ async def group(ctx: StepContext[Search, None, list[HitRange]]) -> list[section.
     return await retrieval.sections(ctx.inputs, ctx.state.plan, ctx.state.limit)
 
 
+def _question(state: Search) -> probe.Question:
+    """The one question a single search asked."""
+    asked = state.asked or state.query
+    return probe.Question(text=state.query, vector=state.plan.vector, asked=asked)
+
+
+async def probe_gaps(
+    ctx: StepContext[Search, None, list[section.Group]],
+) -> list[section.Group]:
+    """The sections, and the best passage a full-text search finds for the words of the
+    question none of them holds."""
+    state = ctx.state
+    return await retrieval.probe_gaps(ctx.inputs, [_question(state)], state.plan)
+
+
 async def fill(ctx: StepContext[Search, None, list[section.Group]]) -> list[section.Group]:
     """The sections within the answer's budget, with the text around and between their passages
     that answers the query too."""
-    asked = retrieval.Question(text=ctx.state.query, vector=ctx.state.plan.vector)
-    return await retrieval.fill(ctx.inputs, [asked], ctx.state.plan)
+    return await retrieval.fill(ctx.inputs, [_question(ctx.state)], ctx.state.plan)
 
 
 async def quote(ctx: StepContext[Search, None, list[section.Group]]) -> list[Excerpt]:
@@ -272,7 +290,7 @@ RANKED = _chain(retrieval.Ranged, *RANKING, fill_thin)  # one question's part of
 
 CHUNKS = _chain(list[Hit], *RANKING, collapse_hits)
 PASSAGES = _chain(list[Passage], *RANKING, fill_thin, collapse_ranges, read)
-EXCERPTS = _chain(list[Excerpt], *RANKING, fill_thin, collapse_all, group, fill, quote)
+EXCERPTS = _chain(list[Excerpt], *RANKING, fill_thin, collapse_all, group, probe_gaps, fill, quote)
 SOURCES = _chain(Sources, *RANKING, shortlist)
 
 
@@ -295,15 +313,19 @@ async def passages(names: list[str], query: str, limit: int | None = None) -> li
     return await PASSAGES.run(state=state) if state else []
 
 
-async def excerpts(names: list[str], query: str, limit: int | None = None) -> list[Excerpt]:
-    """The `limit` best sections of `names` as an agent quotes them, best first."""
-    state = await _search(names, query, limit, deeper=PASSAGE_SCAN)
-    return await EXCERPTS.run(state=state) if state else []
+async def excerpts(
+    names: list[str], query: str, limit: int | None = None, asked: str | None = None
+) -> Answer:
+    """The `limit` best sections of `names` as an agent quotes them, best first, and what they
+    leave out. `asked` is the question alone when `query` carries a context in front of it."""
+    state = await _search(names, query, limit, deeper=PASSAGE_SCAN, asked=asked)
+    if state is None:
+        question = probe.Question(text=query, vector=None, asked=asked or query)
+        return probe.report([], [question])
+    return probe.report(await EXCERPTS.run(state=state), [_question(state)])
 
 
-async def answers(
-    names: list[str], asked: aspects.Questions, limit: int | None = None
-) -> list[Excerpt]:
+async def answers(names: list[str], asked: aspects.Questions, limit: int | None = None) -> Answer:
     """The `limit` best passages of `names` across every question asked, as an agent quotes them.
 
     One question is `excerpts`, searched with the shared context in front of it. Several run the
@@ -315,12 +337,15 @@ async def answers(
     what follows are timed by hand under the names a graph step would have.
     """
     if len(asked.questions) == 1:
-        return await excerpts(names, asked.queries[0], limit)
+        return await excerpts(names, asked.queries[0], limit, asked.questions[0])
     limit = limit or (await load_user_settings()).search.limit
     depth = aspects.depth(len(asked.questions), limit)
     states = await _searches(names, asked.queries, limit, deeper=PASSAGE_SCAN)
     if states is None:
-        return []
+        return probe.report(
+            [],
+            [probe.Question(text=q, vector=None, asked=q, label=q) for q in asked.questions],
+        )
     ranged = await asyncio.gather(*(RANKED.run(state=state) for state in states))
     where, scan = states[0].plan, states[0].scan
     with _timing("cover"):
@@ -330,13 +355,15 @@ async def answers(
     with _timing("group"):
         groups = await retrieval.sections(kept, where, limit, asked.questions)
     questions = [
-        retrieval.Question(text=state.query, vector=state.plan.vector, label=label)
+        probe.Question(text=state.query, vector=state.plan.vector, asked=label, label=label)
         for state, label in zip(states, asked.questions, strict=True)
     ]
+    with _timing("probe_gaps"):
+        groups = await retrieval.probe_gaps(groups, questions, where)
     with _timing("fill"):
         groups = await retrieval.fill(groups, questions, where)
     with _timing("quote"):
-        return await retrieval.read_excerpts(groups)
+        return probe.report(await retrieval.read_excerpts(groups), questions)
 
 
 async def sources(
@@ -357,9 +384,12 @@ async def _search(
     limit: int | None,
     deeper: int,
     sections: int | None = None,
+    asked: str | None = None,
 ) -> Search | None:
     """One search, planned but not yet run, or None when nothing is left to search."""
     found = await _searches(names, [query], limit, deeper, sections)
+    if found and asked is not None:
+        found[0] = msgspec.structs.replace(found[0], asked=asked)
     return found[0] if found else None
 
 

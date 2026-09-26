@@ -13,7 +13,7 @@ from haskie.errors import InvalidInput
 from haskie.indexing import operations
 from haskie.paging import DEFAULT_PAGE_SIZE, Page
 from haskie.search import aspects, flow, retrieval, session, text
-from haskie.search.passage import Excerpt, Passage, Sources
+from haskie.search.passage import Answer, Excerpt, Passage, Sources
 
 
 # What one search returns: the chunks the index holds, the passages they merge into, or the
@@ -75,7 +75,7 @@ async def explore(
     if granularity == Granularity.PASSAGE:
         found: list[Hit] | list[Passage] | list[Excerpt] = await flow.passages(names, q, limit)
     elif granularity == Granularity.EXCERPT:
-        found = await flow.excerpts(names, q, limit)
+        found = (await flow.excerpts(names, q, limit)).excerpts
     else:
         found = await flow.chunks(names, q, limit)
     await session.record_search(session_id, "explore", q, found, started)
@@ -89,8 +89,17 @@ async def search_excerpts(
     session_id: str | None = None,
     collections: str | None = None,
     limit: Limit = None,
-) -> list[Excerpt]:
-    """What the sources say about a question, one section of a document per excerpt, best first.
+) -> Answer:
+    """What the sources say about a question, one section of a document per excerpt, best first,
+    and what they leave out.
+
+    The answer is `excerpts`, `uncovered` and `missing_terms`. `uncovered` lists the questions no
+    excerpt answers, when several were asked. `missing_terms` lists the words of the questions
+    (stopwords aside) that no excerpt's text or headings hold, a form of the word counting
+    ("keeps" holds "keep"). Before answering, the search looks for those words once more by full
+    text, and the best passage it finds joins the answer: in the section it belongs to, or as
+    one excerpt past `limit`. What is still missing after that is what the sources do not say in
+    those words; a synonym in the text does not count.
 
     Each excerpt is one section of one document: the largest heading whose text is at most a few
     pages, with every passage of it the search matched, in document order, and the text around
@@ -108,7 +117,8 @@ async def search_excerpts(
     pass each part as its own `q` (2 to 5), and the background they share once as `context`.
     Each part is searched on its own and the parts take turns at the `limit` slots, so one part
     cannot crowd out the others. Each span's `aspects` lists the questions it ranked high for,
-    and an excerpt's the questions any of its spans does.
+    and an excerpt's the questions any of its spans does. A question in `uncovered` found
+    nothing.
     That is rank, not a judgement: a vector or hybrid search finds a nearest passage for any
     question, so read the text before citing it as the answer to a part. A question no excerpt
     lists found nothing at all. Write each part as a full question, not a keyword. Keep in one
@@ -131,7 +141,8 @@ async def search_excerpts(
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection. Run `search_sources` first when the question is which
     documents or collections cover a topic, then `set_session_collections` with the cover it
-    returns. No results is an answer: the sources do not cover this, and saying so beats guessing.
+    returns. No excerpts is an answer: the sources do not cover this, and saying so beats
+    guessing.
 
     Args:
         q: The question, or 2 to 5 parts of one question, each at most 500 characters.
@@ -146,7 +157,7 @@ async def search_excerpts(
         session_id,
         "excerpts",
         " | ".join(asked.questions),
-        found,
+        found.excerpts,
         started,
         questions=several,
         context=asked.context,

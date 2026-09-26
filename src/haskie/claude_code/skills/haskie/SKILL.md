@@ -28,7 +28,8 @@ Every search scopes to the comma-separated `collections` argument. Without it, t
 selection. Without that, every collection. A hit held by several collections in scope is returned
 once.
 
-**`search_excerpts(q, context?, session_id?, collections?, limit?)`** → excerpts, best first.
+**`search_excerpts(q, context?, session_id?, collections?, limit?)`** → `excerpts` (best first),
+`uncovered` and `missing_terms`.
 `limit` is at least 1, defaults to the user's setting, and counts excerpts. One excerpt is one
 section of one document, the largest heading that is at most a few pages, with every passage of it
 the search matched, in document order, plus the text around and between them that matches as well.
@@ -54,7 +55,11 @@ reading.
 - parts: `aspects`, the parts of `q` a passage ranked high for, on each span and joined on the
   excerpt (empty for one question). Rank is not a
   judgement: a vector or hybrid search finds a nearest passage for any part, so read `text`
-  before citing it as that part's answer. A part no excerpt lists found nothing at all.
+  before citing it as that part's answer. A part in `uncovered` found nothing at all.
+- gaps: `missing_terms`, the words of `q` (stopwords aside) that no excerpt's text or headings
+  hold, after the search looked for them once more by full text. Its best find joins the answer,
+  past `limit` when it is in a section of its own. A missing word is one the sources do not use:
+  search again with a synonym, or say the sources lack it.
 - open: `markdown_file` and `source_file` (absolute paths), `line_start`/`line_end` (1-based, in
   `markdown_file`), `char_start`/`char_end` (0-based), `page_start`/`page_end` (PDF only, else
   null), `seq_start`/`seq_end` (chunk positions in the document)

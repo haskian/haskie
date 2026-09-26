@@ -1,0 +1,210 @@
+"""The words of a question the answer never mentions: which they are, which passage the probe
+found helps which question, where its section goes, and what the answer reports it lacks."""
+
+import msgspec
+import pytest
+from conftest import hit
+
+from haskie.search import probe
+from haskie.search.passage import Excerpt, Span, ranges
+from haskie.search.probe import Question
+from haskie.search.section import Group, Section
+
+ORDER = Question(
+    "Designing orders.\n\nHow does an order keep inventory consistent?",
+    None,
+    "How does an order keep inventory consistent?",
+    label="order",
+)
+LEDGER = Question(
+    "How is the ledger reconciled?", None, "How is the ledger reconciled?", label="ledger"
+)
+ALONE = Question("How is the ledger reconciled?", None, "How is the ledger reconciled?")
+
+
+def _group(document: str, text: str, path: tuple[str, ...] = ("Shop",)) -> Group:
+    (found,) = ranges([hit(text, 1.0, document=document)])
+    return Group("backend", document, Section(path, 1, 1), [found])
+
+
+def test_terms_are_the_topic_words_in_the_order_asked() -> None:
+    assert probe.terms(ORDER.asked) == ["order", "keep", "inventory", "consistent"]
+
+
+@pytest.mark.parametrize(
+    ("name", "questions", "covered", "expected"),
+    [
+        (
+            "a word no text holds is missing, with the questions that used it",
+            [ORDER],
+            ["An order keeps its lines consistent."],
+            {"inventory": ["order"]},
+        ),
+        (
+            "a form of the word holds it: keeps for keep, consistency for consistent",
+            [ORDER],
+            ["Orders keep their inventory in consistency."],
+            {},
+        ),
+        ("a heading holds a word too", [ORDER], ["Inventory", "orders keep consistent"], {}),
+        (
+            "words of several questions, in the order asked",
+            [ORDER, LEDGER],
+            ["An order keeps its lines consistent."],
+            {"inventory": ["order"], "ledger": ["ledger"], "reconciled": ["ledger"]},
+        ),
+        (
+            "nothing kept: every word is missing",
+            [LEDGER],
+            [],
+            {"ledger": ["ledger"], "reconciled": ["ledger"]},
+        ),
+        (
+            "a question of stopwords asks for nothing",
+            [Question("How is it?", None, "How is it?")],
+            [],
+            {},
+        ),
+    ],
+)
+def test_the_missing_words_are_those_no_kept_text_holds(
+    name: str, questions: list[Question], covered: list[str], expected: dict[str, list[str]]
+) -> None:
+    found = probe.missing(questions, covered)
+
+    assert {word: [q.label for q in qs] for word, qs in found.items()} == expected, name
+    assert list(found) == list(expected), f"{name}: in the order asked"
+
+
+def test_the_kept_text_is_every_passage_and_heading() -> None:
+    groups = [_group("a.md", "Orders ship.", ("Shop", "Orders"))]
+
+    assert probe.covered(groups) == ["Orders ship.", "Messaging", "Retries"]
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "questions", "expected"),
+    [
+        (
+            "tagged with the question whose word it holds",
+            "Inventory counts drop.",
+            [ORDER, LEDGER],
+            ["order"],
+        ),
+        (
+            "with every question it helps, in the order asked",
+            "The ledger shows inventory.",
+            [ORDER, LEDGER],
+            ["order", "ledger"],
+        ),
+        ("a single question tags nothing", "The ledger balances.", [ALONE], []),
+    ],
+)
+def test_a_probed_passage_is_tagged_with_the_questions_it_helps(
+    name: str, text: str, questions: list[Question], expected: list[str]
+) -> None:
+    (found,) = ranges([hit(text, 1.0)])
+    wanted = probe.missing(questions, [])
+
+    assert probe.tags(found, wanted) == expected, name
+
+
+def test_the_probed_section_joins_the_section_it_is_part_of_else_comes_after() -> None:
+    kept = [_group("a.md", "Orders ship."), _group("b.md", "Ledgers balance.")]
+    same = _group("b.md", "The ledger is reconciled nightly.")
+    other = _group("c.md", "Inventory counts drop.")
+
+    joined, where = probe.placed(kept, same)
+    added, elsewhere = probe.placed(kept, other)
+
+    assert where == "joined"
+    assert [len(one.ranges) for one in joined] == [1, 2], "into its section, not a slot"
+    assert elsewhere == "added"
+    assert [one.document for one in added] == ["a.md", "b.md", "c.md"], "past the others"
+
+
+def _excerpt(text: str, aspects: list[str], header: str = "Shop") -> Excerpt:
+    span = Span(
+        header=f"{header} > Stock",
+        location="a.md L1-1",
+        seq_start=1,
+        seq_end=1,
+        line_start=1,
+        line_end=1,
+        char_start=0,
+        char_end=len(text),
+        page_start=None,
+        page_end=None,
+        score=1.0,
+        aspects=aspects,
+    )
+    return Excerpt(
+        collection="backend",
+        document="a.md",
+        header=header,
+        location="a.md L1-1",
+        seq_start=1,
+        seq_end=1,
+        line_start=1,
+        line_end=1,
+        char_start=0,
+        char_end=len(text),
+        page_start=None,
+        page_end=None,
+        text=text,
+        score=1.0,
+        source_file="/a.md",
+        markdown_file="/a.md.md",
+        spans=[span],
+        aspects=aspects,
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "excerpts", "questions", "uncovered", "missing"),
+    [
+        (
+            "everything answered",
+            [_excerpt("Orders keep inventory consistent.", ["order"])],
+            [ORDER],
+            [],
+            [],
+        ),
+        (
+            "a question no excerpt names is uncovered",
+            [_excerpt("Orders keep inventory consistent.", ["order"])],
+            [ORDER, LEDGER],
+            ["ledger"],
+            ["ledger", "reconciled"],
+        ),
+        (
+            "a span's heading holds a word",
+            [_excerpt("Orders keep it consistent.", ["order"], header="Inventory")],
+            [ORDER],
+            [],
+            [],
+        ),
+        ("a single question is never uncovered", [], [ALONE], [], ["ledger", "reconciled"]),
+    ],
+)
+def test_the_answer_reports_what_it_lacks(
+    name: str,
+    excerpts: list[Excerpt],
+    questions: list[Question],
+    uncovered: list[str],
+    missing: list[str],
+) -> None:
+    answer = probe.report(excerpts, questions)
+
+    assert answer.excerpts == excerpts
+    assert (answer.uncovered, answer.missing_terms) == (uncovered, missing), name
+
+
+def test_an_answer_is_the_wire_shape_the_tool_returns() -> None:
+    answer = probe.report([], [ALONE])
+
+    assert msgspec.to_builtins(answer) == {
+        "excerpts": [],
+        "uncovered": [],
+        "missing_terms": ["ledger", "reconciled"],
+    }

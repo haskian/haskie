@@ -714,6 +714,12 @@ export interface components {
         AddDocument: {
             document: string;
         };
+        /** Answer */
+        Answer: {
+            excerpts: components["schemas"]["Excerpt"][];
+            uncovered: string[];
+            missing_terms: string[];
+        };
         /** BulkProgress */
         BulkProgress: {
             done: number;
@@ -3206,7 +3212,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Excerpt"][];
+                    "application/json": components["schemas"]["Answer"];
                 };
             };
             /** @description Bad request syntax or unsupported method */

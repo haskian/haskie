@@ -39,7 +39,7 @@ from haskie.document import document
 from haskie.indexing import models
 from haskie.indexing.embed import embed_query
 from haskie.logs import get_logger
-from haskie.search import aspects, collapse, passage, section, session, text, thin
+from haskie.search import aspects, collapse, passage, probe, section, session, text, thin
 from haskie.search import fill as filling
 from haskie.search.passage import Excerpt, Passage, Sources
 from haskie.settings import Reranker, SearchMode, SearchSettings, load_user_settings
@@ -470,12 +470,7 @@ async def sections(
     one query per collection, and only the heading path and char span of each chunk. `labels` are
     the questions of a search that asked several, to log which of them no section kept.
     """
-    wanted: dict[str, set[str]] = {}
-    for collection, doc in section.documents(hit_ranges, limit):
-        wanted.setdefault(collection, set()).add(doc)
-    read = await _per_collection(where, wanted, lambda index, docs: index.outline_rows(docs))
-    rows = [(index.collection, row) for index, found in read for row in found]
-    groups = await cpu.on_cpu(_group, hit_ranges, rows, where.settings.max_section_chars, limit)
+    groups = await _grouped(hit_ranges, where, limit)
     answered = {label for one in groups for kept in one.ranges for label in kept.aspects}
     _log.info(
         "search_sections",
@@ -488,16 +483,8 @@ async def sections(
     return groups
 
 
-class Question(msgspec.Struct, frozen=True):
-    """One question of a search, as the fill scores chunks against it."""
-
-    text: str  # what it was searched with, the shared context included
-    vector: list[float] | None  # its embedding, None for a lexical search
-    label: str | None = None  # the question as asked, to tag with, when several were
-
-
 async def fill(
-    groups: list[section.Group], questions: list[Question], where: Plan
+    groups: list[section.Group], questions: list[probe.Question], where: Plan
 ) -> list[section.Group]:
     """The groups within the answer's budget, each with the chunks around and between its
     passages that answer too (see `fill`).
@@ -522,7 +509,7 @@ def _fill(
     kept: list[section.Group],
     groups: list[section.Group],
     rows: dict[ChunkKey, tuple[Hit, dict]],
-    questions: list[Question],
+    questions: list[probe.Question],
     budget: int,
 ) -> list[section.Group]:
     held = [chunk_key(hit) for one in kept for hit_range in one.ranges for hit in hit_range.hits]
@@ -556,7 +543,7 @@ def _weigh(
     held: list[ChunkKey],
     near: list[ChunkKey],
     rows: dict[ChunkKey, tuple[Hit, dict]],
-    questions: list[Question],
+    questions: list[probe.Question],
 ) -> tuple[dict[ChunkKey, filling.Candidate], str]:
     """Each chunk near a passage as a candidate: its best question's value around the passages'
     own chunks (`fill.value`), and that question. By the vectors when every row has one, else by
@@ -585,6 +572,47 @@ def _weigh(
         best = max(range(len(questions)), key=lambda q: values[q][at])
         weighed[key] = filling.Candidate(rows[key][0], values[best][at], questions[best].label)
     return weighed, "vector" if by_vector else "words"
+
+
+async def _grouped(
+    hit_ranges: list[passage.HitRange], where: Plan, limit: int
+) -> list[section.Group]:
+    """The first `limit` sections of the ranges, the outlines they need read first."""
+    wanted: dict[str, set[str]] = {}
+    for collection, doc in section.documents(hit_ranges, limit):
+        wanted.setdefault(collection, set()).add(doc)
+    read = await _per_collection(where, wanted, lambda index, docs: index.outline_rows(docs))
+    rows = [(index.collection, row) for index, found in read for row in found]
+    return await cpu.on_cpu(_group, hit_ranges, rows, where.settings.max_section_chars, limit)
+
+
+async def probe_gaps(
+    groups: list[section.Group], questions: list[probe.Question], where: Plan
+) -> list[section.Group]:
+    """The groups, with one more passage where the questions use words none of them holds (see
+    `probe`): the best passage a full-text search of those words finds that no group holds yet,
+    tagged with the questions it helps, in its section. Nothing is searched when no word is
+    missing."""
+    wanted = probe.missing(questions, probe.covered(groups))
+    if not wanted:
+        return groups
+    query = " ".join(wanted)
+    lexical = msgspec.structs.replace(where, vector=None)
+    pool = merge(
+        await fan_out(lexical, query, where.settings.candidates),
+        where.settings.rrf_k,
+        where.settings.candidates,
+    )
+    held = {chunk_key(hit) for one in groups for kept in one.ranges for hit in kept.hits}
+    hits = [hit for hit in scan(pool, probe.PROBE_SCAN).hits if chunk_key(hit) not in held]
+    fresh = passage.ranges(hits)
+    where_went = None
+    if fresh:
+        best = msgspec.structs.replace(fresh[0], aspects=probe.tags(fresh[0], wanted))
+        (found,) = await _grouped([best], where, 1)
+        groups, where_went = probe.placed(groups, found)
+    _log.info("search_probe", terms=list(wanted), placed=where_went)
+    return groups
 
 
 def _group(
