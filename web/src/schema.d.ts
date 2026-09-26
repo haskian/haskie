@@ -1559,6 +1559,11 @@ export interface components {
              * @description An excerpt is one section of a document: the largest heading whose text fits this many characters. The passages a search keeps under it come back together, in document order.
              */
             max_section_chars?: number | null;
+            /**
+             * Largest answer (characters)
+             * @description How much text one excerpts search returns at most. Sections past it are left out, the last first, and the text around and between passages that answers too is added while it fits.
+             */
+            max_answer_chars?: number | null;
         };
         /** SearchSettings */
         SearchSettings: {
@@ -1631,6 +1636,12 @@ export interface components {
              * @default 8000
              */
             max_section_chars: number;
+            /**
+             * Largest answer (characters)
+             * @description How much text one excerpts search returns at most. Sections past it are left out, the last first, and the text around and between passages that answers too is added while it fits.
+             * @default 24000
+             */
+            max_answer_chars: number;
         };
         /** SessionCollections */
         SessionCollections: {

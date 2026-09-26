@@ -18,6 +18,7 @@ export const SEARCH_BOUNDS: Record<NumericKeys<SearchSettings>, { min: number; s
   min_passage_chars: { min: 0, step: 50 },
   max_passage_grow: { min: 0, step: 1 },
   max_section_chars: { min: 1, step: 500 },
+  max_answer_chars: { min: 1, step: 1000 },
 }
 
 /**
@@ -40,6 +41,7 @@ export function effectiveSearch(overrides: SearchOverrides, defaults: SearchSett
     min_passage_chars: overrides.min_passage_chars ?? defaults.min_passage_chars,
     max_passage_grow: overrides.max_passage_grow ?? defaults.max_passage_grow,
     max_section_chars: overrides.max_section_chars ?? defaults.max_section_chars,
+    max_answer_chars: overrides.max_answer_chars ?? defaults.max_answer_chars,
   }
 }
 
@@ -47,7 +49,8 @@ export function effectiveSearch(overrides: SearchOverrides, defaults: SearchSett
  * Which search fields a form shows, in order: a field is only asked for when the effective
  * settings make it do something. Fusion weights belong to a hybrid query, probes to a vector
  * one, the reranker model to a reranker, the candidate pool to whichever of the two reads it,
- * how far a short passage grows to a shortest passage that is on, and the section size always.
+ * how far a short passage grows to a shortest passage that is on, and the section and answer
+ * sizes always.
  */
 export function visibleSearchFields(effective: SearchSettings): (keyof SearchSettings)[] {
   const hybrid = effective.mode === 'hybrid'
@@ -62,6 +65,6 @@ export function visibleSearchFields(effective: SearchSettings): (keyof SearchSet
   if (hybrid || reranked) fields.push('candidates')
   fields.push('min_passage_chars')
   if (effective.min_passage_chars > 0) fields.push('max_passage_grow')
-  fields.push('max_section_chars')
+  fields.push('max_section_chars', 'max_answer_chars')
   return fields
 }

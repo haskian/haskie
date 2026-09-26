@@ -194,3 +194,76 @@ async def test_with_a_reranker_a_neighbour_is_scored_by_it(monkeypatch: pytest.M
     )
 
     assert (scores, floor, signal) == ([4.0, -2.0], 2.0, "reranker")
+
+
+# --- what a chunk near a passage is worth ---------------------------------------------------
+
+# two kept chunks and two near them, each with a vector and its words
+WEIGHED = {
+    ("backend", "doc.md", seq): (
+        msgspec.structs.replace(SCANNED.hits[0], seq=seq, text=text),
+        {"document": "doc.md", "seq": seq, "text": text, "vector": vector},
+    )
+    for seq, text, vector in [
+        (1, "retries are idempotent", [1.0, 0.0]),
+        (2, "retries back off", [0.8, 0.6]),
+        (3, "idempotent retries again", [0.95, 0.3122]),
+        (4, "jitter spreads the load", [0.0, 1.0]),
+    ]
+}
+HELD = [("backend", "doc.md", 1), ("backend", "doc.md", 2)]
+NEAR = [("backend", "doc.md", 3), ("backend", "doc.md", 4)]
+
+
+@pytest.mark.parametrize(
+    ("name", "questions", "rows", "signal", "values", "aspects"),
+    [
+        (
+            "by the vector: 0 at the median kept chunk, 1 at the best",
+            [retrieval.Question("retries idempotent", [1.0, 0.0])],
+            WEIGHED,
+            "vector",
+            [0.5, -1.0],
+            [None, None],
+        ),
+        (
+            "without a query vector, by the question's words",
+            [retrieval.Question("idempotent retries", None)],
+            WEIGHED,
+            "words",
+            [1.0, -1.0],
+            [None, None],
+        ),
+        (
+            "each chunk takes its best question, which tags it",
+            [
+                retrieval.Question("idempotent retries", None, label="a"),
+                retrieval.Question("jitter load", None, label="b"),
+            ],
+            WEIGHED,
+            "words",
+            [1.0, 1.0],
+            ["a", "b"],
+        ),
+    ],
+)
+def test_a_chunk_near_a_passage_is_weighed_against_the_kept_chunks(
+    name: str,
+    questions: list[retrieval.Question],
+    rows: dict,
+    signal: str,
+    values: list[float],
+    aspects: list[str | None],
+) -> None:
+    weighed, found = retrieval._weigh(HELD, NEAR, rows, questions)
+
+    assert found == signal, name
+    assert [weighed[key].value for key in NEAR] == pytest.approx(values, abs=1e-3), name
+    assert [weighed[key].aspect for key in NEAR] == aspects, name
+
+
+def test_nothing_near_or_nothing_held_weighs_nothing() -> None:
+    question = [retrieval.Question("retries", None)]
+
+    assert retrieval._weigh(HELD, [], WEIGHED, question) == ({}, "none")
+    assert retrieval._weigh([], NEAR, WEIGHED, question) == ({}, "none")

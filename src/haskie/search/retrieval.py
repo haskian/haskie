@@ -40,6 +40,7 @@ from haskie.indexing import models
 from haskie.indexing.embed import embed_query
 from haskie.logs import get_logger
 from haskie.search import aspects, collapse, passage, section, session, text, thin
+from haskie.search import fill as filling
 from haskie.search.passage import Excerpt, Passage, Sources
 from haskie.settings import Reranker, SearchMode, SearchSettings, load_user_settings
 
@@ -485,6 +486,105 @@ async def sections(
         uncovered=None if labels is None else sum(1 for label in labels if label not in answered),
     )
     return groups
+
+
+class Question(msgspec.Struct, frozen=True):
+    """One question of a search, as the fill scores chunks against it."""
+
+    text: str  # what it was searched with, the shared context included
+    vector: list[float] | None  # its embedding, None for a lexical search
+    label: str | None = None  # the question as asked, to tag with, when several were
+
+
+async def fill(
+    groups: list[section.Group], questions: list[Question], where: Plan
+) -> list[section.Group]:
+    """The groups within the answer's budget, each with the chunks around and between its
+    passages that answer too (see `fill`).
+
+    The chunks near every kept passage are read in one query per collection, with the passages'
+    own, and scored against each question: by its vector when every row has one, else by its
+    words. Each chunk is worth its best question's value, and that question tags it.
+    """
+    budget = where.settings.max_answer_chars
+    kept = filling.within(groups, budget)
+    wanted = {
+        (one.collection, one.document, seq)
+        for one in kept
+        for seq in filling.near(one)
+        | {hit.seq for kept_range in one.ranges for hit in kept_range.hits}
+    }
+    rows = await _rows_at(where, wanted)
+    return await cpu.on_cpu(_fill, kept, groups, rows, questions, budget)
+
+
+def _fill(
+    kept: list[section.Group],
+    groups: list[section.Group],
+    rows: dict[ChunkKey, tuple[Hit, dict]],
+    questions: list[Question],
+    budget: int,
+) -> list[section.Group]:
+    held = [chunk_key(hit) for one in kept for hit_range in one.ranges for hit in hit_range.hits]
+    around = {
+        (one.collection, one.document, seq): at
+        for at, one in enumerate(kept)
+        for seq in filling.near(one)
+        if (one.collection, one.document, seq) in rows
+    }
+    weighed, signal = _weigh(held, list(around), rows, questions)
+    found: list[filling.Fill] = []
+    for at, one in enumerate(kept):
+        candidates = {key[2]: chunk for key, chunk in weighed.items() if around[key] == at}
+        found += filling.fills(at, one, candidates)
+    chosen = filling.choose(found, budget - sum(filling.chars(one.ranges) for one in kept))
+    taken: dict[int, list[filling.Candidate]] = {}
+    for one in chosen:
+        taken.setdefault(one.group, []).extend(one.chunks)
+    _log.info(
+        "search_fill",
+        signal=signal,
+        cut=len(groups) - len(kept),
+        fills=len(chosen),
+        added=sum(len(one.chunks) for one in chosen),
+        chars=sum(one.chars for one in chosen),
+    )
+    return [filling.apply(one, taken.get(at, [])) for at, one in enumerate(kept)]
+
+
+def _weigh(
+    held: list[ChunkKey],
+    near: list[ChunkKey],
+    rows: dict[ChunkKey, tuple[Hit, dict]],
+    questions: list[Question],
+) -> tuple[dict[ChunkKey, filling.Candidate], str]:
+    """Each chunk near a passage as a candidate: its best question's value around the passages'
+    own chunks (`fill.value`), and that question. By the vectors when every row has one, else by
+    the words."""
+    held = [key for key in held if key in rows]
+    if not near or not held:
+        return {}, "none"
+    vectors = [rows[key][1].get("vector") for key in [*held, *near]]
+    by_vector = all(one.vector is not None for one in questions) and all(
+        vector is not None for vector in vectors
+    )
+    values: list[list[float]] = []
+    for question in questions:
+        if by_vector:
+            scores = (
+                collapse.unit_rows(vectors) @ collapse.unit_rows([question.vector])[0]
+            ).tolist()
+        else:
+            words = thin.terms(question.text)
+            scores = [thin.overlap(words, rows[key][0].text) for key in [*held, *near]]
+        own, others = scores[: len(held)], scores[len(held) :]
+        floor, top = statistics.median(own), max(own)
+        values.append([filling.value(score, floor, top) for score in others])
+    weighed: dict[ChunkKey, filling.Candidate] = {}
+    for at, key in enumerate(near):
+        best = max(range(len(questions)), key=lambda q: values[q][at])
+        weighed[key] = filling.Candidate(rows[key][0], values[best][at], questions[best].label)
+    return weighed, "vector" if by_vector else "words"
 
 
 def _group(

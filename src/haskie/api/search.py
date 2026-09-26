@@ -93,10 +93,12 @@ async def search_excerpts(
     """What the sources say about a question, one section of a document per excerpt, best first.
 
     Each excerpt is one section of one document: the largest heading whose text is at most a few
-    pages, with every passage of it the search matched, in document order. `text` joins them:
-    each passage opens with the headings it sits under below `header`, and `[…]` marks text the
-    search skipped between two of them. Chunks are cut at headings, blank lines, blocks and
-    sentences, so each passage begins and ends where the author stopped. `limit` counts excerpts.
+    pages, with every passage of it the search matched, in document order, and the text around
+    and between them that matches the question as well as they do. `text` joins them: each
+    passage opens with the headings it sits under below `header`, and `[…]` marks text skipped
+    between two of them because it did not match. Chunks are cut at headings, blank lines,
+    blocks and sentences, so each passage begins and ends where the author stopped. `limit`
+    counts excerpts, and the whole answer is at most `max_answer_chars` characters.
     Cite the excerpt by its `header` (the section's heading path) and `location` (document, pages,
     lines), or one passage by its span's `header` and `location`. `spans` lists the passages, each
     with its lines, its score, the questions it answers and the places that repeat it.

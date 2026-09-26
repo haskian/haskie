@@ -9,13 +9,14 @@ Four pipelines over one set of steps:
 
     chunks     retrieve -> merge -> rerank -> hits -> collapse_hits
     passages   retrieve -> merge -> rerank -> hits -> fill_thin -> collapse_ranges -> read
-    excerpts   retrieve -> merge -> rerank -> hits -> fill_thin -> collapse_all -> group -> quote
+    excerpts   retrieve -> merge -> rerank -> hits -> fill_thin -> collapse_all -> group -> fill
+               -> quote
     sources    retrieve -> merge -> rerank -> hits -> shortlist
 
 and one that runs the shared ranking once per question, when several are asked at once:
 
     answers    (retrieve -> merge -> rerank -> hits -> fill_thin) per question -> cover -> group
-               -> quote
+               -> fill -> quote
 
 The first four steps are the search every answer shares; what follows is the fold that answer is
 made of, and it is a step rather than something every search pays for. `chunks` folds each
@@ -23,7 +24,8 @@ near-duplicate hit into the hit it repeats (`collapse`). `passages` and `excerpt
 of one section that sit next to each other into one readable span, grow a span too short to stand
 alone by the neighbours that match the question or drop it (`thin`), fold near-duplicate spans the
 same way, and read only the spans they answer with. `excerpts` then groups the spans by the section
-they sit in, so `limit` counts sections, and writes each section out as one excerpt. `sources`
+they sit in, so `limit` counts sections, adds the text around and between them that answers
+too (`fill`), and writes each section out as one excerpt. `sources`
 folds the same hits per document instead.
 
 Two numbers steer that. `scan` is how deep the ranking goes and is what `hits` cuts to; `limit`
@@ -101,6 +103,7 @@ STEP_LABELS: dict[str, str] = {
     "collapse_ranges": "Fold passages",
     "collapse_all": "Fold passages",
     "group": "Group passages by section",
+    "fill": "Fill in around passages",
     "quote": "Read excerpts",
     "read": "Read passages",
     "shortlist": "Fold into documents",
@@ -213,6 +216,13 @@ async def group(ctx: StepContext[Search, None, list[HitRange]]) -> list[section.
     return await retrieval.sections(ctx.inputs, ctx.state.plan, ctx.state.limit)
 
 
+async def fill(ctx: StepContext[Search, None, list[section.Group]]) -> list[section.Group]:
+    """The sections within the answer's budget, with the text around and between their passages
+    that answers the query too."""
+    asked = retrieval.Question(text=ctx.state.query, vector=ctx.state.plan.vector)
+    return await retrieval.fill(ctx.inputs, [asked], ctx.state.plan)
+
+
 async def quote(ctx: StepContext[Search, None, list[section.Group]]) -> list[Excerpt]:
     """Each section read out of its document as one excerpt."""
     return await retrieval.read_excerpts(ctx.inputs)
@@ -262,7 +272,7 @@ RANKED = _chain(retrieval.Ranged, *RANKING, fill_thin)  # one question's part of
 
 CHUNKS = _chain(list[Hit], *RANKING, collapse_hits)
 PASSAGES = _chain(list[Passage], *RANKING, fill_thin, collapse_ranges, read)
-EXCERPTS = _chain(list[Excerpt], *RANKING, fill_thin, collapse_all, group, quote)
+EXCERPTS = _chain(list[Excerpt], *RANKING, fill_thin, collapse_all, group, fill, quote)
 SOURCES = _chain(Sources, *RANKING, shortlist)
 
 
@@ -319,6 +329,12 @@ async def answers(
         )
     with _timing("group"):
         groups = await retrieval.sections(kept, where, limit, asked.questions)
+    questions = [
+        retrieval.Question(text=state.query, vector=state.plan.vector, label=label)
+        for state, label in zip(states, asked.questions, strict=True)
+    ]
+    with _timing("fill"):
+        groups = await retrieval.fill(groups, questions, where)
     with _timing("quote"):
         return await retrieval.read_excerpts(groups)
 

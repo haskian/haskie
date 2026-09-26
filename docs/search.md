@@ -14,7 +14,7 @@ flowchart LR
     rerank --> hits["<b>hits</b><br/>cut to scan depth"]
     hits --> fchunks["collapse hits"] --> chunks(["chunks"])
     hits --> franges["merge neighbours,<br/>grow or drop short ones,<br/>collapse ranges"] --> read["read the spans"] --> passages(["passages"])
-    franges --> group["group by section"] --> excerpts(["excerpts"])
+    franges --> group["group by section"] --> fill["fill around<br/>and between"] --> excerpts(["excerpts"])
     hits --> shortlist["group by document"] --> sources(["sources"])
 ```
 
@@ -68,8 +68,30 @@ the one before it did not, below the section's own `header`, as markdown heading
 `[…]` marks text between two passages that the search did not keep. `spans` lists the passages,
 each with its own `header`, `location`, lines, offsets, score, `aspects` and `also_in`. The
 excerpt's own offsets and lines run from the first passage to the last, and its `score` is the best
-passage's. Filling the text between two passages, and a budget on the length of an excerpt, are the
-next step.
+passage's.
+
+## Filling around and between passages
+
+The text between two kept passages, or just past them, often finishes the answer: the list under
+"three rules:", the paragraph that explains a term. It did not rank, so `search/fill.py` weighs it.
+Every chunk of the section within 4 chunks of a kept passage is scored against the question, by
+the query vector when every row has one, else by the question's words. Its value is its score
+around the kept chunks' own: 0 for one as good as the median kept chunk, 1 for one as good as the
+best, below 0 for a weaker one, clipped to [-1, 1]. With several questions a chunk takes its best
+question's value, and that question tags it.
+
+- A gap between two passages is filled when its values sum above 0, and the two become one.
+- A passage grows outward by the run of chunks next to it whose values sum highest, when that is
+  above 0.
+
+This is the arithmetic of Relevant Segment Extraction [3]: a weak chunk comes in only when stronger
+ones around it pay for it. Where a gap is not filled, `[…]` stays.
+
+`max_answer_chars` (24,000) bounds what one excerpts search returns. Sections past it go first, the
+last first, though the first section always stays. The fills then go in, worth most per character
+first, while they fit. The fill does not ask the reranker even when one is on: scoring every chunk
+near every section against every question would take seconds. Each search logs `search_fill` with
+the signal and what it cut and added.
 
 ## Short passages
 
@@ -177,7 +199,7 @@ flowchart LR
     ranges --> turns["<b>take turns</b><br/>round-robin<br/>over the parts"]
     turns --> fold["collapse ranges<br/>across all parts"]
     fold --> tag["tag each passage<br/>with its parts"]
-    tag --> group["group by section"] --> excerpts(["excerpts"])
+    tag --> group["group by section"] --> fill["fill"] --> excerpts(["excerpts"])
 ```
 
 Each part runs the shared ranking on its own, as deep as one search of that `limit` would go.
@@ -211,8 +233,8 @@ building its first full-text index contributes nothing instead of making the que
 ## Settings
 
 `limit`, `candidates`, `mode`, `fusion`, `rrf_k`, `vector_weight`, `bm25_weight`, `nprobes`,
-`refine_factor`, `reranker`, `reranker_model`, `min_passage_chars`, `max_passage_grow` and
-`max_section_chars` each have a user default and a description in the UI, and a collection can override them. In the shared ranking, each collection retrieves with
+`refine_factor`, `reranker`, `reranker_model`, `min_passage_chars`, `max_passage_grow`,
+`max_section_chars` and `max_answer_chars` each have a user default and a description in the UI, and a collection can override them. In the shared ranking, each collection retrieves with
 its own overrides. The settings of the merged ranking (`rrf_k`, `candidates`, the reranker) come
 from the collection only when it is the one collection in scope, and from the user otherwise.
 `limit` comes from the call, else the user default. `/api/collections/{c}/search` applies all of
@@ -220,7 +242,7 @@ the collection's overrides, and also takes `limit`, `mode`, `fusion`, `vector_we
 `bm25_weight`, `reranker` and `candidates` per call.
 
 Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/collapse.py`,
-`search/aspects.py`, `search/thin.py`, `search/section.py`.
+`search/aspects.py`, `search/thin.py`, `search/section.py`, `search/fill.py`.
 
 ## References
 
@@ -228,3 +250,5 @@ Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/coll
    Passage Re-Ranking with Cross-Encoders." *ECIR*, 2025. https://arxiv.org/abs/2404.06912
 2. Samuel, S. et al. "Beyond Relevance: On the Relationship Between Retrieval and RAG Information
    Coverage." *ICTIR*, 2026. https://arxiv.org/abs/2603.08819
+3. D-Star AI. "dsRAG: Relevant Segment Extraction." GitHub, 2024.
+   https://github.com/D-Star-AI/dsRAG/blob/main/dsrag/rse.py

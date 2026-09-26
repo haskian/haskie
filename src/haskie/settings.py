@@ -236,6 +236,14 @@ MAX_SECTION_CHARS = Meta(
         "characters. The passages a search keeps under it come back together, in document order."
     ),
 )
+MAX_ANSWER_CHARS = Meta(
+    title="Largest answer (characters)",
+    description=(
+        "How much text one excerpts search returns at most. Sections past it are left out, the "
+        "last first, and the text around and between passages that answers too is added while "
+        "it fits."
+    ),
+)
 MAX_PASSAGE_GROW = Meta(
     title="Chunks a short passage may add",
     description="How many neighbouring chunks a short passage may grow by, never past a heading.",
@@ -356,7 +364,15 @@ def _check_search(search: "SearchSettings | SearchOverrides") -> None:
     """Shared by the user-level search settings and a collection's overrides, where a field left
     unset (None) inherits the user value and is not checked here."""
     given = without_none(search)
-    at_least_one = ("limit", "candidates", "rrf_k", "nprobes", "refine_factor", "max_section_chars")
+    at_least_one = (
+        "limit",
+        "candidates",
+        "rrf_k",
+        "nprobes",
+        "refine_factor",
+        "max_section_chars",
+        "max_answer_chars",
+    )
     _at_least(1, **{name: given[name] for name in at_least_one if name in given})
     at_least_zero = ("vector_weight", "bm25_weight", "min_passage_chars", "max_passage_grow")
     _at_least(0, **{name: given[name] for name in at_least_zero if name in given})
@@ -424,6 +440,7 @@ class SearchSettings(msgspec.Struct):
     min_passage_chars: Annotated[int, MIN_PASSAGE_CHARS] = 300
     max_passage_grow: Annotated[int, MAX_PASSAGE_GROW] = 2
     max_section_chars: Annotated[int, MAX_SECTION_CHARS] = 8000
+    max_answer_chars: Annotated[int, MAX_ANSWER_CHARS] = 24000
 
     def __post_init__(self) -> None:
         # `reranker_model` is checked against the catalogue where settings are written
@@ -448,6 +465,7 @@ class SearchOverrides(msgspec.Struct):
     min_passage_chars: Annotated[int | None, MIN_PASSAGE_CHARS] = None
     max_passage_grow: Annotated[int | None, MAX_PASSAGE_GROW] = None
     max_section_chars: Annotated[int | None, MAX_SECTION_CHARS] = None
+    max_answer_chars: Annotated[int | None, MAX_ANSWER_CHARS] = None
 
     def __post_init__(self) -> None:
         # checked as it is decoded, before it is saved: otherwise a value no search can run with

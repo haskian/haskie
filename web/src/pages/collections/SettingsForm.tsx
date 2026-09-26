@@ -126,6 +126,7 @@ export function SettingsForm({
     min_passage_chars: searchNumber('min_passage_chars'),
     max_passage_grow: searchNumber('max_passage_grow'),
     max_section_chars: searchNumber('max_section_chars'),
+    max_answer_chars: searchNumber('max_answer_chars'),
   }
 
   return (

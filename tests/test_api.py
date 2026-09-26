@@ -1138,6 +1138,7 @@ async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
                 "fill_thin",
                 "collapse_all",
                 "group",
+                "fill",
                 "quote",
             ],
         ),
@@ -1272,6 +1273,46 @@ async def test_the_passages_of_one_section_come_back_as_one_excerpt(
     assert (storage["seq_start"], storage["seq_end"]) == (1, 3)
 
 
+# Six paragraphs of one section, every one on retries, longer and longer: a search that scans
+# fewer than six chunks keeps only some of them, and the rest answer just as well.
+FILL_MD = "# Guide\n\n## Retries\n\n" + "\n\n".join(
+    "A retry " + "waits a little longer each time " * (count + 1) + "before it runs again."
+    for count in range(6)
+)
+
+
+async def test_the_text_between_and_around_kept_passages_is_filled_when_it_answers(
+    client: AsyncTestClient,
+) -> None:
+    """One excerpt asked for scans four chunks, so the ranking keeps four of the six paragraphs.
+    The two it left out match the question as well as those it kept, so the excerpt reads the
+    whole section, one passage with no `[…]`, while the passage granularity stays the ranking's."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "fill.md", FILL_MD.encode())
+    await _member("notes", "fill.md")
+    chunks = split(
+        await _markdown_of("fill.md"), ChunkSettings(chunk_size=300, chunk_merge_below=0)
+    )
+    await seed_chunks("notes", "fill.md", chunks)
+    # short passages growing on their own would hide what the fill does
+    overrides = {"search": {"min_passage_chars": 0}}
+    assert (await client.put("/api/collections/notes/overrides", json=overrides)).is_success
+    params = {"q": "retry", "limit": 1}
+
+    scanned = (
+        await client.get("/api/search/explore", params={**params, "granularity": "chunk"})
+    ).json()
+    response = await client.get("/api/search/excerpts", params=params)
+
+    assert len(chunks) == 6, "a chunk per paragraph"
+    assert len(scanned) == 1 and response.status_code == 200, response.text
+    (excerpt,) = response.json()
+    assert [(span["seq_start"], span["seq_end"]) for span in excerpt["spans"]] == [(1, 6)]
+    assert "[…]" not in excerpt["text"]
+    assert excerpt["text"] == "\n\n".join(chunk.text for chunk in chunks)
+
+
 # A section that answers, and a lead-in of another whose table below it says nothing on the query:
 # the lead-in matches the word "lancedb" alone, and the chunk it would grow into matches nothing.
 THIN_MD = (
@@ -1392,7 +1433,7 @@ async def test_several_questions_take_turns_and_say_which_they_answer(
     assert sorted(steps) == sorted(
         ["plan"]
         + ["retrieve", "merge", "rerank", "hits", "fill_thin"] * 2
-        + ["cover", "group", "quote"]
+        + ["cover", "group", "fill", "quote"]
     ), "one plan for every question, the ranking once per question, then the turns, the sections"
     (event,) = (await client.get("/api/sessions/s1/history")).json()
     assert event["subject"] == f"{BY_IDENTITY} | {BY_EVENT}"
