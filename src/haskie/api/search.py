@@ -64,11 +64,11 @@ async def explore(
     `session_id`, else every collection. `limit` defaults to the user setting.
 
     What comes back per granularity: `chunk`, the matching index rows; `passage`, the consecutive
-    chunks of one document merged and widened to the line or the whole sentences around them;
-    `excerpt`, a passage with the parts that do not answer the query left out (today the passage
-    itself). At every granularity a near-duplicate is folded into the better result it repeats:
-    it is listed in that result's `also_in` rather than on its own, and its slot goes to the next
-    result down.
+    chunks of one section merged into one span, cut where the chunker cut;
+    `excerpt`, one section of a document with every passage of it the search kept, and `limit`
+    counting sections. At every granularity a near-duplicate is folded into the better result it
+    repeats: it is listed in that result's `also_in` (an excerpt's spans' `also_in`) rather than
+    on its own, and its slot goes to the next result down.
     """
     started = time.perf_counter()
     names = await retrieval.scope(session_id, collections)
@@ -90,32 +90,37 @@ async def search_excerpts(
     collections: str | None = None,
     limit: Limit = None,
 ) -> list[Excerpt]:
-    """What the sources say about a question, as passages ready to quote, best first.
+    """What the sources say about a question, one section of a document per excerpt, best first.
 
-    Each excerpt is what one document says in one place: the chunks that matched, merged where
-    they sit next to each other, and widened to the line or the whole sentences around them. So
-    it begins and ends where the author stopped. Cite it by its `header` (the heading path inside
-    the document) and its `location` (document, pages, lines). `markdown_file` is the whole
-    document on disk when the excerpt is not enough.
+    Each excerpt is one section of one document: the largest heading whose text is at most a few
+    pages, with every passage of it the search matched, in document order. `text` joins them:
+    each passage opens with the headings it sits under below `header`, and `[…]` marks text the
+    search skipped between two of them. Chunks are cut at headings, blank lines, blocks and
+    sentences, so each passage begins and ends where the author stopped. `limit` counts excerpts.
+    Cite the excerpt by its `header` (the section's heading path) and `location` (document, pages,
+    lines), or one passage by its span's `header` and `location`. `spans` lists the passages, each
+    with its lines, its score, the questions it answers and the places that repeat it.
+    `markdown_file` is the whole document on disk when the excerpt is not enough.
 
     Several questions at once: when parts of a question may be answered in different places,
     pass each part as its own `q` (2 to 5), and the background they share once as `context`.
     Each part is searched on its own and the parts take turns at the `limit` slots, so one part
-    cannot crowd out the others. Each excerpt's `aspects` lists the questions it ranked high for.
+    cannot crowd out the others. Each span's `aspects` lists the questions it ranked high for,
+    and an excerpt's the questions any of its spans does.
     That is rank, not a judgement: a vector or hybrid search finds a nearest passage for any
     question, so read the text before citing it as the answer to a part. A question no excerpt
     lists found nothing at all. Write each part as a full question, not a keyword. Keep in one
     `q` the conditions one passage must meet together. Resolve an ambiguous question before
     searching; when you cannot ask, pass one part per reading.
 
-    An excerpt that says what other places say lists every one of them in `also_in`
+    A passage that says what other places say lists every one of them in its span's `also_in`
     rather than returning each on its own. `also_in` is a tree: each place sits under what it
-    repeats, this excerpt or a place above it, and has its own `also_in`. Its `relation` to that
+    repeats, the passage or a place above it, and has its own `also_in`. Its `relation` to that
     parent says how. `duplicate` is an exact character match: the same text, whitespace aside,
     in any document. `contained` sits inside its parent, which says more. `equivalent` is a
     semantic equivalent: other wording, the same meaning, so a nearly identical vector (a
     hybrid or full-text search also counts nearly the same words; a vector search does not).
-    `to_parent` and `to_root` measure it against its parent and against this excerpt: how much
+    `to_parent` and `to_root` measure it against its parent and against the passage: how much
     of it is in the other (`contained`), how much of the other is in it (`contains`), how alike
     the two are (`alike`), by `words` and by `embedding`, and by `chars` within one document.
     A place may be

@@ -29,35 +29,43 @@ selection. Without that, every collection. A hit held by several collections in 
 once.
 
 **`search_excerpts(q, context?, session_id?, collections?, limit?)`** → excerpts, best first.
-`limit` is at least 1 and defaults to the user's setting. One excerpt is what one document says in
-one place: the matching chunks merged where they sit next to each other, widened to the whole lines
-or sentences around them within 300 characters. So it usually starts and ends where the author did.
+`limit` is at least 1, defaults to the user's setting, and counts excerpts. One excerpt is one
+section of one document, the largest heading that is at most a few pages, with every passage of it
+the search matched, in document order. `text` joins them: each passage opens with the headings it
+sits under below `header`, and `[…]` marks text skipped between two. A passage is the matching
+chunks merged where they sit next to each other. Chunks are cut at headings, blank lines, blocks and
+sentences, so a passage starts and ends where the author did.
 
 `q` is a list: one question, or 2 to 5 parts of one when the parts may be answered in different
 places, each at most 500 characters. Pass the background they share once as `context` (at most
 200 characters). Each part is searched on its own and the parts take turns at the `limit` slots,
-which must be at least the number of parts. Write each part as a full question. Keep in one `q` the conditions one passage
-must meet together. Resolve an ambiguous question first; when you cannot ask, pass one part per
+which must be at least the number of parts. Write each part as a full question. Keep in one `q`
+the conditions one passage must meet together. Resolve an ambiguous question first; when you cannot ask, pass one part per
 reading.
 
-- cite: `document`, `header` (heading breadcrumb, "parent > … > heading"), `location`
-  ("doc p.3-4 L10-20")
-- read: `text`, `score`, `collection` (whose index matched)
-- parts: `aspects`, the parts of `q` it ranked high for (empty for one question). Rank is not a
+- cite: `document`, `header` (the section's heading breadcrumb, "parent > … > heading"),
+  `location` ("doc p.3-4 L10-20", first passage to last); one passage by its span's `header` and
+  `location`
+- read: `text`, `score` (its best passage's), `collection` (whose index matched)
+- passages: `spans`, one per passage in document order, each with `header`, `location`,
+  `line_start`/`line_end`, `char_start`/`char_end`, `seq_start`/`seq_end`, `score`, `aspects` and
+  `also_in`
+- parts: `aspects`, the parts of `q` a passage ranked high for, on each span and joined on the
+  excerpt (empty for one question). Rank is not a
   judgement: a vector or hybrid search finds a nearest passage for any part, so read `text`
   before citing it as that part's answer. A part no excerpt lists found nothing at all.
 - open: `markdown_file` and `source_file` (absolute paths), `line_start`/`line_end` (1-based, in
   `markdown_file`), `char_start`/`char_end` (0-based), `page_start`/`page_end` (PDF only, else
   null), `seq_start`/`seq_end` (chunk positions in the document)
-- repeats: `also_in` lists every other place that says the same thing, folded into this excerpt.
-  It is a tree. Each place sits under what it repeats: this excerpt, or a place above it. Each
+- repeats: a span's `also_in` lists every other place that says what its passage says, folded
+  into it. It is a tree. Each place sits under what it repeats: the passage, or a place above it. Each
   place has its own `also_in`. Each has `collection`, `document`, `header`, `location`,
   `line_start`/`line_end`, `score` (its own match to the query), `relation` to its parent and
   `similarity` (how strongly that relation holds). `duplicate` is an exact character match: the same
   text, whitespace aside, in any document. `contained` sits inside its parent, which says more.
   `equivalent` is the same meaning in other words, so a nearly identical vector. Hybrid and
   full-text searches also count nearly the same words. `to_parent` and `to_root` measure the place
-  against its parent and against this excerpt, by `words` and by `embedding` (null without
+  against its parent and against the passage, by `words` and by `embedding` (null without
   vectors). `contained` is how much of it is in the other. `contains` is how much of the other is
   in it. `alike` is how alike the two are as a whole. `score` is the harmonic mean of `contained`
   and `contains`. `chars` compares two spans of one document. A place may be elsewhere in the same

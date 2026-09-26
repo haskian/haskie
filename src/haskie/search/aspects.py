@@ -13,8 +13,8 @@ Two rules keep the turns fair:
 - A part already answered takes no turn. Its credit is how many picks overlap its own top
   `depth`, and in round r it takes a turn only while its credit is at most r. A pick made for
   another part that its own list ranks high counts for it too.
-- A range next to or over a pick of the same document joins that pick rather than taking a slot:
-  two parts that land on one passage get one passage, tagged with both.
+- A range over a pick, or next to one in the same section, joins that pick rather than taking a
+  slot: two parts that land on one passage get one passage, tagged with both.
 
 `depth` is the share of the answer one part is owed, `ceil(limit / parts)`. A result is tagged
 with every part that picked it, joined it, or ranks it in its own top `depth`. No IO, and no
@@ -28,7 +28,7 @@ from collections.abc import Iterator
 import msgspec
 
 from haskie.errors import InvalidInput
-from haskie.search.passage import HitRange, PassageReference, ranges
+from haskie.search.passage import HitRange, PassageReference, continues, ranges
 
 MAX_QUESTIONS = 5  # Perplexity and OpenSearch cap several queries at 5; xQuAD degrades past few
 MAX_QUESTION = 500  # judgement: a question, not a pasted document
@@ -115,21 +115,31 @@ def interleave(ranked: list[list[HitRange]], depth: int, cap: int) -> list[Pick]
 
 def _ranked_high(span: HitRange, tops: list[list[HitRange]]) -> set[int]:
     """The parts whose own top ranges `span` overlaps."""
-    return {part for part, top in enumerate(tops) if any(_near(span, one, 0) for one in top)}
+    return {part for part, top in enumerate(tops) if any(_overlaps(span, one) for one in top)}
 
 
-def _near(one: HitRange, other: HitRange, gap: int) -> bool:
-    """Whether two ranges of one document overlap (gap 0) or touch (gap 1)."""
+def _overlaps(one: HitRange, other: HitRange) -> bool:
+    """Whether two ranges of one document share a chunk."""
     first, second = one.hits[0], other.hits[0]
     if (first.collection, first.document) != (second.collection, second.document):
         return False
-    return one.seq_start <= other.seq_end + gap and other.seq_start <= one.seq_end + gap
+    return one.seq_start <= other.seq_end and other.seq_start <= one.seq_end
+
+
+def _joins(pick: HitRange, candidate: HitRange) -> bool:
+    """Whether `candidate` is part of the same passage as `pick`: over it, or right next to it
+    in the same section (`passage.continues`)."""
+    return (
+        _overlaps(pick, candidate)
+        or continues(pick.hits[-1], candidate.hits[0])
+        or continues(candidate.hits[-1], pick.hits[0])
+    )
 
 
 def _take(picks: list[Pick], candidate: HitRange, part: int, tops: list[list[HitRange]]) -> None:
-    """`candidate` as a new pick, or joined into the picks of its document it touches or
-    overlaps: those merge into the earliest of them, which keeps its place in the order."""
-    touching = [pick for pick in picks if _near(pick.span, candidate, 1)]
+    """`candidate` as a new pick, or joined into the picks it overlaps or continues in the same
+    section: those merge into the earliest of them, which keeps its place in the order."""
+    touching = [pick for pick in picks if _joins(pick.span, candidate)]
     if not touching:
         picks.append(Pick(candidate, {part}, _ranked_high(candidate, tops)))
         return
@@ -143,11 +153,12 @@ def _take(picks: list[Pick], candidate: HitRange, part: int, tops: list[list[Hit
 
 
 def _merged(spans: list[HitRange]) -> HitRange:
-    """One range over the chunks of ranges that touch or overlap in one document. A chunk two of
-    them hold counts once, with the hit of the range listed first."""
+    """One range over the chunks of ranges that overlap or continue each other in one section. A
+    chunk two of them hold counts once, with the hit of the range listed first. It is `alone`
+    (`thin`) only when each of them was."""
     hits = {hit.seq: hit for span in reversed(spans) for hit in span.hits}
     (merged,) = ranges(sorted(hits.values(), key=lambda hit: hit.seq))
-    return merged
+    return msgspec.structs.replace(merged, alone=all(span.alone for span in spans))
 
 
 def tagged(kept: list[HitRange], picks: list[Pick], labels: list[str]) -> list[HitRange]:

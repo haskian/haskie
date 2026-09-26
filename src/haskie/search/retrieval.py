@@ -3,14 +3,17 @@
 `flow.py` says in what order the steps run and which search runs which of them; this is what
 they call. The pure folds — hits into ranges, ranges into passages, hits into documents — live in
 `passage.py`, so what is left here is the IO: reading the collections, checking the models,
-reading the markdown a range is widened against.
+reading the markdown a range covers.
 
 `scope` is the one place that decides which collections a search covers: the names the caller
 gave, else the session's selection, else every collection.
 """
 
 import asyncio
+import statistics
+from collections.abc import Awaitable, Callable
 from contextlib import ExitStack
+from itertools import islice
 from typing import BinaryIO
 
 import anyio.to_thread
@@ -21,9 +24,11 @@ from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.collection import Collection
 from haskie.collection.index import (
+    ChunkKey,
     CollectionIndex,
     Hit,
     RowKey,
+    chunk_key,
     cross_encode,
     first_per_key,
     gather_rows,
@@ -34,8 +39,8 @@ from haskie.document import document
 from haskie.indexing import models
 from haskie.indexing.embed import embed_query
 from haskie.logs import get_logger
-from haskie.search import aspects, collapse, passage, session, text
-from haskie.search.passage import Passage, Sources
+from haskie.search import aspects, collapse, passage, section, session, text, thin
+from haskie.search.passage import Excerpt, Passage, Sources
 from haskie.settings import Reranker, SearchMode, SearchSettings, load_user_settings
 
 _log = get_logger(__name__)
@@ -215,6 +220,107 @@ def scan(pool: Pool, limit: int) -> Scanned:
     )
 
 
+# --- thin ranges -----------------------------------------------------------------
+
+
+class Ranged(msgspec.Struct):
+    """The hits merged into ranges, the thin ones grown or dropped (`thin`), and every chunk those
+    ranges hold with its vector: what the fold compares them by."""
+
+    ranges: list[passage.HitRange]
+    scanned: Scanned
+
+
+async def fill_thin(scanned: Scanned, where: Plan, query: str) -> Ranged:
+    """The scanned hits as ranges, each thin one grown by the neighbours of its section that
+    match `query`, else marked too short to stand alone (see `thin`).
+
+    Its neighbours are read from the collection only when a range is thin, in one query per
+    collection, and scored the strongest way this search can score: the reranker when one is on,
+    else the query vector, else the question's words. The floor is the median score of the scanned
+    hits the same way, so a neighbour joins when it matches as well as a typical result.
+    """
+    settings = where.settings
+    hit_ranges = passage.ranges(scanned.hits)
+    wanted = thin.around(hit_ranges, settings.min_passage_chars, settings.max_passage_grow)
+    rows = await _rows_at(where, wanted) if wanted else {}
+    scores, floor, signal = await _match_scores(scanned, list(rows.values()), where, query)
+    filled = thin.fill(
+        hit_ranges,
+        {one: hit for one, (hit, _) in rows.items()},
+        dict(zip(rows, scores, strict=True)),
+        floor,
+        settings.min_passage_chars,
+        settings.max_passage_grow,
+    )
+    alone = sum(one.alone for one in filled.ranges)
+    if filled.grown or alone or filled.dropped:
+        _log.info(
+            "search_thin",
+            signal=signal,
+            grown=filled.grown,
+            alone=alone,
+            dropped=filled.dropped,
+            added=len(filled.added),
+        )
+    added = [rows[chunk_key(hit)][1].get("vector") for hit in filled.added]
+    return Ranged(
+        ranges=filled.ranges,
+        scanned=Scanned(hits=[*scanned.hits, *filled.added], vectors=[*scanned.vectors, *added]),
+    )
+
+
+async def _rows_at(where: Plan, wanted: set[ChunkKey]) -> dict[ChunkKey, tuple[Hit, dict]]:
+    """The stored rows of these chunks, each with the `Hit` it would be, from the collections
+    that hold them. Vectors only when the search has a query vector to compare them with."""
+    by_collection: dict[str, list[RowKey]] = {}
+    for collection, doc, seq in wanted:
+        by_collection.setdefault(collection, []).append((doc, seq))
+    vectors = where.vector is not None
+    found = await _per_collection(
+        where, by_collection, lambda index, keys: index.rows_at(keys, vectors)
+    )
+    hits = ((index.hit(row, 0.0), row) for index, rows in found for row in rows)
+    return {chunk_key(hit): (hit, row) for hit, row in hits}
+
+
+async def _per_collection[T](
+    where: Plan,
+    wanted: dict[str, T],
+    read: Callable[[CollectionIndex, T], Awaitable[list[dict]]],
+) -> list[tuple[CollectionIndex, list[dict]]]:
+    """`read` over each collection of the search that `wanted` names, with what it names there,
+    all at once (`gather_rows`)."""
+    indexes = [index for index, _ in where.indexes if index.collection in wanted]
+    return await gather_rows(indexes, lambda index: read(index, wanted[index.collection]))
+
+
+async def _match_scores(
+    scanned: Scanned, rows: list[tuple[Hit, dict]], where: Plan, query: str
+) -> tuple[list[float], float, str]:
+    """How well each row matches `query`, the floor a match has to reach (the median scanned hit
+    scored the same way), and which signal scored them."""
+    if not rows:
+        return [], 0.0, "none"
+    settings = where.settings
+    if settings.reranker != Reranker.NONE:
+        # the scanned hits carry the reranker's scores already: the ranking is its ranking
+        read = [row for _, row in rows]
+        rescored = {
+            row_key(row): row_score(row) for row in await cross_encode(query, read, settings)
+        }
+        floor = statistics.median(hit.score for hit in scanned.hits)
+        return [rescored[row_key(row)] for row in read], floor, "reranker"
+    vectors = [row.get("vector") for _, row in rows]
+    if where.vector is not None and all(one is not None for one in [*scanned.vectors, *vectors]):
+        question = collapse.unit_rows([where.vector])[0]
+        floor = statistics.median((collapse.unit_rows(scanned.vectors) @ question).tolist())
+        return (collapse.unit_rows(vectors) @ question).tolist(), floor, "vector"
+    words = thin.terms(query)
+    floor = statistics.median(thin.overlap(words, hit.text) for hit in scanned.hits)
+    return [thin.overlap(words, hit.text) for hit, _ in rows], floor, "words"
+
+
 # --- what the hits are folded into ------------------------------------------------
 
 
@@ -232,12 +338,11 @@ def _fold_hits(
 
 
 def _fold_ranges(
-    scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode, limit: int
+    ranged: Ranged, model: EmbeddingModel | None, mode: SearchMode, limit: int | None
 ) -> list[passage.HitRange]:
-    scan = _spaces(scanned, model, mode)
-    hit_ranges = passage.ranges(scanned.hits)
-    kept = collapse.ranges(hit_ranges, scanned.hits, scan, limit)
-    _log_collapse(scan.deciding[0].kind, len(hit_ranges), kept, limit)
+    scan = _spaces(ranged.scanned, model, mode)
+    kept = collapse.ranges(ranged.ranges, ranged.scanned.hits, scan, limit)
+    _log_collapse(scan.deciding[0].kind, len(ranged.ranges), kept, limit)
     return kept
 
 
@@ -253,16 +358,22 @@ async def collapse_hits(
     return await cpu.on_cpu(_fold_hits, scanned, model, mode, limit)
 
 
-async def collapse_ranges(
-    scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode, limit: int
-) -> list[passage.HitRange]:
-    """The `limit` best hit ranges, each with the near-duplicates it stands for.
+def standing(ranged: Ranged) -> Ranged:
+    """The ranges without those too short to stand alone (`thin`): what a passage may be."""
+    return msgspec.structs.replace(ranged, ranges=[one for one in ranged.ranges if not one.alone])
 
-    Folded after `passage.ranges` rather than before: the chunks of one passage sit next to each
-    other and read alike, and folding them would split the passage they make up. A worker thread
-    runs the fold, as `collapse_hits` says.
+
+async def collapse_ranges(
+    ranged: Ranged, model: EmbeddingModel | None, mode: SearchMode, limit: int | None
+) -> list[passage.HitRange]:
+    """The `limit` best hit ranges, each with the near-duplicates it stands for; every range that
+    repeats none without a `limit`.
+
+    Folded after `passage.ranges` (in `fill_thin`) rather than before: the chunks of one passage
+    sit next to each other and read alike, and folding them would split the passage they make up.
+    A worker thread runs the fold, as `collapse_hits` says.
     """
-    return await cpu.on_cpu(_fold_ranges, scanned, model, mode, limit)
+    return await cpu.on_cpu(_fold_ranges, ranged, model, mode, limit)
 
 
 def _picked(picks: list[aspects.Pick], scanned: list[Scanned]) -> Scanned:
@@ -280,121 +391,145 @@ def _picked(picks: list[aspects.Pick], scanned: list[Scanned]) -> Scanned:
 
 
 def _cover(
-    scanned: list[Scanned],
+    ranged: list[Ranged],
     labels: list[str],
     model: EmbeddingModel | None,
     mode: SearchMode,
-    limit: int,
     depth: int,
     cap: int,
 ) -> list[passage.HitRange]:
-    picks = aspects.interleave([passage.ranges(one.hits) for one in scanned], depth, cap)
-    joined = _picked(picks, scanned)
+    picks = aspects.interleave([one.ranges for one in ranged], depth, cap)
+    joined = _picked(picks, [one.scanned for one in ranged])
     scan = _spaces(joined, model, mode)
-    kept = collapse.ranges([pick.span for pick in picks], joined.hits, scan, limit)
+    # none cut: the sections they fall in are what the answer counts (`sections`)
+    kept = collapse.ranges([pick.span for pick in picks], joined.hits, scan, None)
     found = aspects.tagged(kept, picks, labels)
-    _log_collapse(scan.deciding[0].kind, len(picks), kept, limit)
-    answered = {label for one in found for label in one.aspects}
+    _log_collapse(scan.deciding[0].kind, len(picks), kept, None)
     _log.info(
         "search_questions",
         questions=len(labels),
-        uncovered=sum(1 for label in labels if label not in answered),
         picks=len(picks),
         absorbed=sum(pick.taken - 1 for pick in picks),
         kept=len(kept),
         folded=sum(collapse.places(one.also_in) for one in kept),
-        short=len(kept) < limit,
     )
     return found
 
 
 async def cover(
-    scanned: list[Scanned],
+    ranged: list[Ranged],
     labels: list[str],
     model: EmbeddingModel | None,
     mode: SearchMode,
-    limit: int,
     depth: int,
     cap: int,
 ) -> list[passage.HitRange]:
-    """The `limit` best ranges across the parts of one question, one scan and one label per part,
-    each tagged with the parts it answers (see `aspects`). A worker thread runs it, as
-    `collapse_hits` says."""
-    return await cpu.on_cpu(_cover, scanned, labels, model, mode, limit, depth, cap)
+    """The ranges across the parts of one question, in the order the parts took them, each with
+    its near-duplicates folded in and tagged with the parts it answers (see `aspects`). None is
+    cut: `sections` counts the answer. `ranged` holds one set of ranges and `labels` one question
+    per part. A worker thread runs it, as `collapse_hits` says."""
+    return await cpu.on_cpu(_cover, ranged, labels, model, mode, depth, cap)
 
 
 def _log_collapse(
-    space: str, candidates: int, kept: list[Hit] | list[passage.HitRange], limit: int
+    space: str, candidates: int, kept: list[Hit] | list[passage.HitRange], limit: int | None
 ) -> None:
-    """One line per search, so how often folding leaves an answer short can be counted."""
+    """One line per search, so how often folding leaves an answer short can be counted. A fold
+    without a `limit` cuts nothing, so it is never short (`sections` says whether the answer is)."""
     _log.info(
         "search_collapsed",
         space=space,
         candidates=candidates,
         kept=len(kept),
         folded=sum(collapse.places(item.also_in) for item in kept),
-        short=len(kept) < limit,
+        short=None if limit is None else len(kept) < limit,
     )
 
 
-async def widen[P: Passage](hit_ranges: list[passage.HitRange], cls: type[P]) -> list[P]:
-    """These hit ranges as passages of `cls`, in the order given.
+async def read(hit_ranges: list[passage.HitRange]) -> list[Passage]:
+    """These hit ranges as passages, in the order given.
 
-    A passage is what the chunks of one document that sit next to each other say together (see
-    `passage.ranges`), widened to the line or the whole sentences around them (`passage.widen`).
-    So the reader gets text that begins and ends where the author stopped. The ranges come cut
-    and folded (`collapse_ranges`), so only the ones answered with are read.
+    A passage is what the chunks of one section that sit next to each other say together (see
+    `passage.ranges`), read out of the document by the range's own offsets (`passage.quote`). The
+    ranges come cut and folded (`collapse_ranges`), so only the ones answered with are read.
     """
-    windows = await _windows_of(hit_ranges)
-    pairs = zip(hit_ranges, windows, strict=True)
-    return [passage.widen(hit_range, window, cls) for hit_range, window in pairs]
+    texts = await _texts_of(hit_ranges)
+    return [
+        passage.quote(hit_range, text) for hit_range, text in zip(hit_ranges, texts, strict=True)
+    ]
 
 
-# Bytes read around a range, per side. `MAX_WIDEN` is a count of characters and a character is at
-# most four bytes in UTF-8, so this much always covers what the widening may reach.
-WINDOW_BYTES = 4 * passage.MAX_WIDEN
+async def sections(
+    hit_ranges: list[passage.HitRange], where: Plan, limit: int, labels: list[str] | None = None
+) -> list[section.Group]:
+    """The first `limit` sections the ranges (best first) fall in, each with every range of it
+    (see `section`).
+
+    The outlines of the documents a section can open in are read first (`section.documents`),
+    one query per collection, and only the heading path and char span of each chunk. `labels` are
+    the questions of a search that asked several, to log which of them no section kept.
+    """
+    wanted: dict[str, set[str]] = {}
+    for collection, doc in section.documents(hit_ranges, limit):
+        wanted.setdefault(collection, set()).add(doc)
+    read = await _per_collection(where, wanted, lambda index, docs: index.outline_rows(docs))
+    rows = [(index.collection, row) for index, found in read for row in found]
+    groups = await cpu.on_cpu(_group, hit_ranges, rows, where.settings.max_section_chars, limit)
+    answered = {label for one in groups for kept in one.ranges for label in kept.aspects}
+    _log.info(
+        "search_sections",
+        ranges=len(hit_ranges),
+        sections=len(groups),
+        grouped=sum(len(one.ranges) for one in groups),
+        short=len(groups) < limit,
+        uncovered=None if labels is None else sum(1 for label in labels if label not in answered),
+    )
+    return groups
 
 
-async def _windows_of(hit_ranges: list[passage.HitRange]) -> list[passage.Window]:
-    """The markdown around each range, read by seeking to it rather than reading the document.
+def _group(
+    hit_ranges: list[passage.HitRange], rows: list[tuple[str, dict]], max_chars: int, limit: int
+) -> list[section.Group]:
+    return section.group(hit_ranges, section.outlines(rows), max_chars, limit)
+
+
+async def read_excerpts(groups: list[section.Group]) -> list[Excerpt]:
+    """Each group as one excerpt, its passages read by their own offsets in one worker-thread
+    hop for the whole search."""
+    texts = iter(await _texts_of([hit_range for one in groups for hit_range in one.ranges]))
+    return [section.excerpt(one, list(islice(texts, len(one.ranges)))) for one in groups]
+
+
+async def _texts_of(hit_ranges: list[passage.HitRange]) -> list[str]:
+    """The markdown each range covers, read by seeking to its byte offsets rather than reading the
+    document.
 
     One worker thread for the whole search and one open file per document, however many ranges
     each holds. Measured: ten ranges cost 166us in a single hop against 717us fanned out one hop
     per document - a hop costs more than the few kilobytes it would overlap.
     """
-    return await anyio.to_thread.run_sync(_read_windows, hit_ranges)
+    return await anyio.to_thread.run_sync(_read_texts, hit_ranges)
 
 
-def _read_windows(hit_ranges: list[passage.HitRange]) -> list[passage.Window]:
-    """Every range's window, in the order asked for. Sync: the caller runs it in a worker thread,
-    where the seeks and reads are ordinary blocking IO."""
+def _read_texts(hit_ranges: list[passage.HitRange]) -> list[str]:
+    """Every range's text, in the order asked for. Sync: the caller runs it in a worker thread,
+    where the seeks and reads are ordinary blocking IO.
+
+    A chunk row's byte offsets fall on character boundaries, so each slice decodes whole. A
+    markdown rewritten since it was indexed gives a wrong passage either way, but it must not fail
+    the search, so a broken character is replaced rather than raised."""
     with ExitStack() as stack:
         handles: dict[str, BinaryIO] = {}
-        windows: list[passage.Window] = []
+        texts: list[str] = []
         for hit_range in hit_ranges:
             path = hit_range.hits[0].markdown_file
             if path not in handles:
                 handles[path] = stack.enter_context(open(path, "rb"))
-            windows.append(_read_window(handles[path], hit_range))
-        return windows
-
-
-def _read_window(handle: BinaryIO, hit_range: passage.HitRange) -> passage.Window:
-    """One range's surroundings: the range itself and `WINDOW_BYTES` either side of it, as much of
-    that as the file holds.
-
-    Decoded in two halves so one pass over the bytes answers both questions: how many characters
-    sit before the range (which is where the window starts, in the document's own offsets) and
-    what the window says. A seek lands on a byte, so the read may open mid-character - decoding
-    drops that half character from the prefix and from the text alike, which is what keeps the
-    two consistent.
-    """
-    start = max(0, hit_range.byte_start - WINDOW_BYTES)
-    handle.seek(start)
-    raw = handle.read(hit_range.byte_end - start + WINDOW_BYTES)
-    before = raw[: hit_range.byte_start - start].decode(errors="ignore")
-    text = before + raw[hit_range.byte_start - start :].decode(errors="ignore")
-    return passage.Window(text=text, char_start=hit_range.char_start - len(before))
+            handle = handles[path]
+            handle.seek(hit_range.byte_start)
+            raw = handle.read(hit_range.byte_end - hit_range.byte_start)
+            texts.append(raw.decode(errors="replace"))
+        return texts
 
 
 async def shortlist(hits: list[Hit], names: list[str], limit: int, sections: int) -> Sources:

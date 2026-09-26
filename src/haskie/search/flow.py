@@ -8,20 +8,23 @@ dropped or reordered by reading this file alone.
 Four pipelines over one set of steps:
 
     chunks     retrieve -> merge -> rerank -> hits -> collapse_hits
-    passages   retrieve -> merge -> rerank -> hits -> collapse_ranges -> widen
-    excerpts   retrieve -> merge -> rerank -> hits -> collapse_ranges -> widen
+    passages   retrieve -> merge -> rerank -> hits -> fill_thin -> collapse_ranges -> read
+    excerpts   retrieve -> merge -> rerank -> hits -> fill_thin -> collapse_all -> group -> quote
     sources    retrieve -> merge -> rerank -> hits -> shortlist
 
 and one that runs the shared ranking once per question, when several are asked at once:
 
-    answers    (retrieve -> merge -> rerank -> hits) per question -> cover -> widen
+    answers    (retrieve -> merge -> rerank -> hits -> fill_thin) per question -> cover -> group
+               -> quote
 
 The first four steps are the search every answer shares; what follows is the fold that answer is
 made of, and it is a step rather than something every search pays for. `chunks` folds each
 near-duplicate hit into the hit it repeats (`collapse`). `passages` and `excerpts` merge the chunks
-of one document that sit next to each other into one readable span, fold near-duplicate spans the
-same way, and read only the spans they answer with. `sources` folds the same hits per document
-instead.
+of one section that sit next to each other into one readable span, grow a span too short to stand
+alone by the neighbours that match the question or drop it (`thin`), fold near-duplicate spans the
+same way, and read only the spans they answer with. `excerpts` then groups the spans by the section
+they sit in, so `limit` counts sections, and writes each section out as one excerpt. `sources`
+folds the same hits per document instead.
 
 Two numbers steer that. `scan` is how deep the ranking goes and is what `hits` cuts to; `limit`
 is how many answers the caller asked for and is what the last fold cuts to. Every pipeline scans
@@ -43,7 +46,7 @@ from pydantic_graph.step import StepFunction
 
 from haskie.collection.index import Hit
 from haskie.paging import check_page_size
-from haskie.search import aspects, retrieval
+from haskie.search import aspects, retrieval, section
 from haskie.search.passage import Excerpt, HitRange, Passage, Sources
 from haskie.settings import load_user_settings
 
@@ -71,7 +74,6 @@ class Search(msgspec.Struct):
     limit: int  # answers the caller asked for; the last step cuts to it
     scan: int  # how deep the ranking goes; `hits` cuts to it
     candidates: int  # rows each collection returns, and the pool the reranker rescores
-    shape: type[Passage] = Passage  # which passage type `widen` builds
     sections: int = DEFAULT_SECTIONS  # `sources` only
 
 
@@ -95,8 +97,12 @@ STEP_LABELS: dict[str, str] = {
     "rerank": "Rerank",
     "hits": "Read hits",
     "collapse_hits": "Fold near-duplicates",
-    "collapse_ranges": "Merge and fold passages",
-    "widen": "Read and widen passages",
+    "fill_thin": "Merge chunks and grow or drop short passages",
+    "collapse_ranges": "Fold passages",
+    "collapse_all": "Fold passages",
+    "group": "Group passages by section",
+    "quote": "Read excerpts",
+    "read": "Read passages",
     "shortlist": "Fold into documents",
     "cover": "Take turns and fold passages",
 }
@@ -174,24 +180,42 @@ async def collapse_hits(ctx: StepContext[Search, None, retrieval.Scanned]) -> li
     )
 
 
-async def collapse_ranges(
-    ctx: StepContext[Search, None, retrieval.Scanned],
-) -> list[HitRange]:
-    """Consecutive chunks of one document merged into one range, and each near-duplicate range
-    folded into the range it repeats."""
+async def fill_thin(ctx: StepContext[Search, None, retrieval.Scanned]) -> retrieval.Ranged:
+    """Consecutive chunks of one section merged into one range, and each range too short to stand
+    alone grown by the neighbours that match the query, or dropped."""
+    return await retrieval.fill_thin(ctx.inputs, ctx.state.plan, ctx.state.query)
+
+
+async def collapse_ranges(ctx: StepContext[Search, None, retrieval.Ranged]) -> list[HitRange]:
+    """The `limit` best ranges, each near-duplicate folded into the range it repeats. A range too
+    short to stand alone (`thin`) is no passage, so it takes no slot."""
     plan = ctx.state.plan
     return await retrieval.collapse_ranges(
-        ctx.inputs, plan.embedding, plan.settings.mode, ctx.state.limit
+        retrieval.standing(ctx.inputs), plan.embedding, plan.settings.mode, ctx.state.limit
     )
 
 
-async def widen(ctx: StepContext[Search, None, list[HitRange]]) -> list[Passage]:
-    """The kept ranges, widened to where a reader stops.
+async def collapse_all(ctx: StepContext[Search, None, retrieval.Ranged]) -> list[HitRange]:
+    """Each near-duplicate range folded into the range it repeats, and none cut: an excerpt is a
+    section, and the sections are what `limit` counts (`group`). A range too short to stand alone
+    is kept too, since the section it sits in may hold another."""
+    plan = ctx.state.plan
+    return await retrieval.collapse_ranges(ctx.inputs, plan.embedding, plan.settings.mode, None)
 
-    `Search.shape` decides the type: an excerpt is the whole passage today, and cutting the parts
-    of it that do not answer the query is a later step that would go here.
-    """
-    return await retrieval.widen(ctx.inputs, ctx.state.shape)
+
+async def read(ctx: StepContext[Search, None, list[HitRange]]) -> list[Passage]:
+    """The kept ranges, read out of their documents."""
+    return await retrieval.read(ctx.inputs)
+
+
+async def group(ctx: StepContext[Search, None, list[HitRange]]) -> list[section.Group]:
+    """The first `limit` sections the ranges fall in, each with every range of it."""
+    return await retrieval.sections(ctx.inputs, ctx.state.plan, ctx.state.limit)
+
+
+async def quote(ctx: StepContext[Search, None, list[section.Group]]) -> list[Excerpt]:
+    """Each section read out of its document as one excerpt."""
+    return await retrieval.read_excerpts(ctx.inputs)
 
 
 async def shortlist(ctx: StepContext[Search, None, retrieval.Scanned]) -> Sources:
@@ -234,10 +258,11 @@ def _chain[T](
 
 RANKING = (retrieve, merge, rerank, hits)  # the search every answer shares
 
-RANKED = _chain(retrieval.Scanned, *RANKING)  # one question's part of `answers`
+RANKED = _chain(retrieval.Ranged, *RANKING, fill_thin)  # one question's part of `answers`
 
 CHUNKS = _chain(list[Hit], *RANKING, collapse_hits)
-PASSAGES = _chain(list[Passage], *RANKING, collapse_ranges, widen)
+PASSAGES = _chain(list[Passage], *RANKING, fill_thin, collapse_ranges, read)
+EXCERPTS = _chain(list[Excerpt], *RANKING, fill_thin, collapse_all, group, quote)
 SOURCES = _chain(Sources, *RANKING, shortlist)
 
 
@@ -261,12 +286,9 @@ async def passages(names: list[str], query: str, limit: int | None = None) -> li
 
 
 async def excerpts(names: list[str], query: str, limit: int | None = None) -> list[Excerpt]:
-    """The `limit` best passages of `names` as an agent quotes them, best first."""
-    state = await _search(names, query, limit, deeper=PASSAGE_SCAN, shape=Excerpt)
-    if state is None:
-        return []
-    # the graph builds whatever `shape` says, and this one said `Excerpt`
-    return cast(list[Excerpt], await PASSAGES.run(state=state))
+    """The `limit` best sections of `names` as an agent quotes them, best first."""
+    state = await _search(names, query, limit, deeper=PASSAGE_SCAN)
+    return await EXCERPTS.run(state=state) if state else []
 
 
 async def answers(
@@ -289,14 +311,16 @@ async def answers(
     states = await _searches(names, asked.queries, limit, deeper=PASSAGE_SCAN)
     if states is None:
         return []
-    scanned = await asyncio.gather(*(RANKED.run(state=state) for state in states))
+    ranged = await asyncio.gather(*(RANKED.run(state=state) for state in states))
     where, scan = states[0].plan, states[0].scan
     with _timing("cover"):
         kept = await retrieval.cover(
-            scanned, asked.questions, where.embedding, where.settings.mode, limit, depth, scan
+            ranged, asked.questions, where.embedding, where.settings.mode, depth, scan
         )
-    with _timing("widen"):
-        return await retrieval.widen(kept, Excerpt)
+    with _timing("group"):
+        groups = await retrieval.sections(kept, where, limit, asked.questions)
+    with _timing("quote"):
+        return await retrieval.read_excerpts(groups)
 
 
 async def sources(
@@ -316,11 +340,10 @@ async def _search(
     query: str,
     limit: int | None,
     deeper: int,
-    shape: type[Passage] = Passage,
     sections: int | None = None,
 ) -> Search | None:
     """One search, planned but not yet run, or None when nothing is left to search."""
-    found = await _searches(names, [query], limit, deeper, shape, sections)
+    found = await _searches(names, [query], limit, deeper, sections)
     return found[0] if found else None
 
 
@@ -329,7 +352,6 @@ async def _searches(
     queries: list[str],
     limit: int | None,
     deeper: int,
-    shape: type[Passage] = Passage,
     sections: int | None = None,
 ) -> list[Search] | None:
     """One search per query over the same collections, planned but not yet run, or None when
@@ -357,7 +379,6 @@ async def _searches(
             limit=limit,
             scan=scan,
             candidates=candidates,
-            shape=shape,
             sections=sections,
         )
         for query, where in zip(queries, plans, strict=True)

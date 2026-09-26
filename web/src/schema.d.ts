@@ -974,7 +974,7 @@ export interface components {
             score: number;
             source_file: string;
             markdown_file: string;
-            also_in?: components["schemas"]["PassageReference"][];
+            spans: components["schemas"]["Span"][];
             aspects?: string[];
         };
         /** FieldDoc */
@@ -1284,8 +1284,6 @@ export interface components {
         Parser: "anydoc" | "plain";
         /** Passage */
         Passage: {
-            collection: string;
-            document: string;
             header: string;
             location: string;
             seq_start: number;
@@ -1296,12 +1294,14 @@ export interface components {
             char_end: number;
             page_start: number | null;
             page_end: number | null;
-            text: string;
             score: number;
-            source_file: string;
-            markdown_file: string;
             also_in?: components["schemas"]["PassageReference"][];
             aspects?: string[];
+            collection: string;
+            document: string;
+            text: string;
+            source_file: string;
+            markdown_file: string;
         };
         /** PassageReference */
         PassageReference: {
@@ -1544,6 +1544,21 @@ export interface components {
              * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded on first use.
              */
             reranker_model?: string | null;
+            /**
+             * Shortest passage (characters)
+             * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question as well as a typical result does. One with no such neighbour is dropped, unless it is the best result. 0 turns this off.
+             */
+            min_passage_chars?: number | null;
+            /**
+             * Chunks a short passage may add
+             * @description How many neighbouring chunks a short passage may grow by, never past a heading.
+             */
+            max_passage_grow?: number | null;
+            /**
+             * Largest section (characters)
+             * @description An excerpt is one section of a document: the largest heading whose text fits this many characters. The passages a search keeps under it come back together, in document order.
+             */
+            max_section_chars?: number | null;
         };
         /** SearchSettings */
         SearchSettings: {
@@ -1598,6 +1613,24 @@ export interface components {
              * @default Xenova/ms-marco-MiniLM-L-6-v2
              */
             reranker_model: string;
+            /**
+             * Shortest passage (characters)
+             * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question as well as a typical result does. One with no such neighbour is dropped, unless it is the best result. 0 turns this off.
+             * @default 300
+             */
+            min_passage_chars: number;
+            /**
+             * Chunks a short passage may add
+             * @description How many neighbouring chunks a short passage may grow by, never past a heading.
+             * @default 2
+             */
+            max_passage_grow: number;
+            /**
+             * Largest section (characters)
+             * @description An excerpt is one section of a document: the largest heading whose text fits this many characters. The passages a search keeps under it come back together, in document order.
+             * @default 8000
+             */
+            max_section_chars: number;
         };
         /** SessionCollections */
         SessionCollections: {
@@ -1639,6 +1672,22 @@ export interface components {
         Sources: {
             documents: components["schemas"]["Source"][];
             collections: string[];
+        };
+        /** Span */
+        Span: {
+            header: string;
+            location: string;
+            seq_start: number;
+            seq_end: number;
+            line_start: number;
+            line_end: number;
+            char_start: number;
+            char_end: number;
+            page_start: number | null;
+            page_end: number | null;
+            score: number;
+            also_in?: components["schemas"]["PassageReference"][];
+            aspects?: string[];
         };
         /**
          * Stage

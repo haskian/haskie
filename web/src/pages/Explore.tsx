@@ -12,7 +12,7 @@ type Answer = Granularity | 'source'
 // What each answer is called on screen, and what its results are: the second picker's options.
 const ANSWERS: Array<PickerOption<Answer> & { plural: string }> = [
   { value: 'chunk', label: 'Chunks', plural: 'chunks', sub: 'as indexed' },
-  { value: 'passage', label: 'Passages', plural: 'passages', sub: 'adjacent chunks, widened' },
+  { value: 'passage', label: 'Passages', plural: 'passages', sub: 'adjacent chunks of a section' },
   { value: 'excerpt', label: 'Excerpts', plural: 'excerpts', sub: 'what an agent reads' },
   { value: 'source', label: 'Sources', plural: 'sources', sub: 'the documents that answer it' },
 ]

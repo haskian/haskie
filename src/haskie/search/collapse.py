@@ -47,7 +47,6 @@ from haskie.collection.index import (
     Overlap,
     Overlaps,
     Relation,
-    location,
 )
 from haskie.search.passage import HitRange, PassageReference, harmonic
 from haskie.settings import SearchMode
@@ -185,10 +184,16 @@ def spaces(
     duplicate = model.duplicate if model else None
     if duplicate is None or not vectors or any(vector is None for vector in vectors):
         return Scan(deciding=[words], measured=[words])
+    measured: list[Space] = [Embedded(unit_rows(vectors), duplicate), words]
+    return Scan(deciding=measured[:1] if mode == SearchMode.VECTOR else measured, measured=measured)
+
+
+def unit_rows(vectors: Sequence[Sequence[float] | None]) -> np.ndarray:
+    """The vectors as rows of unit length, so a matrix product of two is their cosines. A zero
+    vector stays zero rather than dividing by it. The caller has checked that none is missing."""
     matrix = np.asarray(vectors, dtype=np.float64)
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    measured: list[Space] = [Embedded(matrix / np.where(norms == 0, 1.0, norms), duplicate), words]
-    return Scan(deciding=measured[:1] if mode == SearchMode.VECTOR else measured, measured=measured)
+    return matrix / np.where(norms == 0, 1.0, norms)
 
 
 # --- the fold ---------------------------------------------------------------------
@@ -284,7 +289,7 @@ def _decide(item: _Item, kept: _Item, space: Space) -> _Fold | None:
     return None
 
 
-def _groups(items: list[_Item], scores: list[float], scan: Scan, limit: int) -> list[_Group]:
+def _groups(items: list[_Item], scores: list[float], scan: Scan, limit: int | None) -> list[_Group]:
     """Leader clustering over `items`, best first.
 
     An item is compared with the kept results only, and folds under the one it repeats. A
@@ -293,7 +298,7 @@ def _groups(items: list[_Item], scores: list[float], scan: Scan, limit: int) -> 
     a place the new leader would not place is still a repeat of the one above it.
 
     Past `limit` kept items the walk goes on, folding only: a repeat found further down still
-    counts as corroboration, and it costs no slot.
+    counts as corroboration, and it costs no slot. No `limit` keeps every item that repeats none.
     """
     groups: list[_Group] = []
     for index, item in enumerate(items):
@@ -301,7 +306,7 @@ def _groups(items: list[_Item], scores: list[float], scan: Scan, limit: int) -> 
             (g, fold) for g in groups if (fold := _compare(item, items[g.leader], scan.deciding))
         ]
         if not matches:
-            if len(groups) < limit:
+            if limit is None or len(groups) < limit:
                 groups.append(_Group(leader=index, score=scores[index], children=[]))
             continue
         repeats = [(group, fold) for group, fold in matches if not fold.swap]
@@ -347,7 +352,7 @@ def _collapse[R: (Hit, HitRange), F: (HitReference, PassageReference)](
     results: list[R],
     items: list[_Item],
     scan: Scan,
-    limit: int,
+    limit: int | None,
     reference: Callable[[R, _Node, Overlaps, Overlaps, list[F]], F],
 ) -> list[R]:
     """The fold, shared by hits and ranges: the `limit` best results, each with the tree of
@@ -428,7 +433,7 @@ def hits(found: list[Hit], scan: Scan, limit: int) -> list[Hit]:
 
 
 def ranges(
-    hit_ranges: list[HitRange], scanned: list[Hit], scan: Scan, limit: int
+    hit_ranges: list[HitRange], scanned: list[Hit], scan: Scan, limit: int | None
 ) -> list[HitRange]:
     """The `limit` best hit ranges with their near-duplicates folded into them, best first.
 
@@ -463,14 +468,8 @@ def ranges(
             seq_start=hit_range.seq_start,
             seq_end=hit_range.seq_end,
             header=best.header,
-            # not widened: a pointer to where the match is, not a passage to quote
-            location=location(
-                best.document,
-                hit_range.page_start,
-                hit_range.page_end,
-                hit_range.line_start,
-                hit_range.line_end,
-            ),
+            # not read: a pointer to where the match is, not a passage to quote
+            location=hit_range.location,
             line_start=hit_range.line_start,
             line_end=hit_range.line_end,
             score=hit_range.score,

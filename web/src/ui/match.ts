@@ -1,11 +1,12 @@
-import type { Hit, Passage, Source } from '../api'
+import type { Excerpt, Hit, Passage, Source } from '../api'
 
-/** Any shape a search result arrives in: a chunk, a passage (or excerpt), or a document. */
-export type Match = Hit | Passage | Source
+/** Any shape a search result arrives in: a chunk, a passage, an excerpt, or a document. */
+export type Match = Hit | Passage | Excerpt | Source
 
 /** A chunk carries its `seq`; a passage its sequence range; a source its hot sections. */
 export const isHit = (match: Match): match is Hit => 'seq' in match
 export const isSource = (match: Match): match is Source => 'sections' in match
+export const isExcerpt = (match: Match): match is Excerpt => 'spans' in match
 
 /** Between two headings of a heading path, as the backend's `chunk.HEADING_SEP` joins them. */
 export const HEADING_SEP = ' > '
@@ -112,8 +113,11 @@ export const RELATIONS: Record<Reference['relation'], string> = {
 }
 
 /** The places folded straight into a match; each holds the ones folded into it. A source folds
- *  none. */
-export const alsoOf = (match: Match): Reference[] => (isSource(match) ? [] : match.also_in)
+ *  none, and an excerpt's are those of its spans. */
+export function alsoOf(match: Match): Reference[] {
+  if (isSource(match)) return []
+  return isExcerpt(match) ? match.spans.flatMap((span) => span.also_in) : match.also_in
+}
 
 /** Every place of a tree, depth first: what a count or a set of documents reads. */
 export const everyPlace = (places: Reference[]): Reference[] => places.flatMap((place) => [place, ...everyPlace(place.also_in)])
@@ -149,7 +153,7 @@ export function cite(location: string, doc: string): string {
 
 /** The chunks a match covers, by `seq` (the 1-based position in its document): one chunk's, or a
  *  passage's first and last. */
-const seqRange = (match: Hit | Passage): [number, number] => (isHit(match) ? [match.seq, match.seq] : [match.seq_start, match.seq_end])
+const seqRange = (match: Hit | Passage | Excerpt): [number, number] => (isHit(match) ? [match.seq, match.seq] : [match.seq_start, match.seq_end])
 
 /** The chunks a quoted match covers, as a bare number for the bottom corner of the quote: one
  *  chunk's, a passage's run, or nothing for a source (which shows no quote). */
@@ -162,7 +166,7 @@ export function seqLabel(match: Match): string {
 const span = (unit: string, first: number, last: number): string => (first === last ? `${unit} ${first}` : `${unit}s ${first}–${last}`)
 
 /** Where the match sits in the document, in two parts: where to read it (its pages where the
- *  document has pages, and a passage's lines, which is what it was widened to), then the chunks it
+ *  document has pages, and a passage's lines), then the chunks it
  *  is made of. A source covers no one run: its lines, and no chunks. Either part may be empty. */
 export function placeOf(match: Match): [string, string] {
   if (isSource(match)) return [span('line', match.line_start, match.line_end), '']

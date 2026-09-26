@@ -5,10 +5,12 @@ Every range below is one or more real chunks of a backend book: a sentence at it
 its own document, numbered the way the index numbers them.
 """
 
+import msgspec
 import pytest
 from conftest import hit, words_scan
 
 from haskie.errors import InvalidInput
+from haskie.indexing.segment import CutReason
 from haskie.search import aspects, collapse
 from haskie.search.passage import HitRange, PassageReference, ranges
 
@@ -31,22 +33,24 @@ def _span(
     collection: str = "backend",
     text: str | None = None,
     score: float = 1.0,
+    end: CutReason = CutReason.EDGE,
 ) -> HitRange:
     """One range over consecutive chunks of one document, 100 characters a chunk, as
-    `passage.ranges` merges them. `text` stands in for a one-chunk range's sentence."""
-    (found,) = ranges(
-        [
-            hit(
-                text or SENTENCES[seq],
-                score,
-                document=document,
-                collection=collection,
-                seq=seq,
-                char_start=(seq - 1) * 100,
-            )
-            for seq in seqs
-        ]
-    )
+    `passage.ranges` merges them. `text` stands in for a one-chunk range's sentence, and `end` is
+    the cut after its last chunk."""
+    hits = [
+        hit(
+            text or SENTENCES[seq],
+            score,
+            document=document,
+            collection=collection,
+            seq=seq,
+            char_start=(seq - 1) * 100,
+        )
+        for seq in seqs
+    ]
+    hits[-1] = msgspec.structs.replace(hits[-1], end_reason=end)
+    (found,) = ranges(hits)
     return found
 
 
@@ -220,6 +224,16 @@ def test_a_limit_below_the_number_of_parts_is_refused() -> None:
             [("backend", "patterns.md", 1, 3, [0, 1])],
         ),
         (
+            "a range past a heading after a pick is a section of its own: it takes a slot",
+            [
+                [_span("patterns.md", 1, 2, end=CutReason.HEADING)],
+                [_span("patterns.md", 3)],
+            ],
+            1,
+            10,
+            [("backend", "patterns.md", 1, 2, [0]), ("backend", "patterns.md", 3, 3, [1])],
+        ),
+        (
             "a range between two picks merges them into the first",
             [[_span("patterns.md", 1)], [_span("patterns.md", 3)], [_span("patterns.md", 2)]],
             1,
@@ -267,7 +281,7 @@ def test_the_parts_take_turns_at_the_slots(
 
 def test_a_joined_pick_is_one_passage_over_every_chunk_it_holds() -> None:
     """Two parts landing on neighbouring chunks get one range, with its offsets and lines, that
-    `widen` reads once rather than two touching passages, and it counts both ranges it took."""
+    `read` reads once rather than two touching passages, and it counts both ranges it took."""
     (pick,) = aspects.interleave([[_span("patterns.md", 2, 3)], [_span("patterns.md", 4)]], 1, 10)
 
     assert pick.taken == 2

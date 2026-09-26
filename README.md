@@ -90,13 +90,14 @@ decisions, so the agent needs fewer round trips and fewer tokens.
 haskie is young, with much still to add, but it already covers the whole path from import to
 cited answers in Claude Code. Not there yet:
 
-- **More retrieval decisions made for the agent.** Today haskie merges neighbouring hits, widens
-  them to whole sentences and folds repeats. Next on the list, each one a round trip the agent
+- **More retrieval decisions made for the agent.** Today haskie merges neighbouring hits, grows
+  or drops passages too short to stand alone, folds repeats, and groups passages by section. Next on the list, each one a round trip the agent
   would otherwise spend:
-  - **Auto-expanding passages** when the surrounding text holds more of the answer. Today a
-    passage does not widen dynamically, and the agent opens `markdown_file` for more.
-  - **Trimming** the sentences of a passage that do not answer. The excerpt type is in place for
-    it. Today an excerpt is the whole passage.
+  - **Auto-expanding passages** when the surrounding text holds more of the answer. Today an
+    excerpt holds the matched passages of a section, and the agent opens `markdown_file` for the
+    text between them.
+  - **Trimming** the sentences of a passage that do not answer. Today an excerpt keeps
+    every passage whole.
   - **Cross-document merging**, so complementary passages from several documents arrive as one
     answer with every source cited. Today only repeats are folded.
   - **Distillation** of the results into a short, cited brief, for questions where the agent
@@ -238,8 +239,7 @@ intact, where diversity rerankers such as maximal marginal relevance (MMR) reord
 only with kept results stops chains, so A close to B and B close to C never merges A with C. The
 same input always gives the same output. A repeat stays citable as an `also_in` entry (`duplicate`,
 `contained` or `equivalent`), and its slot goes to the next distinct result. Repeated passages do not
-significantly improve answer correctness, while different documents improve it by 17–47% [19]. Each
-result then widens to whole lines or sentences, within 300 characters.
+significantly improve answer correctness, while different documents improve it by 17–47% [19].
 
 **Async-first, with durable jobs.** Every IO is awaited, and CPU work runs in worker threads, so
 search and the UI stay responsive while the machine indexes. Imports, indexing, deletes,

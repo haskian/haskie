@@ -15,6 +15,9 @@ const DEFAULTS: SearchSettings = {
   refine_factor: 10,
   reranker: 'none',
   reranker_model: 'Xenova/ms-marco-MiniLM-L-6-v2',
+  min_passage_chars: 300,
+  max_passage_grow: 2,
+  max_section_chars: 8000,
 }
 
 // A collection that overrides nothing, as `/api/collections/{name}` sends it.
@@ -30,6 +33,9 @@ const NO_OVERRIDES: SearchOverrides = {
   refine_factor: null,
   reranker: null,
   reranker_model: null,
+  min_passage_chars: null,
+  max_passage_grow: null,
+  max_section_chars: null,
 }
 
 const search = (patch: Partial<SearchSettings>): SearchSettings => ({ ...DEFAULTS, ...patch })
@@ -52,32 +58,37 @@ describe('visibleSearchFields', () => {
     {
       name: 'hybrid with rrf asks for the constant, the vector knobs and the candidate pool',
       search: DEFAULTS,
-      expected: ['limit', 'mode', 'fusion', 'rrf_k', 'nprobes', 'refine_factor', 'reranker', 'candidates'],
+      expected: ['limit', 'mode', 'fusion', 'rrf_k', 'nprobes', 'refine_factor', 'reranker', 'candidates', 'min_passage_chars', 'max_passage_grow', 'max_section_chars'],
     },
     {
       name: 'linear fusion swaps the constant for the two weights',
       search: search({ fusion: 'linear' }),
-      expected: ['limit', 'mode', 'fusion', 'vector_weight', 'bm25_weight', 'nprobes', 'refine_factor', 'reranker', 'candidates'],
+      expected: ['limit', 'mode', 'fusion', 'vector_weight', 'bm25_weight', 'nprobes', 'refine_factor', 'reranker', 'candidates', 'min_passage_chars', 'max_passage_grow', 'max_section_chars'],
     },
     {
       name: 'a vector query has no fusion and no candidate pool',
       search: search({ mode: 'vector' }),
-      expected: ['limit', 'mode', 'nprobes', 'refine_factor', 'reranker'],
+      expected: ['limit', 'mode', 'nprobes', 'refine_factor', 'reranker', 'min_passage_chars', 'max_passage_grow', 'max_section_chars'],
     },
     {
       name: 'full text reads no vector index, so it needs no probes',
       search: search({ mode: 'fts' }),
-      expected: ['limit', 'mode', 'reranker'],
+      expected: ['limit', 'mode', 'reranker', 'min_passage_chars', 'max_passage_grow', 'max_section_chars'],
     },
     {
       name: 'a reranker adds its model, and a candidate pool even without hybrid',
       search: search({ mode: 'fts', reranker: 'cross-encoder' }),
-      expected: ['limit', 'mode', 'reranker', 'reranker_model', 'candidates'],
+      expected: ['limit', 'mode', 'reranker', 'reranker_model', 'candidates', 'min_passage_chars', 'max_passage_grow', 'max_section_chars'],
     },
     {
       name: 'hybrid and a reranker ask for the candidate pool once',
       search: search({ reranker: 'cross-encoder' }),
-      expected: ['limit', 'mode', 'fusion', 'rrf_k', 'nprobes', 'refine_factor', 'reranker', 'reranker_model', 'candidates'],
+      expected: ['limit', 'mode', 'fusion', 'rrf_k', 'nprobes', 'refine_factor', 'reranker', 'reranker_model', 'candidates', 'min_passage_chars', 'max_passage_grow', 'max_section_chars'],
+    },
+    {
+      name: 'no shortest passage: nothing grows, so how far is not asked',
+      search: search({ mode: 'fts', min_passage_chars: 0 }),
+      expected: ['limit', 'mode', 'reranker', 'min_passage_chars', 'max_section_chars'],
     },
     {
       name: 'the order is the order the form renders',
@@ -93,6 +104,9 @@ describe('visibleSearchFields', () => {
         'reranker',
         'reranker_model',
         'candidates',
+        'min_passage_chars',
+        'max_passage_grow',
+        'max_section_chars',
       ],
     },
   ]

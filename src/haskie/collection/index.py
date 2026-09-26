@@ -39,6 +39,14 @@ from haskie.indexing.chunk import record as chunk_record
 from haskie.logs import get_logger
 from haskie.settings import Fusion, Reranker, SearchMode, SearchSettings, load_user_settings
 
+# What identifies one chunk, wherever it is stored. The collection is deliberately not part of it:
+# the same chunk of the same document is the same answer, whichever collection's table it came out
+# of, so `search.retrieval.fan_out` and `search.text.merge` both count it once.
+RowKey = tuple[str, int]
+# One chunk as a search result: the collection too, since two collections may chunk one document
+# with different settings and each numbers its own `seq` (`search.passage.ranges`).
+ChunkKey = tuple[str, str, int]  # (collection, document, seq)
+
 
 class Row(msgspec.Struct):
     """A chunk ready for the index: metadata plus (optional) precomputed vector."""
@@ -191,12 +199,17 @@ class Hit(msgspec.Struct):
     also_in: list[HitReference] = []  # the near-duplicates folded into this hit, a tree
 
 
+def chunk_key(hit: "Hit") -> ChunkKey:
+    """Which chunk a hit is, as a search keys it."""
+    return (hit.collection, hit.document, hit.seq)
+
+
 def location(
     doc: str, page_start: int | None, page_end: int | None, line_start: int, line_end: int
 ) -> str:
     """The citation of one span of a document: "doc p.3-4 L10-20", pages only for a PDF.
 
-    Shared so a passage (`passage.widen`) cites in exactly the format a chunk does.
+    Shared so a passage (`passage.quote`) cites in exactly the format a chunk does.
     """
     pages = ""
     if page_start is not None:
@@ -351,13 +364,15 @@ class CollectionIndex:
     async def delete_document(self, doc: str) -> None:
         table = await self._deletable()
         if table is not None:
-            await table.delete(f"document = '{doc}'")  # doc names sanitized in document/document.py
+            await table.delete(f"document = {_quoted(doc)}")
 
     async def delete_parts(self, doc: str, start: int, end: int) -> None:
         """Drop the parts `[start, end)` of one document, leaving every other part alone."""
         table = await self._deletable()
         if table is not None:
-            await table.delete(f"document = '{doc}' and part >= {int(start)} and part < {int(end)}")
+            await table.delete(
+                f"document = {_quoted(doc)} and part >= {int(start)} and part < {int(end)}"
+            )
 
     async def add_parts(
         self,
@@ -575,6 +590,37 @@ class CollectionIndex:
             return []
         return await (await table.search(query, query_type="fts")).limit(limit).to_list()
 
+    async def rows_at(self, keys: Iterable[RowKey], vectors: bool) -> list[dict]:
+        """The stored rows of these chunks, in no order: what a search reads to look at the
+        neighbours of a chunk it matched. Their vectors only when `vectors` says the search can
+        compare them. `[]` when there is nothing readable."""
+        by_document: dict[str, set[int]] = {}
+        for doc, seq in keys:
+            by_document.setdefault(doc, set()).add(seq)
+        table = await self._readable()
+        if table is None or not by_document:
+            return []
+        wanted = " OR ".join(
+            f"(document = {_quoted(doc)} AND seq IN ({', '.join(map(str, sorted(seqs)))}))"
+            for doc, seqs in sorted(by_document.items())
+        )
+        columns = PLAIN_SCHEMA.names + (
+            ["vector"] if vectors and await self.has_vector_column() else []
+        )
+        return await table.query().where(wanted).select(columns).to_list()
+
+    async def outline_rows(self, documents: Iterable[str]) -> list[dict]:
+        """Where every chunk of these documents sits: its `document`, `seq`, heading path and char
+        span, and nothing else, in no order. What a search reads to know how large each section
+        around a match is. `[]` when there is nothing readable."""
+        names = sorted(set(documents))
+        table = await self._readable()
+        if table is None or not names:
+            return []
+        wanted = f"document IN ({', '.join(_quoted(name) for name in names)})"
+        columns = ["document", "seq", "headings", "char_start", "char_end"]
+        return await table.query().where(wanted).select(columns).to_list()
+
     async def search(self, query: str, settings: SearchSettings) -> list[Hit]:
         rerank = settings.reranker != Reranker.NONE
         fetch = max(settings.candidates, settings.limit) if rerank else settings.limit
@@ -660,6 +706,12 @@ async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -
     return sorted(rows, key=lambda r: r["_relevance_score"], reverse=True)
 
 
+def _quoted(value: str) -> str:
+    """`value` as a SQL string literal for a LanceDB filter. A document name is the user's file
+    name, so a quote in it is doubled rather than allowed to end the literal."""
+    return "'" + value.replace("'", "''") + "'"
+
+
 def _header(r: dict) -> str:
     """The header of a stored row, as `Chunk.header` builds it."""
     return HEADING_SEP.join(r["headings"] or [])
@@ -678,12 +730,6 @@ def row_score(r: dict) -> float:
     if "_distance" in r:
         return 1.0 / (1.0 + float(r["_distance"]))
     return 0.0
-
-
-# What identifies one chunk, wherever it is stored. The collection is deliberately not part of it:
-# the same chunk of the same document is the same answer, whichever collection's table it came out
-# of, so `search.retrieval.fan_out` and `search.text.merge` both count it once.
-RowKey = tuple[str, int]
 
 
 def row_key(row: dict) -> RowKey:

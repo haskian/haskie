@@ -1,5 +1,5 @@
-"""Passages out of chunks: folding hits into ranges, widening a range to boundaries a reader would
-stop at, and folding the same hits into the documents and collections that cover a query.
+"""Passages out of chunks: folding hits into ranges, quoting a range as it was cut, and folding
+the same hits into the documents and collections that cover a query.
 
 Every offset below is a real offset into `MARKDOWN`: the fixture builds a `Hit` from a pair of
 snippets and reads its text, lines and char range out of the document, the way the index does.
@@ -7,34 +7,26 @@ snippets and reads its text, lines and char range out of the document, the way t
 
 import msgspec
 import pytest
+from conftest import chunk_hit
 
 from haskie.collection.index import Hit, Overlap, Overlaps, Relation, location
+from haskie.indexing.chunk import Chunk, split
+from haskie.indexing.segment import CutReason
 from haskie.search.passage import (
-    MAX_WIDEN,
-    Excerpt,
     HitRange,
     Passage,
     PassageReference,
     Sources,
-    Window,
     fold_sources,
     harmonic,
     min_cover,
+    quote,
     ranges,
     top_documents,
-    widen,
 )
+from haskie.settings import ChunkSettings
 
-# A long line with no sentence terminator and no newline in it: what the widening has nothing to
-# stop at, so the cap is all that bounds it.
-RUN = ", ".join(f"service-{i:03d}" for i in range(80))
-
-# A long line that does offer sentences: past the cap in both directions, so the widening has to
-# fall back from the newline rule to the outermost whole sentences it can reach.
-SENTENCE_TAIL = "explains how a consumer handles a duplicate message."
-SENTENCES = " ".join(f"Sentence {i} {SENTENCE_TAIL}" for i in range(12))
-
-MARKDOWN = f"""# Retries
+MARKDOWN = """# Retries
 
 A background job retries a failed HTTP call. The retry has to be idempotent, or the side
 effect happens twice.
@@ -53,19 +45,7 @@ Hosts drift apart by milliseconds.
 ## Deduplication
 
 The consumer keys on an idempotency key. It drops any message it has already handled.
-
-## Backpressure
-
-{RUN}
-
-## Long line
-
-{SENTENCES}
 """
-
-# What `widen` is handed: `retrieval` reads a window around the range, and the whole fixture is
-# one such window that happens to start at the beginning of the document.
-WHOLE = Window(text=MARKDOWN, char_start=0)
 
 DOC = "retries.md"
 OTHER = "ordering.md"
@@ -221,6 +201,30 @@ def test_harmonic_of_an_overlap_is_pulled_toward_its_weakest_measure(
             [(COLLECTION, DOC, 1, 1), ("ops", DOC, 2, 2)],
         ),
         (
+            "a heading between two chunks ends the section: they never merge",
+            [
+                msgspec.structs.replace(ONE, end_reason=CutReason.HEADING),
+                msgspec.structs.replace(TWO, start_reason=CutReason.HEADING),
+            ],
+            [(COLLECTION, DOC, 1, 1), (COLLECTION, DOC, 2, 2)],
+        ),
+        (
+            "a paragraph between two chunks is one section: they merge",
+            [
+                msgspec.structs.replace(ONE, end_reason=CutReason.PARAGRAPH),
+                msgspec.structs.replace(TWO, start_reason=CutReason.PARAGRAPH),
+            ],
+            [(COLLECTION, DOC, 1, 2)],
+        ),
+        (
+            "the edge between two parts of a PDF is no section end: they merge",
+            [
+                msgspec.structs.replace(ONE, end_reason=CutReason.EDGE),
+                msgspec.structs.replace(TWO, start_reason=CutReason.EDGE),
+            ],
+            [(COLLECTION, DOC, 1, 2)],
+        ),
+        (
             "spans that score the same sort by document, then by position",
             [_hit(SKEW, 3, 4.0), ONE, OTHER_ONE],
             [("ops", OTHER, 1, 1), (COLLECTION, DOC, 1, 1), (COLLECTION, DOC, 3, 3)],
@@ -247,12 +251,17 @@ def test_a_range_carries_the_span_and_the_score_of_its_members() -> None:
     assert folded.score == pytest.approx(2 * 4.0 * 7.0 / 11.0), "harmonic(best 4, sum 7)"
 
 
-# --- widen ---------------------------------------------------------------------------
+# --- quote ---------------------------------------------------------------------------
 
 
 def _range(char_start: int, char_end: int, **fields) -> HitRange:
     """A range of one chunk over `[char_start, char_end)`, as `ranges` would build it."""
     return ranges([_hit((char_start, char_end), 1, 2.0, **fields)])[0]
+
+
+def _quote(hit_range: HitRange) -> Passage:
+    """`hit_range` as a passage, handed the markdown its offsets cover, as `retrieval` reads it."""
+    return quote(hit_range, MARKDOWN[hit_range.char_start : hit_range.char_end])
 
 
 @pytest.mark.parametrize(
@@ -280,12 +289,12 @@ def test_a_passage_cites_every_page_its_chunks_cover(
     ]
     (hit_range,) = ranges(hits)
 
-    widened = widen(hit_range, WHOLE, Passage)
+    quoted = _quote(hit_range)
 
     assert (hit_range.page_start, hit_range.page_end) == expected, f"{name}: set once, on the range"
-    assert (widened.page_start, widened.page_end) == expected, name
+    assert (quoted.page_start, quoted.page_end) == expected, name
     cited = "" if expected[0] is None else f" p.{expected[0]}-{expected[1]} "
-    assert cited in widened.location, f"{name}: the citation names the same pages"
+    assert cited in quoted.location, f"{name}: the citation names the same pages"
 
 
 # a place measured close to the passage it folded into, in words and in its vectors
@@ -296,7 +305,7 @@ CLOSE = Overlaps(
 )
 
 
-def test_widening_a_range_keeps_what_was_folded_into_it() -> None:
+def test_quoting_a_range_keeps_what_was_folded_into_it() -> None:
     """The pointers are decided on the range (`collapse`), before anything is read, and the
     passage is what the caller sees them on."""
     folded = PassageReference(
@@ -334,67 +343,41 @@ def test_widening_a_range_keeps_what_was_folded_into_it() -> None:
     (hit_range,) = ranges([ONE, TWO])
     hit_range = msgspec.structs.replace(hit_range, also_in=[folded])
 
-    widened = widen(hit_range, WHOLE, Passage)
+    quoted = _quote(hit_range)
 
-    assert widened.also_in == [folded]
+    assert quoted.also_in == [folded]
 
 
 @pytest.mark.parametrize(
-    ("name", "span", "expected", "lines"),
+    ("name", "span", "lines"),
     [
         (
-            "a newline bounds the passage: the line the span sits on",
+            "a range that starts and ends mid-line gains nothing around it",
             _span("has to be idempotent", "or the side"),
-            _text("A background job", "or the side"),
             (3, 3),
         ),
+        ("a heading line", _span("### Skew", "### Skew"), (14, 14)),
+        ("the start of the file", (0, len("# Retries")), (1, 1)),
         (
-            "a heading is a line of its own, so it is never widened into",
-            _span("drift apart", "by milliseconds"),
-            "Hosts drift apart by milliseconds.",
-            (15, 15),
-        ),
-        (
-            "the line before a heading stops at itself",
-            _span("a wall clock", "clock for ordering"),
-            "Never trust a wall clock for ordering",
-            (13, 13),
-        ),
-        (
-            "the start of the file is a boundary of its own",
-            (0, len("# Retries")),
-            "# Retries",
-            (1, 1),
-        ),
-        (
-            "a line longer than the cap falls back to the outermost whole sentences",
-            (_at("Sentence 5 explains"), _at("Sentence 5 explains") + 30),
-            _text("Sentence 1 explains", f"Sentence 9 {SENTENCE_TAIL}"),
-            (27, 27),
-        ),
-        (
-            "neither a newline nor a sentence end in range: the cap is all there is",
-            (_at(RUN) + 400, _at(RUN) + 450),
-            MARKDOWN[_at(RUN) + 400 - MAX_WIDEN : _at(RUN) + 450 + MAX_WIDEN].strip(),
-            (23, 23),
-        ),
-        (
-            "the end of the file stops the widening",
-            (len(MARKDOWN) - 40, len(MARKDOWN)),
-            _text("Sentence 7 explains", f"Sentence 11 {SENTENCE_TAIL}"),
-            (27, 27),
+            "a whole paragraph, as the chunker cuts most of them",
+            _span("The consumer keys", "already handled."),
+            (19, 19),
         ),
     ],
 )
-def test_expand_widens_a_range_to_the_nearest_boundary(
-    name: str, span: tuple[int, int], expected: str, lines: tuple[int, int]
+def test_a_passage_is_its_range_and_nothing_around_it(
+    name: str, span: tuple[int, int], lines: tuple[int, int]
 ) -> None:
-    passage = widen(_range(*span), WHOLE, Passage)
+    """The chunker already cuts where the author did, so the range is quoted as it was cut: the
+    text, the offsets and the lines are the range's own."""
+    hit_range = _range(*span)
 
-    assert passage.text == expected, name
-    assert (passage.line_start, passage.line_end) == lines, f"{name}: lines recounted"
-    assert MARKDOWN[passage.char_start : passage.char_end] == expected, f"{name}: offsets agree"
-    assert not passage.text[:1].isspace() and not passage.text[-1:].isspace(), name
+    passage = _quote(hit_range)
+
+    assert passage.text == MARKDOWN[span[0] : span[1]], name
+    assert (passage.char_start, passage.char_end) == span, f"{name}: the range's offsets"
+    assert (passage.line_start, passage.line_end) == lines, f"{name}: the range's lines"
+    assert (passage.line_start, passage.line_end) == (hit_range.line_start, hit_range.line_end)
 
 
 def test_a_passage_across_a_page_break_carries_no_page_marker() -> None:
@@ -402,45 +385,15 @@ def test_a_passage_across_a_page_break_carries_no_page_marker() -> None:
     it, as a chunk does, while its offsets still cut the source the file holds."""
     markdown = "# Retries\n\nThe retry waits.\n\n<!-- page 2 -->\n\nThen it runs again.\n"
     span = (markdown.index("The retry"), markdown.index("again.") + len("again."))
-    passage = widen(_range(*span), Window(text=markdown, char_start=0), Passage)
+    passage = quote(_range(*span), markdown[span[0] : span[1]])
     assert "<!--" not in passage.text
     assert passage.text == "The retry waits.\n\nThen it runs again."
     assert "<!-- page 2 -->" in markdown[passage.char_start : passage.char_end], "the source's"
 
 
-@pytest.mark.parametrize(
-    ("name", "span", "before"),
-    [
-        ("a window opening mid-line", _span("The consumer keys", "idempotency key."), 200),
-        (
-            "a window opening exactly at the widened start",
-            _span("Hosts drift", "milliseconds."),
-            35,
-        ),
-        ("a window with nothing to spare after it", _span("### Skew", "milliseconds."), 500),
-    ],
-)
-def test_expand_reports_document_offsets_from_a_window(
-    name: str, span: tuple[int, int], before: int
-) -> None:
-    """A search reads a few hundred bytes around the range, not the document, so `widen` works in
-    window coordinates and has to hand back offsets and lines of the document itself."""
-    start = max(0, span[0] - before)
-    window = Window(text=MARKDOWN[start : span[1] + before], char_start=start)
-    folded = _range(*span)
-
-    passage = widen(folded, window, Passage)
-
-    whole = widen(folded, WHOLE, Passage)
-    assert (passage.char_start, passage.char_end) == (whole.char_start, whole.char_end), name
-    assert (passage.line_start, passage.line_end) == (whole.line_start, whole.line_end), name
-    assert passage.text == whole.text, name
-    assert MARKDOWN[passage.char_start : passage.char_end] == passage.text, name
-
-
-def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() -> None:
+def test_a_passage_carries_the_citation_of_the_best_chunk_over_its_lines() -> None:
     """A passage is cited the way a chunk is: `header` from the chunk that ranked it, `location`
-    over the lines it ended up covering and the pages every one of its chunks is on."""
+    over the lines all its chunks cover and the pages every one of its chunks is on."""
     hits = [
         _hit(_span("# Retries", "HTTP call."), 1, 1.0, page_start=1, page_end=1),
         _hit(
@@ -453,7 +406,7 @@ def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() 
         ),
     ]
 
-    passage = widen(ranges(hits)[0], WHOLE, Passage)
+    passage = _quote(ranges(hits)[0])
 
     assert passage.header == "Retries > Backoff", "the best-scoring chunk names the passage"
     assert (passage.page_start, passage.page_end) == (1, 3), "both chunks' pages, not the best's"
@@ -463,18 +416,6 @@ def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() 
     assert passage.markdown_file == f"/home/documents/{DOC}.md"
     assert passage.score == pytest.approx(2 * 5.0 * 6.0 / 11.0)
     assert passage.text.startswith("# Retries") and passage.text.endswith("twice.")
-
-
-def test_an_excerpt_is_a_passage() -> None:
-    """The trimming step is not written yet, so the type exists, the shape is the passage's, and
-    `widen` builds whichever of the two the caller asked for."""
-    span = _range(*OPENING)
-    passage = widen(span, WHOLE, Passage)
-
-    excerpt = widen(span, WHOLE, Excerpt)
-
-    assert isinstance(excerpt, Excerpt) and isinstance(excerpt, Passage)
-    assert excerpt.text == passage.text and excerpt.location == passage.location
 
 
 # --- fold_sources ---------------------------------------------------------------------
@@ -616,3 +557,57 @@ def test_min_cover_is_the_fewest_collections_that_hold_every_document(
     name: str, doc_collections: dict[str, list[str]], expected: list[str]
 ) -> None:
     assert min_cover(doc_collections) == expected, name
+
+
+# --- a passage of every cut the chunker makes -------------------------------------------------
+
+RULES = "\n".join(f"- Rule {i} tells the consumer how to retry one failed call." for i in range(12))
+LONG = " ".join(f"Sentence {i} explains how the consumer handles a duplicate." for i in range(12))
+CODE = "\n".join(f"retry_{i} = backoff(attempt={i}, jitter=True)" for i in range(20))
+EVERY_CUT = f"""# Retries
+
+A background job retries a failed HTTP call. The retry has to be idempotent, or the side effect
+happens twice, and the consumer has no way to tell the second call from the first.
+
+Exponential backoff with jitter spreads the retries out over time. A fixed delay buys a thundering
+herd instead, because every client that failed at once also retries at once.
+
+## Rules
+
+{RULES}
+
+## Long
+
+{LONG}
+
+## Code
+
+```
+{CODE}
+```
+"""
+
+
+def test_every_chunk_is_quoted_as_it_was_cut() -> None:
+    """Whatever the reason a chunk starts or ends where it does, its passage is its own text:
+    nothing from the chunk before or after it joins. Snapping to line or sentence ends used to
+    add text past a sentence cut, from a neighbour the query never matched."""
+    chunks = split(EVERY_CUT, ChunkSettings(chunk_size=300))
+    reasons = {chunk.start_reason for chunk in chunks} | {chunk.end_reason for chunk in chunks}
+
+    passages = [
+        quote(_one_chunk(chunk), EVERY_CUT[chunk.char_start : chunk.char_end]) for chunk in chunks
+    ]
+
+    assert reasons == set(CutReason), "the fixture makes every cut the chunker knows"
+    for chunk, passage in zip(chunks, passages, strict=True):
+        cut = f"{chunk.start_reason} -> {chunk.end_reason}"
+        assert passage.text == chunk.text.strip(), cut
+        assert (passage.char_start, passage.char_end) == (chunk.char_start, chunk.char_end), cut
+        assert (passage.line_start, passage.line_end) == (chunk.line_start, chunk.line_end), cut
+
+
+def _one_chunk(chunk: Chunk) -> HitRange:
+    """A chunk of `EVERY_CUT` as the range a search would build from its hit."""
+    (hit_range,) = ranges([chunk_hit(chunk, 1, document=DOC, collection=COLLECTION)])
+    return hit_range

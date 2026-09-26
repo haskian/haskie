@@ -434,6 +434,47 @@ def hit(
     )
 
 
+def chunk_hit(
+    chunk: "Chunk",
+    seq: int,
+    score: float = 1.0,
+    *,
+    document: str = "patterns.md",
+    collection: str = "backend",
+) -> "Hit":
+    """One chunk the chunker cut (`chunk.split`), as a search reads it back from the index: its
+    own offsets, lines, headings and cut reasons, numbered `seq`."""
+    from haskie.collection.index import Hit, location
+
+    return Hit(
+        collection=collection,
+        document=document,
+        source_path=f"documents/{document}",
+        markdown_path=f"documents/{document}.md",
+        part=0,
+        seq=seq,
+        line_start=chunk.line_start,
+        line_end=chunk.line_end,
+        char_start=chunk.char_start,
+        char_end=chunk.char_end,
+        byte_start=chunk.byte_start,
+        byte_end=chunk.byte_end,
+        page_start=None,
+        page_end=None,
+        headings=chunk.headings,
+        frame=chunk.frame,
+        header=chunk.header,
+        location=location(document, None, None, chunk.line_start, chunk.line_end),
+        text=chunk.text,
+        score=score,
+        layout=chunk.layout,
+        start_reason=chunk.start_reason,
+        end_reason=chunk.end_reason,
+        source_file=f"/home/documents/{document}",
+        markdown_file=f"/home/documents/{document}.md",
+    )
+
+
 def words_scan(hits: "list[Hit]") -> "Scan":
     """The comparison spaces of a search without embeddings."""
     from haskie.search import collapse

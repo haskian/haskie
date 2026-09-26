@@ -221,6 +221,25 @@ ACCELERATOR = Meta(
     ),
 )
 LIMIT = Meta(title="Results", description="Number of results a search returns.")
+MIN_PASSAGE_CHARS = Meta(
+    title="Shortest passage (characters)",
+    description=(
+        "A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its "
+        "section that match the question as well as a typical result does. One with no such "
+        "neighbour is dropped, unless it is the best result. 0 turns this off."
+    ),
+)
+MAX_SECTION_CHARS = Meta(
+    title="Largest section (characters)",
+    description=(
+        "An excerpt is one section of a document: the largest heading whose text fits this many "
+        "characters. The passages a search keeps under it come back together, in document order."
+    ),
+)
+MAX_PASSAGE_GROW = Meta(
+    title="Chunks a short passage may add",
+    description="How many neighbouring chunks a short passage may grow by, never past a heading.",
+)
 CANDIDATES = Meta(
     title="Candidates",
     description=(
@@ -337,10 +356,10 @@ def _check_search(search: "SearchSettings | SearchOverrides") -> None:
     """Shared by the user-level search settings and a collection's overrides, where a field left
     unset (None) inherits the user value and is not checked here."""
     given = without_none(search)
-    at_least_one = ("limit", "candidates", "rrf_k", "nprobes", "refine_factor")
+    at_least_one = ("limit", "candidates", "rrf_k", "nprobes", "refine_factor", "max_section_chars")
     _at_least(1, **{name: given[name] for name in at_least_one if name in given})
-    weights = ("vector_weight", "bm25_weight")
-    _at_least(0, **{name: given[name] for name in weights if name in given})
+    at_least_zero = ("vector_weight", "bm25_weight", "min_passage_chars", "max_passage_grow")
+    _at_least(0, **{name: given[name] for name in at_least_zero if name in given})
 
 
 def _check_chunking(chunk_size: int | None, chunk_merge_below: int | None) -> None:
@@ -402,6 +421,9 @@ class SearchSettings(msgspec.Struct):
     refine_factor: Annotated[int, REFINE_FACTOR] = 10
     reranker: Annotated[Reranker, RERANKER] = Reranker.NONE
     reranker_model: Annotated[str, RERANKER_MODEL] = DEFAULT_RERANKER
+    min_passage_chars: Annotated[int, MIN_PASSAGE_CHARS] = 300
+    max_passage_grow: Annotated[int, MAX_PASSAGE_GROW] = 2
+    max_section_chars: Annotated[int, MAX_SECTION_CHARS] = 8000
 
     def __post_init__(self) -> None:
         # `reranker_model` is checked against the catalogue where settings are written
@@ -423,6 +445,9 @@ class SearchOverrides(msgspec.Struct):
     refine_factor: Annotated[int | None, REFINE_FACTOR] = None
     reranker: Annotated[Reranker | None, RERANKER] = None
     reranker_model: Annotated[str | None, RERANKER_MODEL] = None
+    min_passage_chars: Annotated[int | None, MIN_PASSAGE_CHARS] = None
+    max_passage_grow: Annotated[int | None, MAX_PASSAGE_GROW] = None
+    max_section_chars: Annotated[int | None, MAX_SECTION_CHARS] = None
 
     def __post_init__(self) -> None:
         # checked as it is decoded, before it is saved: otherwise a value no search can run with

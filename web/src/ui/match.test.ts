@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import type { Hit } from '../api'
-import { chunkSizes, everyPlace, fillOf, frameOf, headingOf, MIN_FILL, overlapHint, pieceMeta, piecesOf, type Reference } from './match'
+import type { Excerpt, Hit, Passage } from '../api'
+import { alsoDocuments, alsoOf, chunkSizes, everyPlace, fillOf, frameOf, headingOf, isExcerpt, MIN_FILL, overlapHint, pieceMeta, piecesOf, seqLabel, type Reference } from './match'
 
 describe('fillOf', () => {
   const cases: Array<{ name: string; score: number; scores: number[]; expected: number }> = [
@@ -228,5 +228,74 @@ describe('also_in trees', () => {
     const tree = [{ ...PLACE, seq: 1, also_in: [{ ...PLACE, seq: 2, also_in: [{ ...PLACE, seq: 3 }] }] }, { ...PLACE, seq: 4 }]
     expect(everyPlace(tree).map((place) => ('seq' in place ? place.seq : 0))).toEqual([1, 2, 3, 4])
     expect(everyPlace([])).toEqual([])
+  })
+})
+
+describe('excerpts', () => {
+  const overlap = { contained: 1, contains: 1, alike: 1, score: 1 }
+  // a place folded under a span, as `/api/search/excerpts` sends it
+  const place = (document: string): Passage['also_in'][number] => ({
+    collection: 'notes',
+    document,
+    seq_start: 2,
+    seq_end: 2,
+    header: 'Retries',
+    location: `${document} L3-3`,
+    line_start: 3,
+    line_end: 3,
+    score: 0.5,
+    relation: 'duplicate',
+    similarity: 1,
+    to_parent: { words: overlap, embedding: null, chars: null },
+    to_root: { words: overlap, embedding: null, chars: null },
+    also_in: [],
+  })
+  const span = (also_in: Passage['also_in']): Excerpt['spans'][number] => ({
+    header: 'Guide > Retries',
+    location: 'guide.md L5-7',
+    seq_start: 1,
+    seq_end: 2,
+    line_start: 5,
+    line_end: 7,
+    char_start: 40,
+    char_end: 200,
+    page_start: null,
+    page_end: null,
+    score: 1,
+    also_in,
+    aspects: [],
+  })
+  const EXCERPT: Excerpt = {
+    collection: 'notes',
+    document: 'guide.md',
+    header: 'Guide',
+    location: 'guide.md L5-20',
+    seq_start: 1,
+    seq_end: 6,
+    line_start: 5,
+    line_end: 20,
+    char_start: 40,
+    char_end: 900,
+    page_start: null,
+    page_end: null,
+    text: 'One.\n\n[…]\n\nTwo.',
+    score: 1,
+    source_file: '/home/documents/guide.md',
+    markdown_file: '/home/documents/guide.md.md',
+    spans: [span([place('copy.md')]), span([]), span([place('guide.md'), place('other.md')])],
+    aspects: [],
+  }
+
+  test('an excerpt is told from a passage by its spans', () => {
+    expect(isExcerpt(EXCERPT)).toBe(true)
+  })
+
+  test("an excerpt's folded places are its spans', in span order", () => {
+    expect(alsoOf(EXCERPT).map((one) => one.document)).toEqual(['copy.md', 'guide.md', 'other.md'])
+    expect(alsoDocuments(EXCERPT)).toBe(2)
+  })
+
+  test('its chunks run from the first span to the last', () => {
+    expect(seqLabel(EXCERPT)).toBe('1–6')
   })
 })

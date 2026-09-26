@@ -34,11 +34,12 @@ export type Document = Wire<'Listed'>
 export type CollectionInfo = Wire<'CollectionInfo'>
 export type EmbeddingEntry = Wire<'Entry'> // `embed_cache.Entry`: one cached embedding of a document
 export type Hit = Wire<'Hit'>
-// A passage: consecutive matched chunks of one document, read back from the markdown and widened
-// on each side (`passage.widen`). Widening stops at the nearest newline, else at the outermost
-// whole sentence within 300 characters, else at 300 characters. `Excerpt` is a passage on the
-// wire today; the type name is what a later trimming step keeps.
+// A passage: consecutive matched chunks of one section, read back from the markdown by their
+// offsets (`passage.quote`).
 export type Passage = Wire<'Passage'>
+// An excerpt: one section of a document, holding every passage the search kept in it as a span
+// (`section.excerpt`). Its folded places are the spans', not its own.
+export type Excerpt = Wire<'Excerpt'>
 export type Source = Wire<'Source'>
 export type Sources = Wire<'Sources'>
 export type HotSection = Wire<'HotSection'>

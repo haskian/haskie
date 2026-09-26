@@ -30,12 +30,13 @@ from haskie.collection.collection import Collection, MemberStatus
 from haskie.document import document
 from haskie.document.document import DocumentStatus
 from haskie.indexing import gguf_models, mlx_models
-from haskie.indexing.chunk import Chunk, Piece
+from haskie.indexing.chunk import Chunk, Piece, split
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order
 from haskie.settings import (
     DEFAULT_RERANKER,
     Accelerator,
+    ChunkSettings,
     PipelineSettings,
     UserSettings,
     save_user_settings,
@@ -1042,9 +1043,9 @@ async def test_session_search_survives_the_deletion_of_a_collection(
 
 # --- passages, excerpts and sources -----------------------------------------------------
 
-# One paragraph, one sentence per line, so a passage that widens to whole sentences also has to
-# recount its lines. "lancedb" is in both of the chunks seeded below and in neither section around
-# them, so the query reaches exactly the two chunks that are meant to merge.
+# One paragraph, one sentence per line, so a passage over two chunks spans three lines. "lancedb"
+# is in both of the chunks seeded below and in neither section around them, so the query reaches
+# exactly the two chunks that are meant to merge.
 PASSAGE_MD = (
     "# Guide\n"
     "\n"
@@ -1064,7 +1065,7 @@ PASSAGE_MD = (
 
 async def _markdown_of(doc: str) -> str:
     """The converted markdown of an imported document, as it is on disk: what a chunk's
-    `char_start` and `char_end` are offsets into, and what a passage is widened in."""
+    `char_start` and `char_end` are offsets into, and what a passage is read from."""
     row = await document.get(doc)
     return (home.HOME / row.relative(row.markdown)).read_text(encoding="utf-8")
 
@@ -1072,7 +1073,7 @@ async def _markdown_of(doc: str) -> str:
 def _chunk(markdown: str, start: str, end: str, heading: str = "Retrieval") -> Chunk:
     """One chunk cut out of `markdown` between two of its own substrings, with the offsets and
     line numbers that cut really has. `start` and `end` fall mid-sentence on purpose: a passage
-    has to widen past both."""
+    quotes its chunks as they were cut, and adds nothing around them."""
     char_start = markdown.index(start)
     char_end = markdown.index(end) + len(end)
     return Chunk(
@@ -1128,7 +1129,17 @@ async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
             "excerpts: the ranking, then passages merged, folded and read",
             "/api/search/excerpts",
             {"q": "lancedb"},
-            ["plan", "retrieve", "merge", "rerank", "hits", "collapse_ranges", "widen"],
+            [
+                "plan",
+                "retrieve",
+                "merge",
+                "rerank",
+                "hits",
+                "fill_thin",
+                "collapse_all",
+                "group",
+                "quote",
+            ],
         ),
         (
             "sources: the ranking, then documents",
@@ -1167,7 +1178,7 @@ async def test_explore_merges_consecutive_chunks_into_one_passage(
     client: AsyncTestClient,
 ) -> None:
     """Two chunks that sit next to each other in one document are one passage: stitched by their
-    offsets, so the text they share is in it once, and widened to the sentences they cut into."""
+    offsets, so the text they share is in it once, and nothing around them is added."""
     await _guide_with_two_chunks(client)
 
     chunks = (await client.get("/api/search/explore", params={"q": "lancedb"})).json()
@@ -1179,8 +1190,8 @@ async def test_explore_merges_consecutive_chunks_into_one_passage(
     assert {hit["seq"] for hit in chunks} == {1, 2}, "only the two that mention lancedb match"
     (passage,) = response.json()
     assert (passage["seq_start"], passage["seq_end"]) == (1, 2), "the range the chunks cover"
-    assert passage["text"].startswith("One table holds"), "widened back to the sentence start"
-    assert passage["text"].rstrip().endswith("is what a reader wants."), "and to the sentence end"
+    assert passage["text"].startswith("every chunk of a lancedb"), "starts where chunk 1 does"
+    assert passage["text"].endswith("answer back into a"), "and ends where chunk 2 does"
     assert passage["text"].count("sit in two of them") == 1, "the shared text is not repeated"
     assert (passage["line_start"], passage["line_end"]) == (5, 7), "lines recounted for the text"
     assert passage["header"] == "Guide > Retrieval"
@@ -1189,11 +1200,9 @@ async def test_explore_merges_consecutive_chunks_into_one_passage(
     assert passage["score"] > 0
 
 
-async def test_explore_excerpts_are_the_passages_and_so_is_the_excerpts_route(
-    client: AsyncTestClient,
-) -> None:
-    """An excerpt is the whole passage today (the trimming step is later), and the MCP route is
-    the same search as the exploration at that granularity."""
+async def test_an_excerpt_is_the_section_its_passages_share(client: AsyncTestClient) -> None:
+    """The passages of one section come back as one excerpt: the section's heading path, each
+    passage a span, and the route the MCP tool calls is the same search as the exploration."""
     await _guide_with_two_chunks(client)
 
     passages = (
@@ -1204,11 +1213,133 @@ async def test_explore_excerpts_are_the_passages_and_so_is_the_excerpts_route(
     ).json()
     route = await client.get("/api/search/excerpts", params={"q": "lancedb"})
 
-    assert excerpts == passages
+    (passage,) = passages
+    (excerpt,) = excerpts
+    assert excerpt["header"] == "Guide > Retrieval", "the section under the title"
+    assert excerpt["text"] == passage["text"], "one passage that is its section's only one"
+    assert [(span["seq_start"], span["seq_end"]) for span in excerpt["spans"]] == [(1, 2)]
+    assert excerpt["spans"][0]["location"] == passage["location"]
+    assert (excerpt["line_start"], excerpt["line_end"]) == (
+        passage["line_start"],
+        passage["line_end"],
+    )
     assert route.status_code == 200, route.text
     assert route.json() == excerpts
     nothing = await client.get("/api/search/excerpts", params={"q": "nothingmatchesthis"})
     assert nothing.json() == [], "no hits is an answer, not an error"
+
+
+# One section with two paragraphs on "lancedb" and one between them that is not, then a second
+# section on it: the chunker cuts every paragraph into a chunk of its own at this size.
+SECTIONS_MD = (
+    "# Guide\n\n"
+    "## Storage\n\n"
+    "Lancedb holds every chunk of a document in one table, with its vector and its offsets.\n\n"
+    "The offsets are bytes as well as characters, so a reader can seek straight to a passage.\n\n"
+    "Lancedb compacts the small fragments once the table has grown past a few thousand rows.\n\n"
+    "## Search\n\n"
+    "Lancedb answers a hybrid query by fusing the vector and the full-text lists by their rank.\n"
+)
+
+
+async def test_the_passages_of_one_section_come_back_as_one_excerpt(
+    client: AsyncTestClient,
+) -> None:
+    """Two passages of one section are two results as passages, and one excerpt: the section,
+    with `[…]` where the paragraph between them did not match. The other section is the other."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "sections.md", SECTIONS_MD.encode())
+    await _member("notes", "sections.md")
+    chunks = split(
+        await _markdown_of("sections.md"), ChunkSettings(chunk_size=200, chunk_merge_below=0)
+    )
+    await seed_chunks("notes", "sections.md", chunks)
+    params = {"q": "lancedb", "limit": 2}
+
+    passages = (
+        await client.get("/api/search/explore", params={**params, "granularity": "passage"})
+    ).json()
+    response = await client.get("/api/search/excerpts", params=params)
+
+    assert response.status_code == 200, response.text
+    assert len(passages) == 2, "a passage each for the two best"
+    by_header = {one["header"]: one for one in response.json()}
+    assert set(by_header) == {"Guide > Storage", "Guide > Search"}, "the limit counts sections"
+    storage = by_header["Guide > Storage"]
+    assert [(span["seq_start"], span["seq_end"]) for span in storage["spans"]] == [(1, 1), (3, 3)]
+    assert storage["text"] == "\n\n".join([chunks[0].text, "[…]", chunks[2].text])
+    assert (storage["seq_start"], storage["seq_end"]) == (1, 3)
+
+
+# A section that answers, and a lead-in of another whose table below it says nothing on the query:
+# the lead-in matches the word "lancedb" alone, and the chunk it would grow into matches nothing.
+THIN_MD = (
+    "# Guide\n\n"
+    "## Storage\n\n"
+    "Lancedb stores every chunk of a document in one table, with its vector, its offsets and the "
+    "heading path it sits under, and a full-text index over the framed text, so the words of a "
+    "heading find every chunk under it and a search reads a chunk back by its own byte offsets, "
+    "never the whole markdown document.\n\n"
+    "## Rules\n\n"
+    "Lancedb rules:\n\n"
+    "| step | what happens |\n"
+    "|---|---|\n"
+    "| open | the table is opened once per search and shared by the parts |\n"
+    "| read | rows come back in no order, so the caller sorts them |\n"
+    "| write | a part is replaced whole, so a reader never sees half of one |\n"
+    "| compact | small fragments merge once the table has grown enough |\n"
+    "| drop | an outdated table is dropped and rebuilt from the cache |\n"
+)
+
+
+async def _guide_with_a_lead_in(client: AsyncTestClient) -> list[Chunk]:
+    """`thin.md` in `notes`, cut by the real chunker: the storage section, the lead-in right after
+    its heading, and the table under the lead-in."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "thin.md", THIN_MD.encode())
+    await _member("notes", "thin.md")
+    chunks = split(await _markdown_of("thin.md"), ChunkSettings(chunk_size=400))
+    await seed_chunks("notes", "thin.md", chunks)
+    return chunks
+
+
+async def test_a_collection_reads_the_rows_of_named_chunks(client: AsyncTestClient) -> None:
+    """What a search reads to look at the neighbours of a chunk it matched: the stored rows by
+    (document, seq), and nothing for a chunk or a name it does not hold."""
+    chunks = await _guide_with_a_lead_in(client)
+    index = Collection("notes").index_with(None)
+
+    rows = await index.rows_at([("thin.md", 3), ("thin.md", 2), ("thin.md", 99)], vectors=True)
+    quoted = await index.rows_at([("o'brien.md", 1)], vectors=False)
+
+    assert sorted((row["document"], row["seq"]) for row in rows) == [("thin.md", 2), ("thin.md", 3)]
+    assert {row["seq"]: row["text"] for row in rows}[3] == chunks[2].text
+    assert quoted == [], "a quote in a name is a literal, not the end of the filter"
+    assert all("vector" not in row for row in rows), "a table without vectors has none to read"
+
+
+async def test_an_excerpt_too_short_to_stand_alone_goes_when_nothing_around_it_matches(
+    client: AsyncTestClient,
+) -> None:
+    """The lead-in matched one word of the query and its table none. It sits right after the
+    section that answers, but a heading is between them, so it does not join that passage. On its
+    own it is one line, so it is dropped, and the section that answers is all that is left."""
+    chunks = await _guide_with_a_lead_in(client)
+    lead_in = next(seq for seq, one in enumerate(chunks, start=1) if one.text == "Lancedb rules:")
+
+    chunk_hits = (
+        await client.get(
+            "/api/search/explore",
+            params={"q": "lancedb stores every chunk", "granularity": "chunk"},
+        )
+    ).json()
+    response = await client.get("/api/search/excerpts", params={"q": "lancedb stores every chunk"})
+
+    assert response.status_code == 200, response.text
+    assert lead_in in {hit["seq"] for hit in chunk_hits}, "the lead-in did match"
+    assert [(one["seq_start"], one["seq_end"]) for one in response.json()] == [(1, 1)]
 
 
 # Three short notes on aggregates: one on references, one on events, and a copy of the first under
@@ -1252,13 +1383,17 @@ async def test_several_questions_take_turns_and_say_which_they_answer(
     tagged = {one["document"]: one["aspects"] for one in found}
     kept_note = "references.md" if "references.md" in tagged else "pasted.md"
     assert tagged == {kept_note: [BY_IDENTITY], "events.md": [BY_EVENT]}
-    (copy,) = next(one for one in found if one["document"] == kept_note)["also_in"]
+    ((copy,),) = [
+        span["also_in"] for one in found if one["document"] == kept_note for span in one["spans"]
+    ]
     assert copy["document"] == ({"references.md", "pasted.md"} - {kept_note}).pop()
     assert copy["relation"] == "duplicate", "the pasted note is the same text"
     steps = [entry.split(";")[0].strip() for entry in response.headers["server-timing"].split(",")]
     assert sorted(steps) == sorted(
-        ["plan"] + ["retrieve", "merge", "rerank", "hits"] * 2 + ["cover", "widen"]
-    ), "one plan for every question, the ranking once per question, then the turns and reading"
+        ["plan"]
+        + ["retrieve", "merge", "rerank", "hits", "fill_thin"] * 2
+        + ["cover", "group", "quote"]
+    ), "one plan for every question, the ranking once per question, then the turns, the sections"
     (event,) = (await client.get("/api/sessions/s1/history")).json()
     assert event["subject"] == f"{BY_IDENTITY} | {BY_EVENT}"
     assert event["detail"]["questions"] == [BY_IDENTITY, BY_EVENT]

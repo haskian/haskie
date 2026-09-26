@@ -81,8 +81,8 @@ class Chunk(msgspec.Struct):
     line_end: int  # 1-based, inclusive
     char_start: int  # 0-based offsets into the full markdown, page markers included
     char_end: int
-    # The same span in bytes, which is what a file can be seeked to: a search reads the few
-    # hundred bytes around a chunk rather than the whole document (see `search.retrieval`).
+    # The same span in bytes, which is what a file can be seeked to: a search reads the
+    # bytes of a chunk rather than the whole document (see `search.retrieval`).
     byte_start: int
     byte_end: int
     page_start: int | None = None  # 1-based PDF pages, from page markers; None for non-PDF

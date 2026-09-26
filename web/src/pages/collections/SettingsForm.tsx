@@ -123,6 +123,9 @@ export function SettingsForm({
       (item) => rerankerOption(item, options.reranker_metadata),
     ),
     candidates: searchNumber('candidates'),
+    min_passage_chars: searchNumber('min_passage_chars'),
+    max_passage_grow: searchNumber('max_passage_grow'),
+    max_section_chars: searchNumber('max_section_chars'),
   }
 
   return (
