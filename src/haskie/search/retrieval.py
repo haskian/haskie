@@ -34,7 +34,7 @@ from haskie.document import document
 from haskie.indexing import models
 from haskie.indexing.embed import embed_query
 from haskie.logs import get_logger
-from haskie.search import collapse, passage, session, text
+from haskie.search import aspects, collapse, passage, session, text
 from haskie.search.passage import Passage, Sources
 from haskie.settings import Reranker, SearchMode, SearchSettings, load_user_settings
 
@@ -63,9 +63,10 @@ class Plan(msgspec.Struct):
         return [index.collection for index, _ in self.indexes]
 
 
-async def plan(names: list[str], query: str) -> Plan | None:
-    """Resolve the settings, embed the query once and check each model once, or None when there
-    is nothing left to search.
+async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
+    """One plan per query, or None when there is nothing left to search: the settings resolved
+    and each model checked once for all of them, and each query embedded once. The plans differ
+    only in their `vector`.
 
     A collection deleted since the caller chose it is skipped, so one stale name does not break
     every search.
@@ -83,19 +84,24 @@ async def plan(names: list[str], query: str) -> Plan | None:
     settings = plans[0][1] if len(plans) == 1 else user.search
 
     embedding = await catalogue.embedding_model(user)
-    vector: list[float] | None = None
+    vectors: list[list[float] | None] = [None] * len(queries)
     if embedding is not None and any(one.mode != SearchMode.FTS for _, one in plans):
         await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
-        vector = await cpu.on_cpu(embed_query, embedding, query)
+        vectors = await cpu.on_cpu(_embed_all, embedding, queries)
     if settings.reranker != Reranker.NONE:
         # before the fan-out
         await models.require_ready(models.ModelKind.RERANKER, settings.reranker_model)
-    return Plan(
-        settings=settings,
-        indexes=[(one.index_with(embedding), where) for one, where in plans],
-        vector=vector,
-        embedding=embedding,
-    )
+    indexes = [(one.index_with(embedding), where) for one, where in plans]
+    await asyncio.gather(*(index.open() for index, _ in indexes))
+    return [
+        Plan(settings=settings, indexes=indexes, vector=vector, embedding=embedding)
+        for vector in vectors
+    ]
+
+
+def _embed_all(model: EmbeddingModel, queries: list[str]) -> list[list[float] | None]:
+    """Every query embedded in one worker-thread hop."""
+    return [embed_query(model, query) for query in queries]
 
 
 # --- the rows a search works on ---------------------------------------------------
@@ -257,6 +263,64 @@ async def collapse_ranges(
     runs the fold, as `collapse_hits` says.
     """
     return await cpu.on_cpu(_fold_ranges, scanned, model, mode, limit)
+
+
+def _picked(picks: list[aspects.Pick], scanned: list[Scanned]) -> Scanned:
+    """The chunks of the picks, with their vectors: all the fold across the parts compares.
+    Picks never overlap, so each chunk is in one of them."""
+    vectors = {
+        (hit.collection, hit.document, hit.seq): vector
+        for one in scanned
+        for hit, vector in zip(one.hits, one.vectors, strict=True)
+    }
+    hits = [hit for pick in picks for hit in pick.span.hits]
+    return Scanned(
+        hits=hits, vectors=[vectors[(hit.collection, hit.document, hit.seq)] for hit in hits]
+    )
+
+
+def _cover(
+    scanned: list[Scanned],
+    labels: list[str],
+    model: EmbeddingModel | None,
+    mode: SearchMode,
+    limit: int,
+    depth: int,
+    cap: int,
+) -> list[passage.HitRange]:
+    picks = aspects.interleave([passage.ranges(one.hits) for one in scanned], depth, cap)
+    joined = _picked(picks, scanned)
+    scan = _spaces(joined, model, mode)
+    kept = collapse.ranges([pick.span for pick in picks], joined.hits, scan, limit)
+    found = aspects.tagged(kept, picks, labels)
+    _log_collapse(scan.deciding[0].kind, len(picks), kept, limit)
+    answered = {label for one in found for label in one.aspects}
+    _log.info(
+        "search_questions",
+        questions=len(labels),
+        uncovered=sum(1 for label in labels if label not in answered),
+        picks=len(picks),
+        absorbed=sum(pick.taken - 1 for pick in picks),
+        kept=len(kept),
+        folded=sum(collapse.places(one.also_in) for one in kept),
+        short=len(kept) < limit,
+    )
+    return found
+
+
+async def cover(
+    scanned: list[Scanned],
+    labels: list[str],
+    model: EmbeddingModel | None,
+    mode: SearchMode,
+    limit: int,
+    depth: int,
+    cap: int,
+) -> list[passage.HitRange]:
+    """The `limit` best ranges across the parts of one question, one scan and one label per part,
+    each tagged with the parts it answers (see `aspects`). A worker thread runs it, as
+    `collapse_hits` says."""
+    return await cpu.on_cpu(_cover, scanned, labels, model, mode, limit, depth, cap)
 
 
 def _log_collapse(

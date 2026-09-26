@@ -953,6 +953,8 @@ export interface components {
             documents?: string[] | null;
             collection?: string | null;
             collections?: string[] | null;
+            questions?: string[] | null;
+            context?: string | null;
         };
         /** Excerpt */
         Excerpt: {
@@ -973,6 +975,7 @@ export interface components {
             source_file: string;
             markdown_file: string;
             also_in?: components["schemas"]["PassageReference"][];
+            aspects?: string[];
         };
         /** FieldDoc */
         FieldDoc: {
@@ -1298,6 +1301,7 @@ export interface components {
             source_file: string;
             markdown_file: string;
             also_in?: components["schemas"]["PassageReference"][];
+            aspects?: string[];
         };
         /** PassageReference */
         PassageReference: {
@@ -3124,7 +3128,8 @@ export interface operations {
     ApiSearchExcerptsSearchExcerpts: {
         parameters: {
             query: {
-                q: string;
+                q: string[];
+                context?: string | null;
                 session_id?: string | null;
                 collections?: string | null;
                 limit?: number | null;

@@ -12,7 +12,7 @@ from haskie.collection.index import Hit
 from haskie.errors import InvalidInput
 from haskie.indexing import operations
 from haskie.paging import DEFAULT_PAGE_SIZE, Page
-from haskie.search import flow, retrieval, session, text
+from haskie.search import aspects, flow, retrieval, session, text
 from haskie.search.passage import Excerpt, Passage, Sources
 
 
@@ -84,7 +84,11 @@ async def explore(
 
 @get("/api/search/excerpts", mcp_tool="search_excerpts")
 async def search_excerpts(
-    q: str, session_id: str | None = None, collections: str | None = None, limit: Limit = None
+    q: list[str],
+    context: str | None = None,
+    session_id: str | None = None,
+    collections: str | None = None,
+    limit: Limit = None,
 ) -> list[Excerpt]:
     """What the sources say about a question, as passages ready to quote, best first.
 
@@ -93,6 +97,17 @@ async def search_excerpts(
     it begins and ends where the author stopped. Cite it by its `header` (the heading path inside
     the document) and its `location` (document, pages, lines). `markdown_file` is the whole
     document on disk when the excerpt is not enough.
+
+    Several questions at once: when parts of a question may be answered in different places,
+    pass each part as its own `q` (2 to 5), and the background they share once as `context`.
+    Each part is searched on its own and the parts take turns at the `limit` slots, so one part
+    cannot crowd out the others. Each excerpt's `aspects` lists the questions it ranked high for.
+    That is rank, not a judgement: a vector or hybrid search finds a nearest passage for any
+    question, so read the text before citing it as the answer to a part. A question no excerpt
+    lists found nothing at all. Write each part as a full question, not a keyword. Keep in one
+    `q` the conditions one passage must meet together. Resolve an ambiguous question before
+    searching; when you cannot ask, pass one part per reading.
+
     An excerpt that says what other places say lists every one of them in `also_in`
     rather than returning each on its own. `also_in` is a tree: each place sits under what it
     repeats, this excerpt or a place above it, and has its own `also_in`. Its `relation` to that
@@ -112,11 +127,23 @@ async def search_excerpts(
     returns. No results is an answer: the sources do not cover this, and saying so beats guessing.
 
     Args:
+        q: The question, or 2 to 5 parts of one question, each at most 500 characters.
+        context: Background every part shares, at most 200 characters; searched in front of each.
         session_id: The conversation's id; the search then shows in that session's history.
     """
     started = time.perf_counter()
-    found = await flow.excerpts(await retrieval.scope(session_id, collections), q, limit)
-    await session.record_search(session_id, "excerpts", q, found, started)
+    asked = aspects.questions(q, context)
+    found = await flow.answers(await retrieval.scope(session_id, collections), asked, limit)
+    several = asked.questions if len(asked.questions) > 1 else None
+    await session.record_search(
+        session_id,
+        "excerpts",
+        " | ".join(asked.questions),
+        found,
+        started,
+        questions=several,
+        context=asked.context,
+    )
     return found
 
 

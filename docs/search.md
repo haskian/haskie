@@ -81,8 +81,8 @@ flowchart TD
     alike -- no --> skip2["not a repeat of this one"]
 ```
 
-A duplicate is an exact character match once whitespace is collapsed, in any document. Both texts need at least 7 words, so
-two equal headings are not a point. Equivalent means the same meaning in other words: a nearly
+A duplicate is an exact character match once whitespace is collapsed, in any document. Both texts
+need at least 7 words, so two equal headings do not fold. Equivalent means the same meaning in other words: a nearly
 identical vector, or nearly the same words where words decide.
 
 A new result that repeats no kept result takes a new slot, while fewer than `limit` are taken.
@@ -101,8 +101,8 @@ Hybrid and full-text searches use both:
 Cosine thresholds are set per embedding profile (`duplicate_chunk` and `duplicate_passage` in
 `catalogue/seed.sql`), because a raw cosine means different things for different models. The
 current values are placeholders, not calibrated, and the seed file names their sources. A profile
-without thresholds folds by words alone. The containment threshold is a
-judgement call, and the code says so.
+without thresholds folds by words alone. The containment threshold is a judgement call, and the
+code says so.
 
 A folded result becomes an `also_in` entry under the result it repeats, and `also_in` is a tree.
 When a fuller result takes a slot (the superset swap), the old one moves under it with everything
@@ -110,6 +110,42 @@ folded into it. Each place stays under the place it was measured against. Each e
 `relation` to its parent. It also carries `to_parent` and `to_root`, measured by words and by
 embedding: `contained`, `contains`, `alike`, and `score`, the harmonic mean of the two directions.
 That score is the Dice coefficient for words and the F1 of the best chunk matches for embeddings.
+
+## Several questions at once
+
+When the parts of a question are answered in different places, one search of the whole question
+tends to fill every slot with one part. The reranker scores one passage at a time, so it never
+sees that another part went unanswered. So `search_excerpts` takes `q` as a list: one question, or
+2 to 5 parts of one, each at most 500 characters. An optional `context` of at most 200 characters
+goes in front of every part.
+
+```mermaid
+flowchart LR
+    asked(["q: 2-5 parts<br/>+ context"]) --> each["<b>shared ranking</b><br/>per part, in parallel:<br/>context + part"]
+    each --> ranges["merge neighbours<br/>per part"]
+    ranges --> turns["<b>take turns</b><br/>round-robin<br/>over the parts"]
+    turns --> fold["collapse ranges<br/>across all parts"]
+    fold --> tag["tag each excerpt<br/>with its parts"]
+    tag --> widen["widen"] --> excerpts(["excerpts"])
+```
+
+Each part runs the shared ranking on its own, as deep as one search of that `limit` would go.
+Then the parts take turns at the slots in the order they were asked. On its turn, a part takes its
+best range not yet picked. Each part is owed its own best `ceil(limit / parts)` ranges. A pick made
+for another part counts for this part too when it overlaps one of those ranges, and the part sits
+out one round for each such pick. A range that touches or overlaps a pick of the same document
+joins that pick, so two parts that land on one passage get one passage. Round-robin reads ranks
+alone, so it works with or without a reranker and embeddings. TREC RAG pipelines give each query
+its slots the same way [2]. Near-duplicates then fold across all the parts, once, as in one
+search.
+
+Each excerpt's `aspects` lists the parts it ranked high for: the part that picked it, every part
+that joined it or ranks it among its own owed ranges, and those of every place folded into it.
+The tags come from ranks alone, with no relevance floor. A vector or hybrid search finds nearest
+passages for any part, even one the sources say nothing about, so a tag is not proof of an
+answer. A part no excerpt lists found nothing at all. One question, or a list that deduplicates to one, is the single
+search with the context in front of it, and its `aspects` is empty. A `limit` below the number of
+parts is refused (422).
 
 ## Full-text search
 
@@ -130,9 +166,12 @@ from the collection only when it is the one collection in scope, and from the us
 the collection's overrides, and also takes `limit`, `mode`, `fusion`, `vector_weight`,
 `bm25_weight`, `reranker` and `candidates` per call.
 
-Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/collapse.py`.
+Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/collapse.py`,
+`search/aspects.py`.
 
 ## References
 
 1. Schlatt, F. et al. "Set-Encoder: Permutation-Invariant Inter-Passage Attention for Listwise
    Passage Re-Ranking with Cross-Encoders." *ECIR*, 2025. https://arxiv.org/abs/2404.06912
+2. Samuel, S. et al. "Beyond Relevance: On the Relationship Between Retrieval and RAG Information
+   Coverage." *ICTIR*, 2026. https://arxiv.org/abs/2603.08819

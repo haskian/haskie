@@ -12,6 +12,10 @@ Four pipelines over one set of steps:
     excerpts   retrieve -> merge -> rerank -> hits -> collapse_ranges -> widen
     sources    retrieve -> merge -> rerank -> hits -> shortlist
 
+and one that runs the shared ranking once per question, when several are asked at once:
+
+    answers    (retrieve -> merge -> rerank -> hits) per question -> cover -> widen
+
 The first four steps are the search every answer shares; what follows is the fold that answer is
 made of, and it is a step rather than something every search pays for. `chunks` folds each
 near-duplicate hit into the hit it repeats (`collapse`). `passages` and `excerpts` merge the chunks
@@ -25,6 +29,7 @@ deeper than it answers: a folded near-duplicate frees its slot for the next resu
 chunks go into one passage, and many into one document row.
 """
 
+import asyncio
 import functools
 import time
 from collections.abc import Iterator
@@ -38,7 +43,7 @@ from pydantic_graph.step import StepFunction
 
 from haskie.collection.index import Hit
 from haskie.paging import check_page_size
-from haskie.search import retrieval
+from haskie.search import aspects, retrieval
 from haskie.search.passage import Excerpt, HitRange, Passage, Sources
 from haskie.settings import load_user_settings
 
@@ -93,6 +98,7 @@ STEP_LABELS: dict[str, str] = {
     "collapse_ranges": "Merge and fold passages",
     "widen": "Read and widen passages",
     "shortlist": "Fold into documents",
+    "cover": "Take turns and fold passages",
 }
 
 # The steps of the searches one request runs, in the order they finished. A list per request,
@@ -228,6 +234,8 @@ def _chain[T](
 
 RANKING = (retrieve, merge, rerank, hits)  # the search every answer shares
 
+RANKED = _chain(retrieval.Scanned, *RANKING)  # one question's part of `answers`
+
 CHUNKS = _chain(list[Hit], *RANKING, collapse_hits)
 PASSAGES = _chain(list[Passage], *RANKING, collapse_ranges, widen)
 SOURCES = _chain(Sources, *RANKING, shortlist)
@@ -261,6 +269,36 @@ async def excerpts(names: list[str], query: str, limit: int | None = None) -> li
     return cast(list[Excerpt], await PASSAGES.run(state=state))
 
 
+async def answers(
+    names: list[str], asked: aspects.Questions, limit: int | None = None
+) -> list[Excerpt]:
+    """The `limit` best passages of `names` across every question asked, as an agent quotes them.
+
+    One question is `excerpts`, searched with the shared context in front of it. Several run the
+    shared ranking each, at once and each as deep as one search of `limit` would go; then the
+    questions take turns at the slots and the near-duplicates across all of them fold once
+    (`aspects`). Each excerpt says which of the questions it answers.
+
+    It is not one graph. A graph here is a chain, and this joins several chains, so the join and
+    what follows are timed by hand under the names a graph step would have.
+    """
+    if len(asked.questions) == 1:
+        return await excerpts(names, asked.queries[0], limit)
+    limit = limit or (await load_user_settings()).search.limit
+    depth = aspects.depth(len(asked.questions), limit)
+    states = await _searches(names, asked.queries, limit, deeper=PASSAGE_SCAN)
+    if states is None:
+        return []
+    scanned = await asyncio.gather(*(RANKED.run(state=state) for state in states))
+    where, scan = states[0].plan, states[0].scan
+    with _timing("cover"):
+        kept = await retrieval.cover(
+            scanned, asked.questions, where.embedding, where.settings.mode, limit, depth, scan
+        )
+    with _timing("widen"):
+        return await retrieval.widen(kept, Excerpt)
+
+
 async def sources(
     names: list[str], query: str, limit: int | None = None, sections: int | None = None
 ) -> Sources:
@@ -281,7 +319,21 @@ async def _search(
     shape: type[Passage] = Passage,
     sections: int | None = None,
 ) -> Search | None:
-    """One search, planned but not yet run, or None when nothing is left to search.
+    """One search, planned but not yet run, or None when nothing is left to search."""
+    found = await _searches(names, [query], limit, deeper, shape, sections)
+    return found[0] if found else None
+
+
+async def _searches(
+    names: list[str],
+    queries: list[str],
+    limit: int | None,
+    deeper: int,
+    shape: type[Passage] = Passage,
+    sections: int | None = None,
+) -> list[Search] | None:
+    """One search per query over the same collections, planned but not yet run, or None when
+    nothing is left to search.
 
     The only place a `Search` is built, so every bound a caller asked for is resolved here and
     the steps read numbers rather than compute them. `deeper` is how many chunks the answer this
@@ -289,19 +341,24 @@ async def _search(
     """
     limit = limit or (await load_user_settings()).search.limit
     with _timing("plan"):
-        where = await retrieval.plan(names, query)
-    if where is None:
+        plans = await retrieval.plan(names, queries)
+    if plans is None:
         return None
     # a pipeline that folds scans deeper than it answers, and that is what `MAX_SCAN` bounds
     scan = max(limit, min(limit * deeper, MAX_SCAN))
-    return Search(
-        query=query,
-        plan=where,
-        limit=limit,
-        scan=scan,
-        candidates=max(where.settings.candidates, scan),
-        shape=shape,
-        sections=check_page_size(
-            DEFAULT_SECTIONS if sections is None else sections, MAX_SECTIONS, "sections"
-        ),
+    candidates = max(plans[0].settings.candidates, scan)
+    sections = check_page_size(
+        DEFAULT_SECTIONS if sections is None else sections, MAX_SECTIONS, "sections"
     )
+    return [
+        Search(
+            query=query,
+            plan=where,
+            limit=limit,
+            scan=scan,
+            candidates=candidates,
+            shape=shape,
+            sections=sections,
+        )
+        for query, where in zip(queries, plans, strict=True)
+    ]

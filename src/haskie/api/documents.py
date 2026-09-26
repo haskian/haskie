@@ -159,7 +159,9 @@ async def list_document_embeddings(document: str) -> list[embed_cache.Entry]:
 @get("/api/documents/{document:str}/source")
 async def get_source(document: str) -> File:
     row = await documents.get(document)
-    return File(path=row.source_path(), content_disposition_type="inline")
+    # named after the document, not the stored `original.*`: the name is what the media type is
+    # guessed from, and what a browser that saves it calls the file
+    return File(path=row.source_path(), filename=row.name, content_disposition_type="inline")
 
 
 PREVIEW_MEDIA = {

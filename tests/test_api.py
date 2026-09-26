@@ -13,18 +13,14 @@ runs on is opened by the fixture instead, for the reason `_release_default_execu
 whether or not `web/dist` has been built. `test_static_files_*` covers the other branch.
 """
 
-import asyncio
 import json
 import logging
 import threading
 import time
-from collections.abc import AsyncIterator
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 import structlog
-from anyio.from_thread import start_blocking_portal
 from litestar.testing import AsyncTestClient, RequestFactory
 
 from haskie import app as app_module
@@ -55,6 +51,7 @@ from conftest import (  # isort: skip
     seed_chunks,
     seed_index,
     stage_and_import,
+    text_pdf,
     wait_for,
     wait_import,
     walk_pages,
@@ -65,31 +62,6 @@ pytestmark = pytest.mark.anyio
 MD = "# Title\n\nintro text\n\n## Alpha\n\nalpha body about lancedb\n\n## Beta\n\nbeta body\n"
 LONG_SESSION_ID = "s" * 129
 TOO_MANY_COLLECTIONS = {"collections": [f"c{i}" for i in range(101)]}
-
-
-async def _release_default_executor() -> None:
-    """Hand the portal loop a thread pool of its own, so closing it shuts that one down.
-
-    Litestar's test transport answers every request on a blocking portal: an event loop of its
-    own, in another thread. Closing a portal shuts down its loop's default executor, and DBOS
-    makes *its* thread pool that executor as soon as an async DBOS call runs on the loop
-    (`DBOS._configure_asyncio_thread_pool`). Without this, the first request would leave the
-    running DBOS unable to schedule anything, teardown included. The pool below never starts a
-    thread: a `ThreadPoolExecutor` only spawns one when something is submitted to it.
-    """
-    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
-
-
-@pytest.fixture
-async def client(api_client: AsyncTestClient, dbos) -> AsyncIterator[AsyncTestClient]:
-    """The shared client, plus DBOS and one portal for the whole test, and no lifespan (see the
-    module docstring)."""
-    with start_blocking_portal(backend="asyncio") as portal:
-        api_client.blocking_portal = portal
-        try:
-            yield api_client
-        finally:
-            portal.call(_release_default_executor)
 
 
 @pytest.fixture
@@ -200,6 +172,11 @@ def _requested(lines: list[dict]) -> list[str]:
             "collection override out of range -> unprocessable",
             "PUT", "/api/collections/notes/overrides", {"chunk_size": 0}, None,
             422, "chunk_size must be >= 1, got 0",
+        ),
+        (
+            "collection search override out of range -> unprocessable",
+            "PUT", "/api/collections/notes/overrides", {"search": {"limit": 0}}, None,
+            422, "limit must be >= 1, got 0",
         ),
         (
             "collection override naming an unknown reranker -> unprocessable",
@@ -1234,6 +1211,147 @@ async def test_explore_excerpts_are_the_passages_and_so_is_the_excerpts_route(
     assert nothing.json() == [], "no hits is an answer, not an error"
 
 
+# Three short notes on aggregates: one on references, one on events, and a copy of the first under
+# another name, as a note pasted into a second file is. The two notes share no word, and each
+# question uses only its own note's words, so full-text search finds each part in one note alone.
+REFERENCES = (
+    "# Aggregates\n\n"
+    "Reference other aggregates by identity, never through a direct object pointer.\n"
+)
+EVENTS = "# Events\n\nDomain events carry each change eventually, keeping consistency loose.\n"
+BY_IDENTITY = "Reference other aggregates by identity or by direct object pointer?"
+BY_EVENT = "Which domain events carry each change?"
+
+
+async def _notes_on_aggregates(client: AsyncTestClient) -> None:
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "ddd"})
+    for name, body in (
+        ("references.md", REFERENCES),
+        ("events.md", EVENTS),
+        ("pasted.md", REFERENCES),
+    ):
+        await stage_and_import(client, name, body.encode())
+        await attach_via_api(client, "ddd", name)
+
+
+async def test_several_questions_take_turns_and_say_which_they_answer(
+    client: AsyncTestClient,
+) -> None:
+    """Each part of the question is searched on its own, the copy of one note folds into it across
+    the parts, and each excerpt names the parts it answers. The session keeps what was asked."""
+    await _notes_on_aggregates(client)
+
+    response = await client.get(
+        "/api/search/excerpts",
+        params={"q": [BY_IDENTITY, BY_EVENT], "session_id": "s1", "limit": 4},
+    )
+
+    assert response.status_code == 200, response.text
+    found = response.json()
+    tagged = {one["document"]: one["aspects"] for one in found}
+    kept_note = "references.md" if "references.md" in tagged else "pasted.md"
+    assert tagged == {kept_note: [BY_IDENTITY], "events.md": [BY_EVENT]}
+    (copy,) = next(one for one in found if one["document"] == kept_note)["also_in"]
+    assert copy["document"] == ({"references.md", "pasted.md"} - {kept_note}).pop()
+    assert copy["relation"] == "duplicate", "the pasted note is the same text"
+    steps = [entry.split(";")[0].strip() for entry in response.headers["server-timing"].split(",")]
+    assert sorted(steps) == sorted(
+        ["plan"] + ["retrieve", "merge", "rerank", "hits"] * 2 + ["cover", "widen"]
+    ), "one plan for every question, the ranking once per question, then the turns and reading"
+    (event,) = (await client.get("/api/sessions/s1/history")).json()
+    assert event["subject"] == f"{BY_IDENTITY} | {BY_EVENT}"
+    assert event["detail"]["questions"] == [BY_IDENTITY, BY_EVENT]
+    assert event["detail"]["hits"] == 2
+
+
+async def test_every_question_plans_over_one_open_index(client: AsyncTestClient) -> None:
+    """The parts of one question run at once over the same indexes. Planned together, they share
+    each index with its table already open, so they read one version of it rather than each
+    opening its own."""
+    from haskie.search import retrieval
+
+    await _notes_on_aggregates(client)
+
+    plans = await retrieval.plan(["ddd"], [BY_IDENTITY, BY_EVENT])
+
+    assert plans is not None and len(plans) == 2
+    (first, _), (second, _) = plans[0].indexes[0], plans[1].indexes[0]
+    assert first is second, "one index for every question"
+    assert first._cached is not None, "its table opened before any part searches"
+
+
+async def test_one_question_with_a_context_is_the_single_search(client: AsyncTestClient) -> None:
+    """One question, however it is sent, is today's search: no turns and no tags, with the
+    context read in front of it."""
+    await _notes_on_aggregates(client)
+
+    plain = await client.get("/api/search/excerpts", params={"q": BY_EVENT})
+    repeated = await client.get("/api/search/excerpts", params={"q": [BY_EVENT, f" {BY_EVENT} "]})
+    framed = await client.get(
+        "/api/search/excerpts",
+        params={"q": "Which change?", "context": "Domain events, keeping consistency loose."},
+    )
+
+    assert plain.status_code == repeated.status_code == framed.status_code == 200
+    assert [one["document"] for one in plain.json()] == ["events.md"]
+    assert all(one["aspects"] == [] for one in plain.json())
+    assert repeated.json() == plain.json(), "a repeated question is asked once"
+    assert "cover" not in plain.headers["server-timing"]
+    assert "events.md" in {one["document"] for one in framed.json()}, "found by its context"
+
+
+async def test_several_questions_over_collections_since_deleted_find_nothing(
+    client: AsyncTestClient,
+) -> None:
+    """A session whose only collection is gone has nothing left to search: an empty answer, as
+    one question gets, not an error."""
+    await _notes_on_aggregates(client)
+    await client.put("/api/sessions/s1", json={"collections": ["ddd"]})
+    deleted = await client.delete("/api/collections/ddd")
+    await wait_for(deleted.json()["operation_id"])
+
+    response = await client.get(
+        "/api/search/excerpts", params={"q": [BY_IDENTITY, BY_EVENT], "session_id": "s1"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+
+
+@pytest.mark.parametrize(
+    ("name", "params", "message"),
+    [
+        ("a blank question", {"q": "  "}, "q must hold 1..5 questions, got 0"),
+        ("six parts", {"q": [f"{BY_EVENT} {n}" for n in range(6)]}, "got 6"),
+        ("fewer slots than parts", {"q": [BY_IDENTITY, BY_EVENT], "limit": 1}, "got 1"),
+        ("a context past 200 characters", {"q": BY_EVENT, "context": "x" * 201}, "got 201"),
+    ],
+)
+async def test_questions_a_search_cannot_run_are_refused_before_it_runs(
+    client: AsyncTestClient, name: str, params: dict, message: str
+) -> None:
+    await _notes_on_aggregates(client)
+
+    response = await client.get("/api/search/excerpts", params=params)
+
+    assert response.status_code == 422, f"{name}: {response.text}"
+    assert message in response.text, name
+
+
+async def test_the_mcp_tool_takes_one_question_or_several(api_client: AsyncTestClient) -> None:
+    """The tool schema is what an agent reads: `q` is a list, one question or up to five parts."""
+    from litestar_mcp import LitestarMCP
+    from litestar_mcp.schema_builder import generate_schema_for_handler
+
+    tool = api_client.app.plugins.get(LitestarMCP).discovered_tools["search_excerpts"]
+    schema = generate_schema_for_handler(tool)
+
+    assert schema["properties"]["q"] == {"type": "array", "items": {"type": "string"}}
+    assert schema["properties"]["context"] == {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    assert schema["required"] == ["q"]
+
+
 async def _two_collections_sharing_a_document(client: AsyncTestClient) -> str:
     """`shared.md` in both collections and `beta-only.md` in one: two documents that only `beta`
     covers on its own. Returns the markdown of the shared document."""
@@ -1367,6 +1485,50 @@ async def test_the_mcp_surface_offers_one_search_per_question(api_client: AsyncT
 
     assert {"search_excerpts", "search_sources"} <= served
     assert served.isdisjoint({"search", "search_text", "explore", "search_collection"})
+
+
+@pytest.mark.parametrize(
+    ("name", "search"),
+    [
+        ("a limit below one", {"limit": 0}),
+        ("a negative weight", {"vector_weight": -1}),
+        ("no candidates", {"candidates": 0}),
+    ],
+)
+async def test_a_refused_search_override_is_never_saved(
+    client: AsyncTestClient, name: str, search: dict
+) -> None:
+    """Refused as it is read, before anything is written: a value no search can run with would
+    otherwise be stored, and every later read of the collection would fail on it."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await client.put("/api/collections/notes/overrides", json={"search": {"limit": 3}})
+
+    refused = await client.put("/api/collections/notes/overrides", json={"search": search})
+
+    assert refused.status_code == 422, f"{name}: {refused.text}"
+    after = await client.get("/api/collections/notes")
+    assert after.status_code == 200, f"{name}: the collection still reads: {after.text}"
+    assert after.json()["overrides"]["search"]["limit"] == 3, f"{name}: the old value stands"
+    assert after.json()["search"]["limit"] == 3, name
+    searched = await client.get("/api/collections/notes/search", params={"q": "alpha"})
+    assert searched.status_code == 200, f"{name}: and it still searches: {searched.text}"
+
+
+async def test_the_original_opens_under_its_own_name_and_media_type(
+    client: AsyncTestClient,
+) -> None:
+    """The UI's "Open original" opens this URL in a new tab: a PDF has to arrive as a PDF,
+    named for the document, or the browser downloads a nameless file instead of showing it."""
+    await client.post("/api/init", json={"profile": "none"})
+    await stage_and_import(client, "paper.pdf", text_pdf(["Facility location covers the pool"]))
+
+    source = await client.get("/api/documents/paper.pdf/source")
+
+    assert source.status_code == 200, source.text
+    assert source.headers["content-type"] == "application/pdf"
+    assert source.headers["content-disposition"] == 'inline; filename="paper.pdf"'
+    assert source.content.startswith(b"%PDF-")
 
 
 # --- audit trail ---------------------------------------------------------------------

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-#MISE description="Run the Python tests in parallel with a coverage report"
+#MISE description="Run the Python tests in parallel with a coverage report, after the web UI tests"
+#MISE depends=["test-web"]
 set -euo pipefail
 # Python 3.13 sys.monitoring coverage: near-zero tracing overhead versus the C tracer.
 export COVERAGE_CORE="${COVERAGE_CORE:-sysmon}"

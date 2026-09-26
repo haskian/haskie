@@ -86,6 +86,7 @@ class HitRange(msgspec.Struct):
     page_end: int | None
     score: float  # harmonic(best, sum) over the members
     also_in: list[PassageReference] = []  # the near-duplicates folded in (`collapse`), a tree
+    aspects: list[str] = []  # the questions it answers when several were asked (`aspects`)
 
     @property
     def best(self) -> Hit:
@@ -177,6 +178,8 @@ class Passage(msgspec.Struct):
     source_file: str  # absolute, for a tool outside the app
     markdown_file: str
     also_in: list[PassageReference] = []  # the near-duplicates folded in, a tree
+    # the questions it answers when several were asked at once (`aspects`), else empty
+    aspects: list[str] = []
 
 
 class Excerpt(Passage):
@@ -265,6 +268,7 @@ def widen[P: Passage](hit_range: HitRange, window: Window, cls: type[P]) -> P:
         source_file=best.source_file,
         markdown_file=best.markdown_file,
         also_in=hit_range.also_in,
+        aspects=hit_range.aspects,
     )
 
 

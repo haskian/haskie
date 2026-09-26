@@ -272,6 +272,13 @@ class CollectionIndex:
                 self._cached = await conn.open_table(TABLE)
         return self._cached
 
+    async def open(self) -> None:
+        """Open the connection and the table now, if the table exists. Searches that then run at
+        once over this index share one handle, so they read one version of the table. Otherwise
+        each would find nothing cached and open its own, and the last to finish would stay
+        cached."""
+        await self._existing()
+
     async def _for_write(self) -> lancedb.AsyncTable:
         """Write path: create the table when it is missing, never drop one."""
         table = await self._existing()

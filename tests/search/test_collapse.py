@@ -11,7 +11,7 @@ from collections.abc import Callable
 import msgspec
 import numpy as np
 import pytest
-from conftest import compact_model
+from conftest import compact_model, hit, words_scan
 
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.index import Hit, Overlap, Relation, location
@@ -43,48 +43,6 @@ NEAR = RETRY.replace("failed", "broken")
 AROUND = f"{OUTBOX} {CLOCKS}"
 
 
-def _hit(
-    text: str,
-    score: float,
-    *,
-    document: str = "patterns.md",
-    collection: str = "backend",
-    seq: int = 1,
-    char_start: int = 0,
-) -> Hit:
-    """One indexed chunk: `text` at `char_start` of `document`, on the line its offset gives."""
-    line = char_start // 80 + 1
-    return Hit(
-        collection=collection,
-        document=document,
-        source_path=f"documents/{document}",
-        markdown_path=f"documents/{document}.md",
-        part=0,
-        seq=seq,
-        line_start=line,
-        line_end=line,
-        char_start=char_start,
-        char_end=char_start + len(text),
-        byte_start=char_start,
-        byte_end=char_start + len(text),
-        page_start=None,
-        page_end=None,
-        headings=["Messaging", "Retries"],
-        frame=["Messaging", "Retries"],
-        header="Messaging > Retries",
-        location=location(document, None, None, line, line),
-        text=text,
-        score=score,
-        source_file=f"/home/documents/{document}",
-        markdown_file=f"/home/documents/{document}.md",
-    )
-
-
-def _words(hits: list[Hit]) -> collapse.Scan:
-    """The spaces of a search without embeddings."""
-    return collapse.spaces([hit.text for hit in hits], [None] * len(hits), None)
-
-
 @pytest.fixture
 async def bge_small() -> EmbeddingModel:
     return await compact_model()
@@ -105,7 +63,7 @@ def _heading(text: str, score: float, **fields) -> Hit:
     chunker does: the markdown one reads the line as a heading and makes no chunk of a section
     without text (`segment.pack`), so a heading reaches the fold as text of its own."""
     (alone,) = chunk.split(text, ChunkSettings(chunker=Chunker.TEXT))
-    return msgspec.structs.replace(_hit(alone.text, score, **fields), layout=alone.layout)
+    return msgspec.structs.replace(hit(alone.text, score, **fields), layout=alone.layout)
 
 
 def _unit(*rows: list[float]) -> np.ndarray:
@@ -129,9 +87,9 @@ def _shape(kept: list[Hit]) -> list[tuple[str, int, float, list[str]]]:
         (
             "distinct hits are all kept, best first",
             [
-                _hit(RETRY, 0.9, document="a.md"),
-                _hit(BACKOFF, 0.8, document="b.md"),
-                _hit(CLOCKS, 0.7, document="c.md"),
+                hit(RETRY, 0.9, document="a.md"),
+                hit(BACKOFF, 0.8, document="b.md"),
+                hit(CLOCKS, 0.7, document="c.md"),
             ],
             3,
             [("a.md", 1, 0.9, []), ("b.md", 1, 0.8, []), ("c.md", 1, 0.7, [])],
@@ -139,36 +97,36 @@ def _shape(kept: list[Hit]) -> list[tuple[str, int, float, list[str]]]:
         (
             "a copy in another document folds into the better hit, and the next one takes its slot",
             [
-                _hit(RETRY, 0.9, document="a.md"),
-                _hit(RETRY, 0.8, document="copy.md"),
-                _hit(BACKOFF, 0.7, document="b.md"),
+                hit(RETRY, 0.9, document="a.md"),
+                hit(RETRY, 0.8, document="copy.md"),
+                hit(BACKOFF, 0.7, document="b.md"),
             ],
             2,
             [("a.md", 1, 0.9, ["copy.md"]), ("b.md", 1, 0.7, [])],
         ),
         (
             "a rewording stays: words catch copies, not paraphrases",
-            [_hit(RETRY, 0.9, document="a.md"), _hit(REWORDED, 0.8, document="b.md")],
+            [hit(RETRY, 0.9, document="a.md"), hit(REWORDED, 0.8, document="b.md")],
             2,
             [("a.md", 1, 0.9, []), ("b.md", 1, 0.8, [])],
         ),
         (
             "two neighbouring chunks of one document never fold: they are one passage",
-            [_hit(RETRY, 0.9, seq=4), _hit(RETRY, 0.8, seq=5)],
+            [hit(RETRY, 0.9, seq=4), hit(RETRY, 0.8, seq=5)],
             2,
             [("patterns.md", 4, 0.9, []), ("patterns.md", 5, 0.8, [])],
         ),
         (
             "two distant chunks of one document fold when one repeats the other",
-            [_hit(RETRY, 0.9, seq=4), _hit(RETRY, 0.8, seq=40, char_start=4000)],
+            [hit(RETRY, 0.9, seq=4), hit(RETRY, 0.8, seq=40, char_start=4000)],
             2,
             [("patterns.md", 4, 0.9, ["patterns.md"])],
         ),
         (
             "one document chunked two ways: a partial overlap is no fold on its own",
             [
-                _hit(RETRY, 0.9, collection="backend", seq=3, char_start=200),
-                _hit(BACKOFF, 0.8, collection="ops", seq=2, char_start=230),
+                hit(RETRY, 0.9, collection="backend", seq=3, char_start=200),
+                hit(BACKOFF, 0.8, collection="ops", seq=2, char_start=230),
             ],
             2,
             [("patterns.md", 3, 0.9, []), ("patterns.md", 2, 0.8, [])],
@@ -176,8 +134,8 @@ def _shape(kept: list[Hit]) -> list[tuple[str, int, float, list[str]]]:
         (
             "one document chunked two ways stays apart where the spans barely touch",
             [
-                _hit(RETRY, 0.9, collection="backend", seq=3, char_start=200),
-                _hit(BACKOFF, 0.8, collection="ops", seq=2, char_start=270),
+                hit(RETRY, 0.9, collection="backend", seq=3, char_start=200),
+                hit(BACKOFF, 0.8, collection="ops", seq=2, char_start=270),
             ],
             2,
             [("patterns.md", 3, 0.9, []), ("patterns.md", 2, 0.8, [])],
@@ -185,22 +143,22 @@ def _shape(kept: list[Hit]) -> list[tuple[str, int, float, list[str]]]:
         (
             "a repeat found past the limit still folds, and a distinct one gets no slot",
             [
-                _hit(RETRY, 0.9, document="a.md"),
-                _hit(BACKOFF, 0.8, document="b.md"),
-                _hit(RETRY, 0.7, document="copy.md"),
+                hit(RETRY, 0.9, document="a.md"),
+                hit(BACKOFF, 0.8, document="b.md"),
+                hit(RETRY, 0.7, document="copy.md"),
             ],
             1,
             [("a.md", 1, 0.9, ["copy.md"])],
         ),
         (
             "a fuller hit further down takes the slot, and the score, of the one it contains",
-            [_hit(RETRY, 0.9, document="a.md"), _hit(FULLER, 0.8, document="book.md")],
+            [hit(RETRY, 0.9, document="a.md"), hit(FULLER, 0.8, document="book.md")],
             2,
             [("book.md", 1, 0.9, ["a.md"])],
         ),
         (
             "a bare heading is never contained, though a passage holds every word of it",
-            [_hit(MENTIONS, 0.9, document="book.md"), _heading(HEADING, 0.8, document="book.pdf")],
+            [hit(MENTIONS, 0.9, document="book.md"), _heading(HEADING, 0.8, document="book.pdf")],
             2,
             [("book.md", 1, 0.9, []), ("book.pdf", 1, 0.8, [])],
         ),
@@ -216,10 +174,10 @@ def _shape(kept: list[Hit]) -> list[tuple[str, int, float, list[str]]]:
         (
             "a hit holding two kept ones takes the best slot, and the freed slot goes to the next",
             [
-                _hit(RETRY, 0.9, document="a.md"),
-                _hit(BACKOFF, 0.8, document="b.md"),
-                _hit(BOTH, 0.7, document="book.md"),
-                _hit(CLOCKS, 0.6, document="c.md"),
+                hit(RETRY, 0.9, document="a.md"),
+                hit(BACKOFF, 0.8, document="b.md"),
+                hit(BOTH, 0.7, document="book.md"),
+                hit(CLOCKS, 0.6, document="c.md"),
             ],
             2,
             [("book.md", 1, 0.9, ["a.md", "b.md"]), ("c.md", 1, 0.6, [])],
@@ -229,15 +187,15 @@ def _shape(kept: list[Hit]) -> list[tuple[str, int, float, list[str]]]:
 def test_hits_fold_near_duplicates_in_words(
     name: str, found: list[Hit], limit: int, expected: list[tuple[str, int, float, list[str]]]
 ) -> None:
-    kept = collapse.hits(found, _words(found), limit)
+    kept = collapse.hits(found, words_scan(found), limit)
 
     assert _shape(kept) == expected, name
 
 
 def test_a_fold_records_where_the_repeat_is_and_how_close_it_was() -> None:
-    found = [_hit(RETRY, 0.9, document="a.md"), _hit(RETRY, 0.8, document="copy.md", seq=7)]
+    found = [hit(RETRY, 0.9, document="a.md"), hit(RETRY, 0.8, document="copy.md", seq=7)]
 
-    (kept,) = collapse.hits(found, _words(found), 2)
+    (kept,) = collapse.hits(found, words_scan(found), 2)
 
     (reference,) = kept.also_in
     assert (reference.collection, reference.document, reference.seq) == ("backend", "copy.md", 7)
@@ -263,47 +221,47 @@ def _tree(references: list) -> list:
     [
         (
             "a copy in another document is a duplicate: the same text",
-            [_hit(RETRY, 0.9, document="a.md"), _hit(RETRY, 0.8, document="copy.md")],
+            [hit(RETRY, 0.9, document="a.md"), hit(RETRY, 0.8, document="copy.md")],
             [("a.md", [("copy.md", Relation.DUPLICATE, [])])],
         ),
         (
             "a copy laid out another way is still a duplicate: whitespace is not text",
             [
-                _hit(RETRY, 0.9, document="a.md"),
-                _hit(RETRY.replace(", so ", ",\n  so "), 0.8, document="copy.md"),
+                hit(RETRY, 0.9, document="a.md"),
+                hit(RETRY.replace(", so ", ",\n  so "), 0.8, document="copy.md"),
             ],
             [("a.md", [("copy.md", Relation.DUPLICATE, [])])],
         ),
         (
             "one word changed is equivalent: the same point, other wording",
-            [_hit(RETRY, 0.9, document="a.md"), _hit(NEAR, 0.8, document="near.md")],
+            [hit(RETRY, 0.9, document="a.md"), hit(NEAR, 0.8, document="near.md")],
             [("a.md", [("near.md", Relation.EQUIVALENT, [])])],
         ),
         (
             "a hit inside a fuller one ranked above it is contained",
-            [_hit(FULLER, 0.9, document="book.md"), _hit(RETRY, 0.8, document="a.md")],
+            [hit(FULLER, 0.9, document="book.md"), hit(RETRY, 0.8, document="a.md")],
             [("book.md", [("a.md", Relation.CONTAINED, [])])],
         ),
         (
             "a hit a fuller one below it swapped out is contained in it",
-            [_hit(RETRY, 0.9, document="a.md"), _hit(FULLER, 0.8, document="book.md")],
+            [hit(RETRY, 0.9, document="a.md"), hit(FULLER, 0.8, document="book.md")],
             [("book.md", [("a.md", Relation.CONTAINED, [])])],
         ),
         (
             "after a swap, what the old hit held stays under it",
             [
-                _hit(RETRY, 0.9, document="a.md"),
-                _hit(RETRY, 0.85, document="copy.md"),
-                _hit(FULLER, 0.8, document="book.md"),
+                hit(RETRY, 0.9, document="a.md"),
+                hit(RETRY, 0.85, document="copy.md"),
+                hit(FULLER, 0.8, document="book.md"),
             ],
             [("book.md", [("a.md", Relation.CONTAINED, [("copy.md", Relation.DUPLICATE, [])])])],
         ),
         (
             "two swaps nest two levels: each old hit under the one that took its slot",
             [
-                _hit(RETRY, 0.9, document="a.md"),
-                _hit(FULLER, 0.85, document="book.md"),
-                _hit(f"{FULLER} {OUTBOX}", 0.8, document="guide.md"),
+                hit(RETRY, 0.9, document="a.md"),
+                hit(FULLER, 0.85, document="book.md"),
+                hit(f"{FULLER} {OUTBOX}", 0.8, document="guide.md"),
             ],
             [
                 (
@@ -315,8 +273,8 @@ def _tree(references: list) -> list:
         (
             "one document chunked two ways: a span inside another is contained, by the spans alone",
             [
-                _hit(RETRY, 0.9, collection="backend", seq=3, char_start=200),
-                _hit(AROUND, 0.8, collection="ops", seq=2, char_start=150),
+                hit(RETRY, 0.9, collection="backend", seq=3, char_start=200),
+                hit(AROUND, 0.8, collection="ops", seq=2, char_start=150),
             ],
             [("patterns.md", [("patterns.md", Relation.CONTAINED, [])])],
         ),
@@ -325,7 +283,7 @@ def _tree(references: list) -> list:
 def test_a_place_sits_under_the_result_it_was_folded_into(
     name: str, found: list[Hit], expected: list[tuple[str, list]]
 ) -> None:
-    kept = collapse.hits(found, _words(found), 3)
+    kept = collapse.hits(found, words_scan(found), 3)
 
     assert [(h.document, _tree(h.also_in)) for h in kept] == expected, name
 
@@ -335,21 +293,21 @@ def test_a_place_sits_under_the_result_it_was_folded_into(
     [
         (
             "a sentence inside a fuller paragraph: all of it in there, under half of that in it",
-            [_hit(FULLER, 0.9, document="book.md"), _hit(RETRY, 0.8, document="a.md")],
+            [hit(FULLER, 0.9, document="book.md"), hit(RETRY, 0.8, document="a.md")],
             # 13 of RETRY's 13 word 3-grams, 13 of FULLER's 28; 13 of 26 distinct words shared;
             # the score is the Dice coefficient of the 3-grams, 2 * 13 / (13 + 28)
             (Overlap(1.0, 13 / 28, 0.5, score=26 / 41), None),
         ),
         (
             "a copy: each wholly in the other",
-            [_hit(RETRY, 0.9, document="a.md"), _hit(RETRY, 0.8, document="copy.md")],
+            [hit(RETRY, 0.9, document="a.md"), hit(RETRY, 0.8, document="copy.md")],
             (Overlap(contained=1.0, contains=1.0, alike=1.0, score=1.0), None),
         ),
         (
             "one document chunked two ways: the characters both spans cover",
             [
-                _hit(RETRY, 0.9, collection="backend", seq=3, char_start=200),
-                _hit(AROUND, 0.8, collection="ops", seq=2, char_start=150),
+                hit(RETRY, 0.9, collection="backend", seq=3, char_start=200),
+                hit(AROUND, 0.8, collection="ops", seq=2, char_start=150),
             ],
             # no word 3-gram in common, 2 of 34 distinct words, so a score of 0; RETRY's 78
             # characters all lie in AROUND's span
@@ -360,7 +318,7 @@ def test_a_place_sits_under_the_result_it_was_folded_into(
 def test_a_place_measures_itself_against_its_parent_both_ways_and_as_a_whole(
     name: str, found: list[Hit], expected: tuple[Overlap, float | None]
 ) -> None:
-    (kept,) = collapse.hits(found, _words(found), 2)
+    (kept,) = collapse.hits(found, words_scan(found), 2)
 
     (reference,) = kept.also_in
     words, chars = expected
@@ -383,7 +341,7 @@ async def test_words_decide_a_fold_as_they_rank_the_search(
 ) -> None:
     """NEAR is RETRY with one word changed, and its vector is set far from RETRY's: only the words
     can fold it. An exact copy would fold in every mode: a duplicate needs no space."""
-    found = [_hit(RETRY, 0.9, document="a.md"), _hit(NEAR, 0.8, document="near.md")]
+    found = [hit(RETRY, 0.9, document="a.md"), hit(NEAR, 0.8, document="near.md")]
 
     kept = collapse.hits(found, _embedded(found, _unit([1.0, 0.0], [0.0, 1.0]), bge_small, mode), 2)
 
@@ -401,9 +359,9 @@ async def test_a_repeat_the_new_leader_does_not_place_stays_under_the_one_it_rep
     RETRY as equivalent. FULLER then holds RETRY word for word and takes the slot. REWORDED stays
     under RETRY, the place it repeats, and says how far it is from FULLER as well."""
     found = [
-        _hit(RETRY, 0.9, document="a.md"),
-        _hit(REWORDED, 0.85, document="reworded.md"),
-        _hit(FULLER, 0.8, document="book.md"),
+        hit(RETRY, 0.9, document="a.md"),
+        hit(REWORDED, 0.85, document="reworded.md"),
+        hit(FULLER, 0.8, document="book.md"),
     ]
     spaces = _embedded(found, _unit([1.0, 0.0, 0.0], [0.99, 0.14, 0.0], [0.0, 0.0, 1.0]), bge_small)
 
@@ -437,10 +395,10 @@ async def test_a_place_stays_under_the_chunk_it_repeats_though_another_cites_the
     """Chunks cut from one long line all cite that line. RETRY is found twice on line 1 of a.md,
     and REWORDED folds under the first by its vector before FULLER takes the slot: the tree keeps
     it under that chunk, where a citation of the line could not say which."""
-    first_chunk = _hit(RETRY, 0.9, document="a.md", seq=1)
+    first_chunk = hit(RETRY, 0.9, document="a.md", seq=1)
     # the same sentence again further along the same line: other characters, the same citation
     later_chunk = msgspec.structs.replace(
-        _hit(RETRY, 0.88, document="a.md", seq=40, char_start=400),
+        hit(RETRY, 0.88, document="a.md", seq=40, char_start=400),
         line_start=first_chunk.line_start,
         line_end=first_chunk.line_end,
         location=first_chunk.location,
@@ -448,8 +406,8 @@ async def test_a_place_stays_under_the_chunk_it_repeats_though_another_cites_the
     found = [
         first_chunk,
         later_chunk,
-        _hit(REWORDED, 0.85, document="reworded.md"),
-        _hit(FULLER, 0.8, document="book.md"),
+        hit(REWORDED, 0.85, document="reworded.md"),
+        hit(FULLER, 0.8, document="book.md"),
     ]
     vectors = _unit([1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.99, 0.14, 0.0], [0.0, 0.0, 1.0])
 
@@ -465,13 +423,13 @@ async def test_a_place_stays_under_the_chunk_it_repeats_though_another_cites_the
 def test_every_repeat_is_listed_in_the_same_document_or_another() -> None:
     """Two copies in one other book and a repeat further down the same document: three places."""
     found = [
-        _hit(RETRY, 0.9, document="book.md", seq=4),
-        _hit(RETRY, 0.8, document="notes.md", seq=2),
-        _hit(RETRY, 0.7, document="notes.md", seq=9, char_start=900),
-        _hit(RETRY, 0.6, document="book.md", seq=40, char_start=4000),
+        hit(RETRY, 0.9, document="book.md", seq=4),
+        hit(RETRY, 0.8, document="notes.md", seq=2),
+        hit(RETRY, 0.7, document="notes.md", seq=9, char_start=900),
+        hit(RETRY, 0.6, document="book.md", seq=40, char_start=4000),
     ]
 
-    (kept,) = collapse.hits(found, _words(found), 3)
+    (kept,) = collapse.hits(found, words_scan(found), 3)
 
     assert [(ref.document, ref.seq) for ref in kept.also_in] == [
         ("notes.md", 2),
@@ -481,9 +439,9 @@ def test_every_repeat_is_listed_in_the_same_document_or_another() -> None:
 
 
 def test_also_in_lists_every_repeat_uncapped() -> None:
-    found = [_hit(RETRY, 1.0 - i / 100, document=f"copy{i}.md") for i in range(12)]
+    found = [hit(RETRY, 1.0 - i / 100, document=f"copy{i}.md") for i in range(12)]
 
-    (kept,) = collapse.hits(found, _words(found), 3)
+    (kept,) = collapse.hits(found, words_scan(found), 3)
 
     assert kept.document == "copy0.md"
     assert [ref.document for ref in kept.also_in] == [f"copy{i}.md" for i in range(1, 12)]
@@ -501,7 +459,7 @@ def test_also_in_lists_every_repeat_uncapped() -> None:
 async def test_hits_fold_near_duplicates_in_embeddings(
     name: str, cosine: float, folds: bool, bge_small: EmbeddingModel
 ) -> None:
-    found = [_hit(RETRY, 0.9, document="a.md"), _hit(REWORDED, 0.8, document="b.md")]
+    found = [hit(RETRY, 0.9, document="a.md"), hit(REWORDED, 0.8, document="b.md")]
     vectors = _unit([1.0, 0.0], [cosine, float(np.sqrt(1 - cosine**2))])
 
     kept = collapse.hits(found, _embedded(found, vectors, bge_small), 2)
@@ -516,8 +474,8 @@ async def test_identical_text_under_other_headings_folds_though_its_cosine_misse
     """Each chunk is embedded under its heading path, so one paragraph in two books embeds apart:
     0.927 was measured with bge-small. The words still say it is a copy."""
     found = [
-        _hit(RETRY, 0.9, document="book.md"),
-        msgspec.structs.replace(_hit(RETRY, 0.8, document="notes.md"), header="Delivery"),
+        hit(RETRY, 0.9, document="book.md"),
+        msgspec.structs.replace(hit(RETRY, 0.8, document="notes.md"), header="Delivery"),
     ]
     vectors = _unit([1.0, 0.0], [0.90, float(np.sqrt(1 - 0.90**2))])
 
@@ -535,7 +493,7 @@ async def test_identical_text_under_other_headings_folds_though_its_cosine_misse
 def _passage(texts: list[str], document: str, first_seq: int, score: float) -> list[Hit]:
     """Consecutive chunks of one document: what `passage.ranges` merges into one range."""
     return [
-        _hit(text, score, document=document, seq=first_seq + i, char_start=100 * i)
+        hit(text, score, document=document, seq=first_seq + i, char_start=100 * i)
         for i, text in enumerate(texts)
     ]
 
@@ -718,9 +676,9 @@ async def test_the_spaces_follow_the_rows_the_model_and_the_mode(
 
 
 def test_folding_leaves_the_hits_it_was_given_alone() -> None:
-    found = [_hit(RETRY, 0.9, document="a.md"), _hit(RETRY, 0.8, document="copy.md")]
+    found = [hit(RETRY, 0.9, document="a.md"), hit(RETRY, 0.8, document="copy.md")]
     before = msgspec.json.encode(found)
 
-    collapse.hits(found, _words(found), 2)
+    collapse.hits(found, words_scan(found), 2)
 
     assert msgspec.json.encode(found) == before, "a pure fold: the scan is not rewritten"

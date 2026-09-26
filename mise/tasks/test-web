@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="Run the web UI tests (bun test)"
+set -euo pipefail
+cd web && bun test

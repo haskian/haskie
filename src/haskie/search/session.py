@@ -127,6 +127,8 @@ class EventDetail(msgspec.Struct, omit_defaults=True):
     documents: list[str] | None = None  # search: the distinct documents among the hits, best first
     collection: str | None = None  # attach, detach
     collections: list[str] | None = None  # collections: the selection that was set
+    questions: list[str] | None = None  # search: the parts, when several were asked at once
+    context: str | None = None  # search: the context an excerpts search sent
 
 
 class SessionEvent(msgspec.Struct):
@@ -191,16 +193,30 @@ class Found(Protocol):
 
 
 async def record_search(
-    session: str | None, scope: str, query: str, found: Sequence[Found], started: float
+    session: str | None,
+    scope: str,
+    query: str,
+    found: Sequence[Found],
+    started: float,
+    questions: list[str] | None = None,
+    context: str | None = None,
 ) -> None:
     """A search as one event: the query, how many hits, which documents, and where it looked
-    (the scopes `EventDetail` lists, or a collection's name). `started` is a `perf_counter`."""
+    (the scopes `EventDetail` lists, or a collection's name). `started` is a `perf_counter`.
+    `questions` are the parts of a search of several questions, kept whole; `context` is the
+    context an excerpts search sent, with one question or several."""
     documents = list(dict.fromkeys(hit.document for hit in found))
     await record(
         session,
         Action.SEARCH,
         query,
-        detail=EventDetail(scope=scope, hits=len(found), documents=documents),
+        detail=EventDetail(
+            scope=scope,
+            hits=len(found),
+            documents=documents,
+            questions=questions,
+            context=context,
+        ),
         duration_ms=int((time.perf_counter() - started) * 1000),
     )
 

@@ -28,14 +28,24 @@ Every search scopes to the comma-separated `collections` argument. Without it, t
 selection. Without that, every collection. A hit held by several collections in scope is returned
 once.
 
-**`search_excerpts(q, session_id?, collections?, limit?)`** → excerpts, best first. `limit` is at
-least 1 and defaults to the user's setting. One excerpt is what one document says in one place:
-the matching chunks merged where they sit next to each other, widened to the whole lines or
-sentences around them within 300 characters. So it usually starts and ends where the author did.
+**`search_excerpts(q, context?, session_id?, collections?, limit?)`** → excerpts, best first.
+`limit` is at least 1 and defaults to the user's setting. One excerpt is what one document says in
+one place: the matching chunks merged where they sit next to each other, widened to the whole lines
+or sentences around them within 300 characters. So it usually starts and ends where the author did.
+
+`q` is a list: one question, or 2 to 5 parts of one when the parts may be answered in different
+places, each at most 500 characters. Pass the background they share once as `context` (at most
+200 characters). Each part is searched on its own and the parts take turns at the `limit` slots,
+which must be at least the number of parts. Write each part as a full question. Keep in one `q` the conditions one passage
+must meet together. Resolve an ambiguous question first; when you cannot ask, pass one part per
+reading.
 
 - cite: `document`, `header` (heading breadcrumb, "parent > … > heading"), `location`
   ("doc p.3-4 L10-20")
 - read: `text`, `score`, `collection` (whose index matched)
+- parts: `aspects`, the parts of `q` it ranked high for (empty for one question). Rank is not a
+  judgement: a vector or hybrid search finds a nearest passage for any part, so read `text`
+  before citing it as that part's answer. A part no excerpt lists found nothing at all.
 - open: `markdown_file` and `source_file` (absolute paths), `line_start`/`line_end` (1-based, in
   `markdown_file`), `char_start`/`char_end` (0-based), `page_start`/`page_end` (PDF only, else
   null), `seq_start`/`seq_end` (chunk positions in the document)
@@ -113,4 +123,6 @@ Every write takes `session_id`, so the change shows in the conversation's histor
 - **404**: no such collection or document, including a name in `collections`. Check the name with
   `list_collections` or `list_documents`.
 - **409**: the name is taken, or the document is not `imported` yet.
-- **422**: a bad argument. `limit` out of range, a page size over 1000, or an unknown `status`.
+- **422**: a bad argument. `limit` out of range or below the number of parts, more than 5 parts or
+  none, a question over 500 characters, a `context` over 200 characters, a page size over 1000, or
+  an unknown `status`.

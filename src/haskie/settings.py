@@ -333,6 +333,16 @@ def _at_least(minimum: int | float, **values: int | float) -> None:
             raise InvalidInput(f"{name} must be >= {minimum}, got {value}")
 
 
+def _check_search(search: "SearchSettings | SearchOverrides") -> None:
+    """Shared by the user-level search settings and a collection's overrides, where a field left
+    unset (None) inherits the user value and is not checked here."""
+    given = without_none(search)
+    at_least_one = ("limit", "candidates", "rrf_k", "nprobes", "refine_factor")
+    _at_least(1, **{name: given[name] for name in at_least_one if name in given})
+    weights = ("vector_weight", "bm25_weight")
+    _at_least(0, **{name: given[name] for name in weights if name in given})
+
+
 def _check_chunking(chunk_size: int | None, chunk_merge_below: int | None) -> None:
     """Shared by the user-level settings and the per-collection overrides, where any of them may
     be unset and inherit the user value."""
@@ -394,17 +404,9 @@ class SearchSettings(msgspec.Struct):
     reranker_model: Annotated[str, RERANKER_MODEL] = DEFAULT_RERANKER
 
     def __post_init__(self) -> None:
-        _at_least(
-            1,
-            limit=self.limit,
-            candidates=self.candidates,
-            rrf_k=self.rrf_k,
-            nprobes=self.nprobes,
-            refine_factor=self.refine_factor,
-        )
         # `reranker_model` is checked against the catalogue where settings are written
         # (`catalogue.check`): the catalogue is in the database, and decoding reads none
-        _at_least(0, vector_weight=self.vector_weight, bm25_weight=self.bm25_weight)
+        _check_search(self)
 
 
 class SearchOverrides(msgspec.Struct):
@@ -421,6 +423,11 @@ class SearchOverrides(msgspec.Struct):
     refine_factor: Annotated[int | None, REFINE_FACTOR] = None
     reranker: Annotated[Reranker | None, RERANKER] = None
     reranker_model: Annotated[str | None, RERANKER_MODEL] = None
+
+    def __post_init__(self) -> None:
+        # checked as it is decoded, before it is saved: otherwise a value no search can run with
+        # would be stored, and only fail as the collection's settings resolve, from then on
+        _check_search(self)
 
     def resolve(self, user: SearchSettings) -> SearchSettings:
         return msgspec.structs.replace(user, **without_none(self))

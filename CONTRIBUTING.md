@@ -27,6 +27,7 @@ mise run dev     # API and MCP on :8452 with reload, Vite on :8453
 | `web` | Vite dev server on :8453, proxying `/api` to :8452 |
 | `check` | lint, format and type-check both sides (ruff, ty, oxlint, tsc), and fail if `web/src/schema.d.ts` is stale. `--fix` applies ruff's fixes and formatting |
 | `test` | Python tests in parallel, with coverage |
+| `test-web` | web UI tests (`bun test`); `test` runs them first |
 | `schema` | regenerate `web/src/schema.d.ts` from the OpenAPI document |
 | `build` | build the web UI into `src/haskie/web`, where the wheel ships it |
 | `dist` | `build`, then the wheel and sdist into `dist/` |
