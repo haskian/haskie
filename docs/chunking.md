@@ -3,8 +3,8 @@
 Structure-Aware Chunking cuts a document where its author did. A chunk never spans two sections.
 It cuts at a blank line before it cuts inside a paragraph, and between sentences before it cuts
 inside one. A table or code block stays whole unless it is longer than a chunk. Chunks never
-overlap. The code is
-`src/haskie/indexing/chunk.py` (the steps) and `segment.py` (the pure folds they call).
+overlap. The code is `src/haskie/indexing/chunk.py` (the steps) and `segment.py` (the pure folds
+they call).
 
 ## Settings
 
@@ -159,10 +159,6 @@ half a chunk drops its outermost headings until it fits in half. A last heading 
 long is cut (`chunk._shortened`). Without the step the frame is empty, and the text has the whole
 size. The `text` chunker cuts no sections at headings and never frames. It still files each chunk
 under its heading path for citing.
-
-Keyword search (the full-text index) reads the same `framed` column as the models, so a heading's
-words match every chunk of its section. That is how a heading is found without a chunk of its
-own.
 
 ## No overlap
 

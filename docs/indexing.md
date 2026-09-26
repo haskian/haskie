@@ -92,8 +92,8 @@ flowchart LR
 
 The weights set the mix of queue slots, because the stages cost different things. Converting is
 CPU and IO per page, embedding is model inference, and indexing writes to LanceDB. A slow stage
-backs up on its own queue instead of taking every slot. The semaphore is what caps the CPU work
-itself: every piece of it holds one slot while it runs, including previews and the CPU part of a
+backs up on its own queue instead of taking every slot. The semaphore caps the CPU work itself.
+Every piece of it holds one slot while it runs, including previews and the CPU part of a
 search. Index writes and maintenance are IO and hold no slot. Lower the budget in Settings when
 you need the machine back.
 

@@ -100,8 +100,8 @@ the Operations view, through `table()` declarations of its own: DBOS owns their 
 
 Every table and index is a SQLAlchemy Core `Table` in `tables.py`, the one source of the schema.
 `db.migrate` generates the DDL from it on a fresh home, and every query is a Core statement over
-the same tables, so a column name is written once. Index names start with `idx_` (a home created before
-`tables.py` keeps its older, unprefixed names).
+the same tables, so a column name is written once. Index names start with `idx_`. A home created
+before `tables.py` keeps its older, unprefixed names.
 
 ## How each store is written
 
@@ -114,9 +114,8 @@ the same tables, so a column name is written once. Index names start with `idx_`
 
 ## Schema changes
 
-Before 1.0 there are no migrations. A storage change edits `tables.py` and bumps `SCHEMA_VERSION` in
-`db.py`, stored in
-`PRAGMA user_version`. A home written with another version is refused at startup, with a message
+Before 1.0 there are no migrations. A storage change edits `tables.py` and bumps `SCHEMA_VERSION`
+in `db.py`, which is stored in `PRAGMA user_version`. A home written with another version is refused at startup, with a message
 that says so. The fix is `haskie destroy` and a fresh import.
 
 Code: `tables.py`, `db.py`, `catalogue/catalogue.py`, `catalogue/seed.sql`, `home.py`, `sysdb.py`.

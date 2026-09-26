@@ -103,7 +103,7 @@ document is deleted.
 
 ## The embedding cache
 
-The cache is what makes one document cheap to share. Each computed embedding is one parquet file
+The cache makes one document cheap to share between collections. Each computed embedding is one parquet file
 under the document, plus one `embeddings` row. Its id is the SHA-256 of a URN, one line, that
 names everything the rows depend on:
 

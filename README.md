@@ -75,7 +75,9 @@ decisions, so the agent needs fewer round trips and fewer tokens.
   reranker sharpens the order. A point several sources make comes back once, with the others
   under `also_in`.
 - **The agent decides, haskie does the legwork.** One `search_excerpts` call searches every
-  collection in scope, merges neighbouring hits and folds repeats. `search_sources` names the
+  collection in scope, merges neighbouring hits and folds repeats. A question with several parts
+  goes in one call: each part gets its share of the slots, and each excerpt names the parts it
+  answers. `search_sources` names the
   documents and collections that cover a topic. Each excerpt links to its full markdown file.
 - **Local and polite to your machine.** Your documents never leave it. Only the models download,
   once, from Hugging Face. Indexing runs in parallel within a CPU budget you set, and after a crash
@@ -99,8 +101,6 @@ cited answers in Claude Code. Not there yet:
     answer with every source cited. Today only repeats are folded.
   - **Distillation** of the results into a short, cited brief, for questions where the agent
     needs the gist more than the quotes.
-  - **Multi-aspect querying**, so one call covers every part of a question and each part gets an
-    answer. Today the agent asks one question per part.
 - **OCR.** Scanned pages and images are stored but not searchable.
 - **Other MCP clients.** Any MCP client can use the tools over HTTP. Only Claude Code has a
   one-command setup.
@@ -182,7 +182,7 @@ a `session_id`, so Sessions can replay the conversation.
 
 | tool | what it does |
 | --- | --- |
-| `search_excerpts` | **The main search.** Passages ready to quote, best first, each with `header` and `location`. Repeats fold into `also_in` |
+| `search_excerpts` | **The main search.** Passages ready to quote, best first, each with `header` and `location`. Repeats fold into `also_in`. Takes up to 5 parts of one question, and tags each excerpt with the parts it answers |
 | `search_sources` | Which documents and collections cover a topic. One row per document, with its best sections |
 | `set_session_collections` | Limits the rest of the conversation to the collections `search_sources` suggested |
 | `list_collections`, `get_collection`, `list_collection_documents` | Browse collections and their descriptions |
@@ -210,8 +210,8 @@ search:    query ──► hybrid search ──► rerank ────► passag
 ```
 
 **Structure-Aware Chunking.** Chunks follow the author's structure. A chunk never spans two
-sections, and it cuts at a blank line before inside a paragraph, and between sentences before
-inside one. A table or code block stays whole unless it is longer than a chunk. By default each
+sections. It cuts at a blank line before it cuts inside a paragraph, and between sentences before
+it cuts inside one. A table or code block stays whole unless it is longer than a chunk. By default each
 chunk is embedded and indexed with its heading path in front, such as
 `Part II > Replication > Leaders`. Context added to chunks cuts failed retrievals by 35%, and by
 67% with BM25 and a reranker on top [14]. There an LLM writes the context. haskie takes it from
