@@ -1,6 +1,6 @@
 import { Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { api, MAX_PAGE_SIZE, type CollectionSummary, type Granularity, type SearchScope, type SessionSummary, type StepTiming } from '../api'
+import { api, MAX_PAGE_SIZE, type CollectionSummary, type Granularity, type ScoreStep, type SearchScope, type SessionSummary, type StepTiming } from '../api'
 import type { PageProps } from '../App'
 import { HitGrid, MatchModal, Picker, SearchBox, SearchTook, Shell, type Match, type PickerOption } from '../ui'
 import './Explore.css'
@@ -35,6 +35,7 @@ const ASKINGS: PickerOption<Asking>[] = [
 interface Found {
   results: Match[]
   steps: StepTiming[]
+  scoring: ScoreStep[] // how their scores came to be
   missing: string[]
   uncovered: string[]
 }
@@ -46,15 +47,15 @@ async function search(questions: string[], context: string, answer: Answer, wher
   const [text] = questions
   if (answer === 'source') {
     const found = await api.searchSources(text, where)
-    return { results: found.body.documents, steps: found.steps, missing: [], uncovered: [] }
+    return { results: found.body.documents, steps: found.steps, scoring: found.scoring, missing: [], uncovered: [] }
   }
   if (answer === 'excerpt') {
     const found = await api.searchExcerpts(questions, where, context.trim() || undefined)
     const { excerpts, missing_terms, uncovered } = found.body
-    return { results: excerpts, steps: found.steps, missing: missing_terms, uncovered }
+    return { results: excerpts, steps: found.steps, scoring: found.scoring, missing: missing_terms, uncovered }
   }
   const found = await api.explore(text, answer, where)
-  return { results: found.body, steps: found.steps, missing: [], uncovered: [] }
+  return { results: found.body, steps: found.steps, scoring: found.scoring, missing: [], uncovered: [] }
 }
 
 /** Search across collections, answering at the granularity the picker names: matches, or the
@@ -74,6 +75,7 @@ export function Explore({ route, counts }: PageProps) {
   const [busy, setBusy] = useState(false)
   const [took, setTook] = useState<number | null>(null) // ms the last query took
   const [steps, setSteps] = useState<StepTiming[]>([]) // and how long each of its steps took
+  const [scoring, setScoring] = useState<ScoreStep[]>([]) // and how its scores came to be
   const [missing, setMissing] = useState<string[]>([]) // words the excerpts on screen lack
   const [uncovered, setUncovered] = useState<string[]>([]) // and the questions they do not answer
   const [context, setContext] = useState('') // multi-aspect only: the background every aspect shares
@@ -114,6 +116,7 @@ export function Explore({ route, counts }: PageProps) {
       const found = await search(questions, multi ? context : '', answer, scopeParams(parseScope(scope)))
       setResults(found.results)
       setSteps(found.steps)
+      setScoring(found.scoring)
       setMissing(found.missing)
       setUncovered(found.uncovered)
       setAsked(questions)
@@ -134,6 +137,7 @@ export function Explore({ route, counts }: PageProps) {
     setRan('')
     setResults([])
     setSteps([])
+    setScoring([])
     setMissing([])
     setUncovered([])
     setAsked([])
@@ -208,7 +212,7 @@ export function Explore({ route, counts }: PageProps) {
         {uncovered.length > 0 && <p className="muted">Unanswered: {uncovered.join(' · ')}</p>}
         <HitGrid results={results} query={ran} onOpen={setOpen} questions={asked} />
       </div>
-      <MatchModal match={open} query={ran} onClose={() => setOpen(null)} />
+      <MatchModal match={open} query={ran} scoring={scoring} onClose={() => setOpen(null)} />
     </Shell>
   )
 }

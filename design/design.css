@@ -201,6 +201,12 @@ mark { background: none; color: inherit; font-weight: 600; text-decoration: unde
 /* a hint that opens below its anchor, dark like every other hint, as wide as its rows need */
 .hint-below { top: calc(100% + var(--sp-2)); bottom: auto; max-width: none; transform: translateY(-4px); gap: var(--sp-3); text-transform: none; letter-spacing: 0; font-family: var(--font-sans); }
 .hint-below .muted, .hint-below .label { color: rgba(255, 255, 255, 0.6); }
+.hint-wide { max-width: 560px; }
+.score-lineage { display: grid; grid-template-columns: max-content 1fr; gap: var(--sp-2) var(--sp-4); }
+/* a score with the hint that says how it was computed */
+.score { display: inline-flex; align-items: center; gap: var(--sp-2); }
+.score-basis { position: relative; display: inline-flex; color: var(--text-muted); cursor: help; }
+.score-basis .icon { width: 14px; height: 14px; }
 .search-took { position: relative; justify-self: start; cursor: default; }
 
 /* tabs: role=tablist with .tab buttons; aria-selected marks the active one, aria-controls names its panel */

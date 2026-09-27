@@ -47,7 +47,7 @@ from pydantic_graph.step import StepFunction
 
 from haskie.collection.index import Hit
 from haskie.paging import check_page_size
-from haskie.search import aspects, probe, retrieval, section
+from haskie.search import aspects, probe, retrieval, scoring, section
 from haskie.search.passage import Answer, Excerpt, HitRange, Passage, Sources
 from haskie.settings import load_user_settings
 
@@ -93,8 +93,8 @@ class StepTime(msgspec.Struct, frozen=True):
     ms: float
 
 
-# What each step is, for a person reading the breakdown. `plan` is the work before the graph:
-# settings, the query embedding, the model checks.
+# What each step is, for a person reading the breakdown, in the order the pipelines run them.
+# `plan` is the work before the graph: settings, the query embedding, the model checks.
 STEP_LABELS: dict[str, str] = {
     "plan": "Embed the query",
     "retrieve": "LanceDB retrieval",
@@ -106,8 +106,8 @@ STEP_LABELS: dict[str, str] = {
     "judge_thin": "Merge chunks and find short passages",
     "collapse_ranges": "Fold passages",
     "fold": "Take turns and fold passages",
-    "budget": "Cut to the answer's budget",
     "group": "Group passages by section",
+    "budget": "Cut to the answer's budget",
     "probe_gaps": "Search for missing words",
     "fill": "Fill in around passages",
     "quote": "Read excerpts",
@@ -115,17 +115,48 @@ STEP_LABELS: dict[str, str] = {
     "shortlist": "Fold into documents",
 }
 
-# The steps of the searches one request runs, in the order they finished. A list per request,
-# started by the app (`app.bind_request_context`) and turned into its `Server-Timing` header: the
-# handlers answer what they always did, and an MCP call is timed the same way without seeing it.
-_trace: ContextVar[list[StepTime] | None] = ContextVar("haskie_search_trace", default=None)
+
+class ScoreStep(msgspec.Struct, frozen=True):
+    """How one step set or changed the scores it answered with (`scoring.RULES`)."""
+
+    step: str  # the step's function name
+    label: str  # what it does, as the web UI names it
+    rule: str
 
 
-def start_trace() -> list[StepTime]:
-    """A trace for the current request; every step timed from here on lands in it."""
+class Trace(msgspec.Struct):
+    """What the searches of one request report beside their answer, each in the order its steps
+    finished: how long each step took, and how each step that touched a score scored."""
+
     steps: list[StepTime] = []
-    _trace.set(steps)
-    return steps
+    scoring: list[ScoreStep] = []
+
+
+_PIPELINE_ORDER = {step: at for at, step in enumerate(STEP_LABELS)}
+
+# One per request, started by the app (`app.bind_request_context`) and turned into its headers:
+# the handlers answer what they always did, and an MCP call is traced the same way unseen.
+_trace: ContextVar[Trace | None] = ContextVar("haskie_search_trace", default=None)
+
+
+def start_trace() -> Trace:
+    """A trace for the current request; every step timed from here on lands in it."""
+    trace = Trace()
+    _trace.set(trace)
+    return trace
+
+
+def _lineage(step: str, state: Search, read: Any, answered: Any) -> None:
+    """Records how `step` scored what it answered with, when it set or changed a score. Once per
+    rule: every question of an `answers` runs the same steps, mostly to the same rule."""
+    trace, rule = _trace.get(), scoring.RULES.get(step)
+    if trace is None or rule is None:
+        return
+    said = rule(state, read, answered)
+    if said is not None and all((one.step, one.rule) != (step, said) for one in trace.scoring):
+        trace.scoring.append(ScoreStep(step=step, label=STEP_LABELS.get(step, step), rule=said))
+        # in pipeline order: the questions of an `answers` run at once, and finish interleaved
+        trace.scoring.sort(key=lambda one: _PIPELINE_ORDER.get(one.step, len(_PIPELINE_ORDER)))
 
 
 @contextmanager
@@ -135,10 +166,10 @@ def _timing(step: str) -> Iterator[None]:
     try:
         yield
     finally:
-        steps = _trace.get()
-        if steps is not None:
+        trace = _trace.get()
+        if trace is not None:
             elapsed = (time.perf_counter() - started) * 1000
-            steps.append(StepTime(step=step, label=STEP_LABELS.get(step, step), ms=elapsed))
+            trace.steps.append(StepTime(step=step, label=STEP_LABELS.get(step, step), ms=elapsed))
 
 
 def server_timing(steps: list[StepTime]) -> str:
@@ -146,13 +177,15 @@ def server_timing(steps: list[StepTime]) -> str:
     return ", ".join(f'{one.step};dur={one.ms:.1f};desc="{one.label}"' for one in steps)
 
 
-def _timed[F: StepFunction[Any, Any, Any, Any]](step: F, name: str) -> F:
-    """`step`, recording how long it took under `name`."""
+def _traced[F: StepFunction[Any, Any, Any, Any]](step: F, name: str) -> F:
+    """`step`, recording under `name` how long it took and how it scored."""
 
     @functools.wraps(step)
     async def run(ctx: StepContext[Any, Any, Any]) -> Any:
         with _timing(name):
-            return await step(ctx)
+            answered = await step(ctx)
+        _lineage(name, ctx.state, ctx.inputs, answered)
+        return answered
 
     return cast(F, run)
 
@@ -291,7 +324,7 @@ def _chain[T](
     # every step is a module function; the protocol they are typed by does not promise a name
     names: list[str] = [cast(Any, step).__name__ for step in steps]
     chain: list[Any] = [
-        builder.step(_timed(step, name), node_id=name)
+        builder.step(_traced(step, name), node_id=name)
         for step, name in zip(steps, names, strict=True)
     ]
     pairs = zip(chain, chain[1:], strict=False)  # one edge short of the chain, by construction

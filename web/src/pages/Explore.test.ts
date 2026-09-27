@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { pageQuery, parseServerTiming, type Hit, type Passage, type SearchScope, type Source, type StepTiming } from '../api'
+import { pageQuery, parseScoreLineage, parseServerTiming, type Hit, type ScoreStep, type Passage, type SearchScope, type Source, type StepTiming } from '../api'
 import { cite, position, seqLabel, type Match } from '../ui/match'
 import { questionsOf } from './explore/questions'
 import { parseScope, scopeParams, type Scope } from './explore/scope'
@@ -141,6 +141,21 @@ describe('cite', () => {
       expect(cite(testCase.location, testCase.doc)).toBe(testCase.expected)
     })
   }
+})
+
+describe('parseScoreLineage', () => {
+  const cases: Array<{ name: string; header: string | null; expected: ScoreStep[] }> = [
+    { name: 'no header, no lineage', header: null, expected: [] },
+    {
+      name: 'every step in order, its formula decoded',
+      header: encodeURIComponent(JSON.stringify([{ step: 'retrieve', label: 'LanceDB retrieval', rule: '1 / (3 − 2·cosine)' }, { step: 'rerank', label: 'Rerank', rule: 'logit' }])),
+      expected: [
+        { step: 'retrieve', label: 'LanceDB retrieval', rule: '1 / (3 − 2·cosine)' },
+        { step: 'rerank', label: 'Rerank', rule: 'logit' },
+      ],
+    },
+  ]
+  for (const { name, header, expected } of cases) test(name, () => expect(parseScoreLineage(header)).toEqual(expected))
 })
 
 describe('parseServerTiming', () => {

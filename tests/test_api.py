@@ -18,6 +18,7 @@ import logging
 import threading
 import time
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 import structlog
@@ -1196,10 +1197,50 @@ async def test_a_search_answers_with_the_time_each_step_took(
     assert entries[1][2] == 'desc="LanceDB retrieval"', name
 
 
+@pytest.mark.parametrize(
+    ("name", "path", "params", "lineage"),
+    [
+        ("chunks keep their own score", "/api/search/explore", {"q": "lancedb"}, []),
+        (
+            "passages fold theirs",
+            "/api/search/explore",
+            {"q": "lancedb", "granularity": "passage"},
+            ["fill_thin"],
+        ),
+        (
+            "excerpts, and several questions say each rule once",
+            "/api/search/excerpts",
+            {"q": ["lancedb", "how are rows retrieved"]},
+            ["judge_thin", "fold", "group"],
+        ),
+        ("sources", "/api/search/sources", {"q": "lancedb"}, ["shortlist"]),
+    ],
+)
+async def test_a_search_answers_with_its_score_lineage(
+    client: AsyncTestClient, name: str, path: str, params: dict, lineage: list[str]
+) -> None:
+    """`X-Score-Lineage`: each step that set or changed a score, in the order it ran, and how.
+    JSON, percent-encoded, because the formulas are not Latin-1."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "guide.md", MD.encode())
+    await attach_via_api(client, "notes", "guide.md")
+
+    response = await client.get(path, params=params)
+
+    assert response.status_code == 200, f"{name}: {response.text}"
+    steps = json.loads(unquote(response.headers["x-score-lineage"]))
+    assert [one["step"] for one in steps] == ["retrieve", "merge", *lineage], name
+    assert steps[0]["label"] == "LanceDB retrieval", name
+    assert steps[0]["rule"].endswith("No embedding model, so every mode is BM25."), name
+    assert steps[1]["rule"] == "One collection: its scores are kept.", name
+
+
 async def test_a_request_that_searches_nothing_carries_no_timing(client: AsyncTestClient) -> None:
     response = await client.get("/api/status")
 
     assert "server-timing" not in response.headers
+    assert "x-score-lineage" not in response.headers
 
 
 async def test_explore_merges_consecutive_chunks_into_one_passage(

@@ -571,6 +571,30 @@ describe('MatchModal', () => {
       ],
     },
     {
+      name: 'the score has a hint with its lineage, each step that scored in the order it ran',
+      element: (
+        <MatchModal
+          match={HIT}
+          query="shadow"
+          scoring={[
+            { step: 'retrieve', label: 'LanceDB retrieval', rule: '1 / (1 + d).' },
+            { step: 'rerank', label: 'Rerank', rule: 'The logit replaces it.' },
+          ]}
+          onClose={noop}
+        />
+      ),
+      contains: [
+        '<dt>Score</dt><dd><span class="score"><span class="mono">0.91</span><span class="score-basis" tabindex="0" aria-label="How the score is computed">',
+        '<span class="score-lineage"><span>LanceDB retrieval</span><span class="muted">1 / (1 + d).</span><span>Rerank</span><span class="muted">The logit replaces it.</span></span>',
+      ],
+    },
+    {
+      name: 'a search that did not say how it scored shows the score alone',
+      element: <MatchModal match={HIT} query="shadow" onClose={noop} />,
+      contains: ['<dt>Score</dt><dd><span class="score"><span class="mono">0.91</span></span></dd>'],
+      missing: ['score-basis'],
+    },
+    {
       name: 'a chunk before any heading has no grey path',
       element: <MatchModal match={{ ...HIT, headings: [], frame: [], header: '' }} query="" onClose={noop} />,
       contains: ['<blockquote class="match-text chunk-text"><span class="chunk-piece">'],

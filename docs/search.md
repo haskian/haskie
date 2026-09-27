@@ -29,6 +29,17 @@ flowchart LR
    collection's own scores.
 4. **Rerank** (optional). A cross-encoder rescores the merged `candidates`.
 
+The last of these steps to run sets a chunk's score. With a reranker on, it is the cross-encoder's
+raw logit, so switching the mode only changes which `candidates` it reads: a chunk found in both
+modes scores the same. Without one, several collections give a rank-fusion score, and one
+collection keeps its mode's own: BM25, `1 / (1 + squared L2 distance)`, or the fused score of
+`rrf` or `linear`. Passages, excerpts and documents then fold chunk scores their own way.
+
+Each step that sets or changes a score says how as it runs (`search/scoring.py`), the way each
+step's time goes into `Server-Timing`. A search answers with that lineage, in pipeline order, in
+its `X-Score-Lineage` header: JSON, percent-encoded, one `{step, label, rule}` per step. A step
+that left the scores alone says nothing. The web UI shows it beside a result's score.
+
 The ranking scans deeper than the answer. A folded repeat frees its slot for the next result,
 several chunks go into one passage, several passages into one excerpt, and many chunks into one
 source row.

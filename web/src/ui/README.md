@@ -33,7 +33,7 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `SearchTook` | `<SearchTook counts="12 chunks · 3 sources" ms={took} />` | The line above the results |
 | `HitGrid` | `<HitGrid results={hits} query={q} onOpen={open} />` | Chunks, passages, excerpts or sources; one card shape |
 | `SearchPanel` | `<SearchPanel run={(q) => api.searchCollection(name, q)} placeholder="Search this collection" />` | Box, hits and match modal for one scope |
-| `MatchModal` | `<MatchModal match={open} query={q} onClose={close} />` | One result, and the document it came from. A chunk shows as the models read it: its frame, its typed pieces, the cut reason on each side and its sizes. A passage shows its text, a source its hot sections |
+| `MatchModal` | `<MatchModal match={open} query={q} scoring={how} onClose={close} />` | One result, and the document it came from. A chunk shows as the models read it: its frame, its typed pieces, the cut reason on each side and its sizes. A passage shows its text, a source its hot sections. `scoring` (the `X-Score-Lineage` header) is the hint beside the score |
 | `Jobs` | `<Jobs jobs={jobs} variant="glass" stripes />` | One weighted bar per job of an operation |
 | `Kv` | `<Kv rows={[['Status', doc.status], ['Size', bytes.format(doc.size)]]} />` | Key and value rows |
 | `Field` | `<Field label="Chunk size" help={docs['conversion.chunk_size'].description}><input className="input" /></Field>` | A labelled form control with the setting's help text |

@@ -149,10 +149,24 @@ export interface StepTiming {
   ms: number
 }
 
-/** An answer, and the steps the server took to give it. */
+/** How one step of a search set or changed the scores it answered with (`search.scoring`). */
+export interface ScoreStep {
+  step: string
+  label: string
+  rule: string
+}
+
+/** An answer, the steps the server took to give it, and how its scores came to be, step by step. */
 export interface Timed<T> {
   body: T
   steps: StepTiming[]
+  scoring: ScoreStep[]
+}
+
+/** The `X-Score-Lineage` header: percent-encoded JSON, since its formulas are not Latin-1. A
+ *  missing header is no lineage. */
+export function parseScoreLineage(header: string | null): ScoreStep[] {
+  return header ? (JSON.parse(decodeURIComponent(header)) as ScoreStep[]) : []
 }
 
 /** `retrieve;dur=41.2;desc="LanceDB retrieval", merge;dur=0.3;desc="Fuse rankings"` as steps. A
@@ -169,7 +183,11 @@ export function parseServerTiming(header: string | null): StepTiming[] {
 async function timedRequest<T>(url: string): Promise<Timed<T>> {
   const response = await fetch(url)
   await failed(response)
-  return { body: (await response.json()) as T, steps: parseServerTiming(response.headers.get('Server-Timing')) }
+  return {
+    body: (await response.json()) as T,
+    steps: parseServerTiming(response.headers.get('Server-Timing')),
+    scoring: parseScoreLineage(response.headers.get('X-Score-Lineage')),
+  }
 }
 
 const json = (method: string, body: unknown): RequestInit => ({
