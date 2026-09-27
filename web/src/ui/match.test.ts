@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Excerpt, Hit, Passage } from '../api'
-import { alsoDocuments, alsoOf, chunkSizes, everyPlace, fillOf, frameOf, headingOf, isExcerpt, MIN_FILL, overlapHint, pieceMeta, piecesOf, seqLabel, type Reference } from './match'
+import { alsoDocuments, alsoOf, questionLabels, chunkSizes, everyPlace, fillOf, frameOf, headingOf, isExcerpt, MIN_FILL, overlapHint, pieceMeta, piecesOf, seqLabel, type Reference } from './match'
 
 describe('fillOf', () => {
   const cases: Array<{ name: string; score: number; scores: number[]; expected: number }> = [
@@ -298,4 +298,18 @@ describe('excerpts', () => {
   test('its chunks run from the first span to the last', () => {
     expect(seqLabel(EXCERPT)).toBe('1–6')
   })
+})
+
+describe('questionLabels', () => {
+  const asked = ['Why retry?', 'How long to wait?', 'When to stop?']
+  const cases: Array<{ name: string; aspects: string[]; expected: string }> = [
+    { name: 'each question by its place in what was asked', aspects: ['When to stop?', 'Why retry?'], expected: 'Q3 Q1' },
+    { name: 'none', aspects: [], expected: '' },
+    { name: 'a question not asked this time names nothing', aspects: ['Old question?'], expected: '' },
+  ]
+  for (const one of cases) {
+    test(one.name, () => {
+      expect(questionLabels(one.aspects, asked)).toBe(one.expected)
+    })
+  }
 })

@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api, MAX_PAGE_SIZE, type CollectionSummary, type Granularity, type SearchScope, type SessionSummary, type StepTiming } from '../api'
 import type { PageProps } from '../App'
-import { HitGrid, MatchModal, Picker, SearchBox, SearchTook, Shell, type Match, type PickerOption } from '../ui'
+import { Field, HitGrid, MatchModal, Picker, SearchBox, SearchTook, Shell, type Match, type PickerOption } from '../ui'
 import './Explore.css'
+import { questionsOf } from './explore/questions'
 import { ALL_SCOPE, parseScope, scopeParams, SESSION_PREFIX } from './explore/scope'
 import { errorText } from '../format'
 
@@ -19,27 +20,32 @@ const ANSWERS: Array<PickerOption<Answer> & { plural: string }> = [
 ]
 const answerOf = (value: Answer) => ANSWERS.find((one) => one.value === value) ?? ANSWERS[0]
 
-/** What one search brings back: its results, how long each step took, and the words of the
- *  question no excerpt holds (only excerpts say). */
+/** What one search brings back: its results, how long each step took, and what the excerpts
+ *  say they lack (only excerpts say): the words of the questions they never hold, and the
+ *  questions they do not answer. */
 interface Found {
   results: Match[]
   steps: StepTiming[]
   missing: string[]
+  uncovered: string[]
 }
 
 /** The one request an answer takes: its own route for excerpts and for documents, the explore
- *  route for chunks and passages. */
-async function search(text: string, answer: Answer, where: SearchScope): Promise<Found> {
+ *  route for chunks and passages. Excerpts take every question asked and the shared background;
+ *  the others take the first question. */
+async function search(questions: string[], context: string, answer: Answer, where: SearchScope): Promise<Found> {
+  const [text] = questions
   if (answer === 'source') {
     const found = await api.searchSources(text, where)
-    return { results: found.body.documents, steps: found.steps, missing: [] }
+    return { results: found.body.documents, steps: found.steps, missing: [], uncovered: [] }
   }
   if (answer === 'excerpt') {
-    const found = await api.searchExcerpts(text, where)
-    return { results: found.body.excerpts, steps: found.steps, missing: found.body.missing_terms }
+    const found = await api.searchExcerpts(questions, where, context.trim() || undefined)
+    const { excerpts, missing_terms, uncovered } = found.body
+    return { results: excerpts, steps: found.steps, missing: missing_terms, uncovered }
   }
   const found = await api.explore(text, answer, where)
-  return { results: found.body, steps: found.steps, missing: [] }
+  return { results: found.body, steps: found.steps, missing: [], uncovered: [] }
 }
 
 /** Search across collections, answering at the granularity the picker names: matches, or the
@@ -59,6 +65,10 @@ export function Explore({ route, counts }: PageProps) {
   const [took, setTook] = useState<number | null>(null) // ms the last query took
   const [steps, setSteps] = useState<StepTiming[]>([]) // and how long each of its steps took
   const [missing, setMissing] = useState<string[]>([]) // words the excerpts on screen lack
+  const [uncovered, setUncovered] = useState<string[]>([]) // and the questions they do not answer
+  const [parts, setParts] = useState('') // excerpts only: more parts of the question, one a line
+  const [context, setContext] = useState('') // and the background every part shares
+  const [asked, setAsked] = useState<string[]>([]) // the questions the results on screen answer
 
   useEffect(() => {
     Promise.all([api.collections({ page_size: MAX_PAGE_SIZE }), api.sessions()])
@@ -86,14 +96,17 @@ export function Explore({ route, counts }: PageProps) {
   const submit = async () => {
     const text = query.trim()
     if (text === '') return
+    const questions = answer === 'excerpt' ? questionsOf(text, parts) : [text]
     setError(null)
     setBusy(true)
     const started = performance.now()
     try {
-      const found = await search(text, answer, scopeParams(parseScope(scope)))
+      const found = await search(questions, context, answer, scopeParams(parseScope(scope)))
       setResults(found.results)
       setSteps(found.steps)
       setMissing(found.missing)
+      setUncovered(found.uncovered)
+      setAsked(questions)
       setRan(text)
       setRanAs(answer)
       setTook(Math.round(performance.now() - started))
@@ -110,6 +123,8 @@ export function Explore({ route, counts }: PageProps) {
     setResults([])
     setSteps([])
     setMissing([])
+    setUncovered([])
+    setAsked([])
     setError(null)
     setTook(null)
   }
@@ -132,10 +147,21 @@ export function Explore({ route, counts }: PageProps) {
             </>
           }
         />
+        {answer === 'excerpt' && (
+          <div className="explore-parts">
+            <Field label="More parts of the question" help="One a line, up to four: each is searched on its own and takes its turn at the results.">
+              <textarea className="textarea" rows={2} aria-label="More parts of the question" value={parts} onChange={(event) => setParts(event.target.value)} />
+            </Field>
+            <Field label="Shared background" help="Searched in front of every part, at most 200 characters.">
+              <input className="input" aria-label="Shared background" maxLength={200} value={context} onChange={(event) => setContext(event.target.value)} />
+            </Field>
+          </div>
+        )}
         {error !== null && <p className="muted">{error}</p>}
         <SearchTook counts={`${results.length} ${answerOf(ranAs).plural}`} ms={took} steps={steps} />
         {missing.length > 0 && <p className="muted">No excerpt says: {missing.join(', ')}</p>}
-        <HitGrid results={results} query={ran} onOpen={setOpen} />
+        {uncovered.length > 0 && <p className="muted">Unanswered: {uncovered.join(' · ')}</p>}
+        <HitGrid results={results} query={ran} onOpen={setOpen} questions={asked} />
       </div>
       <MatchModal match={open} query={ran} onClose={() => setOpen(null)} />
     </Shell>

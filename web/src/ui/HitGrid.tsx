@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react'
 import { Mark } from './Mark'
-import { alsoDocuments, alsoOf, everyPlace, fillOf, headingOf, isSource, placeOf, type Match } from './match'
+import { alsoDocuments, alsoOf, everyPlace, fillOf, headingOf, isExcerpt, isSource, placeOf, questionLabels, type Match } from './match'
 
 // `--score` drives the bar under a tile: the result's place among the others, not its raw score.
 const scoreStyle = (fill: number): CSSProperties => ({ '--score': fill }) as CSSProperties
@@ -26,8 +26,19 @@ const linesOf = (match: Match): string[] => {
 const keyOf = (match: Match): string =>
   isSource(match) ? `${match.collection}:${match.document}` : `${match.collection}:${match.document}:${match.char_start}` // offsets are unique in a document
 
-/** The result grid, in any of its shapes: chunks, passages or excerpts that matched, or sources. */
-export function HitGrid<T extends Match>({ results, query, onOpen }: { results: T[]; query: string; onOpen?: (match: T) => void }) {
+/** The result grid, in any of its shapes: chunks, passages or excerpts that matched, or sources.
+ *  With several `questions` asked, an excerpt names the ones it answers ("Q1 Q3") by its score. */
+export function HitGrid<T extends Match>({
+  results,
+  query,
+  onOpen,
+  questions = [],
+}: {
+  results: T[]
+  query: string
+  onOpen?: (match: T) => void
+  questions?: string[]
+}) {
   const scores = results.map((match) => match.score)
   const best = Math.max(...scores)
   const worst = Math.min(...scores)
@@ -40,7 +51,12 @@ export function HitGrid<T extends Match>({ results, query, onOpen }: { results: 
               <span className="kind">{match.collection}</span>
               <span>{match.document}</span>
             </span>
-            <span className="mono muted">{match.score.toFixed(2)}</span>
+            <span className="mono muted">
+              {isExcerpt(match) && questions.length > 1 && (
+                <span title={match.aspects.join('\n')}>{questionLabels(match.aspects, questions)} · </span>
+              )}
+              {match.score.toFixed(2)}
+            </span>
           </header>
           <div className="hit-body">
             <p className="hit-text">

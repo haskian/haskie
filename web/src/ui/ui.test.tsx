@@ -531,6 +531,16 @@ describe('HitGrid', () => {
       element: <HitGrid results={[EXCERPT]} query="shadow" />,
       contains: ['<footer class="hit-foot"><span>Lighting</span><span>p. 2–3 · lines 41–90</span><span>chunks 4–9</span></footer>', '<mark>shadow</mark>'],
     },
+    {
+      name: 'an excerpt names the questions it answers when several were asked',
+      element: <HitGrid results={[{ ...EXCERPT, aspects: ['Why soft?'] }]} query="shadow" questions={['Why hard?', 'Why soft?']} />,
+      contains: ['<span title="Why soft?">Q2 · </span>0.88'],
+    },
+    {
+      name: 'one question asked: no names',
+      element: <HitGrid results={[EXCERPT]} query="shadow" questions={['Why soft?']} />,
+      contains: ['<span class="mono muted">0.88</span>'],
+    },
     { name: 'no hits renders an empty grid', element: <HitGrid results={[] as Hit[]} query="" />, contains: ['<div class="hits"></div>'] },
     { name: 'no sources renders an empty grid', element: <HitGrid results={[] as Source[]} query="" />, contains: ['<div class="hits"></div>'] },
   ])

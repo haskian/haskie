@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { parseServerTiming, type Hit, type Passage, type SearchScope, type Source, type StepTiming } from '../api'
+import { pageQuery, parseServerTiming, type Hit, type Passage, type SearchScope, type Source, type StepTiming } from '../api'
 import { cite, position, seqLabel, type Match } from '../ui/match'
+import { questionsOf } from './explore/questions'
 import { parseScope, scopeParams, type Scope } from './explore/scope'
 
 const HIT: Hit = {
@@ -156,4 +157,31 @@ describe('parseServerTiming', () => {
     { name: 'a step with no desc is named by itself', header: 'merge;dur=0.4', expected: [{ step: 'merge', label: 'merge', ms: 0.4 }] },
   ]
   for (const { name, header, expected } of cases) test(name, () => expect(parseServerTiming(header)).toEqual(expected))
+})
+
+describe('questionsOf', () => {
+  const cases: Array<{ name: string; first: string; parts: string; expected: string[] }> = [
+    { name: 'the search box alone is one question', first: 'Why retry?', parts: '', expected: ['Why retry?'] },
+    { name: 'each line is one more part', first: 'Why retry?', parts: 'How long to wait?\nWhen to stop?', expected: ['Why retry?', 'How long to wait?', 'When to stop?'] },
+    { name: 'blank lines and spaces go', first: ' Why retry? ', parts: '\n  How long?  \n\n', expected: ['Why retry?', 'How long?'] },
+    { name: 'a repeat is asked once', first: 'Why retry?', parts: 'Why retry?\nHow long?', expected: ['Why retry?', 'How long?'] },
+  ]
+  for (const one of cases) {
+    test(one.name, () => {
+      expect(questionsOf(one.first, one.parts)).toEqual(one.expected)
+    })
+  }
+})
+
+describe('pageQuery', () => {
+  const cases: Array<{ name: string; extra: Record<string, string | string[] | undefined>; expected: string }> = [
+    { name: 'a list repeats its key, as a list parameter is read', extra: { q: ['a b', 'c'] }, expected: '?q=a+b&q=c' },
+    { name: 'empty and unset values are no filter', extra: { q: ['a', ''], context: undefined, collections: '' }, expected: '?q=a' },
+    { name: 'nothing set is no query string', extra: {}, expected: '' },
+  ]
+  for (const one of cases) {
+    test(one.name, () => {
+      expect(pageQuery({}, one.extra)).toBe(one.expected)
+    })
+  }
 })

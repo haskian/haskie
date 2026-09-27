@@ -179,12 +179,15 @@ const json = (method: string, body: unknown): RequestInit => ({
 })
 
 // Query string for a paged endpoint, `?k=v&…` or empty. Unset and empty values are dropped:
-// an absent filter is not the same request as a filter on the empty string.
-const pageQuery = (q: PageRequest, extra: Record<string, string | undefined> = {}): string => {
+// an absent filter is not the same request as a filter on the empty string. A list repeats its
+// key once a value (`?q=a&q=b`), as the backend reads a list parameter.
+export const pageQuery = (q: PageRequest, extra: Record<string, string | string[] | undefined> = {}): string => {
   const params = new URLSearchParams()
-  const values: Record<string, string | number | null | undefined> = { ...q, ...extra }
+  const values: Record<string, string | string[] | number | null | undefined> = { ...q, ...extra }
   for (const [key, value] of Object.entries(values)) {
-    if (value !== undefined && value !== null && value !== '') params.set(key, String(value))
+    for (const one of Array.isArray(value) ? value : [value]) {
+      if (one !== undefined && one !== null && one !== '') params.append(key, String(one))
+    }
   }
   const query = params.toString()
   return query ? `?${query}` : ''
@@ -312,8 +315,9 @@ export const api = {
   // steps it took, for the breakdown under the total.
   explore: <G extends Granularity>(q: string, granularity: G, scope: SearchScope = {}) =>
     timedRequest<ExploreResult<G>>(`/api/search/explore${pageQuery({}, { q, granularity, ...scopeQuery(scope) })}`),
-  searchExcerpts: (q: string, scope: SearchScope = {}) =>
-    timedRequest<Answer>(`/api/search/excerpts${pageQuery({}, { q, ...scopeQuery(scope) })}`),
+  // one question, or 2 to 5 parts of one and the background they share (`context`)
+  searchExcerpts: (q: string[], scope: SearchScope = {}, context?: string) =>
+    timedRequest<Answer>(`/api/search/excerpts${pageQuery({}, { q, context, ...scopeQuery(scope) })}`),
   searchSources: (q: string, scope: SearchScope = {}) =>
     timedRequest<Sources>(`/api/search/sources${pageQuery({}, { q, ...scopeQuery(scope) })}`),
 }
