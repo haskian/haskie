@@ -26,14 +26,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from haskie import db, home
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel
-from haskie.collection.index import CollectionIndex, Hit, IndexStats, forget_schema
+from haskie.collection.index import CollectionIndex, IndexStats, forget_schema
 from haskie.document import document
 from haskie.errors import Conflict, NotFound
 from haskie.paging import Page, PageRequest, count_of, keyset, resolve_sort
 from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
-    SearchOverrides,
     SearchSettings,
     load_user_settings,
 )
@@ -412,17 +411,6 @@ class Collection:
                     vector_index_rows=num_rows if retrained else collections.c.vector_index_rows,
                 )
             )
-
-    # --- search ----------------------------------------------------------
-
-    async def search(self, query: str, overrides: SearchOverrides | None = None) -> list[Hit]:
-        """Any SearchSettings field, `limit` included, can be overridden per call; a field left
-        None keeps the collection's own setting."""
-        settings = await self.search_settings()
-        if overrides is not None:
-            settings = overrides.resolve(settings)
-        index = await self.index()
-        return await index.search(query, settings)
 
     async def index(self) -> CollectionIndex:
         return self.index_with(await catalogue.embedding_model(await load_user_settings()))

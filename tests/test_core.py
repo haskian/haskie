@@ -28,9 +28,11 @@ import pytest
 import structlog
 from conftest import (
     MD,
+    collection_hits,
     document_names,
     events,
     import_row,
+    index_hits,
     legacy_index,
     maintenance_state,
     text_pdf,
@@ -1420,7 +1422,7 @@ async def test_existing_is_none_for_a_directory_without_the_table(tmp_path: Path
 @pytest.mark.anyio
 async def test_search_of_a_never_indexed_collection_is_empty(tmp_path: Path) -> None:
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
-    assert await index.search("anything", SearchSettings()) == []
+    assert await index_hits(index, "anything", SearchSettings()) == []
 
 
 @pytest.mark.anyio
@@ -1533,7 +1535,7 @@ async def test_finish_builds_fts_once_and_later_rows_are_still_found(
     assert builds == [FTS_COLUMN], "one build across two documents"
     assert await index.has_index(FTS_COLUMN) is True
     assert [list(i.columns) for i in await table.list_indices()] == [[FTS_COLUMN]], "and one index"
-    found = {hit.document for hit in await index.search("lancedb", SearchSettings(limit=10))}
+    found = {hit.document for hit in await index_hits(index, "lancedb", SearchSettings(limit=10))}
     assert found == {"a.md", "b.md"}, "the rows added after the build are still found"
 
 
@@ -1800,7 +1802,7 @@ async def test_search_falls_back_to_fts_without_an_embedding_model(tmp_path: Pat
     index = CollectionIndex(path, "notes", tmp_path, None)
     await index.finish()  # build the full-text index the fallback needs
 
-    hits = await index.search("hi", SearchSettings(mode=SearchMode.VECTOR))
+    hits = await index_hits(index, "hi", SearchSettings(mode=SearchMode.VECTOR))
 
     assert [h.document for h in hits] == ["a.md"]
 
@@ -2083,7 +2085,7 @@ async def test_a_hit_carries_what_the_models_read_and_its_pieces(tmp_path: Path)
     await index.add_parts("d.md", "documents/d.md", "documents/d.md.md", _aparts([(0, rows)]))
     await index.finish()
 
-    hits = {h.seq: h for h in await index.search("lancedb", SearchSettings(limit=20))}
+    hits = {h.seq: h for h in await index_hits(index, "lancedb", SearchSettings(limit=20))}
     middle = hits[2]
     assert middle.header == "Costs > Europe", "the heading path the models read it after"
     assert middle.layout == chunks[1].layout, "stored as the chunk has them"
@@ -2100,7 +2102,7 @@ async def test_a_hit_carries_what_the_models_read_and_its_pieces(tmp_path: Path)
 @pytest.mark.anyio
 async def test_search_rows_returns_raw_rows_without_cutting(tmp_path: Path) -> None:
     """Retrieval only: as many rows as the caller asked for, carrying the engine's own score and
-    no cross-encoder score. `search` is what cuts to `settings.limit`."""
+    no cross-encoder score."""
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     chunks = [
         c for i in range(6) for c in chunk.split(f"# H\n\nlancedb chapter {i}\n", ChunkSettings())
@@ -2117,10 +2119,8 @@ async def test_search_rows_returns_raw_rows_without_cutting(tmp_path: Path) -> N
     assert all("_score" in row and "_relevance_score" not in row for row in rows)
     assert {row["document"] for row in rows} == {"d.md"}
     assert len(await index.search_rows("lancedb", None, settings, 100)) == 6, "no more than exist"
-    assert len(await index.search("lancedb", settings)) == 2, "the composed search cuts to limit"
     missing = CollectionIndex(tmp_path / "missing", "notes", tmp_path, None)
     assert await missing.search_rows("lancedb", None, settings, 4) == [], "no table, no rows"
-    assert await missing.search("lancedb", settings) == [], "and nothing to compose a search from"
 
 
 @pytest.mark.parametrize(
@@ -2178,7 +2178,7 @@ async def test_query_vector_of_a_never_indexed_collection_is_none(tmp_path: Path
     """No table means no search, so the model is never asked for (it may not be loaded)."""
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, COMPACT)
     assert await index.query_vector("q", SearchSettings(mode=SearchMode.HYBRID)) is None
-    assert await index.search("q", SearchSettings(mode=SearchMode.HYBRID)) == []
+    assert await index_hits(index, "q", SearchSettings(mode=SearchMode.HYBRID)) == []
 
 
 # --- pipeline ----------------------------------------------------------------------
@@ -2339,7 +2339,7 @@ async def test_the_pipeline_indexes_a_markdown_document_into_a_collection() -> N
     assert written == await _indexed_rows(collection) > 0
     (entry,) = await embed_cache.entries(doc.name)
     assert (entry.id, entry.rows) == (cache_id, written)
-    (hit,) = await collection.search("lancedb")
+    (hit,) = await collection_hits(collection.name, "lancedb")
     assert (hit.collection, hit.document) == ("notes", "guide.md")
     assert hit.source_file == str(doc.original), "the hit points at the document's own files"
     assert hit.markdown_file == str(doc.markdown)
@@ -2397,7 +2397,7 @@ async def test_two_collections_with_the_same_chunk_settings_share_one_cache_entr
     rows_beta = await _index(beta, doc, second)
 
     assert rows_alpha > 0 and rows_beta > rows_alpha, "beta chunks the same markdown smaller"
-    assert len(await alpha.search("lancedb")) > 0 and len(await beta.search("lancedb")) > 0
+    assert await collection_hits("alpha", "lancedb") and await collection_hits("beta", "lancedb")
     assert await document.collections_of(doc.name) == ["alpha", "beta"]
 
 

@@ -38,7 +38,10 @@ from haskie.settings import (
     DEFAULT_RERANKER,
     Accelerator,
     ChunkSettings,
+    CollectionOverrides,
     PipelineSettings,
+    Reranker,
+    SearchOverrides,
     UserSettings,
     save_user_settings,
 )
@@ -210,16 +213,6 @@ def _requested(lines: list[dict]) -> list[str]:
             "PUT", "/api/collections/notes/overrides",
             {"search": {"reranker_model": "no/such-model"}}, None,
             422, "unknown reranker model: no/such-model",
-        ),
-        (
-            "search limit below one -> unprocessable",
-            "GET", "/api/collections/notes/search?q=alpha&limit=-5", None, None,
-            422, "Expected `int` >= 1",
-        ),
-        (
-            "search needs a reranker that is not loaded -> service unavailable",
-            "GET", "/api/collections/notes/search?q=alpha&reranker=cross-encoder", None, None,
-            503, "is not loaded yet",
         ),
         (
             "explore limit below one -> unprocessable",
@@ -408,7 +401,15 @@ async def test_request_id_header(
 
 
 async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClient) -> None:
-    response = await ready.get("/api/collections/notes/search?q=alpha&reranker=cross-encoder")
+    """A collection whose search needs a reranker that is not loaded: written straight to the row,
+    since the route that saves it would start the download."""
+    notes = await Collection.get("notes")
+    await notes.set_overrides(
+        CollectionOverrides(search=SearchOverrides(reranker=Reranker.CROSS_ENCODER))
+    )
+
+    response = await ready.get("/api/search/explore", params={"q": "alpha", "collections": "notes"})
+
     assert response.status_code == 503
     assert response.headers["Retry-After"] == errors.NotReady.headers["Retry-After"]
 
@@ -743,7 +744,8 @@ async def test_attach_list_and_detach_a_member(client: AsyncTestClient) -> None:
     assert [entry["document"] for entry in cached] == ["guide.md"] * len(cached)
     assert cached, "indexing the member filled the document's embedding cache"
 
-    (hit,) = (await client.get("/api/collections/notes/search", params={"q": "lancedb"})).json()
+    in_notes = {"q": "lancedb", "collections": "notes"}
+    (hit,) = (await client.get("/api/search/explore", params=in_notes)).json()
     assert (hit["collection"], hit["document"]) == ("notes", "guide.md")
 
     detached = await client.delete("/api/collections/notes/documents/guide.md")
@@ -751,7 +753,7 @@ async def test_attach_list_and_detach_a_member(client: AsyncTestClient) -> None:
     assert detached.status_code == 204, detached.text
     assert (await client.get("/api/collections/notes/documents")).json()["items"] == []
     assert (await client.get("/api/documents/guide.md/collections")).json() == []
-    assert (await client.get("/api/collections/notes/search", params={"q": "lancedb"})).json() == []
+    assert (await client.get("/api/search/explore", params=in_notes)).json() == []
     assert (await client.get("/api/documents/guide.md")).json()["status"] == "imported", (
         "a detach takes nothing from the document"
     )
@@ -770,7 +772,7 @@ async def test_one_document_serves_two_collections(client: AsyncTestClient) -> N
     assert (await client.get("/api/documents/guide.md/collections")).json() == ["alpha", "beta"]
     for name in ("alpha", "beta"):
         found = (
-            await client.get(f"/api/collections/{name}/search", params={"q": "lancedb"})
+            await client.get("/api/search/explore", params={"q": "lancedb", "collections": name})
         ).json()
         assert [hit["collection"] for hit in found] == [name]
     assert len((await client.get("/api/documents/guide.md/embeddings")).json()) == 1, (
@@ -831,7 +833,8 @@ async def test_deleting_a_collection_keeps_its_documents(client: AsyncTestClient
     assert [c["name"] for c in (await client.get("/api/collections")).json()["items"]] == ["kept"]
     assert (await client.get("/api/documents/guide.md")).json()["status"] == "imported"
     assert (await client.get("/api/documents/guide.md/collections")).json() == ["kept"]
-    assert (await client.get("/api/collections/kept/search", params={"q": "lancedb"})).json()
+    kept = {"q": "lancedb", "collections": "kept"}
+    assert (await client.get("/api/search/explore", params=kept)).json()
 
 
 async def test_deleting_a_document_removes_it_from_every_collection(
@@ -853,7 +856,8 @@ async def test_deleting_a_document_removes_it_from_every_collection(
     for name in ("alpha", "beta"):
         assert (await client.get(f"/api/collections/{name}/documents")).json()["items"] == []
         assert (await client.get(f"/api/collections/{name}")).json()["counts"]["total"] == 0
-        found = await client.get(f"/api/collections/{name}/search", params={"q": "lancedb"})
+        scoped = {"q": "lancedb", "collections": name}
+        found = await client.get("/api/search/explore", params=scoped)
         assert found.json() == [], "the rows go from every collection's index too"
 
 
@@ -1914,7 +1918,8 @@ async def test_a_refused_search_override_is_never_saved(
     assert after.status_code == 200, f"{name}: the collection still reads: {after.text}"
     assert after.json()["overrides"]["search"]["limit"] == 3, f"{name}: the old value stands"
     assert after.json()["search"]["limit"] == 3, name
-    searched = await client.get("/api/collections/notes/search", params={"q": "alpha"})
+    scoped = {"q": "alpha", "collections": "notes"}
+    searched = await client.get("/api/search/explore", params=scoped)
     assert searched.status_code == 200, f"{name}: and it still searches: {searched.text}"
 
 

@@ -30,9 +30,10 @@ once.
 
 **`search_excerpts(q, context?, session_id?, collections?, limit?)`** → `excerpts` (best first),
 `uncovered` and `missing_terms`.
-`limit` is at least 1, defaults to the user's setting, and counts excerpts. One excerpt is one
-section of one document, the largest heading that is at most a few pages, with every passage of it
-the search matched, in document order, plus the text around and between them that matches as well.
+`limit` is at least 1, defaults to the collection's setting when one collection is searched, else
+the user's, and counts excerpts. One excerpt is one section of one document, the largest heading
+that is at most a few pages, with every passage of it the search matched, in document order, plus
+the text around and between them that matches as well.
 `text` joins them: each passage opens with the headings it sits under below `header`, and `[…]`
 marks text skipped between two because it did not match. A passage is the matching
 chunks merged where they sit next to each other. Chunks are cut at headings, blank lines, blocks and

@@ -196,7 +196,7 @@ function CollectionBody({ name, onClose, onChanged }: { name: string; onClose: (
       </div>
 
       <div id={TABS[1].id} role="tabpanel" className="collection-panel" hidden={tab !== TABS[1].id}>
-        <SearchPanel run={(query) => api.searchCollection(name, query)} placeholder="Search this collection" />
+        <SearchPanel run={(query) => api.explore(query, 'passage', { collections: [name] })} placeholder="Search this collection" plural="passages" />
       </div>
 
       <div id={TABS[2].id} role="tabpanel" className="collection-panel" hidden={tab !== TABS[2].id}>

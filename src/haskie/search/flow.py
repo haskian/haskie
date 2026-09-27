@@ -49,7 +49,6 @@ from haskie.collection.index import Hit
 from haskie.paging import check_page_size
 from haskie.search import aspects, probe, retrieval, scoring, section
 from haskie.search.passage import Answer, Excerpt, HitRange, Passage, Sources
-from haskie.settings import load_user_settings
 
 # How deep any of these searches reads. A passage or a document row is folded from several chunks,
 # so the scan goes deeper than the answer; this is where that stops.
@@ -377,11 +376,11 @@ async def answers(names: list[str], asked: aspects.Questions, limit: int | None 
     slots, `aspects`) and become excerpts (`ANSWERED`). With several questions, each excerpt says
     which of them it answers.
     """
-    limit = limit or (await load_user_settings()).search.limit
-    aspects.depth(len(asked.questions), limit)  # a limit below the questions fails before searching
     states = await _searches(names, asked, limit, deeper=PASSAGE_SCAN)
     if states is None:
         return probe.report([], asked.asked())
+    # a limit below the questions fails before retrieving
+    aspects.depth(len(asked.questions), states[0].limit)
     ranged = await asyncio.gather(*(RANKED.run(state=state) for state in states))
     found = await ANSWERED.run(state=states[0], inputs=list(ranged))
     return probe.report(found, states[0].questions)
@@ -425,11 +424,12 @@ async def _searches(
     the steps read numbers rather than compute them. `deeper` is how many chunks the answer this
     pipeline builds is folded from, which is what turns the caller's limit into the scan depth.
     """
-    limit = limit or (await load_user_settings()).search.limit
     with _timing("plan"):
         plans = await retrieval.plan(names, asked.framed)
     if plans is None:
         return None
+    # the collection's own limit when it is the only one searched, else the user's (`plan`)
+    limit = limit or plans[0].settings.limit
     # a pipeline that folds scans deeper than it answers, and that is what `MAX_SCAN` bounds
     scan = max(limit, min(limit * deeper, MAX_SCAN))
     candidates = max(plans[0].settings.candidates, scan)

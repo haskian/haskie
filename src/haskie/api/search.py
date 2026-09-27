@@ -61,7 +61,8 @@ async def explore(
     """Search at the granularity the caller wants: the exploration endpoint the UI drives.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
-    `session_id`, else every collection. `limit` defaults to the user setting.
+    `session_id`, else every collection. `limit` defaults to that collection's setting when one
+    collection is searched, else to the user's.
 
     What comes back per granularity: `chunk`, the matching index rows; `passage`, the consecutive
     chunks of one section merged into one span, cut where the chunker cut. The excerpts an agent

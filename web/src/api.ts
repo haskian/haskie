@@ -262,7 +262,6 @@ export const api = {
     request<CollectionInfo>(`${collectionPath(name)}/description`, json('PUT', { description })),
   collection: (name: string) => request<CollectionInfo>(collectionPath(name)),
   deleteCollection: (name: string) => request<BulkStarted>(collectionPath(name), { method: 'DELETE' }),
-  searchCollection: (name: string, q: string) => request<Hit[]>(`${collectionPath(name)}/search?q=${encodeURIComponent(q)}`),
   saveCollectionOverrides: (name: string, s: CollectionOverrides) =>
     request<CollectionInfo>(`${collectionPath(name)}/overrides`, json('PUT', s)),
   indexCollection: (name: string) => request<BulkStarted>(`${collectionPath(name)}/index`, { method: 'POST' }),

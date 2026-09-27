@@ -4,14 +4,13 @@ A collection holds documents it does not own: attaching and detaching move a mem
 rows of this collection's index, never the document itself (see `collection/collection.py`).
 """
 
-import time
 from typing import Annotated
 
 import msgspec
 from litestar import delete, get, post, put
 
 from haskie import audit, logs
-from haskie.api.common import PAGED, BulkStarted, Describe, Limit
+from haskie.api.common import PAGED, BulkStarted, Describe
 from haskie.catalogue import catalogue
 from haskie.collection.collection import (
     Collection,
@@ -20,16 +19,11 @@ from haskie.collection.collection import (
     Member,
     MemberStatus,
 )
-from haskie.collection.index import Hit
 from haskie.indexing import models, workflows
 from haskie.paging import Page, PageRequest, one_of
 from haskie.search import session
 from haskie.settings import (
     CollectionOverrides,
-    Fusion,
-    Reranker,
-    SearchMode,
-    SearchOverrides,
     load_user_settings,
 )
 
@@ -85,42 +79,6 @@ async def delete_collection(collection: str) -> BulkStarted:
     operation_id = await workflows.start_delete_collection(collection)
     audit.attach(operation_id=operation_id)
     return BulkStarted(operation_id=operation_id)
-
-
-@get("/api/collections/{collection:str}/search")
-async def search_collection(
-    collection: str,
-    q: str,
-    limit: Limit = None,
-    mode: SearchMode | None = None,
-    fusion: Fusion | None = None,
-    vector_weight: float | None = None,
-    bm25_weight: float | None = None,
-    reranker: Reranker | None = None,
-    candidates: int | None = None,
-    session_id: str | None = None,
-) -> list[Hit]:
-    """Search one collection. Options default to the collection's search settings:
-    mode hybrid|vector|fts, fusion rrf|linear, vector_weight/bm25_weight for linear,
-    reranker none|cross-encoder (rescoring of `candidates` for any mode).
-
-    Args:
-        session_id: The conversation's id; the search then shows in that session's history.
-    """
-    overrides = SearchOverrides(
-        limit=limit,
-        mode=mode,
-        fusion=fusion,
-        vector_weight=vector_weight,
-        bm25_weight=bm25_weight,
-        reranker=reranker,
-        candidates=candidates,
-    )
-    found = await Collection.get(collection)
-    started = time.perf_counter()
-    hits = await found.search(q, overrides)
-    await session.record_search(session_id, collection, q, hits, started)
-    return hits
 
 
 @put("/api/collections/{collection:str}/overrides")

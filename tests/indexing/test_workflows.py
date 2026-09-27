@@ -37,6 +37,7 @@ from conftest import (
     attach_document,
     audit_lines,
     await_terminal,
+    collection_hits,
     counted_list_workflows,
     delete_collection,
     delete_document,
@@ -370,7 +371,7 @@ async def test_attach_indexes_the_document_into_the_collection(dbos, tmp_path: P
     assert (member.status, member.error) == ("indexed", None)
     assert (await document.get(doc.name)).status == "imported", "the document's status is its own"
     assert await document.collections_of(doc.name) == ["Notes-Stuff"]
-    hits = await collection.search("lancedb", SearchOverrides(limit=5))
+    hits = await collection_hits(collection.name, "lancedb", SearchOverrides(limit=5))
     assert hits and hits[0].headings == ["Title", "Alpha"] and hits[0].collection == "Notes-Stuff"
     assert (hits[0].line_start, hits[0].line_end) == (7, 7), "the text, not its heading"
     assert hits[0].markdown_path == doc.relative(doc.markdown), "home-relative"
@@ -412,7 +413,7 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
     assert [(t.stage, t.seq, t.status) for t in await operations.list_tasks(indexing)] == [
         ("index", 0, "SUCCESS"), ("index", 1, "SUCCESS"), ("index", 2, "SUCCESS"),
     ]  # fmt: skip
-    hit = (await Collection("q").search("word25", SearchOverrides(limit=1)))[0]
+    hit = (await collection_hits("q", "word25", SearchOverrides(limit=1)))[0]
     assert (hit.page_start, hit.part) == (25, 2)
     full = pdf.markdown.read_text()
     assert full[hit.char_start : hit.char_end] == hit.text
@@ -458,7 +459,7 @@ async def test_documents_of_one_collection_index_without_conflict(dbos, tmp_path
     counts = await Collection("serial").counts()
     assert (counts.total, counts.indexed) == (4, 4)
     assert {
-        h.document for h in await Collection("serial").search("D3P5", SearchOverrides(limit=1))
+        h.document for h in await collection_hits("serial", "D3P5", SearchOverrides(limit=1))
     } == {"d3.pdf"}
 
 
@@ -678,7 +679,7 @@ async def test_documents_run_in_parallel_up_to_workers(
     assert 2 <= overlap.peak <= workers, f"peak {overlap.peak} outside 2..{workers}"
     for d in docs:
         await attach_document(dbos, "par", d.name)
-    found = [(await Collection("par").search(f"tokq{i}"))[0].page_start for i in range(3)]
+    found = [(await collection_hits("par", f"tokq{i}"))[0].page_start for i in range(3)]
     assert found == [1, 1, 1]
 
 
@@ -707,7 +708,7 @@ async def test_batches_of_one_document_run_in_parallel_up_to_workers(
     tasks = await operations.list_tasks(job_id)
     assert [t.seq for t in tasks if t.stage == "convert"] == [0, 1, 2, 3, 4, 5]
     await attach_document(dbos, "wide", doc.name)
-    assert (await Collection("wide").search("toks5"))[0].page_start == 6, "one document"
+    assert (await collection_hits("wide", "toks5"))[0].page_start == 6, "one document"
 
 
 async def test_stage_queues_cap_each_stage_separately(
@@ -773,7 +774,7 @@ async def test_the_cpu_budget_bounds_every_stage_together(
     assert running.calls == 12, "three documents, two pages each, converted and embedded"
     for d in docs:
         await attach_document(dbos, "budget", d.name)
-    found = [(await Collection("budget").search(f"tokb{i}"))[0].page_start for i in range(3)]
+    found = [(await collection_hits("budget", f"tokb{i}"))[0].page_start for i in range(3)]
     assert found == [1, 1, 1]
 
 
@@ -921,7 +922,7 @@ async def test_index_groups_parts_into_one_write(dbos, tmp_path: Path) -> None:
     rows = [r for r in (await table.to_arrow()).to_pylist() if r["document"] == doc.name]
     assert len(rows) == await _cached_rows(doc.name) > 0
     assert sorted({r["part"] for r in rows}) == [0, 1, 2], "every part landed in that one commit"
-    assert (await Collection("grouped").search("gamma"))[0].page_start == 3
+    assert (await collection_hits("grouped", "gamma"))[0].page_start == 3
 
 
 async def test_parts_stay_and_only_the_scratch_rows_are_consumed(dbos, tmp_path: Path) -> None:
@@ -960,8 +961,8 @@ async def test_two_collections_with_the_same_params_embed_once(
     (entry,) = await embed_cache.entries(doc.name)
     assert list(spy.calls) == [entry.id], "the one computation is the one cached row"
     assert [p.name for p in doc.embeddings_dir.glob("*.parquet")] == [f"{entry.id}.parquet"]
-    assert (await Collection("left").search("lancedb"))[0].collection == "left"
-    assert (await Collection("right").search("lancedb"))[0].collection == "right"
+    assert (await collection_hits("left", "lancedb"))[0].collection == "left"
+    assert (await collection_hits("right", "lancedb"))[0].collection == "right"
     assert sorted(await document.collections_of(doc.name)) == ["left", "right"]
 
 
@@ -989,8 +990,8 @@ async def test_two_collections_with_different_chunk_size_get_their_own_cache(
     }
     assert spy.calls == Counter({entries[default].id: 1, entries[20].id: 1}), "one run each"
     assert entries[20].rows > entries[default].rows, "smaller chunks, more of them"
-    assert (await Collection("wide").search("lancedb"))[0].document == doc.name
-    assert (await Collection("narrow").search("lancedb"))[0].document == doc.name
+    assert (await collection_hits("wide", "lancedb"))[0].document == doc.name
+    assert (await collection_hits("narrow", "lancedb"))[0].document == doc.name
 
 
 async def test_reindexing_with_unchanged_settings_hits_the_cache(
@@ -1368,7 +1369,7 @@ async def test_indexing_a_document_that_is_not_imported_fails_the_membership(
     assert member.status == "error" and "not imported" in (member.error or "")
     assert (await document.get(doc.name)).status == "queued", "the document's status is untouched"
     assert await embed_cache.entries(doc.name) == [], "nothing was computed"
-    assert await collection.search("intro") == []
+    assert await collection_hits(collection.name, "intro") == []
 
 
 # --- crash recovery ----------------------------------------------------------------
@@ -1578,10 +1579,10 @@ async def test_delete_document_clears_every_collection_it_is_in(dbos, tmp_path: 
             name
         )
         assert {
-            h.document for h in await Collection(name).search("lancedb", SearchOverrides(limit=5))
+            h.document for h in await collection_hits(name, "lancedb", SearchOverrides(limit=5))
         } == set(), name
     assert {
-        h.document for h in await Collection("left").search("beta", SearchOverrides(limit=5))
+        h.document for h in await collection_hits("left", "beta", SearchOverrides(limit=5))
     } == {other.name}
 
 
@@ -1621,7 +1622,7 @@ async def test_attaching_while_a_delete_runs_is_refused(dbos, tmp_path: Path, mo
     release.set()
     await wait_for(job_id)
     assert await Collection("third").member_names() == [], "no membership the snapshot missed"
-    assert await Collection("third").search("lancedb") == [], "and no orphaned index row"
+    assert await collection_hits("third", "lancedb") == [], "and no orphaned index row"
     assert not Collection("third").index_dir.exists(), "the refused attach wrote no table"
     assert await document_names() == []
 
@@ -1639,9 +1640,9 @@ async def test_detach_leaves_the_document_and_the_other_collection(dbos, tmp_pat
     await dbos.detach("drop", doc.name)
 
     assert await Collection("drop").member_names() == []
-    assert await Collection("drop").search("lancedb") == []
+    assert await collection_hits("drop", "lancedb") == []
     assert await Collection("keep").member_names() == [doc.name]
-    assert (await Collection("keep").search("lancedb"))[0].document == doc.name
+    assert (await collection_hits("keep", "lancedb"))[0].document == doc.name
     assert (await document.get(doc.name)).status == "imported"
     assert await document.collections_of(doc.name) == ["keep"]
     assert [e.id for e in await embed_cache.entries(doc.name)] == [entry.id], "the cache stays"
@@ -1683,9 +1684,10 @@ async def test_detach_waits_for_the_index_write_in_flight(
     assert await collection.member_names() == [done.name]
     assert await _rows_of(collection, slow.name) == 0, "its rows went with the membership"
     assert await _rows_of(collection, done.name) > 0, "and the other member kept its own"
-    assert {h.document for h in await collection.search("alpha", SearchOverrides(limit=5))} == {
-        done.name
-    }, "both documents carry 'alpha'; only the one still attached is found"
+    found = await collection_hits(collection.name, "alpha", SearchOverrides(limit=5))
+    assert {h.document for h in found} == {done.name}, (
+        "both documents carry 'alpha'; only the one still attached is found"
+    )
     with pytest.raises(NotFound, match="document not in collection part: slow.pdf"):
         await dbos.detach("part", slow.name)
     await _drain()

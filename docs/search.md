@@ -1,9 +1,10 @@
 # Search
 
 `search_excerpts`, `search_sources` and `GET /api/search/explore` share one ranking, then run the
-fold their answer needs. `search/flow.py` builds these pipelines in one screen. Two more endpoints
-search on their own paths: `/api/collections/{c}/search` asks one collection's index directly,
-and `/api/search/text` is a separate BM25 search. Neither merges collections or folds repeats.
+fold their answer needs. `search/flow.py` builds these pipelines in one screen. A search of one
+collection is the same search with `collections` set to it: the collection page asks `explore`
+for passages. `/api/search/text` is the one search on its own path, a separate BM25 search that
+neither merges collections nor folds repeats.
 
 ```mermaid
 flowchart LR
@@ -49,7 +50,7 @@ source row.
 
 | shape | what it is | who asks for it |
 | --- | --- | --- |
-| chunk (`Hit`) | one indexed chunk and its score | `explore?granularity=chunk`; also returned, without folding, by `/api/search/text` and `/api/collections/{c}/search` |
+| chunk (`Hit`) | one indexed chunk and its score | `explore?granularity=chunk`; also returned, without folding, by `/api/search/text` |
 | passage | neighbouring matched chunks of one section, merged | `explore?granularity=passage` |
 | excerpt | one section of a document, with every passage of it the search kept | `search_excerpts` (the Explore page too) |
 | source | one document: score, best chunk, hottest sections, collections | `search_sources` |
@@ -282,9 +283,8 @@ building its first full-text index contributes nothing instead of making the que
 and a collection can override them. In the shared ranking, each collection retrieves with its own
 overrides. The settings of the merged ranking (`rrf_k`, `candidates`, the reranker) come from the
 collection only when it is the one collection in scope, and from the user otherwise. `limit` comes
-from the call, else the user default. `/api/collections/{c}/search` applies all of the collection's
-overrides, and also takes `limit`, `mode`, `fusion`, `vector_weight`, `bm25_weight`, `reranker` and
-`candidates` per call.
+from the call, else from the same place. No route takes search settings per call: a search with
+other settings is a search of a collection whose overrides say so.
 
 Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/collapse.py`,
 `search/aspects.py`, `search/thin.py`, `search/section.py`, `search/fill.py`, `search/probe.py`.

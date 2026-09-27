@@ -15,6 +15,7 @@ from conftest import (
     WAIT,
     attach_document,
     await_terminal,
+    collection_hits,
     compact_model,
     counted_list_workflows,
     import_document,
@@ -188,32 +189,31 @@ async def test_embed_stage_precomputes_vectors_and_hybrid_search_uses_them(
     records = sorted((await table.to_arrow()).to_pylist(), key=lambda r: r["seq"])
     assert [r["headings"] for r in records] == [["Cats"], ["Finance"]]
     assert all(len(r["vector"]) == 384 for r in records)
-    assert (await collection.search("kitten"))[0].headings[-1] == "Cats", "semantic hit"
+    assert (await collection_hits("vec", "kitten"))[0].headings[-1] == "Cats", "semantic hit"
 
     # search options: every mode/fusion answers; fts alone cannot find "kitten"
-    semantic = await collection.search("kitten", SearchOverrides(mode=SearchMode.VECTOR))
+    semantic = await collection_hits("vec", "kitten", SearchOverrides(mode=SearchMode.VECTOR))
     assert semantic[0].headings[-1] == "Cats"
-    assert await collection.search("kitten", SearchOverrides(mode=SearchMode.FTS)) == []
-    linear = await collection.search(
-        "bonds", SearchOverrides(mode=SearchMode.HYBRID, fusion=Fusion.LINEAR)
+    assert await collection_hits("vec", "kitten", SearchOverrides(mode=SearchMode.FTS)) == []
+    linear = await collection_hits(
+        "vec", "bonds", SearchOverrides(mode=SearchMode.HYBRID, fusion=Fusion.LINEAR)
     )
     assert linear[0].headings[-1] == "Finance"
-    lexical = await collection.search(
-        "bonds", SearchOverrides(fusion=Fusion.LINEAR, vector_weight=0.0, bm25_weight=1.0)
+    lexical = await collection_hits(
+        "vec", "bonds", SearchOverrides(fusion=Fusion.LINEAR, vector_weight=0.0, bm25_weight=1.0)
     )
     assert lexical[0].headings[-1] == "Finance"
-    assert (await collection.search("kitten", SearchOverrides(fusion=Fusion.RRF, limit=1)))[
-        0
-    ].headings[-1] == "Cats"
+    (best,) = await collection_hits("vec", "kitten", SearchOverrides(fusion=Fusion.RRF, limit=1))
+    assert best.headings[-1] == "Cats"
 
     # cross-encoder reranker works on top of any mode, including vector-only and fts
     for mode in (SearchMode.VECTOR, SearchMode.HYBRID):
-        hits = await collection.search(
-            "kitten", SearchOverrides(mode=mode, reranker=Reranker.CROSS_ENCODER, candidates=10)
-        )
+        reranked = SearchOverrides(mode=mode, reranker=Reranker.CROSS_ENCODER, candidates=10)
+        hits = await collection_hits("vec", "kitten", reranked)
         assert hits[0].headings[-1] == "Cats" and hits[0].score > hits[1].score, mode
-    lexical_reranked = await collection.search(
-        "bonds", SearchOverrides(mode=SearchMode.FTS, reranker=Reranker.CROSS_ENCODER)
+        assert all(0 < hit.score < 1 for hit in hits), f"{mode}: the sigmoid of the logit"
+    lexical_reranked = await collection_hits(
+        "vec", "bonds", SearchOverrides(mode=SearchMode.FTS, reranker=Reranker.CROSS_ENCODER)
     )
     assert lexical_reranked[0].headings[-1] == "Finance"
 
@@ -264,12 +264,12 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
     collection = await Collection.create("busy")
     doc = await import_document(dbos, "g.md", MD, tmp_path)
     await attach_document(dbos, "busy", doc.name)
-    assert await collection.search("lancedb"), "ready model answers"
+    assert await collection_hits(collection.name, "lancedb"), "ready model answers"
 
     monkeypatch.setattr(models, "_ready", set())  # as after a restart: caches are cold
 
     with pytest.raises(NotReady, match="is loading in this process"):
-        await collection.search("lancedb")
+        await collection_hits(collection.name, "lancedb")
 
 
 @pytest.mark.parametrize(

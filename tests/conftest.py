@@ -20,9 +20,10 @@ from haskie.indexing.segment import PieceType
 
 if TYPE_CHECKING:  # every helper below imports haskie when it runs, not when pytest collects
     from haskie.catalogue.catalogue import EmbeddingModel
-    from haskie.collection.index import Hit
+    from haskie.collection.index import CollectionIndex, Hit
     from haskie.indexing.chunk import Chunk
     from haskie.search.collapse import Scan
+    from haskie.settings import SearchOverrides, SearchSettings
 
 TEARDOWN_GRACE_SECONDS = 2.0  # how long a cancelled step may still be running at teardown
 TEARDOWN_POLL_SECONDS = 0.05
@@ -491,6 +492,34 @@ async def compact_model() -> "EmbeddingModel":
     model = await catalogue.embedding_model(UserSettings(embedding="compact"))
     assert model is not None
     return model
+
+
+async def index_hits(
+    index: "CollectionIndex", query: str, settings: "SearchSettings"
+) -> list["Hit"]:
+    """What one bare index retrieves for `query` under `settings`, as a search's `retrieve` step
+    reads it (`search_rows`), cut to `settings.limit`: no reranker, no fold."""
+    vector = await index.query_vector(query, settings)
+    rows = await index.search_rows(query, vector, settings, settings.limit)
+    return [index.hit(row) for row in rows]
+
+
+async def collection_hits(
+    name: str, query: str, search: "SearchOverrides | None" = None
+) -> list["Hit"]:
+    """What a chunk search of the one collection `name` answers (`flow.chunks`), the one search
+    the API runs. `search`, when given, first becomes the collection's search overrides: the way to
+    search with other settings, since no route takes them per call."""
+    import msgspec
+
+    from haskie.collection.collection import Collection
+    from haskie.search import flow
+
+    if search is not None:
+        collection = Collection(name)
+        current = (await collection.info()).overrides
+        await collection.set_overrides(msgspec.structs.replace(current, search=search))
+    return await flow.chunks([name], query)
 
 
 async def seed_index(collection: str, doc: str, text: str, heading: str = "Alpha") -> None:

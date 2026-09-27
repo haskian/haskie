@@ -314,23 +314,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/collections/{collection}/search": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** SearchCollection */
-        get: operations["ApiCollectionsSearchSearchCollection"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/collections/{collection}/overrides": {
         parameters: {
             query?: never;
@@ -2551,53 +2534,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BulkStarted"];
-                };
-            };
-            /** @description Bad request syntax or unsupported method */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        status_code: number;
-                        detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
-                    };
-                };
-            };
-        };
-    };
-    ApiCollectionsSearchSearchCollection: {
-        parameters: {
-            query: {
-                q: string;
-                limit?: number | null;
-                mode?: components["schemas"]["SearchMode"] | null;
-                fusion?: components["schemas"]["Fusion"] | null;
-                vector_weight?: number | null;
-                bm25_weight?: number | null;
-                reranker?: components["schemas"]["Reranker"] | null;
-                candidates?: number | null;
-                session_id?: string | null;
-            };
-            header?: never;
-            path: {
-                collection: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Request fulfilled, document follows */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Hit"][];
                 };
             };
             /** @description Bad request syntax or unsupported method */

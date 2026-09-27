@@ -37,7 +37,7 @@ from haskie.indexing import models
 from haskie.indexing.chunk import HEADING_SEP, Chunk, CutReason, Position, framed
 from haskie.indexing.chunk import record as chunk_record
 from haskie.logs import get_logger
-from haskie.settings import Fusion, Reranker, SearchMode, SearchSettings, load_user_settings
+from haskie.settings import Fusion, SearchMode, SearchSettings, load_user_settings
 
 # What identifies one chunk, wherever it is stored. The collection is deliberately not part of it:
 # the same chunk of the same document is the same answer, whichever collection's table it came out
@@ -516,8 +516,7 @@ class CollectionIndex:
 
     # --- search ----------------------------------------------------------
     # Split into three steps so a cross-collection search embeds the query once, retrieves from
-    # every index in parallel and rescores the merge once (see search.flow). `search` below
-    # is the single-index composition of the same steps.
+    # every index in parallel and rescores the merge once (see search.flow).
 
     async def query_vector(self, query: str, settings: SearchSettings) -> list[float] | None:
         """The query embedding, or None when this index can only answer lexically: mode `fts`, no
@@ -631,15 +630,6 @@ class CollectionIndex:
         wanted = f"document IN ({', '.join(_quoted(name) for name in names)})"
         columns = ["document", "seq", "headings", "char_start", "char_end"]
         return await table.query().where(wanted).select(columns).to_list()
-
-    async def search(self, query: str, settings: SearchSettings) -> list[Hit]:
-        rerank = settings.reranker != Reranker.NONE
-        fetch = max(settings.candidates, settings.limit) if rerank else settings.limit
-        vector = await self.query_vector(query, settings)
-        rows = await self.search_rows(query, vector, settings, fetch)
-        if rerank:
-            rows = await cross_encode(query, rows, settings)
-        return [self.hit(r) for r in rows[: settings.limit]]
 
     def hit(self, r: dict, score: float | None = None) -> Hit:
         """One result row as a `Hit`, with the file paths resolved against this index's home.

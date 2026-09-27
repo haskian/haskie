@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from conftest import (
     attach_document,
+    collection_hits,
     events,
     import_document,
     legacy_index,
@@ -38,28 +39,32 @@ pytestmark = pytest.mark.anyio
 
 
 async def test_search_limit_user_and_collection_level(dbos, tmp_path: Path) -> None:
+    """The call's limit, else the collection's when it is the one collection in scope, else the
+    user's: the one search route reads it the way it reads every other collection setting."""
     await save_user_settings(UserSettings(search=SearchSettings(limit=2)))
     collection = await Collection.create("lim")
+    await Collection.create("other")
     await collection.set_overrides(CollectionOverrides(chunk_size=30))
     body = "".join(f"# H{i}\n\ncommon token {i}\n\n" for i in range(6))
     doc = await import_document(dbos, "m.md", body, tmp_path)
     await attach_document(dbos, "lim", doc.name)
 
-    assert len(await collection.search("common")) == 2, "user default"
+    assert len(await flow.chunks(["lim"], "common")) == 2, "user default"
     await collection.set_overrides(
         CollectionOverrides(chunk_size=30, search=SearchOverrides(limit=4))
     )
     assert (await collection.info()).search.limit == 4
-    assert len(await collection.search("common")) == 4, "collection override"
-    assert len(await collection.search("common", SearchOverrides(limit=1))) == 1, (
-        "explicit beats both"
+    assert len(await flow.chunks(["lim"], "common")) == 4, "collection override"
+    assert len(await flow.chunks(["lim"], "common", limit=1)) == 1, "explicit beats both"
+    assert len(await flow.chunks(["lim", "other"], "common")) == 2, (
+        "several collections in scope: the user's"
     )
     effective = (await collection.info()).effective
     assert effective.chunk_size == 30, "a search override does not leak into the chunk settings"
 
     await session.set_collections("s", ["lim"])
     chosen = await session.collections_for("s")
-    assert len(await flow.chunks(chosen, "common")) == 2, "session cut to the user limit"
+    assert len(await flow.chunks(chosen, "common")) == 4, "a session of one: the collection's"
     assert len(await flow.chunks(chosen, "common", limit=3)) == 3
 
 
@@ -77,7 +82,7 @@ async def test_an_outdated_index_is_reported_and_rebuilt(dbos, tmp_path: Path) -
     await attach_document(dbos, "old", doc.name)  # the write path drops the old table and rebuilds
 
     assert (await collection.info()).index_outdated is False
-    (hit,) = await collection.search("hello")
+    (hit,) = await collection_hits(collection.name, "hello")
     assert hit.source_path == doc.relative(doc.original) and hit.line_start == 3
     assert hit.source_file == str(home.HOME / hit.source_path), "absolute, for a tool outside"
 
@@ -94,7 +99,7 @@ async def test_home_is_portable(dbos, tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr(db, "_migrated", set())
 
     again = await Collection.get("port")
-    (hit,) = await again.search("portable")
+    (hit,) = await collection_hits(again.name, "portable")
     assert hit.source_file == str(moved / hit.source_path), "resolved against the home it is in"
     assert (moved / hit.source_path).read_bytes().startswith(b"# P")
     assert (moved / hit.markdown_path).exists()
@@ -139,7 +144,7 @@ async def test_session_search_counts_a_shared_document_once(dbos, tmp_path: Path
     assert len(keys) == len(set(keys)), f"one hit per passage, got {keys}"
     assert sorted(h.document for h in hits) == sorted([solo.name, shared.name])
     assert {h.collection for h in hits} == {"first"}, "credited to the first that returned it"
-    assert {h.collection for h in await Collection("second").search("shared")} == {"second"}
+    assert {h.collection for h in await collection_hits("second", "shared")} == {"second"}
 
 
 async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkeypatch) -> None:
