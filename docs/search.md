@@ -72,7 +72,7 @@ that no kept passage opens takes no slot.
 
 Which section: the largest one that still reads as a quote. A passage's heading path is tried
 from the top. A level whose section holds the whole document (a title over everything) says
-nothing, and a level whose section is longer than `max_section_chars` (8,000) is split one heading
+nothing, and a level whose section is longer than `max_section_chars` (12,000) is split one heading
 down. So a book groups by chapter or by section, and a short note by its title. A passage under the
 deepest heading it has takes that section, however long. The sections come from each document's
 outline: every chunk's `seq`, heading path and char span, read in one LanceDB query per
@@ -114,7 +114,7 @@ The Explore page shows the missing words and questions under the results.
 
 The text between two kept passages, or just past them, often finishes the answer: the list under
 "three rules:", the paragraph that explains a term. It did not rank, so `search/fill.py` weighs it.
-Every chunk of the section within `max_passage_grow` (2) chunks of a kept passage is scored against
+Every chunk of the section within `max_passage_grow` (3) chunks of a kept passage is scored against
 the question, by the query vector when every row has one, else by the question's words. Its value
 is its score around the kept chunks' own: 0 for one as good as the median kept chunk, 1 for one as
 good as the best, below 0 for a weaker one, clipped to [-1, 1]. With several questions a chunk
@@ -143,7 +143,7 @@ calibration: an uncalibrated reranker's curve is the identity. dsRAG also decays
 rank; here every chunk was scored, so none is. It costs one reranker pass a question over the
 chunks near every section, and short passages grow the same way.
 
-`max_answer_chars` (24,000) bounds what one excerpts search returns. Right after grouping, a
+`max_answer_chars` (36,000) bounds what one excerpts search returns. Right after grouping, a
 `budget` step cuts the sections to it, the last first, though the first section always stays
 (`search_budget` logs how many went). The fills then go in, worth most per character first, while
 they fit the room left. By default the fill does not ask the reranker even when one is on: scoring
@@ -155,7 +155,7 @@ every chunk near every section against every question would take seconds. Each s
 A passage under `min_passage_chars` (300), or under 7 words, is thin: a section's lead-in ("Three
 rules:", with the list in the next chunk), or a section's last line. For the `passages` answer,
 `search/thin.py` grows it by the rule every excerpt's passages grow by: on each side, the run of up
-to `max_passage_grow` (2) chunks whose values sum highest, when that is above 0. It never grows
+to `max_passage_grow` (3) chunks whose values sum highest, when that is above 0. It never grows
 past a heading. A neighbour's value is its score around the scanned hits' own: 0 for one as good as
 the median, 1 for one as good as the best, scored by the reranker when one is on, else by the
 cosine to the query vector, else by the share of the question's words it holds. The floor is this

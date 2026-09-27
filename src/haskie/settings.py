@@ -514,9 +514,9 @@ class SearchSettings(msgspec.Struct):
     fill_values: Annotated[FillValues, FILL_VALUES] = FillValues.RELATIVE
     min_rerank_score: Annotated[float | None, MIN_RERANK_SCORE] = None
     min_passage_chars: Annotated[int, MIN_PASSAGE_CHARS] = 300
-    max_passage_grow: Annotated[int, MAX_PASSAGE_GROW] = 2
-    max_section_chars: Annotated[int, MAX_SECTION_CHARS] = 8000
-    max_answer_chars: Annotated[int, MAX_ANSWER_CHARS] = 24000
+    max_passage_grow: Annotated[int, MAX_PASSAGE_GROW] = 3
+    max_section_chars: Annotated[int, MAX_SECTION_CHARS] = 12000
+    max_answer_chars: Annotated[int, MAX_ANSWER_CHARS] = 36000
 
     def __post_init__(self) -> None:
         # `reranker_model` is checked against the catalogue where settings are written

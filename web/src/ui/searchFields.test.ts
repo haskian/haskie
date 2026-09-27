@@ -21,9 +21,9 @@ const DEFAULTS: SearchSettings = {
   rerank_excerpts: false,
   fill_values: 'relative',
   min_passage_chars: 300,
-  max_passage_grow: 2,
-  max_section_chars: 8000,
-  max_answer_chars: 24000,
+  max_passage_grow: 3,
+  max_section_chars: 12000,
+  max_answer_chars: 36000,
 }
 
 // A collection that overrides nothing, as `/api/collections/{name}` sends it.

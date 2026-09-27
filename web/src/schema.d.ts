@@ -1707,19 +1707,19 @@ export interface components {
             /**
              * Chunks a passage may grow by
              * @description How many neighbouring chunks of its section a passage may grow by on each side, once, never past a heading, and only where they match the question: a short passage as the passages are ranked, every excerpt's passages as the excerpt is filled. Twice this is the longest gap between two passages that is filled. 0 turns growing off.
-             * @default 2
+             * @default 3
              */
             max_passage_grow: number;
             /**
              * Largest section (characters)
              * @description An excerpt is one section of a document: the largest heading whose text fits this many characters. The passages a search keeps under it come back together, in document order.
-             * @default 8000
+             * @default 12000
              */
             max_section_chars: number;
             /**
              * Largest answer (characters)
              * @description How much text the sections of one excerpts search hold. Sections past it are left out, the last first, and the text around and between passages that answers too is added while it fits. One excerpt found for words no section holds may come past it.
-             * @default 24000
+             * @default 36000
              */
             max_answer_chars: number;
         };
