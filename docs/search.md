@@ -33,7 +33,8 @@ flowchart LR
 The last of these steps to run sets a chunk's score. With a reranker on, it is the sigmoid of the
 cross-encoder's logit, 0 to 1, so switching the mode only changes which `candidates` it reads: a
 chunk found in both modes scores the same. The sigmoid is there because most logits are negative,
-and the harmonic rule below folds any score at or below 0 to 0. Without one, several collections
+and a passage folds its chunks' scores (below): a negative one would subtract under `sum` and
+zero the whole under `harmonic`. Without one, several collections
 give a rank-fusion score, and one collection keeps its mode's own: BM25, `1 / (1 + squared L2
 distance)`, or the fused score of `rrf` or `linear`. Passages, excerpts and documents then fold
 chunk scores their own way.
