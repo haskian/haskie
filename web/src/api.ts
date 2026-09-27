@@ -66,6 +66,7 @@ export type BulkStarted = Wire<'BulkStarted'>
 export type OperationProgress = Wire<'OperationProgress'>
 export type Preview = Wire<'Preview'>
 export type Staged = Wire<'Staged'>
+export type Rendered = Wire<'Rendered'>
 export type Member = Wire<'Member'>
 export type CollectionSummary = Wire<'CollectionSummary'>
 
@@ -285,6 +286,8 @@ export const api = {
     return request<Page<Document>>(`/api/documents${pageQuery(page, { status })}`)
   },
   document: (doc: string) => request<Document>(documentPath(doc)),
+  // a search result's text as HTML, raw HTML stripped by the server (`render.fragment_html`)
+  renderMarkdown: (markdown: string) => request<Rendered>('/api/documents/render', json('POST', { markdown })),
   // Upload step one: the bytes land in staging under an id. Nothing is imported until `importStaged`.
   stageUpload: (file: File) => {
     const body = new FormData()

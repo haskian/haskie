@@ -45,6 +45,28 @@ class Head(msgspec.Struct):
     kind: Literal["head"] = "head"
 
 
+MAX_RENDERED = 100_000  # characters: an excerpt is at most a few sections (`max_answer_chars`)
+
+
+class Markdown(msgspec.Struct):
+    """Markdown to render, as a search result quotes it."""
+
+    markdown: str
+
+
+class Rendered(msgspec.Struct):
+    html: str
+
+
+@post("/api/documents/render", status_code=200)
+async def render_markdown(data: Markdown) -> Rendered:
+    """A search result's text as HTML, rendered as the document viewer renders a page: raw HTML is
+    stripped first, so the text a document holds cannot inject markup."""
+    if len(data.markdown) > MAX_RENDERED:
+        raise InvalidInput(f"markdown must be at most {MAX_RENDERED} characters")
+    return Rendered(html=await cpu.on_cpu(render.fragment_html, data.markdown))
+
+
 @post("/api/documents/staging")
 @audit.audited("document.stage")
 async def stage_document(

@@ -5,6 +5,7 @@ import type { Anchor } from './anchor'
 import { DocumentPanes } from './DocumentPanes'
 import { Kv } from './Kv'
 import { Mark } from './Mark'
+import { MarkdownQuote } from './MarkdownQuote'
 import { CUT_REASONS, PIECE_NAMES, RELATIONS, alsoOf, chunkSizes, cite, everyPlace, overlapHint, frameOf, headingOf, isHit, isSource, lastHeading, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Reference, type Size, isExcerpt, questionLabels } from './match'
 import { errorText } from '../format'
 import { Modal } from './Modal'
@@ -331,8 +332,8 @@ function MatchBody({ match, query, scoring, asked }: { match: Match; query: stri
         ) : isHit(match) ? (
           <ChunkQuote hit={match} query={query} />
         ) : (
-          <blockquote className="match-text">
-            <Mark text={match.text} query={query} />
+          <blockquote className="match-text match-markdown">
+            <MarkdownQuote text={match.text} query={query} />
             <span className="match-seq" title={`chunk ${seqLabel(match)}`}>{seqLabel(match)}</span>
           </blockquote>
         )}

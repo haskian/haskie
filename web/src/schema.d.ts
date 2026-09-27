@@ -73,6 +73,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/render": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** RenderMarkdown */
+        post: operations["ApiDocumentsRenderRenderMarkdown"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/staging": {
         parameters: {
             query?: never;
@@ -1122,6 +1139,10 @@ export interface components {
             last_maintained_at: number | null;
             vector_index_rows: number;
         };
+        /** Markdown */
+        Markdown: {
+            markdown: string;
+        };
         /** Matryoshka */
         Matryoshka: {
             /** @default false */
@@ -1434,6 +1455,10 @@ export interface components {
          * @enum {string}
          */
         Relation: "duplicate" | "contained" | "equivalent";
+        /** Rendered */
+        Rendered: {
+            html: string;
+        };
         /**
          * Reranker
          * @description Second-stage scoring applied to the Candidates of any mode (vector, fts or hybrid). cross-encoder: a model reads query and chunk together and rescores each pair; slower but more precise than embeddings. none: keep the retrieval order.
@@ -1945,6 +1970,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Options"];
+                };
+            };
+        };
+    };
+    ApiDocumentsRenderRenderMarkdown: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Markdown"];
+            };
+        };
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Rendered"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
                 };
             };
         };

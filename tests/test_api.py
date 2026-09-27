@@ -2493,3 +2493,34 @@ async def test_chunk_trend_lists_imports_and_indexes_and_bounds_its_window(
     assert all(abs(point["ts"] - time.time()) < 60 for point in points)
     bad = await client.get("/api/insights/chunks", params={"days": 367})
     assert bad.status_code == 422 and "days must be 1.." in bad.text
+
+
+@pytest.mark.parametrize(
+    ("name", "markdown", "status", "expected"),
+    [
+        (
+            "an excerpt's headings, lists and emphasis as HTML, headings without ids",
+            "### Rules\n\n- one *rule*\n- two\n\n[…]",
+            200,
+            "<h3>Rules</h3>\n<ul>\n<li>one <em>rule</em></li>\n<li>two</li>\n</ul>\n<p>[…]</p>\n",
+        ),
+        (
+            "raw HTML a document holds is stripped, never passed on",
+            "text <script>alert(1)</script> after",
+            200,
+            "<p>text alert(1) after</p>\n",
+        ),
+        ("past the limit is refused", "x" * 100_001, 422, "at most 100000 characters"),
+    ],
+)
+async def test_a_search_results_text_renders_as_markdown(
+    client: AsyncTestClient, name: str, markdown: str, status: int, expected: str
+) -> None:
+    response = await client.post("/api/documents/render", json={"markdown": markdown})
+
+    assert response.status_code == status, f"{name}: {response.text}"
+    body = response.json()
+    if status == 200:
+        assert body["html"] == expected, name
+    else:
+        assert expected in body["detail"], name

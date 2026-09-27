@@ -199,7 +199,13 @@ export function Explore({ route, counts }: PageProps) {
         <SearchTook counts={`${shown.results.length} ${answerOf(shown.as).plural}`} ms={shown.took} steps={shown.steps} />
         {shown.missing.length > 0 && <p className="muted">No excerpt says: {shown.missing.join(', ')}</p>}
         {shown.uncovered.length > 0 && <p className="muted">Unanswered: {shown.uncovered.join(' · ')}</p>}
-        <HitGrid results={shown.results} query={shown.asked[0] ?? ''} onOpen={setOpen} questions={shown.asked} />
+        <HitGrid
+          results={shown.results}
+          query={shown.asked[0] ?? ''}
+          onOpen={setOpen}
+          questions={shown.asked}
+          reranked={shown.scoring.some((one) => one.step === 'rerank')}
+        />
       </div>
       <MatchModal match={open} query={shown.asked[0] ?? ''} scoring={shown.scoring} asked={{ questions: shown.asked, context: shown.context }} onClose={() => setOpen(null)} />
     </Shell>

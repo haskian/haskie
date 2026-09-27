@@ -236,6 +236,11 @@ body:has(.modal[open]) { overflow: hidden; }
 .match-text { position: relative; margin: 0; max-width: 64ch; padding-left: var(--sp-4); padding-bottom: var(--sp-6); border-left: 2px solid var(--line); font-size: var(--fs-lg); line-height: 1.5; }
 .match-text::before { content: open-quote; }
 .match-text::after { content: close-quote; }
+/* a passage or excerpt as the document renders it: the body size, and its own structure in place of quote marks */
+.match-markdown { font-size: var(--fs-md); }
+.match-markdown::before, .match-markdown::after { content: none; }
+.match-markdown .markdown { font-size: inherit; }
+.match-markdown .markdown > * + * { margin-top: var(--sp-3); }
 .match-seq { position: absolute; right: 0; bottom: 0; font: 400 var(--fs-xs)/1.4 var(--font-mono); letter-spacing: var(--tracking-mono); color: var(--text-muted); }
 /* a chunk and what surrounds it on screen: its frame and its two cuts, close to the quote */
 .chunk { display: grid; gap: var(--sp-2); }
@@ -372,7 +377,9 @@ body.over .drop-overlay { opacity: 1; }
 /* the questions an excerpt answers, a bordered tag each; currentColor follows the tile's hover */
 .hit-questions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .question-score { opacity: 0.6; }
-.question-tag { padding: var(--sp-1) var(--sp-2); border: 1px solid currentColor; font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--tracking-mono); line-height: 1; }
+.question-tag { position: relative; cursor: default; padding: var(--sp-1) var(--sp-2); border: 1px solid currentColor; font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--tracking-mono); line-height: 1; }
+.question-tag:hover, .question-tag:focus-visible { background: color-mix(in srgb, currentColor 25%, transparent); outline: none; }
+.question-tag .hint { font-family: var(--font-sans); letter-spacing: 0; line-height: 1.4; white-space: normal; }
 /* four lines whatever the result says: a one-word hit and a long one make the same tile */
 .hit-text { margin: 0; font-size: var(--fs-sm); line-height: 1.5; height: calc(4 * 1.5em); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .hit-body::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: linear-gradient(var(--ok), var(--ok)) 0 0 / calc(var(--score, 0) * 100%) 100% no-repeat; }

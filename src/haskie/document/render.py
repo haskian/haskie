@@ -72,6 +72,13 @@ def _without_raw_html(markdown: str) -> str:
     return out
 
 
+def fragment_html(markdown: str) -> str:
+    """A piece of markdown as HTML, raw HTML stripped as for a page (`_without_raw_html`), and its
+    headings without ids: a quoted excerpt sits beside the whole document, whose anchors it must
+    not repeat."""
+    return pyromark.html(_without_raw_html(markdown), options=OPTIONS)
+
+
 def to_html(markdown: str, first_heading: int = 0) -> tuple[str, int]:
     """Render one page of markdown, giving each heading the id its table of contents links to.
     Returns the HTML and how many headings it numbered.

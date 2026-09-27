@@ -23,6 +23,14 @@ const linesOf = (match: Match): string[] => {
   const [where, chunks] = placeOf(match)
   return [heading, where || EMPTY, `${chunks}${alsoIn(match)}`]
 }
+/** What the number on a question's tag means: the excerpt's best chunk for that question, on the
+ *  reranker's scale when one scored it, else on that question's own search's scale. */
+export function questionScoreMeaning(label: string, reranked: boolean): string {
+  return reranked
+    ? `The reranker's score for this excerpt's best chunk against ${label}: 0 to 1, higher is better. A question tags an excerpt only when the reranker scored it above its floor.`
+    : `This excerpt's best chunk's score in ${label}'s own search: on that search's scale, so not comparable with another question's.`
+}
+
 const keyOf = (match: Match): string =>
   isSource(match) ? `${match.collection}:${match.document}` : `${match.collection}:${match.document}:${match.char_start}` // offsets are unique in a document
 
@@ -34,11 +42,13 @@ export function HitGrid<T extends Match>({
   query,
   onOpen,
   questions = [],
+  reranked = false,
 }: {
   results: T[]
   query: string
   onOpen?: (match: T) => void
   questions?: string[]
+  reranked?: boolean // a reranker scored the results, so a question's score reads 0 to 1
 }) {
   const scores = results.map((match) => match.score)
   const best = Math.max(...scores)
@@ -66,9 +76,17 @@ export function HitGrid<T extends Match>({
             {isExcerpt(match) && questions.length > 1 && (
               <div className="hit-questions">
                 {questionLabels(match.aspects, questions, match.aspect_scores).map(({ label, question, score }) => (
-                  <span key={label} className="question-tag" title={question}>
+                  <span key={label} className="question-tag" tabIndex={0} onClick={(event) => event.stopPropagation()}>
                     {label}
                     {score !== undefined && <span className="question-score"> {score}</span>}
+                    <span className="hint hint-below hint-wide" role="tooltip">
+                      <strong>
+                        {label}
+                        {score !== undefined && ` · ${score}`}
+                      </strong>
+                      <span>{question}</span>
+                      {score !== undefined && <span className="muted">{questionScoreMeaning(label, reranked)}</span>}
+                    </span>
                   </span>
                 ))}
               </div>

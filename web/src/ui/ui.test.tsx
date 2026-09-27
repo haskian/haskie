@@ -538,7 +538,7 @@ describe('HitGrid', () => {
       element: <HitGrid results={[{ ...EXCERPT, aspects: ['Why soft?'] }]} query="shadow" questions={['Why hard?', 'Why soft?']} />,
       contains: [
         '<span class="mono muted">0.88</span>',
-        '</footer><div class="hit-questions"><span class="question-tag" title="Why soft?">Q2</span></div>',
+        '</footer><div class="hit-questions"><span class="question-tag" tabindex="0">Q2<span class="hint hint-below hint-wide" role="tooltip"><strong>Q2</strong><span>Why soft?</span></span></span></div>',
       ],
     },
     {
@@ -548,9 +548,24 @@ describe('HitGrid', () => {
           results={[{ ...EXCERPT, aspects: ['Why soft?'], aspect_scores: { 'Why soft?': 0.84 } }]}
           query="shadow"
           questions={['Why hard?', 'Why soft?']}
+          reranked
         />
       ),
-      contains: ['<span class="question-tag" title="Why soft?">Q2<span class="question-score"> 0.84</span></span>'],
+      contains: [
+        '<span class="question-tag" tabindex="0">Q2<span class="question-score"> 0.84</span>',
+        '<strong>Q2 · 0.84</strong><span>Why soft?</span><span class="muted">The reranker&#x27;s score for this excerpt&#x27;s best chunk against Q2: 0 to 1',
+      ],
+    },
+    {
+      name: "without a reranker, the score is on its own search's scale",
+      element: (
+        <HitGrid
+          results={[{ ...EXCERPT, aspects: ['Why soft?'], aspect_scores: { 'Why soft?': 7.3 } }]}
+          query="shadow"
+          questions={['Why hard?', 'Why soft?']}
+        />
+      ),
+      contains: ['score in Q2&#x27;s own search: on that search&#x27;s scale, so not comparable'],
     },
     {
       name: 'one question asked: no names',
@@ -641,6 +656,11 @@ describe('MatchModal', () => {
       element: <MatchModal match={HIT} query="shadow" onClose={noop} />,
       contains: ['<dt>Score</dt><dd><span class="score"><span class="mono">0.91</span></span></dd>'],
       missing: ['score-basis'],
+    },
+    {
+      name: 'a passage quotes its text as markdown, the plain text marked until the server renders it',
+      element: <MatchModal match={PASSAGE} query="shadow" onClose={noop} />,
+      contains: ['<blockquote class="match-text match-markdown"><div class="markdown"><p>Area lights soften the <mark>shadow</mark> edge'],
     },
     {
       name: 'a chunk before any heading has no grey path',
