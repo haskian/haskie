@@ -12,6 +12,7 @@ between for a chunk partly on both. The query vector is [1, 0].
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 from conftest import one_part
 
@@ -19,6 +20,7 @@ from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.index import ChunkKey, CollectionIndex, Hit, Row, chunk_key
 from haskie.indexing.chunk import split
 from haskie.search import probe, retrieval, section
+from haskie.search.collapse import Vector
 from haskie.search.passage import ranges
 from haskie.search.retrieval import Plan, Scanned
 from haskie.settings import ChunkSettings, SearchSettings
@@ -71,7 +73,8 @@ async def test_a_neighbour_is_read_back_with_its_vector(tmp_path: Path) -> None:
     lexical = await index.rows_at([(DOC, 4)], vectors=False)
 
     ((hit, row),) = rows.values()
-    assert (hit.seq, row["vector"]) == (4, pytest.approx(OFF)), "the chunk asked for, its vector"
+    assert (hit.seq, row["vector"].tolist()) == (4, pytest.approx(OFF)), "the chunk, its vector"
+    assert row["vector"].dtype == np.float32, "a row of the read's array, not a list of floats"
     assert hit.score == 0.0, "read, not ranked"
     assert "vector" not in lexical[0], "a lexical search reads no vector"
 
@@ -104,7 +107,7 @@ async def test_a_short_passage_grows_by_the_neighbours_that_mean_the_same(tmp_pa
     ranged = await retrieval.fill_thin(scanned, where, QUERY)
 
     assert [(one.seq_start, one.seq_end) for one in ranged.ranges] == [(1, 3), (7, 7)]
-    added: dict[ChunkKey, list[float] | None] = {
+    added: dict[ChunkKey, Vector | None] = {
         chunk_key(hit): vector
         for hit, vector in zip(ranged.scanned.hits, ranged.scanned.vectors, strict=True)
     }

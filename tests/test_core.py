@@ -39,6 +39,7 @@ from sqlalchemy.exc import IntegrityError
 
 from haskie import audit, db, home, logs, tables
 from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
+from haskie.collection import index as index_module
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection, DocumentCounts, Member, MemberStatus
 from haskie.collection.index import (
@@ -3028,3 +3029,35 @@ def test_the_audit_record_names_a_collection_and_a_document() -> None:
     """A document belongs to no collection, so a document-scoped action carries `doc` alone."""
     assert {"collection", "document"} <= audit.RECORD_FIELDS
     assert "library" not in audit.RECORD_FIELDS
+
+
+@pytest.mark.parametrize(
+    ("name", "vectors", "expected"),
+    [
+        (
+            "every row a vector: rows of one float32 array",
+            [[1.0, 2.0], [3.0, 4.0]],
+            [[1.0, 2.0], [3.0, 4.0]],
+        ),
+        (
+            "a row without one holds None, the others keep their own",
+            [[1.0, 2.0], None, [5.0, 6.0]],
+            [[1.0, 2.0], None, [5.0, 6.0]],
+        ),
+        ("no rows", [], []),
+    ],
+)
+def test_a_read_holds_each_vector_as_an_array_row(name: str, vectors: list, expected: list) -> None:
+    """A search compares vectors as arrays (`collapse.unit_rows`), so a read never builds the
+    list of floats each row would carry."""
+    column = pa.array(vectors, type=pa.list_(pa.float32(), 2))
+    found = index_module._rows(pa.table({"seq": list(range(len(vectors))), "vector": column}))
+
+    assert [row["seq"] for row in found] == list(range(len(vectors))), name
+    got = [None if row["vector"] is None else row["vector"].tolist() for row in found]
+    assert got == expected, name
+    assert all(row["vector"] is None or row["vector"].dtype == np.float32 for row in found), name
+
+
+def test_a_read_without_a_vector_column_is_plain_rows() -> None:
+    assert index_module._rows(pa.table({"seq": [1, 2]})) == [{"seq": 1}, {"seq": 2}]

@@ -574,17 +574,17 @@ class CollectionIndex:
             found = await table.search(query, query_type="fts")
             if not vectors:
                 found = found.select([*PLAIN_SCHEMA.names, "_score"])
-            return await found.limit(limit).to_list()
+            return _rows(await found.limit(limit).to_arrow())
         if settings.mode == SearchMode.VECTOR:
             found = _tuned(await table.search(vector, query_type="vector"), settings)
-            return await found.limit(limit).to_list()
+            return _rows(await found.limit(limit).to_arrow())
         # the async API builds a hybrid query out of its two halves instead of `query_type=hybrid`
         hybrid = table.query().nearest_to(vector).nearest_to_text(query)
-        return (
+        return _rows(
             await _tuned(hybrid, settings)
             .limit(max(settings.candidates, limit))
             .rerank(reranker=_fusion(settings))
-            .to_list()
+            .to_arrow()
         )
 
     async def fts_rows(self, query: str, limit: int) -> list[dict]:
@@ -599,7 +599,7 @@ class CollectionIndex:
         table = await self._readable()
         if table is None or not await self.has_index(FTS_COLUMN):
             return []
-        return await (await table.search(query, query_type="fts")).limit(limit).to_list()
+        return _rows(await (await table.search(query, query_type="fts")).limit(limit).to_arrow())
 
     async def rows_at(self, keys: Iterable[RowKey], vectors: bool) -> list[dict]:
         """The stored rows of these chunks, in no order: what a search reads to look at the
@@ -618,7 +618,7 @@ class CollectionIndex:
         columns = PLAIN_SCHEMA.names + (
             ["vector"] if vectors and await self.has_vector_column() else []
         )
-        return await table.query().where(wanted).select(columns).to_list()
+        return _rows(await table.query().where(wanted).select(columns).to_arrow())
 
     async def outline_rows(self, documents: Iterable[str]) -> list[dict]:
         """Where every chunk of these documents sits: its `document`, `seq`, heading path and char
@@ -715,6 +715,27 @@ async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -
     for row, score in zip(rows, scores, strict=True):
         row["_relevance_score"] = score
     return sorted(rows, key=lambda r: r["_relevance_score"], reverse=True)
+
+
+def _rows(found: pa.Table) -> list[dict]:
+    """A read's rows as dicts, each vector a row of one float32 array rather than a thousand
+    Python floats: what a search compares vectors in anyway (`search.collapse.unit_rows`), so
+    the list a row would carry is never built. A row without a vector holds None."""
+    if "vector" not in found.column_names:
+        return found.to_pylist()
+    column = found.column("vector").combine_chunks()
+    width = column.type.list_size
+    matrix = column.flatten().to_numpy(zero_copy_only=False).reshape(-1, width)
+    rows = found.drop_columns(["vector"]).to_pylist()
+    if column.null_count:
+        # `flatten` skips the slots of a null vector, so the rows of the matrix follow the others
+        present = iter(matrix)
+        for row, missing in zip(rows, column.is_null().to_pylist(), strict=True):
+            row["vector"] = None if missing else next(present)
+        return rows
+    for row, vector in zip(rows, matrix, strict=True):
+        row["vector"] = vector
+    return rows
 
 
 def _quoted(value: str) -> str:

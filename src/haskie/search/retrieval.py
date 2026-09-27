@@ -208,7 +208,7 @@ class Scanned(msgspec.Struct):
     """
 
     hits: list[Hit]
-    vectors: list[list[float] | None]
+    vectors: list[collapse.Vector | None]
 
 
 def scan(pool: Pool, limit: int) -> Scanned:
@@ -336,9 +336,9 @@ def _valued(scores: list[float], reference: list[float]) -> list[float]:
 
 
 def _values(
-    reference: list[tuple[str, list[float] | None]],
-    candidates: list[tuple[str, list[float] | None]],
-    asked: list[tuple[str, list[float] | None]],
+    reference: list[tuple[str, collapse.Vector | None]],
+    candidates: list[tuple[str, collapse.Vector | None]],
+    asked: list[tuple[str, collapse.Vector | None]],
 ) -> tuple[list[list[float]], str]:
     """What each candidate (text, vector) is worth to each question (one row per question),
     around the reference chunks, the ranked ones it grows next to (`_valued`); and by what: the

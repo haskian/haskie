@@ -51,6 +51,9 @@ from haskie.collection.index import (
 from haskie.search.passage import HitRange, PassageReference, harmonic
 from haskie.settings import SearchMode
 
+# A chunk's vector: a row of the float32 array a read holds (`index._rows`), or a list a test builds
+type Vector = Sequence[float] | np.ndarray
+
 # word Jaccard: Set-Encoder (ECIR 2025, https://arxiv.org/abs/2404.06912) defines near-duplicate
 # clusters as Jaccard > 0.5
 TAU_WORDS = 0.5
@@ -172,7 +175,7 @@ class Scan(msgspec.Struct, frozen=True):
 
 def spaces(
     texts: Sequence[str],
-    vectors: Sequence[Sequence[float] | None],
+    vectors: Sequence[Vector | None],
     model: EmbeddingModel | None,
     mode: SearchMode = SearchMode.HYBRID,
 ) -> Scan:
@@ -188,7 +191,7 @@ def spaces(
     return Scan(deciding=measured[:1] if mode == SearchMode.VECTOR else measured, measured=measured)
 
 
-def unit_rows(vectors: Sequence[Sequence[float] | None]) -> np.ndarray:
+def unit_rows(vectors: Sequence[Vector | None]) -> np.ndarray:
     """The vectors as rows of unit length, so a matrix product of two is their cosines. A zero
     vector stays zero rather than dividing by it. The caller has checked that none is missing."""
     matrix = np.asarray(vectors, dtype=np.float64)
