@@ -17,7 +17,7 @@ from haskie.catalogue.catalogue import UNCALIBRATED
 from haskie.collection.index import Hit, chunk_key, location
 from haskie.indexing.segment import CutReason
 from haskie.search import probe, retrieval, section
-from haskie.search.passage import ranges
+from haskie.search.passage import Excerpt, ranges
 from haskie.search.retrieval import Plan, Pool, Scanned
 from haskie.search.thin import Filled
 from haskie.settings import Reranker, ScoreFold, SearchSettings
@@ -464,6 +464,135 @@ def test_the_rerank_floor_is_the_settings_else_the_rerankers(
     )
 
     assert where.rerank_floor == expected, name
+
+
+def _excerpt(text: str, score: float, aspects: list[str] | None = None) -> Excerpt:
+    """An excerpt as `quote` makes it; only its text, score and questions matter here."""
+    return Excerpt(
+        collection="backend",
+        document="a.md",
+        header="Retries",
+        location="a.md L1-1",
+        seq_start=1,
+        seq_end=1,
+        line_start=1,
+        line_end=1,
+        char_start=0,
+        char_end=len(text),
+        page_start=None,
+        page_end=None,
+        text=text,
+        score=score,
+        source_file="/a.md",
+        markdown_file="/a.md.md",
+        spans=[],
+        aspects=aspects or [],
+    )
+
+
+def _reranking(
+    monkeypatch: pytest.MonkeyPatch, logits: dict[str, float], reads: int = 8192
+) -> list[str]:
+    """A reranker that answers `logits[a word of the query]` for text holding that word, else
+    -5, and reads `reads` tokens; the queries it was asked, in order."""
+    asked: list[str] = []
+
+    async def rerank(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
+        asked.append(query)
+        for row in rows:
+            hit = [
+                value for word, value in logits.items() if word in query and word in row["framed"]
+            ]
+            row["_relevance_score"] = _sigmoid(hit[0] if hit else -5.0)
+        return rows
+
+    async def model_reads(model: str) -> int:
+        return reads
+
+    monkeypatch.setattr(retrieval, "cross_encode", rerank)
+    monkeypatch.setattr(retrieval, "_reads", model_reads)
+    return asked
+
+
+def _judge(**search: Any) -> Plan:
+    return Plan(
+        settings=SearchSettings(reranker=Reranker.CROSS_ENCODER, **search),
+        indexes=[],
+        vector=None,
+        embedding=None,
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "where", "reads", "expected"),
+    [
+        (
+            "off, the default: the chunk scores stand",
+            _judge(),
+            8192,
+            [("folded", 3.0), ("jitter", 1.0)],
+        ),
+        (
+            "on: scored whole and sorted by it",
+            _judge(rerank_excerpts=True),
+            8192,
+            [("jitter", _sigmoid(4.0)), ("folded", _sigmoid(-5.0))],
+        ),
+        (
+            "an excerpt past what the reranker reads: none is rescored",
+            _judge(rerank_excerpts=True),
+            2,
+            [("folded", 3.0), ("jitter", 1.0)],
+        ),
+        (
+            "no reranker: nothing to score with",
+            Plan(
+                settings=SearchSettings(rerank_excerpts=True),
+                indexes=[],
+                vector=None,
+                embedding=None,
+            ),
+            8192,
+            [("folded", 3.0), ("jitter", 1.0)],
+        ),
+    ],
+)
+async def test_whole_excerpts_are_reranked_only_when_asked_and_all_fit(
+    monkeypatch: pytest.MonkeyPatch, name: str, where: Plan, reads: int, expected: list
+) -> None:
+    """Two excerpts: folded chunk scores put "folded" first, while the reranker, reading each
+    whole, finds only "jitter" answers the question."""
+    _reranking(monkeypatch, {"jitter": 4.0}, reads)
+    found = [_excerpt("folded chunks say backoff", 3.0), _excerpt("jitter spreads retries", 1.0)]
+    question = [probe.Question(None, "does jitter help?")]
+
+    ranked = await retrieval.rerank_excerpts(found, question, where)
+
+    assert [(one.text.split()[0], one.score) for one in ranked] == pytest.approx(expected), name
+
+
+@pytest.mark.anyio
+async def test_with_several_questions_an_excerpt_scores_its_best_and_keeps_its_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each question reads only the excerpts that answer it, once over all of them; an excerpt
+    scores the best of its questions, and the turns' order stands."""
+    asked = _reranking(monkeypatch, {"jitter": 4.0, "idempotent": 2.0})
+    found = [
+        _excerpt("folded chunks say backoff", 3.0, ["retries"]),
+        _excerpt("jitter and idempotent keys", 1.0, ["retries", "keys"]),
+    ]
+    questions = [
+        probe.Question(None, "does jitter help?", label="retries"),
+        probe.Question(None, "are keys idempotent?", label="keys"),
+    ]
+
+    ranked = await retrieval.rerank_excerpts(found, questions, _judge(rerank_excerpts=True))
+
+    assert [one.text.split()[0] for one in ranked] == ["folded", "jitter"], "turns kept"
+    assert [one.score for one in ranked] == pytest.approx([_sigmoid(-5.0), _sigmoid(4.0)])
+    assert asked == ["does jitter help?", "are keys idempotent?"], "one pass a question"
 
 
 def test_the_budget_cuts_the_last_sections_first() -> None:

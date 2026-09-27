@@ -191,6 +191,17 @@ def _shortlist(state: "Search", *_: Any) -> str | None:
     )
 
 
+def _rerank_excerpts(state: "Search", before: list, after: list) -> str | None:
+    """Whole excerpts reranked, when the experiment ran and changed a score."""
+    if [one.score for one in before] == [one.score for one in after]:
+        return None
+    return (
+        "Each excerpt scores the reranker's sigmoid for its whole text, its heading path in "
+        "front, against the best of the questions it answers, in place of its passages' scores. "
+        "A single question's excerpts are sorted by it (rerank_excerpts, an experiment)."
+    )
+
+
 # The steps that set or change a score, by the step names `flow` runs them under. A step missing
 # here passes its scores on as it read them.
 RULES: dict[str, Rule] = {
@@ -204,4 +215,5 @@ RULES: dict[str, Rule] = {
     "probe_gaps": _probe_gaps,
     "fill": _fill,
     "shortlist": _shortlist,
+    "rerank_excerpts": _rerank_excerpts,
 }

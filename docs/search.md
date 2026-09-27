@@ -187,6 +187,22 @@ nothing under any rule. An excerpt scores its best passage. The near-duplicate f
 two results' overlap as the harmonic mean of its two directions, whatever `score_fold` is: that is
 an overlap, not a score of matched chunks. Every search's score lineage names the rule it used.
 
+### Reranking whole excerpts (experiment)
+
+Folding chunk scores judges an excerpt by its parts, never by the text an agent reads. Recent
+long-document rerankers score the unit they return instead: SumRank ranks condensed documents
+[7], and EBCAR scores passages with their context [8]. With `rerank_excerpts` on and a reranker
+chosen, an excerpts search scores each finished excerpt, its heading path in front, against the
+questions it answers, one reranker pass a question, and the best of them is its score. A single
+question's excerpts are then sorted by it; several keep the order their turns gave them.
+
+It runs only when every excerpt fits what the reranker reads, estimated at four characters a
+token: the catalogue's context for an ONNX reranker (jina-v1-turbo and ettin read 8,192 tokens),
+512 for the MLX ones, whose loader cuts there, and 512 for MiniLM. An excerpt cut short would be
+scored on its opening alone, beside others scored whole, so if one does not fit the chunk scores
+stand. Each search logs `search_rerank_excerpts` with whether it ran and how long it took. It is
+off until an evaluation shows it returns more answer per character than the fold.
+
 ## Folding repeats
 
 A pointwise reranker scores one passage at a time, so it cannot see that two results repeat each
@@ -340,3 +356,7 @@ Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/coll
    https://www.elastic.co/docs/reference/elasticsearch/mapping-reference/semantic-text-reference
 6. Cohere. "Best practices for using Rerank: interpreting results." Cohere documentation, 2026.
    https://docs.cohere.com/docs/reranking-best-practices
+7. Feng, J. et al. "SumRank: Aligning Summarization Models for Long-Document Listwise Reranking."
+   arXiv preprint, 2026. https://arxiv.org/abs/2603.24204
+8. Yuan, Y. et al. "Embedding-Based Context-Aware Reranker." arXiv preprint, 2025.
+   https://arxiv.org/abs/2510.13329

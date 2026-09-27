@@ -348,6 +348,15 @@ MIN_RERANK_SCORE = Meta(
         "0 keeps every chunk."
     ),
 )
+RERANK_EXCERPTS = Meta(
+    title="Rerank whole excerpts (experiment)",
+    description=(
+        "With a reranker on, an excerpts search scores each finished excerpt as one text against "
+        "the questions it answers, instead of folding its chunks' scores, and a single question's "
+        "excerpts are sorted by it. Only when every excerpt fits what the reranker reads; else "
+        "the chunk scores stand. Off until measured to help."
+    ),
+)
 RERANK_WITH_CONTEXT = Meta(
     title="Rerank with the shared context",
     description=(
@@ -484,6 +493,7 @@ class SearchSettings(msgspec.Struct):
     reranker_model: Annotated[str, RERANKER_MODEL] = DEFAULT_RERANKER
     rerank_with_context: Annotated[bool, RERANK_WITH_CONTEXT] = False
     score_fold: Annotated[ScoreFold, SCORE_FOLD] = ScoreFold.SUM
+    rerank_excerpts: Annotated[bool, RERANK_EXCERPTS] = False
     min_rerank_score: Annotated[float | None, MIN_RERANK_SCORE] = None
     min_passage_chars: Annotated[int, MIN_PASSAGE_CHARS] = 300
     max_passage_grow: Annotated[int, MAX_PASSAGE_GROW] = 2
@@ -512,6 +522,7 @@ class SearchOverrides(msgspec.Struct):
     reranker_model: Annotated[str | None, RERANKER_MODEL] = None
     rerank_with_context: Annotated[bool | None, RERANK_WITH_CONTEXT] = None
     score_fold: Annotated[ScoreFold | None, SCORE_FOLD] = None
+    rerank_excerpts: Annotated[bool | None, RERANK_EXCERPTS] = None
     min_rerank_score: Annotated[float | None, MIN_RERANK_SCORE] = None
     min_passage_chars: Annotated[int | None, MIN_PASSAGE_CHARS] = None
     max_passage_grow: Annotated[int | None, MAX_PASSAGE_GROW] = None

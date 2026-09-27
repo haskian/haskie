@@ -11,6 +11,7 @@ gave, else the session's selection, else every collection.
 
 import asyncio
 import statistics
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import ExitStack
 from itertools import islice
@@ -24,6 +25,7 @@ from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel, RerankerCalibration
 from haskie.collection.collection import Collection
 from haskie.collection.index import (
+    FTS_COLUMN,
     ChunkKey,
     CollectionIndex,
     Hit,
@@ -37,8 +39,9 @@ from haskie.collection.index import (
     row_score,
 )
 from haskie.document import document
-from haskie.indexing import models
+from haskie.indexing import hardware, mlx_models, models
 from haskie.indexing.embed import embed_query
+from haskie.indexing.hardware import Runtime
 from haskie.logs import get_logger
 from haskie.search import aspects, collapse, passage, probe, section, session, text, thin
 from haskie.search import fill as filling
@@ -743,6 +746,63 @@ def _group(
     hit_ranges: list[passage.HitRange], rows: list[tuple[str, dict]], max_chars: int, limit: int
 ) -> list[section.Group]:
     return section.group(hit_ranges, section.outlines(rows), max_chars, limit)
+
+
+CHARS_PER_TOKEN = 4  # a rough English average: what an excerpt's length is judged against
+
+
+async def rerank_excerpts(
+    excerpts: list[Excerpt], questions: list[probe.Question], where: Plan
+) -> list[Excerpt]:
+    """Each excerpt scored as one text, its heading path in front, by the reranker against the
+    questions it answers (every question when it names none), its score the best of them; a
+    single question's excerpts sorted by it. An experiment (`rerank_excerpts`): long-document
+    reranking scores the unit it returns rather than folding its chunks (SumRank, arXiv
+    2603.24204; EBCAR, arXiv 2510.13329), but
+    nothing here measures it against the fold yet.
+
+    Only when every excerpt fits what the reranker reads (`_reads`): an excerpt cut short would
+    be scored on its first part, and one scored so beside others scored whole, or by folded chunk
+    scores, would sort on two scales. So the excerpts come back as they were, and it is logged.
+    """
+    settings = where.settings
+    if not (excerpts and settings.rerank_excerpts and settings.reranker != Reranker.NONE):
+        return excerpts
+    started = time.perf_counter()
+    reads = await _reads(settings.reranker_model)
+    longest = max(len(one.header) + len(one.text) for one in excerpts) // CHARS_PER_TOKEN
+    if longest > reads:
+        _log.info("search_rerank_excerpts", applied=False, longest=longest, reads=reads)
+        return excerpts
+    asked = {question.label or question.asked: question.asked for question in questions}
+    best: list[float] = [0.0] * len(excerpts)
+    # one reranker pass a question, over the excerpts that answer it
+    for label, question in asked.items():
+        at = [n for n, one in enumerate(excerpts) if label in one.aspects or not one.aspects]
+        rows = [{FTS_COLUMN: f"{excerpts[n].header}\n\n{excerpts[n].text}"} for n in at]
+        await cross_encode(question, rows, settings)  # scores the rows in place
+        for n, row in zip(at, rows, strict=True):
+            best[n] = max(best[n], row_score(row))
+    pairs = zip(excerpts, best, strict=True)
+    rescored = [msgspec.structs.replace(one, score=score) for one, score in pairs]
+    if len(questions) == 1:
+        rescored.sort(key=lambda one: -one.score)
+    _log.info(
+        "search_rerank_excerpts",
+        applied=True,
+        excerpts=len(rescored),
+        ms=round((time.perf_counter() - started) * 1000, 1),
+    )
+    return rescored
+
+
+async def _reads(model: str) -> int:
+    """How many tokens of a pair `model` reads: what the catalogue says it takes, or less where
+    its loader cuts shorter (the MLX rerankers read `mlx_models.MAX_PAIR_TOKENS`)."""
+    context = (await catalogue.rerankers())[model].context_tokens
+    if hardware.runtime(model) == Runtime.MLX:
+        return min(context, mlx_models.MAX_PAIR_TOKENS)
+    return context
 
 
 async def read_excerpts(groups: list[section.Group]) -> list[Excerpt]:

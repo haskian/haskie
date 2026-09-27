@@ -141,6 +141,14 @@ export function SettingsForm({
     score_fold: enumInput('score_fold', 'search.score_fold', options.score_folds, draft.search.score_fold, searchDefaults.score_fold, (next) =>
       setSearch('score_fold', next as ScoreFold | null),
     ),
+    rerank_excerpts: enumInput(
+      'rerank_excerpts',
+      'search.rerank_excerpts',
+      [ON, OFF],
+      draft.search.rerank_excerpts == null ? null : onOff(draft.search.rerank_excerpts),
+      onOff(searchDefaults.rerank_excerpts),
+      (next) => setSearch('rerank_excerpts', next === null ? null : next === ON),
+    ),
     candidates: searchNumber('candidates'),
     min_passage_chars: searchNumber('min_passage_chars'),
     max_passage_grow: searchNumber('max_passage_grow'),

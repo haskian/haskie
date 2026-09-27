@@ -118,6 +118,7 @@ STEP_LABELS: dict[str, str] = {
     "probe_gaps": "Search for missing words",
     "fill": "Fill in around passages",
     "quote": "Read excerpts",
+    "rerank_excerpts": "Rerank whole excerpts",
     "read": "Read passages",
     "shortlist": "Fold into documents",
 }
@@ -319,6 +320,12 @@ async def shortlist(ctx: StepContext[Search, None, retrieval.Scanned]) -> Source
     )
 
 
+async def rerank_excerpts(ctx: StepContext[Search, None, list[Excerpt]]) -> list[Excerpt]:
+    """Each excerpt scored as one text by the reranker, when the settings ask for it
+    (`rerank_excerpts`, an experiment) and every excerpt fits what it reads."""
+    return await retrieval.rerank_excerpts(ctx.inputs, ctx.state.questions, ctx.state.plan)
+
+
 # --- the pipelines ----------------------------------------------------------------
 
 
@@ -357,7 +364,15 @@ CHUNKS = _chain(list[Hit], *RANKING, collapse_hits)
 PASSAGES = _chain(list[Passage], *RANKING, fill_thin, collapse_ranges, read)
 # each question's ranked ranges into excerpts
 ANSWERED = _chain(
-    list[Excerpt], fold, group, budget, probe_gaps, fill, quote, input_type=list[retrieval.Ranged]
+    list[Excerpt],
+    fold,
+    group,
+    budget,
+    probe_gaps,
+    fill,
+    quote,
+    rerank_excerpts,
+    input_type=list[retrieval.Ranged],
 )
 SOURCES = _chain(Sources, *RANKING, shortlist)
 

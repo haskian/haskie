@@ -1558,6 +1558,11 @@ export interface components {
              */
             score_fold?: components["schemas"]["ScoreFold"] | null;
             /**
+             * Rerank whole excerpts (experiment)
+             * @description With a reranker on, an excerpts search scores each finished excerpt as one text against the questions it answers, instead of folding its chunks' scores, and a single question's excerpts are sorted by it. Only when every excerpt fits what the reranker reads; else the chunk scores stand. Off until measured to help.
+             */
+            rerank_excerpts?: boolean | null;
+            /**
              * Lowest reranker score
              * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. Empty: the chosen reranker's own floor, calibrated on borderline pairs (mise run calibrate-rerankers). 0 keeps every chunk.
              */
@@ -1643,6 +1648,12 @@ export interface components {
              */
             rerank_with_context: boolean;
             score_fold?: components["schemas"]["ScoreFold"];
+            /**
+             * Rerank whole excerpts (experiment)
+             * @description With a reranker on, an excerpts search scores each finished excerpt as one text against the questions it answers, instead of folding its chunks' scores, and a single question's excerpts are sorted by it. Only when every excerpt fits what the reranker reads; else the chunk scores stand. Off until measured to help.
+             * @default false
+             */
+            rerank_excerpts: boolean;
             /**
              * Lowest reranker score
              * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. Empty: the chosen reranker's own floor, calibrated on borderline pairs (mise run calibrate-rerankers). 0 keeps every chunk.

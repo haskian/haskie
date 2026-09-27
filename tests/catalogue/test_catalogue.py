@@ -421,3 +421,27 @@ def test_a_cut_is_keyed_apart_from_the_same_size_whole() -> None:
     cut = EmbeddingModel("test/tiny", 2, matryoshka=Matryoshka())
 
     assert whole.cache_name != cut.cache_name
+
+
+@pytest.mark.parametrize(
+    ("name", "model", "reads"),
+    [
+        (
+            "what the catalogue says an ONNX reranker takes",
+            "jinaai/jina-reranker-v1-turbo-en",
+            8192,
+        ),
+        (
+            "an MLX reranker reads what its loader cuts to",
+            "soichisumi/bge-reranker-v2-m3-mlx-affine8",
+            512,
+        ),
+        ("a 512-token reranker", "Xenova/ms-marco-MiniLM-L-6-v2", 512),
+    ],
+)
+async def test_a_whole_excerpt_is_judged_against_what_its_reranker_reads(
+    name: str, model: str, reads: int
+) -> None:
+    from haskie.search import retrieval
+
+    assert await retrieval._reads(model) == reads, name

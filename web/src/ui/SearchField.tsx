@@ -57,6 +57,13 @@ export function SearchField({
           <Picker ariaLabel={doc.title} options={choices(options.fusions)} value={search.fusion} onChange={(fusion) => onChange({ ...search, fusion })} />
         </Field>
       )
+    case 'rerank_excerpts':
+      return (
+        <div className="field">
+          <Toggle label={doc.title} checked={search.rerank_excerpts} onChange={(rerank_excerpts) => onChange({ ...search, rerank_excerpts })} />
+          <span className="faint">{doc.description}</span>
+        </div>
+      )
     case 'min_rerank_score':
       // empty is a value: the chosen reranker's own calibrated floor
       return (
