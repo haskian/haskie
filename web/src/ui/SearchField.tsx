@@ -125,6 +125,7 @@ export function SearchField({
           help={doc.description}
           value={search[name]}
           min={bounds.min}
+          max={bounds.max}
           step={bounds.step}
           onChange={(value) => onChange({ ...search, [name]: value })}
         />

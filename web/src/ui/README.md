@@ -56,7 +56,7 @@ imported from `ui/match` or `ui/anchor` directly, mostly by `ui/` itself.
 | Module | Usage | What it is |
 | --- | --- | --- |
 | `documents` | `documentIcon(doc.suffix)`, `nameRange(name)`, `groupByRange(rows, (row) => row.name)` and `NAME_RANGES` | The icon and the gallery bands every listing uses |
-| `searchFields` | `effectiveSearch(overrides, defaults)`, `visibleSearchFields(effective)` and `SEARCH_BOUNDS` | The settings a search runs with, which fields a form asks for, and the legal numeric bounds |
+| `searchFields` | `effectiveSearch(overrides, defaults)`, `visibleSearchFields(effective)`, `visibleExpansionFields(effective)` and `SEARCH_BOUNDS` | The settings a search runs with, which search and expansion fields a form asks for, and the legal numeric bounds |
 | `match` | `position(match)`, `headingOf(match)`, the kind guards, the `Match` type; `piecesOf`, `frameOf`, `chunkSizes`, `CUT_REASONS`, `PIECE_NAMES`; `HEADING_SEP` | Where a result sits in its document. A chunk as the chunk view draws it. The heading path separator the backend uses |
 | `anchor` | `headingPath(toc, index)` and `anchorIndex(toc, anchor)` | The heading path down to a table-of-contents entry, and the entry a result opens at |
 | `markTerms` | `markTerms(text, query)` | The list `Mark` renders |

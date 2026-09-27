@@ -17,7 +17,7 @@ from conftest import chunk_hit
 
 from haskie.collection.index import ChunkKey
 from haskie.indexing.chunk import split
-from haskie.search import thin
+from haskie.search import fill, thin
 from haskie.search.fill import Candidate
 from haskie.search.passage import HitRange, ranges
 from haskie.settings import ChunkSettings, ScoreFold
@@ -233,6 +233,58 @@ def test_a_thin_range_grows_by_matching_neighbours_or_goes(
     counts: tuple[int, int],
 ) -> None:
     filled = thin.fill(found, _neighbours(values), min_chars, reach, how=HARMONIC)
+
+    assert [(one.seq_start, one.seq_end, one.alone) for one in filled.ranges] == expected, name
+    counted = (filled.grown, sum(one.alone for one in filled.ranges))
+    assert counted == counts, f"{name}: grown, alone"
+
+
+@pytest.mark.parametrize(
+    ("name", "found", "values", "bias", "expected", "counts"),
+    [
+        (
+            "no bias: a neighbour just under the median is no match",
+            [_range(6), _range(1)],
+            {2: -0.1},
+            0.0,
+            [(1, 1, True), (6, 6, False)],
+            (0, 1),
+        ),
+        (
+            "an eager bias takes that neighbour",
+            [_range(6), _range(1)],
+            {2: -0.1},
+            0.3,
+            [(1, 2, False), (6, 6, False)],
+            (1, 0),
+        ),
+        (
+            "a strict bias refuses even a strong neighbour: the thin range stays, alone",
+            [_range(6), _range(1)],
+            {2: MATCH},
+            -1.0,
+            [(1, 1, True), (6, 6, False)],
+            (0, 1),
+        ),
+        (
+            "the best range stays however strict the bias",
+            [_range(1)],
+            {2: MATCH},
+            -1.0,
+            [(1, 1, False)],
+            (0, 0),
+        ),
+    ],
+)
+def test_the_grow_bias_decides_how_eagerly_a_thin_range_grows(
+    name: str,
+    found: list[HitRange],
+    values: dict[int, float],
+    bias: float,
+    expected: list[tuple[int, int, bool]],
+    counts: tuple[int, int],
+) -> None:
+    filled = thin.fill(found, fill.biased(_neighbours(values), bias), 100, 2, how=HARMONIC)
 
     assert [(one.seq_start, one.seq_end, one.alone) for one in filled.ranges] == expected, name
     counted = (filled.grown, sum(one.alone for one in filled.ranges))

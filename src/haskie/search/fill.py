@@ -19,6 +19,9 @@ comes in only when stronger ones around it pay for it.
 `run` and `value` are the one growth rule of a search: a passage too short to stand alone grows
 by them too (`thin`), against the scanned hits rather than the kept ones.
 
+`grow_bias` moves every value before it is summed (`biased`), whichever way it was valued: above
+0 a passage grows more eagerly, below 0 more strictly, and at -1 nothing grows.
+
 With a reranker on, `fill_values = absolute` (an experiment) values a chunk as dsRAG does instead
 (`absolute`): its reranker score spread by the reranker's calibrated beta curve, minus a fixed
 penalty. It needs no kept chunks to compare with, but it trusts the calibration: an uncalibrated
@@ -111,6 +114,16 @@ def _fraction(x: float, a: float, b: float) -> float:
 def _nonzero(x: float) -> float:
     """1 / x, with x kept off 0 as Lentz's method needs."""
     return 1.0 / (x if abs(x) > 1e-300 else 1e-300)
+
+
+def biased(candidates: dict[ChunkKey, Candidate], bias: float) -> dict[ChunkKey, Candidate]:
+    """Each candidate's value moved by `bias` (`grow_bias`), however it was valued: above 0 a
+    weaker chunk pays its way, below 0 only a stronger one does."""
+    if not bias:
+        return candidates
+    return {
+        key: msgspec.structs.replace(one, value=one.value + bias) for key, one in candidates.items()
+    }
 
 
 def value(score: float, floor: float, top: float) -> float:

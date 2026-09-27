@@ -269,6 +269,15 @@ MAX_PASSAGE_GROW = Meta(
         "the longest gap between two passages that is filled. 0 turns growing off."
     ),
 )
+GROW_BIAS = Meta(
+    title="Growth bias",
+    description=(
+        "Added to the value of every chunk a passage could grow by, -1 to 1 (see Values for "
+        "growing and filling). A stretch of chunks is taken when its values sum above 0, so "
+        "above 0 passages grow more eagerly, taking weaker chunks, and below 0 only by stronger "
+        "ones. At -1 nothing grows, and a short passage is dropped unless it is the best result."
+    ),
+)
 CANDIDATES = Meta(
     title="Candidates",
     description=(
@@ -447,6 +456,9 @@ def _check_search(search: "SearchSettings | SearchOverrides") -> None:
     floor = given.get("min_rerank_score")
     if floor is not None and not 0 <= floor <= 1:
         raise InvalidInput(f"min_rerank_score must be 0 to 1, got {floor}")
+    bias = given.get("grow_bias")
+    if bias is not None and not -1 <= bias <= 1:
+        raise InvalidInput(f"grow_bias must be -1 to 1, got {bias}")
 
 
 def _check_chunking(chunk_size: int | None, chunk_merge_below: int | None) -> None:
@@ -515,6 +527,7 @@ class SearchSettings(msgspec.Struct):
     min_rerank_score: Annotated[float | None, MIN_RERANK_SCORE] = None
     min_passage_chars: Annotated[int, MIN_PASSAGE_CHARS] = 300
     max_passage_grow: Annotated[int, MAX_PASSAGE_GROW] = 3
+    grow_bias: Annotated[float, GROW_BIAS] = 0.0
     max_section_chars: Annotated[int, MAX_SECTION_CHARS] = 12000
     max_answer_chars: Annotated[int, MAX_ANSWER_CHARS] = 36000
 
@@ -545,6 +558,7 @@ class SearchOverrides(msgspec.Struct):
     min_rerank_score: Annotated[float | None, MIN_RERANK_SCORE] = None
     min_passage_chars: Annotated[int | None, MIN_PASSAGE_CHARS] = None
     max_passage_grow: Annotated[int | None, MAX_PASSAGE_GROW] = None
+    grow_bias: Annotated[float | None, GROW_BIAS] = None
     max_section_chars: Annotated[int | None, MAX_SECTION_CHARS] = None
     max_answer_chars: Annotated[int | None, MAX_ANSWER_CHARS] = None
 

@@ -161,6 +161,30 @@ def test_a_section_could_bridge_its_gaps_and_grow_its_ends(
     assert _shape(fill.fills(0, _group(*found), _candidates(values), 4)) == expected, name
 
 
+@pytest.mark.parametrize(
+    ("name", "bias", "values", "expected"),
+    [
+        ("no bias: a gap summing under 0 is not bridged", 0.0, {3: 0.3, 4: -0.4}, [[3]]),
+        ("an eager bias bridges it", 0.2, {3: 0.3, 4: -0.4}, [[3, 4], [3]]),
+        ("a strict bias refuses what no bias takes", -0.4, {3: 0.3, 4: -0.4}, []),
+        ("-1 takes nothing, not even the best chunks", -1.0, {3: 1.0, 4: 1.0}, []),
+    ],
+)
+def test_the_grow_bias_moves_every_value_before_it_is_summed(
+    name: str, bias: float, values: dict[int, float], expected: list[list[int]]
+) -> None:
+    candidates = fill.biased(_candidates(values), bias)
+
+    assert _shape(fill.fills(0, _group(_range(2), _range(5)), candidates, 4)) == expected, name
+
+
+def test_no_bias_leaves_the_candidates_as_they_are() -> None:
+    candidates = _candidates({3: 0.3}, aspect="a")
+
+    assert fill.biased(candidates, 0.0) is candidates
+    assert fill.biased(candidates, 0.5)[(COLLECTION, DOC, 3)] == Candidate(HITS[3], 0.8, "a")
+
+
 # --- run ------------------------------------------------------------------------------
 
 

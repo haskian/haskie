@@ -143,6 +143,12 @@ calibration: an uncalibrated reranker's curve is the identity. dsRAG also decays
 rank; here every chunk was scored, so none is. It costs one reranker pass a question over the
 chunks near every section, and short passages grow the same way.
 
+`grow_bias` (0, from -1 to 1) says how eagerly passages grow. It is added to every value, however
+the value was reached, before the values are summed (`fill.biased`). Above 0 a weaker chunk pays
+its way, so passages grow further and more gaps fill. Below 0 only a stronger chunk does. At -1
+even a chunk as good as the best is worth 0, so nothing grows. Under `fill_values = absolute` the
+bias moves dsRAG's penalty: 0.1 makes it 0.08. The same bias applies to short passages.
+
 `max_answer_chars` (36,000) bounds what one excerpts search returns. Right after grouping, a
 `budget` step cuts the sections to it, the last first, though the first section always stays
 (`search_budget` logs how many went). The fills then go in, worth most per character first, while
@@ -158,8 +164,8 @@ rules:", with the list in the next chunk), or a section's last line. For the `pa
 to `max_passage_grow` (3) chunks whose values sum highest, when that is above 0. It never grows
 past a heading. A neighbour's value is its score around the scanned hits' own: 0 for one as good as
 the median, 1 for one as good as the best, scored by the reranker when one is on, else by the
-cosine to the query vector, else by the share of the question's words it holds. The floor is this
-search's own, so it needs no calibration per model. An excerpts search only judges it here, whether
+cosine to the query vector, else by the share of the question's words it holds, then moved by
+`grow_bias`. The floor is this search's own, so it needs no calibration per model. An excerpts search only judges it here, whether
 a run worth taking is next to it, and leaves the growing to the fill.
 
 A thin passage that took nothing is too short to stand alone. As a passage it is dropped, and its
@@ -342,8 +348,10 @@ building its first full-text index contributes nothing instead of making the que
 
 `limit`, `candidates`, `mode`, `fusion`, `rrf_k`, `vector_weight`, `bm25_weight`, `nprobes`,
 `refine_factor`, `reranker`, `reranker_model`, `min_passage_chars`, `max_passage_grow`,
-`max_section_chars` and `max_answer_chars` each have a user default and a description in the UI,
-and a collection can override them. In the shared ranking, each collection retrieves with its own
+`grow_bias`, `fill_values`, `max_section_chars` and `max_answer_chars` each have a user default
+and a description in the UI, and a collection can override them. The UI groups the ones that
+decide how passages expand under Expansion: `min_passage_chars`, `max_passage_grow`,
+`fill_values`, `grow_bias`, `max_section_chars` and `max_answer_chars`. In the shared ranking, each collection retrieves with its own
 overrides. The settings of the merged ranking (`rrf_k`, `candidates`, the reranker) come from the
 collection only when it is the one collection in scope, and from the user otherwise. `limit` comes
 from the call, else from the same place. No route takes search settings per call: a search with

@@ -1616,6 +1616,11 @@ export interface components {
              */
             max_passage_grow?: number | null;
             /**
+             * Growth bias
+             * @description Added to the value of every chunk a passage could grow by, -1 to 1 (see Values for growing and filling). A stretch of chunks is taken when its values sum above 0, so above 0 passages grow more eagerly, taking weaker chunks, and below 0 only by stronger ones. At -1 nothing grows, and a short passage is dropped unless it is the best result.
+             */
+            grow_bias?: number | null;
+            /**
              * Largest section (characters)
              * @description An excerpt is one section of a document: the largest heading whose text fits this many characters. The passages a search keeps under it come back together, in document order.
              */
@@ -1710,6 +1715,12 @@ export interface components {
              * @default 3
              */
             max_passage_grow: number;
+            /**
+             * Growth bias
+             * @description Added to the value of every chunk a passage could grow by, -1 to 1 (see Values for growing and filling). A stretch of chunks is taken when its values sum above 0, so above 0 passages grow more eagerly, taking weaker chunks, and below 0 only by stronger ones. At -1 nothing grows, and a short passage is dropped unless it is the best result.
+             * @default 0
+             */
+            grow_bias: number;
             /**
              * Largest section (characters)
              * @description An excerpt is one section of a document: the largest heading whose text fits this many characters. The passages a search keeps under it come back together, in document order.

@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import type { Chunker, ChunkSettings, CollectionOverrides, FillValues, Fusion, Options, Reranker, ScoreFold, SearchMode, SearchSettings } from '../../api'
-import { effectiveSearch, Field, Picker, rerankerOption, SEARCH_BOUNDS, visibleSearchFields, type NumericKeys, type PickerOption } from '../../ui'
+import { effectiveSearch, Field, Picker, rerankerOption, SEARCH_BOUNDS, visibleExpansionFields, visibleSearchFields, type NumericKeys, type PickerOption } from '../../ui'
 
 type SearchField = keyof SearchSettings
 
@@ -155,6 +155,7 @@ export function SettingsForm({
     candidates: searchNumber('candidates'),
     min_passage_chars: searchNumber('min_passage_chars'),
     max_passage_grow: searchNumber('max_passage_grow'),
+    grow_bias: searchNumber('grow_bias'),
     max_section_chars: searchNumber('max_section_chars'),
     max_answer_chars: searchNumber('max_answer_chars'),
   }
@@ -184,6 +185,8 @@ export function SettingsForm({
       </div>
       <span className="mono muted">Search</span>
       <div className="collection-fields">{visibleSearchFields(current).map((key) => searchFields[key])}</div>
+      <span className="mono muted">Expansion</span>
+      <div className="collection-fields">{visibleExpansionFields(current).map((key) => searchFields[key])}</div>
       <div className="row row-loose">
         <button className="btn btn-primary" type="button" disabled={busy} onClick={() => onSave(draft)}>
           Save

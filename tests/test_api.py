@@ -487,6 +487,7 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     options = (await client.get("/api/options")).json()
     assert "anydoc" in options["parsers"] and "hybrid" in options["search_modes"]
     assert options["docs"]["conversion.chunk_size"]["title"] == "Chunk size (characters)"
+    assert options["docs"]["search.grow_bias"]["title"] == "Growth bias"
     assert options["embedding_profiles"]["compact"]["dims"] == 384
     # the catalogue, read from the database: full-text only first, then the models by size
     profiles = options["embedding_profiles"]
@@ -1918,6 +1919,24 @@ async def test_the_mcp_surface_offers_one_search_per_question(api_client: AsyncT
     assert served.isdisjoint({"search", "search_text", "explore", "search_collection"})
 
 
+@pytest.mark.parametrize("bias", [-1.0, 1.0])
+async def test_a_growth_bias_at_either_end_is_saved_and_searched_with(
+    client: AsyncTestClient, bias: float
+) -> None:
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+
+    body = {"search": {"grow_bias": bias}}
+    saved = await client.put("/api/collections/notes/overrides", json=body)
+
+    assert saved.status_code == 200, saved.text
+    after = (await client.get("/api/collections/notes")).json()
+    assert (after["overrides"]["search"]["grow_bias"], after["search"]["grow_bias"]) == (bias, bias)
+    scoped = {"q": "alpha", "collections": "notes"}
+    searched = await client.get("/api/search/explore", params=scoped)
+    assert searched.status_code == 200, searched.text
+
+
 @pytest.mark.parametrize(
     ("name", "search"),
     [
@@ -1926,6 +1945,8 @@ async def test_the_mcp_surface_offers_one_search_per_question(api_client: AsyncT
         ("no candidates", {"candidates": 0}),
         ("a reranker floor above 1", {"min_rerank_score": 1.5}),
         ("a reranker floor below 0", {"min_rerank_score": -0.1}),
+        ("a growth bias above 1", {"grow_bias": 1.5}),
+        ("a growth bias below -1", {"grow_bias": -1.01}),
     ],
 )
 async def test_a_refused_search_override_is_never_saved(

@@ -336,11 +336,14 @@ def _thin(
             [(hit.text, row.get("vector")) for hit, row in rows.values()],
             [(query, where.vector)],
         )
-    neighbours = {
-        key: filling.Candidate(hit, worth)
-        for (key, (hit, _)), worth in zip(rows.items(), values, strict=True)
-    }
     settings = where.settings
+    neighbours = filling.biased(
+        {
+            key: filling.Candidate(hit, worth)
+            for (key, (hit, _)), worth in zip(rows.items(), values, strict=True)
+        },
+        settings.grow_bias,
+    )
     found = thin.fill(
         hit_ranges,
         neighbours,
@@ -609,9 +612,9 @@ async def fill(
     absolute = None
     if not tags and settings.fill_values == FillValues.ABSOLUTE:
         absolute = await _absolute(sorted(set().union(*nears)), rows, questions, where)
-    how = settings.score_fold
+    how, bias = settings.score_fold, settings.grow_bias
     return await cpu.on_cpu(
-        _fill, groups, nears, rows, questions, reach, budget, tags, how, absolute
+        _fill, groups, nears, rows, questions, reach, budget, tags, how, bias, absolute
     )
 
 
@@ -647,6 +650,7 @@ def _fill(
     budget: int,
     tags: bool,
     how: ScoreFold,
+    bias: float,
     absolute: dict[ChunkKey, filling.Candidate] | None = None,
 ) -> list[section.Group]:
     held = [key for one in groups for hit in one.hits if (key := chunk_key(hit)) in rows]
@@ -657,6 +661,7 @@ def _fill(
         weighed, signal = _weigh(held, near, rows, questions)
     if not tags:
         weighed = {key: msgspec.structs.replace(one, aspect=None) for key, one in weighed.items()}
+    weighed = filling.biased(weighed, bias)
     found = [
         one
         for at, group in enumerate(groups)

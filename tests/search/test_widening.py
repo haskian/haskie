@@ -99,6 +99,49 @@ async def test_a_section_fills_by_what_its_chunks_mean(tmp_path: Path) -> None:
     assert [hit.score for hit in filled.ranges[0].hits] == [1.0, 0.0, 1.0], "chunk 2 is unranked"
 
 
+def _biased(where: Plan, bias: float) -> Plan:
+    return msgspec.structs.replace(
+        where, settings=msgspec.structs.replace(where.settings, grow_bias=bias)
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "bias", "expected"),
+    [
+        ("no bias: chunks 4 (-1) and 5 (+1) sum to 0, so neither joins", 0.0, [(1, 3)]),
+        ("an eager bias takes off-topic chunk 4 for chunk 5 past it", 0.5, [(1, 5)]),
+        ("-1: chunk 2, as good as the best, is worth 0: the gap stays", -1.0, [(1, 1), (3, 3)]),
+    ],
+)
+async def test_the_grow_bias_decides_how_far_a_section_fills(
+    tmp_path: Path, name: str, bias: float, expected: list[tuple[int, int]]
+) -> None:
+    """The fixture of `test_a_section_fills_by_what_its_chunks_mean`, with `grow_bias` set."""
+    where, hits = await _index(tmp_path, VECTORS)
+    where = _biased(where, bias)
+    groups = await retrieval.sections(ranges([hits[1], hits[3]], how=HARMONIC), where, limit=5)
+
+    (filled,) = await retrieval.fill(groups, _asked(), where)
+
+    assert [(one.seq_start, one.seq_end) for one in filled.ranges] == expected, name
+
+
+@pytest.mark.anyio
+async def test_a_strict_grow_bias_leaves_a_short_passage_as_it_is(tmp_path: Path) -> None:
+    """The fixture of the next test, where chunk 1 grows to 3 with no bias. At -1 no neighbour is
+    worth taking; chunk 1 is still the best range, so it stays, thin."""
+    where, hits = await _index(tmp_path, VECTORS)
+    scanned = Scanned(hits=[hits[1], hits[7]], vectors=[ON, [0.8, 0.6]])
+
+    ranged = await retrieval.fill_thin(scanned, _biased(where, -1.0), QUERY, QUERY)
+
+    assert [(one.seq_start, one.seq_end, one.alone) for one in ranged.ranges] == [
+        (1, 1, False),
+        (7, 7, False),
+    ]
+
+
 @pytest.mark.anyio
 async def test_a_short_passage_grows_by_the_neighbours_that_mean_the_same(tmp_path: Path) -> None:
     """Scanned: chunk 1 (cosine 1.0) and chunk 7 (0.8, a whole short section), so the median is
