@@ -222,7 +222,7 @@ NEAR = [("backend", "doc.md", 3), ("backend", "doc.md", 4)]
     [
         (
             "by the vector: 0 at the median kept chunk, 1 at the best",
-            [probe.Question("retries idempotent", [1.0, 0.0], "retries idempotent")],
+            [probe.Question([1.0, 0.0], "retries idempotent")],
             WEIGHED,
             "vector",
             [0.5, -1.0],
@@ -230,7 +230,7 @@ NEAR = [("backend", "doc.md", 3), ("backend", "doc.md", 4)]
         ),
         (
             "without a query vector, by the question's words",
-            [probe.Question("idempotent retries", None, "idempotent retries")],
+            [probe.Question(None, "idempotent retries")],
             WEIGHED,
             "words",
             [1.0, -1.0],
@@ -239,8 +239,8 @@ NEAR = [("backend", "doc.md", 3), ("backend", "doc.md", 4)]
         (
             "each chunk takes its best question, which tags it",
             [
-                probe.Question("idempotent retries", None, "idempotent retries", label="a"),
-                probe.Question("jitter load", None, "jitter load", label="b"),
+                probe.Question(None, "idempotent retries", label="a"),
+                probe.Question(None, "jitter load", label="b"),
             ],
             WEIGHED,
             "words",
@@ -265,7 +265,7 @@ def test_a_chunk_near_a_passage_is_weighed_against_the_kept_chunks(
 
 
 def test_nothing_near_or_nothing_held_weighs_nothing() -> None:
-    question = [probe.Question("retries", None, "retries")]
+    question = [probe.Question(None, "retries")]
 
     assert retrieval._weigh(HELD, [], WEIGHED, question) == ({}, "none")
     assert retrieval._weigh([], NEAR, WEIGHED, question) == ({}, "none")
@@ -298,7 +298,7 @@ async def test_with_a_reranker_a_thin_range_grows_by_the_neighbours_it_scores(
     monkeypatch.setattr(retrieval, "_rows_at", rows_at)
     monkeypatch.setattr(retrieval, "cross_encode", rerank)
 
-    ranged = await retrieval.fill_thin(scanned, _plan(Reranker.CROSS_ENCODER), QUERY)
+    ranged = await retrieval.fill_thin(scanned, _plan(Reranker.CROSS_ENCODER), QUERY, QUERY)
 
     assert [(one.seq_start, one.seq_end) for one in ranged.ranges] == [(2, 3), (6, 6)]
     assert [hit.seq for hit in ranged.scanned.hits] == [2, 6, 3], "the neighbour joins the scan"

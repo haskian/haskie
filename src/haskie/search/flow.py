@@ -70,7 +70,8 @@ class Search(msgspec.Struct):
     """One search, as every step of it sees it. The values that flow between the steps are their
     inputs and outputs; this is what they all read."""
 
-    query: str
+    query: str  # the question alone: what full-text search and the word scores read
+    framed: str  # the shared context, then the question: what the embedding and reranker read
     plan: retrieval.Plan
     limit: int  # answers the caller asked for; the last step cuts to it
     scan: int  # how deep the ranking goes; `hits` cuts to it
@@ -171,7 +172,7 @@ async def merge(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Poo
 
 async def rerank(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Pool:
     """The merged candidates, rescored by a cross-encoder that reads query and chunk together."""
-    return await retrieval.rerank(ctx.inputs, ctx.state.query, ctx.state.plan.settings)
+    return await retrieval.rerank(ctx.inputs, ctx.state.framed, ctx.state.plan.settings)
 
 
 async def hits(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Scanned:
@@ -190,14 +191,16 @@ async def collapse_hits(ctx: StepContext[Search, None, retrieval.Scanned]) -> li
 async def fill_thin(ctx: StepContext[Search, None, retrieval.Scanned]) -> retrieval.Ranged:
     """Consecutive chunks of one section merged into one range, and each range too short to stand
     alone grown by the neighbours that match the query, or dropped."""
-    return await retrieval.fill_thin(ctx.inputs, ctx.state.plan, ctx.state.query)
+    return await retrieval.fill_thin(ctx.inputs, ctx.state.plan, ctx.state.query, ctx.state.framed)
 
 
 async def judge_thin(ctx: StepContext[Search, None, retrieval.Scanned]) -> retrieval.Ranged:
     """Consecutive chunks of one section merged into one range, and each range too short to stand
     alone judged by the neighbours that match the query, but not grown: the fill grows every
     passage of an excerpt once, short ones included."""
-    return await retrieval.fill_thin(ctx.inputs, ctx.state.plan, ctx.state.query, grows=False)
+    return await retrieval.fill_thin(
+        ctx.inputs, ctx.state.plan, ctx.state.query, ctx.state.framed, grows=False
+    )
 
 
 async def collapse_ranges(ctx: StepContext[Search, None, retrieval.Ranged]) -> list[HitRange]:
@@ -391,7 +394,7 @@ async def _searches(
     """
     limit = limit or (await load_user_settings()).search.limit
     with _timing("plan"):
-        plans = await retrieval.plan(names, asked.queries)
+        plans = await retrieval.plan(names, asked.framed)
     if plans is None:
         return None
     # a pipeline that folds scans deeper than it answers, and that is what `MAX_SCAN` bounds
@@ -404,6 +407,7 @@ async def _searches(
     return [
         Search(
             query=query,
+            framed=framed,
             plan=where,
             limit=limit,
             scan=scan,
@@ -411,5 +415,5 @@ async def _searches(
             sections=sections,
             questions=questions,
         )
-        for query, where in zip(asked.queries, plans, strict=True)
+        for query, framed, where in zip(asked.questions, asked.framed, plans, strict=True)
     ]

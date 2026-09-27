@@ -152,7 +152,7 @@ export function Explore({ route, counts }: PageProps) {
             <Field label="More parts of the question" help="One a line, up to four: each is searched on its own and takes its turn at the results.">
               <textarea className="textarea" rows={2} aria-label="More parts of the question" value={parts} onChange={(event) => setParts(event.target.value)} />
             </Field>
-            <Field label="Shared background" help="Searched in front of every part, at most 200 characters.">
+            <Field label="Shared background" help="What the parts share, at most 200 characters: it steers what they mean, never the words they match.">
               <input className="input" aria-label="Shared background" maxLength={200} value={context} onChange={(event) => setContext(event.target.value)} />
             </Field>
           </div>

@@ -39,11 +39,12 @@ chunks merged where they sit next to each other. Chunks are cut at headings, bla
 sentences, so a passage starts and ends where the author did.
 
 `q` is a list: one question, or 2 to 5 parts of one when the parts may be answered in different
-places, each at most 500 characters. Pass the background they share once as `context` (at most
-200 characters). Each part is searched on its own and the parts take turns at the `limit` slots,
-which must be at least the number of parts. Write each part as a full question. Keep in one `q`
-the conditions one passage must meet together. Resolve an ambiguous question first; when you cannot ask, pass one part per
-reading.
+places, each at most 500 characters. Pass the background they share once as `context` (at most 200
+characters): it steers what each part means, never the words a part matches, so a part the sources
+do not cover stays uncovered. Each part is searched on its own and the parts take turns at the
+`limit` slots, which must be at least the number of parts. Write each part as a full question. Keep
+in one `q` the conditions one passage must meet together. Resolve an ambiguous question first; when
+you cannot ask, pass one part per reading.
 
 - cite: `document`, `header` (the section's heading breadcrumb, "parent > … > heading"),
   `location` ("doc p.3-4 L10-20", first passage to last); one passage by its span's `header` and
@@ -56,10 +57,10 @@ reading.
   excerpt (empty for one question). Rank is not a
   judgement: a vector or hybrid search finds a nearest passage for any part, so read `text`
   before citing it as that part's answer. A part in `uncovered` found nothing at all.
-- gaps: `missing_terms`, the words of `q` (stopwords aside) that no excerpt's text or headings
-  hold, after the search looked for them once more by full text. Its best find joins the answer,
-  past `limit` and the answer budget when it is in a section of its own. A missing word is one the sources do not use:
-  search again with a synonym, or say the sources lack it.
+- gaps: `missing_terms`, the words of `q` (stopwords aside) that no excerpt's text or headings hold,
+  after the search looked for them once more by full text. Its best find joins the answer, past
+  `limit` and the answer budget when it is in a section of its own. A missing word is one the
+  sources do not use: search again with a synonym, or say the sources lack it.
 - open: `markdown_file` and `source_file` (absolute paths), `line_start`/`line_end` (1-based, in
   `markdown_file`), `char_start`/`char_end` (0-based), `page_start`/`page_end` (PDF only, else
   null), `seq_start`/`seq_end` (chunk positions in the document)

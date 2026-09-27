@@ -10,16 +10,9 @@ from haskie.search.passage import Excerpt, Span, ranges
 from haskie.search.probe import Question
 from haskie.search.section import Group, Section
 
-ORDER = Question(
-    "Designing orders.\n\nHow does an order keep inventory consistent?",
-    None,
-    "How does an order keep inventory consistent?",
-    label="order",
-)
-LEDGER = Question(
-    "How is the ledger reconciled?", None, "How is the ledger reconciled?", label="ledger"
-)
-ALONE = Question("How is the ledger reconciled?", None, "How is the ledger reconciled?")
+ORDER = Question(None, "How does an order keep inventory consistent?", label="order")
+LEDGER = Question(None, "How is the ledger reconciled?", label="ledger")
+ALONE = Question(None, "How is the ledger reconciled?")
 
 
 def _group(document: str, text: str, path: tuple[str, ...] = ("Shop",)) -> Group:
@@ -77,7 +70,7 @@ def test_a_text_holds_a_word_or_a_form_of_it(
         ),
         (
             "a question of stopwords asks for nothing",
-            [Question("How is it?", None, "How is it?")],
+            [Question(None, "How is it?")],
             [],
             {},
         ),

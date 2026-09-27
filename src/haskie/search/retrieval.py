@@ -232,15 +232,19 @@ class Ranged(msgspec.Struct):
     scanned: Scanned
 
 
-async def fill_thin(scanned: Scanned, where: Plan, query: str, grows: bool = True) -> Ranged:
+async def fill_thin(
+    scanned: Scanned, where: Plan, query: str, framed: str, grows: bool = True
+) -> Ranged:
     """The scanned hits as ranges, each thin one grown by the neighbours of its section that
     match `query`, else marked too short to stand alone (see `thin`).
 
     Its neighbours are read from the collection only when a range is thin, in one query per
-    collection, and valued around the scanned hits (`fill.value`): by the reranker when one is
-    on, since the scanned hits carry its scores already, else as `_values` does. The valuing and
-    the growing run in one worker-thread hop. `grows` False only judges which thin ranges could
-    grow, for the fill of an excerpts search to grow them, so a passage grows once.
+    collection, and valued around the scanned hits (`fill.value`): by the reranker when one is on,
+    since the scanned hits carry its scores already, else as `_values` does. The valuing and the
+    growing run in one worker-thread hop. The reranker reads the `framed` question, the context in
+    front; the word scores read `query`, the question alone (`aspects.Questions.framed`). `grows`
+    False only judges which thin ranges could grow, for the fill of an excerpts search to grow
+    them, so a passage grows once.
     """
     settings = where.settings
     hit_ranges = passage.ranges(scanned.hits)
@@ -250,7 +254,7 @@ async def fill_thin(scanned: Scanned, where: Plan, query: str, grows: bool = Tru
     if rows and settings.reranker != Reranker.NONE:
         read = [row for _, row in rows.values()]
         rescored = {
-            row_key(row): row_score(row) for row in await cross_encode(query, read, settings)
+            row_key(row): row_score(row) for row in await cross_encode(framed, read, settings)
         }
         reranked = [rescored[row_key(row)] for row in read]
     filled, signal = await cpu.on_cpu(
@@ -601,7 +605,7 @@ def _weigh(
     values, signal = _values(
         [(rows[key][0].text, rows[key][1].get("vector")) for key in held],
         [(rows[key][0].text, rows[key][1].get("vector")) for key in near],
-        [(question.text, question.vector) for question in questions],
+        [(question.asked, question.vector) for question in questions],
     )
     weighed: dict[ChunkKey, filling.Candidate] = {}
     for at, key in enumerate(near):

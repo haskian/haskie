@@ -1603,8 +1603,8 @@ async def test_the_answer_budget_cuts_the_last_sections(client: AsyncTestClient,
 
 
 async def test_one_question_with_a_context_is_the_single_search(client: AsyncTestClient) -> None:
-    """One question, however it is sent, is today's search: no turns and no tags, with the
-    context read in front of it."""
+    """One question, however it is sent, is today's search: no turns and no tags. Its context is
+    for the models to read; the full-text search reads the question's own words."""
     await _notes_on_aggregates(client)
 
     plain = await client.get("/api/search/excerpts", params={"q": BY_EVENT})
@@ -1623,11 +1623,36 @@ async def test_one_question_with_a_context_is_the_single_search(client: AsyncTes
     assert repeated.json() == plain.json(), "a repeated question is asked once"
     assert "cover" not in plain.headers["server-timing"]
     found = framed.json()["excerpts"]
-    assert "events.md" in {one["document"] for one in found}, "found by its context"
+    assert "events.md" in {one["document"] for one in found}, "found by its own word, change"
     missing = framed.json()["missing_terms"]
     assert missing == ["reaches", "warehouse"], (
         "the question's words no note has, not the context's"
     )
+
+
+async def test_a_context_never_makes_a_question_match_by_its_own_words(
+    client: AsyncTestClient,
+) -> None:
+    """The shared context names the notes' topic, and one part asks about something they never
+    mention. Its full-text search reads the part alone, so the context's words find it nothing:
+    it is uncovered, and no excerpt is tagged with it."""
+    await _notes_on_aggregates(client)
+    offtopic = "Which warehouse ledger reconciles stock?"
+
+    response = await client.get(
+        "/api/search/excerpts",
+        params={
+            "q": [BY_EVENT, offtopic],
+            "context": "Domain events carry each change between aggregates.",
+            "limit": 4,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    assert answer["uncovered"] == [offtopic]
+    assert all(offtopic not in one["aspects"] for one in answer["excerpts"])
+    assert "events.md" in {one["document"] for one in answer["excerpts"]}
 
 
 async def test_several_questions_over_collections_since_deleted_find_nothing(

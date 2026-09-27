@@ -114,7 +114,7 @@ def test_the_questions_a_caller_sends_are_stripped_and_deduplicated(
     checked = aspects.questions(asked, context)
 
     assert checked.questions == questions, name
-    assert checked.queries == queries, name
+    assert checked.framed == queries, name
     assert checked.context == shared, name
 
 

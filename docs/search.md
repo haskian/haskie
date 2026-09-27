@@ -216,10 +216,13 @@ That score is the Dice coefficient for words and the F1 of the best chunk matche
 ## Several questions at once
 
 When the parts of a question are answered in different places, one search of the whole question
-tends to fill every slot with one part. The reranker scores one passage at a time, so it never
-sees that another part went unanswered. So `search_excerpts` takes `q` as a list: one question, or
-2 to 5 parts of one, each at most 500 characters. An optional `context` of at most 200 characters
-goes in front of every part.
+tends to fill every slot with one part. The reranker scores one passage at a time, so it never sees
+that another part went unanswered. So `search_excerpts` takes `q` as a list: one question, or 2 to
+5 parts of one, each at most 500 characters. An optional `context` of at most 200 characters is the
+background the parts share. The models read it in front of each part: the query embedding and the
+reranker, as they read a chunk under its heading path. Full-text search and the word scores read
+the part alone. The context's words would otherwise make every part match every passage that shares
+them, so a part the sources say nothing about would look answered.
 
 ```mermaid
 flowchart LR
@@ -248,7 +251,7 @@ An excerpt's `aspects` joins its spans'. The tags come from ranks alone, with no
 vector or hybrid search finds nearest passages for any part, even one the sources say nothing
 about, so a tag is not proof of an answer. A part no excerpt lists found nothing at all, and the
 answer's `uncovered` names it. One question, or a list that deduplicates to one, is the single
-search with the context in front of it, and its `aspects` is empty. A `limit` below the number of
+search, its context read the same way, and its `aspects` is empty. A `limit` below the number of
 parts is refused (422).
 
 ## Full-text search

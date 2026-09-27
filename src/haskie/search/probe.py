@@ -31,9 +31,8 @@ PROBE_SCAN = 20  # hits the probe's full-text search reads: its best new passage
 class Question(msgspec.Struct, frozen=True):
     """One question of a search, as the steps after the ranking read it."""
 
-    text: str  # what it was searched with, the shared context included
-    vector: list[float] | None  # its embedding, None for a lexical search
-    asked: str  # the question alone, whose words the answer should hold
+    vector: list[float] | None  # the embedding of its framed form, None for a lexical search
+    asked: str  # the question alone: what its words are read from, and the answer should hold
     label: str | None = None  # the question to tag passages with, when several were asked
 
 

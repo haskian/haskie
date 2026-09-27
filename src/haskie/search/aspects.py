@@ -43,20 +43,25 @@ class Questions(msgspec.Struct, frozen=True):
     context: str | None = None
 
     @property
-    def queries(self) -> list[str]:
-        """What each question is searched with: the shared context, then the question."""
+    def framed(self) -> list[str]:
+        """What the models read each question as: the shared context, then the question. The
+        embedding and the reranker read it, as they read a chunk under its heading path, so the
+        context steers what a question means. Full-text search and the word scores read the
+        question alone: the context's words would make any question match any passage that
+        shares them, one the sources say nothing about included."""
         if self.context is None:
             return list(self.questions)
         return [f"{self.context}\n\n{question}" for question in self.questions]
 
     def asked(self, vectors: list[list[float] | None] | None = None) -> list[probe.Question]:
-        """Each question as the steps after the ranking read it, given its query's embedding (None
-        for a lexical search, or none planned). Tagged with itself only when several were asked."""
+        """Each question as the steps after the ranking read it, given the embedding of its framed
+        form (None for a lexical search, or none planned). Tagged with itself only when several
+        were asked."""
         several = len(self.questions) > 1
         vectors = vectors or [None] * len(self.questions)
         return [
-            probe.Question(text=query, vector=vector, asked=asked, label=asked if several else None)
-            for query, asked, vector in zip(self.queries, self.questions, vectors, strict=True)
+            probe.Question(vector=vector, asked=asked, label=asked if several else None)
+            for asked, vector in zip(self.questions, vectors, strict=True)
         ]
 
 

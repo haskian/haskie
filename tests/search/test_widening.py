@@ -57,7 +57,7 @@ async def _index(tmp_path: Path, vectors: dict[int, list[float]]) -> tuple[Plan,
 
 
 def _asked() -> list[probe.Question]:
-    return [probe.Question(text=QUERY, vector=ON, asked=QUERY)]
+    return [probe.Question(vector=ON, asked=QUERY)]
 
 
 NEAR = [0.95, 0.312]  # cosine 0.95 to the query
@@ -104,7 +104,7 @@ async def test_a_short_passage_grows_by_the_neighbours_that_mean_the_same(tmp_pa
     where, hits = await _index(tmp_path, VECTORS)
     scanned = Scanned(hits=[hits[1], hits[7]], vectors=[ON, [0.8, 0.6]])
 
-    ranged = await retrieval.fill_thin(scanned, where, QUERY)
+    ranged = await retrieval.fill_thin(scanned, where, QUERY, QUERY)
 
     assert [(one.seq_start, one.seq_end) for one in ranged.ranges] == [(1, 3), (7, 7)]
     added: dict[ChunkKey, Vector | None] = {
@@ -122,7 +122,7 @@ async def test_a_short_passage_with_no_neighbour_worth_it_stands_alone(tmp_path:
     where, hits = await _index(tmp_path, {**VECTORS, 4: OFF, 6: OFF})
     scanned = Scanned(hits=[hits[1], hits[5]], vectors=[ON, ON])
 
-    ranged = await retrieval.fill_thin(scanned, where, QUERY)
+    ranged = await retrieval.fill_thin(scanned, where, QUERY, QUERY)
 
     shape = [(one.seq_start, one.seq_end, one.alone) for one in ranged.ranges]
     assert shape == [(1, 2, False), (5, 5, True)]
@@ -138,7 +138,7 @@ async def test_in_an_excerpt_a_short_passage_grows_once_by_the_fill(tmp_path: Pa
     where, hits = await _index(tmp_path, VECTORS)
     scanned = Scanned(hits=[hits[1], hits[7]], vectors=[ON, [0.8, 0.6]])
 
-    judged = await retrieval.fill_thin(scanned, where, QUERY, grows=False)
+    judged = await retrieval.fill_thin(scanned, where, QUERY, QUERY, grows=False)
     groups = await retrieval.sections([judged.ranges[0]], where, limit=1)
     (filled,) = await retrieval.fill(groups, _asked(), where)
 
