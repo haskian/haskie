@@ -549,7 +549,12 @@ class CollectionIndex:
         return table
 
     async def search_rows(
-        self, query: str, vector: list[float] | None, settings: SearchSettings, limit: int
+        self,
+        query: str,
+        vector: list[float] | None,
+        settings: SearchSettings,
+        limit: int,
+        vectors: bool = True,
     ) -> list[dict]:
         """Retrieval only: at most `limit` raw LanceDB rows, neither cut to `settings.limit` nor
         rescored by a cross-encoder.
@@ -558,12 +563,18 @@ class CollectionIndex:
         falls back to full text whatever the caller passed, so one collection of a session can lack
         the embedding the others have. A hybrid query always fuses over at least
         `settings.candidates` rows, because the fusion is only as good as its candidate pool.
+
+        `vectors` False leaves the vector column out of a lexical read, for a caller that only
+        wants the chunks: the probe for missing words (`search.retrieval.probe_gaps`).
         """
         table = await self._readable()
         if table is None:
             return []
         if vector is None or not await self.has_vector_column():
-            return await (await table.search(query, query_type="fts")).limit(limit).to_list()
+            found = await table.search(query, query_type="fts")
+            if not vectors:
+                found = found.select([*PLAIN_SCHEMA.names, "_score"])
+            return await found.limit(limit).to_list()
         if settings.mode == SearchMode.VECTOR:
             found = _tuned(await table.search(vector, query_type="vector"), settings)
             return await found.limit(limit).to_list()

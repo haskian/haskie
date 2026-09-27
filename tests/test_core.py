@@ -2486,7 +2486,7 @@ async def test_session_search_reads_its_collections_concurrently(monkeypatch) ->
     await session.set_collections("s1", ["a", "b"])
     arrived = {"a": asyncio.Event(), "b": asyncio.Event()}
 
-    async def paired(self, query, vector, settings_, limit) -> list[dict]:
+    async def paired(self, query, vector, settings_, limit, vectors=True) -> list[dict]:
         arrived[self.collection].set()
         other = arrived["b" if self.collection == "a" else "a"]
         await asyncio.wait_for(other.wait(), CONCURRENT_SEARCH_SECONDS)

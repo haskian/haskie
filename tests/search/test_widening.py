@@ -144,3 +144,20 @@ async def test_in_an_excerpt_a_short_passage_grows_once_by_the_fill(tmp_path: Pa
         (7, 7, False),
     ], "judged, not grown"
     assert [(one.seq_start, one.seq_end) for one in filled.ranges] == [(1, 2)], "grown once"
+
+
+@pytest.mark.anyio
+async def test_a_lexical_read_leaves_vectors_out_only_when_asked(tmp_path: Path) -> None:
+    """The probe's full-text search only wants the chunks, so its rows carry no vector but keep
+    their score; any other full-text read keeps the vectors the fold compares by."""
+    where, _ = await _index(tmp_path, VECTORS)
+    await where.indexes[0][0].finish()  # the full-text index the search reads
+    lexical = Plan(settings=where.settings, indexes=where.indexes, vector=None, embedding=None)
+
+    probed = await retrieval.fan_out(lexical, "backoff", 5, vectors=False)
+    plain = await retrieval.fan_out(lexical, "backoff", 5)
+
+    assert probed.rows and all("vector" not in row for _, row in probed.rows.values())
+    assert all(row["_score"] > 0 for _, row in probed.rows.values()), "scored as before"
+    assert all(row["vector"] is not None for _, row in plain.rows.values())
+    assert list(probed.rows) == list(plain.rows), "the same chunks, in the same order"

@@ -125,7 +125,7 @@ class Pool(msgspec.Struct):
     ranked: list[tuple[RowKey, float]] = []  # merged, best first
 
 
-async def fan_out(where: Plan, query: str, candidates: int) -> Pool:
+async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True) -> Pool:
     """Read every collection concurrently and keep one row per chunk.
 
     A chunk counts once. The same document may be a member of several of the chosen collections,
@@ -144,7 +144,7 @@ async def fan_out(where: Plan, query: str, candidates: int) -> Pool:
         settings = chosen[index.collection]
         wanted = None if settings.mode == SearchMode.FTS else where.vector
         try:
-            return await index.search_rows(query, wanted, settings, candidates)
+            return await index.search_rows(query, wanted, settings, candidates, vectors)
         except Exception:
             _log.exception("session_collection_search_failed", collection=index.collection)
             raise
@@ -636,7 +636,7 @@ async def probe_gaps(
     held = {chunk_key(hit) for one in groups for hit in one.hits}
     depth = probe.PROBE_SCAN + len(held)  # enough rows that the best new one is among them
     lexical = msgspec.structs.replace(where, vector=None)
-    found = await fan_out(lexical, " ".join(wanted), depth)
+    found = await fan_out(lexical, " ".join(wanted), depth, vectors=False)  # it only wants chunks
     pool = merge(found, where.settings.rrf_k, depth)
     hits = [hit for hit in scan(pool, depth).hits if chunk_key(hit) not in held]
     fresh = passage.ranges(hits)
