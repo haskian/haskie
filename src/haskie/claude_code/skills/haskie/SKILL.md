@@ -64,18 +64,18 @@ you cannot ask, pass one part per reading.
 - open: `markdown_file` and `source_file` (absolute paths), `line_start`/`line_end` (1-based, in
   `markdown_file`), `char_start`/`char_end` (0-based), `page_start`/`page_end` (PDF only, else
   null), `seq_start`/`seq_end` (chunk positions in the document)
-- repeats: a span's `also_in` lists every other place that says what its passage says, folded
-  into it. It is a tree. Each place sits under what it repeats: the passage, or a place above it. Each
+- repeats: a span's `also_in` lists every other place that says what its passage says, folded into
+  it. It is a tree. Each place sits under what it repeats: the passage, or a place above it. Each
   place has its own `also_in`. Each has `collection`, `document`, `header`, `location`,
   `line_start`/`line_end`, `score` (its own match to the query), `relation` to its parent and
   `similarity` (how strongly that relation holds). `duplicate` is an exact character match: the same
   text, whitespace aside, in any document. `contained` sits inside its parent, which says more.
   `equivalent` is the same meaning in other words, so a nearly identical vector. Hybrid and
   full-text searches also count nearly the same words. `to_parent` and `to_root` measure the place
-  against its parent and against the passage, by `words` and by `embedding` (null without
-  vectors). `contained` is how much of it is in the other. `contains` is how much of the other is
-  in it. `alike` is how alike the two are as a whole. `score` is the harmonic mean of `contained`
-  and `contains`. `chars` compares two spans of one document. A place may be elsewhere in the same
+  against its parent and against the passage, by `words` and by `embedding` (null without vectors).
+  `contained` is how much of it is in the other. `contains` is how much of the other is in it.
+  `alike` is how alike the two are as a whole. `score` is the harmonic mean of `contained` and
+  `contains`. `chars` compares two spans of one document. A place may be elsewhere in the same
   document, so cite it as a second source only when its `document` differs.
 
 **`search_sources(q, session_id?, collections?, limit?, sections?)`** → `documents`, best first
