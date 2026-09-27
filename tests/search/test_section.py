@@ -258,6 +258,28 @@ def test_passages_group_by_section_and_the_sections_take_the_slots(
     assert shape == expected, name
 
 
+# --- within -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "budget", "expected"),
+    [
+        ("everything fits", 10_000, 3),
+        ("the sections past the budget go, the last first", 300, 2),
+        ("a later small section does not jump the queue", 200, 1),
+        ("the first stays even over the budget", 10, 1),
+    ],
+)
+def test_the_sections_are_cut_to_the_budget_in_order(name: str, budget: int, expected: int) -> None:
+    storage = section.Group(COLLECTION, DOC, Section(STORAGE, 2, 3), [_range(2), _range(3)])
+    ranking = section.Group(COLLECTION, DOC, Section(SEARCH, 4, 6), [_range(5)])
+    folding = section.Group(COLLECTION, DOC, Section(SEARCH, 7, 7), [_range(7)])
+    groups = [ranking, storage, folding]
+
+    assert [one.chars for one in groups] == [96, 89 + 93, 92], "the fixture's passages"
+    assert len(section.within(groups, budget)) == expected, name
+
+
 # --- excerpt --------------------------------------------------------------------------
 
 

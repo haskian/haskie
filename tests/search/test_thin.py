@@ -19,6 +19,7 @@ from conftest import chunk_hit
 from haskie.collection.index import ChunkKey
 from haskie.indexing.chunk import split
 from haskie.search import thin
+from haskie.search.fill import Candidate
 from haskie.search.passage import HitRange, ranges
 from haskie.settings import ChunkSettings
 
@@ -114,14 +115,18 @@ def test_a_range_without_a_word_asks_for_nothing() -> None:
 
 # --- fill -----------------------------------------------------------------------------
 
-MATCH, WEAK, FLOOR = 0.9, 0.1, 0.5
+MATCH, WEAK = 0.8, -0.4  # values around the scanned hits (`fill.value`)
+
+
+def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
+    return {_key(seq): Candidate(HITS[seq], worth) for seq, worth in values.items()}
 
 
 @pytest.mark.parametrize(
-    ("name", "found", "scores", "min_chars", "grow", "expected", "counts"),
+    ("name", "found", "values", "min_chars", "reach", "expected", "counts"),
     [
         (
-            "a lead-in grows into its table until it is long enough",
+            "a lead-in grows into its table",
             [_range(1)],
             {2: MATCH, 3: MATCH},
             300,
@@ -130,7 +135,7 @@ MATCH, WEAK, FLOOR = 0.9, 0.1, 0.5
             (1, 0, 0),
         ),
         (
-            "growing stops at `grow` chunks, thin or not",
+            "growing stops at `reach` chunks",
             [_range(1)],
             {2: MATCH, 3: MATCH},
             300,
@@ -148,16 +153,25 @@ MATCH, WEAK, FLOOR = 0.9, 0.1, 0.5
             (1, 0, 0),
         ),
         (
-            "of two neighbours that match, the closer match comes first",
+            "both sides grow",
             [_range(3)],
-            {2: WEAK + FLOOR, 4: MATCH},
+            {2: MATCH, 4: MATCH},
             300,
             1,
-            [(3, 4, False)],
+            [(2, 4, False)],
             (1, 0, 0),
         ),
         (
-            "a neighbour under the floor is no match: the thin range stays, alone",
+            "a weak neighbour joins when a stronger one past it pays for it",
+            [_range(1)],
+            {2: -0.2, 3: MATCH},
+            300,
+            2,
+            [(1, 3, False)],
+            (1, 0, 0),
+        ),
+        (
+            "a weak neighbour is no match: the thin range stays, alone",
             [_range(6), _range(1)],
             {2: WEAK},
             100,
@@ -216,22 +230,17 @@ MATCH, WEAK, FLOOR = 0.9, 0.1, 0.5
 def test_a_thin_range_grows_by_matching_neighbours_or_goes(
     name: str,
     found: list[HitRange],
-    scores: dict[int, float],
+    values: dict[int, float],
     min_chars: int,
-    grow: int,
+    reach: int,
     expected: list[tuple[int, int, bool]],
     counts: tuple[int, int, int],
 ) -> None:
-    neighbours = {_key(seq): HITS[seq] for seq in scores}
-
-    filled = thin.fill(
-        found, neighbours, {_key(seq): s for seq, s in scores.items()}, FLOOR, min_chars, grow
-    )
+    filled = thin.fill(found, _neighbours(values), min_chars, reach)
 
     assert [(one.seq_start, one.seq_end, one.alone) for one in filled.ranges] == expected, name
     counted = (filled.grown, sum(one.alone for one in filled.ranges), filled.dropped)
     assert counted == counts, f"{name}: grown, alone, dropped"
-    assert all(hit.score == 0.0 for hit in filled.added), f"{name}: a neighbour joins unranked"
 
 
 def test_a_neighbour_that_joins_leaves_the_range_score_as_it_matched() -> None:
@@ -239,14 +248,14 @@ def test_a_neighbour_that_joins_leaves_the_range_score_as_it_matched() -> None:
     ranked, so it lifts nothing."""
     found = _range(1)
 
-    (grown,) = thin.fill([found], {_key(2): HITS[2]}, {_key(2): MATCH}, FLOOR, 300, 1).ranges
+    (grown,) = thin.fill([found], _neighbours({2: MATCH}), 300, 1).ranges
 
     assert grown.score == found.score
-    assert [hit.seq for hit in grown.hits] == [1, 2]
+    assert [(hit.seq, hit.score) for hit in grown.hits] == [(1, 1.0), (2, 0.0)]
 
 
 def test_a_range_without_a_word_goes_even_when_it_ranked_first() -> None:
-    filled = thin.fill([*ranges([RULE]), _range(6)], {}, {}, FLOOR, 300, 2)
+    filled = thin.fill([*ranges([RULE]), _range(6)], {}, 300, 2)
 
     assert [(one.hits[0].document, one.seq_start) for one in filled.ranges] == [(DOC, 6)]
     assert filled.dropped == 1
@@ -267,8 +276,14 @@ def test_a_range_without_a_word_goes_even_when_it_ranked_first() -> None:
 def test_overlap_is_the_share_of_the_question_words_a_text_holds(
     name: str, question: str, text: str, expected: float
 ) -> None:
-    assert thin.overlap(thin.terms(question), text) == pytest.approx(expected), name
+    assert thin.overlap(thin.terms(question), set(thin.terms(text))) == pytest.approx(expected), (
+        name
+    )
 
 
 def test_terms_drop_question_words_and_short_ones() -> None:
-    assert thin.terms("How should an Order be retried?") == {"order", "retried"}
+    assert thin.terms("How should an Order be retried, and the order kept?") == [
+        "order",
+        "retried",
+        "kept",
+    ], "once each, in the order they come"

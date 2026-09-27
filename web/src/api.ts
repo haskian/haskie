@@ -40,6 +40,8 @@ export type Passage = Wire<'Passage'>
 // An excerpt: one section of a document, holding every passage the search kept in it as a span
 // (`section.excerpt`). Its folded places are the spans', not its own.
 export type Excerpt = Wire<'Excerpt'>
+// What an excerpts search answers with: the excerpts, and what they leave out (`probe.report`).
+export type Answer = Wire<'Answer'>
 export type Source = Wire<'Source'>
 export type Sources = Wire<'Sources'>
 export type HotSection = Wire<'HotSection'>
@@ -305,11 +307,13 @@ export const api = {
   saveSession: (id: string, collections: string[]) =>
     request<string[]>(`/api/sessions/${encodeURIComponent(id)}`, json('PUT', { collections })),
 
-  // The two searches Explore runs, over one scope: `collections` when given, else the session's
+  // The three searches Explore runs, over one scope: `collections` when given, else the session's
   // selection, else every collection (the backend applies that order). Each answers with the
   // steps it took, for the breakdown under the total.
   explore: <G extends Granularity>(q: string, granularity: G, scope: SearchScope = {}) =>
     timedRequest<ExploreResult<G>>(`/api/search/explore${pageQuery({}, { q, granularity, ...scopeQuery(scope) })}`),
+  searchExcerpts: (q: string, scope: SearchScope = {}) =>
+    timedRequest<Answer>(`/api/search/excerpts${pageQuery({}, { q, ...scopeQuery(scope) })}`),
   searchSources: (q: string, scope: SearchScope = {}) =>
     timedRequest<Sources>(`/api/search/sources${pageQuery({}, { q, ...scopeQuery(scope) })}`),
 }

@@ -88,9 +88,9 @@ describe('visibleSearchFields', () => {
       expected: ['limit', 'mode', 'fusion', 'rrf_k', 'nprobes', 'refine_factor', 'reranker', 'reranker_model', 'candidates', 'min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars'],
     },
     {
-      name: 'no shortest passage: nothing grows, so how far is not asked',
+      name: 'no shortest passage still asks how far passages grow: every excerpt grows by it',
       search: search({ mode: 'fts', min_passage_chars: 0 }),
-      expected: ['limit', 'mode', 'reranker', 'min_passage_chars', 'max_section_chars', 'max_answer_chars'],
+      expected: ['limit', 'mode', 'reranker', 'min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars'],
     },
     {
       name: 'the order is the order the form renders',

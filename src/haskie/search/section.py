@@ -20,7 +20,7 @@ from collections.abc import Sequence
 
 import msgspec
 
-from haskie.collection.index import location
+from haskie.collection.index import Hit, location
 from haskie.document.convert import without_markers
 from haskie.indexing.chunk import HEADING_SEP
 from haskie.search.passage import Excerpt, HitRange, pages, span
@@ -103,6 +103,29 @@ class Group(msgspec.Struct):
     document: str
     section: Section
     ranges: list[HitRange]
+
+    @property
+    def hits(self) -> list[Hit]:
+        """Every chunk its passages hold."""
+        return [hit for hit_range in self.ranges for hit in hit_range.hits]
+
+    @property
+    def chars(self) -> int:
+        """How long its passages are together."""
+        return sum(hit_range.char_end - hit_range.char_start for hit_range in self.ranges)
+
+
+def within(groups: list[Group], budget: int) -> list[Group]:
+    """The groups whose passages fit `budget` characters together, in order. The first always
+    stays: an answer of one section over the budget beats no answer."""
+    kept: list[Group] = []
+    used = 0
+    for one in groups:
+        if kept and used + one.chars > budget:
+            break
+        kept.append(one)
+        used += one.chars
+    return kept
 
 
 def group(

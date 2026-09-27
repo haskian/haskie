@@ -28,7 +28,8 @@ from collections.abc import Iterator
 import msgspec
 
 from haskie.errors import InvalidInput
-from haskie.search.passage import HitRange, PassageReference, continues, ranges
+from haskie.search import probe
+from haskie.search.passage import HitRange, PassageReference, continues, rejoin
 
 MAX_QUESTIONS = 5  # Perplexity and OpenSearch cap several queries at 5; xQuAD degrades past few
 MAX_QUESTION = 500  # judgement: a question, not a pasted document
@@ -47,6 +48,16 @@ class Questions(msgspec.Struct, frozen=True):
         if self.context is None:
             return list(self.questions)
         return [f"{self.context}\n\n{question}" for question in self.questions]
+
+    def asked(self, vectors: list[list[float] | None] | None = None) -> list[probe.Question]:
+        """Each question as the steps after the ranking read it, given its query's embedding (None
+        for a lexical search, or none planned). Tagged with itself only when several were asked."""
+        several = len(self.questions) > 1
+        vectors = vectors or [None] * len(self.questions)
+        return [
+            probe.Question(text=query, vector=vector, asked=asked, label=asked if several else None)
+            for query, asked, vector in zip(self.queries, self.questions, vectors, strict=True)
+        ]
 
 
 def questions(asked: list[str], context: str | None = None) -> Questions:
@@ -144,21 +155,13 @@ def _take(picks: list[Pick], candidate: HitRange, part: int, tops: list[list[Hit
         picks.append(Pick(candidate, {part}, _ranked_high(candidate, tops)))
         return
     first, *rest = touching
-    first.span = _merged([first.span, *(pick.span for pick in rest), candidate])
+    # overlapping or continuing each other in one section, they rebuild into one range
+    (first.span,) = rejoin([first.span, *(pick.span for pick in rest), candidate])
     first.questions |= {part}.union(*(pick.questions for pick in rest))
     first.taken += 1 + sum(pick.taken for pick in rest)
     first.ranked_high = _ranked_high(first.span, tops)
     for pick in rest:
         picks.remove(pick)
-
-
-def _merged(spans: list[HitRange]) -> HitRange:
-    """One range over the chunks of ranges that overlap or continue each other in one section. A
-    chunk two of them hold counts once, with the hit of the range listed first. It is `alone`
-    (`thin`) only when each of them was."""
-    hits = {hit.seq: hit for span in reversed(spans) for hit in span.hits}
-    (merged,) = ranges(sorted(hits.values(), key=lambda hit: hit.seq))
-    return msgspec.structs.replace(merged, alone=all(span.alone for span in spans))
 
 
 def tagged(kept: list[HitRange], picks: list[Pick], labels: list[str]) -> list[HitRange]:

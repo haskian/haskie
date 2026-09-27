@@ -18,7 +18,7 @@ and the memberships and hands them in.
 
 import msgspec
 
-from haskie.collection.index import Hit, Overlaps, Relation, location
+from haskie.collection.index import ChunkKey, Hit, Overlaps, Relation, chunk_key, location
 from haskie.document.convert import without_markers
 from haskie.indexing.segment import CutReason
 
@@ -150,6 +150,47 @@ def ranges(hits: list[Hit]) -> list[HitRange]:
     if run:
         found.append(_range(run))
     return sorted(found, key=lambda found: (-found.score, found.hits[0].document, found.seq_start))
+
+
+def part(hit: Hit, aspects: list[str] | None = None) -> HitRange:
+    """One chunk a search did not rank, as a range to `rejoin` to the ranges it sits next to: its
+    score 0, so a range it joins scores what its ranked chunks matched, and the questions it
+    answers, if any."""
+    (found,) = ranges([msgspec.structs.replace(hit, score=0.0)])
+    return msgspec.structs.replace(found, aspects=aspects or [])
+
+
+def rejoin(parts: list[HitRange]) -> list[HitRange]:
+    """The ranges over every chunk `parts` hold, rebuilt by `ranges`, so parts that overlap or
+    continue each other in one section become one range, best first.
+
+    A chunk several parts hold counts once, as the first of them has it. Each rebuilt range
+    carries what its parts carried: their folded places, their questions in the order the parts
+    are listed, and `alone` (`thin`) only when every one of them was. A part never splits, since
+    its chunks continue each other, so each lands whole in one rebuilt range.
+    """
+    hits: dict[ChunkKey, Hit] = {}
+    for one in parts:
+        for hit in one.hits:
+            hits.setdefault(chunk_key(hit), hit)
+    starts: dict[ChunkKey, list[int]] = {}  # the parts each chunk is the first chunk of
+    for at, one in enumerate(parts):
+        starts.setdefault(chunk_key(one.hits[0]), []).append(at)
+    rebuilt: list[HitRange] = []
+    for one in ranges(list(hits.values())):
+        held = [
+            parts[at]
+            for at in sorted(at for hit in one.hits for at in starts.get(chunk_key(hit), ()))
+        ]
+        rebuilt.append(
+            msgspec.structs.replace(
+                one,
+                also_in=[place for kept in held for place in kept.also_in],
+                aspects=list(dict.fromkeys(label for kept in held for label in kept.aspects)),
+                alone=all(kept.alone for kept in held),
+            )
+        )
+    return rebuilt
 
 
 def _range(hits: list[Hit]) -> HitRange:

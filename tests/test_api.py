@@ -180,6 +180,31 @@ def _requested(lines: list[dict]) -> list[str]:
             422, "limit must be >= 1, got 0",
         ),
         (
+            "a section cap of none -> unprocessable",
+            "PUT", "/api/settings", {"search": {"max_section_chars": 0}}, None,
+            422, "max_section_chars must be >= 1, got 0",
+        ),
+        (
+            "an answer budget of none -> unprocessable",
+            "PUT", "/api/collections/notes/overrides", {"search": {"max_answer_chars": 0}}, None,
+            422, "max_answer_chars must be >= 1, got 0",
+        ),
+        (
+            "a negative shortest passage -> unprocessable",
+            "PUT", "/api/settings", {"search": {"min_passage_chars": -1}}, None,
+            422, "min_passage_chars must be >= 0, got -1",
+        ),
+        (
+            "a negative growth -> unprocessable",
+            "PUT", "/api/collections/notes/overrides", {"search": {"max_passage_grow": -1}}, None,
+            422, "max_passage_grow must be >= 0, got -1",
+        ),
+        (
+            "explore has no excerpt granularity: excerpts have their own route",
+            "GET", "/api/search/explore?q=alpha&granularity=excerpt", None, None,
+            422, "Invalid enum value 'excerpt'",
+        ),
+        (
             "collection override naming an unknown reranker -> unprocessable",
             "PUT", "/api/collections/notes/overrides",
             {"search": {"reranker_model": "no/such-model"}}, None,
@@ -1136,8 +1161,9 @@ async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
                 "rerank",
                 "hits",
                 "fill_thin",
-                "collapse_all",
+                "fold",
                 "group",
+                "budget",
                 "probe_gaps",
                 "fill",
                 "quote",
@@ -1204,16 +1230,18 @@ async def test_explore_merges_consecutive_chunks_into_one_passage(
 
 async def test_an_excerpt_is_the_section_its_passages_share(client: AsyncTestClient) -> None:
     """The passages of one section come back as one excerpt: the section's heading path, each
-    passage a span, and the route the MCP tool calls is the same search as the exploration."""
+    passage a span. Excerpts have one route, the one the MCP tool calls."""
     await _guide_with_two_chunks(client)
 
     passages = (
         await client.get("/api/search/explore", params={"q": "lancedb", "granularity": "passage"})
     ).json()
-    excerpts = (
-        await client.get("/api/search/explore", params={"q": "lancedb", "granularity": "excerpt"})
-    ).json()
     route = await client.get("/api/search/excerpts", params={"q": "lancedb"})
+    explored = await client.get(
+        "/api/search/explore", params={"q": "lancedb", "granularity": "excerpt"}
+    )
+    answer = route.json()
+    excerpts = answer["excerpts"]
 
     (passage,) = passages
     (excerpt,) = excerpts
@@ -1226,7 +1254,8 @@ async def test_an_excerpt_is_the_section_its_passages_share(client: AsyncTestCli
         passage["line_end"],
     )
     assert route.status_code == 200, route.text
-    assert route.json() == {"excerpts": excerpts, "uncovered": [], "missing_terms": []}
+    assert (answer["uncovered"], answer["missing_terms"]) == ([], [])
+    assert explored.status_code == 422, "excerpts have a route of their own"
     nothing = await client.get("/api/search/excerpts", params={"q": "nothingmatchesthis"})
     assert nothing.json() == {
         "excerpts": [],
@@ -1351,9 +1380,35 @@ async def test_a_word_no_excerpt_holds_is_searched_for_once_more(
     probed = [r.msg for r in caplog.records if isinstance(r.msg, dict)]
     (logged,) = [msg for msg in probed if msg["event"] == "search_probe"]
     assert logged["terms"] == ["inventory"], "the only word the order sections lack"
-    assert logged["placed"] == "added", "one excerpt past the limit, the ranked one kept"
+    assert (logged["found"], logged["joined"]) == (True, False), "past the limit, apart"
     assert [one["document"] for one in answer["excerpts"]] == ["orders.md", "stock.md"]
     assert answer["excerpts"][0]["header"] == "Orders > Step 5"
+    assert answer["missing_terms"] == []
+
+
+async def test_the_probed_excerpt_comes_past_the_budget_the_sections_were_cut_to(
+    client: AsyncTestClient, caplog
+) -> None:
+    """Two order sections rank, the budget keeps one of them, and "inventory" is in neither: the
+    probe's passage still joins, past the budget, since the cut came before it."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "shop"})
+    for name, body in (("orders.md", ORDERS_MD), ("stock.md", STOCK_MD)):
+        await stage_and_import(client, name, body.encode())
+        await attach_via_api(client, "shop", name)
+    overrides = {"search": {"max_answer_chars": 60}}
+    assert (await client.put("/api/collections/shop/overrides", json=overrides)).is_success
+    question = "How does order reconciliation against the ledger keep inventory consistent?"
+
+    with caplog.at_level(logging.INFO):
+        response = await client.get("/api/search/excerpts", params={"q": question, "limit": 2})
+
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    logged = {r.msg["event"]: r.msg for r in caplog.records if isinstance(r.msg, dict)}
+    assert logged["search_budget"]["cut"] == 1, "one order section cut to the budget"
+    assert (logged["search_probe"]["found"], logged["search_probe"]["joined"]) == (True, False)
+    assert [one["document"] for one in answer["excerpts"]] == ["orders.md", "stock.md"]
     assert answer["missing_terms"] == []
 
 
@@ -1479,7 +1534,7 @@ async def test_several_questions_take_turns_and_say_which_they_answer(
     assert sorted(steps) == sorted(
         ["plan"]
         + ["retrieve", "merge", "rerank", "hits", "fill_thin"] * 2
-        + ["cover", "group", "probe_gaps", "fill", "quote"]
+        + ["fold", "group", "budget", "probe_gaps", "fill", "quote"]
     ), "one plan for every question, the ranking once per question, then the turns, the sections"
     (event,) = (await client.get("/api/sessions/s1/history")).json()
     assert event["subject"] == f"{BY_IDENTITY} | {BY_EVENT}"
@@ -1501,6 +1556,50 @@ async def test_every_question_plans_over_one_open_index(client: AsyncTestClient)
     (first, _), (second, _) = plans[0].indexes[0], plans[1].indexes[0]
     assert first is second, "one index for every question"
     assert first._cached is not None, "its table opened before any part searches"
+
+
+async def test_a_question_nothing_answers_is_named_with_the_words_it_used(
+    client: AsyncTestClient,
+) -> None:
+    """Two questions, and the notes answer one: the other is `uncovered`, and its words no
+    excerpt holds are `missing_terms`, even after the search looked for them once more."""
+    await _notes_on_aggregates(client)
+    unanswered = "Which warehouse ledger reconciles stock?"
+
+    response = await client.get(
+        "/api/search/excerpts", params={"q": [BY_EVENT, unanswered], "limit": 2}
+    )
+
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    assert [one["document"] for one in answer["excerpts"]] == ["events.md"]
+    assert answer["uncovered"] == [unanswered]
+    assert answer["missing_terms"] == ["warehouse", "ledger", "reconciles", "stock"]
+
+
+async def test_the_answer_budget_cuts_the_last_sections(client: AsyncTestClient, caplog) -> None:
+    """A collection whose answers may hold 100 characters: the best section stays, however long,
+    and the next one is cut, which the search logs."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "sections.md", SECTIONS_MD.encode())
+    await _member("notes", "sections.md")
+    markdown = await _markdown_of("sections.md")
+    await seed_chunks(
+        "notes", "sections.md", split(markdown, ChunkSettings(chunk_size=200, chunk_merge_below=0))
+    )
+    overrides = {"search": {"max_answer_chars": 100}}
+    assert (await client.put("/api/collections/notes/overrides", json=overrides)).is_success
+
+    with caplog.at_level(logging.INFO):
+        response = await client.get("/api/search/excerpts", params={"q": "lancedb", "limit": 2})
+
+    assert response.status_code == 200, response.text
+    (only,) = response.json()["excerpts"]
+    assert only["header"] == "Guide > Storage", "the best section, over the budget, stays"
+    logged = [r.msg for r in caplog.records if isinstance(r.msg, dict)]
+    (cut,) = [msg for msg in logged if msg["event"] == "search_budget"]
+    assert cut["cut"] == 1
 
 
 async def test_one_question_with_a_context_is_the_single_search(client: AsyncTestClient) -> None:

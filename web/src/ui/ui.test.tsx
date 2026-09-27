@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { FileText } from 'lucide-react'
 import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { EmbedderMetadata, Hit, Passage, RerankerMetadata, Source, Status } from '../api'
+import type { EmbedderMetadata, Excerpt, Hit, Passage, RerankerMetadata, Source, Status } from '../api'
 import { Field } from './Field'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
@@ -105,6 +105,31 @@ const PASSAGE: Passage = {
   source_file: '/home/ada/.haskie/sources/area.pdf',
   markdown_file: '/home/ada/.haskie/markdown/area.md',
   also_in: [],
+  aspects: [],
+}
+
+// A section of two passages: its heading path, and its lines from the first passage to the last.
+const EXCERPT: Excerpt = {
+  collection: 'A–E',
+  document: 'area.pdf',
+  header: 'Lighting',
+  location: 'area.pdf p.2-3 L41-90',
+  seq_start: 4,
+  seq_end: 9,
+  line_start: 41,
+  line_end: 90,
+  char_start: 1204,
+  char_end: 3900,
+  page_start: 2,
+  page_end: 3,
+  text: '## Soft shadows\n\nArea lights soften the shadow edge.\n\n[…]\n\n## Hard shadows\n\nA point light casts a hard one.',
+  score: 0.88,
+  source_file: '/home/ada/.haskie/sources/area.pdf',
+  markdown_file: '/home/ada/.haskie/markdown/area.md',
+  spans: [
+    { ...PASSAGE, header: 'Lighting > Soft shadows', seq_end: 4, aspects: [], also_in: [] },
+    { ...PASSAGE, header: 'Lighting > Hard shadows', seq_start: 9, seq_end: 9, also_in: [] },
+  ].map(({ collection: _c, document: _d, text: _t, source_file: _s, markdown_file: _m, ...span }) => span),
   aspects: [],
 }
 
@@ -500,6 +525,11 @@ describe('HitGrid', () => {
       name: 'a source without a description falls back to the matched text',
       element: <HitGrid results={[{ ...SOURCE, description: '' }]} query="shadow" />,
       contains: ['<mark>shadow</mark> 1.4×'],
+    },
+    {
+      name: 'an excerpt: its section heading, its pages and lines from the first passage to the last',
+      element: <HitGrid results={[EXCERPT]} query="shadow" />,
+      contains: ['<footer class="hit-foot"><span>Lighting</span><span>p. 2–3 · lines 41–90</span><span>chunks 4–9</span></footer>', '<mark>shadow</mark>'],
     },
     { name: 'no hits renders an empty grid', element: <HitGrid results={[] as Hit[]} query="" />, contains: ['<div class="hits"></div>'] },
     { name: 'no sources renders an empty grid', element: <HitGrid results={[] as Source[]} query="" />, contains: ['<div class="hits"></div>'] },

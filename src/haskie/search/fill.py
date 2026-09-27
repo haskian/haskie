@@ -12,27 +12,28 @@ comes in only when stronger ones around it pay for it.
 
 - A gap between two passages is filled when its values sum above 0: the two become one.
 - A passage grows outward by the run of chunks next to it whose values sum highest, when that is
-  above 0, up to `REACH` chunks and never out of its section.
+  above 0 (`run`), up to `max_passage_grow` chunks and never out of its section.
 
-What is added is bounded by the answer's budget (`max_answer_chars`), spent on the fills worth
-most per character first. Sections that do not fit the budget with their passages alone go first,
-the last kept first. No IO here: `retrieval.fill` reads and scores the chunks.
+`run` and `value` are the one growth rule of a search: a passage too short to stand alone grows
+by them too (`thin`), against the scanned hits rather than the kept ones.
+
+What is added is bounded by the room the answer's budget (`max_answer_chars`) leaves after its
+sections (`section.within`), spent on the fills worth most per character first. No IO here:
+`retrieval.fill` reads and scores the chunks.
 """
 
 import msgspec
 
-from haskie.collection.index import Hit
-from haskie.search.passage import HitRange, ranges
+from haskie.collection.index import ChunkKey, Hit
+from haskie.search.passage import continues, part, rejoin
 from haskie.search.section import Group
-
-REACH = 4  # chunks a passage may grow by on each side, and half the longest gap filled
 
 
 class Candidate(msgspec.Struct, frozen=True):
-    """A chunk near a kept passage, as fill weighs it."""
+    """A chunk next to a passage, as a growth weighs it."""
 
     hit: Hit
-    value: float  # around the kept chunks: 0 the median one, 1 the best, below 0 weaker
+    value: float  # around the ranked chunks: 0 the median one, 1 the best, below 0 weaker
     aspect: str | None = None  # the question it answers best, when several were asked
 
 
@@ -52,80 +53,86 @@ class Fill(msgspec.Struct, frozen=True):
 
 
 def value(score: float, floor: float, top: float) -> float:
-    """`score` around the kept chunks' own scores: 0 at their median `floor`, 1 at their best
-    `top`, clipped to [-1, 1]. When every kept chunk scores the same, a chunk at least as good is
-    worth 1 and a weaker one -1."""
+    """`score` around the ranked chunks' own scores: 0 at their median `floor`, 1 at their best
+    `top`, clipped to [-1, 1]. When every ranked chunk scores the same, a chunk at least as good
+    is worth 1 and a weaker one -1."""
     if top <= floor:
         return 1.0 if score >= floor else -1.0
     return max(-1.0, min(1.0, (score - floor) / (top - floor)))
 
 
-def chars(hit_ranges: list[HitRange]) -> int:
-    return sum(one.char_end - one.char_start for one in hit_ranges)
+def run(outward: list[Candidate]) -> list[Candidate]:
+    """The chunks outward from a passage, nearest first, up to the point where their values sum
+    highest; none when no prefix sums above 0. A weak chunk comes in only when stronger ones past
+    it pay for it."""
+    best: list[Candidate] = []
+    total = best_total = 0.0
+    for at, chunk in enumerate(outward):
+        total += chunk.value
+        if total > best_total:
+            best, best_total = outward[: at + 1], total
+    return best
 
 
-def within(groups: list[Group], budget: int) -> list[Group]:
-    """The groups whose passages fit `budget` characters together, in order. The first always
-    stays: an answer of one section over the budget beats no answer."""
-    kept: list[Group] = []
-    used = 0
-    for one in groups:
-        size = chars(one.ranges)
-        if kept and used + size > budget:
-            break
-        kept.append(one)
-        used += size
-    return kept
-
-
-def near(one: Group) -> set[int]:
-    """The chunks of a group's section a fill could take: `REACH` either side of each passage,
+def near(one: Group, reach: int) -> set[int]:
+    """The chunks of a group's section a fill could take: `reach` either side of each passage,
     and not the passages' own."""
-    held = {hit.seq for hit_range in one.ranges for hit in hit_range.hits}
+    held = {hit.seq for hit in one.hits}
     wanted = {
         seq
         for hit_range in one.ranges
-        for seq in range(hit_range.seq_start - REACH, hit_range.seq_end + REACH + 1)
+        for seq in range(hit_range.seq_start - reach, hit_range.seq_end + reach + 1)
     }
     return {seq for seq in wanted if one.section.seq_start <= seq <= one.section.seq_end} - held
 
 
-def fills(at: int, one: Group, candidates: dict[int, Candidate]) -> list[Fill]:
-    """What group `at` could take out of `candidates` (by `seq`): each gap between two of its
-    passages whose chunks are all read and sum above 0, and the best run outward from its first
-    and last passage when it sums above 0."""
+def fills(at: int, one: Group, candidates: dict[ChunkKey, Candidate], reach: int) -> list[Fill]:
+    """What group `at` could take out of `candidates`: each gap between two of its passages whose
+    chunks are all read and sum above 0, and the best `run` of up to `reach` chunks outward from
+    its first and last passage."""
     spans = sorted(one.ranges, key=lambda hit_range: hit_range.seq_start)
     found: list[Fill] = []
     for before, after in zip(spans, spans[1:], strict=False):
-        gap = [candidates.get(seq) for seq in range(before.seq_end + 1, after.seq_start)]
-        if gap and all(chunk is not None for chunk in gap):
-            chunks = [chunk for chunk in gap if chunk is not None]
+        keys = [
+            (one.collection, one.document, seq)
+            for seq in range(before.seq_end + 1, after.seq_start)
+        ]
+        if keys and all(key in candidates for key in keys):
+            chunks = [candidates[key] for key in keys]
             if sum(chunk.value for chunk in chunks) > 0:
                 found.append(Fill(at, chunks))
-    for run in (
-        _run(candidates, range(spans[0].seq_start - 1, spans[0].seq_start - REACH - 1, -1)),
-        _run(candidates, range(spans[-1].seq_end + 1, spans[-1].seq_end + REACH + 1)),
-    ):
-        if run:
-            found.append(Fill(at, run))
+    found += [
+        Fill(at, side)
+        for side in grow(spans[0].hits[0], spans[-1].hits[-1], candidates, reach)
+        if side
+    ]
     return found
 
 
-def _run(candidates: dict[int, Candidate], outward: range) -> list[Candidate]:
-    """The chunks outward from a passage, nearest first, up to the point where their values sum
-    highest; none when no prefix sums above 0."""
-    taken: list[Candidate] = []
-    best: list[Candidate] = []
-    total = best_total = 0.0
-    for seq in outward:
-        chunk = candidates.get(seq)
-        if chunk is None:
+def grow(
+    first: Hit, last: Hit, candidates: dict[ChunkKey, Candidate], reach: int
+) -> list[list[Candidate]]:
+    """What a passage from `first` to `last` grows by out of `candidates`: the best `run` of up to
+    `reach` chunks before it and after it, never past a heading (`passage.continues`)."""
+    return [run(_outward(first, candidates, reach, -1)), run(_outward(last, candidates, reach, 1))]
+
+
+def _outward(
+    edge: Hit, candidates: dict[ChunkKey, Candidate], reach: int, step: int
+) -> list[Candidate]:
+    """The read chunks past `edge` one way (`step` -1 or 1), nearest first, up to `reach` of
+    them, while each continues the section: what a `run` is taken from."""
+    found: list[Candidate] = []
+    current = edge
+    for _ in range(reach):
+        chunk = candidates.get((current.collection, current.document, current.seq + step))
+        if chunk is None or not continues(
+            *((chunk.hit, current) if step < 0 else (current, chunk.hit))
+        ):
             break
-        taken.append(chunk)
-        total += chunk.value
-        if total > best_total:
-            best, best_total = list(taken), total
-    return best
+        found.append(chunk)
+        current = chunk.hit
+    return found
 
 
 def choose(found: list[Fill], room: int) -> list[Fill]:
@@ -139,24 +146,9 @@ def choose(found: list[Fill], room: int) -> list[Fill]:
 
 
 def apply(one: Group, taken: list[Candidate]) -> Group:
-    """The group with `taken` chunks joined to its passages: the ranges rebuilt over every chunk,
-    so a bridged gap makes two passages one. Each rebuilt range keeps the folded places and the
-    questions of the passages it holds, and adds the questions its new chunks answer best."""
+    """The group with `taken` chunks joined to its passages (`passage.rejoin`), so a bridged gap
+    makes two passages one. Each joined chunk brings the question it answers best."""
     if not taken:
         return one
-    joined = [msgspec.structs.replace(chunk.hit, score=0.0) for chunk in taken]
-    tags = {chunk.hit.seq: chunk.aspect for chunk in taken if chunk.aspect is not None}
-    rebuilt: list[HitRange] = []
-    for hit_range in ranges([hit for kept in one.ranges for hit in kept.hits] + joined):
-        seqs = {hit.seq for hit in hit_range.hits}
-        held = [kept for kept in one.ranges if kept.seq_start in seqs]
-        aspects = [label for kept in held for label in kept.aspects]
-        aspects += [label for seq, label in sorted(tags.items()) if seq in seqs]
-        rebuilt.append(
-            msgspec.structs.replace(
-                hit_range,
-                also_in=[place for kept in held for place in kept.also_in],
-                aspects=list(dict.fromkeys(aspects)),
-            )
-        )
-    return msgspec.structs.replace(one, ranges=rebuilt)
+    added = [part(chunk.hit, [chunk.aspect] if chunk.aspect else None) for chunk in taken]
+    return msgspec.structs.replace(one, ranges=rejoin([*one.ranges, *added]))

@@ -58,7 +58,7 @@ reading.
   before citing it as that part's answer. A part in `uncovered` found nothing at all.
 - gaps: `missing_terms`, the words of `q` (stopwords aside) that no excerpt's text or headings
   hold, after the search looked for them once more by full text. Its best find joins the answer,
-  past `limit` when it is in a section of its own. A missing word is one the sources do not use:
+  past `limit` and the answer budget when it is in a section of its own. A missing word is one the sources do not use:
   search again with a synonym, or say the sources lack it.
 - open: `markdown_file` and `source_file` (absolute paths), `line_start`/`line_end` (1-based, in
   `markdown_file`), `char_start`/`char_end` (0-based), `page_start`/`page_end` (PDF only, else

@@ -3,19 +3,20 @@ else dropped.
 
 A chunk is cut where the author cut, so a short one is usually a section's lead-in ("Three
 rules:", with the list in the next chunk), a section's last line, or a separator (`---`). Alone
-it tells a reader little and costs a slot. So a thin range takes the chunk before or after it,
-one at a time, as long as that chunk is in the same section and matches the question. A range
-with no such neighbour is marked `alone`, unless it is the best range of the search: a short
+it tells a reader little and costs a slot. So a thin range grows by the chunks of its section
+next to it that match the question, by the rule every passage of an excerpt grows by
+(`fill.run`): on each side, the run of chunks whose values sum highest, when that is above 0. A
+range with no such run is marked `alone`, unless it is the best range of the search: a short
 exact answer ("Tim Cook, CEO") is still an answer. What `alone` costs is decided where the answer
 is cut: a passage that is alone goes, and so does an excerpt whose passages all are, while a
 short passage inside a section with another passage stays in that section's excerpt. A thin
 range with a section end on both sides is a whole section, a short note say, not a piece of one:
 it is kept as the author wrote it.
 
-"Matches" is measured, not assumed: `retrieval.fill_thin` scores the neighbours the way it can
-score the question against the scanned hits (the reranker, the query vector, or the question's
-words), and a neighbour matches when it scores at least the median scanned hit. The floor is
-this search's own, so no calibrated threshold is needed. No IO here.
+"Matches" is measured, not assumed: `retrieval.fill_thin` scores the neighbours the way it scores
+the scanned hits (the reranker, the query vector, or the question's words), and values each
+around them (`fill.value`): 0 as good as the median scanned hit, 1 as good as the best. The
+floor is this search's own, so no calibrated threshold is needed. No IO here.
 """
 
 import msgspec
@@ -23,7 +24,8 @@ import msgspec
 from haskie.collection.index import ChunkKey, Hit, chunk_key
 from haskie.indexing.segment import CutReason
 from haskie.search.collapse import MIN_WORDS, WORD
-from haskie.search.passage import HitRange, continues, ends_section, ranges
+from haskie.search.fill import Candidate, grow
+from haskie.search.passage import HitRange, ends_section, part, rejoin
 
 # The words of a question that say nothing about its topic. A short list on purpose: the question
 # words and the glue of English questions, so the words left are the ones a passage should share.
@@ -38,20 +40,17 @@ STOPWORDS = frozenset(
 _BOUNDS = frozenset({CutReason.HEADING, CutReason.EDGE})
 
 
-def is_thin(hits: list[Hit], min_chars: int) -> bool:
-    """Consecutive hits shorter than `min_chars`, or under `MIN_WORDS` words: too little to quote
-    on its own. `min_chars` 0 turns the check off."""
-    if min_chars <= 0:
-        return False
-    words = sum(len(WORD.findall(hit.text)) for hit in hits)
-    return hits[-1].char_end - hits[0].char_start < min_chars or words < MIN_WORDS
-
-
 def _fragment(hit_range: HitRange, min_chars: int) -> bool:
-    """Thin, with words, and part of a longer section: what grows or goes. A range with a section
-    bound on both sides is a whole section, a short note say, with nothing of it to grow into."""
-    whole = hit_range.hits[0].start_reason in _BOUNDS and hit_range.hits[-1].end_reason in _BOUNDS
-    return is_thin(hit_range.hits, min_chars) and not _wordless(hit_range) and not whole
+    """Thin (shorter than `min_chars`, or under `MIN_WORDS` words), with words, and part of a
+    longer section: what grows or goes. A range with a section bound on both sides is a whole
+    section, a short note say, with nothing of it to grow into. `min_chars` 0 turns this off."""
+    if min_chars <= 0 or _wordless(hit_range):
+        return False
+    first, last = hit_range.hits[0], hit_range.hits[-1]
+    if first.start_reason in _BOUNDS and last.end_reason in _BOUNDS:
+        return False
+    words = sum(len(WORD.findall(hit.text)) for hit in hit_range.hits)
+    return last.char_end - first.char_start < min_chars or words < MIN_WORDS
 
 
 def _wordless(hit_range: HitRange) -> bool:
@@ -86,92 +85,55 @@ class Filled(msgspec.Struct):
 
 
 def fill(
-    hit_ranges: list[HitRange],
-    neighbours: dict[ChunkKey, Hit],
-    scores: dict[ChunkKey, float],
-    floor: float,
-    min_chars: int,
-    grow: int,
+    hit_ranges: list[HitRange], neighbours: dict[ChunkKey, Candidate], min_chars: int, reach: int
 ) -> Filled:
-    """Grow each thin range by the neighbours that match (`scores[key] >= floor`), best first,
-    never past a heading (`passage.continues`), until it is no longer thin or has taken `grow`. A
-    thin range that took none is marked `alone`, unless it is the first of `hit_ranges`, the best
-    the search found. A thin range that is a whole section is kept as it is. A range without a
-    word is dropped whatever it ranked.
+    """Grow each thin range by the neighbours worth taking, as every passage of an excerpt grows
+    (`fill.run`): on each side, the run of up to `reach` chunks whose values sum highest, when
+    that is above 0, never past a heading (`passage.continues`). A thin range that took none is
+    marked `alone`, unless it is the first of `hit_ranges`, the best the search found. A thin
+    range that is a whole section is kept as it is. A range without a word is dropped whatever it
+    ranked.
 
-    A neighbour joins with score 0, so a range's score (`passage.harmonic` over its chunks) says
-    how strongly it matched, not how much it grew. The ranges are rebuilt from every kept chunk at
-    the end, so two ranges a neighbour now joins become one, and a rebuilt range is `alone` only
-    when every chunk of it came from a range that was.
+    The ranges are rebuilt at the end (`passage.rejoin`), so two ranges a neighbour now joins
+    become one, and a neighbour scores 0: a range's score says how strongly it matched, not how
+    much it grew.
     """
-    kept: dict[ChunkKey, Hit] = {}
+    kept: list[HitRange] = []
     added: dict[ChunkKey, Hit] = {}
-    lonely: set[ChunkKey] = set()
     grown = dropped = 0
     for position, hit_range in enumerate(hit_ranges):
         if _wordless(hit_range):
             dropped += 1
             continue
         if _fragment(hit_range, min_chars):
-            took = _grow(hit_range.hits, neighbours, scores, floor, min_chars, grow)
+            took = [
+                chunk.hit
+                for side in grow(hit_range.hits[0], hit_range.hits[-1], neighbours, reach)
+                for chunk in side
+            ]
             if took:
                 grown += 1
                 added.update((chunk_key(hit), hit) for hit in took)
             elif position > 0:
-                lonely.update(chunk_key(hit) for hit in hit_range.hits)
-        kept.update((chunk_key(hit), hit) for hit in hit_range.hits)
-    joined = [hit for one, hit in added.items() if one not in kept]
-    kept.update((chunk_key(hit), hit) for hit in joined)
-    rebuilt = [
-        msgspec.structs.replace(one, alone=all(chunk_key(hit) in lonely for hit in one.hits))
-        for one in ranges(list(kept.values()))
-    ]
+                hit_range = msgspec.structs.replace(hit_range, alone=True)
+        kept.append(hit_range)
+    held = {chunk_key(hit) for one in kept for hit in one.hits}
+    joined = [hit for key, hit in added.items() if key not in held]
+    rebuilt = rejoin([*kept, *(part(hit) for hit in joined)])
     return Filled(ranges=rebuilt, added=joined, grown=grown, dropped=dropped)
 
 
-def _grow(
-    hits: list[Hit],
-    neighbours: dict[ChunkKey, Hit],
-    scores: dict[ChunkKey, float],
-    floor: float,
-    min_chars: int,
-    grow: int,
-) -> list[Hit]:
-    """The neighbours one thin run of hits takes, in the order it takes them."""
-    took: list[Hit] = []
-    current = list(hits)
-    while len(took) < grow:
-        first, last = current[0], current[-1]
-        before = neighbours.get((first.collection, first.document, first.seq - 1))
-        after = neighbours.get((last.collection, last.document, last.seq + 1))
-        matching = [
-            one
-            for one in (
-                before if before is not None and continues(before, first) else None,
-                after if after is not None and continues(last, after) else None,
-            )
-            if one is not None and scores[chunk_key(one)] >= floor
-        ]
-        if not matching:
-            break
-        best = max(matching, key=lambda one: (scores[chunk_key(one)], -one.seq))
-        took.append(msgspec.structs.replace(best, score=0.0))
-        current = [took[-1], *current] if best.seq < first.seq else [*current, took[-1]]
-        if not is_thin(current, min_chars):
-            break
-    return took
+def terms(text: str) -> list[str]:
+    """The words of `text` a passage on its topic would share, once each in the order they come:
+    lowercase, three letters or more, no stopwords."""
+    found = WORD.findall(text.lower())
+    return [word for word in dict.fromkeys(found) if len(word) > 2 and word not in STOPWORDS]
 
 
-def terms(text: str) -> set[str]:
-    """The words of `text` a passage on its topic would share: lowercase, three letters or more,
-    no stopwords."""
-    return {word for word in WORD.findall(text.lower()) if len(word) > 2} - STOPWORDS
-
-
-def overlap(question: set[str], text: str) -> float:
-    """The share of the question's words that `text` holds: the match score when there is neither
-    a reranker nor a vector to ask. A chunk's heading path is left out, since every chunk of a
-    section shares it."""
+def overlap(question: list[str], held: set[str]) -> float:
+    """The share of the question's words (`terms`) that a text's words (`held`) hold: the match
+    score when there is neither a reranker nor a vector to ask. A chunk's heading path is left
+    out, since every chunk of a section shares it."""
     if not question:
         return 0.0
-    return len(question & terms(text)) / len(question)
+    return sum(1 for word in question if word in held) / len(question)

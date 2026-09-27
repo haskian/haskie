@@ -48,9 +48,8 @@ export function effectiveSearch(overrides: SearchOverrides, defaults: SearchSett
 /**
  * Which search fields a form shows, in order: a field is only asked for when the effective
  * settings make it do something. Fusion weights belong to a hybrid query, probes to a vector
- * one, the reranker model to a reranker, the candidate pool to whichever of the two reads it,
- * how far a short passage grows to a shortest passage that is on, and the section and answer
- * sizes always.
+ * one, the reranker model to a reranker, the candidate pool to whichever of the two reads it;
+ * the passage and answer sizes always, since every excerpts search reads them.
  */
 export function visibleSearchFields(effective: SearchSettings): (keyof SearchSettings)[] {
   const hybrid = effective.mode === 'hybrid'
@@ -63,8 +62,6 @@ export function visibleSearchFields(effective: SearchSettings): (keyof SearchSet
   fields.push('reranker')
   if (reranked) fields.push('reranker_model')
   if (hybrid || reranked) fields.push('candidates')
-  fields.push('min_passage_chars')
-  if (effective.min_passage_chars > 0) fields.push('max_passage_grow')
-  fields.push('max_section_chars', 'max_answer_chars')
+  fields.push('min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars')
   return fields
 }

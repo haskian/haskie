@@ -9,21 +9,19 @@ Four pipelines over one set of steps:
 
     chunks     retrieve -> merge -> rerank -> hits -> collapse_hits
     passages   retrieve -> merge -> rerank -> hits -> fill_thin -> collapse_ranges -> read
-    excerpts   retrieve -> merge -> rerank -> hits -> fill_thin -> collapse_all -> group
-               -> probe_gaps -> fill -> quote
     sources    retrieve -> merge -> rerank -> hits -> shortlist
 
-and one that runs the shared ranking once per question, when several are asked at once:
+and the excerpts an agent reads, which run the shared ranking once per question asked:
 
-    answers    (retrieve -> merge -> rerank -> hits -> fill_thin) per question -> cover -> group
-               -> probe_gaps -> fill -> quote
+    answers    (retrieve -> merge -> rerank -> hits -> fill_thin) per question -> fold -> group
+               -> budget -> probe_gaps -> fill -> quote
 
 The first four steps are the search every answer shares; what follows is the fold that answer is
 made of, and it is a step rather than something every search pays for. `chunks` folds each
-near-duplicate hit into the hit it repeats (`collapse`). `passages` and `excerpts` merge the chunks
+near-duplicate hit into the hit it repeats (`collapse`). `passages` and `answers` merge the chunks
 of one section that sit next to each other into one readable span, grow a span too short to stand
 alone by the neighbours that match the question or drop it (`thin`), fold near-duplicate spans the
-same way, and read only the spans they answer with. `excerpts` then groups the spans by the section
+same way, and read only the spans they answer with. `answers` then groups the spans by the section
 they sit in, so `limit` counts sections, searches once more for the words of the question no
 section holds (`probe`), adds the text around and between the passages that answers too (`fill`),
 and writes each section out as one excerpt. `sources`
@@ -77,9 +75,10 @@ class Search(msgspec.Struct):
     limit: int  # answers the caller asked for; the last step cuts to it
     scan: int  # how deep the ranking goes; `hits` cuts to it
     candidates: int  # rows each collection returns, and the pool the reranker rescores
+    # every question of the search as the steps after the ranking read them: each search of an
+    # `answers` holds them all, and `query` is its own
+    questions: list[probe.Question]
     sections: int = DEFAULT_SECTIONS  # `sources` only
-    # the question alone, when `query` carries a context in front of it; else `query` itself
-    asked: str | None = None
 
 
 # --- the trace --------------------------------------------------------------------
@@ -104,14 +103,14 @@ STEP_LABELS: dict[str, str] = {
     "collapse_hits": "Fold near-duplicates",
     "fill_thin": "Merge chunks and grow or drop short passages",
     "collapse_ranges": "Fold passages",
-    "collapse_all": "Fold passages",
+    "fold": "Take turns and fold passages",
+    "budget": "Cut to the answer's budget",
     "group": "Group passages by section",
     "probe_gaps": "Search for missing words",
     "fill": "Fill in around passages",
     "quote": "Read excerpts",
     "read": "Read passages",
     "shortlist": "Fold into documents",
-    "cover": "Take turns and fold passages",
 }
 
 # The steps of the searches one request runs, in the order they finished. A list per request,
@@ -202,12 +201,20 @@ async def collapse_ranges(ctx: StepContext[Search, None, retrieval.Ranged]) -> l
     )
 
 
-async def collapse_all(ctx: StepContext[Search, None, retrieval.Ranged]) -> list[HitRange]:
-    """Each near-duplicate range folded into the range it repeats, and none cut: an excerpt is a
-    section, and the sections are what `limit` counts (`group`). A range too short to stand alone
-    is kept too, since the section it sits in may hold another."""
-    plan = ctx.state.plan
-    return await retrieval.collapse_ranges(ctx.inputs, plan.embedding, plan.settings.mode, None)
+async def fold(ctx: StepContext[Search, None, list[retrieval.Ranged]]) -> list[HitRange]:
+    """Each question's ranges folded into one list, none cut: an excerpt is a section, and the
+    sections are what `limit` counts (`group`). One question's are its own, each near-duplicate
+    folded into the range it repeats; several take turns (`retrieval.cover`). A range too short
+    to stand alone is kept too, since the section it sits in may hold another."""
+    state = ctx.state
+    plan, ranged = state.plan, ctx.inputs
+    if len(ranged) == 1:
+        return await retrieval.collapse_ranges(ranged[0], plan.embedding, plan.settings.mode, None)
+    labels = [one.asked for one in state.questions]
+    depth = aspects.depth(len(labels), state.limit)
+    return await retrieval.cover(
+        ranged, labels, plan.embedding, plan.settings.mode, depth, state.scan
+    )
 
 
 async def read(ctx: StepContext[Search, None, list[HitRange]]) -> list[Passage]:
@@ -217,28 +224,29 @@ async def read(ctx: StepContext[Search, None, list[HitRange]]) -> list[Passage]:
 
 async def group(ctx: StepContext[Search, None, list[HitRange]]) -> list[section.Group]:
     """The first `limit` sections the ranges fall in, each with every range of it."""
-    return await retrieval.sections(ctx.inputs, ctx.state.plan, ctx.state.limit)
+    state = ctx.state
+    labels = [one.label for one in state.questions if one.label is not None] or None
+    return await retrieval.sections(ctx.inputs, state.plan, state.limit, labels)
 
 
-def _question(state: Search) -> probe.Question:
-    """The one question a single search asked."""
-    asked = state.asked or state.query
-    return probe.Question(text=state.query, vector=state.plan.vector, asked=asked)
+async def budget(ctx: StepContext[Search, None, list[section.Group]]) -> list[section.Group]:
+    """The sections that fit the answer's budget, the last cut first. The probe's passage comes
+    after this cut, and the fill spends what room is left."""
+    return retrieval.budget(ctx.inputs, ctx.state.plan)
 
 
 async def probe_gaps(
     ctx: StepContext[Search, None, list[section.Group]],
 ) -> list[section.Group]:
     """The sections, and the best passage a full-text search finds for the words of the
-    question none of them holds."""
-    state = ctx.state
-    return await retrieval.probe_gaps(ctx.inputs, [_question(state)], state.plan)
+    questions none of them holds."""
+    return await retrieval.probe_gaps(ctx.inputs, ctx.state.questions, ctx.state.plan)
 
 
 async def fill(ctx: StepContext[Search, None, list[section.Group]]) -> list[section.Group]:
-    """The sections within the answer's budget, with the text around and between their passages
-    that answers the query too."""
-    return await retrieval.fill(ctx.inputs, [_question(ctx.state)], ctx.state.plan)
+    """The sections with the text around and between their passages that answers too, while it
+    fits the answer's budget."""
+    return await retrieval.fill(ctx.inputs, ctx.state.questions, ctx.state.plan)
 
 
 async def quote(ctx: StepContext[Search, None, list[section.Group]]) -> list[Excerpt]:
@@ -258,15 +266,15 @@ async def shortlist(ctx: StepContext[Search, None, retrieval.Scanned]) -> Source
 
 
 def _chain[T](
-    output: type[T], *steps: StepFunction[Search, None, Any, Any]
-) -> Graph[Search, None, None, T]:
+    output: type[T], *steps: StepFunction[Search, None, Any, Any], input_type: Any = None
+) -> Graph[Search, None, Any, T]:
     """One pipeline: the steps in order, each one's answer the next one's input.
 
     Linear on purpose. A step that sends a search back for more (a decision model asking for
     another pass over the collections, say) is an edge this helper does not draw, and gets its own
     builder here rather than a branch inside a step.
     """
-    builder = GraphBuilder(state_type=Search, output_type=output)
+    builder = GraphBuilder(state_type=Search, input_type=input_type, output_type=output)
     # `list[Any]`: a chain is heterogeneous — each step's output is the next one's input — and
     # the builder checks that pairing itself when it draws the edges
     # every step is a module function; the protocol they are typed by does not promise a name
@@ -290,7 +298,10 @@ RANKED = _chain(retrieval.Ranged, *RANKING, fill_thin)  # one question's part of
 
 CHUNKS = _chain(list[Hit], *RANKING, collapse_hits)
 PASSAGES = _chain(list[Passage], *RANKING, fill_thin, collapse_ranges, read)
-EXCERPTS = _chain(list[Excerpt], *RANKING, fill_thin, collapse_all, group, probe_gaps, fill, quote)
+# each question's ranked ranges into excerpts
+ANSWERED = _chain(
+    list[Excerpt], fold, group, budget, probe_gaps, fill, quote, input_type=list[retrieval.Ranged]
+)
 SOURCES = _chain(Sources, *RANKING, shortlist)
 
 
@@ -313,57 +324,23 @@ async def passages(names: list[str], query: str, limit: int | None = None) -> li
     return await PASSAGES.run(state=state) if state else []
 
 
-async def excerpts(
-    names: list[str], query: str, limit: int | None = None, asked: str | None = None
-) -> Answer:
-    """The `limit` best sections of `names` as an agent quotes them, best first, and what they
-    leave out. `asked` is the question alone when `query` carries a context in front of it."""
-    state = await _search(names, query, limit, deeper=PASSAGE_SCAN, asked=asked)
-    if state is None:
-        question = probe.Question(text=query, vector=None, asked=asked or query)
-        return probe.report([], [question])
-    return probe.report(await EXCERPTS.run(state=state), [_question(state)])
-
-
 async def answers(names: list[str], asked: aspects.Questions, limit: int | None = None) -> Answer:
-    """The `limit` best passages of `names` across every question asked, as an agent quotes them.
+    """The `limit` best sections of `names` for every question asked, as an agent quotes them,
+    and what they leave out.
 
-    One question is `excerpts`, searched with the shared context in front of it. Several run the
-    shared ranking each, at once and each as deep as one search of `limit` would go; then the
-    questions take turns at the slots and the near-duplicates across all of them fold once
-    (`aspects`). Each excerpt says which of the questions it answers.
-
-    It is not one graph. A graph here is a chain, and this joins several chains, so the join and
-    what follows are timed by hand under the names a graph step would have.
+    Each question runs the shared ranking, all at once and each as deep as one search of `limit`
+    would go (`RANKED`); then their ranges fold into one list (`fold`: several take turns at the
+    slots, `aspects`) and become excerpts (`ANSWERED`). With several questions, each excerpt says
+    which of them it answers.
     """
-    if len(asked.questions) == 1:
-        return await excerpts(names, asked.queries[0], limit, asked.questions[0])
     limit = limit or (await load_user_settings()).search.limit
-    depth = aspects.depth(len(asked.questions), limit)
-    states = await _searches(names, asked.queries, limit, deeper=PASSAGE_SCAN)
+    aspects.depth(len(asked.questions), limit)  # a limit below the questions fails before searching
+    states = await _searches(names, asked, limit, deeper=PASSAGE_SCAN)
     if states is None:
-        return probe.report(
-            [],
-            [probe.Question(text=q, vector=None, asked=q, label=q) for q in asked.questions],
-        )
+        return probe.report([], asked.asked())
     ranged = await asyncio.gather(*(RANKED.run(state=state) for state in states))
-    where, scan = states[0].plan, states[0].scan
-    with _timing("cover"):
-        kept = await retrieval.cover(
-            ranged, asked.questions, where.embedding, where.settings.mode, depth, scan
-        )
-    with _timing("group"):
-        groups = await retrieval.sections(kept, where, limit, asked.questions)
-    questions = [
-        probe.Question(text=state.query, vector=state.plan.vector, asked=label, label=label)
-        for state, label in zip(states, asked.questions, strict=True)
-    ]
-    with _timing("probe_gaps"):
-        groups = await retrieval.probe_gaps(groups, questions, where)
-    with _timing("fill"):
-        groups = await retrieval.fill(groups, questions, where)
-    with _timing("quote"):
-        return probe.report(await retrieval.read_excerpts(groups), questions)
+    found = await ANSWERED.run(state=states[0], inputs=list(ranged))
+    return probe.report(found, states[0].questions)
 
 
 async def sources(
@@ -384,18 +361,15 @@ async def _search(
     limit: int | None,
     deeper: int,
     sections: int | None = None,
-    asked: str | None = None,
 ) -> Search | None:
     """One search, planned but not yet run, or None when nothing is left to search."""
-    found = await _searches(names, [query], limit, deeper, sections)
-    if found and asked is not None:
-        found[0] = msgspec.structs.replace(found[0], asked=asked)
+    found = await _searches(names, aspects.Questions(questions=[query]), limit, deeper, sections)
     return found[0] if found else None
 
 
 async def _searches(
     names: list[str],
-    queries: list[str],
+    asked: aspects.Questions,
     limit: int | None,
     deeper: int,
     sections: int | None = None,
@@ -409,7 +383,7 @@ async def _searches(
     """
     limit = limit or (await load_user_settings()).search.limit
     with _timing("plan"):
-        plans = await retrieval.plan(names, queries)
+        plans = await retrieval.plan(names, asked.queries)
     if plans is None:
         return None
     # a pipeline that folds scans deeper than it answers, and that is what `MAX_SCAN` bounds
@@ -418,6 +392,7 @@ async def _searches(
     sections = check_page_size(
         DEFAULT_SECTIONS if sections is None else sections, MAX_SECTIONS, "sections"
     )
+    questions = asked.asked([where.vector for where in plans])
     return [
         Search(
             query=query,
@@ -426,6 +401,7 @@ async def _searches(
             scan=scan,
             candidates=candidates,
             sections=sections,
+            questions=questions,
         )
-        for query, where in zip(queries, plans, strict=True)
+        for query, where in zip(asked.queries, plans, strict=True)
     ]

@@ -5,9 +5,11 @@ Every offset below is a real offset into `MARKDOWN`: the fixture builds a `Hit` 
 snippets and reads its text, lines and char range out of the document, the way the index does.
 """
 
+import random
+
 import msgspec
 import pytest
-from conftest import chunk_hit
+from conftest import chunk_hit, hit
 
 from haskie.collection.index import Hit, Overlap, Overlaps, Relation, location
 from haskie.indexing.chunk import Chunk, split
@@ -20,8 +22,10 @@ from haskie.search.passage import (
     fold_sources,
     harmonic,
     min_cover,
+    part,
     quote,
     ranges,
+    rejoin,
     top_documents,
 )
 from haskie.settings import ChunkSettings
@@ -611,3 +615,150 @@ def _one_chunk(chunk: Chunk) -> HitRange:
     """A chunk of `EVERY_CUT` as the range a search would build from its hit."""
     (hit_range,) = ranges([chunk_hit(chunk, 1, document=DOC, collection=COLLECTION)])
     return hit_range
+
+
+# --- rejoin ---------------------------------------------------------------------------
+
+
+def _place(document: str) -> PassageReference:
+    """A place folded under a range, as `collapse` lists it."""
+    return PassageReference(
+        collection=COLLECTION,
+        document=document,
+        seq_start=1,
+        seq_end=1,
+        header="Retries",
+        location=f"{document} L1-1",
+        line_start=1,
+        line_end=1,
+        score=1.0,
+        relation=Relation.DUPLICATE,
+        similarity=1.0,
+        to_parent=CLOSE,
+        to_root=CLOSE,
+    )
+
+
+def _part(
+    *hits: Hit, aspects: list[str] | None = None, alone: bool = False, place: str = ""
+) -> HitRange:
+    (found,) = ranges(list(hits))
+    return msgspec.structs.replace(
+        found, aspects=aspects or [], alone=alone, also_in=[_place(place)] if place else []
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "parts", "expected"),
+    [
+        (
+            "parts that continue each other become one, carrying what each carried",
+            [_part(ONE, aspects=["a"], place="x.md"), _part(TWO, aspects=["b", "a"], place="y.md")],
+            [((1, 2), ["a", "b"], ["x.md", "y.md"], False)],
+        ),
+        (
+            "parts apart stay apart, each with its own",
+            [_part(ONE, aspects=["a"]), _part(THREE, aspects=["b"])],
+            [((1, 1), ["a"], [], False), ((3, 3), ["b"], [], False)],
+        ),
+        (
+            "alone only when every part it holds was",
+            [_part(ONE, alone=True), _part(TWO, alone=True), _part(FOUR, alone=True)],
+            [((1, 2), [], [], True), ((4, 4), [], [], True)],
+        ),
+        (
+            "one part that stands makes the whole stand",
+            [_part(ONE, alone=True), _part(TWO)],
+            [((1, 2), [], [], False)],
+        ),
+        (
+            "overlapping parts hold a shared chunk once",
+            [_part(ONE, TWO, aspects=["a"]), _part(TWO, THREE, aspects=["b"])],
+            [((1, 3), ["a", "b"], [], False)],
+        ),
+        ("nothing to rejoin", [], []),
+    ],
+)
+def test_rejoin_rebuilds_ranges_over_every_part_and_keeps_what_they_carried(
+    name: str,
+    parts: list[HitRange],
+    expected: list[tuple[tuple[int, int], list[str], list[str], bool]],
+) -> None:
+    rebuilt = rejoin(parts)
+
+    shape = [
+        (
+            (one.seq_start, one.seq_end),
+            one.aspects,
+            [place.document for place in one.also_in],
+            one.alone,
+        )
+        for one in sorted(rebuilt, key=lambda one: one.seq_start)
+    ]
+    assert shape == expected, name
+
+
+def test_a_shared_chunk_is_held_as_the_first_part_listed_has_it() -> None:
+    ranked, unranked = TWO, msgspec.structs.replace(TWO, score=0.0)
+
+    (rebuilt,) = rejoin([_part(ONE, ranked), _part(unranked, THREE)])
+
+    assert [hit.score for hit in rebuilt.hits] == [4.0, 3.0, 2.0]
+
+
+def test_a_part_is_an_unranked_chunk_with_the_questions_it_answers() -> None:
+    found = part(TWO, ["a"])
+
+    assert [(hit.seq, hit.score) for hit in found.hits] == [(2, 0.0)]
+    assert (found.aspects, found.alone) == (["a"], False)
+    assert part(TWO).aspects == []
+
+
+# --- rejoin, over many random parts ---------------------------------------------------------
+
+
+def _random_parts(rng: random.Random) -> list[HitRange]:
+    """Runs of consecutive chunks of one section of twelve, some overlapping, some apart, with
+    random questions and random `alone` marks."""
+    chunks = {
+        seq: hit(f"Chunk {seq} says one thing.", 1.0, seq=seq, char_start=seq * 40)
+        for seq in range(1, 13)
+    }
+    parts = []
+    for _ in range(rng.randint(1, 6)):
+        start = rng.randint(1, 12)
+        end = rng.randint(start, min(12, start + 2))
+        (found,) = ranges([chunks[seq] for seq in range(start, end + 1)])
+        parts.append(
+            msgspec.structs.replace(
+                found,
+                aspects=rng.sample(["a", "b", "c"], rng.randint(0, 2)),
+                alone=rng.random() < 0.5,
+            )
+        )
+    return parts
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_rejoin_keeps_every_chunk_once_and_what_each_part_carried(seed: int) -> None:
+    rng = random.Random(seed)
+    parts = _random_parts(rng)
+
+    rebuilt = rejoin(parts)
+
+    held = [hit.seq for one in rebuilt for hit in one.hits]
+    assert sorted(held) == sorted({hit.seq for one in parts for hit in one.hits}), "each chunk once"
+    spans = sorted((one.seq_start, one.seq_end) for one in rebuilt)
+    for start, end in spans:
+        assert [hit.seq for one in rebuilt if one.seq_start == start for hit in one.hits] == list(
+            range(start, end + 1)
+        ), "a range is a run of consecutive chunks"
+    assert all(after[0] > before[1] + 1 for before, after in zip(spans, spans[1:], strict=False)), (
+        "ranges that touch are one range"
+    )
+    for one in rebuilt:
+        inside = [part for part in parts if one.seq_start <= part.seq_start <= one.seq_end]
+        assert one.alone == all(part.alone for part in inside)
+        assert one.aspects == list(
+            dict.fromkeys(label for part in inside for label in part.aspects)
+        )

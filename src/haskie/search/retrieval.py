@@ -237,23 +237,22 @@ async def fill_thin(scanned: Scanned, where: Plan, query: str) -> Ranged:
     match `query`, else marked too short to stand alone (see `thin`).
 
     Its neighbours are read from the collection only when a range is thin, in one query per
-    collection, and scored the strongest way this search can score: the reranker when one is on,
-    else the query vector, else the question's words. The floor is the median score of the scanned
-    hits the same way, so a neighbour joins when it matches as well as a typical result.
+    collection, and valued around the scanned hits (`fill.value`): by the reranker when one is
+    on, since the scanned hits carry its scores already, else as `_values` does. The valuing and
+    the growing run in one worker-thread hop.
     """
     settings = where.settings
     hit_ranges = passage.ranges(scanned.hits)
     wanted = thin.around(hit_ranges, settings.min_passage_chars, settings.max_passage_grow)
     rows = await _rows_at(where, wanted) if wanted else {}
-    scores, floor, signal = await _match_scores(scanned, list(rows.values()), where, query)
-    filled = thin.fill(
-        hit_ranges,
-        {one: hit for one, (hit, _) in rows.items()},
-        dict(zip(rows, scores, strict=True)),
-        floor,
-        settings.min_passage_chars,
-        settings.max_passage_grow,
-    )
+    reranked = None
+    if rows and settings.reranker != Reranker.NONE:
+        read = [row for _, row in rows.values()]
+        rescored = {
+            row_key(row): row_score(row) for row in await cross_encode(query, read, settings)
+        }
+        reranked = [rescored[row_key(row)] for row in read]
+    filled, signal = await cpu.on_cpu(_thin, hit_ranges, scanned, rows, reranked, where, query)
     alone = sum(one.alone for one in filled.ranges)
     if filled.grown or alone or filled.dropped:
         _log.info(
@@ -269,6 +268,35 @@ async def fill_thin(scanned: Scanned, where: Plan, query: str) -> Ranged:
         ranges=filled.ranges,
         scanned=Scanned(hits=[*scanned.hits, *filled.added], vectors=[*scanned.vectors, *added]),
     )
+
+
+def _thin(
+    hit_ranges: list[passage.HitRange],
+    scanned: Scanned,
+    rows: dict[ChunkKey, tuple[Hit, dict]],
+    reranked: list[float] | None,
+    where: Plan,
+    query: str,
+) -> tuple[thin.Filled, str]:
+    """The neighbours valued (`reranked` are their reranker scores, when one is on) and the thin
+    ranges grown by them."""
+    if not rows:
+        values, signal = [], "none"
+    elif reranked is not None:
+        values, signal = _valued(reranked, [hit.score for hit in scanned.hits]), "reranker"
+    else:
+        (values,), signal = _values(
+            list(zip((hit.text for hit in scanned.hits), scanned.vectors, strict=True)),
+            [(hit.text, row.get("vector")) for hit, row in rows.values()],
+            [(query, where.vector)],
+        )
+    neighbours = {
+        key: filling.Candidate(hit, worth)
+        for (key, (hit, _)), worth in zip(rows.items(), values, strict=True)
+    }
+    settings = where.settings
+    found = thin.fill(hit_ranges, neighbours, settings.min_passage_chars, settings.max_passage_grow)
+    return found, signal
 
 
 async def _rows_at(where: Plan, wanted: set[ChunkKey]) -> dict[ChunkKey, tuple[Hit, dict]]:
@@ -296,30 +324,34 @@ async def _per_collection[T](
     return await gather_rows(indexes, lambda index: read(index, wanted[index.collection]))
 
 
-async def _match_scores(
-    scanned: Scanned, rows: list[tuple[Hit, dict]], where: Plan, query: str
-) -> tuple[list[float], float, str]:
-    """How well each row matches `query`, the floor a match has to reach (the median scanned hit
-    scored the same way), and which signal scored them."""
-    if not rows:
-        return [], 0.0, "none"
-    settings = where.settings
-    if settings.reranker != Reranker.NONE:
-        # the scanned hits carry the reranker's scores already: the ranking is its ranking
-        read = [row for _, row in rows]
-        rescored = {
-            row_key(row): row_score(row) for row in await cross_encode(query, read, settings)
-        }
-        floor = statistics.median(hit.score for hit in scanned.hits)
-        return [rescored[row_key(row)] for row in read], floor, "reranker"
-    vectors = [row.get("vector") for _, row in rows]
-    if where.vector is not None and all(one is not None for one in [*scanned.vectors, *vectors]):
-        question = collapse.unit_rows([where.vector])[0]
-        floor = statistics.median((collapse.unit_rows(scanned.vectors) @ question).tolist())
-        return (collapse.unit_rows(vectors) @ question).tolist(), floor, "vector"
-    words = thin.terms(query)
-    floor = statistics.median(thin.overlap(words, hit.text) for hit in scanned.hits)
-    return [thin.overlap(words, hit.text) for hit, _ in rows], floor, "words"
+def _valued(scores: list[float], reference: list[float]) -> list[float]:
+    """Each score around the reference scores (`fill.value`): 0 at their median, 1 at their best."""
+    floor, top = statistics.median(reference), max(reference)
+    return [filling.value(score, floor, top) for score in scores]
+
+
+def _values(
+    reference: list[tuple[str, list[float] | None]],
+    candidates: list[tuple[str, list[float] | None]],
+    asked: list[tuple[str, list[float] | None]],
+) -> tuple[list[list[float]], str]:
+    """What each candidate (text, vector) is worth to each question (one row per question),
+    around the reference chunks, the ranked ones it grows next to (`_valued`); and by what: the
+    cosine of the vectors when every text and question has one, else the share of the question's
+    words each text holds (`thin.overlap`). Reference and candidates are scored together, so they
+    are on one scale, and each text is read once however many questions there are."""
+    every = [*reference, *candidates]
+    vectors = [vector for _, vector in every]
+    if all(vector is not None for _, vector in asked) and all(one is not None for one in vectors):
+        found = collapse.unit_rows(vectors) @ collapse.unit_rows([one for _, one in asked]).T
+        scores, signal = found.T.tolist(), "vector"
+    else:
+        held = [set(thin.terms(text)) for text, _ in every]
+        words = [thin.terms(question) for question, _ in asked]
+        scores = [[thin.overlap(each, one) for one in held] for each in words]
+        signal = "words"
+    cut = len(reference)
+    return [_valued(per[cut:], per[:cut]) for per in scores], signal
 
 
 # --- what the hits are folded into ------------------------------------------------
@@ -483,60 +515,72 @@ async def sections(
     return groups
 
 
+def budget(groups: list[section.Group], where: Plan) -> list[section.Group]:
+    """The groups that fit the answer's budget (`section.within`), the last cut first."""
+    kept = section.within(groups, where.settings.max_answer_chars)
+    if len(kept) < len(groups):
+        _log.info(
+            "search_budget", cut=len(groups) - len(kept), chars=sum(one.chars for one in kept)
+        )
+    return kept
+
+
 async def fill(
     groups: list[section.Group], questions: list[probe.Question], where: Plan
 ) -> list[section.Group]:
-    """The groups within the answer's budget, each with the chunks around and between its
-    passages that answer too (see `fill`).
+    """The groups, each with the chunks around and between its passages that answer too (see
+    `fill`), while they fit the room the answer's budget leaves.
 
     The chunks near every kept passage are read in one query per collection, with the passages'
-    own, and scored against each question: by its vector when every row has one, else by its
-    words. Each chunk is worth its best question's value, and that question tags it.
+    own, and valued around them for each question (`_values`). Each chunk is worth its best
+    question's value, and that question tags it.
     """
-    budget = where.settings.max_answer_chars
-    kept = filling.within(groups, budget)
+    reach = where.settings.max_passage_grow
     wanted = {
         (one.collection, one.document, seq)
-        for one in kept
-        for seq in filling.near(one)
-        | {hit.seq for kept_range in one.ranges for hit in kept_range.hits}
+        for one in groups
+        for seq in filling.near(one, reach) | {hit.seq for hit in one.hits}
     }
     rows = await _rows_at(where, wanted)
-    return await cpu.on_cpu(_fill, kept, groups, rows, questions, budget)
+    budget = where.settings.max_answer_chars
+    return await cpu.on_cpu(_fill, groups, rows, questions, reach, budget)
 
 
 def _fill(
-    kept: list[section.Group],
     groups: list[section.Group],
     rows: dict[ChunkKey, tuple[Hit, dict]],
     questions: list[probe.Question],
+    reach: int,
     budget: int,
 ) -> list[section.Group]:
-    held = [chunk_key(hit) for one in kept for hit_range in one.ranges for hit in hit_range.hits]
-    around = {
-        (one.collection, one.document, seq): at
-        for at, one in enumerate(kept)
-        for seq in filling.near(one)
-        if (one.collection, one.document, seq) in rows
+    held = [key for one in groups for hit in one.hits if (key := chunk_key(hit)) in rows]
+    near = {
+        key: at
+        for at, one in enumerate(groups)
+        for seq in filling.near(one, reach)
+        if (key := (one.collection, one.document, seq)) in rows
     }
-    weighed, signal = _weigh(held, list(around), rows, questions)
-    found: list[filling.Fill] = []
-    for at, one in enumerate(kept):
-        candidates = {key[2]: chunk for key, chunk in weighed.items() if around[key] == at}
-        found += filling.fills(at, one, candidates)
-    chosen = filling.choose(found, budget - sum(filling.chars(one.ranges) for one in kept))
+    weighed, signal = _weigh(held, list(near), rows, questions)
+    candidates: dict[int, dict[ChunkKey, filling.Candidate]] = {}
+    for key, chunk in weighed.items():
+        candidates.setdefault(near[key], {})[key] = chunk
+    found = [
+        one
+        for at, group in enumerate(groups)
+        for one in filling.fills(at, group, candidates.get(at, {}), reach)
+    ]
+    chosen = filling.choose(found, budget - sum(one.chars for one in groups))
     taken: dict[int, list[filling.Candidate]] = {}
     for one in chosen:
         taken.setdefault(one.group, []).extend(one.chunks)
     _log.info(
         "search_fill",
         signal=signal,
-        cut=len(groups) - len(kept),
         fills=len(chosen),
         added=sum(len(one.chunks) for one in chosen),
         chars=sum(one.chars for one in chosen),
     )
-    return [filling.apply(one, taken.get(at, [])) for at, one in enumerate(kept)]
+    return [filling.apply(one, taken.get(at, [])) for at, one in enumerate(groups)]
 
 
 def _weigh(
@@ -546,32 +590,19 @@ def _weigh(
     questions: list[probe.Question],
 ) -> tuple[dict[ChunkKey, filling.Candidate], str]:
     """Each chunk near a passage as a candidate: its best question's value around the passages'
-    own chunks (`fill.value`), and that question. By the vectors when every row has one, else by
-    the words."""
-    held = [key for key in held if key in rows]
+    own chunks (`_values`), and that question."""
     if not near or not held:
         return {}, "none"
-    vectors = [rows[key][1].get("vector") for key in [*held, *near]]
-    by_vector = all(one.vector is not None for one in questions) and all(
-        vector is not None for vector in vectors
+    values, signal = _values(
+        [(rows[key][0].text, rows[key][1].get("vector")) for key in held],
+        [(rows[key][0].text, rows[key][1].get("vector")) for key in near],
+        [(question.text, question.vector) for question in questions],
     )
-    values: list[list[float]] = []
-    for question in questions:
-        if by_vector:
-            scores = (
-                collapse.unit_rows(vectors) @ collapse.unit_rows([question.vector])[0]
-            ).tolist()
-        else:
-            words = thin.terms(question.text)
-            scores = [thin.overlap(words, rows[key][0].text) for key in [*held, *near]]
-        own, others = scores[: len(held)], scores[len(held) :]
-        floor, top = statistics.median(own), max(own)
-        values.append([filling.value(score, floor, top) for score in others])
     weighed: dict[ChunkKey, filling.Candidate] = {}
     for at, key in enumerate(near):
-        best = max(range(len(questions)), key=lambda q: values[q][at])
+        best = max(range(len(questions)), key=lambda question: values[question][at])
         weighed[key] = filling.Candidate(rows[key][0], values[best][at], questions[best].label)
-    return weighed, "vector" if by_vector else "words"
+    return weighed, signal
 
 
 async def _grouped(
@@ -596,22 +627,20 @@ async def probe_gaps(
     wanted = probe.missing(questions, probe.covered(groups))
     if not wanted:
         return groups
-    query = " ".join(wanted)
+    held = {chunk_key(hit) for one in groups for hit in one.hits}
+    depth = probe.PROBE_SCAN + len(held)  # enough rows that the best new one is among them
     lexical = msgspec.structs.replace(where, vector=None)
-    pool = merge(
-        await fan_out(lexical, query, where.settings.candidates),
-        where.settings.rrf_k,
-        where.settings.candidates,
-    )
-    held = {chunk_key(hit) for one in groups for kept in one.ranges for hit in kept.hits}
-    hits = [hit for hit in scan(pool, probe.PROBE_SCAN).hits if chunk_key(hit) not in held]
+    found = await fan_out(lexical, " ".join(wanted), depth)
+    pool = merge(found, where.settings.rrf_k, depth)
+    hits = [hit for hit in scan(pool, depth).hits if chunk_key(hit) not in held]
     fresh = passage.ranges(hits)
-    where_went = None
+    joined = None
     if fresh:
         best = msgspec.structs.replace(fresh[0], aspects=probe.tags(fresh[0], wanted))
-        (found,) = await _grouped([best], where, 1)
-        groups, where_went = probe.placed(groups, found)
-    _log.info("search_probe", terms=list(wanted), placed=where_went)
+        (one,) = await _grouped([best], where, 1)
+        placed = probe.placed(groups, one)
+        joined, groups = len(placed) == len(groups), placed
+    _log.info("search_probe", terms=list(wanted), found=bool(fresh), joined=joined)
     return groups
 
 

@@ -1000,7 +1000,7 @@ export interface components {
          * @default chunk
          * @enum {string}
          */
-        Granularity: "chunk" | "passage" | "excerpt";
+        Granularity: "chunk" | "passage";
         /** Hit */
         Hit: {
             collection: string;
@@ -1552,12 +1552,12 @@ export interface components {
             reranker_model?: string | null;
             /**
              * Shortest passage (characters)
-             * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question as well as a typical result does. One with no such neighbour is dropped, unless it is the best result. 0 turns this off.
+             * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question (see Chunks a passage may grow by). One that finds none is dropped, unless it is the best result. 0 turns this off.
              */
             min_passage_chars?: number | null;
             /**
-             * Chunks a short passage may add
-             * @description How many neighbouring chunks a short passage may grow by, never past a heading.
+             * Chunks a passage may grow by
+             * @description How many neighbouring chunks of its section a passage may grow by on each side, never past a heading, and only where they match the question: a short passage before the slots are counted, every excerpt's passages after. Twice this is the longest gap between two passages that is filled. 0 turns growing off.
              */
             max_passage_grow?: number | null;
             /**
@@ -1567,7 +1567,7 @@ export interface components {
             max_section_chars?: number | null;
             /**
              * Largest answer (characters)
-             * @description How much text one excerpts search returns at most. Sections past it are left out, the last first, and the text around and between passages that answers too is added while it fits.
+             * @description How much text the sections of one excerpts search hold. Sections past it are left out, the last first, and the text around and between passages that answers too is added while it fits. One excerpt found for words no section holds may come past it.
              */
             max_answer_chars?: number | null;
         };
@@ -1626,13 +1626,13 @@ export interface components {
             reranker_model: string;
             /**
              * Shortest passage (characters)
-             * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question as well as a typical result does. One with no such neighbour is dropped, unless it is the best result. 0 turns this off.
+             * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question (see Chunks a passage may grow by). One that finds none is dropped, unless it is the best result. 0 turns this off.
              * @default 300
              */
             min_passage_chars: number;
             /**
-             * Chunks a short passage may add
-             * @description How many neighbouring chunks a short passage may grow by, never past a heading.
+             * Chunks a passage may grow by
+             * @description How many neighbouring chunks of its section a passage may grow by on each side, never past a heading, and only where they match the question: a short passage before the slots are counted, every excerpt's passages after. Twice this is the longest gap between two passages that is filled. 0 turns growing off.
              * @default 2
              */
             max_passage_grow: number;
@@ -1644,7 +1644,7 @@ export interface components {
             max_section_chars: number;
             /**
              * Largest answer (characters)
-             * @description How much text one excerpts search returns at most. Sections past it are left out, the last first, and the text around and between passages that answers too is added while it fits.
+             * @description How much text the sections of one excerpts search hold. Sections past it are left out, the last first, and the text around and between passages that answers too is added while it fits. One excerpt found for words no section holds may come past it.
              * @default 24000
              */
             max_answer_chars: number;
@@ -3171,7 +3171,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Hit"][] | components["schemas"]["Passage"][] | components["schemas"]["Excerpt"][];
+                    "application/json": components["schemas"]["Hit"][] | components["schemas"]["Passage"][];
                 };
             };
             /** @description Bad request syntax or unsupported method */

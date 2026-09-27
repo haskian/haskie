@@ -14,7 +14,7 @@ flowchart LR
     rerank --> hits["<b>hits</b><br/>cut to scan depth"]
     hits --> fchunks["collapse hits"] --> chunks(["chunks"])
     hits --> franges["merge neighbours,<br/>grow or drop short ones,<br/>collapse ranges"] --> read["read the spans"] --> passages(["passages"])
-    franges --> group["group by section"] --> probe["search again for<br/>missing words"] --> fill["fill around<br/>and between"] --> excerpts(["excerpts"])
+    franges --> group["group by section"] --> budget["cut to<br/>the budget"] --> probe["search again for<br/>missing words"] --> fill["fill around<br/>and between"] --> excerpts(["excerpts"])
     hits --> shortlist["group by document"] --> sources(["sources"])
 ```
 
@@ -39,7 +39,7 @@ source row.
 | --- | --- | --- |
 | chunk (`Hit`) | one indexed chunk and its score | `explore?granularity=chunk`; also returned, without folding, by `/api/search/text` and `/api/collections/{c}/search` |
 | passage | neighbouring matched chunks of one section, merged | `explore?granularity=passage` |
-| excerpt | one section of a document, with every passage of it the search kept | `search_excerpts`, `explore?granularity=excerpt` |
+| excerpt | one section of a document, with every passage of it the search kept | `search_excerpts` (the Explore page too) |
 | source | one document: score, best chunk, hottest sections, collections | `search_sources` |
 
 A passage is the text its chunks cover, read by their offsets, with nothing added around it.
@@ -73,60 +73,67 @@ passage's.
 ## Words the answer never mentions
 
 A search ranks by the whole question, so the part most of it is about can fill every slot while a
-word the rest hangs on goes missing: "keep inventory consistent when an order is placed",
-answered by five passages on orders and none on inventory. `search/probe.py` looks for each word
-of the question (stopwords and words under three letters aside) in the kept sections' text and
-headings. A text holds a word when one of its words starts with the word's stem, the word less
-two letters but at least four, so "keeps" holds "keep" and "consistency" holds "consistent". The
-words none of them holds are searched for once more by BM25 alone, and the best passage that
-search finds that no section holds yet joins the answer. It joins the kept section it belongs to,
-or comes after the others as one excerpt past `limit`. Taking the last ranked section's slot
-instead would trade one gap for another, and a search of one excerpt would lose its whole answer.
-It is tagged with the questions whose words it holds.
+word the rest hangs on goes missing: "keep inventory consistent when an order is placed", answered
+by five passages on orders and none on inventory. `search/probe.py` looks for each word of the
+question (stopwords and words under three letters aside) in the kept sections' text and headings. A
+text holds a word when one of its words has the same stem, by the Snowball English stemmer that
+LanceDB's full-text index uses. So "keeps" holds "keep", "deployment" holds "deploy" and
+"consistency" holds "consistent", while "category" does not hold "cat". The words none of them
+holds are searched for once more by BM25 alone, and the best passage that search finds that no
+section holds yet joins the answer. It joins the kept section it belongs to, or comes after the
+others as one excerpt past `limit` and past the budget, which the sections were cut to before it.
+Taking the last ranked section's slot instead would trade one gap for another, and a search of one
+excerpt would lose its whole answer. It is tagged with the questions whose words it holds.
 
 `search_excerpts` answers with `excerpts`, `uncovered` (the questions no excerpt names, when
 several were asked) and `missing_terms` (the words still missing after the probe). A synonym
 defeats the probe: it asks only for the words the question used. Each search that probes logs
-`search_probe` with the words and where its passage went.
+`search_probe` with the words, whether it found a passage, and whether that joined a kept section.
+The Explore page shows the missing words and questions under the results.
 
 ## Filling around and between passages
 
 The text between two kept passages, or just past them, often finishes the answer: the list under
 "three rules:", the paragraph that explains a term. It did not rank, so `search/fill.py` weighs it.
-Every chunk of the section within 4 chunks of a kept passage is scored against the question, by
-the query vector when every row has one, else by the question's words. Its value is its score
-around the kept chunks' own: 0 for one as good as the median kept chunk, 1 for one as good as the
-best, below 0 for a weaker one, clipped to [-1, 1]. With several questions a chunk takes its best
-question's value, and that question tags it.
+Every chunk of the section within `max_passage_grow` (2) chunks of a kept passage is scored against
+the question, by the query vector when every row has one, else by the question's words. Its value
+is its score around the kept chunks' own: 0 for one as good as the median kept chunk, 1 for one as
+good as the best, below 0 for a weaker one, clipped to [-1, 1]. With several questions a chunk
+takes its best question's value, and that question tags it.
 
-- A gap between two passages is filled when its values sum above 0, and the two become one.
+- A gap between two passages is filled when its values sum above 0, and the two become one. So a
+  gap of up to twice `max_passage_grow` chunks can be filled.
 - A passage grows outward by the run of chunks next to it whose values sum highest, when that is
   above 0.
+
+The same rule grows a short passage before the slots are counted (next section), so a search has
+one way of growing a passage, one scale of value and one setting for how far.
 
 This is the arithmetic of Relevant Segment Extraction [3]: a weak chunk comes in only when stronger
 ones around it pay for it. Where a gap is not filled, `[…]` stays.
 
-`max_answer_chars` (24,000) bounds what one excerpts search returns. Sections past it go first, the
-last first, though the first section always stays. The fills then go in, worth most per character
-first, while they fit. The fill does not ask the reranker even when one is on: scoring every chunk
+`max_answer_chars` (24,000) bounds what one excerpts search returns. Right after grouping, a
+`budget` step cuts the sections to it, the last first, though the first section always stays
+(`search_budget` logs how many went). The fills then go in, worth most per character first, while
+they fit the room left. The fill does not ask the reranker even when one is on: scoring every chunk
 near every section against every question would take seconds. Each search logs `search_fill` with
-the signal and what it cut and added.
+the signal and what it added.
 
 ## Short passages
 
 A passage under `min_passage_chars` (300), or under 7 words, is thin: a section's lead-in ("Three
 rules:", with the list in the next chunk), a section's last line, or a separator. `search/thin.py`
-grows it by the chunk before or after it, one at a time and up to `max_passage_grow` (2), while it
-stays thin. It never grows past a heading or the end of the document, and it takes only a chunk
-that matches the question. A thin passage that took nothing is too short to stand alone. As a
-passage it is dropped, and its slot goes to the next result. As part of an excerpt it stays when
-another passage of its section is kept, and a section with no other passage is no excerpt.
+grows it by the rule every excerpt's passages grow by: on each side, the run of up to
+`max_passage_grow` (2) chunks whose values sum highest, when that is above 0. It never grows past a
+heading. A neighbour's value is its score around the scanned hits' own: 0 for one as good as the
+median, 1 for one as good as the best, scored by the reranker when one is on, else by the cosine to
+the query vector, else by the share of the question's words it holds. The floor is this search's
+own, so it needs no calibration per model.
 
-A neighbour matches when it scores at least the median scanned hit, scored the same way. That is
-the reranker when one is on, else the cosine to the query vector, else the share of the question's
-words it holds. The floor is this search's own, so it needs no calibration per model.
-
-Two thin passages stay even when nothing around them matches:
+A thin passage that took nothing is too short to stand alone. As a passage it is dropped, and its
+slot goes to the next result. As part of an excerpt it stays when another passage of its section is
+kept, and a section with no other passage is no excerpt. Two thin passages stay even when nothing
+around them matches:
 
 - the best result of the search, because a short exact answer is still an answer;
 - a whole section, with a heading or the document's edge on both sides, such as a short note.
@@ -134,8 +141,8 @@ Two thin passages stay even when nothing around them matches:
 
 A passage without a single word, such as `---`, is dropped even when it ranks first. The
 neighbours are read only when a passage is thin, in one LanceDB query per collection. Each search
-logs `search_thin` with the signal used and how many passages were thin, grown and dropped. With
-several questions, each question's passages are grown or dropped against that question.
+logs `search_thin` with the signal used and how many passages grew, stayed alone and were dropped.
+With several questions, each question's passages are grown or dropped against that question.
 
 `search_sources` scores a document by the harmonic mean of its best chunk and the sum of all its
 matched chunks. Every further chunk lifts the score, but the mean stays under twice the best
@@ -174,8 +181,8 @@ flowchart TD
 ```
 
 A duplicate is an exact character match once whitespace is collapsed, in any document. Both texts
-need at least 7 words, so two equal headings do not fold. Equivalent means the same meaning in other words: a nearly
-identical vector, or nearly the same words where words decide.
+need at least 7 words, so two equal headings do not fold. Equivalent means the same meaning in
+other words: a nearly identical vector, or nearly the same words where words decide.
 
 A new result that repeats no kept result takes a new slot, while fewer than `limit` are taken.
 
@@ -218,7 +225,7 @@ flowchart LR
     ranges --> turns["<b>take turns</b><br/>round-robin<br/>over the parts"]
     turns --> fold["collapse ranges<br/>across all parts"]
     fold --> tag["tag each passage<br/>with its parts"]
-    tag --> group["group by section"] --> probe["probe"] --> fill["fill"] --> excerpts(["excerpts"])
+    tag --> group["group by section"] --> budget["budget"] --> probe["probe"] --> fill["fill"] --> excerpts(["excerpts"])
 ```
 
 Each part runs the shared ranking on its own, as deep as one search of that `limit` would go.
@@ -234,12 +241,11 @@ picked them.
 
 Each span's `aspects` lists the parts its passage ranked high for: the part that picked it, every
 part that joined it or ranks it among its own owed ranges, and those of every place folded into it.
-An excerpt's `aspects` joins its spans'.
-The tags come from ranks alone, with no relevance floor. A vector or hybrid search finds nearest
-passages for any part, even one the sources say nothing about, so a tag is not proof of an
-answer. A part no excerpt lists found nothing at all, and the answer's `uncovered` names it. One
-question, or a list that deduplicates
-to one, is the single search with the context in front of it, and its `aspects` is empty. A `limit` below the number of
+An excerpt's `aspects` joins its spans'. The tags come from ranks alone, with no relevance floor. A
+vector or hybrid search finds nearest passages for any part, even one the sources say nothing
+about, so a tag is not proof of an answer. A part no excerpt lists found nothing at all, and the
+answer's `uncovered` names it. One question, or a list that deduplicates to one, is the single
+search with the context in front of it, and its `aspects` is empty. A `limit` below the number of
 parts is refused (422).
 
 ## Full-text search
@@ -254,12 +260,13 @@ building its first full-text index contributes nothing instead of making the que
 
 `limit`, `candidates`, `mode`, `fusion`, `rrf_k`, `vector_weight`, `bm25_weight`, `nprobes`,
 `refine_factor`, `reranker`, `reranker_model`, `min_passage_chars`, `max_passage_grow`,
-`max_section_chars` and `max_answer_chars` each have a user default and a description in the UI, and a collection can override them. In the shared ranking, each collection retrieves with
-its own overrides. The settings of the merged ranking (`rrf_k`, `candidates`, the reranker) come
-from the collection only when it is the one collection in scope, and from the user otherwise.
-`limit` comes from the call, else the user default. `/api/collections/{c}/search` applies all of
-the collection's overrides, and also takes `limit`, `mode`, `fusion`, `vector_weight`,
-`bm25_weight`, `reranker` and `candidates` per call.
+`max_section_chars` and `max_answer_chars` each have a user default and a description in the UI,
+and a collection can override them. In the shared ranking, each collection retrieves with its own
+overrides. The settings of the merged ranking (`rrf_k`, `candidates`, the reranker) come from the
+collection only when it is the one collection in scope, and from the user otherwise. `limit` comes
+from the call, else the user default. `/api/collections/{c}/search` applies all of the collection's
+overrides, and also takes `limit`, `mode`, `fusion`, `vector_weight`, `bm25_weight`, `reranker` and
+`candidates` per call.
 
 Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/collapse.py`,
 `search/aspects.py`, `search/thin.py`, `search/section.py`, `search/fill.py`, `search/probe.py`.

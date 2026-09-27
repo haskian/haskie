@@ -6,8 +6,9 @@ import './Explore.css'
 import { ALL_SCOPE, parseScope, scopeParams, SESSION_PREFIX } from './explore/scope'
 import { errorText } from '../format'
 
-/** What a search answers with: a granularity of matches, or the documents that hold them. */
-type Answer = Granularity | 'source'
+/** What a search answers with: a granularity of matches, the excerpts an agent reads, or the
+ *  documents that hold them. */
+type Answer = Granularity | 'excerpt' | 'source'
 
 // What each answer is called on screen, and what its results are: the second picker's options.
 const ANSWERS: Array<PickerOption<Answer> & { plural: string }> = [
@@ -18,14 +19,27 @@ const ANSWERS: Array<PickerOption<Answer> & { plural: string }> = [
 ]
 const answerOf = (value: Answer) => ANSWERS.find((one) => one.value === value) ?? ANSWERS[0]
 
-/** The one request an answer takes: the sources route for documents, the explore route else. */
-async function search(text: string, answer: Answer, where: SearchScope): Promise<{ results: Match[]; steps: StepTiming[] }> {
+/** What one search brings back: its results, how long each step took, and the words of the
+ *  question no excerpt holds (only excerpts say). */
+interface Found {
+  results: Match[]
+  steps: StepTiming[]
+  missing: string[]
+}
+
+/** The one request an answer takes: its own route for excerpts and for documents, the explore
+ *  route for chunks and passages. */
+async function search(text: string, answer: Answer, where: SearchScope): Promise<Found> {
   if (answer === 'source') {
     const found = await api.searchSources(text, where)
-    return { results: found.body.documents, steps: found.steps }
+    return { results: found.body.documents, steps: found.steps, missing: [] }
+  }
+  if (answer === 'excerpt') {
+    const found = await api.searchExcerpts(text, where)
+    return { results: found.body.excerpts, steps: found.steps, missing: found.body.missing_terms }
   }
   const found = await api.explore(text, answer, where)
-  return { results: found.body, steps: found.steps }
+  return { results: found.body, steps: found.steps, missing: [] }
 }
 
 /** Search across collections, answering at the granularity the picker names: matches, or the
@@ -44,6 +58,7 @@ export function Explore({ route, counts }: PageProps) {
   const [busy, setBusy] = useState(false)
   const [took, setTook] = useState<number | null>(null) // ms the last query took
   const [steps, setSteps] = useState<StepTiming[]>([]) // and how long each of its steps took
+  const [missing, setMissing] = useState<string[]>([]) // words the excerpts on screen lack
 
   useEffect(() => {
     Promise.all([api.collections({ page_size: MAX_PAGE_SIZE }), api.sessions()])
@@ -78,6 +93,7 @@ export function Explore({ route, counts }: PageProps) {
       const found = await search(text, answer, scopeParams(parseScope(scope)))
       setResults(found.results)
       setSteps(found.steps)
+      setMissing(found.missing)
       setRan(text)
       setRanAs(answer)
       setTook(Math.round(performance.now() - started))
@@ -93,6 +109,7 @@ export function Explore({ route, counts }: PageProps) {
     setRan('')
     setResults([])
     setSteps([])
+    setMissing([])
     setError(null)
     setTook(null)
   }
@@ -117,6 +134,7 @@ export function Explore({ route, counts }: PageProps) {
         />
         {error !== null && <p className="muted">{error}</p>}
         <SearchTook counts={`${results.length} ${answerOf(ranAs).plural}`} ms={took} steps={steps} />
+        {missing.length > 0 && <p className="muted">No excerpt says: {missing.join(', ')}</p>}
         <HitGrid results={results} query={ran} onOpen={setOpen} />
       </div>
       <MatchModal match={open} query={ran} onClose={() => setOpen(null)} />

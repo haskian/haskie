@@ -27,8 +27,24 @@ def _group(document: str, text: str, path: tuple[str, ...] = ("Shop",)) -> Group
     return Group("backend", document, Section(path, 1, 1), [found])
 
 
-def test_terms_are_the_topic_words_in_the_order_asked() -> None:
-    assert probe.terms(ORDER.asked) == ["order", "keep", "inventory", "consistent"]
+@pytest.mark.parametrize(
+    ("name", "word", "text", "expected"),
+    [
+        ("the word itself", "keep", "We keep it.", True),
+        ("a longer form", "keep", "It keeps and keeping goes on.", True),
+        ("a form with another ending", "consistent", "Consistency matters.", True),
+        ("a noun of the verb, many letters longer", "deploy", "The deployment ran.", True),
+        ("the verb of a noun", "configuration", "Configure it first.", True),
+        ("a word that only starts the same is another word", "cat", "A category.", False),
+        ("nor is a longer one", "test", "The testament.", False),
+        ("an irregular form does not count", "run", "It ran.", False),
+        ("a word not there", "inventory", "Orders ship.", False),
+    ],
+)
+def test_a_text_holds_a_word_or_a_form_of_it(
+    name: str, word: str, text: str, expected: bool
+) -> None:
+    assert (probe.stem(word) in probe.vocabulary([text])) is expected, name
 
 
 @pytest.mark.parametrize(
@@ -114,12 +130,10 @@ def test_the_probed_section_joins_the_section_it_is_part_of_else_comes_after() -
     same = _group("b.md", "The ledger is reconciled nightly.")
     other = _group("c.md", "Inventory counts drop.")
 
-    joined, where = probe.placed(kept, same)
-    added, elsewhere = probe.placed(kept, other)
+    joined = probe.placed(kept, same)
+    added = probe.placed(kept, other)
 
-    assert where == "joined"
     assert [len(one.ranges) for one in joined] == [1, 2], "into its section, not a slot"
-    assert elsewhere == "added"
     assert [one.document for one in added] == ["a.md", "b.md", "c.md"], "past the others"
 
 

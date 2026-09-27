@@ -13,15 +13,15 @@ from haskie.errors import InvalidInput
 from haskie.indexing import operations
 from haskie.paging import DEFAULT_PAGE_SIZE, Page
 from haskie.search import aspects, flow, retrieval, session, text
-from haskie.search.passage import Answer, Excerpt, Passage, Sources
+from haskie.search.passage import Answer, Passage, Sources
 
 
-# What one search returns: the chunks the index holds, the passages they merge into, or the
-# excerpt of a passage an agent quotes.
+# What an exploration returns: the chunks the index holds, or the passages they merge into. The
+# excerpts an agent reads have their own route (`search_excerpts`), since they answer with more
+# than a list: what they leave out.
 class Granularity(StrEnum):
     CHUNK = "chunk"
     PASSAGE = "passage"
-    EXCERPT = "excerpt"
 
 
 class SessionCollections(msgspec.Struct):
@@ -57,25 +57,22 @@ async def explore(
     session_id: str | None = None,
     collections: str | None = None,
     limit: Limit = None,
-) -> list[Hit] | list[Passage] | list[Excerpt]:
+) -> list[Hit] | list[Passage]:
     """Search at the granularity the caller wants: the exploration endpoint the UI drives.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection. `limit` defaults to the user setting.
 
     What comes back per granularity: `chunk`, the matching index rows; `passage`, the consecutive
-    chunks of one section merged into one span, cut where the chunker cut;
-    `excerpt`, one section of a document with every passage of it the search kept, and `limit`
-    counting sections. At every granularity a near-duplicate is folded into the better result it
-    repeats: it is listed in that result's `also_in` (an excerpt's spans' `also_in`) rather than
-    on its own, and its slot goes to the next result down.
+    chunks of one section merged into one span, cut where the chunker cut. The excerpts an agent
+    reads are `search_excerpts`. At every granularity a near-duplicate is folded into the better
+    result it repeats: it is listed in that result's `also_in` rather than on its own, and its
+    slot goes to the next result down.
     """
     started = time.perf_counter()
     names = await retrieval.scope(session_id, collections)
     if granularity == Granularity.PASSAGE:
-        found: list[Hit] | list[Passage] | list[Excerpt] = await flow.passages(names, q, limit)
-    elif granularity == Granularity.EXCERPT:
-        found = (await flow.excerpts(names, q, limit)).excerpts
+        found: list[Hit] | list[Passage] = await flow.passages(names, q, limit)
     else:
         found = await flow.chunks(names, q, limit)
     await session.record_search(session_id, "explore", q, found, started)
@@ -95,11 +92,11 @@ async def search_excerpts(
 
     The answer is `excerpts`, `uncovered` and `missing_terms`. `uncovered` lists the questions no
     excerpt answers, when several were asked. `missing_terms` lists the words of the questions
-    (stopwords aside) that no excerpt's text or headings hold, a form of the word counting
-    ("keeps" holds "keep"). Before answering, the search looks for those words once more by full
-    text, and the best passage it finds joins the answer: in the section it belongs to, or as
-    one excerpt past `limit`. What is still missing after that is what the sources do not say in
-    those words; a synonym in the text does not count.
+    (stopwords aside) that no excerpt's text or headings hold, a form of the word counting ("keeps"
+    holds "keep"). Before answering, the search looks for those words once more by full text, and
+    the best passage it finds joins the answer: in the section it belongs to, or as one excerpt past
+    `limit` and the budget. What is still missing after that is what the sources do not say in those
+    words; a synonym in the text does not count.
 
     Each excerpt is one section of one document: the largest heading whose text is at most a few
     pages, with every passage of it the search matched, in document order, and the text around
@@ -107,7 +104,7 @@ async def search_excerpts(
     passage opens with the headings it sits under below `header`, and `[…]` marks text skipped
     between two of them because it did not match. Chunks are cut at headings, blank lines,
     blocks and sentences, so each passage begins and ends where the author stopped. `limit`
-    counts excerpts, and the whole answer is at most `max_answer_chars` characters.
+    counts excerpts, and the sections are cut to `max_answer_chars` characters.
     Cite the excerpt by its `header` (the section's heading path) and `location` (document, pages,
     lines), or one passage by its span's `header` and `location`. `spans` lists the passages, each
     with its lines, its score, the questions it answers and the places that repeat it.

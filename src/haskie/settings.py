@@ -225,8 +225,8 @@ MIN_PASSAGE_CHARS = Meta(
     title="Shortest passage (characters)",
     description=(
         "A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its "
-        "section that match the question as well as a typical result does. One with no such "
-        "neighbour is dropped, unless it is the best result. 0 turns this off."
+        "section that match the question (see Chunks a passage may grow by). One that finds none "
+        "is dropped, unless it is the best result. 0 turns this off."
     ),
 )
 MAX_SECTION_CHARS = Meta(
@@ -239,14 +239,19 @@ MAX_SECTION_CHARS = Meta(
 MAX_ANSWER_CHARS = Meta(
     title="Largest answer (characters)",
     description=(
-        "How much text one excerpts search returns at most. Sections past it are left out, the "
-        "last first, and the text around and between passages that answers too is added while "
-        "it fits."
+        "How much text the sections of one excerpts search hold. Sections past it are left out, "
+        "the last first, and the text around and between passages that answers too is added "
+        "while it fits. One excerpt found for words no section holds may come past it."
     ),
 )
 MAX_PASSAGE_GROW = Meta(
-    title="Chunks a short passage may add",
-    description="How many neighbouring chunks a short passage may grow by, never past a heading.",
+    title="Chunks a passage may grow by",
+    description=(
+        "How many neighbouring chunks of its section a passage may grow by on each side, never "
+        "past a heading, and only where they match the question: a short passage before the "
+        "slots are counted, every excerpt's passages after. Twice this is the longest gap "
+        "between two passages that is filled. 0 turns growing off."
+    ),
 )
 CANDIDATES = Meta(
     title="Candidates",

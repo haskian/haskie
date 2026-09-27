@@ -6,10 +6,13 @@ paragraphs: eight paragraphs of 93 characters under "Guide > Retries" (seq 1-8),
 Other" (seq 9).
 """
 
+import random
+
 import msgspec
 import pytest
 from conftest import chunk_hit
 
+from haskie.collection.index import ChunkKey
 from haskie.indexing.chunk import split
 from haskie.search import fill
 from haskie.search.fill import Candidate, Fill
@@ -46,8 +49,10 @@ def _group(*found: HitRange, section: Section = RETRIES) -> Group:
     return Group(COLLECTION, DOC, section, list(found))
 
 
-def _candidates(values: dict[int, float], aspect: str | None = None) -> dict[int, Candidate]:
-    return {seq: Candidate(HITS[seq], worth, aspect) for seq, worth in values.items()}
+def _candidates(values: dict[int, float], aspect: str | None = None) -> dict[ChunkKey, Candidate]:
+    return {
+        (COLLECTION, DOC, seq): Candidate(HITS[seq], worth, aspect) for seq, worth in values.items()
+    }
 
 
 def test_the_fixture_is_the_chunks_the_docstring_names() -> None:
@@ -78,31 +83,13 @@ def test_a_chunk_is_worth_its_score_around_the_kept_chunks(
     assert fill.value(score, floor, top) == pytest.approx(expected), name
 
 
-# --- within ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("name", "budget", "expected"),
-    [
-        ("everything fits", 1000, 3),
-        ("the sections past the budget go, the last first", 2 * SIZE, 2),
-        ("a later small section does not jump the queue", 3 * SIZE - 1, 2),
-        ("the first stays even over the budget", 10, 1),
-    ],
-)
-def test_the_sections_are_cut_to_the_budget_in_order(name: str, budget: int, expected: int) -> None:
-    groups = [_group(_range(1)), _group(_range(3)), _group(_range(5))]
-
-    assert len(fill.within(groups, budget)) == expected, name
-
-
 # --- near -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("name", "found", "section", "expected"),
     [
-        ("up to REACH either side", [_range(4)], RETRIES, {1, 2, 3, 5, 6, 7, 8}),
+        ("up to `reach` either side", [_range(4)], RETRIES, {1, 2, 3, 5, 6, 7, 8}),
         ("never out of the section", [_range(1)], Section(("Guide", "Retries"), 1, 3), {2, 3}),
         ("not the passages' own chunks", [_range(2), _range(5, 6)], RETRIES, {1, 3, 4, 7, 8}),
     ],
@@ -110,7 +97,7 @@ def test_the_sections_are_cut_to_the_budget_in_order(name: str, budget: int, exp
 def test_the_chunks_a_fill_could_take_are_near_the_passages(
     name: str, found: list[HitRange], section: Section, expected: set[int]
 ) -> None:
-    assert fill.near(_group(*found, section=section)) == expected, name
+    assert fill.near(_group(*found, section=section), 4) == expected, name
 
 
 # --- fills ----------------------------------------------------------------------------
@@ -145,7 +132,27 @@ def _shape(found: list[Fill]) -> list[list[int]]:
 def test_a_section_could_bridge_its_gaps_and_grow_its_ends(
     name: str, found: list[HitRange], values: dict[int, float], expected: list[list[int]]
 ) -> None:
-    assert _shape(fill.fills(0, _group(*found), _candidates(values))) == expected, name
+    assert _shape(fill.fills(0, _group(*found), _candidates(values), 4)) == expected, name
+
+
+# --- run ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "values", "expected"),
+    [
+        ("the prefix that sums highest", [0.5, -0.1, 0.3, -0.9], [5, 6, 7]),
+        ("a weak chunk first is paid for by a strong one after", [-0.2, 0.6], [5, 6]),
+        ("nothing sums above 0: none", [-0.1, 0.05], []),
+        ("nothing read: none", [], []),
+    ],
+)
+def test_a_run_outward_takes_the_prefix_worth_most(
+    name: str, values: list[float], expected: list[int]
+) -> None:
+    outward = [Candidate(HITS[seq], worth) for seq, worth in zip(range(5, 9), values, strict=False)]
+
+    assert [chunk.hit.seq for chunk in fill.run(outward)] == expected, name
 
 
 # --- choose ---------------------------------------------------------------------------
@@ -181,3 +188,34 @@ def test_a_group_that_takes_nothing_is_unchanged() -> None:
     one = _group(_range(2))
 
     assert fill.apply(one, []) is one
+
+
+# --- the fill, over many random sections ----------------------------------------------------
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_a_fill_takes_only_unkept_chunks_of_its_section_within_the_room(seed: int) -> None:
+    """Whatever passages a section holds and whatever its neighbours are worth: a fill takes only
+    chunks the section holds and its passages do not, within `reach` of a passage, never more
+    than the room; and the group it makes holds every chunk once."""
+    rng = random.Random(seed)
+    kept = sorted(rng.sample(range(1, 9), rng.randint(1, 4)))
+    found = [_range(seq) for seq in kept]
+    reach = rng.randint(0, 3)
+    one = _group(*found)
+    near = fill.near(one, reach)
+    values = {seq: rng.uniform(-1, 1) for seq in near}
+    room = rng.randint(0, 6) * SIZE
+
+    chosen = fill.choose(fill.fills(0, one, _candidates(values), reach), room)
+    taken = [chunk for piece in chosen for chunk in piece.chunks]
+    joined = fill.apply(one, taken)
+
+    seqs = [chunk.hit.seq for chunk in taken]
+    assert len(seqs) == len(set(seqs)), "a chunk is taken once"
+    assert set(seqs) <= near, "only chunks near a passage, in the section, not a passage's own"
+    assert all(min(abs(seq - k) for k in kept) <= reach for seq in seqs), "within reach"
+    assert sum(piece.chars for piece in chosen) <= room, "never more than the room"
+    assert all(piece.value > 0 for piece in chosen), "only what is worth taking"
+    held = sorted(hit.seq for hit_range in joined.ranges for hit in hit_range.hits)
+    assert held == sorted([*kept, *seqs]), "the group holds every chunk once"
