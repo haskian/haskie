@@ -97,3 +97,22 @@ values
     ('nomic-v1.5-gguf', 'nomic-ai/nomic-embed-text-v1.5-GGUF', 768, null, 'search_query: ', 'search_document: ', null, null, null),
     ('bge-m3-gguf', 'ggml-org/bge-m3-Q8_0-GGUF', 1024, null, '', '', null, null, null),
     ('jina-v3', 'jinaai/jina-embeddings-v3', 1024, null, '', '', null, null, null);
+
+-- Each reranker's floor and score curve (`reranker_calibration`). Uncalibrated until measured:
+-- a floor of 0.05 (logit about -3), judged on one book with MiniLM-L-6, and the identity curve
+-- (beta 1, 1). `mise run calibrate-rerankers` measures both on borderline pairs of your own
+-- collections, the way Cohere sets a relevance threshold: the average score of 30 to 50 pairs a
+-- person judged borderline relevant.
+insert or ignore into reranker_calibration (model, floor, beta_a, beta_b, source)
+values
+    ('Xenova/ms-marco-MiniLM-L-6-v2', 0.05, 1.0, 1.0, 'uncalibrated'),
+    ('Xenova/ms-marco-MiniLM-L-12-v2', 0.05, 1.0, 1.0, 'uncalibrated'),
+    ('BAAI/bge-reranker-base', 0.05, 1.0, 1.0, 'uncalibrated'),
+    ('jinaai/jina-reranker-v1-turbo-en', 0.05, 1.0, 1.0, 'uncalibrated'),
+    ('cross-encoder/ettin-reranker-68m-v1', 0.05, 1.0, 1.0, 'uncalibrated'),
+    ('mixedbread-ai/mxbai-rerank-xsmall-v1', 0.05, 1.0, 1.0, 'uncalibrated'),
+    ('mixedbread-ai/mxbai-rerank-base-v1', 0.05, 1.0, 1.0, 'uncalibrated'),
+    ('jinaai/jina-reranker-v2-base-multilingual', 0.05, 1.0, 1.0, 'uncalibrated'),
+    ('soichisumi/bge-reranker-v2-m3-mlx-affine8', 0.05, 1.0, 1.0, 'uncalibrated'),
+    ('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 0.05, 1.0, 1.0, 'uncalibrated'),
+    ('afanjul/gte-reranker-modernbert-base-mlx', 0.05, 1.0, 1.0, 'uncalibrated');

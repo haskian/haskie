@@ -58,7 +58,7 @@ export function SettingsForm({
     key: string,
     docKey: string,
     value: number | null,
-    placeholder: number,
+    placeholder: number | string, // the default the empty field falls back to
     spec: NumberSpec,
     onChange: (next: number | null) => void,
   ): ReactNode => (
@@ -130,7 +130,14 @@ export function SettingsForm({
       onOff(searchDefaults.rerank_with_context),
       (next) => setSearch('rerank_with_context', next === null ? null : next === ON),
     ),
-    min_rerank_score: searchNumber('min_rerank_score'),
+    min_rerank_score: numberInput(
+      'min_rerank_score',
+      'search.min_rerank_score',
+      draft.search.min_rerank_score ?? null,
+      searchDefaults.min_rerank_score ?? "the reranker's floor",
+      { min: 0, max: 1, step: 0.01 },
+      (next) => setSearch('min_rerank_score', next),
+    ),
     score_fold: enumInput('score_fold', 'search.score_fold', options.score_folds, draft.search.score_fold, searchDefaults.score_fold, (next) =>
       setSearch('score_fold', next as ScoreFold | null),
     ),

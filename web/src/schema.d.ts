@@ -1559,7 +1559,7 @@ export interface components {
             score_fold?: components["schemas"]["ScoreFold"] | null;
             /**
              * Lowest reranker score
-             * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. 0 keeps every chunk. Rerankers differ: tune it per model.
+             * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. Empty: the chosen reranker's own floor, calibrated on borderline pairs (mise run calibrate-rerankers). 0 keeps every chunk.
              */
             min_rerank_score?: number | null;
             /**
@@ -1645,10 +1645,9 @@ export interface components {
             score_fold?: components["schemas"]["ScoreFold"];
             /**
              * Lowest reranker score
-             * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. 0 keeps every chunk. Rerankers differ: tune it per model.
-             * @default 0.05
+             * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. Empty: the chosen reranker's own floor, calibrated on borderline pairs (mise run calibrate-rerankers). 0 keeps every chunk.
              */
-            min_rerank_score: number;
+            min_rerank_score?: number | null;
             /**
              * Shortest passage (characters)
              * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question (see Chunks a passage may grow by). One that finds none is dropped, unless it is the best result. 0 turns this off.

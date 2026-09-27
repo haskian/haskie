@@ -343,8 +343,9 @@ MIN_RERANK_SCORE = Meta(
     description=(
         "With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are "
         "built: the reranker judged it does not answer. A question nothing clears is reported "
-        "unanswered, and a question tags only the excerpts it scores this high. 0 keeps every "
-        "chunk. Rerankers differ: tune it per model."
+        "unanswered, and a question tags only the excerpts it scores this high. Empty: the chosen "
+        "reranker's own floor, calibrated on borderline pairs (mise run calibrate-rerankers). "
+        "0 keeps every chunk."
     ),
 )
 RERANK_WITH_CONTEXT = Meta(
@@ -483,7 +484,7 @@ class SearchSettings(msgspec.Struct):
     reranker_model: Annotated[str, RERANKER_MODEL] = DEFAULT_RERANKER
     rerank_with_context: Annotated[bool, RERANK_WITH_CONTEXT] = False
     score_fold: Annotated[ScoreFold, SCORE_FOLD] = ScoreFold.SUM
-    min_rerank_score: Annotated[float, MIN_RERANK_SCORE] = 0.05
+    min_rerank_score: Annotated[float | None, MIN_RERANK_SCORE] = None
     min_passage_chars: Annotated[int, MIN_PASSAGE_CHARS] = 300
     max_passage_grow: Annotated[int, MAX_PASSAGE_GROW] = 2
     max_section_chars: Annotated[int, MAX_SECTION_CHARS] = 8000

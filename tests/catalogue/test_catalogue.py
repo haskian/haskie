@@ -133,6 +133,23 @@ async def test_the_seed_holds_to_its_own_references() -> None:
     assert list(broken) == [] and list(kinds) == [("embedder",)]
 
 
+async def test_every_reranker_has_its_calibration_and_only_a_reranker() -> None:
+    """The floor a search drops chunks under comes from here when the settings leave it unset, so
+    a reranker without a row would silently fall back to the defaults."""
+    rerankers = await catalogue.rerankers()
+    async with db.connect() as conn:
+        rows = await conn.exec_driver_sql(
+            "select c.model, m.kind from reranker_calibration c join models m on m.name = c.model"
+        )
+        calibrated = {model: kind for model, kind in rows}
+
+    assert set(calibrated) == set(rerankers), "one row for every reranker"
+    assert set(calibrated.values()) == {"reranker"}, "and for no embedder"
+    for name in rerankers:
+        assert await catalogue.calibration(name) == catalogue.UNCALIBRATED, name
+    assert await catalogue.calibration("no/such-model") == catalogue.UNCALIBRATED, "a default"
+
+
 def test_the_seed_replays_harmlessly(tmp_path: Path) -> None:
     """`migrate` stamps the version last, so a crash partway leaves 0 and the next boot runs the
     schema and the seed again over what the first run wrote."""

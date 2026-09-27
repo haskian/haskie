@@ -23,7 +23,7 @@ from haskie.errors import InvalidInput
 from haskie.indexing import hardware
 from haskie.indexing.hardware import Device, Runtime
 from haskie.settings import NO_EMBEDDING, Accelerator, CollectionOverrides, Reranker, UserSettings
-from haskie.tables import embedding_profiles, models
+from haskie.tables import embedding_profiles, models, reranker_calibration
 
 
 class ModelMetadata(msgspec.Struct, frozen=True):
@@ -47,6 +47,19 @@ class EmbedderMetadata(ModelMetadata, frozen=True):
 
 class RerankerMetadata(ModelMetadata, frozen=True):
     """A reranker's metadata: the facts every model has, and none of its own."""
+
+
+class RerankerCalibration(msgspec.Struct, frozen=True):
+    """How one reranker's scores read (`reranker_calibration`): measured on borderline pairs by
+    `catalogue.calibrate`, else the seed's uncalibrated defaults."""
+
+    floor: float  # under it the reranker judged a chunk no answer (`min_rerank_score`)
+    beta_a: float  # the beta curve that spreads its scores evenly over 0 to 1 (`fill.absolute`)
+    beta_b: float
+    source: str  # what measured it, or "uncalibrated"
+
+
+UNCALIBRATED = RerankerCalibration(floor=0.05, beta_a=1.0, beta_b=1.0, source="uncalibrated")
 
 
 class DuplicateCosine(msgspec.Struct, frozen=True):
@@ -187,6 +200,20 @@ async def rerankers() -> dict[str, RerankerMetadata]:
         .order_by(models.c.parameters, models.c.name)
     )
     return {record["name"]: _metadata(record, RerankerMetadata) for record in records}
+
+
+async def calibration(model: str) -> RerankerCalibration:
+    """How `model`'s scores read; the uncalibrated defaults for a model the catalogue has no row
+    for, as a reranker added after the seed has."""
+    records = await _records(
+        select(
+            reranker_calibration.c.floor,
+            reranker_calibration.c.beta_a,
+            reranker_calibration.c.beta_b,
+            reranker_calibration.c.source,
+        ).where(reranker_calibration.c.model == model)
+    )
+    return msgspec.convert(records[0], RerankerCalibration) if records else UNCALIBRATED
 
 
 async def embedding_model(settings: UserSettings) -> EmbeddingModel | None:

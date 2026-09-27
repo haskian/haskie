@@ -111,8 +111,13 @@ def _rerank(state: "Search", *_: Any) -> str | None:
         "together, so the mode only decides which candidates it reads, and a chunk scores the same "
         "in every mode that finds it."
     )
-    if settings.min_rerank_score > 0:
-        rule = f"{rule} Chunks it scores under {settings.min_rerank_score:g} are dropped."
+    floor, calibrated = state.plan.rerank_floor, state.plan.calibration
+    if floor > 0:
+        # where the floor came from: the settings, or the reranker's calibration and its source
+        said = "set"
+        if settings.min_rerank_score is None and calibrated is not None:
+            said = calibrated.source
+        rule = f"{rule} Chunks it scores under {floor:g} ({said}) are dropped."
     if state.framed == state.query:
         return rule
     if settings.rerank_with_context:

@@ -57,6 +57,22 @@ export function SearchField({
           <Picker ariaLabel={doc.title} options={choices(options.fusions)} value={search.fusion} onChange={(fusion) => onChange({ ...search, fusion })} />
         </Field>
       )
+    case 'min_rerank_score':
+      // empty is a value: the chosen reranker's own calibrated floor
+      return (
+        <Field label={doc.title} help={doc.description}>
+          <input
+            className="input"
+            type="number"
+            min={0}
+            max={1}
+            step={0.01}
+            value={search.min_rerank_score ?? ''}
+            placeholder="the reranker's floor"
+            onChange={(event) => onChange({ ...search, min_rerank_score: event.target.value === '' ? null : Number(event.target.value) })}
+          />
+        </Field>
+      )
     case 'score_fold':
       return (
         <Field label={doc.title} help={doc.description}>

@@ -8,7 +8,7 @@ import msgspec
 import pytest
 from conftest import hit
 
-from haskie.catalogue.catalogue import EmbeddingModel
+from haskie.catalogue.catalogue import UNCALIBRATED, EmbeddingModel, RerankerCalibration
 from haskie.collection.index import CollectionIndex
 from haskie.search import flow
 from haskie.search.flow import Search
@@ -30,13 +30,14 @@ VECTOR = (
     "1 / (1 + d), d the squared L2 distance between the query and chunk embeddings: "
     "1 / (3 − 2·cosine) for unit vectors, 1 at cosine 1 and 0.33 at cosine 0."
 )
-RERANK = (
+RERANKS = (
     "The cross-encoder Xenova/ms-marco-MiniLM-L-6-v2 rescores up to 50 candidates, and the "
     "sigmoid of its logit, 1 / (1 + e^−logit), replaces every score before it: 0 to 1, 0.5 at "
     "logit 0, bounded but not calibrated. It reads the query and the chunk together, so the mode "
     "only decides which candidates it reads, and a chunk scores the same in every mode that finds "
-    "it. Chunks it scores under 0.05 are dropped."
+    "it."
 )
+RERANK = f"{RERANKS} Chunks it scores under 0.05 (uncalibrated) are dropped."
 PASSAGE = "A passage scores the sum of its matched chunks' scores."
 
 
@@ -44,14 +45,22 @@ def _search(
     *settings: SearchSettings,
     vector: list[float] | None = ON,
     embedding: EmbeddingModel | None = MODEL,
+    calibration: RerankerCalibration | None = UNCALIBRATED,
 ) -> Search:
-    """A search over one collection per settings, `c0`, `c1`, …, the first settings the plan's."""
+    """A search over one collection per settings, `c0`, `c1`, …, the first settings the plan's,
+    its reranker read by `calibration` (the seed's uncalibrated floor, 0.05)."""
     chosen = settings or (SearchSettings(),)
     indexes = [
         (CollectionIndex(Path(f"/tmp/c{n}"), f"c{n}", Path("/tmp"), embedding), one)
         for n, one in enumerate(chosen)
     ]
-    where = Plan(settings=chosen[0], indexes=indexes, vector=vector, embedding=embedding)
+    where = Plan(
+        settings=chosen[0],
+        indexes=indexes,
+        vector=vector,
+        embedding=embedding,
+        calibration=calibration,
+    )
     return Search(query="q", framed="q", plan=where, limit=5, scan=20, candidates=50, questions=[])
 
 
@@ -195,6 +204,22 @@ def test_retrieval_says_how_each_collection_scored(
             None,
             _pool("c0", ranked=3),
             RERANK,
+        ),
+        (
+            "a floor the settings set, over the reranker's calibrated one",
+            "rerank",
+            _search(SearchSettings(reranker=Reranker.CROSS_ENCODER, min_rerank_score=0.2)),
+            None,
+            None,
+            f"{RERANKS} Chunks it scores under 0.2 (set) are dropped.",
+        ),
+        (
+            "a floor of 0 drops nothing, and says nothing",
+            "rerank",
+            _search(SearchSettings(reranker=Reranker.CROSS_ENCODER, min_rerank_score=0.0)),
+            None,
+            None,
+            RERANKS,
         ),
         (
             "a shared context: the reranker reads each question alone, by default",

@@ -13,6 +13,7 @@ import msgspec
 import pytest
 from conftest import hit
 
+from haskie.catalogue.catalogue import UNCALIBRATED
 from haskie.collection.index import Hit, chunk_key, location
 from haskie.indexing.segment import CutReason
 from haskie.search import probe, retrieval, section
@@ -428,10 +429,41 @@ async def test_the_probes_find_is_judged_by_the_reranker_per_missing_question(
     monkeypatch.setattr(retrieval, "cross_encode", rerank)
     wanted = {"stock": [order], "ledger": [books], "right": [order]}  # a question twice: once
 
-    kept, scores = await retrieval._judged([ledger, weather], pool, wanted, SearchSettings())
+    where = Plan(
+        settings=SearchSettings(reranker=Reranker.CROSS_ENCODER),
+        indexes=[],
+        vector=None,
+        embedding=None,
+        calibration=UNCALIBRATED,
+    )
+
+    kept, scores = await retrieval._judged([ledger, weather], pool, wanted, where)
 
     assert [(one.seq, one.score) for one in kept] == [(1, 0.9)], "its best question's score"
     assert scores == {"order": {chunk_key(ledger): 0.9}, "books": {chunk_key(ledger): 0.6}}
+
+
+@pytest.mark.parametrize(
+    ("name", "set_", "calibration", "expected"),
+    [
+        ("the settings' floor wins", 0.2, UNCALIBRATED, 0.2),
+        ("0 set is a floor too: it keeps every chunk", 0.0, UNCALIBRATED, 0.0),
+        ("unset: the reranker's calibrated floor", None, UNCALIBRATED, 0.05),
+        ("unset, with no reranker read: nothing dropped", None, None, 0.0),
+    ],
+)
+def test_the_rerank_floor_is_the_settings_else_the_rerankers(
+    name: str, set_: float | None, calibration: Any, expected: float
+) -> None:
+    where = Plan(
+        settings=SearchSettings(min_rerank_score=set_),
+        indexes=[],
+        vector=None,
+        embedding=None,
+        calibration=calibration,
+    )
+
+    assert where.rerank_floor == expected, name
 
 
 def test_the_budget_cuts_the_last_sections_first() -> None:

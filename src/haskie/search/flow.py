@@ -212,7 +212,7 @@ async def merge(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Poo
 
 async def rerank(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Pool:
     """The merged candidates, rescored by a cross-encoder that reads query and chunk together."""
-    return await retrieval.rerank(ctx.inputs, ctx.state.rerank_query, ctx.state.plan.settings)
+    return await retrieval.rerank(ctx.inputs, ctx.state.rerank_query, ctx.state.plan)
 
 
 async def hits(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Scanned:

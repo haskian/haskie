@@ -181,6 +181,20 @@ embedding_profiles = Table(
     CheckConstraint("(duplicate_chunk is null) = (duplicate_passage is null)"),
 )
 
+# how one reranker's scores read (`catalogue.calibration`): its floor, under which it judged a
+# chunk no answer (`min_rerank_score`), and the beta curve that spreads its scores evenly over 0 to
+# 1 (`fill_values = absolute`). Measured on borderline pairs (`catalogue.calibrate`), else the
+# uncalibrated defaults the seed gives
+reranker_calibration = Table(
+    "reranker_calibration",
+    metadata,
+    Column("model", Text, ForeignKey("models.name"), primary_key=True),
+    Column("floor", Float, CheckConstraint("floor between 0 and 1"), nullable=False),
+    Column("beta_a", Float, CheckConstraint("beta_a > 0"), nullable=False),
+    Column("beta_b", Float, CheckConstraint("beta_b > 0"), nullable=False),
+    Column("source", Text, nullable=False),  # what measured it, or "uncalibrated"
+)
+
 # an upload waiting in `staging/`, before any name is taken
 staging = Table(
     "staging",

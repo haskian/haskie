@@ -19,7 +19,6 @@ export const SEARCH_BOUNDS: Record<NumericKeys<SearchSettings>, { min: number; s
   max_passage_grow: { min: 0, step: 1 },
   max_section_chars: { min: 1, step: 500 },
   max_answer_chars: { min: 1, step: 1000 },
-  min_rerank_score: { min: 0, step: 0.01 },
 }
 
 /**

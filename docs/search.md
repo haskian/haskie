@@ -286,18 +286,23 @@ its chunks, or those of a place folded into it: that part's best such chunk. The
 than a fold over them, so a part's score stays on the reranker's 0 to 1 scale, the one
 `min_rerank_score` is set on; a fold of three strong chunks would read 2.5.
 
-With a reranker on, its score has a scale: under `min_rerank_score` (0.05) the reranker judged a
-chunk no answer, and it is dropped from the ranking before passages are built. A part's tag in
+With a reranker on, its score has a scale: under its floor the reranker judged a chunk no answer,
+and it is dropped from the ranking before passages are built. The floor is `min_rerank_score` when
+set, else the reranker's own (`reranker_calibration` in the catalogue): the average score it gives
+30 to 50 pairs a person judged borderline relevant, the way Cohere sets a relevance threshold [6].
+`mise run calibrate-rerankers` measures it on your own collections; until then every reranker starts
+at 0.05, judged on one book with MiniLM-L-6, and says so in the score lineage. A part's tag in
 `aspects` then means the reranker judged the passage an answer to it. Each chunk of the passage
-scores its best part, and the passage folds those scores by `score_fold` like any passage. Without a reranker the scores of two parts share no scale, so `aspects` lists the parts the
-passage ranked high for: the part that picked it, every part that joined it or ranks it among its
-own owed ranges, and those of every place folded into it; it keeps the score it was picked with. A
-vector or hybrid search finds nearest passages for any part, even one the sources say nothing
-about, so without a reranker a tag is not proof of an answer. An excerpt's `aspects` joins its
-spans', and its `aspect_scores` holds each part's best. A part no excerpt lists found nothing, and
-the answer's `uncovered` names it. One question, or a list that deduplicates to one, is the single
-search, its context read the same way, and its `aspects` is empty. A `limit` below the number of
-parts is refused (422).
+scores its best part, and the passage folds those scores by `score_fold` like any passage. Without a
+reranker the scores of two parts share no scale, so `aspects` lists the parts the passage ranked
+high for: the part that picked it, every part that joined it or ranks it among its own owed ranges,
+and those of every place folded into it; it keeps the score it was picked with. A vector or hybrid
+search finds nearest passages for any part, even one the sources say nothing about, so without a
+reranker a tag is not proof of an answer. An excerpt's `aspects` joins its spans', and its
+`aspect_scores` holds each part's best. A part no excerpt lists found nothing, and the answer's
+`uncovered` names it. One question, or a list that deduplicates to one, is the single search, its
+context read the same way, and its `aspects` is empty. A `limit` below the number of parts is
+refused (422).
 
 ## Full-text search
 
@@ -333,3 +338,5 @@ Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/coll
    https://docs.vespa.ai/en/rag/working-with-chunks.html
 5. Elastic. "semantic_text field type reference: chunking." Elasticsearch documentation, 2026.
    https://www.elastic.co/docs/reference/elasticsearch/mapping-reference/semantic-text-reference
+6. Cohere. "Best practices for using Rerank: interpreting results." Cohere documentation, 2026.
+   https://docs.cohere.com/docs/reranking-best-practices

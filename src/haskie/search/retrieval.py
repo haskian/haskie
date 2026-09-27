@@ -21,7 +21,7 @@ import msgspec
 
 from haskie import cpu
 from haskie.catalogue import catalogue
-from haskie.catalogue.catalogue import EmbeddingModel
+from haskie.catalogue.catalogue import EmbeddingModel, RerankerCalibration
 from haskie.collection.collection import Collection
 from haskie.collection.index import (
     ChunkKey,
@@ -63,6 +63,16 @@ class Plan(msgspec.Struct):
     indexes: list[tuple[CollectionIndex, SearchSettings]]  # in the caller's order
     vector: list[float] | None  # the query embedding, None for a lexical search
     embedding: EmbeddingModel | None  # the model every index of the search embeds with
+    # how the reranker's scores read, when one is on (`catalogue.calibration`)
+    calibration: RerankerCalibration | None = None
+
+    @property
+    def rerank_floor(self) -> float:
+        """The reranker score a chunk must reach to stay: the settings' `min_rerank_score` when
+        set, else the reranker's calibrated floor, else 0, which keeps every chunk."""
+        if self.settings.min_rerank_score is not None:
+            return self.settings.min_rerank_score
+        return self.calibration.floor if self.calibration is not None else 0.0
 
     @property
     def names(self) -> list[str]:
@@ -95,13 +105,21 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
     if embedding is not None and any(one.mode != SearchMode.FTS for _, one in plans):
         await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
         vectors = await cpu.on_cpu(_embed_all, embedding, queries)
+    calibrated = None
     if settings.reranker != Reranker.NONE:
         # before the fan-out
         await models.require_ready(models.ModelKind.RERANKER, settings.reranker_model)
+        calibrated = await catalogue.calibration(settings.reranker_model)
     indexes = [(one.index_with(embedding), where) for one, where in plans]
     await asyncio.gather(*(index.open() for index, _ in indexes))
     return [
-        Plan(settings=settings, indexes=indexes, vector=vector, embedding=embedding)
+        Plan(
+            settings=settings,
+            indexes=indexes,
+            vector=vector,
+            embedding=embedding,
+            calibration=calibrated,
+        )
         for vector in vectors
     ]
 
@@ -187,20 +205,21 @@ def merge(pool: Pool, rrf_k: int, candidates: int) -> Pool:
     return msgspec.structs.replace(pool, ranked=merged[:candidates])
 
 
-async def rerank(pool: Pool, query: str, settings: SearchSettings) -> Pool:
+async def rerank(pool: Pool, query: str, where: Plan) -> Pool:
     """Rescore the merged candidates with a cross-encoder, which reads query and chunk together.
 
     One pass for the whole search rather than one per collection: the pool it rescores is what
     every collection returned, and its scores are the only ones comparable across them. The model
     is CPU work, so it runs in a worker thread under one slot of the CPU budget.
     """
+    settings = where.settings
     if settings.reranker == Reranker.NONE:
         return pool
     rows = [pool.rows[key][1] for key, _ in pool.ranked]
     rescored = [(row_key(row), row_score(row)) for row in await cross_encode(query, rows, settings)]
     # the reranker's score has a scale: under the floor it judged the chunk no answer, and a
     # search that keeps it would fill a slot, or tag a question, with it
-    kept = [(key, score) for key, score in rescored if score >= settings.min_rerank_score]
+    kept = [(key, score) for key, score in rescored if score >= where.rerank_floor]
     return msgspec.structs.replace(pool, ranked=kept)
 
 
@@ -670,7 +689,7 @@ async def probe_gaps(
     reranked = where.settings.reranker != Reranker.NONE
     scores: dict[str, dict[ChunkKey, float]] = {}
     if reranked and hits:
-        hits, scores = await _judged(hits[: probe.PROBE_SCAN], pool, wanted, where.settings)
+        hits, scores = await _judged(hits[: probe.PROBE_SCAN], pool, wanted, where)
     fresh = passage.ranges(hits, where.settings.score_fold)
     joined = None
     if fresh and reranked:
@@ -692,21 +711,22 @@ async def probe_gaps(
 
 
 async def _judged(
-    hits: list[Hit], pool: Pool, wanted: dict[str, list[probe.Question]], settings: SearchSettings
+    hits: list[Hit], pool: Pool, wanted: dict[str, list[probe.Question]], where: Plan
 ) -> tuple[list[Hit], dict[str, dict[ChunkKey, float]]]:
     """The probe's hits the reranker judges an answer to a question whose words are missing, each
     scored by its best such question, and each labelled question's scores of the hits that clear
-    the floor (`min_rerank_score`). The reranker reads each question alone."""
+    the floor (`Plan.rerank_floor`). The reranker reads each question alone."""
     # by what was asked: a question with its query vector is no dict key
     asked = list({one.asked: one for questions in wanted.values() for one in questions}.values())
+    floor = where.rerank_floor
     best: dict[ChunkKey, float] = {}
     scores: dict[str, dict[ChunkKey, float]] = {}
     for question in asked:
         rows = [dict(pool.rows[(hit.document, hit.seq)][1]) for hit in hits]
-        await cross_encode(question.asked, rows, settings)  # scores the copies in place
+        await cross_encode(question.asked, rows, where.settings)  # scores the copies in place
         for hit, row in zip(hits, rows, strict=True):
             score, key = row_score(row), chunk_key(hit)
-            if score < settings.min_rerank_score:
+            if score < floor:
                 continue
             best[key] = max(score, best.get(key, score))
             if question.label is not None:
