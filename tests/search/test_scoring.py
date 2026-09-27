@@ -147,10 +147,11 @@ def test_retrieval_says_how_each_collection_scored(name: str, state: Search, exp
             _search(SearchSettings(reranker=Reranker.CROSS_ENCODER, mode=SearchMode.VECTOR)),
             None,
             _pool("c0", ranked=3),
-            "The cross-encoder Xenova/ms-marco-MiniLM-L-6-v2 rescores up to 50 candidates, and its "
-            "raw logit replaces every score before it: unbounded, higher is better. It reads the "
-            "query and the chunk together, so the mode only decides which candidates it reads, "
-            "and a chunk scores the same in every mode that finds it.",
+            "The cross-encoder Xenova/ms-marco-MiniLM-L-6-v2 rescores up to 50 candidates, and the "
+            "sigmoid of its logit, 1 / (1 + e^−logit), replaces every score before it: 0 to 1, "
+            "0.5 at logit 0, bounded but not calibrated. It reads the query and the chunk "
+            "together, so the mode only decides which candidates it reads, and a chunk scores the "
+            "same in every mode that finds it.",
         ),
         ("passages that are only judged", "judge_thin", _search(), None, None, PASSAGE),
         (

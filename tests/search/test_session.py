@@ -5,6 +5,7 @@ and imports its documents through it. The session tests assert the mechanism - o
 embedding, one model check, one cross-encoder pass over the merge - and not only the end state.
 """
 
+import math
 import shutil
 from pathlib import Path
 
@@ -267,7 +268,10 @@ async def test_session_search_reranks_once_over_the_merge(
     # the cross-encoder reads each chunk under its heading path (`chunk.framed`)
     read = [chunk.framed(h.frame, h.text) for h in hits]
     assert read == [texts[-1], texts[-2]], "best cross-encoder score first"
-    assert [h.score for h in hits] == [3.0, 2.0], "the hit carries the cross-encoder score"
+    sigmoid = [1 / (1 + math.exp(-logit)) for logit in (3, 2)]
+    assert [h.score for h in hits] == pytest.approx(sigmoid), (
+        "the hit carries the sigmoid of the cross-encoder's logit"
+    )
 
 
 async def test_session_search_propagates_a_broken_collection(

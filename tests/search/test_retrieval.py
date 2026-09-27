@@ -5,6 +5,7 @@ whole document. These check that the slice is the right one, whatever the charac
 the texts line up with the ranges they were read for.
 """
 
+import math
 from pathlib import Path
 
 import msgspec
@@ -126,6 +127,11 @@ def _read(rows: list[dict]) -> list[tuple[Hit, dict]]:
     return [(msgspec.structs.replace(hit, seq=row["seq"], text=row["text"]), row) for row in rows]
 
 
+def _sigmoid(logit: float) -> float:
+    """A reranker score, as `cross_encode` stores it."""
+    return 1 / (1 + math.exp(-logit))
+
+
 def _plan(reranker: Reranker = Reranker.NONE, vector: list[float] | None = None) -> Plan:
     return Plan(
         settings=SearchSettings(reranker=reranker), indexes=[], vector=vector, embedding=None
@@ -176,7 +182,7 @@ def test_a_neighbour_is_valued_around_the_scanned_hits(
             "the reranker's scores when one is on",
             _plan(Reranker.CROSS_ENCODER),
             NEIGHBOURS,
-            [4.0, -2.0],
+            [_sigmoid(4.0), _sigmoid(-2.0)],
             "reranker",
         ),
         ("else the scanned hits' own signal", _plan(vector=[1.0, 0.0]), NEIGHBOURS, None, "vector"),
@@ -272,36 +278,70 @@ def test_nothing_near_or_nothing_held_weighs_nothing() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "others", "after", "grown"),
+    [
+        (
+            "one it rates above the median scanned hit joins",
+            [1.0],
+            {3: 5.0},
+            [(2, 3)],
+        ),
+        (
+            "a weak neighbour is not paid for by a slightly better one past it, as on the logits",
+            [5.0, 2.0, 0.0, -2.0, -4.0, -5.0, -5.0, -6.0, -7.0, -8.0, -9.0],
+            {3: -10.0, 4: -3.0},
+            [(2, 2)],
+        ),
+    ],
+)
 async def test_with_a_reranker_a_thin_range_grows_by_the_neighbours_it_scores(
     monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    others: list[float],
+    after: dict[int, float],
+    grown: list[tuple[int, int]],
 ) -> None:
-    """The reranker scored the ranking, so it scores the neighbours too: one it rates above the
-    median scanned hit joins, and the thin range grows by it."""
-    short = [
+    """The reranker scored the ranking, so it scores the neighbours too, valued on its logits
+    around the scanned hits': the sigmoid it stores would make every weak one cost nearly 0."""
+    thin = msgspec.structs.replace(
+        hit("Retries back off.", _sigmoid(8.0 if len(others) > 1 else 3.0), seq=2, char_start=200),
+        start_reason=CutReason.PARAGRAPH,
+        end_reason=CutReason.PARAGRAPH,
+    )
+    rest = [
         msgspec.structs.replace(
-            hit(text, score, seq=seq, char_start=seq * 100),
+            hit("Keys dedupe.", _sigmoid(score), document=f"other{n}.md", seq=6, char_start=600),
             start_reason=CutReason.PARAGRAPH,
             end_reason=CutReason.PARAGRAPH,
         )
-        for text, score, seq in [("Retries back off.", 3.0, 2), ("Keys dedupe.", 1.0, 6)]
+        for n, score in enumerate(others)
     ]
-    scanned = Scanned(hits=short, vectors=[None, None])
-    after = msgspec.structs.replace(short[0], seq=3, text="Jitter spreads them.", score=0.0)
-    row = {"document": after.document, "seq": 3, "text": after.text}
+    scanned = Scanned(hits=[thin, *rest], vectors=[None] * (1 + len(rest)))
+    near = {
+        seq: msgspec.structs.replace(
+            thin, seq=seq, text=f"Jitter spreads them {seq}.", char_start=seq * 100, score=0.0
+        )
+        for seq in after
+    }
 
     async def rows_at(where: Plan, wanted: set) -> dict:
-        return {chunk_key(after): (after, row)} if chunk_key(after) in wanted else {}
+        found = {
+            chunk_key(one): (one, {"document": one.document, "seq": one.seq, "text": one.text})
+            for one in near.values()
+        }
+        return {key: row for key, row in found.items() if key in wanted}
 
     async def rerank(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
-        return [{**one, "_relevance_score": 5.0} for one in rows]
+        return [{**one, "_relevance_score": _sigmoid(after[one["seq"]])} for one in rows]
 
     monkeypatch.setattr(retrieval, "_rows_at", rows_at)
     monkeypatch.setattr(retrieval, "cross_encode", rerank)
 
     ranged = await retrieval.fill_thin(scanned, _plan(Reranker.CROSS_ENCODER), QUERY, QUERY)
 
-    assert [(one.seq_start, one.seq_end) for one in ranged.ranges] == [(2, 3), (6, 6)]
-    assert [hit.seq for hit in ranged.scanned.hits] == [2, 6, 3], "the neighbour joins the scan"
+    ours = [one for one in ranged.ranges if one.hits[0].document == thin.document]
+    assert [(one.seq_start, one.seq_end) for one in ours] == grown, name
 
 
 def test_the_budget_cuts_the_last_sections_first() -> None:

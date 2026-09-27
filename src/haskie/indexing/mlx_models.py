@@ -105,11 +105,15 @@ def _load(path: Path, **classes: Any) -> tuple[Any, Any]:
 
 
 class Reranker:
-    """A cross-encoder converted to MLX: one score per (query, text) pair, in the order given,
-    as the model's own head answers it (bge a logit, gte a probability)."""
+    """A cross-encoder converted to MLX: one logit per (query, text) pair, in the order given,
+    as every reranker answers (`index.cross_encode` turns it into the score)."""
 
     def __init__(self, path: Path) -> None:
         self._model, self._tokenizer = _load(path, get_model_classes=_with_head)
+        # mlx-embeddings' ModernBERT (gte) puts a sigmoid on its one label unless it is told the
+        # head is a regression; the logit is what the other rerankers answer
+        if hasattr(self._model, "is_regression"):
+            self._model.is_regression = True
 
     def rerank(self, query: str, texts: Sequence[str]) -> list[float]:
         scores: list[float] = []

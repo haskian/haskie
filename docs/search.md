@@ -29,9 +29,10 @@ flowchart LR
    collection's own scores.
 4. **Rerank** (optional). A cross-encoder rescores the merged `candidates`.
 
-The last of these steps to run sets a chunk's score. With a reranker on, it is the cross-encoder's
-raw logit, so switching the mode only changes which `candidates` it reads: a chunk found in both
-modes scores the same. Without one, several collections give a rank-fusion score, and one
+The last of these steps to run sets a chunk's score. With a reranker on, it is the sigmoid of the
+cross-encoder's logit, 0 to 1, so switching the mode only changes which `candidates` it reads: a
+chunk found in both modes scores the same. The sigmoid is there because most logits are negative,
+and a passage's score (the harmonic mean below) is 0 for any score at or below 0. Without one, several collections give a rank-fusion score, and one
 collection keeps its mode's own: BM25, `1 / (1 + squared L2 distance)`, or the fused score of
 `rrf` or `linear`. Passages, excerpts and documents then fold chunk scores their own way.
 

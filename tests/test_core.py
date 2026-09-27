@@ -8,6 +8,7 @@ the HTTP contract lives in `tests/test_api.py`.
 
 import base64
 import io
+import math
 import random
 import sqlite3
 import sys
@@ -1914,19 +1915,45 @@ def test_fusion_reranker_per_setting(name: str, settings: SearchSettings, expect
     assert type(_fusion(settings)).__name__.startswith(expected), name
 
 
+@pytest.mark.parametrize(
+    ("name", "score", "expected"),
+    [
+        ("a middling score", 0.5, 0.0),
+        ("a strong one", 1 / (1 + math.exp(-3.25)), 3.25),
+        ("a weak one", 1 / (1 + math.exp(30.0)), -30.0),
+        ("0, where the sigmoid rounds a logit below about -745", 0.0, math.log(math.ulp(0.0))),
+        ("1, where it rounds one above about 37", 1.0, 36.7368005696771),
+    ],
+)
+def test_logit_undoes_the_rerankers_sigmoid(name: str, score: float, expected: float) -> None:
+    from haskie.collection.index import logit
+
+    assert logit(score) == pytest.approx(expected, abs=1e-9), name
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("name", "texts", "expected"),
+    ("name", "logits", "expected"),
     [
-        ("nothing retrieved, nothing to rescore", [], []),
-        ("best first, whatever retrieval scored", ["short", "a longer chunk"], [14.0, 5.0]),
+        ("nothing retrieved, nothing to rescore", {}, []),
+        (
+            "best first, whatever retrieval scored, as the sigmoid of the logit",
+            {"short": 5.0, "a longer chunk": 14.0},
+            [1 / (1 + math.exp(-14.0)), 1 / (1 + math.exp(-5.0))],
+        ),
+        (
+            "a negative logit keeps its rank above 0, where a passage score can use it",
+            {"off topic": -9.5, "near": -1.25, "on topic": 0.0},
+            [0.5, 1 / (1 + math.exp(1.25)), 1 / (1 + math.exp(9.5))],
+        ),
+        ("a logit past what exp can take is 0, not an error", {"noise": -800.0}, [0.0]),
     ],
 )
 async def test_cross_encode_rescores_candidates_best_first(
-    monkeypatch: pytest.MonkeyPatch, name: str, texts: list[str], expected: list[float]
+    monkeypatch: pytest.MonkeyPatch, name: str, logits: dict[str, float], expected: list[float]
 ) -> None:
-    """The cross-encoder is CPU work, so it runs in a worker thread; its score replaces whatever
-    the retrieval stage put on the row (see `row_score`)."""
+    """The cross-encoder is CPU work, so it runs in a worker thread; the sigmoid of its logit
+    replaces whatever the retrieval stage put on the row (see `row_score`)."""
     from haskie.collection.index import cross_encode
     from haskie.indexing import models
 
@@ -1940,16 +1967,17 @@ async def test_cross_encode_rescores_candidates_best_first(
 
     def rerank_scores(model: str, accelerator: Accelerator, q: str, ts: list[str]) -> list[float]:
         hardware.append(accelerator)
-        return [float(len(t)) for t in ts]
+        return [logits[t] for t in ts]
 
     monkeypatch.setattr(embed, "rerank_scores", rerank_scores)
     await save_user_settings(UserSettings(pipeline=PipelineSettings(accelerator=Accelerator.CPU)))
     settings = SearchSettings(reranker=Reranker.CROSS_ENCODER)
-    rows = [{"text": text, FTS_COLUMN: text, "frame": [], "_score": 9.0} for text in texts]
+    rows = [{"text": text, FTS_COLUMN: text, "frame": [], "_score": 9.0} for text in logits]
 
     ranked = await cross_encode("q", rows, settings)
 
-    assert [row_score(row) for row in ranked] == expected, name
+    assert [row_score(row) for row in ranked] == pytest.approx(expected), name
+    assert all(0.0 <= row_score(row) < 1.0 for row in ranked), f"{name}: bounded"
     assert checked == [("reranker", settings.reranker_model)], name
     assert hardware == [Accelerator.CPU], f"{name}: on the hardware the settings choose"
 

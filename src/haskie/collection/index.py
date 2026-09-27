@@ -702,6 +702,11 @@ def _tuned(builder: Any, settings: SearchSettings) -> Any:
 async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
     """Second stage for any mode: rescore candidate rows with a cross-encoder, best first.
 
+    The score is the sigmoid of the model's logit, in (0, 1). A raw logit is mostly negative for
+    all but the few best candidates, and a passage's score (`passage.harmonic`) is 0 for any score
+    at or below 0, so every passage after the first few would tie at 0 and lose its rank. The
+    sigmoid keeps the order and bounds the scale; it is not a calibrated probability.
+
     Module-level, so a session rescores one merged candidate list instead of running a
     cross-encoder per collection. The cross-encoder itself is CPU work, so it runs in a worker
     thread under one slot of the CPU budget.
@@ -712,9 +717,29 @@ async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -
     read = [r[FTS_COLUMN] for r in rows]  # as they were embedded
     accelerator = (await load_user_settings()).pipeline.accelerator
     scores = await cpu.on_cpu(rerank_scores, settings.reranker_model, accelerator, query, read)
-    for row, score in zip(rows, scores, strict=True):
-        row["_relevance_score"] = score
+    for row, logit in zip(rows, scores, strict=True):
+        row["_relevance_score"] = _sigmoid(logit)
     return sorted(rows, key=lambda r: r["_relevance_score"], reverse=True)
+
+
+def logit(score: float) -> float:
+    """The logit a reranker score (`cross_encode`) came from. Reranker scores are compared on this
+    scale: the sigmoid squeezes every weak score toward 0, so their differences vanish there. A
+    logit past about ±37 rounds to 0 or 1, so the score is kept just inside them."""
+    kept = min(max(score, _SMALLEST), _LARGEST)
+    return math.log(kept) - math.log1p(-kept)
+
+
+_SMALLEST = math.ulp(0.0)  # the smallest positive float: e^−744, the sigmoid's own floor
+_LARGEST = math.nextafter(1.0, 0.0)
+
+
+def _sigmoid(logit: float) -> float:
+    """1 / (1 + e^−logit), without the overflow `math.exp` raises for a logit below about −709."""
+    if logit >= 0:
+        return 1.0 / (1.0 + math.exp(-logit))
+    lifted = math.exp(logit)
+    return lifted / (1.0 + lifted)
 
 
 def _rows(found: pa.Table) -> list[dict]:

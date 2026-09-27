@@ -53,6 +53,29 @@ def test_a_model_loads_and_runs_on_the_mlx_thread_whoever_calls(
     assert (answered, ran_on) == ([0.5, 0.5, 0.5], ["mlx_0", "mlx_0"]), "load, then one batch"
 
 
+@pytest.mark.parametrize(
+    ("name", "model", "expected"),
+    [
+        (
+            "a head that puts a sigmoid on its label answers the logit instead",
+            SimpleNamespace(is_regression=None),
+            True,
+        ),
+        ("a head that answers a logit already is left alone", SimpleNamespace(), None),
+    ],
+)
+def test_every_reranker_answers_a_logit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, model: Any, expected: bool | None
+) -> None:
+    """gte (ModernBERT) came back as sigmoid(logit) and bge as the logit, and `cross_encode`
+    applies the sigmoid once, to every reranker alike."""
+    monkeypatch.setattr(mlx_models, "_load", lambda path, **classes: (model, None))
+
+    mlx_models.Reranker(tmp_path)
+
+    assert getattr(model, "is_regression", None) is expected, name
+
+
 @needs_mlx
 @pytest.mark.parametrize(
     ("name", "count"),

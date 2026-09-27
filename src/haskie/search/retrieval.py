@@ -32,6 +32,7 @@ from haskie.collection.index import (
     cross_encode,
     first_per_key,
     gather_rows,
+    logit,
     row_key,
     row_score,
 )
@@ -290,7 +291,9 @@ def _thin(
     if not rows:
         values, signal = [], "none"
     elif reranked is not None:
-        values, signal = _valued(reranked, [hit.score for hit in scanned.hits]), "reranker"
+        # on the logit scale: a linear value between the median and the best is only fair there
+        reference = [logit(hit.score) for hit in scanned.hits]
+        values, signal = _valued([logit(one) for one in reranked], reference), "reranker"
     else:
         (values,), signal = _values(
             list(zip((hit.text for hit in scanned.hits), scanned.vectors, strict=True)),
