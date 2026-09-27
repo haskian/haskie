@@ -111,18 +111,17 @@ async def search_excerpts(
     with its lines, its score, the questions it answers and the places that repeat it.
     `markdown_file` is the whole document on disk when the excerpt is not enough.
 
-    Several questions at once: when parts of a question may be answered in different places,
-    pass each part as its own `q` (2 to 5), and the background they share once as `context`.
-    Each part is searched on its own and the parts take turns at the `limit` slots, so one part
-    cannot crowd out the others. Each span's `aspects` lists the questions it answers and
-    `aspect_scores` how well it matched each, and an excerpt's the questions any of its spans
-    does. With a reranker on, a tag is its judgement: chunks it scores under the floor are
-    dropped. Without one, a tag is rank, not a judgement: a vector or hybrid search finds a
-    nearest passage for any question, so read the text before citing it as the answer to a
-    part. A question in `uncovered` found nothing. A question no excerpt
-    lists found nothing at all. Write each part as a full question, not a keyword. Keep in one
-    `q` the conditions one passage must meet together. Resolve an ambiguous question before
-    searching; when you cannot ask, pass one part per reading.
+    Several questions at once: when parts of a question may be answered in different places, pass
+    each part as its own `q` (2 to 5), and the background they share once as `context`. Each part is
+    searched on its own and the parts take turns at the `limit` slots, so one part cannot crowd out
+    the others. Each span's `aspects` lists the questions it answers and `aspect_scores` how well it
+    matched each (its best chunk for it), and an excerpt's the questions any of its spans does. With
+    a reranker on, a tag is its judgement: chunks it scores under the floor are dropped. Without
+    one, a tag is rank, not a judgement: a vector or hybrid search finds a nearest passage for any
+    question, so read the text before citing it as the answer to a part. A question in `uncovered`
+    found nothing. A question no excerpt lists found nothing at all. Write each part as a full
+    question, not a keyword. Keep in one `q` the conditions one passage must meet together. Resolve
+    an ambiguous question before searching; when you cannot ask, pass one part per reading.
 
     A passage that says what other places say lists every one of them in its span's `also_in`
     rather than returning each on its own. `also_in` is a tree: each place sits under what it

@@ -56,9 +56,10 @@ the author did. Excerpts come best first.
 - `spans`: one per passage, in document order, each with `header`, `location`, `score`, `aspects`,
   `also_in`, `line_start`/`line_end`, `char_start`/`char_end` and `seq_start`/`seq_end`.
 - `aspects`: the parts of `q` a passage answers, on each span and joined on the excerpt (empty for
-  one question), with `aspect_scores` saying how well it matched each. With a reranker on, a tag is
-  its judgement; without one it is rank, and a vector or hybrid search finds a nearest passage for
-  any part, so read `text` before you cite it as that part's answer.
+  one question), with `aspect_scores` saying how well it matched each (its best chunk for that
+  part). With a reranker on, a tag is its judgement; without one it is rank, and a vector or hybrid
+  search finds a nearest passage for any part, so read `text` before you cite it as that part's
+  answer.
 - open: `markdown_file` and `source_file` (absolute paths), `line_start`/`line_end` (1-based, in
   `markdown_file`), `char_start`/`char_end` (0-based), `page_start`/`page_end` (PDF only, else
   null), `seq_start`/`seq_end` (chunk positions in the document).

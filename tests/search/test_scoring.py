@@ -266,9 +266,9 @@ def test_retrieval_says_how_each_collection_scored(
             _search(SearchSettings(reranker=Reranker.CROSS_ENCODER)),
             [None, None],
             None,
-            "Each passage scores its best question: the reranker's score for it, as each "
-            "question's own ranking holds it. The questions take turns at the slots, so the list "
-            "is not in score order.",
+            "Each chunk of a passage scores its best question, the reranker's score for it in "
+            "that question's own ranking, and the passage folds them by its rule. The questions "
+            "take turns at the slots, so the list is not in score order.",
         ),
         ("an excerpt", "group", _search(), None, None, "An excerpt scores its best passage."),
         ("a probe that added nothing", "probe_gaps", _search(), _groups(1), _groups(1), None),

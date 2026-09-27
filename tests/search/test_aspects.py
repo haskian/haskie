@@ -362,7 +362,7 @@ def test_a_kept_passage_answers_its_own_part_and_every_folded_one(
     folded = collapse.ranges([pick.span for pick in picks], scanned, words_scan(scanned), 2)
     labels = [AGGREGATE, EVENTS, ORDERING][: len(ranked)]
 
-    found = aspects.tagged(folded, picks, labels, _scans(ranked), by_score)
+    found = aspects.tagged(folded, picks, labels, _scans(ranked), by_score, HARMONIC)
 
     assert [(one.hits[0].document, _tree(one.also_in)) for one in found] == kept, name
     assert [one.aspects for one in found] == tags, name
@@ -401,9 +401,44 @@ def test_a_passage_scores_each_part_whose_ranking_holds_it(
     picks = aspects.interleave([first, second], 1, 1, how=HARMONIC)
     scans = _scans([first, second])
 
-    (found,) = aspects.tagged([picks[0].span], picks[:1], [AGGREGATE, EVENTS], scans, by_score)
+    (found,) = aspects.tagged(
+        [picks[0].span], picks[:1], [AGGREGATE, EVENTS], scans, by_score, HARMONIC
+    )
 
     assert found.aspect_scores == pytest.approx({AGGREGATE: 0.4, EVENTS: 0.9}), name
     assert (found.aspects, found.score) == (aspects_, pytest.approx(score)), name
     (rejoined,) = rejoin([found], how=HARMONIC)
     assert rejoined.score == pytest.approx(score), f"{name}: a later rejoin (the fill) keeps it"
+
+
+@pytest.mark.parametrize(
+    ("name", "by_score", "how", "score"),
+    [
+        ("reranked, summed: each chunk at its best question, added", True, ScoreFold.SUM, 2.55),
+        ("reranked, by the best chunk", True, ScoreFold.MAX, 0.95),
+        ("by rank: the range keeps the scores it was picked with", False, ScoreFold.SUM, 2.4),
+    ],
+)
+def test_a_questions_score_is_its_best_chunk_on_the_rerankers_scale(
+    name: str, by_score: bool, how: ScoreFold, score: float
+) -> None:
+    """A three-chunk passage the first part ranked at 0.9, 0.8 and 0.7, and the second holds its
+    middle chunk at 0.95. Each part's score is its best chunk, never above the reranker's 1, the
+    scale its floor is set on. The range's own score folds its chunks by the settings' rule: with
+    a reranker, each chunk at its best part's score (0.9, 0.95, 0.7)."""
+    (span,) = ranges(
+        [
+            msgspec.structs.replace(hit, score=value)
+            for hit, value in zip(_span("a.md", 1, 2, 3).hits, (0.9, 0.8, 0.7), strict=True)
+        ],
+        how=ScoreFold.SUM,
+    )
+    first, second = [span], [_span("a.md", 2, score=0.95)]
+    picks = aspects.interleave([first, second], 1, 1, how=how)
+    scans = _scans([first, second])
+
+    (found,) = aspects.tagged([picks[0].span], picks[:1], [AGGREGATE, EVENTS], scans, by_score, how)
+
+    assert found.aspect_scores == pytest.approx({AGGREGATE: 0.9, EVENTS: 0.95}), name
+    assert found.score == pytest.approx(score), name
+    assert max(found.aspect_scores.values()) <= 1.0, f"{name}: on the reranker's scale"

@@ -138,9 +138,9 @@ def _fold(state: "Search", ranged: list, __: Any) -> str | None:
         return None
     if state.plan.settings.reranker != Reranker.NONE:
         return (
-            "Each passage scores its best question: the reranker's score for it, as each "
-            "question's own ranking holds it. The questions take turns at the slots, so the "
-            "list is not in score order."
+            "Each chunk of a passage scores its best question, the reranker's score for it in "
+            "that question's own ranking, and the passage folds them by its rule. The questions "
+            "take turns at the slots, so the list is not in score order."
         )
     return (
         "Each question's passages keep the scores of their own search, and the questions take "

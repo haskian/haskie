@@ -27,10 +27,10 @@ from collections.abc import Iterator
 
 import msgspec
 
-from haskie.collection.index import ChunkKey, chunk_key
+from haskie.collection.index import ChunkKey, Hit, chunk_key
 from haskie.errors import InvalidInput
 from haskie.search import probe
-from haskie.search.passage import HitRange, PassageReference, continues, harmonic, rejoin
+from haskie.search.passage import HitRange, PassageReference, continues, fold, rejoin
 from haskie.settings import ScoreFold
 
 MAX_QUESTIONS = 5  # Perplexity and OpenSearch cap several queries at 5; xQuAD degrades past few
@@ -184,18 +184,20 @@ def tagged(
     labels: list[str],
     scans: list[dict[ChunkKey, float]],
     by_score: bool,
+    how: ScoreFold,
 ) -> list[HitRange]:
     """The kept ranges, each with how well it matched every question whose own ranking (`scans`,
-    one per question, chunk to score) holds its chunks or its folded places' (`aspect_scores`,
-    scored as a range is: `harmonic`), and with the questions it answers (`aspects`), in the
-    order they were asked.
+    one per question, chunk to score) holds its chunks or its folded places' (`aspect_scores`:
+    the best such chunk, `question_scores`), and with the questions it answers (`aspects`), in
+    the order they were asked.
 
     A question it answers is, with a reranker on (`by_score`), one whose ranking holds it: the
     reranker's score has a scale, and chunks under its floor were dropped from every ranking, so
-    being there means the reranker judged it an answer. Its score is then its best question's,
-    since the questions' scores share that scale. Without one, a score says nothing across
-    questions, so the answered questions are those that picked it or rank it in their own top
-    (`Pick`), and it keeps the score it was picked with.
+    being there means the reranker judged it an answer. The questions' scores then share that
+    scale, so each chunk scores its best question and the range folds those by `how`, as any
+    range does. Without one, a score says nothing across questions, so the answered questions are
+    those that picked it or rank it in their own top (`Pick`), and the range keeps the scores it
+    was picked with.
 
     The fold keeps one of the picks as each result and lists others under it, so every place is
     looked up by the chunks it covers - picks never overlap, so those are unique.
@@ -223,17 +225,27 @@ def tagged(
             for seq in range(place.seq_start, place.seq_end + 1)
         ]
 
+    def best(hit: Hit) -> Hit:
+        """The chunk at its best question's score."""
+        key = chunk_key(hit)
+        return msgspec.structs.replace(
+            hit, score=max([hit.score, *(scan[key] for scan in scans if key in scan)])
+        )
+
+    def lifted(one: HitRange) -> HitRange:
+        """Each chunk at its best question's score, and the range folded over them."""
+        hits = [best(hit) for hit in one.hits]
+        return msgspec.structs.replace(one, hits=hits, score=fold([h.score for h in hits], how))
+
     tagged: list[HitRange] = []
     for one in kept:
         scores = question_scores(keys(one), by_label)
         if by_score:
+            one = lifted(one)
             answers = [label for label in labels if label in scores]
-            best = max([one.score, *scores.values()])
         else:
-            answers, best = answered(one), one.score
-        tagged.append(
-            msgspec.structs.replace(one, aspects=answers, aspect_scores=scores, score=best)
-        )
+            answers = answered(one)
+        tagged.append(msgspec.structs.replace(one, aspects=answers, aspect_scores=scores))
     return tagged
 
 
@@ -241,12 +253,14 @@ def question_scores(
     keys: list[ChunkKey], scans: dict[str, dict[ChunkKey, float]]
 ) -> dict[str, float]:
     """How well chunks `keys` matched each question whose own ranking (`scans`, question to chunk
-    to score) holds any of them, scored as a range is (`harmonic`), in the order `scans` lists."""
+    to score) holds any of them: its best such chunk, in the order `scans` lists. The best chunk,
+    not a fold over them, so the score stays on the reranker's scale, the one its floor
+    (`min_rerank_score`) is set on and the one each chunk was judged on."""
     found: dict[str, float] = {}
     for label, scan in scans.items():
         values = [scan[key] for key in keys if key in scan]
         if values:
-            found[label] = harmonic(max(values), sum(values))
+            found[label] = max(values)
     return found
 
 

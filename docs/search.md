@@ -282,12 +282,14 @@ search, and the passages group by section, the sections taking the slots in the 
 picked them.
 
 Each span's `aspect_scores` gives how well its passage matched every part whose own ranking holds
-its chunks, or those of a place folded into it, scored as a passage is (the harmonic mean below).
+its chunks, or those of a place folded into it: that part's best such chunk. The best chunk rather
+than a fold over them, so a part's score stays on the reranker's 0 to 1 scale, the one
+`min_rerank_score` is set on; a fold of three strong chunks would read 2.5.
 
 With a reranker on, its score has a scale: under `min_rerank_score` (0.05) the reranker judged a
 chunk no answer, and it is dropped from the ranking before passages are built. A part's tag in
-`aspects` then means the reranker judged the passage an answer to it, and a passage scores its best
-part. Without a reranker the scores of two parts share no scale, so `aspects` lists the parts the
+`aspects` then means the reranker judged the passage an answer to it. Each chunk of the passage
+scores its best part, and the passage folds those scores by `score_fold` like any passage. Without a reranker the scores of two parts share no scale, so `aspects` lists the parts the
 passage ranked high for: the part that picked it, every part that joined it or ranks it among its
 own owed ranges, and those of every place folded into it; it keeps the score it was picked with. A
 vector or hybrid search finds nearest passages for any part, even one the sources say nothing

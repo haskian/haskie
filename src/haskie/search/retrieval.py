@@ -457,7 +457,7 @@ def _cover(
     # none cut: the sections they fall in are what the answer counts (`sections`)
     kept = collapse.ranges([pick.span for pick in picks], joined.hits, scan, None)
     scans = [{chunk_key(hit): hit.score for hit in one.scanned.hits} for one in ranged]
-    found = aspects.tagged(kept, picks, labels, scans, by_score)
+    found = aspects.tagged(kept, picks, labels, scans, by_score, how)
     _log_collapse(scan.deciding[0].kind, len(picks), kept, None)
     _log.info(
         "search_questions",
