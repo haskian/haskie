@@ -13,7 +13,7 @@ from haskie.collection.index import chunk_key
 from haskie.errors import InvalidInput
 from haskie.indexing.segment import CutReason
 from haskie.search import aspects, collapse
-from haskie.search.passage import HitRange, PassageReference, ranges
+from haskie.search.passage import HitRange, PassageReference, ranges, rejoin
 
 # What each chunk of `patterns.md` and the other documents says, by its `seq`.
 SENTENCES = {
@@ -400,3 +400,5 @@ def test_a_passage_scores_each_part_whose_ranking_holds_it(
 
     assert found.aspect_scores == pytest.approx({AGGREGATE: 0.4, EVENTS: 0.9}), name
     assert (found.aspects, found.score) == (aspects_, pytest.approx(score)), name
+    (rejoined,) = rejoin([found])
+    assert rejoined.score == pytest.approx(score), f"{name}: a later rejoin (the fill) keeps it"

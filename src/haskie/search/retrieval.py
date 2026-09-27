@@ -550,7 +550,8 @@ async def fill(
 
     The chunks near every kept passage are read in one query per collection, with the passages'
     own, and valued around them for each question (`_values`). Each chunk is worth its best
-    question's value, and that question tags it.
+    question's value, and that question tags it, unless a reranker is on: then only its
+    judgement tags (`aspects.tagged`).
     """
     reach = where.settings.max_passage_grow
     # each group's own: sections of one document can nest, and a chunk near two groups is a
@@ -574,7 +575,7 @@ def _fill(
     questions: list[probe.Question],
     reach: int,
     budget: int,
-    tags: bool = True,
+    tags: bool,
 ) -> list[section.Group]:
     held = [key for one in groups for hit in one.hits if (key := chunk_key(hit)) in rows]
     near = list(dict.fromkeys(key for keys in nears for key in keys if key in rows))
@@ -664,12 +665,7 @@ async def probe_gaps(
     fresh = passage.ranges(hits)
     joined = None
     if fresh and reranked:
-        keys = [chunk_key(hit) for hit in fresh[0].hits]
-        found = {
-            label: passage.harmonic(max(values), sum(values))
-            for label, scored in scores.items()
-            if (values := [scored[key] for key in keys if key in scored])
-        }
+        found = aspects.question_scores([chunk_key(hit) for hit in fresh[0].hits], scores)
         best = msgspec.structs.replace(fresh[0], aspects=list(found), aspect_scores=found)
     elif fresh:
         best = msgspec.structs.replace(
@@ -692,7 +688,8 @@ async def _judged(
     """The probe's hits the reranker judges an answer to a question whose words are missing, each
     scored by its best such question, and each labelled question's scores of the hits that clear
     the floor (`min_rerank_score`). The reranker reads each question alone."""
-    asked = list(dict.fromkeys(question for questions in wanted.values() for question in questions))
+    # by what was asked: a question with its query vector is no dict key
+    asked = list({one.asked: one for questions in wanted.values() for one in questions}.values())
     best: dict[ChunkKey, float] = {}
     scores: dict[str, dict[ChunkKey, float]] = {}
     for question in asked:

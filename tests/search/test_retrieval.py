@@ -411,8 +411,9 @@ async def test_the_probes_find_is_judged_by_the_reranker_per_missing_question(
         },  # ty: ignore[invalid-argument-type]
         rankings={},
     )
-    order = probe.Question(None, "How does stock stay right?", label="order")
-    books = probe.Question(None, "How is the ledger closed?", label="books")
+    # with their query vectors, as a search with an embedding model asks them
+    order = probe.Question([1.0, 0.0], "How does stock stay right?", label="order")
+    books = probe.Question([0.0, 1.0], "How is the ledger closed?", label="books")
 
     async def rerank(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
         for row in rows:
@@ -421,7 +422,7 @@ async def test_the_probes_find_is_judged_by_the_reranker_per_missing_question(
         return rows
 
     monkeypatch.setattr(retrieval, "cross_encode", rerank)
-    wanted = {"stock": [order], "ledger": [books]}
+    wanted = {"stock": [order], "ledger": [books], "right": [order]}  # a question twice: once
 
     kept, scores = await retrieval._judged([ledger, weather], pool, wanted, SearchSettings())
 

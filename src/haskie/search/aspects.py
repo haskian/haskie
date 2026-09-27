@@ -17,9 +17,9 @@ Two rules keep the turns fair:
   slot: two parts that land on one passage get one passage, tagged with both.
 
 `depth` is the share of the answer one part is owed, `ceil(limit / parts)`. A result is tagged
-with every part that picked it, joined it, or ranks it in its own top `depth`. No IO, and no
-scores: which part a result answers is read off ranks alone, since no calibrated relevance floor
-exists yet.
+with every part that picked it, joined it, or ranks it in its own top `depth`: the turns read
+ranks alone. With a reranker on, its score has a scale and a floor (`min_rerank_score`), so the
+tags come from the reranker's scores instead (`tagged`). No IO.
 """
 
 import math
@@ -207,22 +207,18 @@ def tagged(
             parts |= by_place.get(_place(place.collection, place.document, place), set())
         return [labels[part] for part in sorted(parts)]
 
-    def scored(one: HitRange) -> dict[str, float]:
-        keys = [chunk_key(hit) for hit in one.hits] + [
+    by_label = dict(zip(labels, scans, strict=True))
+
+    def keys(one: HitRange) -> list[ChunkKey]:
+        return [chunk_key(hit) for hit in one.hits] + [
             (place.collection, place.document, seq)
             for place in _walk(one.also_in)
             for seq in range(place.seq_start, place.seq_end + 1)
         ]
-        found: dict[str, float] = {}
-        for label, scan in zip(labels, scans, strict=True):
-            values = [scan[key] for key in keys if key in scan]
-            if values:
-                found[label] = harmonic(max(values), sum(values))
-        return found
 
     tagged: list[HitRange] = []
     for one in kept:
-        scores = scored(one)
+        scores = question_scores(keys(one), by_label)
         if by_score:
             answers = [label for label in labels if label in scores]
             best = max([one.score, *scores.values()])
@@ -232,6 +228,19 @@ def tagged(
             msgspec.structs.replace(one, aspects=answers, aspect_scores=scores, score=best)
         )
     return tagged
+
+
+def question_scores(
+    keys: list[ChunkKey], scans: dict[str, dict[ChunkKey, float]]
+) -> dict[str, float]:
+    """How well chunks `keys` matched each question whose own ranking (`scans`, question to chunk
+    to score) holds any of them, scored as a range is (`harmonic`), in the order `scans` lists."""
+    found: dict[str, float] = {}
+    for label, scan in scans.items():
+        values = [scan[key] for key in keys if key in scan]
+        if values:
+            found[label] = harmonic(max(values), sum(values))
+    return found
 
 
 def _place(

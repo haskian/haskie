@@ -259,11 +259,11 @@ function askedRows(match: Match, query: string, asked?: Asked): [string, ReactNo
   }
   return [
     ...(asked.context === '' ? [] : [['Context', asked.context] as [string, ReactNode]]),
-    ...questionLabels(match.aspects, asked.questions).map(({ label, question }): [string, ReactNode] => [
+    ...questionLabels(match.aspects, asked.questions, match.aspect_scores).map(({ label, question, score }): [string, ReactNode] => [
       label,
       <span key={label}>
         <span className="code">{question}</span>
-        {question in match.aspect_scores && <span className="mono muted"> · {match.aspect_scores[question].toFixed(2)}</span>}
+        {score !== undefined && <span className="mono muted"> · {score}</span>}
       </span>,
     ]),
   ]

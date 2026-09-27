@@ -35,7 +35,7 @@ several collections in scope comes back once.
   must meet together. Write each part as a full question. An ambiguous question you cannot ask
   about gets one part per reading.
 - `context` is the background the parts share, at most 200 characters. It steers what each part
-  means, never the words a part matches.
+  means, never the words a part matches (unless the `rerank_with_context` setting is on).
 - `limit` counts excerpts. It defaults to the collection's setting when one collection is
   searched, else the user's, and never to fewer than the parts. A `limit` you pass must be at
   least the number of parts. The parts take turns at the slots, so one part cannot crowd out the
@@ -69,9 +69,10 @@ What the answer lacks:
   sources lack them.
 - `missing_terms`: the words of `q` (stopwords aside) that no excerpt's text or headings hold in any
   form ("keeps" counts as "keep"). The search already looked for them once more by full text, and
-  its best find joins the answer as a span with `score` 0, past `limit` when it is in a section of
-  its own. A missing word is one the sources do not use: search again with a synonym, or say the
-  sources lack it.
+  its best find joins the answer, past `limit` when it is in a section of its own. With a reranker
+  on, it joins only when the reranker judges it an answer, and scores what the reranker gave it;
+  without one, its span scores 0. A missing word is one the sources do not use: search again with a
+  synonym, or say the sources lack it.
 
 Repeats: a span's `also_in` lists every other place that says what the passage says, folded into
 it rather than returned on its own. It is a tree: each place sits under what it repeats and has its

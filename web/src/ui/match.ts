@@ -192,11 +192,19 @@ export function fillOf(score: number, best: number, worst: number): number {
   return MIN_FILL + (1 - MIN_FILL) * ((score - worst) / (best - worst))
 }
 
-/** How an excerpt card names the questions it answers: "Q1 Q3", by their place in `asked`. A
- *  question no longer asked names nothing. */
-export function questionLabels(aspects: string[], asked: string[]): Array<{ label: string; question: string }> {
+/** The questions a result answers, each by its place in what was asked ("Q2"), with its text and
+ *  how well the result matched it, formatted, when the search said. A question not asked this
+ *  time names nothing. */
+export function questionLabels(
+  aspects: string[],
+  asked: string[],
+  scores: Record<string, number> = {},
+): Array<{ label: string; question: string; score?: string }> {
   return aspects
     .map((aspect) => asked.indexOf(aspect))
     .filter((at) => at >= 0)
-    .map((at) => ({ label: `Q${at + 1}`, question: asked[at] }))
+    .map((at) => {
+      const question = asked[at]
+      return { label: `Q${at + 1}`, question, ...(question in scores ? { score: scores[question].toFixed(2) } : {}) }
+    })
 }

@@ -65,10 +65,10 @@ export function HitGrid<T extends Match>({
             </footer>
             {isExcerpt(match) && questions.length > 1 && (
               <div className="hit-questions">
-                {questionLabels(match.aspects, questions).map(({ label, question }) => (
+                {questionLabels(match.aspects, questions, match.aspect_scores).map(({ label, question, score }) => (
                   <span key={label} className="question-tag" title={question}>
                     {label}
-                    {question in match.aspect_scores && <span className="question-score"> {match.aspect_scores[question].toFixed(2)}</span>}
+                    {score !== undefined && <span className="question-score"> {score}</span>}
                   </span>
                 ))}
               </div>

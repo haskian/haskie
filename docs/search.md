@@ -96,9 +96,11 @@ holds are searched for once more by BM25 alone, and the best passage that search
 section holds yet joins the answer. It joins the kept section it belongs to, or comes after the
 others as one excerpt past `limit` and past the budget, which the sections were cut to before it.
 Taking the last ranked section's slot instead would trade one gap for another, and a search of one
-excerpt would lose its whole answer. It is tagged with the questions whose words it holds, and
-it scores 0, as the fill's chunks do: its BM25 score is on another scale than the ranked
-passages', and would sort it above them.
+excerpt would lose its whole answer. With a reranker on, what the search finds is judged as the
+ranked chunks are: scored against each question whose words are missing, dropped under
+`min_rerank_score`, and tagged with the questions it clears. Without one, it is tagged with the
+questions whose words it holds, and it scores 0, as the fill's chunks do: its BM25 score is on
+another scale than the ranked passages', and would sort it above them.
 
 `search_excerpts` answers with `excerpts`, `uncovered` (the questions no excerpt names, when
 several were asked) and `missing_terms` (the words still missing after the probe). A synonym
@@ -114,7 +116,8 @@ Every chunk of the section within `max_passage_grow` (2) chunks of a kept passag
 the question, by the query vector when every row has one, else by the question's words. Its value
 is its score around the kept chunks' own: 0 for one as good as the median kept chunk, 1 for one as
 good as the best, below 0 for a weaker one, clipped to [-1, 1]. With several questions a chunk
-takes its best question's value, and that question tags it.
+takes its best question's value. Without a reranker that question tags it; with one, only the
+reranker's judgement tags (`aspects.tagged`), so a filled chunk brings no tag.
 
 - A gap between two passages is filled when its values sum above 0, and the two become one. So a
   gap of up to twice `max_passage_grow` chunks can be filled.

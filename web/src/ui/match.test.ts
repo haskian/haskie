@@ -304,7 +304,7 @@ describe('excerpts', () => {
 
 describe('questionLabels', () => {
   const asked = ['Why retry?', 'How long to wait?', 'When to stop?']
-  const cases: Array<{ name: string; aspects: string[]; expected: Array<{ label: string; question: string }> }> = [
+  const cases: Array<{ name: string; aspects: string[]; scores?: Record<string, number>; expected: Array<{ label: string; question: string; score?: string }> }> = [
     {
       name: 'each question by its place in what was asked, with its text',
       aspects: ['When to stop?', 'Why retry?'],
@@ -314,11 +314,17 @@ describe('questionLabels', () => {
       ],
     },
     { name: 'none', aspects: [], expected: [] },
+    {
+      name: 'with the score the result matched it by, when the search said',
+      aspects: ['Why retry?'],
+      scores: { 'Why retry?': 0.8412 },
+      expected: [{ label: 'Q1', question: 'Why retry?', score: '0.84' }],
+    },
     { name: 'a question not asked this time names nothing', aspects: ['Old question?'], expected: [] },
   ]
   for (const one of cases) {
     test(one.name, () => {
-      expect(questionLabels(one.aspects, asked)).toEqual(one.expected)
+      expect(questionLabels(one.aspects, asked, one.scores)).toEqual(one.expected)
     })
   }
 })

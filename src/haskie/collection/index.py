@@ -753,6 +753,14 @@ def _header(r: dict) -> str:
     return HEADING_SEP.join(r["headings"] or [])
 
 
+def row_mode(r: dict) -> SearchMode:
+    """The search a row came out of, read off the score column it carries, as `row_score` reads
+    it: fused scores for hybrid, a distance for vector, BM25 for full text."""
+    if "_relevance_score" in r:
+        return SearchMode.HYBRID
+    return SearchMode.VECTOR if "_distance" in r else SearchMode.FTS
+
+
 def row_score(r: dict) -> float:
     """Higher is better in every mode: cross-encoder / fusion score, BM25 score, or vector
     distance mapped through 1 / (1 + d).

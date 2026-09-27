@@ -11,7 +11,7 @@ the same numbers. So each step that sets or changes a score says how, in words, 
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from haskie.collection.index import chunk_key
+from haskie.collection.index import chunk_key, row_mode
 from haskie.settings import Fusion, Reranker, SearchMode, SearchSettings
 
 if TYPE_CHECKING:
@@ -43,14 +43,11 @@ def _retrieve(state: "Search", _: None, pool: "Pool") -> str | None:
 
 
 def _ran(pool: "Pool", collection: str, settings: SearchSettings, embedded: bool) -> SearchMode:
-    """The search a collection ran, read off the score column of a row it returned, as
-    `index.row_score` reads it: a table written without vectors answers any mode by full text. A
-    collection that returned nothing scored nothing, so its settings say it."""
+    """The search a collection ran, read off a row it returned (`index.row_mode`): a table
+    written without vectors answers any mode by full text. A collection that returned nothing
+    scored nothing, so its settings say it."""
     for key in pool.rankings.get(collection, [])[:1]:
-        _, row = pool.rows[key]
-        if "_relevance_score" in row:
-            return SearchMode.HYBRID
-        return SearchMode.VECTOR if "_distance" in row else SearchMode.FTS
+        return row_mode(pool.rows[key][1])
     return settings.mode if embedded else SearchMode.FTS
 
 
@@ -129,10 +126,16 @@ def _judge_thin(*_: Any) -> str | None:
     return _PASSAGE
 
 
-def _fold(_: "Search", ranged: list, __: Any) -> str | None:
+def _fold(state: "Search", ranged: list, __: Any) -> str | None:
     """Only several questions change what a score is compared with."""
     if len(ranged) == 1:
         return None
+    if state.plan.settings.reranker != Reranker.NONE:
+        return (
+            "Each passage scores its best question: the reranker's score for it, as each "
+            "question's own ranking holds it. The questions take turns at the slots, so the "
+            "list is not in score order."
+        )
     return (
         "Each question's passages keep the scores of their own search, and the questions take "
         "turns at the slots, so the list is not in score order."

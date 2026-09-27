@@ -190,9 +190,9 @@ def rejoin(parts: list[HitRange]) -> list[HitRange]:
                 also_in=[place for kept in held for place in kept.also_in],
                 aspects=list(dict.fromkeys(label for kept in held for label in kept.aspects)),
                 aspect_scores=best_of([kept.aspect_scores for kept in held]),
-                score=max(
-                    [one.score, *(score for kept in held for score in kept.aspect_scores.values())]
-                ),
+                # the parts' own scores, which `aspects.tagged` lifted to a best question only when
+                # the questions' scores share a scale
+                score=max([one.score, *(kept.score for kept in held)]),
                 alone=all(kept.alone for kept in held),
             )
         )

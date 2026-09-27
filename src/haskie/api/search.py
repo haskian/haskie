@@ -147,7 +147,8 @@ async def search_excerpts(
         q: The question, or 2 to 5 parts of one question, each at most 500 characters.
         context: Background every part shares, at most 200 characters. The query embedding reads
             it in front of each part to find candidates; full-text search and the reranker read
-            the part alone, so the context never outranks what a part asks.
+            the part alone, so the context never outranks what a part asks (unless the
+            `rerank_with_context` setting is on).
         session_id: The conversation's id; the search then shows in that session's history.
     """
     started = time.perf_counter()

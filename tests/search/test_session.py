@@ -39,6 +39,16 @@ from haskie.settings import (
 pytestmark = pytest.mark.anyio
 
 
+@pytest.fixture
+def models_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every model counts as loaded: these searches stub what the models answer."""
+
+    async def ready(kind: str, model: str) -> None:
+        return None
+
+    monkeypatch.setattr(models, "require_ready", ready)
+
+
 async def test_search_limit_user_and_collection_level(dbos, tmp_path: Path) -> None:
     """The call's limit, else the collection's when it is the one collection in scope, else the
     user's: the one search route reads it the way it reads every other collection setting."""
@@ -191,7 +201,9 @@ async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkey
     assert checked == [("embedding", compact.name)], "one check, not one per collection"
 
 
-async def test_session_search_folds_a_near_duplicate_by_its_vector(dbos, monkeypatch) -> None:
+async def test_session_search_folds_a_near_duplicate_by_its_vector(
+    dbos, models_ready: None, monkeypatch
+) -> None:
     """The fold runs on the vectors the index returned: two documents whose chunks embed alike
     come back as one hit that names the other, though their words have little in common. If the
     rows lost their vectors, the search would fall back to words and keep both."""
@@ -218,11 +230,7 @@ async def test_session_search_folds_a_near_duplicate_by_its_vector(dbos, monkeyp
         await index.finish()
     await session.set_collections("s", ["a", "b"])
 
-    async def require_ready(kind: str, model: str) -> None:
-        return None
-
     monkeypatch.setattr(retrieval, "embed_query", lambda model, text: vector)
-    monkeypatch.setattr(models, "require_ready", require_ready)
 
     (hit,) = await flow.chunks(await session.collections_for("s"), "idempotent retries", limit=10)
 
@@ -237,7 +245,7 @@ async def test_session_search_folds_a_near_duplicate_by_its_vector(dbos, monkeyp
 
 
 async def test_session_search_reranks_once_over_the_merge(
-    dbos, tmp_path: Path, monkeypatch
+    dbos, models_ready: None, tmp_path: Path, monkeypatch
 ) -> None:
     """The cross-encoder sees the merged candidates of every collection once, and its score is
     the score of the returned hits."""
@@ -252,11 +260,6 @@ async def test_session_search_reranks_once_over_the_merge(
         await attach_document(dbos, name, doc.name)
     await session.set_collections("s", ["a", "b"])
     calls: list[list[str]] = []
-
-    async def require_ready(kind: str, model: str) -> None:
-        return None
-
-    monkeypatch.setattr(models, "require_ready", require_ready)
 
     def fake_rerank(model: str, accelerator: str, query: str, texts: list[str]) -> list[float]:
         calls.append(texts)
@@ -296,7 +299,13 @@ async def test_session_search_reranks_once_over_the_merge(
     ],
 )
 async def test_the_reranker_reads_the_shared_context_only_when_set_to(
-    dbos, tmp_path: Path, monkeypatch, name: str, with_context: bool, read: set[str]
+    dbos,
+    models_ready: None,
+    tmp_path: Path,
+    monkeypatch,
+    name: str,
+    with_context: bool,
+    read: set[str],
 ) -> None:
     """A cross-encoder matches words: a context every document shares ("ddd" over a DDD book)
     would outrank what each question asks, so by default the reranker, the growth of short
@@ -309,14 +318,10 @@ async def test_the_reranker_reads_the_shared_context_only_when_set_to(
     await attach_document(dbos, "pay", doc.name)
     asked: set[str] = set()
 
-    async def require_ready(kind: str, model: str) -> None:
-        return None
-
     def fake_rerank(model: str, accelerator: str, query: str, texts: list[str]) -> list[float]:
         asked.add(query)
         return [0.0] * len(texts)
 
-    monkeypatch.setattr(models, "require_ready", require_ready)
     monkeypatch.setattr(embed, "rerank_scores", fake_rerank)
 
     await flow.answers(["pay"], aspects.questions(["Why retry?", "How long to wait?"], "payments"))
@@ -336,7 +341,7 @@ def _judge(topics: dict[str, str]) -> Any:
 
 
 async def test_with_a_reranker_a_question_tags_only_what_it_judged_an_answer(
-    dbos, tmp_path: Path, monkeypatch
+    dbos, models_ready: None, tmp_path: Path, monkeypatch
 ) -> None:
     """The reranker scores every chunk against each question: under the floor a chunk is dropped,
     so a question tags only the excerpts it judged an answer, each excerpt scores its best
@@ -351,10 +356,6 @@ async def test_with_a_reranker_a_question_tags_only_what_it_judged_an_answer(
     doc = await import_document(dbos, "pay.md", body, tmp_path)
     await attach_document(dbos, "pay", doc.name)
 
-    async def require_ready(kind: str, model: str) -> None:
-        return None
-
-    monkeypatch.setattr(models, "require_ready", require_ready)
     monkeypatch.setattr(embed, "rerank_scores", _judge({"retry": "retry", "refund": "refund"}))
     asked = ["Why retry a payment?", "How does a refund reach the card?", "Is there a tax?"]
 
