@@ -19,6 +19,7 @@ from haskie.search.passage import (
     Passage,
     PassageReference,
     Sources,
+    fold,
     fold_sources,
     harmonic,
     min_cover,
@@ -28,7 +29,10 @@ from haskie.search.passage import (
     rejoin,
     top_documents,
 )
-from haskie.settings import ChunkSettings
+from haskie.settings import ChunkSettings, ScoreFold
+
+HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
+
 
 MARKDOWN = """# Retries
 
@@ -156,6 +160,58 @@ def test_harmonic_folds_the_best_chunk_with_the_sum(
 
 
 @pytest.mark.parametrize(
+    ("name", "scores", "sum_", "max_", "harmonic_"),
+    [
+        ("one chunk scores itself under every rule", [3.0], 3.0, 3.0, 3.0),
+        ("a second chunk adds to the sum, not to the max", [3.0, 3.0], 6.0, 3.0, 4.0),
+        (
+            "many weak chunks: the sum outgrows the harmonic mean",
+            [1.0] * 100,
+            100.0,
+            1.0,
+            200 / 101,
+        ),
+        ("a chunk nobody ranked scores 0 and adds nothing", [2.0, 0.0], 2.0, 2.0, 2.0),
+        ("nothing matched scores nothing", [], 0.0, 0.0, 0.0),
+    ],
+)
+def test_a_passages_chunks_fold_by_the_rule_the_settings_choose(
+    name: str, scores: list[float], sum_: float, max_: float, harmonic_: float
+) -> None:
+    """`sum` as Vespa's chunk example, `max` as Elasticsearch's semantic_text, `harmonic` haskie's
+    own: between the best and twice it."""
+    found = {how: fold(scores, how) for how in ScoreFold}
+
+    assert found == pytest.approx(
+        {ScoreFold.SUM: sum_, ScoreFold.MAX: max_, ScoreFold.HARMONIC: harmonic_}
+    ), name
+
+
+@pytest.mark.parametrize(
+    ("how", "order"),
+    [
+        (ScoreFold.SUM, [OTHER, DOC]),
+        (ScoreFold.MAX, [DOC, OTHER]),
+        (ScoreFold.HARMONIC, [DOC, OTHER]),
+    ],
+)
+def test_documents_rank_by_the_rule_the_settings_choose(how: ScoreFold, order: list[str]) -> None:
+    """One strong chunk (5) against three fair ones (2, 2, 2): the sum ranks the document with
+    more evidence first, the best chunk and the harmonic mean the strong one."""
+    strong = _hit(BACKOFF, 2, 5.0)
+    fair = [
+        _hit(text, seq, 2.0, document=OTHER, collection="ops", header="Retries")
+        for seq, text in ((1, OPENING), (2, BACKOFF), (3, SKEW))
+    ]
+    hits = [strong, *fair]
+
+    found = fold_sources(top_documents(hits, 10, how), {}, 3, how).documents
+
+    assert [one.document for one in found] == order, how
+    assert [ranges(hits, how)[0].hits[0].document] == [order[0]], f"{how}: passages the same"
+
+
+@pytest.mark.parametrize(
     ("name", "shares", "expected"),
     [
         ("a copy: whole both ways", (1.0, 1.0), 1.0),
@@ -238,7 +294,7 @@ def test_harmonic_of_an_overlap_is_pulled_toward_its_weakest_measure(
 def test_ranges_folds_consecutive_chunks_of_one_document(
     name: str, hits: list[Hit], expected: list[tuple[str, str, int, int]]
 ) -> None:
-    folded = ranges(hits)
+    folded = ranges(hits, how=HARMONIC)
 
     shape = [(r.hits[0].collection, r.hits[0].document, r.seq_start, r.seq_end) for r in folded]
     assert shape == expected, name
@@ -247,7 +303,7 @@ def test_ranges_folds_consecutive_chunks_of_one_document(
 def test_a_range_carries_the_span_and_the_score_of_its_members() -> None:
     """The span is the union of its chunks, and the score is the document rule applied to one
     span: one strong chunk lifted by what sits next to it."""
-    (folded,) = ranges([ONE, TWO])
+    (folded,) = ranges([ONE, TWO], how=HARMONIC)
 
     assert (folded.char_start, folded.char_end) == (ONE.char_start, TWO.char_end)
     assert (folded.line_start, folded.line_end) == (ONE.line_start, TWO.line_end)
@@ -260,7 +316,7 @@ def test_a_range_carries_the_span_and_the_score_of_its_members() -> None:
 
 def _range(char_start: int, char_end: int, **fields) -> HitRange:
     """A range of one chunk over `[char_start, char_end)`, as `ranges` would build it."""
-    return ranges([_hit((char_start, char_end), 1, 2.0, **fields)])[0]
+    return ranges([_hit((char_start, char_end), 1, 2.0, **fields)], how=HARMONIC)[0]
 
 
 def _quote(hit_range: HitRange) -> Passage:
@@ -291,7 +347,7 @@ def test_a_passage_cites_every_page_its_chunks_cover(
             zip([OPENING, BACKOFF, SKEW], pages, strict=False), 1
         )
     ]
-    (hit_range,) = ranges(hits)
+    (hit_range,) = ranges(hits, how=HARMONIC)
 
     quoted = _quote(hit_range)
 
@@ -344,7 +400,7 @@ def test_quoting_a_range_keeps_what_was_folded_into_it() -> None:
             )
         ],
     )
-    (hit_range,) = ranges([ONE, TWO])
+    (hit_range,) = ranges([ONE, TWO], how=HARMONIC)
     hit_range = msgspec.structs.replace(hit_range, also_in=[folded])
 
     quoted = _quote(hit_range)
@@ -410,7 +466,7 @@ def test_a_passage_carries_the_citation_of_the_best_chunk_over_its_lines() -> No
         ),
     ]
 
-    passage = _quote(ranges(hits)[0])
+    passage = _quote(ranges(hits, how=HARMONIC)[0])
 
     assert passage.header == "Retries > Backoff", "the best-scoring chunk names the passage"
     assert (passage.page_start, passage.page_end) == (1, 3), "both chunks' pages, not the best's"
@@ -426,7 +482,9 @@ def test_a_passage_carries_the_citation_of_the_best_chunk_over_its_lines() -> No
 
 
 def _sources(hits: list[Hit], memberships=None, limit: int = 10, sections: int = 3) -> Sources:
-    return fold_sources(top_documents(hits, limit), memberships or {}, sections)
+    return fold_sources(
+        top_documents(hits, limit, how=HARMONIC), memberships or {}, sections, how=HARMONIC
+    )
 
 
 def test_one_document_folds_to_one_row_of_evidence() -> None:
@@ -613,7 +671,7 @@ def test_every_chunk_is_quoted_as_it_was_cut() -> None:
 
 def _one_chunk(chunk: Chunk) -> HitRange:
     """A chunk of `EVERY_CUT` as the range a search would build from its hit."""
-    (hit_range,) = ranges([chunk_hit(chunk, 1, document=DOC, collection=COLLECTION)])
+    (hit_range,) = ranges([chunk_hit(chunk, 1, document=DOC, collection=COLLECTION)], how=HARMONIC)
     return hit_range
 
 
@@ -642,7 +700,7 @@ def _place(document: str) -> PassageReference:
 def _part(
     *hits: Hit, aspects: list[str] | None = None, alone: bool = False, place: str = ""
 ) -> HitRange:
-    (found,) = ranges(list(hits))
+    (found,) = ranges(list(hits), how=HARMONIC)
     return msgspec.structs.replace(
         found, aspects=aspects or [], alone=alone, also_in=[_place(place)] if place else []
     )
@@ -684,7 +742,7 @@ def test_rejoin_rebuilds_ranges_over_every_part_and_keeps_what_they_carried(
     parts: list[HitRange],
     expected: list[tuple[tuple[int, int], list[str], list[str], bool]],
 ) -> None:
-    rebuilt = rejoin(parts)
+    rebuilt = rejoin(parts, how=HARMONIC)
 
     shape = [
         (
@@ -701,7 +759,7 @@ def test_rejoin_rebuilds_ranges_over_every_part_and_keeps_what_they_carried(
 def test_a_shared_chunk_is_held_as_the_first_part_listed_has_it() -> None:
     ranked, unranked = TWO, msgspec.structs.replace(TWO, score=0.0)
 
-    (rebuilt,) = rejoin([_part(ONE, ranked), _part(unranked, THREE)])
+    (rebuilt,) = rejoin([_part(ONE, ranked), _part(unranked, THREE)], how=HARMONIC)
 
     assert [hit.score for hit in rebuilt.hits] == [4.0, 3.0, 2.0]
 
@@ -728,7 +786,7 @@ def _random_parts(rng: random.Random) -> list[HitRange]:
     for _ in range(rng.randint(1, 6)):
         start = rng.randint(1, 12)
         end = rng.randint(start, min(12, start + 2))
-        (found,) = ranges([chunks[seq] for seq in range(start, end + 1)])
+        (found,) = ranges([chunks[seq] for seq in range(start, end + 1)], how=HARMONIC)
         parts.append(
             msgspec.structs.replace(
                 found,
@@ -744,7 +802,7 @@ def test_rejoin_keeps_every_chunk_once_and_what_each_part_carried(seed: int) -> 
     rng = random.Random(seed)
     parts = _random_parts(rng)
 
-    rebuilt = rejoin(parts)
+    rebuilt = rejoin(parts, how=HARMONIC)
 
     held = [hit.seq for one in rebuilt for hit in one.hits]
     assert sorted(held) == sorted({hit.seq for one in parts for hit in one.hits}), "each chunk once"

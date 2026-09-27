@@ -26,6 +26,7 @@ from haskie.indexing.segment import CutReason
 from haskie.search.collapse import MIN_WORDS, WORD
 from haskie.search.fill import Candidate, grow
 from haskie.search.passage import HitRange, ends_section, part, rejoin
+from haskie.settings import ScoreFold
 
 # The words of a question that say nothing about its topic. A short list on purpose: the question
 # words and the glue of English questions, so the words left are the ones a passage should share.
@@ -83,6 +84,7 @@ def fill(
     neighbours: dict[ChunkKey, Candidate],
     min_chars: int,
     reach: int,
+    how: ScoreFold,
     grows: bool = True,
 ) -> Filled:
     """Grow each thin range by the neighbours worth taking, as every passage of an excerpt grows
@@ -118,7 +120,7 @@ def fill(
         kept.append(hit_range)
     held = {chunk_key(hit) for one in kept for hit in one.hits}
     joined = [hit for key, hit in added.items() if key not in held]
-    rebuilt = rejoin([*kept, *(part(hit) for hit in joined)])
+    rebuilt = rejoin([*kept, *(part(hit) for hit in joined)], how)
     return Filled(ranges=rebuilt, added=joined, grown=grown)
 
 

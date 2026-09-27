@@ -1195,6 +1195,7 @@ export interface components {
             accelerators: components["schemas"]["Accelerator"][];
             search_modes: components["schemas"]["SearchMode"][];
             fusions: components["schemas"]["Fusion"][];
+            score_folds: components["schemas"]["ScoreFold"][];
             rerankers: components["schemas"]["Reranker"][];
             reranker_models: string[];
             reranker_metadata: {
@@ -1470,6 +1471,13 @@ export interface components {
          * @enum {string}
          */
         Runtime: "onnx" | "mlx" | "gguf";
+        /**
+         * ScoreFold
+         * @description How the scores of a passage's matched chunks, or a document's, fold into one. sum: every matched chunk adds, so more evidence ranks higher (Vespa's chunk example). max: the best chunk alone (Elasticsearch semantic_text). harmonic: between the best and twice it, so more chunks lift a result but many weak ones never outrank one strong one.
+         * @default sum
+         * @enum {string}
+         */
+        ScoreFold: "max" | "sum" | "harmonic";
         /** SearchAt */
         SearchAt: {
             ts: number;
@@ -1544,6 +1552,11 @@ export interface components {
              * @description When several questions share a context, the query embedding reads the context in front of each question to find candidates. Off: the reranker, which sets the final order, reads each question alone, so a context every document matches ("ddd" over a DDD book) cannot outrank what the question asks. On: the reranker reads it too.
              */
             rerank_with_context?: boolean | null;
+            /**
+             * Passage and document score
+             * @description How the scores of a passage's matched chunks, or a document's, fold into one. sum: every matched chunk adds, so more evidence ranks higher (Vespa's chunk example). max: the best chunk alone (Elasticsearch semantic_text). harmonic: between the best and twice it, so more chunks lift a result but many weak ones never outrank one strong one.
+             */
+            score_fold?: components["schemas"]["ScoreFold"] | null;
             /**
              * Lowest reranker score
              * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. 0 keeps every chunk. Rerankers differ: tune it per model.
@@ -1629,6 +1642,7 @@ export interface components {
              * @default false
              */
             rerank_with_context: boolean;
+            score_fold?: components["schemas"]["ScoreFold"];
             /**
              * Lowest reranker score
              * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. 0 keeps every chunk. Rerankers differ: tune it per model.

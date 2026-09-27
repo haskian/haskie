@@ -22,7 +22,10 @@ from haskie.indexing.chunk import split
 from haskie.search import section
 from haskie.search.passage import HitRange, ranges
 from haskie.search.section import Entry, Section
-from haskie.settings import ChunkSettings
+from haskie.settings import ChunkSettings, ScoreFold
+
+HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
+
 
 MARKDOWN = """# Guide
 
@@ -70,7 +73,7 @@ def _hit(seq: int, score: float = 1.0) -> Hit:
 def _range(
     seq: int, score: float = 1.0, aspects: list[str] | None = None, doc: str = DOC
 ) -> HitRange:
-    (found,) = ranges([msgspec.structs.replace(_hit(seq, score), document=doc)])
+    (found,) = ranges([msgspec.structs.replace(_hit(seq, score), document=doc)], how=HARMONIC)
     return msgspec.structs.replace(found, aspects=aspects or [])
 
 

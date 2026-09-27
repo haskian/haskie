@@ -24,7 +24,9 @@ from haskie.search import probe, retrieval, section
 from haskie.search.collapse import Vector
 from haskie.search.passage import ranges
 from haskie.search.retrieval import Plan, Scanned
-from haskie.settings import ChunkSettings, Reranker, SearchSettings
+from haskie.settings import ChunkSettings, Reranker, ScoreFold, SearchSettings
+
+HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
 
 MARKDOWN = (
     "# Guide\n\n## Retries\n\n"
@@ -34,6 +36,7 @@ MARKDOWN = (
     )
     + "\n\n## Other\n\nThe other section talks about something else entirely, far from here.\n"
 )
+
 DOC = "guide.md"
 ON, OFF = [1.0, 0.0], [0.0, 1.0]
 QUERY = "How do retries back off?"
@@ -87,7 +90,7 @@ async def test_a_section_fills_by_what_its_chunks_mean(tmp_path: Path) -> None:
     is off-topic (-1) and chunk 5 on it (+1): the run sums to 0, not above, so neither joins."""
     where, hits = await _index(tmp_path, VECTORS)
     kept = [hits[1], hits[3]]
-    groups = await retrieval.sections(ranges(kept), where, limit=5)
+    groups = await retrieval.sections(ranges(kept, how=HARMONIC), where, limit=5)
 
     (filled,) = await retrieval.fill(groups, _asked(), where)
 
@@ -176,8 +179,10 @@ async def test_a_chunk_near_two_groups_is_a_candidate_of_each(
     continues; one map of chunk to group gave it to whichever came last."""
     where, hits = await _index(tmp_path, VECTORS)
     within = section.Section(("Guide", "Retries"), 1, 6)
-    retries = section.Group("notes", DOC, within, ranges([hits[1]]))
-    guide = section.Group("notes", DOC, section.Section(("Guide",), 1, 7), ranges([hits[3]]))
+    retries = section.Group("notes", DOC, within, ranges([hits[1]], how=HARMONIC))
+    guide = section.Group(
+        "notes", DOC, section.Section(("Guide",), 1, 7), ranges([hits[3]], how=HARMONIC)
+    )
     offered: dict[int, set[int]] = {}
     fills = retrieval.filling.fills
 
@@ -209,7 +214,7 @@ async def test_a_filled_chunk_tags_a_question_only_without_a_reranker(
     judge = Reranker.CROSS_ENCODER if reranker else Reranker.NONE
     settings = SearchSettings(max_passage_grow=2, reranker=judge)
     where = msgspec.structs.replace(where, settings=settings)
-    groups = await retrieval.sections(ranges([hits[1]]), where, limit=1)
+    groups = await retrieval.sections(ranges([hits[1]], how=HARMONIC), where, limit=1)
     asked = [
         probe.Question(vector=ON, asked=QUERY, label="q1"),
         probe.Question(vector=OFF, asked="What else?", label="q2"),

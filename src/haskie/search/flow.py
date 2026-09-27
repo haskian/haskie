@@ -264,9 +264,11 @@ async def fold(ctx: StepContext[Search, None, list[retrieval.Ranged]]) -> list[H
         return await retrieval.collapse_ranges(ranged[0], plan.embedding, plan.settings.mode, None)
     labels = [one.asked for one in state.questions]
     depth = aspects.depth(len(labels), state.limit)
-    by_score = plan.settings.reranker != Reranker.NONE
+    settings = plan.settings
+    by_score = settings.reranker != Reranker.NONE
+    how = settings.score_fold
     return await retrieval.cover(
-        ranged, labels, plan.embedding, plan.settings.mode, depth, state.scan, by_score
+        ranged, labels, plan.embedding, settings.mode, depth, state.scan, by_score, how
     )
 
 
@@ -310,8 +312,10 @@ async def quote(ctx: StepContext[Search, None, list[section.Group]]) -> list[Exc
 async def shortlist(ctx: StepContext[Search, None, retrieval.Scanned]) -> Sources:
     """The same hits folded per document instead of per passage, with the collections to read
     them from."""
+    state = ctx.state
+    how = state.plan.settings.score_fold
     return await retrieval.shortlist(
-        ctx.inputs.hits, ctx.state.plan.names, ctx.state.limit, ctx.state.sections
+        ctx.inputs.hits, state.plan.names, state.limit, state.sections, how
     )
 
 

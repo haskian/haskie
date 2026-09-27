@@ -31,6 +31,7 @@ from haskie.collection.index import ChunkKey, chunk_key
 from haskie.errors import InvalidInput
 from haskie.search import probe
 from haskie.search.passage import HitRange, PassageReference, continues, harmonic, rejoin
+from haskie.settings import ScoreFold
 
 MAX_QUESTIONS = 5  # Perplexity and OpenSearch cap several queries at 5; xQuAD degrades past few
 MAX_QUESTION = 500  # judgement: a question, not a pasted document
@@ -105,7 +106,7 @@ class Pick(msgspec.Struct):
     taken: int = 1
 
 
-def interleave(ranked: list[list[HitRange]], depth: int, cap: int) -> list[Pick]:
+def interleave(ranked: list[list[HitRange]], depth: int, cap: int, how: ScoreFold) -> list[Pick]:
     """The ranges of every part in the order the turns pick them, at most `cap`.
 
     `ranked` is one list per part, best first. The output is deeper than any answer: the fold
@@ -125,7 +126,7 @@ def interleave(ranked: list[list[HitRange]], depth: int, cap: int) -> list[Pick]
             credit = sum(1 for pick in picks if part in pick.ranked_high)
             if cursors[part] >= len(found) or credit > turn:
                 continue
-            _take(picks, found[cursors[part]], part, tops)
+            _take(picks, found[cursors[part]], part, tops, how)
             cursors[part] += 1
         turn += 1
     return picks
@@ -154,7 +155,13 @@ def _joins(pick: HitRange, candidate: HitRange) -> bool:
     )
 
 
-def _take(picks: list[Pick], candidate: HitRange, part: int, tops: list[list[HitRange]]) -> None:
+def _take(
+    picks: list[Pick],
+    candidate: HitRange,
+    part: int,
+    tops: list[list[HitRange]],
+    how: ScoreFold,
+) -> None:
     """`candidate` as a new pick, or joined into the picks it overlaps or continues in the same
     section: those merge into the earliest of them, which keeps its place in the order."""
     touching = [pick for pick in picks if _joins(pick.span, candidate)]
@@ -163,7 +170,7 @@ def _take(picks: list[Pick], candidate: HitRange, part: int, tops: list[list[Hit
         return
     first, *rest = touching
     # overlapping or continuing each other in one section, they rebuild into one range
-    (first.span,) = rejoin([first.span, *(pick.span for pick in rest), candidate])
+    (first.span,) = rejoin([first.span, *(pick.span for pick in rest), candidate], how)
     first.questions |= {part}.union(*(pick.questions for pick in rest))
     first.taken += 1 + sum(pick.taken for pick in rest)
     first.ranked_high = _ranked_high(first.span, tops)

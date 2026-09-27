@@ -33,9 +33,10 @@ flowchart LR
 The last of these steps to run sets a chunk's score. With a reranker on, it is the sigmoid of the
 cross-encoder's logit, 0 to 1, so switching the mode only changes which `candidates` it reads: a
 chunk found in both modes scores the same. The sigmoid is there because most logits are negative,
-and a passage's score (the harmonic mean below) is 0 for any score at or below 0. Without one, several collections give a rank-fusion score, and one
-collection keeps its mode's own: BM25, `1 / (1 + squared L2 distance)`, or the fused score of
-`rrf` or `linear`. Passages, excerpts and documents then fold chunk scores their own way.
+and the harmonic rule below folds any score at or below 0 to 0. Without one, several collections
+give a rank-fusion score, and one collection keeps its mode's own: BM25, `1 / (1 + squared L2
+distance)`, or the fused score of `rrf` or `linear`. Passages, excerpts and documents then fold
+chunk scores their own way.
 
 Each step that sets or changes a score says how as it runs (`search/scoring.py`), the way each
 step's time goes into `Server-Timing`. A search answers with that lineage, in pipeline order, in
@@ -165,12 +166,26 @@ search logs `search_thin` with the signal used and how many passages grew, staye
 dropped. With several questions, each question's passages are grown or dropped against that
 question.
 
-`search_sources` scores a document by the harmonic mean of its best chunk and the sum of all its
-matched chunks. Every further chunk lifts the score, but the mean stays under twice the best
-chunk. So a document that answers throughout outranks one that answers once, and weak mentions
-cannot pile up without limit. It also returns a small set of collections that holds every
-document listed, ready for `set_session_collections`. The set comes from the standard greedy
+`search_sources` scores a document, and each of its sections, by folding the scores of the chunks it
+matched (see "How chunk scores fold" below). It also returns a small set of collections that holds
+every document listed, ready for `set_session_collections`. The set comes from the standard greedy
 approximation of set cover, so it is small but not guaranteed smallest.
+
+## How chunk scores fold
+
+A passage, a document and a document's section each hold several matched chunks, and the
+`score_fold` setting (`passage.fold`) turns their scores into one:
+
+| rule | score | who scores this way |
+|---|---|---|
+| `sum` (default) | every matched chunk adds, so more matching text ranks higher | Vespa's chunk example: `sum(chunk_scores())` [4] |
+| `max` | the best chunk alone | Elasticsearch `semantic_text`: "the most relevant passage will be used to compute a score" [5] |
+| `harmonic` | harmonic(best, sum): between the best and twice it, so many weak chunks never outrank one strong one | haskie's own rule; no source measures it against the other two |
+
+A chunk the search did not rank, one a passage grew into or the fill added, scores 0 and adds
+nothing under any rule. An excerpt scores its best passage. The near-duplicate fold still measures
+two results' overlap as the harmonic mean of its two directions, whatever `score_fold` is: that is
+an overlap, not a score of matched chunks. Every search's score lineage names the rule it used.
 
 ## Folding repeats
 
@@ -312,3 +327,7 @@ Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/coll
    Coverage." *ICTIR*, 2026. https://arxiv.org/abs/2603.08819
 3. D-Star AI. "dsRAG: Relevant Segment Extraction." GitHub, 2024.
    https://github.com/D-Star-AI/dsRAG/blob/main/dsrag/rse.py
+4. Vespa. "Working with chunks." Vespa documentation, 2026.
+   https://docs.vespa.ai/en/rag/working-with-chunks.html
+5. Elastic. "semantic_text field type reference: chunking." Elasticsearch documentation, 2026.
+   https://www.elastic.co/docs/reference/elasticsearch/mapping-reference/semantic-text-reference

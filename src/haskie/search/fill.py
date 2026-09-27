@@ -29,6 +29,7 @@ import msgspec
 from haskie.collection.index import ChunkKey, Hit, chunk_key
 from haskie.search.passage import continues, part, rejoin
 from haskie.search.section import Group
+from haskie.settings import ScoreFold
 
 
 class Candidate(msgspec.Struct, frozen=True):
@@ -155,10 +156,10 @@ def choose(found: list[Fill], room: int) -> list[Fill]:
     return chosen
 
 
-def apply(one: Group, taken: list[Candidate]) -> Group:
+def apply(one: Group, taken: list[Candidate], how: ScoreFold) -> Group:
     """The group with `taken` chunks joined to its passages (`passage.rejoin`), so a bridged gap
     makes two passages one. Each joined chunk brings the question it answers best."""
     if not taken:
         return one
     added = [part(chunk.hit, [chunk.aspect] if chunk.aspect else None) for chunk in taken]
-    return msgspec.structs.replace(one, ranges=rejoin([*one.ranges, *added]))
+    return msgspec.structs.replace(one, ranges=rejoin([*one.ranges, *added], how))

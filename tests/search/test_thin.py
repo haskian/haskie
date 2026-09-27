@@ -20,7 +20,10 @@ from haskie.indexing.chunk import split
 from haskie.search import thin
 from haskie.search.fill import Candidate
 from haskie.search.passage import HitRange, ranges
-from haskie.settings import ChunkSettings
+from haskie.settings import ChunkSettings, ScoreFold
+
+HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
+
 
 MARKDOWN = """# Retries
 
@@ -57,7 +60,7 @@ HITS = {
 
 
 def _range(*seqs: int) -> HitRange:
-    (found,) = ranges([HITS[seq] for seq in seqs])
+    (found,) = ranges([HITS[seq] for seq in seqs], how=HARMONIC)
     return found
 
 
@@ -229,7 +232,7 @@ def test_a_thin_range_grows_by_matching_neighbours_or_goes(
     expected: list[tuple[int, int, bool]],
     counts: tuple[int, int],
 ) -> None:
-    filled = thin.fill(found, _neighbours(values), min_chars, reach)
+    filled = thin.fill(found, _neighbours(values), min_chars, reach, how=HARMONIC)
 
     assert [(one.seq_start, one.seq_end, one.alone) for one in filled.ranges] == expected, name
     counted = (filled.grown, sum(one.alone for one in filled.ranges))
@@ -241,7 +244,7 @@ def test_a_neighbour_that_joins_leaves_the_range_score_as_it_matched() -> None:
     ranked, so it lifts nothing."""
     found = _range(1)
 
-    (grown,) = thin.fill([found], _neighbours({2: MATCH}), 300, 1).ranges
+    (grown,) = thin.fill([found], _neighbours({2: MATCH}), 300, 1, how=HARMONIC).ranges
 
     assert grown.score == found.score
     assert [(hit.seq, hit.score) for hit in grown.hits] == [(1, 1.0), (2, 0.0)]
@@ -280,7 +283,7 @@ def test_judging_marks_what_could_grow_and_grows_nothing() -> None:
     with a neighbour worth taking stands, one without is alone, and neither takes a chunk."""
     found = [_range(6), _range(1), _range(4)]
 
-    filled = thin.fill(found, _neighbours({2: MATCH, 3: -1.0}), 300, 2, grows=False)
+    filled = thin.fill(found, _neighbours({2: MATCH, 3: -1.0}), 300, 2, grows=False, how=HARMONIC)
 
     shape = [(one.seq_start, one.seq_end, one.alone) for one in filled.ranges]
     assert shape == [(1, 1, False), (4, 4, True), (6, 6, False)], "best first, ties by place"

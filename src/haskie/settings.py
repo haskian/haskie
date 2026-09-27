@@ -58,6 +58,15 @@ class Fusion(StrEnum):
     LINEAR = "linear"
 
 
+class ScoreFold(StrEnum):
+    """How the scores of several matched chunks fold into one: a passage's, a document's, a
+    section's (`passage.fold`)."""
+
+    MAX = "max"
+    SUM = "sum"
+    HARMONIC = "harmonic"
+
+
 class Reranker(StrEnum):
     NONE = "none"
     CROSS_ENCODER = "cross-encoder"
@@ -277,6 +286,15 @@ FUSION = Meta(
         "using Vector weight and BM25 weight."
     ),
 )
+SCORE_FOLD = Meta(
+    title="Passage and document score",
+    description=(
+        "How the scores of a passage's matched chunks, or a document's, fold into one. sum: every "
+        "matched chunk adds, so more evidence ranks higher (Vespa's chunk example). max: the best "
+        "chunk alone (Elasticsearch semantic_text). harmonic: between the best and twice it, so "
+        "more chunks lift a result but many weak ones never outrank one strong one."
+    ),
+)
 RRF_K = Meta(
     title="RRF k",
     description=(
@@ -464,6 +482,7 @@ class SearchSettings(msgspec.Struct):
     reranker: Annotated[Reranker, RERANKER] = Reranker.NONE
     reranker_model: Annotated[str, RERANKER_MODEL] = DEFAULT_RERANKER
     rerank_with_context: Annotated[bool, RERANK_WITH_CONTEXT] = False
+    score_fold: Annotated[ScoreFold, SCORE_FOLD] = ScoreFold.SUM
     min_rerank_score: Annotated[float, MIN_RERANK_SCORE] = 0.05
     min_passage_chars: Annotated[int, MIN_PASSAGE_CHARS] = 300
     max_passage_grow: Annotated[int, MAX_PASSAGE_GROW] = 2
@@ -491,6 +510,7 @@ class SearchOverrides(msgspec.Struct):
     reranker: Annotated[Reranker | None, RERANKER] = None
     reranker_model: Annotated[str | None, RERANKER_MODEL] = None
     rerank_with_context: Annotated[bool | None, RERANK_WITH_CONTEXT] = None
+    score_fold: Annotated[ScoreFold | None, SCORE_FOLD] = None
     min_rerank_score: Annotated[float | None, MIN_RERANK_SCORE] = None
     min_passage_chars: Annotated[int | None, MIN_PASSAGE_CHARS] = None
     max_passage_grow: Annotated[int | None, MAX_PASSAGE_GROW] = None

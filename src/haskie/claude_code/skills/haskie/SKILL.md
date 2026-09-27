@@ -96,10 +96,10 @@ and `collections`. Use it to learn which documents or collections cover a topic,
 and run `search_excerpts` again.
 
 - `limit`: documents, 1 to 100, default 10. `sections`: headings per document, 1 to 20, default 3.
-- Per document: `document`, `description`, `score` (its best chunk folded with every chunk it
-  matched, so a document that answers throughout beats one that answers once), `chunks` (how many
-  matched), `collections` (the searched ones holding it), its best chunk as `text`, `header`,
-  `location` and `line_start`/`line_end`, and `markdown_file`/`source_file`.
+- Per document: `document`, `description`, `score` (every chunk it matched folded into one, by
+  default their sum, so a document that answers throughout beats one that answers once), `chunks`
+  (how many matched), `collections` (the searched ones holding it), its best chunk as `text`,
+  `header`, `location` and `line_start`/`line_end`, and `markdown_file`/`source_file`.
 - `sections`: the hottest headings inside it, each with `header`, `score`, `chunks`, `location`
   and `line_start`/`line_end`. Read them to know where to look in a long document.
 - `collections` at the top level: a small set of collections that together hold every document

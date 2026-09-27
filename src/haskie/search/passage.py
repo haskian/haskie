@@ -11,9 +11,9 @@ offsets cover into a passage. `top_documents` and `fold_sources` answer the othe
 which documents and which collections cover this. They fold the same hits per document instead
 of per range.
 
-`harmonic` is the scoring rule all of them share: a range or a document scores the harmonic mean
-of its best chunk and the sum of every chunk it holds. No IO: `retrieval.py` reads the markdown
-and the memberships and hands them in.
+`fold` is the scoring rule all of them share: how a range's or a document's chunk scores become one,
+by the `score_fold` setting (`ScoreFold`). No IO: `retrieval.py` reads the markdown and the
+memberships and hands them in.
 """
 
 import msgspec
@@ -21,19 +21,40 @@ import msgspec
 from haskie.collection.index import ChunkKey, Hit, Overlaps, Relation, chunk_key, location
 from haskie.document.convert import without_markers
 from haskie.indexing.segment import CutReason
+from haskie.settings import ScoreFold
 
 # --- scoring ---------------------------------------------------------------------
+
+
+def fold(scores: list[float], how: ScoreFold) -> float:
+    """The scores of several matched chunks as one, by the `score_fold` setting:
+
+    - `sum`: every chunk adds, so a result with more matching text ranks higher. Vespa scores a
+      chunked document so in its example (`sum(chunk_scores())`, "Working with chunks").
+    - `max`: the best chunk alone, so a result is as good as its best part. Elasticsearch scores a
+      `semantic_text` field so: "the most relevant passage will be used to compute a score".
+    - `harmonic`: harmonic(best, sum), between the best and twice it. Every further chunk lifts
+      the result, but many weak chunks never outrank one strong one. haskie's own rule; no source
+      measures it against the other two.
+
+    A chunk the search did not rank (grown or filled in) scores 0 and adds nothing under any of
+    them. Empty is 0."""
+    if not scores:
+        return 0.0
+    if how == ScoreFold.MAX:
+        return max(scores)
+    if how == ScoreFold.SUM:
+        return sum(scores)
+    return harmonic(max(scores), sum(scores))
 
 
 def harmonic(a: float, b: float) -> float:
     """The harmonic mean of `a` and `b`: pulled toward the smaller, so one weak value holds the
     whole down, and 0 when either is 0 or less.
 
-    Two uses. How strongly a range or a document matches is harmonic(best chunk, sum of all its
-    matched chunks): a document matched once scores its one chunk, every further chunk lifts it,
-    but the mean stays under twice the best, so many weak chunks never outrank one strong one, and
-    a document with a few strong chunks is not held back for having few. How strongly two results
-    overlap is harmonic(contained, contains) (`collapse`): high only when each holds the other."""
+    Two uses. The `harmonic` rule of `fold` is harmonic(best chunk, sum of all). How strongly two
+    results overlap is harmonic(contained, contains) (`collapse`): high only when each holds the
+    other, whichever rule folds the scores."""
     if a <= 0 or b <= 0:
         return 0.0
     return 2 * a * b / (a + b)
@@ -77,7 +98,7 @@ class HitRange(msgspec.Struct):
     byte_end: int
     page_start: int | None  # 1-based PDF pages, every member's (see `pages`); None for non-PDF
     page_end: int | None
-    score: float  # harmonic(best, sum) over the members
+    score: float  # its members' scores, folded by the search's rule (`fold`)
     also_in: list[PassageReference] = []  # the near-duplicates folded in (`collapse`), a tree
     aspects: list[str] = []  # the questions it answers when several were asked (`aspects`)
     # how well it matched each question whose own ranking holds its chunks (`aspects.tagged`)
@@ -127,8 +148,8 @@ def continues(before: Hit, after: Hit) -> bool:
     ) and not ends_section(before)
 
 
-def ranges(hits: list[Hit]) -> list[HitRange]:
-    """Fold hits into ranges, best range first.
+def ranges(hits: list[Hit], how: ScoreFold) -> list[HitRange]:
+    """Fold hits into ranges, best range first, each scored by `how` (`fold`).
 
     Only chunks with no gap between them merge, and only within one section (`continues`): a gap
     is text the query did not match, and bridging it would put an unmatched paragraph inside a
@@ -146,11 +167,11 @@ def ranges(hits: list[Hit]) -> list[HitRange]:
     run: list[Hit] = []
     for hit in sorted(hits, key=lambda hit: (hit.collection, hit.document, hit.seq)):
         if run and not continues(run[-1], hit):
-            found.append(_range(run))
+            found.append(_range(run, how))
             run = []
         run.append(hit)
     if run:
-        found.append(_range(run))
+        found.append(_range(run, how))
     return sorted(found, key=lambda found: (-found.score, found.hits[0].document, found.seq_start))
 
 
@@ -158,13 +179,14 @@ def part(hit: Hit, aspects: list[str] | None = None) -> HitRange:
     """One chunk a search did not rank, as a range to `rejoin` to the ranges it sits next to: its
     score 0, so a range it joins scores what its ranked chunks matched, and the questions it
     answers, if any."""
-    (found,) = ranges([msgspec.structs.replace(hit, score=0.0)])
+    # a score of 0 folds to 0 under every rule
+    (found,) = ranges([msgspec.structs.replace(hit, score=0.0)], ScoreFold.SUM)
     return msgspec.structs.replace(found, aspects=aspects or [])
 
 
-def rejoin(parts: list[HitRange]) -> list[HitRange]:
-    """The ranges over every chunk `parts` hold, rebuilt by `ranges`, so parts that overlap or
-    continue each other in one section become one range, best first.
+def rejoin(parts: list[HitRange], how: ScoreFold) -> list[HitRange]:
+    """The ranges over every chunk `parts` hold, rebuilt by `ranges` and scored by `how`, so parts
+    that overlap or continue each other in one section become one range, best first.
 
     A chunk several parts hold counts once, as the first of them has it. Each rebuilt range
     carries what its parts carried: their folded places, their questions in the order the parts
@@ -179,7 +201,7 @@ def rejoin(parts: list[HitRange]) -> list[HitRange]:
     for at, one in enumerate(parts):
         starts.setdefault(chunk_key(one.hits[0]), []).append(at)
     rebuilt: list[HitRange] = []
-    for one in ranges(list(hits.values())):
+    for one in ranges(list(hits.values()), how):
         held = [
             parts[at]
             for at in sorted(at for hit in one.hits for at in starts.get(chunk_key(hit), ()))
@@ -208,9 +230,8 @@ def best_of(scores: list[dict[str, float]]) -> dict[str, float]:
     return best
 
 
-def _range(hits: list[Hit]) -> HitRange:
+def _range(hits: list[Hit], how: ScoreFold) -> HitRange:
     """One range out of an ascending run of hits of one document."""
-    best = max(hit.score for hit in hits)
     page_start, page_end = pages(hits)
     return HitRange(
         hits=hits,
@@ -224,7 +245,7 @@ def _range(hits: list[Hit]) -> HitRange:
         byte_end=max(hit.byte_end for hit in hits),
         page_start=page_start,
         page_end=page_end,
-        score=harmonic(best, sum(hit.score for hit in hits)),
+        score=fold([hit.score for hit in hits], how),
     )
 
 
@@ -372,9 +393,9 @@ class HotSection(msgspec.Struct):
 class Source(msgspec.Struct):
     """One document the query matched, and the best evidence that it did.
 
-    The answer to "which documents should I read", not "which passages answer this": `score` is
-    the harmonic mean of the document's best chunk and the sum of every scanned chunk that came
-    from it (see `harmonic`), and `chunks` how many there were. The evidence fields are its best
+    The answer to "which documents should I read", not "which passages answer this": `score`
+    folds every scanned chunk that came from it by the search's rule (`fold`), and `chunks` says
+    how many there were. The evidence fields are its best
     chunk; `sections` and `collections` say where in the document the query landed and which of
     the searched collections hold it.
     """
@@ -404,15 +425,14 @@ class Sources(msgspec.Struct):
     collections: list[str]  # the fewest that together hold every document above
 
 
-def _document_score(hits: list[Hit]) -> float:
-    """How strongly one document matched, from its chunks in ranked order: its best chunk folded
-    with the sum of all of them."""
-    return harmonic(hits[0].score, sum(hit.score for hit in hits))
+def _document_score(hits: list[Hit], how: ScoreFold) -> float:
+    """How strongly one document matched: its chunks' scores folded by `how` (`fold`)."""
+    return fold([hit.score for hit in hits], how)
 
 
-def top_documents(hits: list[Hit], limit: int) -> list[list[Hit]]:
+def top_documents(hits: list[Hit], limit: int, how: ScoreFold) -> list[list[Hit]]:
     """The `limit` documents `hits` (best first) point at hardest, best first, each as the chunks
-    it was matched by.
+    it was matched by, scored by `how` (`fold`).
 
     By document name alone, not by (collection, document): a document in two collections is one
     document to read. Cut here rather than after the rows are built, because every document that
@@ -421,23 +441,27 @@ def top_documents(hits: list[Hit], limit: int) -> list[list[Hit]]:
     by_doc: dict[str, list[Hit]] = {}
     for hit in hits:
         by_doc.setdefault(hit.document, []).append(hit)
-    ranked = sorted(by_doc.values(), key=lambda group: (-_document_score(group), group[0].document))
+    ranked = sorted(
+        by_doc.values(), key=lambda group: (-_document_score(group, how), group[0].document)
+    )
     return ranked[:limit]
 
 
 def fold_sources(
-    groups: list[list[Hit]], memberships: dict[str, list[str]], sections: int
+    groups: list[list[Hit]], memberships: dict[str, list[str]], sections: int, how: ScoreFold
 ) -> Sources:
     """Fold the kept documents (see `top_documents`) to one row each, in the order given, and
     cover them with the fewest collections."""
-    documents = [_source(group, memberships, sections) for group in groups]
+    documents = [_source(group, memberships, sections, how) for group in groups]
     return Sources(
         documents=documents,
         collections=min_cover({source.document: source.collections for source in documents}),
     )
 
 
-def _source(hits: list[Hit], memberships: dict[str, list[str]], sections: int) -> Source:
+def _source(
+    hits: list[Hit], memberships: dict[str, list[str]], sections: int, how: ScoreFold
+) -> Source:
     """One document's row from its matched chunks, in the order they were ranked: the first hit
     is its best one, and the passage the row shows. `description` is left empty for the caller to
     fill, because it lives in the metadata store and nothing here does IO."""
@@ -445,7 +469,7 @@ def _source(hits: list[Hit], memberships: dict[str, list[str]], sections: int) -
     return Source(
         collection=best.collection,
         document=best.document,
-        score=_document_score(hits),
+        score=_document_score(hits, how),
         chunks=len(hits),
         description="",
         header=best.header,
@@ -457,11 +481,11 @@ def _source(hits: list[Hit], memberships: dict[str, list[str]], sections: int) -
         line_end=best.line_end,
         # a document whose memberships were not looked up is credited to the table that matched it
         collections=memberships.get(best.document, [best.collection]),
-        sections=_sections(hits, sections),
+        sections=_sections(hits, sections, how),
     )
 
 
-def _sections(hits: list[Hit], limit: int) -> list[HotSection]:
+def _sections(hits: list[Hit], limit: int, how: ScoreFold) -> list[HotSection]:
     """The `limit` headings of one document the query landed under hardest, scored the way the
     document itself is. `hits` is best first, so each group's first member is its best chunk."""
     by_header: dict[str, list[Hit]] = {}
@@ -475,7 +499,7 @@ def _sections(hits: list[Hit], limit: int) -> list[HotSection]:
         found.append(
             HotSection(
                 header=header,
-                score=harmonic(best.score, sum(hit.score for hit in group)),
+                score=fold([hit.score for hit in group], how),
                 chunks=len(group),
                 line_start=line_start,
                 line_end=line_end,

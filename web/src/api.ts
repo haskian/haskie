@@ -82,6 +82,7 @@ export type MemberStatus = Member['status']
 export type SearchMode = NonNullable<SearchSettings['mode']>
 export type Fusion = NonNullable<SearchSettings['fusion']>
 export type Reranker = NonNullable<SearchSettings['reranker']>
+export type ScoreFold = NonNullable<SearchSettings['score_fold']>
 export type OperationKind = Operation['kind']
 export type Stage = Job['stage']
 export type RunStatus = Operation['status']

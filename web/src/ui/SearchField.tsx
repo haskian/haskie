@@ -57,6 +57,12 @@ export function SearchField({
           <Picker ariaLabel={doc.title} options={choices(options.fusions)} value={search.fusion} onChange={(fusion) => onChange({ ...search, fusion })} />
         </Field>
       )
+    case 'score_fold':
+      return (
+        <Field label={doc.title} help={doc.description}>
+          <Picker ariaLabel={doc.title} options={choices(options.score_folds)} value={search.score_fold} onChange={(score_fold) => onChange({ ...search, score_fold })} />
+        </Field>
+      )
     case 'reranker':
       return (
         <Field label={doc.title} help={doc.description}>

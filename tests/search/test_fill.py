@@ -18,7 +18,9 @@ from haskie.search import fill
 from haskie.search.fill import Candidate, Fill
 from haskie.search.passage import HitRange, ranges
 from haskie.search.section import Group, Section
-from haskie.settings import ChunkSettings
+from haskie.settings import ChunkSettings, ScoreFold
+
+HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
 
 MARKDOWN = (
     "# Guide\n\n## Retries\n\n"
@@ -29,6 +31,7 @@ MARKDOWN = (
     )
     + "\n\n## Other\n\nThe other section talks about something else entirely, far from retries.\n"
 )
+
 DOC = "retries.md"
 COLLECTION = "notes"
 CHUNKS = split(MARKDOWN, ChunkSettings(chunk_size=150, chunk_merge_below=0))
@@ -41,7 +44,7 @@ SIZE = 93  # every paragraph's length
 
 
 def _range(*seqs: int, aspects: list[str] | None = None) -> HitRange:
-    (found,) = ranges([HITS[seq] for seq in seqs])
+    (found,) = ranges([HITS[seq] for seq in seqs], how=HARMONIC)
     return msgspec.structs.replace(found, aspects=aspects or [])
 
 
@@ -209,7 +212,7 @@ def test_a_bridged_gap_makes_two_passages_one_that_keeps_what_both_held() -> Non
     second = _range(5, aspects=["b"])
     taken = list(_candidates({3: 0.6, 4: 0.1}, aspect="c").values())
 
-    (joined,) = fill.apply(_group(first, second), taken).ranges
+    (joined,) = fill.apply(_group(first, second), taken, how=HARMONIC).ranges
 
     assert (joined.seq_start, joined.seq_end) == (2, 5)
     assert joined.aspects == ["a", "b", "c"], "the passages' questions, then the fill's"
@@ -219,7 +222,7 @@ def test_a_bridged_gap_makes_two_passages_one_that_keeps_what_both_held() -> Non
 def test_a_group_that_takes_nothing_is_unchanged() -> None:
     one = _group(_range(2))
 
-    assert fill.apply(one, []) is one
+    assert fill.apply(one, [], how=HARMONIC) is one
 
 
 # --- the fill, over many random sections ----------------------------------------------------
@@ -241,7 +244,7 @@ def test_a_fill_takes_only_unkept_chunks_of_its_section_within_the_room(seed: in
 
     chosen = fill.choose(fill.fills(0, one, _candidates(values), reach), room)
     taken = [chunk for piece in chosen for chunk in piece.chunks]
-    joined = fill.apply(one, taken)
+    joined = fill.apply(one, taken, how=HARMONIC)
 
     seqs = [chunk.hit.seq for chunk in taken]
     assert len(seqs) == len(set(seqs)), "a chunk is taken once"

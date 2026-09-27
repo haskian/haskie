@@ -18,7 +18,9 @@ from haskie.collection.index import Hit, Overlap, Relation, location
 from haskie.indexing import chunk
 from haskie.search import collapse
 from haskie.search.passage import HitRange, ranges
-from haskie.settings import Chunker, ChunkSettings, SearchMode
+from haskie.settings import Chunker, ChunkSettings, ScoreFold, SearchMode
+
+HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
 
 RETRY = "A background job retries a failed HTTP call, so the call has to be idempotent."
 REWORDED = "Make the side effect safe to repeat, because the job may run the request twice."
@@ -33,6 +35,7 @@ MENTIONS = (
     "The domain is the set of activities that those processes support. We show the Docker "
     "configuration in Appendix D, and you'd find the rest of the setup there too."
 )
+
 HEADING = "## <u>APPENDIX D</u>"
 # RETRY and BACKOFF in one chunk: a fuller passage that holds two results kept apart
 BOTH = f"{RETRY} {BACKOFF}"
@@ -385,7 +388,10 @@ async def test_a_repeat_the_new_leader_does_not_place_stays_under_the_one_it_rep
     ("name", "fold"),
     [
         ("hits", lambda found, spaces: collapse.hits(found, spaces, 3)),
-        ("ranges", lambda found, spaces: collapse.ranges(ranges(found), found, spaces, 3)),
+        (
+            "ranges",
+            lambda found, spaces: collapse.ranges(ranges(found, how=HARMONIC), found, spaces, 3),
+        ),
     ],
 )
 @pytest.mark.anyio
@@ -501,7 +507,9 @@ def _passage(texts: list[str], document: str, first_seq: int, score: float) -> l
 def _ranges(
     scanned: list[Hit], vectors: np.ndarray, limit: int, model: EmbeddingModel
 ) -> list[HitRange]:
-    return collapse.ranges(ranges(scanned), scanned, _embedded(scanned, vectors, model), limit)
+    return collapse.ranges(
+        ranges(scanned, how=HARMONIC), scanned, _embedded(scanned, vectors, model), limit
+    )
 
 
 E1, E2, E3, E4 = (list(row) for row in np.eye(4))
@@ -583,7 +591,7 @@ async def test_a_folded_range_points_at_its_own_lines(bge_small: EmbeddingModel)
     (kept,) = _ranges(scanned, _unit(E1, E2, E3, E2), 2, bge_small)
 
     (reference,) = kept.also_in
-    (small_range,) = ranges(small)
+    (small_range,) = ranges(small, how=HARMONIC)
     assert (reference.document, reference.seq_start, reference.seq_end) == ("note.md", 10, 10)
     assert (reference.line_start, reference.line_end) == (
         small_range.line_start,

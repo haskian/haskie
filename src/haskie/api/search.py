@@ -177,8 +177,9 @@ async def search_sources(
 ) -> Sources:
     """Which documents cover a topic, and which collections to select to read them.
 
-    One row per document rather than per passage: `score` folds its best matching chunk with all
-    of them (so many weak mentions never outrank one strong one), `chunks` counts them, `sections`
+    One row per document rather than per passage: `score` folds the scores of every chunk it
+    matched, by the `score_fold` setting (by default their sum, so a document that answers
+    throughout outranks one that answers once), `chunks` counts them, `sections`
     names the hottest headings inside it with their `location`, and `collections` says which of
     the searched collections hold it. `documents` is that list, best first; `collections` at the
     top level is the smallest set of collections covering every document in it — pass it to

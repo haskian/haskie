@@ -16,7 +16,9 @@ from haskie.search.passage import ranges
 from haskie.search.retrieval import Plan, Pool
 from haskie.search.scoring import RULES
 from haskie.search.section import Group, Section
-from haskie.settings import Fusion, Reranker, SearchMode, SearchSettings
+from haskie.settings import Fusion, Reranker, ScoreFold, SearchMode, SearchSettings
+
+HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
 
 MODEL = EmbeddingModel("test/model", 2)
 ON = [1.0, 0.0]
@@ -35,10 +37,7 @@ RERANK = (
     "only decides which candidates it reads, and a chunk scores the same in every mode that finds "
     "it. Chunks it scores under 0.05 are dropped."
 )
-PASSAGE = (
-    "A passage scores the harmonic mean of its best chunk and the sum of its matched chunks: "
-    "2·best·sum / (best + sum), between the best and twice it."
-)
+PASSAGE = "A passage scores the sum of its matched chunks' scores."
 
 
 def _search(
@@ -65,7 +64,9 @@ def _pool(*answered: str, empty: tuple[str, ...] = (), ranked: int = 0) -> Pool:
 
 
 def _groups(*seqs: int) -> list[Group]:
-    found = ranges([hit(f"chunk {seq}", 1.0, document="a.md", seq=seq) for seq in seqs])
+    found = ranges(
+        [hit(f"chunk {seq}", 1.0, document="a.md", seq=seq) for seq in seqs], how=HARMONIC
+    )
     return [Group("c0", "a.md", Section(("A",), 1, 9), found)]
 
 
@@ -216,7 +217,31 @@ def test_retrieval_says_how_each_collection_scored(
             None,
             f"{RERANK} It reads each question with the shared context in front.",
         ),
-        ("passages that are only judged", "judge_thin", _search(), None, None, PASSAGE),
+        (
+            "passages that are only judged, by the default sum",
+            "judge_thin",
+            _search(),
+            None,
+            None,
+            PASSAGE,
+        ),
+        (
+            "by the best chunk",
+            "judge_thin",
+            _search(SearchSettings(score_fold=ScoreFold.MAX)),
+            None,
+            None,
+            "A passage scores its best chunk's score.",
+        ),
+        (
+            "by the harmonic mean",
+            "judge_thin",
+            _search(SearchSettings(score_fold=ScoreFold.HARMONIC)),
+            None,
+            None,
+            "A passage scores the harmonic mean of its best chunk and the sum of its matched "
+            "chunks, 2·best·sum / (best + sum), between the best and twice it.",
+        ),
         (
             "passages that grow",
             "fill_thin",
@@ -281,9 +306,8 @@ def test_retrieval_says_how_each_collection_scored(
             _search(),
             None,
             None,
-            "A document scores the harmonic mean of its best chunk and the sum of all its matched "
-            "chunks: 2·best·sum / (best + sum), between the best and twice it. Each section of it "
-            "scores the same over its own chunks.",
+            "A document scores the sum of its matched chunks' scores. Each section of it scores "
+            "the same over its own chunks.",
         ),
     ],
 )

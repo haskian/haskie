@@ -9,6 +9,9 @@ from haskie.search import probe
 from haskie.search.passage import Excerpt, Span, ranges
 from haskie.search.probe import Question
 from haskie.search.section import Group, Section
+from haskie.settings import ScoreFold
+
+HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
 
 ORDER = Question(None, "How does an order keep inventory consistent?", label="order")
 LEDGER = Question(None, "How is the ledger reconciled?", label="ledger")
@@ -16,7 +19,7 @@ ALONE = Question(None, "How is the ledger reconciled?")
 
 
 def _group(document: str, text: str, path: tuple[str, ...] = ("Shop",)) -> Group:
-    (found,) = ranges([hit(text, 1.0, document=document)])
+    (found,) = ranges([hit(text, 1.0, document=document)], how=HARMONIC)
     return Group("backend", document, Section(path, 1, 1), [found])
 
 
@@ -37,6 +40,7 @@ def _group(document: str, text: str, path: tuple[str, ...] = ("Shop",)) -> Group
 def test_a_text_holds_a_word_or_a_form_of_it(
     name: str, word: str, text: str, expected: bool
 ) -> None:
+
     assert (probe.stem(word) in probe.vocabulary([text])) is expected, name
 
 
@@ -112,7 +116,7 @@ def test_the_kept_text_is_every_passage_and_heading() -> None:
 def test_a_probed_passage_is_tagged_with_the_questions_it_helps(
     name: str, text: str, questions: list[Question], expected: list[str]
 ) -> None:
-    (found,) = ranges([hit(text, 1.0)])
+    (found,) = ranges([hit(text, 1.0)], how=HARMONIC)
     wanted = probe.missing(questions, [])
 
     assert probe.tags(found, wanted) == expected, name

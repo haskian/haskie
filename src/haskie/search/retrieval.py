@@ -43,7 +43,7 @@ from haskie.logs import get_logger
 from haskie.search import aspects, collapse, passage, probe, section, session, text, thin
 from haskie.search import fill as filling
 from haskie.search.passage import Excerpt, Passage, Sources
-from haskie.settings import Reranker, SearchMode, SearchSettings, load_user_settings
+from haskie.settings import Reranker, ScoreFold, SearchMode, SearchSettings, load_user_settings
 
 _log = get_logger(__name__)
 
@@ -251,7 +251,7 @@ async def fill_thin(
     them, so a passage grows once.
     """
     settings = where.settings
-    hit_ranges = passage.ranges(scanned.hits)
+    hit_ranges = passage.ranges(scanned.hits, settings.score_fold)
     wanted = thin.around(hit_ranges, settings.min_passage_chars, settings.max_passage_grow)
     rows = await _rows_at(where, wanted) if wanted else {}
     reranked = None
@@ -309,7 +309,12 @@ def _thin(
     }
     settings = where.settings
     found = thin.fill(
-        hit_ranges, neighbours, settings.min_passage_chars, settings.max_passage_grow, grows
+        hit_ranges,
+        neighbours,
+        settings.min_passage_chars,
+        settings.max_passage_grow,
+        settings.score_fold,
+        grows,
     )
     return found, signal
 
@@ -444,8 +449,9 @@ def _cover(
     depth: int,
     cap: int,
     by_score: bool,
+    how: ScoreFold,
 ) -> list[passage.HitRange]:
-    picks = aspects.interleave([one.ranges for one in ranged], depth, cap)
+    picks = aspects.interleave([one.ranges for one in ranged], depth, cap, how)
     joined = _picked(picks, [one.scanned for one in ranged])
     scan = _spaces(joined, model, mode)
     # none cut: the sections they fall in are what the answer counts (`sections`)
@@ -472,13 +478,14 @@ async def cover(
     depth: int,
     cap: int,
     by_score: bool,
+    how: ScoreFold,
 ) -> list[passage.HitRange]:
     """The ranges across the parts of one question, in the order the parts took them, each with
     its near-duplicates folded in and tagged with the parts it answers (see `aspects`). None is
     cut: `sections` counts the answer. `ranged` holds one set of ranges and `labels` one question
     per part; `by_score` tags by the reranker's scores (`aspects.tagged`). A worker thread runs
     it, as `collapse_hits` says."""
-    return await cpu.on_cpu(_cover, ranged, labels, model, mode, depth, cap, by_score)
+    return await cpu.on_cpu(_cover, ranged, labels, model, mode, depth, cap, by_score, how)
 
 
 def _log_collapse(
@@ -565,7 +572,8 @@ async def fill(
     # with a reranker on, a question tags only what it judged an answer (`aspects.tagged`); the
     # fill weighs by vectors or words, so its chunks bring no tag of their own
     tags = where.settings.reranker == Reranker.NONE
-    return await cpu.on_cpu(_fill, groups, nears, rows, questions, reach, budget, tags)
+    how = where.settings.score_fold
+    return await cpu.on_cpu(_fill, groups, nears, rows, questions, reach, budget, tags, how)
 
 
 def _fill(
@@ -576,6 +584,7 @@ def _fill(
     reach: int,
     budget: int,
     tags: bool,
+    how: ScoreFold,
 ) -> list[section.Group]:
     held = [key for one in groups for hit in one.hits if (key := chunk_key(hit)) in rows]
     near = list(dict.fromkeys(key for keys in nears for key in keys if key in rows))
@@ -600,7 +609,7 @@ def _fill(
         added=sum(len(one.chunks) for one in chosen),
         chars=sum(one.chars for one in chosen),
     )
-    return [filling.apply(one, taken.get(at, [])) for at, one in enumerate(groups)]
+    return [filling.apply(one, taken.get(at, []), how) for at, one in enumerate(groups)]
 
 
 def _weigh(
@@ -662,7 +671,7 @@ async def probe_gaps(
     scores: dict[str, dict[ChunkKey, float]] = {}
     if reranked and hits:
         hits, scores = await _judged(hits[: probe.PROBE_SCAN], pool, wanted, where.settings)
-    fresh = passage.ranges(hits)
+    fresh = passage.ranges(hits, where.settings.score_fold)
     joined = None
     if fresh and reranked:
         found = aspects.question_scores([chunk_key(hit) for hit in fresh[0].hits], scores)
@@ -755,23 +764,25 @@ def _read_texts(hit_ranges: list[passage.HitRange]) -> list[str]:
         return texts
 
 
-async def shortlist(hits: list[Hit], names: list[str], limit: int, sections: int) -> Sources:
+async def shortlist(
+    hits: list[Hit], names: list[str], limit: int, sections: int, how: ScoreFold
+) -> Sources:
     """Which documents these hits came from, one row per document, and the collections to select
     to read them.
 
-    Its score folds its best chunk with the sum of every chunk it matched (see
-    `passage.harmonic`), `sections` says where in it the answer sits, and `collections` names
+    Its score folds every chunk it matched by `how` (`passage.fold`), `sections` says where in it
+    the answer sits, and `collections` names
     which of the searched collections hold it. `Sources.collections` is the cover: the fewest
     collections a follow-up search has to select to reach every row.
     """
     # the shortlist is cut first: only a document that made it is worth a membership and a
     # description, and both are one query for the whole of it
-    kept = passage.top_documents(hits, limit)
+    kept = passage.top_documents(hits, limit, how)
     docs = {group[0].document for group in kept}
     memberships, described = await asyncio.gather(
         document.memberships(docs, names), document.descriptions_of(docs)
     )
-    found = passage.fold_sources(kept, memberships, sections)
+    found = passage.fold_sources(kept, memberships, sections, how)
     document.fill_descriptions(found.documents, described)
     return found
 

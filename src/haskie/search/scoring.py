@@ -12,14 +12,22 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from haskie.collection.index import chunk_key, row_mode
-from haskie.settings import Fusion, Reranker, SearchMode, SearchSettings
+from haskie.settings import Fusion, Reranker, ScoreFold, SearchMode, SearchSettings
 
 if TYPE_CHECKING:
     from haskie.search.flow import Search
     from haskie.search.retrieval import Pool
     from haskie.search.section import Group
 
-_HARMONIC = "2·best·sum / (best + sum), between the best and twice it"
+# how each `score_fold` folds chunk scores into one (`passage.fold`), in the lineage's words
+_FOLDS = {
+    ScoreFold.SUM: "the sum of its matched chunks' scores",
+    ScoreFold.MAX: "its best chunk's score",
+    ScoreFold.HARMONIC: (
+        "the harmonic mean of its best chunk and the sum of its matched chunks, 2·best·sum / "
+        "(best + sum), between the best and twice it"
+    ),
+}
 
 # One step's rule: how the step scored what it answered with, from the search, what the step read
 # and what it answered; None when it set or changed no score this time.
@@ -112,18 +120,16 @@ def _rerank(state: "Search", *_: Any) -> str | None:
     return f"{rule} It reads each question alone: the shared context only found the candidates."
 
 
-_PASSAGE = (
-    "A passage scores the harmonic mean of its best chunk and the sum of its matched chunks: "
-    f"{_HARMONIC}."
-)
+def _passage(state: "Search") -> str:
+    return f"A passage scores {_FOLDS[state.plan.settings.score_fold]}."
 
 
-def _fill_thin(*_: Any) -> str | None:
-    return f"{_PASSAGE} A chunk a short passage grew into scores 0, so it adds nothing."
+def _fill_thin(state: "Search", *_: Any) -> str | None:
+    return f"{_passage(state)} A chunk a short passage grew into scores 0, so it adds nothing."
 
 
-def _judge_thin(*_: Any) -> str | None:
-    return _PASSAGE
+def _judge_thin(state: "Search", *_: Any) -> str | None:
+    return _passage(state)
 
 
 def _fold(state: "Search", ranged: list, __: Any) -> str | None:
@@ -173,10 +179,10 @@ def _fill(_: "Search", before: list["Group"], after: list["Group"]) -> str | Non
     return "Text filled in around and between passages scores 0; each passage keeps its score."
 
 
-def _shortlist(*_: Any) -> str | None:
+def _shortlist(state: "Search", *_: Any) -> str | None:
     return (
-        "A document scores the harmonic mean of its best chunk and the sum of all its matched "
-        f"chunks: {_HARMONIC}. Each section of it scores the same over its own chunks."
+        f"A document scores {_FOLDS[state.plan.settings.score_fold]}. Each section of it scores "
+        "the same over its own chunks."
     )
 
 

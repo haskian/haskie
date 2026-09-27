@@ -19,7 +19,9 @@ from haskie.search import probe, retrieval, section
 from haskie.search.passage import ranges
 from haskie.search.retrieval import Plan, Pool, Scanned
 from haskie.search.thin import Filled
-from haskie.settings import Reranker, SearchSettings
+from haskie.settings import Reranker, ScoreFold, SearchSettings
+
+HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
 
 # Multi-byte on purpose: a char offset is not a file position, so a read by char offsets would
 # land mid-character.
@@ -79,7 +81,7 @@ def test_a_read_is_exactly_the_span_of_one_range(
 ) -> None:
     path = tmp_path / "doc.md"
     path.write_text(markdown, encoding="utf-8")
-    (hit_range,) = ranges([_hit(markdown, path, snippet)])
+    (hit_range,) = ranges([_hit(markdown, path, snippet)], how=HARMONIC)
 
     (text,) = retrieval._read_texts([hit_range])
 
@@ -95,7 +97,9 @@ async def test_the_texts_of_a_search_come_back_in_order(tmp_path: Path) -> None:
     second.write_text(WIDE, encoding="utf-8")
     snippets = [(ASCII, first, "Paragraph 20 about"), (WIDE, second, "Абзац 20 — über")]
     snippets.append((ASCII, first, "Paragraph 31 about"))
-    hit_ranges = [ranges([_hit(markdown, path, one)])[0] for markdown, path, one in snippets]
+    hit_ranges = [
+        ranges([_hit(markdown, path, one)], how=HARMONIC)[0] for markdown, path, one in snippets
+    ]
 
     texts = await retrieval._texts_of(hit_ranges)
 
@@ -436,7 +440,7 @@ def test_the_budget_cuts_the_last_sections_first() -> None:
             "backend",
             doc,
             section.Section(("Retries",), 1, 1),
-            ranges([hit(text, 1.0, document=doc)]),
+            ranges([hit(text, 1.0, document=doc)], how=HARMONIC),
         )
         for doc, text in [("a.md", "x" * 50), ("b.md", "y" * 50), ("c.md", "z" * 50)]
     ]

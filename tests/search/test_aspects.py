@@ -14,6 +14,9 @@ from haskie.errors import InvalidInput
 from haskie.indexing.segment import CutReason
 from haskie.search import aspects, collapse
 from haskie.search.passage import HitRange, PassageReference, ranges, rejoin
+from haskie.settings import ScoreFold
+
+HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
 
 # What each chunk of `patterns.md` and the other documents says, by its `seq`.
 SENTENCES = {
@@ -51,7 +54,7 @@ def _span(
         for seq in seqs
     ]
     hits[-1] = msgspec.structs.replace(hits[-1], end_reason=end)
-    (found,) = ranges(hits)
+    (found,) = ranges(hits, how=HARMONIC)
     return found
 
 
@@ -277,13 +280,15 @@ def test_the_parts_take_turns_at_the_slots(
     cap: int,
     expected: list[tuple[str, str, int, int, list[int]]],
 ) -> None:
-    assert _shape(aspects.interleave(ranked, depth, cap)) == expected, name
+    assert _shape(aspects.interleave(ranked, depth, cap, how=HARMONIC)) == expected, name
 
 
 def test_a_joined_pick_is_one_passage_over_every_chunk_it_holds() -> None:
     """Two parts landing on neighbouring chunks get one range, with its offsets and lines, that
     `read` reads once rather than two touching passages, and it counts both ranges it took."""
-    (pick,) = aspects.interleave([[_span("patterns.md", 2, 3)], [_span("patterns.md", 4)]], 1, 10)
+    (pick,) = aspects.interleave(
+        [[_span("patterns.md", 2, 3)], [_span("patterns.md", 4)]], 1, 10, how=HARMONIC
+    )
 
     assert pick.taken == 2
 
@@ -352,7 +357,7 @@ def test_a_kept_passage_answers_its_own_part_and_every_folded_one(
 ) -> None:
     """By rank or by the reranker's score, the same here: every part's ranking holds only its own
     passage, which it picked."""
-    picks = aspects.interleave(ranked, 1, 10)
+    picks = aspects.interleave(ranked, 1, 10, how=HARMONIC)
     scanned = [one for found in ranked for span in found for one in span.hits]
     folded = collapse.ranges([pick.span for pick in picks], scanned, words_scan(scanned), 2)
     labels = [AGGREGATE, EVENTS, ORDERING][: len(ranked)]
@@ -393,12 +398,12 @@ def test_a_passage_scores_each_part_whose_ranking_holds_it(
     b.md holds. Each part's score is the one its own ranking gave."""
     first = [_span("a.md", 1, score=0.4)]
     second = [_span("b.md", 1, score=0.95), _span("a.md", 1, score=0.9)]
-    picks = aspects.interleave([first, second], 1, 1)
+    picks = aspects.interleave([first, second], 1, 1, how=HARMONIC)
     scans = _scans([first, second])
 
     (found,) = aspects.tagged([picks[0].span], picks[:1], [AGGREGATE, EVENTS], scans, by_score)
 
     assert found.aspect_scores == pytest.approx({AGGREGATE: 0.4, EVENTS: 0.9}), name
     assert (found.aspects, found.score) == (aspects_, pytest.approx(score)), name
-    (rejoined,) = rejoin([found])
+    (rejoined,) = rejoin([found], how=HARMONIC)
     assert rejoined.score == pytest.approx(score), f"{name}: a later rejoin (the fill) keeps it"
