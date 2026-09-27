@@ -16,11 +16,11 @@ from conftest import hit
 from haskie.catalogue.catalogue import UNCALIBRATED
 from haskie.collection.index import Hit, chunk_key, location
 from haskie.indexing.segment import CutReason
-from haskie.search import probe, retrieval, section
+from haskie.search import probe, retrieval, section, thin
 from haskie.search.passage import Excerpt, ranges
 from haskie.search.retrieval import Plan, Pool, Scanned
 from haskie.search.thin import Filled
-from haskie.settings import Reranker, ScoreFold, SearchSettings
+from haskie.settings import FillValues, Reranker, ScoreFold, SearchSettings
 
 HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
 
@@ -193,6 +193,18 @@ def test_a_neighbour_is_valued_around_the_scanned_hits(
             "reranker",
         ),
         ("else the scanned hits' own signal", _plan(vector=[1.0, 0.0]), NEIGHBOURS, None, "vector"),
+        (
+            "absolute: the reranker's score spread by its curve, less dsRAG's penalty",
+            msgspec.structs.replace(
+                _plan(Reranker.CROSS_ENCODER),
+                settings=SearchSettings(
+                    reranker=Reranker.CROSS_ENCODER, fill_values=FillValues.ABSOLUTE
+                ),
+            ),
+            NEIGHBOURS,
+            [_sigmoid(4.0), _sigmoid(-2.0)],
+            "reranker, absolute",
+        ),
     ],
 )
 def test_thin_values_neighbours_the_strongest_way_the_search_can(
@@ -593,6 +605,28 @@ async def test_with_several_questions_an_excerpt_scores_its_best_and_keeps_its_t
     assert [one.text.split()[0] for one in ranked] == ["folded", "jitter"], "turns kept"
     assert [one.score for one in ranked] == pytest.approx([_sigmoid(-5.0), _sigmoid(4.0)])
     assert asked == ["does jitter help?", "are keys idempotent?"], "one pass a question"
+
+
+def test_absolute_values_need_no_kept_chunks_to_compare_with() -> None:
+    """A neighbour the reranker scores 0.9 is worth 0.72 and one at 0.1 costs 0.08, whatever the
+    scanned hits scored: dsRAG's values, on the identity curve of an uncalibrated reranker."""
+    where = msgspec.structs.replace(
+        _plan(Reranker.CROSS_ENCODER),
+        settings=SearchSettings(reranker=Reranker.CROSS_ENCODER, fill_values=FillValues.ABSOLUTE),
+    )
+    read = {chunk_key(hit): (hit, row) for hit, row in _read(NEIGHBOURS)}
+    seen: list[list[float]] = []
+    original = thin.fill
+
+    def spy(hit_ranges: Any, neighbours: dict, *rest: Any, **named: Any) -> Any:
+        seen.append([one.value for one in neighbours.values()])
+        return original(hit_ranges, neighbours, *rest, **named)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(thin, "fill", spy)
+        retrieval._thin([], SCANNED, read, [0.9, 0.1], where, QUERY, grows=True)
+
+    assert seen == [pytest.approx([0.72, -0.08])]
 
 
 def test_the_budget_cuts_the_last_sections_first() -> None:

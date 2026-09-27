@@ -24,7 +24,7 @@ from haskie.search import probe, retrieval, section
 from haskie.search.collapse import Vector
 from haskie.search.passage import ranges
 from haskie.search.retrieval import Plan, Scanned
-from haskie.settings import ChunkSettings, Reranker, ScoreFold, SearchSettings
+from haskie.settings import ChunkSettings, FillValues, Reranker, ScoreFold, SearchSettings
 
 HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
 
@@ -225,3 +225,32 @@ async def test_a_filled_chunk_tags_a_question_only_without_a_reranker(
     assert [hit.seq for hit in filled.ranges[0].hits][:2] == [1, 2], f"{name}: chunk 2 joined"
     assert ("q1" in filled.ranges[0].aspects) is tagged, name
     assert bool(filled.ranges[0].aspects) is tagged, name
+
+
+@pytest.mark.anyio
+async def test_absolute_values_fill_by_the_rerankers_scores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `fill_values = absolute` the fill asks the reranker about each chunk near a passage,
+    once a question, and values it as dsRAG does: chunk 2 at 0.9 is worth 0.72, chunk 3 at 0.05
+    costs 0.13, so the passage takes 2 and stops, whatever the vectors say."""
+    where, hits = await _index(tmp_path, VECTORS)
+    settings = SearchSettings(
+        max_passage_grow=2, reranker=Reranker.CROSS_ENCODER, fill_values=FillValues.ABSOLUTE
+    )
+    where = msgspec.structs.replace(where, settings=settings)
+    groups = await retrieval.sections(ranges([hits[1]], how=HARMONIC), where, limit=1)
+    asked: list[str] = []
+
+    async def rerank(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
+        asked.append(query)
+        for row in rows:
+            row["_relevance_score"] = {2: 0.9, 3: 0.05}.get(row["seq"], 0.0)
+        return rows
+
+    monkeypatch.setattr(retrieval, "cross_encode", rerank)
+
+    (filled,) = await retrieval.fill(groups, _asked(), where)
+
+    assert [(one.seq_start, one.seq_end) for one in filled.ranges] == [(1, 2)]
+    assert asked == [QUERY], "one reranker pass a question"

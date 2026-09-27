@@ -122,8 +122,9 @@ reranker's judgement tags (`aspects.tagged`), so a filled chunk brings no tag.
 
 - A gap between two passages is filled when its values sum above 0, and the two become one. So a
   gap of up to twice `max_passage_grow` chunks can be filled.
-- A passage grows outward by the run of chunks next to it whose values sum highest, when that is
-  above 0.
+- Every passage grows outward by the run of chunks next to it whose values sum highest, when that
+  is above 0: into a gap as far as its half, so the passages on either side never reach for one
+  chunk.
 
 The same rule grows a short passage of the `passages` answer (next section), so a search has one
 way of growing a passage, one scale of value and one setting for how far. A passage grows once:
@@ -133,12 +134,20 @@ grows every passage, short ones included.
 This is the arithmetic of Relevant Segment Extraction [3]: a weak chunk comes in only when stronger
 ones around it pay for it. Where a gap is not filled, `[…]` stays.
 
+With a reranker on, `fill_values = absolute` (an experiment) values a chunk as dsRAG does instead:
+the reranker scores it against every question, one pass a question, and its best score, spread
+by the reranker's calibrated beta curve so its scores are about even over 0 to 1, less 0.18
+(dsRAG's balanced preset) is its value. It needs no kept chunks to compare with, and it trusts the
+calibration: an uncalibrated reranker's curve is the identity. dsRAG also decays a chunk by its
+rank; here every chunk was scored, so none is. It costs one reranker pass a question over the
+chunks near every section, and short passages grow the same way.
+
 `max_answer_chars` (24,000) bounds what one excerpts search returns. Right after grouping, a
 `budget` step cuts the sections to it, the last first, though the first section always stays
 (`search_budget` logs how many went). The fills then go in, worth most per character first, while
-they fit the room left. The fill does not ask the reranker even when one is on: scoring every chunk
-near every section against every question would take seconds. Each search logs `search_fill` with
-the signal and what it added.
+they fit the room left. By default the fill does not ask the reranker even when one is on: scoring
+every chunk near every section against every question would take seconds. Each search logs
+`search_fill` with the signal and what it added.
 
 ## Short passages
 

@@ -42,6 +42,7 @@ export function effectiveSearch(overrides: SearchOverrides, defaults: SearchSett
     min_rerank_score: overrides.min_rerank_score ?? defaults.min_rerank_score,
     score_fold: overrides.score_fold ?? defaults.score_fold,
     rerank_excerpts: overrides.rerank_excerpts ?? defaults.rerank_excerpts,
+    fill_values: overrides.fill_values ?? defaults.fill_values,
     min_passage_chars: overrides.min_passage_chars ?? defaults.min_passage_chars,
     max_passage_grow: overrides.max_passage_grow ?? defaults.max_passage_grow,
     max_section_chars: overrides.max_section_chars ?? defaults.max_section_chars,
@@ -64,7 +65,7 @@ export function visibleSearchFields(effective: SearchSettings): (keyof SearchSet
   if (hybrid && effective.fusion === 'linear') fields.push('vector_weight', 'bm25_weight')
   if (effective.mode !== 'fts') fields.push('nprobes', 'refine_factor')
   fields.push('reranker')
-  if (reranked) fields.push('reranker_model', 'rerank_with_context', 'min_rerank_score', 'rerank_excerpts')
+  if (reranked) fields.push('reranker_model', 'rerank_with_context', 'min_rerank_score', 'rerank_excerpts', 'fill_values')
   if (hybrid || reranked) fields.push('candidates')
   fields.push('score_fold', 'min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars')
   return fields

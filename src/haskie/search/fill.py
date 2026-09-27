@@ -19,10 +19,17 @@ comes in only when stronger ones around it pay for it.
 `run` and `value` are the one growth rule of a search: a passage too short to stand alone grows
 by them too (`thin`), against the scanned hits rather than the kept ones.
 
+With a reranker on, `fill_values = absolute` (an experiment) values a chunk as dsRAG does instead
+(`absolute`): its reranker score spread by the reranker's calibrated beta curve, minus a fixed
+penalty. It needs no kept chunks to compare with, but it trusts the calibration: an uncalibrated
+reranker's curve is the identity.
+
 What is added is bounded by the room the answer's budget (`max_answer_chars`) leaves after its
 sections (`section.within`), spent on the fills worth most per character first. No IO here:
 `retrieval.fill` reads and scores the chunks.
 """
+
+import math
 
 import msgspec
 
@@ -53,6 +60,57 @@ class Fill(msgspec.Struct, frozen=True):
     @property
     def chars(self) -> int:
         return sum(one.hit.char_end - one.hit.char_start for one in self.chunks)
+
+
+IRRELEVANT_PENALTY = 0.18  # dsRAG's "balanced" preset: segments of about 4 to 10 chunks
+
+
+def absolute(score: float, beta_a: float, beta_b: float) -> float:
+    """A reranker score in 0 to 1 as dsRAG's Relevant Segment Extraction values a chunk: spread by
+    the reranker's beta curve (`beta_cdf`), so its scores are about even over 0 to 1, minus
+    `IRRELEVANT_PENALTY`. A chunk the reranker read counts with its own score, where dsRAG decays
+    a chunk by its rank: every chunk here was scored, none was only ranked."""
+    return beta_cdf(score, beta_a, beta_b) - IRRELEVANT_PENALTY
+
+
+def beta_cdf(x: float, a: float, b: float) -> float:
+    """The regularized incomplete beta function I_x(a, b): the beta distribution's cumulative
+    function, by its continued fraction (Numerical Recipes, `betacf`). The identity at a = b = 1."""
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+    front = math.exp(
+        math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x)
+    )
+    # the fraction converges fast on the side of the mean it is evaluated on
+    if x < (a + 1) / (a + b + 2):
+        return front * _fraction(x, a, b) / a
+    return 1.0 - front * _fraction(1.0 - x, b, a) / b
+
+
+def _fraction(x: float, a: float, b: float) -> float:
+    """The continued fraction of the incomplete beta function, by Lentz's method: two terms a
+    round, the even one and the odd one, until a round changes it by under 1e-12."""
+    tiny = 1e-300
+    c, d = 1.0, _nonzero(1.0 - (a + b) * x / (a + 1.0))
+    h = d
+    for m in range(1, 300):
+        even = m * (b - m) * x / ((a + 2 * m - 1) * (a + 2 * m))
+        odd = -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1))
+        for term in (even, odd):
+            d = _nonzero(1.0 + term * d)
+            c = 1.0 + term / c
+            c = c if abs(c) > tiny else tiny
+            h *= d * c
+        if abs(d * c - 1.0) < 1e-12:
+            break
+    return h
+
+
+def _nonzero(x: float) -> float:
+    """1 / x, with x kept off 0 as Lentz's method needs."""
+    return 1.0 / (x if abs(x) > 1e-300 else 1e-300)
 
 
 def value(score: float, floor: float, top: float) -> float:

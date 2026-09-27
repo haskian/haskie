@@ -975,6 +975,13 @@ export interface components {
             description: string;
         };
         /**
+         * FillValues
+         * @description How a chunk next to a passage is judged worth taking. relative: its score against the kept chunks, 0 at their median and 1 at their best, by the reranker, the query vector or the question's words. absolute (experiment, with a reranker on): the reranker's score spread by its calibrated curve, minus 0.18, as dsRAG's Relevant Segment Extraction values a chunk.
+         * @default relative
+         * @enum {string}
+         */
+        FillValues: "relative" | "absolute";
+        /**
          * Fusion
          * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
          * @default rrf
@@ -1196,6 +1203,7 @@ export interface components {
             search_modes: components["schemas"]["SearchMode"][];
             fusions: components["schemas"]["Fusion"][];
             score_folds: components["schemas"]["ScoreFold"][];
+            fill_values: components["schemas"]["FillValues"][];
             rerankers: components["schemas"]["Reranker"][];
             reranker_models: string[];
             reranker_metadata: {
@@ -1563,6 +1571,11 @@ export interface components {
              */
             rerank_excerpts?: boolean | null;
             /**
+             * Values for growing and filling
+             * @description How a chunk next to a passage is judged worth taking. relative: its score against the kept chunks, 0 at their median and 1 at their best, by the reranker, the query vector or the question's words. absolute (experiment, with a reranker on): the reranker's score spread by its calibrated curve, minus 0.18, as dsRAG's Relevant Segment Extraction values a chunk.
+             */
+            fill_values?: components["schemas"]["FillValues"] | null;
+            /**
              * Lowest reranker score
              * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. Empty: the chosen reranker's own floor, calibrated on borderline pairs (mise run calibrate-rerankers). 0 keeps every chunk.
              */
@@ -1654,6 +1667,7 @@ export interface components {
              * @default false
              */
             rerank_excerpts: boolean;
+            fill_values?: components["schemas"]["FillValues"];
             /**
              * Lowest reranker score
              * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. Empty: the chosen reranker's own floor, calibrated on borderline pairs (mise run calibrate-rerankers). 0 keeps every chunk.

@@ -67,6 +67,13 @@ class ScoreFold(StrEnum):
     HARMONIC = "harmonic"
 
 
+class FillValues(StrEnum):
+    """How a chunk near a passage is valued when a passage grows or a section fills (`fill`)."""
+
+    RELATIVE = "relative"
+    ABSOLUTE = "absolute"
+
+
 class Reranker(StrEnum):
     NONE = "none"
     CROSS_ENCODER = "cross-encoder"
@@ -348,6 +355,16 @@ MIN_RERANK_SCORE = Meta(
         "0 keeps every chunk."
     ),
 )
+FILL_VALUES = Meta(
+    title="Values for growing and filling",
+    description=(
+        "How a chunk next to a passage is judged worth taking. relative: its score against the "
+        "kept chunks, 0 at their median and 1 at their best, by the reranker, the query vector or "
+        "the question's words. absolute (experiment, with a reranker on): the reranker's score "
+        "spread by its calibrated curve, minus 0.18, as dsRAG's Relevant Segment Extraction "
+        "values a chunk."
+    ),
+)
 RERANK_EXCERPTS = Meta(
     title="Rerank whole excerpts (experiment)",
     description=(
@@ -494,6 +511,7 @@ class SearchSettings(msgspec.Struct):
     rerank_with_context: Annotated[bool, RERANK_WITH_CONTEXT] = False
     score_fold: Annotated[ScoreFold, SCORE_FOLD] = ScoreFold.SUM
     rerank_excerpts: Annotated[bool, RERANK_EXCERPTS] = False
+    fill_values: Annotated[FillValues, FILL_VALUES] = FillValues.RELATIVE
     min_rerank_score: Annotated[float | None, MIN_RERANK_SCORE] = None
     min_passage_chars: Annotated[int, MIN_PASSAGE_CHARS] = 300
     max_passage_grow: Annotated[int, MAX_PASSAGE_GROW] = 2
@@ -523,6 +541,7 @@ class SearchOverrides(msgspec.Struct):
     rerank_with_context: Annotated[bool | None, RERANK_WITH_CONTEXT] = None
     score_fold: Annotated[ScoreFold | None, SCORE_FOLD] = None
     rerank_excerpts: Annotated[bool | None, RERANK_EXCERPTS] = None
+    fill_values: Annotated[FillValues | None, FILL_VALUES] = None
     min_rerank_score: Annotated[float | None, MIN_RERANK_SCORE] = None
     min_passage_chars: Annotated[int | None, MIN_PASSAGE_CHARS] = None
     max_passage_grow: Annotated[int | None, MAX_PASSAGE_GROW] = None

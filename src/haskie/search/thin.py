@@ -16,7 +16,8 @@ it is kept as the author wrote it.
 "Matches" is measured, not assumed: `retrieval.fill_thin` scores the neighbours the way it scores
 the scanned hits (the reranker, the query vector, or the question's words), and values each
 around them (`fill.value`): 0 as good as the median scanned hit, 1 as good as the best. The
-floor is this search's own, so no calibrated threshold is needed. No IO here.
+floor is this search's own, so no calibrated threshold is needed. With `fill_values = absolute`
+the reranker's score is valued as dsRAG values it instead (`fill.absolute`). No IO here.
 """
 
 import msgspec

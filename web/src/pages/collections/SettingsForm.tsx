@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import type { Chunker, ChunkSettings, CollectionOverrides, Fusion, Options, Reranker, ScoreFold, SearchMode, SearchSettings } from '../../api'
+import type { Chunker, ChunkSettings, CollectionOverrides, FillValues, Fusion, Options, Reranker, ScoreFold, SearchMode, SearchSettings } from '../../api'
 import { effectiveSearch, Field, Picker, rerankerOption, SEARCH_BOUNDS, visibleSearchFields, type NumericKeys, type PickerOption } from '../../ui'
 
 type SearchField = keyof SearchSettings
@@ -148,6 +148,9 @@ export function SettingsForm({
       draft.search.rerank_excerpts == null ? null : onOff(draft.search.rerank_excerpts),
       onOff(searchDefaults.rerank_excerpts),
       (next) => setSearch('rerank_excerpts', next === null ? null : next === ON),
+    ),
+    fill_values: enumInput('fill_values', 'search.fill_values', options.fill_values, draft.search.fill_values, searchDefaults.fill_values, (next) =>
+      setSearch('fill_values', next as FillValues | null),
     ),
     candidates: searchNumber('candidates'),
     min_passage_chars: searchNumber('min_passage_chars'),

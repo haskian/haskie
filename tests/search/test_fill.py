@@ -254,3 +254,39 @@ def test_a_fill_takes_only_unkept_chunks_of_its_section_within_the_room(seed: in
     assert all(piece.value > 0 for piece in chosen), "only what is worth taking"
     held = sorted(hit.seq for hit_range in joined.ranges for hit in hit_range.hits)
     assert held == sorted([*kept, *seqs]), "the group holds every chunk once"
+
+
+# --- absolute values (dsRAG) ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "x", "a", "b", "expected"),
+    [
+        ("the identity curve changes nothing", 0.3, 1.0, 1.0, 0.3),
+        ("a symmetric curve holds its middle", 0.5, 0.4, 0.4, 0.5),
+        ("below 0 is 0", -0.2, 2.0, 3.0, 0.0),
+        ("above 1 is 1", 1.2, 2.0, 3.0, 1.0),
+        # I_0.2(2, 3) = 1 - (1 - 0.2)^4 - 4 * 0.2 * (1 - 0.2)^3 in closed form for integer a, b
+        ("a closed form it must meet", 0.2, 2.0, 3.0, 1 - 0.8**4 - 4 * 0.2 * 0.8**3),
+        # dsRAG's Cohere curve (0.4, 0.4) lifts a low score: scipy's beta.cdf gives 0.18004
+        ("a low score, lifted as dsRAG's Cohere curve lifts it", 0.05, 0.4, 0.4, 0.18004),
+    ],
+)
+def test_a_score_is_spread_by_its_rerankers_beta_curve(
+    name: str, x: float, a: float, b: float, expected: float
+) -> None:
+    assert fill.beta_cdf(x, a, b) == pytest.approx(expected, abs=1e-4), name
+
+
+@pytest.mark.parametrize(
+    ("name", "score", "expected"),
+    [
+        ("a score the curve maps under the penalty costs", 0.1, 0.1 - fill.IRRELEVANT_PENALTY),
+        ("one above it pays", 0.9, 0.9 - fill.IRRELEVANT_PENALTY),
+        ("0 is the penalty alone, as an unread chunk is in dsRAG", 0.0, -fill.IRRELEVANT_PENALTY),
+    ],
+)
+def test_an_absolute_value_is_the_spread_score_less_the_penalty(
+    name: str, score: float, expected: float
+) -> None:
+    assert fill.absolute(score, 1.0, 1.0) == pytest.approx(expected), name

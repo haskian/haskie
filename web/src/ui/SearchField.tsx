@@ -80,6 +80,12 @@ export function SearchField({
           />
         </Field>
       )
+    case 'fill_values':
+      return (
+        <Field label={doc.title} help={doc.description}>
+          <Picker ariaLabel={doc.title} options={choices(options.fill_values)} value={search.fill_values} onChange={(fill_values) => onChange({ ...search, fill_values })} />
+        </Field>
+      )
     case 'score_fold':
       return (
         <Field label={doc.title} help={doc.description}>

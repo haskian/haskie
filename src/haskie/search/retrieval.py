@@ -22,7 +22,7 @@ import msgspec
 
 from haskie import cpu
 from haskie.catalogue import catalogue
-from haskie.catalogue.catalogue import EmbeddingModel, RerankerCalibration
+from haskie.catalogue.catalogue import UNCALIBRATED, EmbeddingModel, RerankerCalibration
 from haskie.collection.collection import Collection
 from haskie.collection.index import (
     FTS_COLUMN,
@@ -46,7 +46,14 @@ from haskie.logs import get_logger
 from haskie.search import aspects, collapse, passage, probe, section, session, text, thin
 from haskie.search import fill as filling
 from haskie.search.passage import Excerpt, Passage, Sources
-from haskie.settings import Reranker, ScoreFold, SearchMode, SearchSettings, load_user_settings
+from haskie.settings import (
+    FillValues,
+    Reranker,
+    ScoreFold,
+    SearchMode,
+    SearchSettings,
+    load_user_settings,
+)
 
 _log = get_logger(__name__)
 
@@ -315,6 +322,10 @@ def _thin(
     ranges grown by them, or only judged when they do not grow here (`thin.fill`)."""
     if not rows:
         values, signal = [], "none"
+    elif reranked is not None and where.settings.fill_values == FillValues.ABSOLUTE:
+        curve = where.calibration or UNCALIBRATED
+        values = [filling.absolute(one, curve.beta_a, curve.beta_b) for one in reranked]
+        signal = "reranker, absolute"
     elif reranked is not None:
         # on the logit scale: a linear value between the median and the best is only fair there
         reference = [logit(hit.score) for hit in scanned.hits]
@@ -593,9 +604,38 @@ async def fill(
     budget = where.settings.max_answer_chars
     # with a reranker on, a question tags only what it judged an answer (`aspects.tagged`); the
     # fill weighs by vectors or words, so its chunks bring no tag of their own
-    tags = where.settings.reranker == Reranker.NONE
-    how = where.settings.score_fold
-    return await cpu.on_cpu(_fill, groups, nears, rows, questions, reach, budget, tags, how)
+    settings = where.settings
+    tags = settings.reranker == Reranker.NONE
+    absolute = None
+    if not tags and settings.fill_values == FillValues.ABSOLUTE:
+        absolute = await _absolute(sorted(set().union(*nears)), rows, questions, where)
+    how = settings.score_fold
+    return await cpu.on_cpu(
+        _fill, groups, nears, rows, questions, reach, budget, tags, how, absolute
+    )
+
+
+async def _absolute(
+    near: list[ChunkKey],
+    rows: dict[ChunkKey, tuple[Hit, dict]],
+    questions: list[probe.Question],
+    where: Plan,
+) -> dict[ChunkKey, filling.Candidate]:
+    """Each chunk near a passage valued as dsRAG does (`fill.absolute`): the reranker reads it
+    against every question, one pass a question, and its best question's score, spread by the
+    reranker's curve and less the penalty, is its value."""
+    read = [key for key in near if key in rows]
+    curve = where.calibration or UNCALIBRATED
+    best: dict[ChunkKey, float] = {}
+    for question in questions:
+        copies = [dict(rows[key][1]) for key in read]
+        await cross_encode(question.asked, copies, where.settings)  # scores the copies in place
+        for key, row in zip(read, copies, strict=True):
+            best[key] = max(row_score(row), best.get(key, 0.0))
+    return {
+        key: filling.Candidate(rows[key][0], filling.absolute(score, curve.beta_a, curve.beta_b))
+        for key, score in best.items()
+    }
 
 
 def _fill(
@@ -607,10 +647,14 @@ def _fill(
     budget: int,
     tags: bool,
     how: ScoreFold,
+    absolute: dict[ChunkKey, filling.Candidate] | None = None,
 ) -> list[section.Group]:
     held = [key for one in groups for hit in one.hits if (key := chunk_key(hit)) in rows]
     near = list(dict.fromkeys(key for keys in nears for key in keys if key in rows))
-    weighed, signal = _weigh(held, near, rows, questions)
+    if absolute is not None:
+        weighed, signal = absolute, "reranker, absolute"
+    else:
+        weighed, signal = _weigh(held, near, rows, questions)
     if not tags:
         weighed = {key: msgspec.structs.replace(one, aspect=None) for key, one in weighed.items()}
     found = [
@@ -758,8 +802,7 @@ async def rerank_excerpts(
     questions it answers (every question when it names none), its score the best of them; a
     single question's excerpts sorted by it. An experiment (`rerank_excerpts`): long-document
     reranking scores the unit it returns rather than folding its chunks (SumRank, arXiv
-    2603.24204; EBCAR, arXiv 2510.13329), but
-    nothing here measures it against the fold yet.
+    2603.24204; EBCAR, arXiv 2510.13329), but nothing here measures it against the fold yet.
 
     Only when every excerpt fits what the reranker reads (`_reads`): an excerpt cut short would
     be scored on its first part, and one scored so beside others scored whole, or by folded chunk

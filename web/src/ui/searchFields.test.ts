@@ -19,6 +19,7 @@ const DEFAULTS: SearchSettings = {
   min_rerank_score: 0.05,
   score_fold: 'sum',
   rerank_excerpts: false,
+  fill_values: 'relative',
   min_passage_chars: 300,
   max_passage_grow: 2,
   max_section_chars: 8000,
@@ -42,6 +43,7 @@ const NO_OVERRIDES: SearchOverrides = {
   min_rerank_score: null,
   score_fold: null,
   rerank_excerpts: null,
+  fill_values: null,
   min_passage_chars: null,
   max_passage_grow: null,
   max_section_chars: null,
@@ -90,12 +92,12 @@ describe('visibleSearchFields', () => {
     {
       name: 'a reranker adds its model, and a candidate pool even without hybrid',
       search: search({ mode: 'fts', reranker: 'cross-encoder' }),
-      expected: ['limit', 'mode', 'reranker', 'reranker_model', 'rerank_with_context', 'min_rerank_score', 'rerank_excerpts', 'candidates', 'score_fold', 'min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars'],
+      expected: ['limit', 'mode', 'reranker', 'reranker_model', 'rerank_with_context', 'min_rerank_score', 'rerank_excerpts', 'fill_values', 'candidates', 'score_fold', 'min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars'],
     },
     {
       name: 'hybrid and a reranker ask for the candidate pool once',
       search: search({ reranker: 'cross-encoder' }),
-      expected: ['limit', 'mode', 'fusion', 'rrf_k', 'nprobes', 'refine_factor', 'reranker', 'reranker_model', 'rerank_with_context', 'min_rerank_score', 'rerank_excerpts', 'candidates', 'score_fold', 'min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars'],
+      expected: ['limit', 'mode', 'fusion', 'rrf_k', 'nprobes', 'refine_factor', 'reranker', 'reranker_model', 'rerank_with_context', 'min_rerank_score', 'rerank_excerpts', 'fill_values', 'candidates', 'score_fold', 'min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars'],
     },
     {
       name: 'no shortest passage still asks how far passages grow: every excerpt grows by it',
@@ -118,6 +120,7 @@ describe('visibleSearchFields', () => {
         'rerank_with_context',
         'min_rerank_score',
         'rerank_excerpts',
+        'fill_values',
         'candidates',
         'score_fold',
         'min_passage_chars',

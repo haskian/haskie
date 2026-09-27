@@ -16,6 +16,7 @@ from haskie.settings import (
     Accelerator,
     Chunker,
     FieldDoc,
+    FillValues,
     Fusion,
     Parser,
     Reranker,
@@ -58,6 +59,7 @@ class Options(msgspec.Struct):
     search_modes: tuple[SearchMode, ...]
     fusions: tuple[Fusion, ...]
     score_folds: tuple[ScoreFold, ...]
+    fill_values: tuple[FillValues, ...]
     rerankers: tuple[Reranker, ...]
     reranker_models: tuple[str, ...]
     reranker_metadata: dict[str, RerankerMetadata]  # every reranker model, offered here or not
@@ -149,6 +151,7 @@ async def get_options() -> Options:
         search_modes=tuple(SearchMode),
         fusions=tuple(Fusion),
         score_folds=tuple(ScoreFold),
+        fill_values=tuple(FillValues),
         rerankers=tuple(Reranker),
         # a model is offered only where it runs under the hardware setting; one already chosen
         # still validates, and fails to load with the reason (`hardware.device`)
