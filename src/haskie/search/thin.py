@@ -2,7 +2,7 @@
 else dropped.
 
 A chunk is cut where the author cut, so a short one is usually a section's lead-in ("Three
-rules:", with the list in the next chunk), a section's last line, or a separator (`---`). Alone
+rules:", with the list in the next chunk), or a section's last line. Alone
 it tells a reader little and costs a slot. So a thin range grows by the chunks of its section
 next to it that match the question, by the rule every passage of an excerpt grows by
 (`fill.run`): on each side, the run of chunks whose values sum highest, when that is above 0. A
@@ -41,21 +41,16 @@ _BOUNDS = frozenset({CutReason.HEADING, CutReason.EDGE})
 
 
 def _fragment(hit_range: HitRange, min_chars: int) -> bool:
-    """Thin (shorter than `min_chars`, or under `MIN_WORDS` words), with words, and part of a
-    longer section: what grows or goes. A range with a section bound on both sides is a whole
+    """Thin (shorter than `min_chars`, or under `MIN_WORDS` words) and part of a longer section:
+    what grows or goes. A range with a section bound on both sides is a whole
     section, a short note say, with nothing of it to grow into. `min_chars` 0 turns this off."""
-    if min_chars <= 0 or _wordless(hit_range):
+    if min_chars <= 0:
         return False
     first, last = hit_range.hits[0], hit_range.hits[-1]
     if first.start_reason in _BOUNDS and last.end_reason in _BOUNDS:
         return False
     words = sum(len(WORD.findall(hit.text)) for hit in hit_range.hits)
     return last.char_end - first.char_start < min_chars or words < MIN_WORDS
-
-
-def _wordless(hit_range: HitRange) -> bool:
-    """No word at all, a separator or a stray symbol: nothing to quote, whatever it ranked."""
-    return not any(WORD.search(hit.text) for hit in hit_range.hits)
 
 
 def around(hit_ranges: list[HitRange], min_chars: int, grow: int) -> set[ChunkKey]:
@@ -81,7 +76,6 @@ class Filled(msgspec.Struct):
     ranges: list[HitRange]  # best first, as `passage.ranges` orders them
     added: list[Hit]  # the neighbours that joined, each once
     grown: int  # thin ranges that took at least one neighbour
-    dropped: int  # ranges without a word, which went
 
 
 def fill(
@@ -95,8 +89,7 @@ def fill(
     (`fill.run`): on each side, the run of up to `reach` chunks whose values sum highest, when
     that is above 0, never past a heading (`passage.continues`). A thin range that took none is
     marked `alone`, unless it is the first of `hit_ranges`, the best the search found. A thin
-    range that is a whole section is kept as it is. A range without a word is dropped whatever it
-    ranked.
+    range that is a whole section is kept as it is.
 
     `grows` False only judges: a thin range with a run worth taking stands, but takes nothing,
     for a later step to grow it once (the fill of an excerpts search, `fill.fills`), so no passage
@@ -108,11 +101,8 @@ def fill(
     """
     kept: list[HitRange] = []
     added: dict[ChunkKey, Hit] = {}
-    grown = dropped = 0
+    grown = 0
     for position, hit_range in enumerate(hit_ranges):
-        if _wordless(hit_range):
-            dropped += 1
-            continue
         if _fragment(hit_range, min_chars):
             took = [
                 chunk.hit
@@ -129,7 +119,7 @@ def fill(
     held = {chunk_key(hit) for one in kept for hit in one.hits}
     joined = [hit for key, hit in added.items() if key not in held]
     rebuilt = rejoin([*kept, *(part(hit) for hit in joined)])
-    return Filled(ranges=rebuilt, added=joined, grown=grown, dropped=dropped)
+    return Filled(ranges=rebuilt, added=joined, grown=grown)
 
 
 def terms(text: str) -> list[str]:

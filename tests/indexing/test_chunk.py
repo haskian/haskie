@@ -54,7 +54,8 @@ def _check(text: str, settings: ChunkSettings, chunks: list[Chunk], byte_offset:
                     content[: block.start] + " " * (block.end - block.start) + content[block.end :]
                 )
     lost = "".join(c for i, c in enumerate(content) if not c.isspace() and i not in covered)
-    assert not lost, f"text in no chunk: {lost!r}"
+    # a chunk without a word is never made (`chunk._worded`), so a separator may be in none
+    assert not any(c.isalnum() for c in lost), f"text in no chunk: {lost!r}"
 
 
 def _texts(c: Chunk) -> list[str]:
@@ -599,6 +600,16 @@ def test_paragraphs_are_chunks_and_short_ones_merge(
             "word " * 30,
             [("edge", "length_oversize"), ("length_oversize", "edge")],
         ),
+        (
+            "a separator alone at a section's end makes no chunk: the one before ends there",
+            f"# A\n\n{MID}\n\n{MID_TWO}\n\n---\n\n# B\n\n{MID}",
+            [("edge", "paragraph"), ("paragraph", "heading"), ("heading", "edge")],
+        ),
+        (
+            "a section of a separator alone makes no chunk: its heading rides on",
+            f"# A\n\n{MID}\n\n# B\n\n---\n\n# C\n\n{MID_TWO}",
+            [("edge", "heading"), ("heading", "edge")],
+        ),
     ],
 )
 def test_each_chunk_says_why_it_starts_and_ends_where_it_does(
@@ -1084,3 +1095,37 @@ def test_record_carries_pieces_for_the_cache_and_text_and_layout_for_the_index()
     assert values["text"] == "One. Two."
     assert values["layout"] == [{"type": "text", "position": 0}, {"type": "text", "position": 5}]
     assert (values["headings"], values["frame"]) == (["H"], ["H"])
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "expected"),
+    [
+        (
+            "a separator between two paragraphs, alone, goes",
+            f"{MID}\n\n---\n\n{MID_TWO}",
+            [[], []],
+        ),
+        (
+            "a section of a separator alone: its heading opens the next section's path",
+            f"# A\n\n{MID}\n\n## B\n\n* * *\n\n## C\n\n{MID_TWO}",
+            [["A"], ["A", "C"]],
+        ),
+        (
+            "a page marker and a separator alone say nothing either",
+            f"{MID}\n\n<!-- page 2 -->\n\n---\n\n{MID_TWO}",
+            [[], []],
+        ),
+        ("a document of separators alone makes no chunk", "---\n\n***\n\n- - -", []),
+    ],
+)
+def test_a_chunk_without_a_word_is_never_made(
+    name: str, text: str, expected: list[list[str]]
+) -> None:
+    """A separator or a stray symbol packed alone would be found by its heading path alone, and
+    say nothing: it makes no chunk, and every chunk made holds a word."""
+    chunks = _split(text, _paragraphs())
+
+    assert [c.headings for c in chunks] == expected, name
+    assert all(any(ch.isalnum() for ch in c.text) for c in chunks), (
+        f"{name}: every chunk says a word"
+    )

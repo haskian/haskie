@@ -225,8 +225,8 @@ def scan(pool: Pool, limit: int) -> Scanned:
 
 
 class Ranged(msgspec.Struct):
-    """The hits merged into ranges, the thin ones grown or dropped (`thin`), and every chunk those
-    ranges hold with its vector: what the fold compares them by."""
+    """The hits merged into ranges, the thin ones grown or marked alone (`thin`), and every chunk
+    those ranges hold with its vector: what the fold compares them by."""
 
     ranges: list[passage.HitRange]
     scanned: Scanned
@@ -257,13 +257,12 @@ async def fill_thin(scanned: Scanned, where: Plan, query: str, grows: bool = Tru
         _thin, hit_ranges, scanned, rows, reranked, where, query, grows
     )
     alone = sum(one.alone for one in filled.ranges)
-    if filled.grown or alone or filled.dropped:
+    if filled.grown or alone:
         _log.info(
             "search_thin",
             signal=signal,
             grown=filled.grown,
             alone=alone,
-            dropped=filled.dropped,
             added=len(filled.added),
         )
     added = [rows[chunk_key(hit)][1].get("vector") for hit in filled.added]

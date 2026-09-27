@@ -124,14 +124,14 @@ the signal and what it added.
 ## Short passages
 
 A passage under `min_passage_chars` (300), or under 7 words, is thin: a section's lead-in ("Three
-rules:", with the list in the next chunk), a section's last line, or a separator. For the
-`passages` answer, `search/thin.py` grows it by the rule every excerpt's passages grow by: on each
-side, the run of up to `max_passage_grow` (2) chunks whose values sum highest, when that is above
-0. It never grows past a heading. A neighbour's value is its score around the scanned hits' own: 0
-for one as good as the median, 1 for one as good as the best, scored by the reranker when one is
-on, else by the cosine to the query vector, else by the share of the question's words it holds. The
-floor is this search's own, so it needs no calibration per model. An excerpts search only judges it
-here, whether a run worth taking is next to it, and leaves the growing to the fill.
+rules:", with the list in the next chunk), or a section's last line. For the `passages` answer,
+`search/thin.py` grows it by the rule every excerpt's passages grow by: on each side, the run of up
+to `max_passage_grow` (2) chunks whose values sum highest, when that is above 0. It never grows
+past a heading. A neighbour's value is its score around the scanned hits' own: 0 for one as good as
+the median, 1 for one as good as the best, scored by the reranker when one is on, else by the
+cosine to the query vector, else by the share of the question's words it holds. The floor is this
+search's own, so it needs no calibration per model. An excerpts search only judges it here, whether
+a run worth taking is next to it, and leaves the growing to the fill.
 
 A thin passage that took nothing is too short to stand alone. As a passage it is dropped, and its
 slot goes to the next result. As part of an excerpt it stays when another passage of its section is
@@ -142,10 +142,10 @@ around them matches:
 - a whole section, with a heading or the document's edge on both sides, such as a short note.
   Nothing of it is missing.
 
-A passage without a single word, such as `---`, is dropped even when it ranks first. The
-neighbours are read only when a passage is thin, in one LanceDB query per collection. Each search
-logs `search_thin` with the signal used and how many passages grew, stayed alone and were dropped.
-With several questions, each question's passages are grown or dropped against that question.
+The neighbours are read only when a passage is thin, in one LanceDB query per collection. Each
+search logs `search_thin` with the signal used and how many passages grew, stayed alone and were
+dropped. With several questions, each question's passages are grown or dropped against that
+question.
 
 `search_sources` scores a document by the harmonic mean of its best chunk and the sum of all its
 matched chunks. Every further chunk lifts the score, but the mean stays under twice the best

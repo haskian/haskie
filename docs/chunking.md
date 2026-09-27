@@ -160,6 +160,14 @@ long is cut (`chunk._shortened`). Without the step the frame is empty, and the t
 size. The `text` chunker cuts no sections at headings and never frames. It still files each chunk
 under its heading path for citing.
 
+## Chunks that say nothing
+
+A chunk made only of pieces without a word (a `---` rule, a stray symbol, a page marker alone)
+is not kept (`chunk._worded`). A search would find it only through its heading path, and it would
+tell a reader nothing. Its headings ride on to the next chunk, and the chunk before it takes its
+end reason, so the reasons of neighbouring chunks still meet. A rule inside a chunk, between two
+paragraphs that merged, stays: the pieces of a chunk tile its span of the text.
+
 ## No overlap
 
 Chunks never overlap: every character of text is in at most one chunk. With the `markdown`

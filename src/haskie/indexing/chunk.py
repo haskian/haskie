@@ -32,6 +32,7 @@ alters the output for unchanged input and settings. Otherwise the cache keeps se
 current code would no longer produce.
 """
 
+import re
 from bisect import bisect_right
 from collections.abc import Callable, Sequence
 from itertools import accumulate
@@ -46,6 +47,7 @@ from haskie.settings import Chunker, ChunkSettings
 
 CHUNK_VERSION = 3  # see the module docstring; 3: e5's query and passage prefixes
 HEADING_SEP = " > "  # between two headings of a heading path: "Part I > Chapter 2 > Retries"
+WORD = re.compile(r"\w")  # what a piece needs one of to say anything
 type Opened = tuple[int, str]  # a heading still open: its level, 1 to 6, and its text
 
 
@@ -208,7 +210,9 @@ def pack(run: Chunking, found: list[Section]) -> list[Packed]:
 
     A section of headings alone packs into no chunk, so its headings ride on the next chunk
     instead, where `locate` reads the heading paths from: `# Part II` over an empty `## Ch 5`
-    still heads `## Ch 6` after it."""
+    still heads `## Ch 6` after it. A chunk without a word says nothing (`---`, a stray symbol, a
+    page marker alone) and makes no chunk either (`_worded`), and a section of such chunks alone
+    is one of headings alone."""
     size = run.settings.chunk_size
     short = size * run.settings.chunk_merge_below / 100  # of the whole size, whatever the frame
     ends: list[CutReason] = [CutReason.HEADING] * (len(found) - 1) + [CutReason.EDGE]
@@ -217,14 +221,34 @@ def pack(run: Chunking, found: list[Section]) -> list[Packed]:
     for section, end in zip(found, ends, strict=False):
         budget = size - len(frame(section.frame))
         pieces = segment.fit(run.text, section.pieces, budget)
-        cut = segment.pack(pieces, budget, short, end)
+        cut = _worded(run.text, segment.pack(pieces, budget, short, end))
         if not cut:
-            carried += pieces
+            carried += [piece for piece in pieces if piece.kind == SpanKind.HEADING]
             continue
         cut[0] = msgspec.structs.replace(cut[0], headings=[*carried, *cut[0].headings])
         carried = []
         packed += [msgspec.structs.replace(chunk, frame=section.frame) for chunk in cut]
     return packed
+
+
+def _worded(text: str, cut: list[Packed]) -> list[Packed]:
+    """The chunks of one section that hold a word, the others dropped: a separator or a stray
+    symbol packed alone says nothing, and would only be matched by its heading path. A dropped
+    chunk hands its headings to the next chunk kept, and its end to the one kept before it, so a
+    chunk's end still says why the next one starts where it does."""
+    kept: list[Packed] = []
+    headings: list[Span] = []
+    for chunk in cut:
+        if not WORD.search(without_markers(text[chunk.pieces[0].start : chunk.pieces[-1].end])):
+            headings += chunk.headings
+            if kept:
+                kept[-1] = msgspec.structs.replace(kept[-1], end_reason=chunk.end_reason)
+            continue
+        if headings:
+            chunk = msgspec.structs.replace(chunk, headings=[*headings, *chunk.headings])
+            headings = []
+        kept.append(chunk)
+    return kept
 
 
 # --- the pipelines ----------------------------------------------------------------

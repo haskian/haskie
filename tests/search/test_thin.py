@@ -12,7 +12,6 @@ the offsets, lines and cut reasons it really has:
     seq 6  heading -> edge               "## Notes", a whole section
 """
 
-import msgspec
 import pytest
 from conftest import chunk_hit
 
@@ -55,8 +54,6 @@ HITS = {
     seq: chunk_hit(chunk, seq, document=DOC, collection=COLLECTION)
     for seq, chunk in enumerate(CHUNKS, start=1)
 }
-# a separator line of another document: a chunk without a word
-RULE = msgspec.structs.replace(HITS[5], document="other.md", seq=9, text="---", char_end=3)
 
 
 def _range(*seqs: int) -> HitRange:
@@ -109,10 +106,6 @@ def test_around_asks_for_the_chunks_a_thin_range_could_take(
     assert wanted == {_key(seq) for seq in expected}, name
 
 
-def test_a_range_without_a_word_asks_for_nothing() -> None:
-    assert thin.around(ranges([RULE]), 300, 2) == set()
-
-
 # --- fill -----------------------------------------------------------------------------
 
 MATCH, WEAK = 0.8, -0.4  # values around the scanned hits (`fill.value`)
@@ -132,7 +125,7 @@ def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
             300,
             2,
             [(1, 3, False)],
-            (1, 0, 0),
+            (1, 0),
         ),
         (
             "growing stops at `reach` chunks",
@@ -141,7 +134,7 @@ def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
             300,
             1,
             [(1, 2, False)],
-            (1, 0, 0),
+            (1, 0),
         ),
         (
             "a section's tail grows back, never past the heading after it",
@@ -150,7 +143,7 @@ def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
             300,
             2,
             [(2, 4, False)],
-            (1, 0, 0),
+            (1, 0),
         ),
         (
             "both sides grow",
@@ -159,7 +152,7 @@ def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
             300,
             1,
             [(2, 4, False)],
-            (1, 0, 0),
+            (1, 0),
         ),
         (
             "a weak neighbour joins when a stronger one past it pays for it",
@@ -168,7 +161,7 @@ def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
             300,
             2,
             [(1, 3, False)],
-            (1, 0, 0),
+            (1, 0),
         ),
         (
             "a weak neighbour is no match: the thin range stays, alone",
@@ -177,7 +170,7 @@ def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
             100,
             2,
             [(1, 1, True), (6, 6, False)],
-            (0, 1, 0),
+            (0, 1),
         ),
         (
             "a neighbour the read did not return is no match either",
@@ -186,7 +179,7 @@ def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
             100,
             2,
             [(1, 1, True), (6, 6, False)],
-            (0, 1, 0),
+            (0, 1),
         ),
         (
             "the best range stays, thin, when nothing matches: a short exact answer",
@@ -195,7 +188,7 @@ def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
             300,
             2,
             [(1, 1, False)],
-            (0, 0, 0),
+            (0, 0),
         ),
         (
             "a whole section is kept as the author wrote it",
@@ -204,7 +197,7 @@ def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
             200,
             2,
             [(2, 2, False), (5, 5, False)],
-            (0, 0, 0),
+            (0, 0),
         ),
         (
             "two thin ranges that take the same chunk become one",
@@ -213,7 +206,7 @@ def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
             300,
             1,
             [(1, 3, False)],
-            (2, 0, 0),
+            (2, 0),
         ),
         (
             "a range long enough is left alone",
@@ -222,9 +215,9 @@ def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
             100,
             2,
             [(2, 2, False)],
-            (0, 0, 0),
+            (0, 0),
         ),
-        ("the check turned off", [_range(1)], {2: MATCH}, 0, 2, [(1, 1, False)], (0, 0, 0)),
+        ("the check turned off", [_range(1)], {2: MATCH}, 0, 2, [(1, 1, False)], (0, 0)),
     ],
 )
 def test_a_thin_range_grows_by_matching_neighbours_or_goes(
@@ -234,13 +227,13 @@ def test_a_thin_range_grows_by_matching_neighbours_or_goes(
     min_chars: int,
     reach: int,
     expected: list[tuple[int, int, bool]],
-    counts: tuple[int, int, int],
+    counts: tuple[int, int],
 ) -> None:
     filled = thin.fill(found, _neighbours(values), min_chars, reach)
 
     assert [(one.seq_start, one.seq_end, one.alone) for one in filled.ranges] == expected, name
-    counted = (filled.grown, sum(one.alone for one in filled.ranges), filled.dropped)
-    assert counted == counts, f"{name}: grown, alone, dropped"
+    counted = (filled.grown, sum(one.alone for one in filled.ranges))
+    assert counted == counts, f"{name}: grown, alone"
 
 
 def test_a_neighbour_that_joins_leaves_the_range_score_as_it_matched() -> None:
@@ -252,13 +245,6 @@ def test_a_neighbour_that_joins_leaves_the_range_score_as_it_matched() -> None:
 
     assert grown.score == found.score
     assert [(hit.seq, hit.score) for hit in grown.hits] == [(1, 1.0), (2, 0.0)]
-
-
-def test_a_range_without_a_word_goes_even_when_it_ranked_first() -> None:
-    filled = thin.fill([*ranges([RULE]), _range(6)], {}, 300, 2)
-
-    assert [(one.hits[0].document, one.seq_start) for one in filled.ranges] == [(DOC, 6)]
-    assert filled.dropped == 1
 
 
 # --- words, when there is neither a reranker nor a vector ------------------------------
