@@ -1557,7 +1557,7 @@ export interface components {
             min_passage_chars?: number | null;
             /**
              * Chunks a passage may grow by
-             * @description How many neighbouring chunks of its section a passage may grow by on each side, never past a heading, and only where they match the question: a short passage before the slots are counted, every excerpt's passages after. Twice this is the longest gap between two passages that is filled. 0 turns growing off.
+             * @description How many neighbouring chunks of its section a passage may grow by on each side, once, never past a heading, and only where they match the question: a short passage as the passages are ranked, every excerpt's passages as the excerpt is filled. Twice this is the longest gap between two passages that is filled. 0 turns growing off.
              */
             max_passage_grow?: number | null;
             /**
@@ -1632,7 +1632,7 @@ export interface components {
             min_passage_chars: number;
             /**
              * Chunks a passage may grow by
-             * @description How many neighbouring chunks of its section a passage may grow by on each side, never past a heading, and only where they match the question: a short passage before the slots are counted, every excerpt's passages after. Twice this is the longest gap between two passages that is filled. 0 turns growing off.
+             * @description How many neighbouring chunks of its section a passage may grow by on each side, once, never past a heading, and only where they match the question: a short passage as the passages are ranked, every excerpt's passages as the excerpt is filled. Twice this is the longest gap between two passages that is filled. 0 turns growing off.
              * @default 2
              */
             max_passage_grow: number;

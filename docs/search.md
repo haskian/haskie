@@ -106,8 +106,10 @@ takes its best question's value, and that question tags it.
 - A passage grows outward by the run of chunks next to it whose values sum highest, when that is
   above 0.
 
-The same rule grows a short passage before the slots are counted (next section), so a search has
-one way of growing a passage, one scale of value and one setting for how far.
+The same rule grows a short passage of the `passages` answer (next section), so a search has one
+way of growing a passage, one scale of value and one setting for how far. A passage grows once:
+an excerpts search only judges its short passages before the slots are counted, and the fill
+grows every passage, short ones included.
 
 This is the arithmetic of Relevant Segment Extraction [3]: a weak chunk comes in only when stronger
 ones around it pay for it. Where a gap is not filled, `[…]` stays.
@@ -122,13 +124,14 @@ the signal and what it added.
 ## Short passages
 
 A passage under `min_passage_chars` (300), or under 7 words, is thin: a section's lead-in ("Three
-rules:", with the list in the next chunk), a section's last line, or a separator. `search/thin.py`
-grows it by the rule every excerpt's passages grow by: on each side, the run of up to
-`max_passage_grow` (2) chunks whose values sum highest, when that is above 0. It never grows past a
-heading. A neighbour's value is its score around the scanned hits' own: 0 for one as good as the
-median, 1 for one as good as the best, scored by the reranker when one is on, else by the cosine to
-the query vector, else by the share of the question's words it holds. The floor is this search's
-own, so it needs no calibration per model.
+rules:", with the list in the next chunk), a section's last line, or a separator. For the
+`passages` answer, `search/thin.py` grows it by the rule every excerpt's passages grow by: on each
+side, the run of up to `max_passage_grow` (2) chunks whose values sum highest, when that is above
+0. It never grows past a heading. A neighbour's value is its score around the scanned hits' own: 0
+for one as good as the median, 1 for one as good as the best, scored by the reranker when one is
+on, else by the cosine to the query vector, else by the share of the question's words it holds. The
+floor is this search's own, so it needs no calibration per model. An excerpts search only judges it
+here, whether a run worth taking is next to it, and leaves the growing to the fill.
 
 A thin passage that took nothing is too short to stand alone. As a passage it is dropped, and its
 slot goes to the next result. As part of an excerpt it stays when another passage of its section is

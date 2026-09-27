@@ -1160,7 +1160,7 @@ async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
                 "merge",
                 "rerank",
                 "hits",
-                "fill_thin",
+                "judge_thin",
                 "fold",
                 "group",
                 "budget",
@@ -1533,7 +1533,7 @@ async def test_several_questions_take_turns_and_say_which_they_answer(
     steps = [entry.split(";")[0].strip() for entry in response.headers["server-timing"].split(",")]
     assert sorted(steps) == sorted(
         ["plan"]
-        + ["retrieve", "merge", "rerank", "hits", "fill_thin"] * 2
+        + ["retrieve", "merge", "rerank", "hits", "judge_thin"] * 2
         + ["fold", "group", "budget", "probe_gaps", "fill", "quote"]
     ), "one plan for every question, the ranking once per question, then the turns, the sections"
     (event,) = (await client.get("/api/sessions/s1/history")).json()

@@ -13,7 +13,7 @@ Four pipelines over one set of steps:
 
 and the excerpts an agent reads, which run the shared ranking once per question asked:
 
-    answers    (retrieve -> merge -> rerank -> hits -> fill_thin) per question -> fold -> group
+    answers    (retrieve -> merge -> rerank -> hits -> judge_thin) per question -> fold -> group
                -> budget -> probe_gaps -> fill -> quote
 
 The first four steps are the search every answer shares; what follows is the fold that answer is
@@ -102,6 +102,7 @@ STEP_LABELS: dict[str, str] = {
     "hits": "Read hits",
     "collapse_hits": "Fold near-duplicates",
     "fill_thin": "Merge chunks and grow or drop short passages",
+    "judge_thin": "Merge chunks and find short passages",
     "collapse_ranges": "Fold passages",
     "fold": "Take turns and fold passages",
     "budget": "Cut to the answer's budget",
@@ -190,6 +191,13 @@ async def fill_thin(ctx: StepContext[Search, None, retrieval.Scanned]) -> retrie
     """Consecutive chunks of one section merged into one range, and each range too short to stand
     alone grown by the neighbours that match the query, or dropped."""
     return await retrieval.fill_thin(ctx.inputs, ctx.state.plan, ctx.state.query)
+
+
+async def judge_thin(ctx: StepContext[Search, None, retrieval.Scanned]) -> retrieval.Ranged:
+    """Consecutive chunks of one section merged into one range, and each range too short to stand
+    alone judged by the neighbours that match the query, but not grown: the fill grows every
+    passage of an excerpt once, short ones included."""
+    return await retrieval.fill_thin(ctx.inputs, ctx.state.plan, ctx.state.query, grows=False)
 
 
 async def collapse_ranges(ctx: StepContext[Search, None, retrieval.Ranged]) -> list[HitRange]:
@@ -294,7 +302,7 @@ def _chain[T](
 
 RANKING = (retrieve, merge, rerank, hits)  # the search every answer shares
 
-RANKED = _chain(retrieval.Ranged, *RANKING, fill_thin)  # one question's part of `answers`
+RANKED = _chain(retrieval.Ranged, *RANKING, judge_thin)  # one question's part of `answers`
 
 CHUNKS = _chain(list[Hit], *RANKING, collapse_hits)
 PASSAGES = _chain(list[Passage], *RANKING, fill_thin, collapse_ranges, read)

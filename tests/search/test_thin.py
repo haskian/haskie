@@ -287,3 +287,15 @@ def test_terms_drop_question_words_and_short_ones() -> None:
         "retried",
         "kept",
     ], "once each, in the order they come"
+
+
+def test_judging_marks_what_could_grow_and_grows_nothing() -> None:
+    """For a search whose fill grows every passage once, the thin step only judges: a lead-in
+    with a neighbour worth taking stands, one without is alone, and neither takes a chunk."""
+    found = [_range(6), _range(1), _range(4)]
+
+    filled = thin.fill(found, _neighbours({2: MATCH, 3: -1.0}), 300, 2, grows=False)
+
+    shape = [(one.seq_start, one.seq_end, one.alone) for one in filled.ranges]
+    assert shape == [(1, 1, False), (4, 4, True), (6, 6, False)], "best first, ties by place"
+    assert (filled.added, filled.grown) == ([], 1), "judged to grow, grown by nothing"

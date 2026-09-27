@@ -232,14 +232,15 @@ class Ranged(msgspec.Struct):
     scanned: Scanned
 
 
-async def fill_thin(scanned: Scanned, where: Plan, query: str) -> Ranged:
+async def fill_thin(scanned: Scanned, where: Plan, query: str, grows: bool = True) -> Ranged:
     """The scanned hits as ranges, each thin one grown by the neighbours of its section that
     match `query`, else marked too short to stand alone (see `thin`).
 
     Its neighbours are read from the collection only when a range is thin, in one query per
     collection, and valued around the scanned hits (`fill.value`): by the reranker when one is
     on, since the scanned hits carry its scores already, else as `_values` does. The valuing and
-    the growing run in one worker-thread hop.
+    the growing run in one worker-thread hop. `grows` False only judges which thin ranges could
+    grow, for the fill of an excerpts search to grow them, so a passage grows once.
     """
     settings = where.settings
     hit_ranges = passage.ranges(scanned.hits)
@@ -252,7 +253,9 @@ async def fill_thin(scanned: Scanned, where: Plan, query: str) -> Ranged:
             row_key(row): row_score(row) for row in await cross_encode(query, read, settings)
         }
         reranked = [rescored[row_key(row)] for row in read]
-    filled, signal = await cpu.on_cpu(_thin, hit_ranges, scanned, rows, reranked, where, query)
+    filled, signal = await cpu.on_cpu(
+        _thin, hit_ranges, scanned, rows, reranked, where, query, grows
+    )
     alone = sum(one.alone for one in filled.ranges)
     if filled.grown or alone or filled.dropped:
         _log.info(
@@ -277,9 +280,10 @@ def _thin(
     reranked: list[float] | None,
     where: Plan,
     query: str,
+    grows: bool,
 ) -> tuple[thin.Filled, str]:
     """The neighbours valued (`reranked` are their reranker scores, when one is on) and the thin
-    ranges grown by them."""
+    ranges grown by them, or only judged when they do not grow here (`thin.fill`)."""
     if not rows:
         values, signal = [], "none"
     elif reranked is not None:
@@ -295,7 +299,9 @@ def _thin(
         for (key, (hit, _)), worth in zip(rows.items(), values, strict=True)
     }
     settings = where.settings
-    found = thin.fill(hit_ranges, neighbours, settings.min_passage_chars, settings.max_passage_grow)
+    found = thin.fill(
+        hit_ranges, neighbours, settings.min_passage_chars, settings.max_passage_grow, grows
+    )
     return found, signal
 
 

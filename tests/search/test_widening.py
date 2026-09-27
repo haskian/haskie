@@ -123,3 +123,24 @@ async def test_a_short_passage_with_no_neighbour_worth_it_stands_alone(tmp_path:
 
     shape = [(one.seq_start, one.seq_end, one.alone) for one in ranged.ranges]
     assert shape == [(1, 2, False), (5, 5, True)]
+
+
+@pytest.mark.anyio
+async def test_in_an_excerpt_a_short_passage_grows_once_by_the_fill(tmp_path: Path) -> None:
+    """An excerpts search only judges its short passages (`grows=False`); the fill then grows
+    each passage once, by at most `max_passage_grow` chunks a side. Chunk 1 stands, since chunk
+    2 is worth taking. The fill values against the kept chunk alone (cosine 1.0): chunk 2 (1.0)
+    is worth 1 and chunk 3 (0.95) -1, so it grows by 2 only, where growing twice would have
+    reached 4."""
+    where, hits = await _index(tmp_path, VECTORS)
+    scanned = Scanned(hits=[hits[1], hits[7]], vectors=[ON, [0.8, 0.6]])
+
+    judged = await retrieval.fill_thin(scanned, where, QUERY, grows=False)
+    groups = await retrieval.sections([judged.ranges[0]], where, limit=1)
+    (filled,) = await retrieval.fill(groups, _asked(), where)
+
+    assert [(one.seq_start, one.seq_end, one.alone) for one in judged.ranges] == [
+        (1, 1, False),
+        (7, 7, False),
+    ], "judged, not grown"
+    assert [(one.seq_start, one.seq_end) for one in filled.ranges] == [(1, 2)], "grown once"

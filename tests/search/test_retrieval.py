@@ -187,7 +187,7 @@ def test_thin_values_neighbours_the_strongest_way_the_search_can(
 ) -> None:
     read = {chunk_key(hit): (hit, row) for hit, row in _read(rows)}
 
-    filled, found = retrieval._thin([], SCANNED, read, reranked, where, QUERY)
+    filled, found = retrieval._thin([], SCANNED, read, reranked, where, QUERY, grows=True)
 
     assert found == signal, name
     assert filled.ranges == [], f"{name}: no thin range, nothing grows"

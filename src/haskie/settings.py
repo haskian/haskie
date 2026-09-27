@@ -247,10 +247,10 @@ MAX_ANSWER_CHARS = Meta(
 MAX_PASSAGE_GROW = Meta(
     title="Chunks a passage may grow by",
     description=(
-        "How many neighbouring chunks of its section a passage may grow by on each side, never "
-        "past a heading, and only where they match the question: a short passage before the "
-        "slots are counted, every excerpt's passages after. Twice this is the longest gap "
-        "between two passages that is filled. 0 turns growing off."
+        "How many neighbouring chunks of its section a passage may grow by on each side, once, "
+        "never past a heading, and only where they match the question: a short passage as the "
+        "passages are ranked, every excerpt's passages as the excerpt is filled. Twice this is "
+        "the longest gap between two passages that is filled. 0 turns growing off."
     ),
 )
 CANDIDATES = Meta(

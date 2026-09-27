@@ -85,7 +85,11 @@ class Filled(msgspec.Struct):
 
 
 def fill(
-    hit_ranges: list[HitRange], neighbours: dict[ChunkKey, Candidate], min_chars: int, reach: int
+    hit_ranges: list[HitRange],
+    neighbours: dict[ChunkKey, Candidate],
+    min_chars: int,
+    reach: int,
+    grows: bool = True,
 ) -> Filled:
     """Grow each thin range by the neighbours worth taking, as every passage of an excerpt grows
     (`fill.run`): on each side, the run of up to `reach` chunks whose values sum highest, when
@@ -93,6 +97,10 @@ def fill(
     marked `alone`, unless it is the first of `hit_ranges`, the best the search found. A thin
     range that is a whole section is kept as it is. A range without a word is dropped whatever it
     ranked.
+
+    `grows` False only judges: a thin range with a run worth taking stands, but takes nothing,
+    for a later step to grow it once (the fill of an excerpts search, `fill.fills`), so no passage
+    grows twice.
 
     The ranges are rebuilt at the end (`passage.rejoin`), so two ranges a neighbour now joins
     become one, and a neighbour scores 0: a range's score says how strongly it matched, not how
@@ -113,7 +121,8 @@ def fill(
             ]
             if took:
                 grown += 1
-                added.update((chunk_key(hit), hit) for hit in took)
+                if grows:
+                    added.update((chunk_key(hit), hit) for hit in took)
             elif position > 0:
                 hit_range = msgspec.structs.replace(hit_range, alone=True)
         kept.append(hit_range)
