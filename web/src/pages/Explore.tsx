@@ -40,6 +40,17 @@ interface Found {
   uncovered: string[]
 }
 
+/** The search whose results are on screen: what it found, the questions it asked (the first is
+ *  the one its matches are marked by), what it answered with, and the ms it took. */
+interface Shown extends Found {
+  asked: string[]
+  context: string // the background the questions shared, as it was sent
+  as: Answer
+  took: number | null // null before the first search: the line above the results stays blank
+}
+
+const NOTHING: Shown = { results: [], steps: [], scoring: [], missing: [], uncovered: [], asked: [], context: '', as: 'excerpt', took: null }
+
 /** The one request an answer takes: its own route for excerpts and for documents, the explore
  *  route for chunks and passages. Excerpts take every question asked and the shared background;
  *  the others take the first question. */
@@ -67,19 +78,11 @@ export function Explore({ route, counts }: PageProps) {
   const [answer, setAnswer] = useState<Answer>('excerpt')
   const [asking, setAsking] = useState<Asking>('single')
   const [aspects, setAspects] = useState(['']) // the query first, then the other aspects
-  const [ran, setRan] = useState('') // the query the results on screen answer
-  const [ranAs, setRanAs] = useState<Answer>('excerpt') // and what it answered with
-  const [results, setResults] = useState<Match[]>([])
+  const [context, setContext] = useState('') // multi-aspect only: the background every aspect shares
+  const [shown, setShown] = useState<Shown>(NOTHING)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState<Match | null>(null)
   const [busy, setBusy] = useState(false)
-  const [took, setTook] = useState<number | null>(null) // ms the last query took
-  const [steps, setSteps] = useState<StepTiming[]>([]) // and how long each of its steps took
-  const [scoring, setScoring] = useState<ScoreStep[]>([]) // and how its scores came to be
-  const [missing, setMissing] = useState<string[]>([]) // words the excerpts on screen lack
-  const [uncovered, setUncovered] = useState<string[]>([]) // and the questions they do not answer
-  const [context, setContext] = useState('') // multi-aspect only: the background every aspect shares
-  const [asked, setAsked] = useState<string[]>([]) // the questions the results on screen answer
 
   useEffect(() => {
     Promise.all([api.collections({ page_size: MAX_PAGE_SIZE }), api.sessions()])
@@ -113,16 +116,9 @@ export function Explore({ route, counts }: PageProps) {
     setBusy(true)
     const started = performance.now()
     try {
-      const found = await search(questions, multi ? context : '', answer, scopeParams(parseScope(scope)))
-      setResults(found.results)
-      setSteps(found.steps)
-      setScoring(found.scoring)
-      setMissing(found.missing)
-      setUncovered(found.uncovered)
-      setAsked(questions)
-      setRan(questions[0])
-      setRanAs(answer)
-      setTook(Math.round(performance.now() - started))
+      const shared = multi ? context.trim() : ''
+      const found = await search(questions, shared, answer, scopeParams(parseScope(scope)))
+      setShown({ ...found, asked: questions, context: shared, as: answer, took: Math.round(performance.now() - started) })
     } catch (cause) {
       setError(errorText(cause))
     } finally {
@@ -134,15 +130,8 @@ export function Explore({ route, counts }: PageProps) {
 
   const clear = () => {
     setAspect(0, '')
-    setRan('')
-    setResults([])
-    setSteps([])
-    setScoring([])
-    setMissing([])
-    setUncovered([])
-    setAsked([])
+    setShown(NOTHING)
     setError(null)
-    setTook(null)
   }
 
   const reset = () => {
@@ -207,12 +196,12 @@ export function Explore({ route, counts }: PageProps) {
           />
         )}
         {error !== null && <p className="muted">{error}</p>}
-        <SearchTook counts={`${results.length} ${answerOf(ranAs).plural}`} ms={took} steps={steps} />
-        {missing.length > 0 && <p className="muted">No excerpt says: {missing.join(', ')}</p>}
-        {uncovered.length > 0 && <p className="muted">Unanswered: {uncovered.join(' · ')}</p>}
-        <HitGrid results={results} query={ran} onOpen={setOpen} questions={asked} />
+        <SearchTook counts={`${shown.results.length} ${answerOf(shown.as).plural}`} ms={shown.took} steps={shown.steps} />
+        {shown.missing.length > 0 && <p className="muted">No excerpt says: {shown.missing.join(', ')}</p>}
+        {shown.uncovered.length > 0 && <p className="muted">Unanswered: {shown.uncovered.join(' · ')}</p>}
+        <HitGrid results={shown.results} query={shown.asked[0] ?? ''} onOpen={setOpen} questions={shown.asked} />
       </div>
-      <MatchModal match={open} query={ran} scoring={scoring} onClose={() => setOpen(null)} />
+      <MatchModal match={open} query={shown.asked[0] ?? ''} scoring={shown.scoring} asked={{ questions: shown.asked, context: shown.context }} onClose={() => setOpen(null)} />
     </Shell>
   )
 }

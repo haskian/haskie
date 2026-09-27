@@ -27,7 +27,8 @@ const keyOf = (match: Match): string =>
   isSource(match) ? `${match.collection}:${match.document}` : `${match.collection}:${match.document}:${match.char_start}` // offsets are unique in a document
 
 /** The result grid, in any of its shapes: chunks, passages or excerpts that matched, or sources.
- *  With several `questions` asked, an excerpt names the ones it answers ("Q1 Q3") by its score. */
+ *  With several `questions` asked, an excerpt names the ones it answers, a tag each with how well
+ *  it matched that question ("Q1 0.84"), at the bottom of its tile. */
 export function HitGrid<T extends Match>({
   results,
   query,
@@ -51,12 +52,7 @@ export function HitGrid<T extends Match>({
               <span className="kind">{match.collection}</span>
               <span>{match.document}</span>
             </span>
-            <span className="mono muted">
-              {isExcerpt(match) && questions.length > 1 && (
-                <span title={match.aspects.join('\n')}>{questionLabels(match.aspects, questions)} · </span>
-              )}
-              {match.score.toFixed(2)}
-            </span>
+            <span className="mono muted">{match.score.toFixed(2)}</span>
           </header>
           <div className="hit-body">
             <p className="hit-text">
@@ -67,6 +63,16 @@ export function HitGrid<T extends Match>({
                 <span key={index}>{line}</span>
               ))}
             </footer>
+            {isExcerpt(match) && questions.length > 1 && (
+              <div className="hit-questions">
+                {questionLabels(match.aspects, questions).map(({ label, question }) => (
+                  <span key={label} className="question-tag" title={question}>
+                    {label}
+                    {question in match.aspect_scores && <span className="question-score"> {match.aspect_scores[question].toFixed(2)}</span>}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         </article>
       ))}

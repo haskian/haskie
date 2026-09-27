@@ -16,6 +16,7 @@ from haskie.settings import Fusion, Reranker, SearchMode, SearchSettings
 
 if TYPE_CHECKING:
     from haskie.search.flow import Search
+    from haskie.search.retrieval import Pool
     from haskie.search.section import Group
 
 _HARMONIC = "2·best·sum / (best + sum), between the best and twice it"
@@ -25,28 +26,42 @@ _HARMONIC = "2·best·sum / (best + sum), between the best and twice it"
 type Rule = Callable[["Search", Any, Any], str | None]
 
 
-def _retrieve(state: "Search", *_: Any) -> str | None:
-    """Each collection's rows scored by its own mode. From the settings alone, as every rule of the
-    ranking is, so each question of a search says the same and is recorded once."""
+def _retrieve(state: "Search", _: None, pool: "Pool") -> str | None:
+    """Each collection's rows scored by the search it ran (`_ran`), which is its mode unless its
+    table has no vectors. The same for every question of a search, so it is recorded once."""
     where = state.plan
     rules: dict[str, list[str]] = {}
     for index, settings in where.indexes:
-        rule = _retrieved(settings, where.vector is not None, where.embedding is not None)
+        ran = _ran(pool, index.collection, settings, where.vector is not None)
+        rule = _retrieved(settings, ran)
+        if where.embedding is None:
+            rule = f"{rule} No embedding model, so every mode is BM25."
         rules.setdefault(rule, []).append(index.collection)
     if len(rules) == 1:
         return next(iter(rules))
     return " ".join(f"{', '.join(names)}: {rule}" for rule, names in rules.items())
 
 
-def _retrieved(settings: SearchSettings, embedded: bool, has_model: bool) -> str:
-    """How one collection's retrieval scores a chunk. Mirrors `index.row_score` per mode."""
-    if not embedded or settings.mode == SearchMode.FTS:
-        lexical = (
+def _ran(pool: "Pool", collection: str, settings: SearchSettings, embedded: bool) -> SearchMode:
+    """The search a collection ran, read off the score column of a row it returned, as
+    `index.row_score` reads it: a table written without vectors answers any mode by full text. A
+    collection that returned nothing scored nothing, so its settings say it."""
+    for key in pool.rankings.get(collection, [])[:1]:
+        _, row = pool.rows[key]
+        if "_relevance_score" in row:
+            return SearchMode.HYBRID
+        return SearchMode.VECTOR if "_distance" in row else SearchMode.FTS
+    return settings.mode if embedded else SearchMode.FTS
+
+
+def _retrieved(settings: SearchSettings, ran: SearchMode) -> str:
+    """How one collection's retrieval scored a chunk, by the search it ran."""
+    if ran == SearchMode.FTS:
+        return (
             "BM25 score from LanceDB's full-text index: unbounded, higher is better, larger for "
             "rarer query words. Comparable within one search only."
         )
-        return lexical if has_model else f"{lexical} No embedding model, so every mode is BM25."
-    if settings.mode == SearchMode.VECTOR:
+    if ran == SearchMode.VECTOR:
         return (
             "1 / (1 + d), d the squared L2 distance between the query and chunk embeddings: "
             "1 / (3 − 2·cosine) for unit vectors, 1 at cosine 1 and 0.33 at cosine 0."
@@ -84,13 +99,20 @@ def _rerank(state: "Search", *_: Any) -> str | None:
     settings = state.plan.settings
     if settings.reranker == Reranker.NONE:
         return None
-    return (
+    rule = (
         f"The cross-encoder {settings.reranker_model} rescores up to {state.candidates} "
         "candidates, and the sigmoid of its logit, 1 / (1 + e^−logit), replaces every score before "
         "it: 0 to 1, 0.5 at logit 0, bounded but not calibrated. It reads the query and the chunk "
         "together, so the mode only decides which candidates it reads, and a chunk scores the same "
         "in every mode that finds it."
     )
+    if settings.min_rerank_score > 0:
+        rule = f"{rule} Chunks it scores under {settings.min_rerank_score:g} are dropped."
+    if state.framed == state.query:
+        return rule
+    if settings.rerank_with_context:
+        return f"{rule} It reads each question with the shared context in front."
+    return f"{rule} It reads each question alone: the shared context only found the candidates."
 
 
 _PASSAGE = (
@@ -127,13 +149,18 @@ def _new_hits(before: list["Group"], after: list["Group"]) -> bool:
 
 
 def _probe_gaps(state: "Search", before: list["Group"], after: list["Group"]) -> str | None:
-    """The probe's passage, scored by a search of its own, when it added one."""
+    """The probe's passage, when it added one: judged by the reranker when one is on, else 0."""
     if not _new_hits(before, after):
         return None
-    fused = " fused by rank across collections" if len(state.plan.indexes) > 1 else ""
+    if state.plan.settings.reranker != Reranker.NONE:
+        return (
+            "The passage the probe added, found by a full-text search of the missing words, is "
+            "scored by the reranker against each question whose words are missing, as the ranked "
+            "chunks are, and kept only above its floor."
+        )
     return (
-        "The passage the probe added scores by a full-text search of the missing words alone: "
-        f"BM25{fused}, on another scale than the passages ranked for the question."
+        "The passage the probe added scores 0: a full-text search of the missing words alone "
+        "found it, on another scale than the passages ranked for the question."
     )
 
 

@@ -96,7 +96,9 @@ holds are searched for once more by BM25 alone, and the best passage that search
 section holds yet joins the answer. It joins the kept section it belongs to, or comes after the
 others as one excerpt past `limit` and past the budget, which the sections were cut to before it.
 Taking the last ranked section's slot instead would trade one gap for another, and a search of one
-excerpt would lose its whole answer. It is tagged with the questions whose words it holds.
+excerpt would lose its whole answer. It is tagged with the questions whose words it holds, and
+it scores 0, as the fill's chunks do: its BM25 score is on another scale than the ranked
+passages', and would sort it above them.
 
 `search_excerpts` answers with `excerpts`, `uncovered` (the questions no excerpt names, when
 several were asked) and `missing_terms` (the words still missing after the probe). A synonym
@@ -232,10 +234,13 @@ When the parts of a question are answered in different places, one search of the
 tends to fill every slot with one part. The reranker scores one passage at a time, so it never sees
 that another part went unanswered. So `search_excerpts` takes `q` as a list: one question, or 2 to
 5 parts of one, each at most 500 characters. An optional `context` of at most 200 characters is the
-background the parts share. The models read it in front of each part: the query embedding and the
-reranker, as they read a chunk under its heading path. Full-text search and the word scores read
-the part alone. The context's words would otherwise make every part match every passage that shares
-them, so a part the sources say nothing about would look answered.
+background the parts share. The query embedding reads it in front of each part, as it reads a chunk
+under its heading path, so the context steers which candidates come up. Everything that matches
+words reads the part alone: full-text search, the word scores, and the reranker, which sets the
+final order. The context's words would otherwise make every part match every passage that shares
+them: "ddd" over a book on DDD ranks "Can I DDD?" above what a part about anti-patterns asks, and a
+part the sources say nothing about would look answered. `rerank_with_context` (off by default)
+puts the context in front of each part for the reranker too.
 
 ```mermaid
 flowchart LR
@@ -258,12 +263,19 @@ its slots the same way [2]. Near-duplicates then fold across all the parts, once
 search, and the passages group by section, the sections taking the slots in the order the parts
 picked them.
 
-Each span's `aspects` lists the parts its passage ranked high for: the part that picked it, every
-part that joined it or ranks it among its own owed ranges, and those of every place folded into it.
-An excerpt's `aspects` joins its spans'. The tags come from ranks alone, with no relevance floor. A
+Each span's `aspect_scores` gives how well its passage matched every part whose own ranking holds
+its chunks, or those of a place folded into it, scored as a passage is (the harmonic mean below).
+
+With a reranker on, its score has a scale: under `min_rerank_score` (0.05) the reranker judged a
+chunk no answer, and it is dropped from the ranking before passages are built. A part's tag in
+`aspects` then means the reranker judged the passage an answer to it, and a passage scores its best
+part. Without a reranker the scores of two parts share no scale, so `aspects` lists the parts the
+passage ranked high for: the part that picked it, every part that joined it or ranks it among its
+own owed ranges, and those of every place folded into it; it keeps the score it was picked with. A
 vector or hybrid search finds nearest passages for any part, even one the sources say nothing
-about, so a tag is not proof of an answer. A part no excerpt lists found nothing at all, and the
-answer's `uncovered` names it. One question, or a list that deduplicates to one, is the single
+about, so without a reranker a tag is not proof of an answer. An excerpt's `aspects` joins its
+spans', and its `aspect_scores` holds each part's best. A part no excerpt lists found nothing, and
+the answer's `uncovered` names it. One question, or a list that deduplicates to one, is the single
 search, its context read the same way, and its `aspects` is empty. A `limit` below the number of
 parts is refused (422).
 

@@ -497,29 +497,32 @@ async def compact_model() -> "EmbeddingModel":
 async def index_hits(
     index: "CollectionIndex", query: str, settings: "SearchSettings"
 ) -> list["Hit"]:
-    """What one bare index retrieves for `query` under `settings`, as a search's `retrieve` step
-    reads it (`search_rows`), cut to `settings.limit`: no reranker, no fold."""
-    vector = await index.query_vector(query, settings)
-    rows = await index.search_rows(query, vector, settings, settings.limit)
+    """What one bare index retrieves for `query` by full text, as a search's `retrieve` step reads
+    it (`search_rows`), cut to `settings.limit`: no embedding, no reranker, no fold."""
+    rows = await index.search_rows(query, None, settings, settings.limit)
     return [index.hit(row) for row in rows]
 
 
-async def collection_hits(
-    name: str, query: str, search: "SearchOverrides | None" = None
-) -> list["Hit"]:
+async def collection_hits(name: str, query: str) -> list["Hit"]:
     """What a chunk search of the one collection `name` answers (`flow.chunks`), the one search
-    the API runs. `search`, when given, first becomes the collection's search overrides: the way to
-    search with other settings, since no route takes them per call."""
+    the API runs, with the collection's own settings."""
+    from haskie.search import flow
+
+    return await flow.chunks([name], query)
+
+
+async def search_with(name: str, query: str, search: "SearchOverrides") -> list["Hit"]:
+    """`search` saved as the collection's search overrides, replacing any before, then its chunk
+    search (`collection_hits`): no route takes search settings per call. Later searches of the
+    collection keep them."""
     import msgspec
 
     from haskie.collection.collection import Collection
-    from haskie.search import flow
 
-    if search is not None:
-        collection = Collection(name)
-        current = (await collection.info()).overrides
-        await collection.set_overrides(msgspec.structs.replace(current, search=search))
-    return await flow.chunks([name], query)
+    collection = Collection(name)
+    current = (await collection.info()).overrides
+    await collection.set_overrides(msgspec.structs.replace(current, search=search))
+    return await collection_hits(name, query)
 
 
 async def seed_index(collection: str, doc: str, text: str, heading: str = "Alpha") -> None:

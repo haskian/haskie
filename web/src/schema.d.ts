@@ -965,6 +965,9 @@ export interface components {
             markdown_file: string;
             spans: components["schemas"]["Span"][];
             aspects?: string[];
+            aspect_scores?: {
+                [key: string]: number;
+            };
         };
         /** FieldDoc */
         FieldDoc: {
@@ -1286,6 +1289,9 @@ export interface components {
             score: number;
             also_in?: components["schemas"]["PassageReference"][];
             aspects?: string[];
+            aspect_scores?: {
+                [key: string]: number;
+            };
             collection: string;
             document: string;
             text: string;
@@ -1534,6 +1540,16 @@ export interface components {
              */
             reranker_model?: string | null;
             /**
+             * Rerank with the shared context
+             * @description When several questions share a context, the query embedding reads the context in front of each question to find candidates. Off: the reranker, which sets the final order, reads each question alone, so a context every document matches ("ddd" over a DDD book) cannot outrank what the question asks. On: the reranker reads it too.
+             */
+            rerank_with_context?: boolean | null;
+            /**
+             * Lowest reranker score
+             * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. 0 keeps every chunk. Rerankers differ: tune it per model.
+             */
+            min_rerank_score?: number | null;
+            /**
              * Shortest passage (characters)
              * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question (see Chunks a passage may grow by). One that finds none is dropped, unless it is the best result. 0 turns this off.
              */
@@ -1607,6 +1623,18 @@ export interface components {
              * @default Xenova/ms-marco-MiniLM-L-6-v2
              */
             reranker_model: string;
+            /**
+             * Rerank with the shared context
+             * @description When several questions share a context, the query embedding reads the context in front of each question to find candidates. Off: the reranker, which sets the final order, reads each question alone, so a context every document matches ("ddd" over a DDD book) cannot outrank what the question asks. On: the reranker reads it too.
+             * @default false
+             */
+            rerank_with_context: boolean;
+            /**
+             * Lowest reranker score
+             * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. 0 keeps every chunk. Rerankers differ: tune it per model.
+             * @default 0.05
+             */
+            min_rerank_score: number;
             /**
              * Shortest passage (characters)
              * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question (see Chunks a passage may grow by). One that finds none is dropped, unless it is the best result. 0 turns this off.
@@ -1688,6 +1716,9 @@ export interface components {
             score: number;
             also_in?: components["schemas"]["PassageReference"][];
             aspects?: string[];
+            aspect_scores?: {
+                [key: string]: number;
+            };
         };
         /**
          * Stage

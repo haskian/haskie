@@ -15,6 +15,8 @@ const DEFAULTS: SearchSettings = {
   refine_factor: 10,
   reranker: 'none',
   reranker_model: 'Xenova/ms-marco-MiniLM-L-6-v2',
+  rerank_with_context: false,
+  min_rerank_score: 0.05,
   min_passage_chars: 300,
   max_passage_grow: 2,
   max_section_chars: 8000,
@@ -34,6 +36,8 @@ const NO_OVERRIDES: SearchOverrides = {
   refine_factor: null,
   reranker: null,
   reranker_model: null,
+  rerank_with_context: null,
+  min_rerank_score: null,
   min_passage_chars: null,
   max_passage_grow: null,
   max_section_chars: null,
@@ -47,6 +51,8 @@ describe('effectiveSearch', () => {
     { name: 'no override falls back to the default', overrides: NO_OVERRIDES, expected: DEFAULTS },
     { name: 'an override wins', overrides: { ...NO_OVERRIDES, limit: 25, mode: 'fts' }, expected: { limit: 25, mode: 'fts' } },
     { name: 'zero is a value, not an absent override', overrides: { ...NO_OVERRIDES, bm25_weight: 0 }, expected: { bm25_weight: 0 } },
+    { name: 'false is a value too', overrides: { ...NO_OVERRIDES, rerank_with_context: false }, expected: { rerank_with_context: false } },
+    { name: 'a switch turned on wins', overrides: { ...NO_OVERRIDES, rerank_with_context: true }, expected: { rerank_with_context: true } },
   ]
   for (const one of cases) {
     test(one.name, () => {
@@ -80,12 +86,12 @@ describe('visibleSearchFields', () => {
     {
       name: 'a reranker adds its model, and a candidate pool even without hybrid',
       search: search({ mode: 'fts', reranker: 'cross-encoder' }),
-      expected: ['limit', 'mode', 'reranker', 'reranker_model', 'candidates', 'min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars'],
+      expected: ['limit', 'mode', 'reranker', 'reranker_model', 'rerank_with_context', 'min_rerank_score', 'candidates', 'min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars'],
     },
     {
       name: 'hybrid and a reranker ask for the candidate pool once',
       search: search({ reranker: 'cross-encoder' }),
-      expected: ['limit', 'mode', 'fusion', 'rrf_k', 'nprobes', 'refine_factor', 'reranker', 'reranker_model', 'candidates', 'min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars'],
+      expected: ['limit', 'mode', 'fusion', 'rrf_k', 'nprobes', 'refine_factor', 'reranker', 'reranker_model', 'rerank_with_context', 'min_rerank_score', 'candidates', 'min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars'],
     },
     {
       name: 'no shortest passage still asks how far passages grow: every excerpt grows by it',
@@ -105,6 +111,8 @@ describe('visibleSearchFields', () => {
         'refine_factor',
         'reranker',
         'reranker_model',
+        'rerank_with_context',
+        'min_rerank_score',
         'candidates',
         'min_passage_chars',
         'max_passage_grow',

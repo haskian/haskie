@@ -4,6 +4,7 @@ search, what the step read and what it answered, and nothing from a step that le
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import pytest
 from conftest import hit
 
@@ -26,6 +27,13 @@ BM25 = (
 VECTOR = (
     "1 / (1 + d), d the squared L2 distance between the query and chunk embeddings: "
     "1 / (3 − 2·cosine) for unit vectors, 1 at cosine 1 and 0.33 at cosine 0."
+)
+RERANK = (
+    "The cross-encoder Xenova/ms-marco-MiniLM-L-6-v2 rescores up to 50 candidates, and the "
+    "sigmoid of its logit, 1 / (1 + e^−logit), replaces every score before it: 0 to 1, 0.5 at "
+    "logit 0, bounded but not calibrated. It reads the query and the chunk together, so the mode "
+    "only decides which candidates it reads, and a chunk scores the same in every mode that finds "
+    "it. Chunks it scores under 0.05 are dropped."
 )
 PASSAGE = (
     "A passage scores the harmonic mean of its best chunk and the sum of its matched chunks: "
@@ -61,47 +69,82 @@ def _groups(*seqs: int) -> list[Group]:
     return [Group("c0", "a.md", Section(("A",), 1, 9), found)]
 
 
+def _read(*columns: str | None) -> Pool:
+    """What retrieval read: collection `c<n>` returned one row scored in the column `columns[n]`
+    names (`_score` BM25, `_distance` vector, `_relevance_score` fused), or nothing for None."""
+    rows = {("a.md", n): (None, {column: 1.0}) for n, column in enumerate(columns) if column}
+    rankings = {f"c{n}": [("a.md", n)] if column else [] for n, column in enumerate(columns)}
+    return Pool(rows=rows, rankings=rankings)  # ty: ignore[invalid-argument-type]
+
+
+LINEAR = (
+    "Hybrid: {} × vector + {} × BM25, each min-max scaled to 0–1 over the candidates, a half that "
+    "missed the chunk counting 0. The best candidate of any search scores near 1."
+)
+
+
 @pytest.mark.parametrize(
-    ("name", "state", "expected"),
+    ("name", "state", "read", "expected"),
     [
         (
             "full text when the mode asks for it",
             _search(SearchSettings(mode=SearchMode.FTS), vector=None),
+            _read("_score"),
             BM25,
         ),
         (
             "full text in any mode without an embedding model",
             _search(SearchSettings(), vector=None, embedding=None),
+            _read("_score"),
             f"{BM25} No embedding model, so every mode is BM25.",
         ),
         (
             "vector: the distance, turned into a score",
             _search(SearchSettings(mode=SearchMode.VECTOR)),
+            _read("_distance"),
             VECTOR,
         ),
         (
             "hybrid, linear: the weights as shares of their sum",
             _search(SearchSettings(fusion=Fusion.LINEAR, vector_weight=3.0, bm25_weight=1.0)),
-            "Hybrid: 0.75 × vector + 0.25 × BM25, each min-max scaled to 0–1 over the candidates, "
-            "a half that missed the chunk counting 0. The best candidate of any search scores "
-            "near 1.",
+            _read("_relevance_score"),
+            LINEAR.format("0.75", "0.25"),
         ),
         (
             "hybrid, linear, both weights 0: an even split",
             _search(SearchSettings(fusion=Fusion.LINEAR, vector_weight=0.0, bm25_weight=0.0)),
-            "Hybrid: 0.50 × vector + 0.50 × BM25, each min-max scaled to 0–1 over the candidates, "
-            "a half that missed the chunk counting 0. The best candidate of any search scores "
-            "near 1.",
+            _read("_relevance_score"),
+            LINEAR.format("0.50", "0.50"),
         ),
         (
             "hybrid, reciprocal rank fusion",
             _search(SearchSettings(fusion=Fusion.RRF, rrf_k=10)),
+            _read("_relevance_score"),
             "Hybrid: reciprocal rank fusion of the vector and BM25 ranks, the sum of 1 / (10 + "
             "rank) over the two, at most 0.1818. Rank only.",
         ),
         (
+            "hybrid asked of a table written without vectors: it answered by full text",
+            _search(SearchSettings(mode=SearchMode.HYBRID)),
+            _read("_score"),
+            BM25,
+        ),
+        (
+            "a collection that returned nothing: its settings say it",
+            _search(SearchSettings(mode=SearchMode.VECTOR)),
+            _read(None),
+            VECTOR,
+        ),
+        (
+            "and a lexical search's, full text",
+            _search(SearchSettings(mode=SearchMode.VECTOR), vector=None),
+            _read(None),
+            BM25,
+        ),
+        (
             "collections of one rule say it once",
             _search(SearchSettings(mode=SearchMode.VECTOR), SearchSettings(mode=SearchMode.VECTOR)),
+            _read("_distance", "_distance"),
             VECTOR,
         ),
         (
@@ -111,12 +154,15 @@ def _groups(*seqs: int) -> list[Group]:
                 SearchSettings(mode=SearchMode.FTS),
                 SearchSettings(mode=SearchMode.VECTOR),
             ),
+            _read("_distance", "_score", "_distance"),
             f"c0, c2: {VECTOR} c1: {BM25}",
         ),
     ],
 )
-def test_retrieval_says_how_each_collection_scored(name: str, state: Search, expected: str) -> None:
-    assert RULES["retrieve"](state, None, _pool("c0")) == expected, name
+def test_retrieval_says_how_each_collection_scored(
+    name: str, state: Search, read: Pool, expected: str
+) -> None:
+    assert RULES["retrieve"](state, None, read) == expected, name
 
 
 @pytest.mark.parametrize(
@@ -147,11 +193,28 @@ def test_retrieval_says_how_each_collection_scored(name: str, state: Search, exp
             _search(SearchSettings(reranker=Reranker.CROSS_ENCODER, mode=SearchMode.VECTOR)),
             None,
             _pool("c0", ranked=3),
-            "The cross-encoder Xenova/ms-marco-MiniLM-L-6-v2 rescores up to 50 candidates, and the "
-            "sigmoid of its logit, 1 / (1 + e^−logit), replaces every score before it: 0 to 1, "
-            "0.5 at logit 0, bounded but not calibrated. It reads the query and the chunk "
-            "together, so the mode only decides which candidates it reads, and a chunk scores the "
-            "same in every mode that finds it.",
+            RERANK,
+        ),
+        (
+            "a shared context: the reranker reads each question alone, by default",
+            "rerank",
+            msgspec.structs.replace(
+                _search(SearchSettings(reranker=Reranker.CROSS_ENCODER)), framed="ddd\n\nq"
+            ),
+            None,
+            None,
+            f"{RERANK} It reads each question alone: the shared context only found the candidates.",
+        ),
+        (
+            "or with it in front, when set to",
+            "rerank",
+            msgspec.structs.replace(
+                _search(SearchSettings(reranker=Reranker.CROSS_ENCODER, rerank_with_context=True)),
+                framed="ddd\n\nq",
+            ),
+            None,
+            None,
+            f"{RERANK} It reads each question with the shared context in front.",
         ),
         ("passages that are only judged", "judge_thin", _search(), None, None, PASSAGE),
         (
@@ -175,23 +238,23 @@ def test_retrieval_says_how_each_collection_scored(name: str, state: Search, exp
         ("an excerpt", "group", _search(), None, None, "An excerpt scores its best passage."),
         ("a probe that added nothing", "probe_gaps", _search(), _groups(1), _groups(1), None),
         (
-            "a probe's passage, from one collection",
+            "a probe's passage",
             "probe_gaps",
             _search(),
             _groups(1),
             _groups(1, 5),
-            "The passage the probe added scores by a full-text search of the missing words alone: "
-            "BM25, on another scale than the passages ranked for the question.",
+            "The passage the probe added scores 0: a full-text search of the missing words alone "
+            "found it, on another scale than the passages ranked for the question.",
         ),
         (
-            "a probe's passage, from several",
+            "a probe's passage, judged by the reranker",
             "probe_gaps",
-            _search(SearchSettings(), SearchSettings()),
+            _search(SearchSettings(reranker=Reranker.CROSS_ENCODER)),
             _groups(1),
             _groups(1, 5),
-            "The passage the probe added scores by a full-text search of the missing words alone: "
-            "BM25 fused by rank across collections, on another scale than the passages ranked for "
-            "the question.",
+            "The passage the probe added, found by a full-text search of the missing words, is "
+            "scored by the reranker against each question whose words are missing, as the ranked "
+            "chunks are, and kept only above its floor.",
         ),
         ("a fill that added nothing", "fill", _search(), _groups(1), _groups(1), None),
         (
@@ -235,7 +298,8 @@ def test_several_questions_record_each_rule_once_whatever_each_read() -> None:
 
     for ranked in (12, 30):
         pool = _pool("c0", ranked=ranked)
-        for step in ("retrieve", "merge", "rerank"):
+        flow._lineage("retrieve", state, None, _read("_relevance_score"))
+        for step in ("merge", "rerank"):
             flow._lineage(step, state, pool, pool)
 
     assert [one.step for one in trace.scoring] == ["retrieve", "merge", "rerank"]

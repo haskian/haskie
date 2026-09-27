@@ -80,6 +80,8 @@ class HitRange(msgspec.Struct):
     score: float  # harmonic(best, sum) over the members
     also_in: list[PassageReference] = []  # the near-duplicates folded in (`collapse`), a tree
     aspects: list[str] = []  # the questions it answers when several were asked (`aspects`)
+    # how well it matched each question whose own ranking holds its chunks (`aspects.tagged`)
+    aspect_scores: dict[str, float] = {}
     # too short to stand alone, and nothing around it matched (`thin`): a passage of its own goes,
     # while it stays inside an excerpt whose section holds another passage (`section.group`)
     alone: bool = False
@@ -187,10 +189,23 @@ def rejoin(parts: list[HitRange]) -> list[HitRange]:
                 one,
                 also_in=[place for kept in held for place in kept.also_in],
                 aspects=list(dict.fromkeys(label for kept in held for label in kept.aspects)),
+                aspect_scores=best_of([kept.aspect_scores for kept in held]),
+                score=max(
+                    [one.score, *(score for kept in held for score in kept.aspect_scores.values())]
+                ),
                 alone=all(kept.alone for kept in held),
             )
         )
     return rebuilt
+
+
+def best_of(scores: list[dict[str, float]]) -> dict[str, float]:
+    """Each question's best score over several sets, in the order they name them."""
+    best: dict[str, float] = {}
+    for one in scores:
+        for label, score in one.items():
+            best[label] = max(score, best.get(label, score))
+    return best
 
 
 def _range(hits: list[Hit]) -> HitRange:
@@ -235,6 +250,8 @@ class Span(msgspec.Struct, kw_only=True):
     also_in: list[PassageReference] = []  # the near-duplicates folded in, a tree
     # the questions it answers when several were asked at once (`aspects`), else empty
     aspects: list[str] = []
+    # how well it matched each question whose ranking holds its chunks, several asked, else empty
+    aspect_scores: dict[str, float] = {}
 
 
 class Passage(Span, kw_only=True):
@@ -277,6 +294,8 @@ class Excerpt(msgspec.Struct):
     spans: list[Span]  # in document order
     # the questions any of its passages answers when several were asked at once, else empty
     aspects: list[str] = []
+    # each question's best score over the passages, several asked, else empty
+    aspect_scores: dict[str, float] = {}
 
 
 class Answer(msgspec.Struct):
@@ -310,6 +329,7 @@ def _cited(hit_range: HitRange) -> dict:
         "score": hit_range.score,
         "also_in": hit_range.also_in,
         "aspects": hit_range.aspects,
+        "aspect_scores": hit_range.aspect_scores,
     }
 
 

@@ -4,6 +4,7 @@ import { ModelFacts } from './ModelFacts'
 import { choices, docFor, rerankerOptions } from './options'
 import { Picker } from './Picker'
 import { SEARCH_BOUNDS } from './searchFields'
+import { Toggle } from './Toggle'
 
 /** A number setting: the design's `.field` with a number input in it. */
 export function Num({
@@ -73,6 +74,13 @@ export function SearchField({
           />
           <ModelFacts name={search.reranker_model} metadata={options.reranker_metadata[search.reranker_model]} />
         </Field>
+      )
+    case 'rerank_with_context':
+      return (
+        <div className="field">
+          <Toggle label={doc.title} checked={search.rerank_with_context} onChange={(rerank_with_context) => onChange({ ...search, rerank_with_context })} />
+          <span className="faint">{doc.description}</span>
+        </div>
       )
     default: {
       const bounds = SEARCH_BOUNDS[name]

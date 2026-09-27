@@ -11,8 +11,10 @@ by the same arithmetic: a stretch of chunks joins when its values sum above 0, s
 comes in only when stronger ones around it pay for it.
 
 - A gap between two passages is filled when its values sum above 0: the two become one.
-- A passage grows outward by the run of chunks next to it whose values sum highest, when that is
-  above 0 (`run`), up to `max_passage_grow` chunks and never out of its section.
+- Every passage grows outward by the run of chunks next to it whose values sum highest, when that
+  is above 0 (`run`), up to `max_passage_grow` chunks and never out of its section. Into a gap it
+  grows at most halfway, so the passages on either side never reach for the same chunk; the
+  first half goes to the passage before it.
 
 `run` and `value` are the one growth rule of a search: a passage too short to stand alone grows
 by them too (`thin`), against the scanned hits rather than the kept ones.
@@ -24,7 +26,7 @@ sections (`section.within`), spent on the fills worth most per character first. 
 
 import msgspec
 
-from haskie.collection.index import ChunkKey, Hit
+from haskie.collection.index import ChunkKey, Hit, chunk_key
 from haskie.search.passage import continues, part, rejoin
 from haskie.search.section import Group
 
@@ -89,7 +91,7 @@ def near(one: Group, reach: int) -> set[int]:
 def fills(at: int, one: Group, candidates: dict[ChunkKey, Candidate], reach: int) -> list[Fill]:
     """What group `at` could take out of `candidates`: each gap between two of its passages whose
     chunks are all read and sum above 0, and the best `run` of up to `reach` chunks outward from
-    its first and last passage."""
+    each passage, into a gap only as far as its half (`fill` module docstring)."""
     spans = sorted(one.ranges, key=lambda hit_range: hit_range.seq_start)
     found: list[Fill] = []
     for before, after in zip(spans, spans[1:], strict=False):
@@ -101,20 +103,23 @@ def fills(at: int, one: Group, candidates: dict[ChunkKey, Candidate], reach: int
             chunks = [candidates[key] for key in keys]
             if sum(chunk.value for chunk in chunks) > 0:
                 found.append(Fill(at, chunks))
-    found += [
-        Fill(at, side)
-        for side in grow(spans[0].hits[0], spans[-1].hits[-1], candidates, reach)
-        if side
-    ]
+    # the chunks between each two passages; the section's ends are open as far as `reach`
+    between = zip(spans, spans[1:], strict=False)
+    gaps = [2 * reach, *(b.seq_start - a.seq_end - 1 for a, b in between), 2 * reach]
+    for index, span in enumerate(spans):
+        # a gap of g chunks: the passage before it may take ceil(g / 2), the one after floor(g / 2)
+        back, ahead = gaps[index] // 2, (gaps[index + 1] + 1) // 2
+        sides = grow(span.hits[0], span.hits[-1], candidates, min(back, reach), min(ahead, reach))
+        found += [Fill(at, side) for side in sides if side]
     return found
 
 
 def grow(
-    first: Hit, last: Hit, candidates: dict[ChunkKey, Candidate], reach: int
+    first: Hit, last: Hit, candidates: dict[ChunkKey, Candidate], back: int, ahead: int
 ) -> list[list[Candidate]]:
     """What a passage from `first` to `last` grows by out of `candidates`: the best `run` of up to
-    `reach` chunks before it and after it, never past a heading (`passage.continues`)."""
-    return [run(_outward(first, candidates, reach, -1)), run(_outward(last, candidates, reach, 1))]
+    `back` chunks before it and `ahead` after it, never past a heading (`passage.continues`)."""
+    return [run(_outward(first, candidates, back, -1)), run(_outward(last, candidates, ahead, 1))]
 
 
 def _outward(
@@ -136,12 +141,17 @@ def _outward(
 
 
 def choose(found: list[Fill], room: int) -> list[Fill]:
-    """The fills worth most per character, while they fit `room` characters."""
+    """The fills worth most per character, while they fit `room` characters. A bridged gap and the
+    runs into it share chunks: a fill brings only the chunks none chosen before holds, and only
+    when those are still worth taking."""
     chosen: list[Fill] = []
+    taken: set[ChunkKey] = set()
     for one in sorted(found, key=lambda fill: -fill.value / max(fill.chars, 1)):
-        if one.chars <= room:
-            chosen.append(one)
-            room -= one.chars
+        new = Fill(one.group, [chunk for chunk in one.chunks if chunk_key(chunk.hit) not in taken])
+        if new.chunks and new.value > 0 and new.chars <= room:
+            chosen.append(new)
+            taken.update(chunk_key(chunk.hit) for chunk in new.chunks)
+            room -= new.chars
     return chosen
 
 

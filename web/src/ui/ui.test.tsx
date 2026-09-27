@@ -106,6 +106,7 @@ const PASSAGE: Passage = {
   markdown_file: '/home/ada/.haskie/markdown/area.md',
   also_in: [],
   aspects: [],
+  aspect_scores: {},
 }
 
 // A section of two passages: its heading path, and its lines from the first passage to the last.
@@ -131,6 +132,7 @@ const EXCERPT: Excerpt = {
     { ...PASSAGE, header: 'Lighting > Hard shadows', seq_start: 9, seq_end: 9, also_in: [] },
   ].map(({ collection: _c, document: _d, text: _t, source_file: _s, markdown_file: _m, ...span }) => span),
   aspects: [],
+  aspect_scores: {},
 }
 
 const bar = (over: Partial<JobBar> = {}): JobBar => ({ label: 'Embed', done: 9, total: 22, state: 'active', ...over })
@@ -534,12 +536,27 @@ describe('HitGrid', () => {
     {
       name: 'an excerpt names the questions it answers when several were asked',
       element: <HitGrid results={[{ ...EXCERPT, aspects: ['Why soft?'] }]} query="shadow" questions={['Why hard?', 'Why soft?']} />,
-      contains: ['<span title="Why soft?">Q2 · </span>0.88'],
+      contains: [
+        '<span class="mono muted">0.88</span>',
+        '</footer><div class="hit-questions"><span class="question-tag" title="Why soft?">Q2</span></div>',
+      ],
+    },
+    {
+      name: 'a tag carries how well the excerpt matched its question',
+      element: (
+        <HitGrid
+          results={[{ ...EXCERPT, aspects: ['Why soft?'], aspect_scores: { 'Why soft?': 0.84 } }]}
+          query="shadow"
+          questions={['Why hard?', 'Why soft?']}
+        />
+      ),
+      contains: ['<span class="question-tag" title="Why soft?">Q2<span class="question-score"> 0.84</span></span>'],
     },
     {
       name: 'one question asked: no names',
       element: <HitGrid results={[EXCERPT]} query="shadow" questions={['Why soft?']} />,
       contains: ['<span class="mono muted">0.88</span>'],
+      missing: ['hit-questions'],
     },
     { name: 'no hits renders an empty grid', element: <HitGrid results={[] as Hit[]} query="" />, contains: ['<div class="hits"></div>'] },
     { name: 'no sources renders an empty grid', element: <HitGrid results={[] as Source[]} query="" />, contains: ['<div class="hits"></div>'] },
@@ -587,6 +604,37 @@ describe('MatchModal', () => {
         '<dt>Score</dt><dd><span class="score"><span class="mono">0.91</span><span class="score-basis" tabindex="0" aria-label="How the score is computed">',
         '<span class="score-lineage"><span>LanceDB retrieval</span><span class="muted">1 / (1 + d).</span><span>Rerank</span><span class="muted">The logit replaces it.</span></span>',
       ],
+    },
+    {
+      name: 'an excerpt of several questions shows the context, then each question it answers',
+      element: (
+        <MatchModal
+          match={{ ...EXCERPT, aspects: ['Why soft?'], aspect_scores: { 'Why soft?': 0.84 } }}
+          query="Why hard?"
+          asked={{ questions: ['Why hard?', 'Why soft?'], context: 'area lights' }}
+          onClose={noop}
+        />
+      ),
+      contains: ['<dt>Context</dt><dd>area lights</dd><dt>Q2</dt><dd><span><span class="code">Why soft?</span><span class="mono muted"> · 0.84</span></span></dd></dl>'],
+      missing: ['<dt>Query</dt>', '<dt>Q1</dt>'],
+    },
+    {
+      name: 'no context sent: the questions alone',
+      element: (
+        <MatchModal
+          match={{ ...EXCERPT, aspects: ['Why hard?', 'Why soft?'] }}
+          query="Why hard?"
+          asked={{ questions: ['Why hard?', 'Why soft?'], context: '' }}
+          onClose={noop}
+        />
+      ),
+      contains: ['<dt>Q1</dt><dd><span><span class="code">Why hard?</span></span></dd><dt>Q2</dt>'],
+      missing: ['<dt>Context</dt>'],
+    },
+    {
+      name: 'one question asked: the query, as for any match',
+      element: <MatchModal match={EXCERPT} query="shadow" asked={{ questions: ['shadow'], context: '' }} onClose={noop} />,
+      contains: ['<dt>Query</dt><dd><span class="code">shadow</span></dd>'],
     },
     {
       name: 'a search that did not say how it scored shows the score alone',

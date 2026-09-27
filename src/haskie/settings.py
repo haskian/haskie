@@ -320,6 +320,24 @@ RERANKER = Meta(
         "but more precise than embeddings. none: keep the retrieval order."
     ),
 )
+MIN_RERANK_SCORE = Meta(
+    title="Lowest reranker score",
+    description=(
+        "With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are "
+        "built: the reranker judged it does not answer. A question nothing clears is reported "
+        "unanswered, and a question tags only the excerpts it scores this high. 0 keeps every "
+        "chunk. Rerankers differ: tune it per model."
+    ),
+)
+RERANK_WITH_CONTEXT = Meta(
+    title="Rerank with the shared context",
+    description=(
+        "When several questions share a context, the query embedding reads the context in front "
+        "of each question to find candidates. Off: the reranker, which sets the final order, reads "
+        'each question alone, so a context every document matches ("ddd" over a DDD book) '
+        "cannot outrank what the question asks. On: the reranker reads it too."
+    ),
+)
 RERANKER_MODEL = Meta(
     title="Reranker model",
     description=(
@@ -381,6 +399,9 @@ def _check_search(search: "SearchSettings | SearchOverrides") -> None:
     _at_least(1, **{name: given[name] for name in at_least_one if name in given})
     at_least_zero = ("vector_weight", "bm25_weight", "min_passage_chars", "max_passage_grow")
     _at_least(0, **{name: given[name] for name in at_least_zero if name in given})
+    floor = given.get("min_rerank_score")
+    if floor is not None and not 0 <= floor <= 1:
+        raise InvalidInput(f"min_rerank_score must be 0 to 1, got {floor}")
 
 
 def _check_chunking(chunk_size: int | None, chunk_merge_below: int | None) -> None:
@@ -442,6 +463,8 @@ class SearchSettings(msgspec.Struct):
     refine_factor: Annotated[int, REFINE_FACTOR] = 10
     reranker: Annotated[Reranker, RERANKER] = Reranker.NONE
     reranker_model: Annotated[str, RERANKER_MODEL] = DEFAULT_RERANKER
+    rerank_with_context: Annotated[bool, RERANK_WITH_CONTEXT] = False
+    min_rerank_score: Annotated[float, MIN_RERANK_SCORE] = 0.05
     min_passage_chars: Annotated[int, MIN_PASSAGE_CHARS] = 300
     max_passage_grow: Annotated[int, MAX_PASSAGE_GROW] = 2
     max_section_chars: Annotated[int, MAX_SECTION_CHARS] = 8000
@@ -467,6 +490,8 @@ class SearchOverrides(msgspec.Struct):
     refine_factor: Annotated[int | None, REFINE_FACTOR] = None
     reranker: Annotated[Reranker | None, RERANKER] = None
     reranker_model: Annotated[str | None, RERANKER_MODEL] = None
+    rerank_with_context: Annotated[bool | None, RERANK_WITH_CONTEXT] = None
+    min_rerank_score: Annotated[float | None, MIN_RERANK_SCORE] = None
     min_passage_chars: Annotated[int | None, MIN_PASSAGE_CHARS] = None
     max_passage_grow: Annotated[int | None, MAX_PASSAGE_GROW] = None
     max_section_chars: Annotated[int | None, MAX_SECTION_CHARS] = None

@@ -114,11 +114,12 @@ async def search_excerpts(
     Several questions at once: when parts of a question may be answered in different places,
     pass each part as its own `q` (2 to 5), and the background they share once as `context`.
     Each part is searched on its own and the parts take turns at the `limit` slots, so one part
-    cannot crowd out the others. Each span's `aspects` lists the questions it ranked high for,
-    and an excerpt's the questions any of its spans does. A question in `uncovered` found
-    nothing.
-    That is rank, not a judgement: a vector or hybrid search finds a nearest passage for any
-    question, so read the text before citing it as the answer to a part. A question no excerpt
+    cannot crowd out the others. Each span's `aspects` lists the questions it answers and
+    `aspect_scores` how well it matched each, and an excerpt's the questions any of its spans
+    does. With a reranker on, a tag is its judgement: chunks it scores under the floor are
+    dropped. Without one, a tag is rank, not a judgement: a vector or hybrid search finds a
+    nearest passage for any question, so read the text before citing it as the answer to a
+    part. A question in `uncovered` found nothing. A question no excerpt
     lists found nothing at all. Write each part as a full question, not a keyword. Keep in one
     `q` the conditions one passage must meet together. Resolve an ambiguous question before
     searching; when you cannot ask, pass one part per reading.
@@ -144,8 +145,9 @@ async def search_excerpts(
 
     Args:
         q: The question, or 2 to 5 parts of one question, each at most 500 characters.
-        context: Background every part shares, at most 200 characters. The embedding and the
-            reranker read it in front of each part; full-text search reads the part alone.
+        context: Background every part shares, at most 200 characters. The query embedding reads
+            it in front of each part to find candidates; full-text search and the reranker read
+            the part alone, so the context never outranks what a part asks.
         session_id: The conversation's id; the search then shows in that session's history.
     """
     started = time.perf_counter()

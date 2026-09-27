@@ -264,6 +264,7 @@ describe('excerpts', () => {
     score: 1,
     also_in,
     aspects: [],
+    aspect_scores: {},
   })
   const EXCERPT: Excerpt = {
     collection: 'notes',
@@ -284,6 +285,7 @@ describe('excerpts', () => {
     markdown_file: '/home/documents/guide.md.md',
     spans: [span([place('copy.md')]), span([]), span([place('guide.md'), place('other.md')])],
     aspects: [],
+    aspect_scores: {},
   }
 
   test('an excerpt is told from a passage by its spans', () => {
@@ -302,14 +304,21 @@ describe('excerpts', () => {
 
 describe('questionLabels', () => {
   const asked = ['Why retry?', 'How long to wait?', 'When to stop?']
-  const cases: Array<{ name: string; aspects: string[]; expected: string }> = [
-    { name: 'each question by its place in what was asked', aspects: ['When to stop?', 'Why retry?'], expected: 'Q3 Q1' },
-    { name: 'none', aspects: [], expected: '' },
-    { name: 'a question not asked this time names nothing', aspects: ['Old question?'], expected: '' },
+  const cases: Array<{ name: string; aspects: string[]; expected: Array<{ label: string; question: string }> }> = [
+    {
+      name: 'each question by its place in what was asked, with its text',
+      aspects: ['When to stop?', 'Why retry?'],
+      expected: [
+        { label: 'Q3', question: 'When to stop?' },
+        { label: 'Q1', question: 'Why retry?' },
+      ],
+    },
+    { name: 'none', aspects: [], expected: [] },
+    { name: 'a question not asked this time names nothing', aspects: ['Old question?'], expected: [] },
   ]
   for (const one of cases) {
     test(one.name, () => {
-      expect(questionLabels(one.aspects, asked)).toBe(one.expected)
+      expect(questionLabels(one.aspects, asked)).toEqual(one.expected)
     })
   }
 })

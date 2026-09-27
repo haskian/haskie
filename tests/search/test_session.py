@@ -8,6 +8,7 @@ embedding, one model check, one cross-encoder pass over the merge - and not only
 import math
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import (
@@ -24,7 +25,7 @@ from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection
 from haskie.errors import NotFound
 from haskie.indexing import chunk, embed, models
-from haskie.search import flow, retrieval, session
+from haskie.search import aspects, flow, retrieval, session
 from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
@@ -277,6 +278,95 @@ async def test_session_search_reranks_once_over_the_merge(
     assert [h.score for h in hits] == pytest.approx(sigmoid), (
         "the hit carries the sigmoid of the cross-encoder's logit"
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "with_context", "read"),
+    [
+        (
+            "off, the default: the reranker reads each question alone",
+            False,
+            {"Why retry?", "How long to wait?"},
+        ),
+        (
+            "on: the context in front of each",
+            True,
+            {"payments\n\nWhy retry?", "payments\n\nHow long to wait?"},
+        ),
+    ],
+)
+async def test_the_reranker_reads_the_shared_context_only_when_set_to(
+    dbos, tmp_path: Path, monkeypatch, name: str, with_context: bool, read: set[str]
+) -> None:
+    """A cross-encoder matches words: a context every document shares ("ddd" over a DDD book)
+    would outrank what each question asks, so by default the reranker, the growth of short
+    passages included, reads the question alone."""
+    settings = SearchSettings(reranker=Reranker.CROSS_ENCODER, rerank_with_context=with_context)
+    await save_user_settings(UserSettings(search=settings))
+    await Collection.create("pay")
+    body = "# Retries\n\nWhy retry a payment? Wait longer each time.\n\n# Other\n\nx\n"
+    doc = await import_document(dbos, "pay.md", body, tmp_path)
+    await attach_document(dbos, "pay", doc.name)
+    asked: set[str] = set()
+
+    async def require_ready(kind: str, model: str) -> None:
+        return None
+
+    def fake_rerank(model: str, accelerator: str, query: str, texts: list[str]) -> list[float]:
+        asked.add(query)
+        return [0.0] * len(texts)
+
+    monkeypatch.setattr(models, "require_ready", require_ready)
+    monkeypatch.setattr(embed, "rerank_scores", fake_rerank)
+
+    await flow.answers(["pay"], aspects.questions(["Why retry?", "How long to wait?"], "payments"))
+
+    assert asked == read, name
+
+
+def _judge(topics: dict[str, str]) -> Any:
+    """A reranker that answers logit 5 where the chunk holds the topic word of the question
+    (`topics`, question word to chunk word), else -8: sigmoid 0.993 and 0.0003."""
+
+    def rerank(model: str, accelerator: str, query: str, texts: list[str]) -> list[float]:
+        words = [word for asked, word in topics.items() if asked in query.lower()]
+        return [5.0 if any(word in text.lower() for word in words) else -8.0 for text in texts]
+
+    return rerank
+
+
+async def test_with_a_reranker_a_question_tags_only_what_it_judged_an_answer(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """The reranker scores every chunk against each question: under the floor a chunk is dropped,
+    so a question tags only the excerpts it judged an answer, each excerpt scores its best
+    question, and a question nothing clears is unanswered rather than given the least bad."""
+    await save_user_settings(UserSettings(search=SearchSettings(reranker=Reranker.CROSS_ENCODER)))
+    await Collection.create("pay")
+    body = (
+        "# Retries\n\nRetry a failed payment with backoff.\n\n"
+        "# Refunds\n\nRefund a payment to the card it came from.\n\n"
+        "# Weather\n\nIt rains on the payment office.\n"
+    )
+    doc = await import_document(dbos, "pay.md", body, tmp_path)
+    await attach_document(dbos, "pay", doc.name)
+
+    async def require_ready(kind: str, model: str) -> None:
+        return None
+
+    monkeypatch.setattr(models, "require_ready", require_ready)
+    monkeypatch.setattr(embed, "rerank_scores", _judge({"retry": "retry", "refund": "refund"}))
+    asked = ["Why retry a payment?", "How does a refund reach the card?", "Is there a tax?"]
+
+    answer = await flow.answers(["pay"], aspects.questions(asked, None))
+
+    found = {one.header: (one.aspects, one.aspect_scores, one.score) for one in answer.excerpts}
+    top = 1 / (1 + math.exp(-5))
+    assert found == {
+        "Retries": ([asked[0]], {asked[0]: pytest.approx(top)}, pytest.approx(top)),
+        "Refunds": ([asked[1]], {asked[1]: pytest.approx(top)}, pytest.approx(top)),
+    }, "no weather: every question judged it no answer"
+    assert answer.uncovered == [asked[2]], "nothing about a tax, so it is not answered"
 
 
 async def test_session_search_propagates_a_broken_collection(

@@ -9,6 +9,7 @@ import msgspec
 import pytest
 from conftest import hit, words_scan
 
+from haskie.collection.index import chunk_key
 from haskie.errors import InvalidInput
 from haskie.indexing.segment import CutReason
 from haskie.search import aspects, collapse
@@ -341,14 +342,61 @@ def _tree(references: list[PassageReference]) -> list:
         ),
     ],
 )
+@pytest.mark.parametrize("by_score", [False, True])
 def test_a_kept_passage_answers_its_own_part_and_every_folded_one(
-    name: str, ranked: list[list[HitRange]], kept: list[tuple], tags: list[list[str]]
+    name: str,
+    ranked: list[list[HitRange]],
+    kept: list[tuple],
+    tags: list[list[str]],
+    by_score: bool,
 ) -> None:
+    """By rank or by the reranker's score, the same here: every part's ranking holds only its own
+    passage, which it picked."""
     picks = aspects.interleave(ranked, 1, 10)
     scanned = [one for found in ranked for span in found for one in span.hits]
     folded = collapse.ranges([pick.span for pick in picks], scanned, words_scan(scanned), 2)
+    labels = [AGGREGATE, EVENTS, ORDERING][: len(ranked)]
 
-    found = aspects.tagged(folded, picks, [AGGREGATE, EVENTS, ORDERING][: len(ranked)])
+    found = aspects.tagged(folded, picks, labels, _scans(ranked), by_score)
 
     assert [(one.hits[0].document, _tree(one.also_in)) for one in found] == kept, name
     assert [one.aspects for one in found] == tags, name
+    assert [list(one.aspect_scores) for one in found] == tags, f"{name}: a score for each"
+
+
+def _scans(ranked: list[list[HitRange]]) -> list[dict]:
+    """Each part's own ranking, chunk to score, as its scanned hits hold it."""
+    return [{chunk_key(hit): hit.score for span in found for hit in span.hits} for found in ranked]
+
+
+@pytest.mark.parametrize(
+    ("name", "by_score", "aspects_", "score"),
+    [
+        (
+            "by the reranker's score: every part whose ranking holds it, and its best score",
+            True,
+            [AGGREGATE, EVENTS],
+            0.9,
+        ),
+        (
+            "by rank: only the part that picked it or ranks it in its top, and the pick's score",
+            False,
+            [AGGREGATE],
+            0.4,
+        ),
+    ],
+)
+def test_a_passage_scores_each_part_whose_ranking_holds_it(
+    name: str, by_score: bool, aspects_: list[str], score: float
+) -> None:
+    """The first part picks a.md at 0.4; the second ranks it at 0.9, but below its own top, which
+    b.md holds. Each part's score is the one its own ranking gave."""
+    first = [_span("a.md", 1, score=0.4)]
+    second = [_span("b.md", 1, score=0.95), _span("a.md", 1, score=0.9)]
+    picks = aspects.interleave([first, second], 1, 1)
+    scans = _scans([first, second])
+
+    (found,) = aspects.tagged([picks[0].span], picks[:1], [AGGREGATE, EVENTS], scans, by_score)
+
+    assert found.aspect_scores == pytest.approx({AGGREGATE: 0.4, EVENTS: 0.9}), name
+    assert (found.aspects, found.score) == (aspects_, pytest.approx(score)), name

@@ -515,20 +515,8 @@ class CollectionIndex:
         )
 
     # --- search ----------------------------------------------------------
-    # Split into three steps so a cross-collection search embeds the query once, retrieves from
-    # every index in parallel and rescores the merge once (see search.flow).
-
-    async def query_vector(self, query: str, settings: SearchSettings) -> list[float] | None:
-        """The query embedding, or None when this index can only answer lexically: mode `fts`, no
-        embedding model, or a table written without a vector column."""
-        if settings.mode == SearchMode.FTS or self.embedding is None:
-            return None
-        if not await self.has_vector_column():
-            return None
-        from haskie.indexing.embed import embed_query
-
-        await models.require_ready(models.ModelKind.EMBEDDING, self.embedding.name)
-        return await cpu.on_cpu(embed_query, self.embedding, query)
+    # Retrieval and row-to-Hit only: a search embeds the query once (`retrieval.plan`), retrieves
+    # from every index in parallel and rescores the merge once (see search.flow).
 
     async def _readable(self) -> lancedb.AsyncTable | None:
         """The table to read from, or None when there is nothing this build can read.
@@ -558,7 +546,7 @@ class CollectionIndex:
         """Retrieval only: at most `limit` raw LanceDB rows, neither cut to `settings.limit` nor
         rescored by a cross-encoder.
 
-        `vector` is None for a lexical query (see `query_vector`); a table without a vector column
+        `vector` is None for a lexical query; a table without a vector column
         falls back to full text whatever the caller passed, so one collection of a session can lack
         the embedding the others have. A hybrid query always fuses over at least
         `settings.candidates` rows, because the fusion is only as good as its candidate pool.
@@ -690,7 +678,8 @@ def _tuned(builder: Any, settings: SearchSettings) -> Any:
 
 
 async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
-    """Second stage for any mode: rescore candidate rows with a cross-encoder, best first.
+    """Second stage for any mode: rescore candidate rows with a cross-encoder, in place, and
+    return them best first.
 
     The score is the sigmoid of the model's logit, in (0, 1). A raw logit is mostly negative for
     all but the few best candidates, and a passage's score (`passage.harmonic`) is 0 for any score

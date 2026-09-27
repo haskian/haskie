@@ -106,7 +106,7 @@ def fill(
         if _fragment(hit_range, min_chars):
             took = [
                 chunk.hit
-                for side in grow(hit_range.hits[0], hit_range.hits[-1], neighbours, reach)
+                for side in grow(hit_range.hits[0], hit_range.hits[-1], neighbours, reach, reach)
                 for chunk in side
             ]
             if took:

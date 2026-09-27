@@ -27,13 +27,14 @@ from collections.abc import Iterator
 
 import msgspec
 
+from haskie.collection.index import ChunkKey, chunk_key
 from haskie.errors import InvalidInput
 from haskie.search import probe
-from haskie.search.passage import HitRange, PassageReference, continues, rejoin
+from haskie.search.passage import HitRange, PassageReference, continues, harmonic, rejoin
 
 MAX_QUESTIONS = 5  # Perplexity and OpenSearch cap several queries at 5; xQuAD degrades past few
 MAX_QUESTION = 500  # judgement: a question, not a pasted document
-MAX_CONTEXT = 200  # a long context outweighs a short question in the embedding and the reranker
+MAX_CONTEXT = 200  # a long context outweighs a short question in the embedding
 
 
 class Questions(msgspec.Struct, frozen=True):
@@ -44,11 +45,12 @@ class Questions(msgspec.Struct, frozen=True):
 
     @property
     def framed(self) -> list[str]:
-        """What the models read each question as: the shared context, then the question. The
-        embedding and the reranker read it, as they read a chunk under its heading path, so the
-        context steers what a question means. Full-text search and the word scores read the
-        question alone: the context's words would make any question match any passage that
-        shares them, one the sources say nothing about included."""
+        """What the query embedding reads each question as: the shared context, then the question,
+        as it reads a chunk under its heading path, so the context steers what a question means.
+        Full-text search, the word scores and the reranker read the question alone: the context's
+        words would make any question match any passage that shares them, one the sources say
+        nothing about included. The reranker reads this form only when `rerank_with_context` is
+        on (`flow.Search.rerank_query`)."""
         if self.context is None:
             return list(self.questions)
         return [f"{self.context}\n\n{question}" for question in self.questions]
@@ -169,9 +171,24 @@ def _take(picks: list[Pick], candidate: HitRange, part: int, tops: list[list[Hit
         picks.remove(pick)
 
 
-def tagged(kept: list[HitRange], picks: list[Pick], labels: list[str]) -> list[HitRange]:
-    """The kept ranges, each with the questions it answers (`HitRange.aspects`): its own pick's,
-    and those of every place folded into it (`also_in`), in the order they were asked.
+def tagged(
+    kept: list[HitRange],
+    picks: list[Pick],
+    labels: list[str],
+    scans: list[dict[ChunkKey, float]],
+    by_score: bool,
+) -> list[HitRange]:
+    """The kept ranges, each with how well it matched every question whose own ranking (`scans`,
+    one per question, chunk to score) holds its chunks or its folded places' (`aspect_scores`,
+    scored as a range is: `harmonic`), and with the questions it answers (`aspects`), in the
+    order they were asked.
+
+    A question it answers is, with a reranker on (`by_score`), one whose ranking holds it: the
+    reranker's score has a scale, and chunks under its floor were dropped from every ranking, so
+    being there means the reranker judged it an answer. Its score is then its best question's,
+    since the questions' scores share that scale. Without one, a score says nothing across
+    questions, so the answered questions are those that picked it or rank it in their own top
+    (`Pick`), and it keeps the score it was picked with.
 
     The fold keeps one of the picks as each result and lists others under it, so every place is
     looked up by the chunks it covers - picks never overlap, so those are unique.
@@ -190,7 +207,31 @@ def tagged(kept: list[HitRange], picks: list[Pick], labels: list[str]) -> list[H
             parts |= by_place.get(_place(place.collection, place.document, place), set())
         return [labels[part] for part in sorted(parts)]
 
-    return [msgspec.structs.replace(one, aspects=answered(one)) for one in kept]
+    def scored(one: HitRange) -> dict[str, float]:
+        keys = [chunk_key(hit) for hit in one.hits] + [
+            (place.collection, place.document, seq)
+            for place in _walk(one.also_in)
+            for seq in range(place.seq_start, place.seq_end + 1)
+        ]
+        found: dict[str, float] = {}
+        for label, scan in zip(labels, scans, strict=True):
+            values = [scan[key] for key in keys if key in scan]
+            if values:
+                found[label] = harmonic(max(values), sum(values))
+        return found
+
+    tagged: list[HitRange] = []
+    for one in kept:
+        scores = scored(one)
+        if by_score:
+            answers = [label for label in labels if label in scores]
+            best = max([one.score, *scores.values()])
+        else:
+            answers, best = answered(one), one.score
+        tagged.append(
+            msgspec.structs.replace(one, aspects=answers, aspect_scores=scores, score=best)
+        )
+    return tagged
 
 
 def _place(

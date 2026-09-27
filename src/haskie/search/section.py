@@ -23,7 +23,7 @@ import msgspec
 from haskie.collection.index import Hit, location
 from haskie.document.convert import without_markers
 from haskie.indexing.chunk import HEADING_SEP
-from haskie.search.passage import Excerpt, HitRange, pages, span
+from haskie.search.passage import Excerpt, HitRange, best_of, pages, span
 
 ELISION = "[…]"  # between two passages the document has text between
 
@@ -158,16 +158,21 @@ def group(
 
 
 def documents(hit_ranges: list[HitRange], limit: int) -> set[Place]:
-    """The documents whose outlines `group` needs: the first `limit` ones, in rank order, that a
-    range standing alone is in. Every kept section opens on such a range, so the k-th section is
-    in one of the first k of them, and a range of any other document joins none of them."""
-    found: dict[Place, None] = {}
+    """The documents whose outlines `group` needs: those of every range, in rank order, up to the
+    one where the `limit`-th document a range standing alone is in turns up. Sections of at least
+    `limit` documents have a standing range by then, so the first `limit` sections open before
+    it. A section opens on its first range, which may be alone and come before its standing one,
+    so the documents of alone ranges are read too."""
+    found: set[Place] = set()
+    standing: set[Place] = set()
     for hit_range in hit_ranges:
-        if len(found) == limit:
+        if len(standing) == limit:
             break
+        place = (hit_range.hits[0].collection, hit_range.hits[0].document)
+        found.add(place)
         if not hit_range.alone:
-            found[(hit_range.hits[0].collection, hit_range.hits[0].document)] = None
-    return set(found)
+            standing.add(place)
+    return found
 
 
 def excerpt(found: Group, texts: list[str]) -> Excerpt:
@@ -213,4 +218,5 @@ def excerpt(found: Group, texts: list[str]) -> Excerpt:
         markdown_file=best.markdown_file,
         spans=spans,
         aspects=list(dict.fromkeys(label for one in spans for label in one.aspects)),
+        aspect_scores=best_of([one.aspect_scores for one in spans]),
     )

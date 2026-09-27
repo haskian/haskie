@@ -184,8 +184,14 @@ def test_a_chunk_its_outline_does_not_hold_is_a_broken_search() -> None:
             {(COLLECTION, DOC), (COLLECTION, "b.md")},
         ),
         (
-            "a document whose ranges are all too short to stand alone opens no section",
+            "a document of a short range is read too, up to the last document the slots need",
             [msgspec.structs.replace(_range(4, doc="b.md"), alone=True), _range(2)],
+            1,
+            {(COLLECTION, "b.md"), (COLLECTION, DOC)},
+        ),
+        (
+            "none past it",
+            [_range(2), msgspec.structs.replace(_range(4, doc="b.md"), alone=True)],
             1,
             {(COLLECTION, DOC)},
         ),
@@ -196,6 +202,27 @@ def test_only_the_documents_a_section_can_open_in_are_read(
     name: str, found: list[HitRange], limit: int, expected: set[tuple[str, str]]
 ) -> None:
     assert section.documents(found, limit) == expected, name
+
+
+def test_the_documents_read_hold_the_sections_a_short_range_opens() -> None:
+    """A section opens on its first range even when it is short, and its standing one ranks later:
+    Search opens second, on a short passage, though its standing one comes after another
+    document's. Reading only where standing ranges are would lose it for that document."""
+    found = [
+        _range(2),
+        msgspec.structs.replace(_range(4, doc="b.md"), alone=True),
+        _range(2, doc="c.md"),
+        _range(6, doc="b.md"),
+    ]
+    read = section.documents(found, 2)
+    outlines = {place: OUTLINE for place in read}  # every document cut alike
+
+    groups = section.group(found, outlines, 1000, 2)
+
+    assert [(one.document, one.section.path) for one in groups] == [
+        (DOC, STORAGE),
+        ("b.md", SEARCH),
+    ]
 
 
 # --- group ----------------------------------------------------------------------------

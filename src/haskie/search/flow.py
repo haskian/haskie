@@ -49,6 +49,7 @@ from haskie.collection.index import Hit
 from haskie.paging import check_page_size
 from haskie.search import aspects, probe, retrieval, scoring, section
 from haskie.search.passage import Answer, Excerpt, HitRange, Passage, Sources
+from haskie.settings import Reranker
 
 # How deep any of these searches reads. A passage or a document row is folded from several chunks,
 # so the scan goes deeper than the answer; this is where that stops.
@@ -70,7 +71,7 @@ class Search(msgspec.Struct):
     inputs and outputs; this is what they all read."""
 
     query: str  # the question alone: what full-text search and the word scores read
-    framed: str  # the shared context, then the question: what the embedding and reranker read
+    framed: str  # the shared context, then the question: what the query embedding reads
     plan: retrieval.Plan
     limit: int  # answers the caller asked for; the last step cuts to it
     scan: int  # how deep the ranking goes; `hits` cuts to it
@@ -79,6 +80,13 @@ class Search(msgspec.Struct):
     # `answers` holds them all, and `query` is its own
     questions: list[probe.Question]
     sections: int = DEFAULT_SECTIONS  # `sources` only
+
+    @property
+    def rerank_query(self) -> str:
+        """What the reranker reads: the question alone, unless the settings put the context in
+        front of it too (`rerank_with_context`). A cross-encoder matches words, so a context every
+        document shares ("ddd" over a DDD book) would outrank what the question asks."""
+        return self.framed if self.plan.settings.rerank_with_context else self.query
 
 
 # --- the trace --------------------------------------------------------------------
@@ -204,7 +212,7 @@ async def merge(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Poo
 
 async def rerank(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Pool:
     """The merged candidates, rescored by a cross-encoder that reads query and chunk together."""
-    return await retrieval.rerank(ctx.inputs, ctx.state.framed, ctx.state.plan.settings)
+    return await retrieval.rerank(ctx.inputs, ctx.state.rerank_query, ctx.state.plan.settings)
 
 
 async def hits(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Scanned:
@@ -223,7 +231,8 @@ async def collapse_hits(ctx: StepContext[Search, None, retrieval.Scanned]) -> li
 async def fill_thin(ctx: StepContext[Search, None, retrieval.Scanned]) -> retrieval.Ranged:
     """Consecutive chunks of one section merged into one range, and each range too short to stand
     alone grown by the neighbours that match the query, or dropped."""
-    return await retrieval.fill_thin(ctx.inputs, ctx.state.plan, ctx.state.query, ctx.state.framed)
+    state = ctx.state
+    return await retrieval.fill_thin(ctx.inputs, state.plan, state.query, state.rerank_query)
 
 
 async def judge_thin(ctx: StepContext[Search, None, retrieval.Scanned]) -> retrieval.Ranged:
@@ -231,7 +240,7 @@ async def judge_thin(ctx: StepContext[Search, None, retrieval.Scanned]) -> retri
     alone judged by the neighbours that match the query, but not grown: the fill grows every
     passage of an excerpt once, short ones included."""
     return await retrieval.fill_thin(
-        ctx.inputs, ctx.state.plan, ctx.state.query, ctx.state.framed, grows=False
+        ctx.inputs, ctx.state.plan, ctx.state.query, ctx.state.rerank_query, grows=False
     )
 
 
@@ -255,8 +264,9 @@ async def fold(ctx: StepContext[Search, None, list[retrieval.Ranged]]) -> list[H
         return await retrieval.collapse_ranges(ranged[0], plan.embedding, plan.settings.mode, None)
     labels = [one.asked for one in state.questions]
     depth = aspects.depth(len(labels), state.limit)
+    by_score = plan.settings.reranker != Reranker.NONE
     return await retrieval.cover(
-        ranged, labels, plan.embedding, plan.settings.mode, depth, state.scan
+        ranged, labels, plan.embedding, plan.settings.mode, depth, state.scan, by_score
     )
 
 
@@ -376,11 +386,11 @@ async def answers(names: list[str], asked: aspects.Questions, limit: int | None 
     slots, `aspects`) and become excerpts (`ANSWERED`). With several questions, each excerpt says
     which of them it answers.
     """
+    if limit is not None:  # the caller's limit is refused before anything is read or embedded
+        aspects.depth(len(asked.questions), limit)
     states = await _searches(names, asked, limit, deeper=PASSAGE_SCAN)
     if states is None:
         return probe.report([], asked.asked())
-    # a limit below the questions fails before retrieving
-    aspects.depth(len(asked.questions), states[0].limit)
     ranged = await asyncio.gather(*(RANKED.run(state=state) for state in states))
     found = await ANSWERED.run(state=states[0], inputs=list(ranged))
     return probe.report(found, states[0].questions)
@@ -428,8 +438,9 @@ async def _searches(
         plans = await retrieval.plan(names, asked.framed)
     if plans is None:
         return None
-    # the collection's own limit when it is the only one searched, else the user's (`plan`)
-    limit = limit or plans[0].settings.limit
+    # the collection's own limit when it is the only one searched, else the user's (`plan`), and
+    # a slot for each question at least: a caller who set no limit cannot be refused for it
+    limit = limit or max(plans[0].settings.limit, len(asked.questions))
     # a pipeline that folds scans deeper than it answers, and that is what `MAX_SCAN` bounds
     scan = max(limit, min(limit * deeper, MAX_SCAN))
     candidates = max(plans[0].settings.candidates, scan)

@@ -2123,64 +2123,6 @@ async def test_search_rows_returns_raw_rows_without_cutting(tmp_path: Path) -> N
     assert await missing.search_rows("lancedb", None, settings, 4) == [], "no table, no rows"
 
 
-@pytest.mark.parametrize(
-    ("name", "embedding", "settings", "vector_column", "expected"),
-    [
-        ("mode fts never embeds", COMPACT, SearchSettings(mode=SearchMode.FTS), True, None),
-        ("no embedding profile", None, SearchSettings(mode=SearchMode.HYBRID), True, None),
-        ("no vector column", COMPACT, SearchSettings(mode=SearchMode.HYBRID), False, None),
-        (
-            "hybrid over a vector table",
-            COMPACT,
-            SearchSettings(mode=SearchMode.HYBRID),
-            True,
-            [0.5] * 384,
-        ),
-        (
-            "vector mode over a vector table",
-            COMPACT,
-            SearchSettings(mode=SearchMode.VECTOR),
-            True,
-            [0.5] * 384,
-        ),
-    ],
-)
-@pytest.mark.anyio
-async def test_query_vector_is_none_for_fts_and_without_embedding(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-    embedding: EmbeddingModel | None,
-    settings: SearchSettings,
-    vector_column: bool,
-    expected: list[float] | None,
-) -> None:
-    from haskie.indexing import models
-
-    path = tmp_path / "index"
-    vector_field = pa.field("vector", pa.list_(pa.float32(), 384))
-    _table_with(path, PLAIN_SCHEMA.append(vector_field) if vector_column else PLAIN_SCHEMA)
-    checked: list[tuple[str, str]] = []
-
-    async def require_ready(kind: str, model: str) -> None:
-        checked.append((kind, model))
-
-    monkeypatch.setattr(models, "require_ready", require_ready)
-    monkeypatch.setattr(embed, "embed_query", lambda model, text: [0.5] * model.dims)
-    index = CollectionIndex(path, "notes", tmp_path, embedding)
-
-    assert await index.query_vector("q", settings) == expected, name
-    assert checked == ([("embedding", COMPACT.name)] if expected else []), name
-
-
-@pytest.mark.anyio
-async def test_query_vector_of_a_never_indexed_collection_is_none(tmp_path: Path) -> None:
-    """No table means no search, so the model is never asked for (it may not be loaded)."""
-    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, COMPACT)
-    assert await index.query_vector("q", SearchSettings(mode=SearchMode.HYBRID)) is None
-    assert await index_hits(index, "q", SearchSettings(mode=SearchMode.HYBRID)) == []
-
-
 # --- pipeline ----------------------------------------------------------------------
 #
 # The three stages called straight through, in the order `workflows` calls them: convert once per
@@ -2403,8 +2345,8 @@ async def test_two_collections_with_the_same_chunk_settings_share_one_cache_entr
 
 # --- sessions and cross-collection search --------------------------------------------
 #
-# `CollectionIndex` splits search into retrieval (`search_rows`), the query embedding
-# (`query_vector`) and row-to-Hit (`hit`), so a session embeds once, fans out and rescores once.
+# `CollectionIndex` answers retrieval (`search_rows`) and row-to-Hit (`hit`); the search embeds the
+# query once (`retrieval.plan`), fans out and rescores once.
 # `retrieval.rrf_merge` fuses the per-collection rankings by rank, because two indexes do not
 # score on the same scale. `search.text.merge` merges raw BM25 scores instead: one lexical scorer
 # with the same tokenizer answers in every collection. Both count a passage once, because one

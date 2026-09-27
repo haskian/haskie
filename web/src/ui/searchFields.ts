@@ -19,6 +19,7 @@ export const SEARCH_BOUNDS: Record<NumericKeys<SearchSettings>, { min: number; s
   max_passage_grow: { min: 0, step: 1 },
   max_section_chars: { min: 1, step: 500 },
   max_answer_chars: { min: 1, step: 1000 },
+  min_rerank_score: { min: 0, step: 0.01 },
 }
 
 /**
@@ -38,6 +39,8 @@ export function effectiveSearch(overrides: SearchOverrides, defaults: SearchSett
     refine_factor: overrides.refine_factor ?? defaults.refine_factor,
     reranker: overrides.reranker ?? defaults.reranker,
     reranker_model: overrides.reranker_model ?? defaults.reranker_model,
+    rerank_with_context: overrides.rerank_with_context ?? defaults.rerank_with_context,
+    min_rerank_score: overrides.min_rerank_score ?? defaults.min_rerank_score,
     min_passage_chars: overrides.min_passage_chars ?? defaults.min_passage_chars,
     max_passage_grow: overrides.max_passage_grow ?? defaults.max_passage_grow,
     max_section_chars: overrides.max_section_chars ?? defaults.max_section_chars,
@@ -48,7 +51,7 @@ export function effectiveSearch(overrides: SearchOverrides, defaults: SearchSett
 /**
  * Which search fields a form shows, in order: a field is only asked for when the effective
  * settings make it do something. Fusion weights belong to a hybrid query, probes to a vector
- * one, the reranker model to a reranker, the candidate pool to whichever of the two reads it;
+ * one, the reranker model and whether it reads the shared context to a reranker, the candidate pool to whichever of the two reads it;
  * the passage and answer sizes always, since every excerpts search reads them.
  */
 export function visibleSearchFields(effective: SearchSettings): (keyof SearchSettings)[] {
@@ -60,7 +63,7 @@ export function visibleSearchFields(effective: SearchSettings): (keyof SearchSet
   if (hybrid && effective.fusion === 'linear') fields.push('vector_weight', 'bm25_weight')
   if (effective.mode !== 'fts') fields.push('nprobes', 'refine_factor')
   fields.push('reranker')
-  if (reranked) fields.push('reranker_model')
+  if (reranked) fields.push('reranker_model', 'rerank_with_context', 'min_rerank_score')
   if (hybrid || reranked) fields.push('candidates')
   fields.push('min_passage_chars', 'max_passage_grow', 'max_section_chars', 'max_answer_chars')
   return fields

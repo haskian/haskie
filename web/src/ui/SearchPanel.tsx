@@ -1,11 +1,20 @@
 import { useState } from 'react'
-import type { ScoreStep, StepTiming, Timed } from '../api'
+import type { Timed } from '../api'
 import { HitGrid } from './HitGrid'
 import type { Match } from './match'
 import { MatchModal } from './MatchModal'
 import { SearchBox } from './SearchBox'
 import { SearchTook } from './SearchTook'
 import { errorText } from '../format'
+
+/** The search whose results are on screen: what it answered, the query it answers, and the ms it
+ *  took, null before the first search so the line above the results stays blank. */
+interface Shown extends Timed<Match[]> {
+  asked: string
+  took: number | null
+}
+
+const NOTHING: Shown = { body: [], steps: [], scoring: [], asked: '', took: null }
 
 /**
  * A search over one scope: the box, the results it answered with, and the match one opens, with
@@ -14,42 +23,28 @@ import { errorText } from '../format'
  */
 export function SearchPanel({ run, placeholder, plural }: { run: (query: string) => Promise<Timed<Match[]>>; placeholder: string; plural: string }) {
   const [query, setQuery] = useState('')
-  const [asked, setAsked] = useState('') // the query the results on screen answer
-  const [results, setResults] = useState<Match[]>([])
-  const [steps, setSteps] = useState<StepTiming[]>([]) // how long each step of it took
-  const [scoring, setScoring] = useState<ScoreStep[]>([]) // and how its scores came to be
+  const [shown, setShown] = useState<Shown>(NOTHING)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState<Match | null>(null)
   const [busy, setBusy] = useState(false)
-  const [took, setTook] = useState<number | null>(null) // ms the last query took
 
   const clear = (): void => {
     setQuery('')
-    setAsked('')
-    setResults([])
-    setSteps([])
-    setScoring([])
+    setShown(NOTHING)
     setError(null)
-    setTook(null)
   }
 
   const submit = (): void => {
-    const next = query.trim()
-    if (next === '') {
+    const asked = query.trim()
+    if (asked === '') {
       clear()
       return
     }
-    setAsked(next)
     setError(null)
     const started = performance.now()
     setBusy(true)
-    run(next)
-      .then((found) => {
-        setResults(found.body)
-        setSteps(found.steps)
-        setScoring(found.scoring)
-        setTook(Math.round(performance.now() - started))
-      })
+    run(asked)
+      .then((found) => setShown({ ...found, asked, took: Math.round(performance.now() - started) }))
       .catch((cause: unknown) => setError(errorText(cause)))
       .finally(() => setBusy(false))
   }
@@ -58,9 +53,9 @@ export function SearchPanel({ run, placeholder, plural }: { run: (query: string)
     <>
       <SearchBox value={query} onChange={setQuery} placeholder={placeholder} onSubmit={submit} onClear={clear} busy={busy} />
       {error !== null && <p className="muted">{error}</p>}
-      <SearchTook counts={`${results.length} ${plural}`} ms={took} steps={steps} />
-      <HitGrid results={results} query={asked} onOpen={setOpen} />
-      <MatchModal match={open} query={asked} scoring={scoring} onClose={() => setOpen(null)} />
+      <SearchTook counts={`${shown.body.length} ${plural}`} ms={shown.took} steps={shown.steps} />
+      <HitGrid results={shown.body} query={shown.asked} onOpen={setOpen} />
+      <MatchModal match={open} query={shown.asked} scoring={shown.scoring} onClose={() => setOpen(null)} />
     </>
   )
 }

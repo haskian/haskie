@@ -12,6 +12,7 @@ between for a chunk partly on both. The query vector is [1, 0].
 
 from pathlib import Path
 
+import msgspec
 import numpy as np
 import pytest
 from conftest import one_part
@@ -23,7 +24,7 @@ from haskie.search import probe, retrieval, section
 from haskie.search.collapse import Vector
 from haskie.search.passage import ranges
 from haskie.search.retrieval import Plan, Scanned
-from haskie.settings import ChunkSettings, SearchSettings
+from haskie.settings import ChunkSettings, Reranker, SearchSettings
 
 MARKDOWN = (
     "# Guide\n\n## Retries\n\n"
@@ -164,3 +165,58 @@ async def test_a_lexical_read_leaves_vectors_out_only_when_asked(tmp_path: Path)
     assert all(row["_score"] > 0 for _, row in probed.rows.values()), "scored as before"
     assert all(row["vector"] is not None for _, row in plain.rows.values())
     assert list(probed.rows) == list(plain.rows), "the same chunks, in the same order"
+
+
+@pytest.mark.anyio
+async def test_a_chunk_near_two_groups_is_a_candidate_of_each(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sections of one document can nest: a group of the whole guide and one of its Retries
+    section. Chunk 2 is near a passage of each, and each may take it, the one whose passage it
+    continues; one map of chunk to group gave it to whichever came last."""
+    where, hits = await _index(tmp_path, VECTORS)
+    within = section.Section(("Guide", "Retries"), 1, 6)
+    retries = section.Group("notes", DOC, within, ranges([hits[1]]))
+    guide = section.Group("notes", DOC, section.Section(("Guide",), 1, 7), ranges([hits[3]]))
+    offered: dict[int, set[int]] = {}
+    fills = retrieval.filling.fills
+
+    def seen(at: int, one: section.Group, candidates: dict, reach: int) -> list:
+        offered[at] = {seq for _, _, seq in candidates}
+        return fills(at, one, candidates, reach)
+
+    monkeypatch.setattr(retrieval.filling, "fills", seen)
+
+    await retrieval.fill([retries, guide], _asked(), where)
+
+    assert offered == {0: {2, 3}, 1: {1, 2, 4, 5}}
+
+
+@pytest.mark.parametrize(
+    ("name", "reranker", "tagged"),
+    [
+        ("without a reranker, a filled chunk tags the question it matches best", False, True),
+        ("with one, only the reranker tags: a filled chunk brings none", True, False),
+    ],
+)
+@pytest.mark.anyio
+async def test_a_filled_chunk_tags_a_question_only_without_a_reranker(
+    tmp_path: Path, name: str, reranker: bool, tagged: bool
+) -> None:
+    """Chunk 1 is kept untagged; chunk 2 next to it is as close to the first question as it is,
+    so the fill takes it, with the question it matches best only when no reranker judges tags."""
+    where, hits = await _index(tmp_path, VECTORS)
+    judge = Reranker.CROSS_ENCODER if reranker else Reranker.NONE
+    settings = SearchSettings(max_passage_grow=2, reranker=judge)
+    where = msgspec.structs.replace(where, settings=settings)
+    groups = await retrieval.sections(ranges([hits[1]]), where, limit=1)
+    asked = [
+        probe.Question(vector=ON, asked=QUERY, label="q1"),
+        probe.Question(vector=OFF, asked="What else?", label="q2"),
+    ]
+
+    (filled,) = await retrieval.fill(groups, asked, where)
+
+    assert [hit.seq for hit in filled.ranges[0].hits][:2] == [1, 2], f"{name}: chunk 2 joined"
+    assert ("q1" in filled.ranges[0].aspects) is tagged, name
+    assert bool(filled.ranges[0].aspects) is tagged, name

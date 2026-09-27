@@ -198,7 +198,10 @@ async def rerank(pool: Pool, query: str, settings: SearchSettings) -> Pool:
         return pool
     rows = [pool.rows[key][1] for key, _ in pool.ranked]
     rescored = [(row_key(row), row_score(row)) for row in await cross_encode(query, rows, settings)]
-    return msgspec.structs.replace(pool, ranked=rescored)
+    # the reranker's score has a scale: under the floor it judged the chunk no answer, and a
+    # search that keeps it would fill a slot, or tag a question, with it
+    kept = [(key, score) for key, score in rescored if score >= settings.min_rerank_score]
+    return msgspec.structs.replace(pool, ranked=kept)
 
 
 class Scanned(msgspec.Struct):
@@ -234,7 +237,7 @@ class Ranged(msgspec.Struct):
 
 
 async def fill_thin(
-    scanned: Scanned, where: Plan, query: str, framed: str, grows: bool = True
+    scanned: Scanned, where: Plan, query: str, rerank_query: str, grows: bool = True
 ) -> Ranged:
     """The scanned hits as ranges, each thin one grown by the neighbours of its section that
     match `query`, else marked too short to stand alone (see `thin`).
@@ -242,8 +245,8 @@ async def fill_thin(
     Its neighbours are read from the collection only when a range is thin, in one query per
     collection, and valued around the scanned hits (`fill.value`): by the reranker when one is on,
     since the scanned hits carry its scores already, else as `_values` does. The valuing and the
-    growing run in one worker-thread hop. The reranker reads the `framed` question, the context in
-    front; the word scores read `query`, the question alone (`aspects.Questions.framed`). `grows`
+    growing run in one worker-thread hop. The reranker reads `rerank_query`
+    (`flow.Search.rerank_query`); the word scores read `query`, the question alone. `grows`
     False only judges which thin ranges could grow, for the fill of an excerpts search to grow
     them, so a passage grows once.
     """
@@ -254,10 +257,10 @@ async def fill_thin(
     reranked = None
     if rows and settings.reranker != Reranker.NONE:
         read = [row for _, row in rows.values()]
-        rescored = {
-            row_key(row): row_score(row) for row in await cross_encode(framed, read, settings)
-        }
-        reranked = [rescored[row_key(row)] for row in read]
+        # scored in place and read back in `rows`' order: a (document, seq) key would let two
+        # collections' chunk 5 of one document, cut two ways, share one score
+        await cross_encode(rerank_query, read, settings)
+        reranked = [row_score(row) for row in read]
     filled, signal = await cpu.on_cpu(
         _thin, hit_ranges, scanned, rows, reranked, where, query, grows
     )
@@ -425,14 +428,12 @@ def _picked(picks: list[aspects.Pick], scanned: list[Scanned]) -> Scanned:
     """The chunks of the picks, with their vectors: all the fold across the parts compares.
     Picks never overlap, so each chunk is in one of them."""
     vectors = {
-        (hit.collection, hit.document, hit.seq): vector
+        chunk_key(hit): vector
         for one in scanned
         for hit, vector in zip(one.hits, one.vectors, strict=True)
     }
     hits = [hit for pick in picks for hit in pick.span.hits]
-    return Scanned(
-        hits=hits, vectors=[vectors[(hit.collection, hit.document, hit.seq)] for hit in hits]
-    )
+    return Scanned(hits=hits, vectors=[vectors[chunk_key(hit)] for hit in hits])
 
 
 def _cover(
@@ -442,13 +443,15 @@ def _cover(
     mode: SearchMode,
     depth: int,
     cap: int,
+    by_score: bool,
 ) -> list[passage.HitRange]:
     picks = aspects.interleave([one.ranges for one in ranged], depth, cap)
     joined = _picked(picks, [one.scanned for one in ranged])
     scan = _spaces(joined, model, mode)
     # none cut: the sections they fall in are what the answer counts (`sections`)
     kept = collapse.ranges([pick.span for pick in picks], joined.hits, scan, None)
-    found = aspects.tagged(kept, picks, labels)
+    scans = [{chunk_key(hit): hit.score for hit in one.scanned.hits} for one in ranged]
+    found = aspects.tagged(kept, picks, labels, scans, by_score)
     _log_collapse(scan.deciding[0].kind, len(picks), kept, None)
     _log.info(
         "search_questions",
@@ -468,12 +471,14 @@ async def cover(
     mode: SearchMode,
     depth: int,
     cap: int,
+    by_score: bool,
 ) -> list[passage.HitRange]:
     """The ranges across the parts of one question, in the order the parts took them, each with
     its near-duplicates folded in and tagged with the parts it answers (see `aspects`). None is
     cut: `sections` counts the answer. `ranged` holds one set of ranges and `labels` one question
-    per part. A worker thread runs it, as `collapse_hits` says."""
-    return await cpu.on_cpu(_cover, ranged, labels, model, mode, depth, cap)
+    per part; `by_score` tags by the reranker's scores (`aspects.tagged`). A worker thread runs
+    it, as `collapse_hits` says."""
+    return await cpu.on_cpu(_cover, ranged, labels, model, mode, depth, cap, by_score)
 
 
 def _log_collapse(
@@ -548,38 +553,40 @@ async def fill(
     question's value, and that question tags it.
     """
     reach = where.settings.max_passage_grow
-    wanted = {
-        (one.collection, one.document, seq)
-        for one in groups
-        for seq in filling.near(one, reach) | {hit.seq for hit in one.hits}
-    }
+    # each group's own: sections of one document can nest, and a chunk near two groups is a
+    # candidate of each, for the one whose passage it continues
+    nears = [
+        {(one.collection, one.document, seq) for seq in filling.near(one, reach)} for one in groups
+    ]
+    wanted = set().union(*nears, (chunk_key(hit) for one in groups for hit in one.hits))
     rows = await _rows_at(where, wanted)
     budget = where.settings.max_answer_chars
-    return await cpu.on_cpu(_fill, groups, rows, questions, reach, budget)
+    # with a reranker on, a question tags only what it judged an answer (`aspects.tagged`); the
+    # fill weighs by vectors or words, so its chunks bring no tag of their own
+    tags = where.settings.reranker == Reranker.NONE
+    return await cpu.on_cpu(_fill, groups, nears, rows, questions, reach, budget, tags)
 
 
 def _fill(
     groups: list[section.Group],
+    nears: list[set[ChunkKey]],
     rows: dict[ChunkKey, tuple[Hit, dict]],
     questions: list[probe.Question],
     reach: int,
     budget: int,
+    tags: bool = True,
 ) -> list[section.Group]:
     held = [key for one in groups for hit in one.hits if (key := chunk_key(hit)) in rows]
-    near = {
-        key: at
-        for at, one in enumerate(groups)
-        for seq in filling.near(one, reach)
-        if (key := (one.collection, one.document, seq)) in rows
-    }
-    weighed, signal = _weigh(held, list(near), rows, questions)
-    candidates: dict[int, dict[ChunkKey, filling.Candidate]] = {}
-    for key, chunk in weighed.items():
-        candidates.setdefault(near[key], {})[key] = chunk
+    near = list(dict.fromkeys(key for keys in nears for key in keys if key in rows))
+    weighed, signal = _weigh(held, near, rows, questions)
+    if not tags:
+        weighed = {key: msgspec.structs.replace(one, aspect=None) for key, one in weighed.items()}
     found = [
         one
         for at, group in enumerate(groups)
-        for one in filling.fills(at, group, candidates.get(at, {}), reach)
+        for one in filling.fills(
+            at, group, {key: weighed[key] for key in nears[at] if key in weighed}, reach
+        )
     ]
     chosen = filling.choose(found, budget - sum(one.chars for one in groups))
     taken: dict[int, list[filling.Candidate]] = {}
@@ -635,7 +642,12 @@ async def probe_gaps(
     """The groups, with one more passage where the questions use words none of them holds (see
     `probe`): the best passage a full-text search of those words finds that no group holds yet,
     tagged with the questions it helps, in its section. Nothing is searched when no word is
-    missing."""
+    missing.
+
+    With a reranker on, what the search finds is judged as the ranked chunks were (`_judged`):
+    scored against each question whose words are missing, dropped under the floor, tagged with
+    the questions it clears it for. Without one, its BM25 score is on another scale than the
+    ranked passages', so it scores 0 and is tagged by the words it holds (`probe.tags`)."""
     wanted = probe.missing(questions, probe.covered(groups))
     if not wanted:
         return groups
@@ -645,15 +657,60 @@ async def probe_gaps(
     found = await fan_out(lexical, " ".join(wanted), depth, vectors=False)  # it only wants chunks
     pool = merge(found, where.settings.rrf_k, depth)
     hits = [hit for hit in scan(pool, depth).hits if chunk_key(hit) not in held]
+    reranked = where.settings.reranker != Reranker.NONE
+    scores: dict[str, dict[ChunkKey, float]] = {}
+    if reranked and hits:
+        hits, scores = await _judged(hits[: probe.PROBE_SCAN], pool, wanted, where.settings)
     fresh = passage.ranges(hits)
     joined = None
+    if fresh and reranked:
+        keys = [chunk_key(hit) for hit in fresh[0].hits]
+        found = {
+            label: passage.harmonic(max(values), sum(values))
+            for label, scored in scores.items()
+            if (values := [scored[key] for key in keys if key in scored])
+        }
+        best = msgspec.structs.replace(fresh[0], aspects=list(found), aspect_scores=found)
+    elif fresh:
+        best = msgspec.structs.replace(
+            fresh[0],
+            hits=[msgspec.structs.replace(hit, score=0.0) for hit in fresh[0].hits],
+            score=0.0,
+            aspects=probe.tags(fresh[0], wanted),
+        )
     if fresh:
-        best = msgspec.structs.replace(fresh[0], aspects=probe.tags(fresh[0], wanted))
         (one,) = await _grouped([best], where, 1)
         placed = probe.placed(groups, one)
         joined, groups = len(placed) == len(groups), placed
     _log.info("search_probe", terms=list(wanted), found=bool(fresh), joined=joined)
     return groups
+
+
+async def _judged(
+    hits: list[Hit], pool: Pool, wanted: dict[str, list[probe.Question]], settings: SearchSettings
+) -> tuple[list[Hit], dict[str, dict[ChunkKey, float]]]:
+    """The probe's hits the reranker judges an answer to a question whose words are missing, each
+    scored by its best such question, and each labelled question's scores of the hits that clear
+    the floor (`min_rerank_score`). The reranker reads each question alone."""
+    asked = list(dict.fromkeys(question for questions in wanted.values() for question in questions))
+    best: dict[ChunkKey, float] = {}
+    scores: dict[str, dict[ChunkKey, float]] = {}
+    for question in asked:
+        rows = [dict(pool.rows[(hit.document, hit.seq)][1]) for hit in hits]
+        await cross_encode(question.asked, rows, settings)  # scores the copies in place
+        for hit, row in zip(hits, rows, strict=True):
+            score, key = row_score(row), chunk_key(hit)
+            if score < settings.min_rerank_score:
+                continue
+            best[key] = max(score, best.get(key, score))
+            if question.label is not None:
+                scores.setdefault(question.label, {})[key] = score
+    kept = [
+        msgspec.structs.replace(hit, score=best[key])
+        for hit in hits
+        if (key := chunk_key(hit)) in best
+    ]
+    return kept, scores
 
 
 def _group(

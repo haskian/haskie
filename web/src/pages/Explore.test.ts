@@ -69,6 +69,7 @@ const PASSAGE: Passage = {
   markdown_file: '/Users/ada/.haskie/markdown/area-lights.md',
   also_in: [],
   aspects: [],
+  aspect_scores: {},
 }
 
 describe('parseScope', () => {

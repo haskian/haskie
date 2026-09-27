@@ -194,10 +194,9 @@ export function fillOf(score: number, best: number, worst: number): number {
 
 /** How an excerpt card names the questions it answers: "Q1 Q3", by their place in `asked`. A
  *  question no longer asked names nothing. */
-export function questionLabels(aspects: string[], asked: string[]): string {
+export function questionLabels(aspects: string[], asked: string[]): Array<{ label: string; question: string }> {
   return aspects
     .map((aspect) => asked.indexOf(aspect))
     .filter((at) => at >= 0)
-    .map((at) => `Q${at + 1}`)
-    .join(' ')
+    .map((at) => ({ label: `Q${at + 1}`, question: asked[at] }))
 }

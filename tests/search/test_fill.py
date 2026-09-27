@@ -111,13 +111,36 @@ def _shape(found: list[Fill]) -> list[list[int]]:
     ("name", "found", "values", "expected"),
     [
         (
-            "a gap that sums above 0 is bridged, a weak chunk paid for by a strong one",
+            "a gap that sums above 0 is bridged, a weak chunk paid for by a strong one; each side "
+            "may also grow into its half",
             [_range(2), _range(5)],
             {3: 0.6, 4: -0.2},
+            [[3, 4], [3]],
+        ),
+        (
+            "a gap that sums to 0 or less is not bridged, but its good half still grows",
+            [_range(2), _range(5)],
+            {3: 0.2, 4: -0.2},
+            [[3]],
+        ),
+        (
+            "a gap with an unread chunk is not bridged, and the chunk read next to a passage grows",
+            [_range(2), _range(5)],
+            {3: 0.9},
+            [[3]],
+        ),
+        (
+            "a middle passage grows too: a lead-in takes its list, however far the next passage",
+            [_range(1), _range(3), _range(8)],
+            {4: 0.7, 5: 0.4},
+            [[4, 5]],
+        ),
+        (
+            "an odd gap: its middle chunk goes to the passage before it",
+            [_range(2), _range(6)],
+            {3: -0.5, 4: 0.9, 5: -0.5},
             [[3, 4]],
         ),
-        ("a gap that sums to 0 or less stays", [_range(2), _range(5)], {3: 0.2, 4: -0.2}, []),
-        ("a gap with an unread chunk stays", [_range(2), _range(5)], {3: 0.9}, []),
         (
             "a passage grows outward by the run that sums highest",
             [_range(4)],
@@ -156,6 +179,15 @@ def test_a_run_outward_takes_the_prefix_worth_most(
 
 
 # --- choose ---------------------------------------------------------------------------
+
+
+def test_a_chunk_two_fills_share_is_taken_once_and_only_while_it_pays() -> None:
+    bridge = Fill(0, list(_candidates({3: 0.9, 4: 0.3}).values()))
+    grown = Fill(0, list(_candidates({3: 0.9}).values()))  # the passage before the gap, into it
+    weak_rest = Fill(0, list(_candidates({3: 0.9, 4: -0.2}).values()))
+
+    assert _shape(fill.choose([bridge, grown], 4 * SIZE)) == [[3], [4]], "the rest of the bridge"
+    assert _shape(fill.choose([weak_rest, grown], 4 * SIZE)) == [[3]], "a rest worth nothing stays"
 
 
 def test_the_budget_pays_for_the_fills_worth_most_per_character() -> None:

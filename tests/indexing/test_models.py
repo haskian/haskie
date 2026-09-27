@@ -20,6 +20,7 @@ from conftest import (
     counted_list_workflows,
     import_document,
     restart_dbos,
+    search_with,
     until,
     wait_event,
     wait_for,
@@ -192,27 +193,27 @@ async def test_embed_stage_precomputes_vectors_and_hybrid_search_uses_them(
     assert (await collection_hits("vec", "kitten"))[0].headings[-1] == "Cats", "semantic hit"
 
     # search options: every mode/fusion answers; fts alone cannot find "kitten"
-    semantic = await collection_hits("vec", "kitten", SearchOverrides(mode=SearchMode.VECTOR))
+    semantic = await search_with("vec", "kitten", SearchOverrides(mode=SearchMode.VECTOR))
     assert semantic[0].headings[-1] == "Cats"
-    assert await collection_hits("vec", "kitten", SearchOverrides(mode=SearchMode.FTS)) == []
-    linear = await collection_hits(
+    assert await search_with("vec", "kitten", SearchOverrides(mode=SearchMode.FTS)) == []
+    linear = await search_with(
         "vec", "bonds", SearchOverrides(mode=SearchMode.HYBRID, fusion=Fusion.LINEAR)
     )
     assert linear[0].headings[-1] == "Finance"
-    lexical = await collection_hits(
+    lexical = await search_with(
         "vec", "bonds", SearchOverrides(fusion=Fusion.LINEAR, vector_weight=0.0, bm25_weight=1.0)
     )
     assert lexical[0].headings[-1] == "Finance"
-    (best,) = await collection_hits("vec", "kitten", SearchOverrides(fusion=Fusion.RRF, limit=1))
+    (best,) = await search_with("vec", "kitten", SearchOverrides(fusion=Fusion.RRF, limit=1))
     assert best.headings[-1] == "Cats"
 
     # cross-encoder reranker works on top of any mode, including vector-only and fts
     for mode in (SearchMode.VECTOR, SearchMode.HYBRID):
         reranked = SearchOverrides(mode=mode, reranker=Reranker.CROSS_ENCODER, candidates=10)
-        hits = await collection_hits("vec", "kitten", reranked)
+        hits = await search_with("vec", "kitten", reranked)
         assert hits[0].headings[-1] == "Cats" and hits[0].score > hits[1].score, mode
         assert all(0 < hit.score < 1 for hit in hits), f"{mode}: the sigmoid of the logit"
-    lexical_reranked = await collection_hits(
+    lexical_reranked = await search_with(
         "vec", "bonds", SearchOverrides(mode=SearchMode.FTS, reranker=Reranker.CROSS_ENCODER)
     )
     assert lexical_reranked[0].headings[-1] == "Finance"

@@ -7,6 +7,7 @@ the texts line up with the ranges they were read for.
 
 import math
 from pathlib import Path
+from typing import Any
 
 import msgspec
 import pytest
@@ -16,7 +17,8 @@ from haskie.collection.index import Hit, chunk_key, location
 from haskie.indexing.segment import CutReason
 from haskie.search import probe, retrieval, section
 from haskie.search.passage import ranges
-from haskie.search.retrieval import Plan, Scanned
+from haskie.search.retrieval import Plan, Pool, Scanned
+from haskie.search.thin import Filled
 from haskie.settings import Reranker, SearchSettings
 
 # Multi-byte on purpose: a char offset is not a file position, so a read by char offsets would
@@ -279,16 +281,18 @@ def test_nothing_near_or_nothing_held_weighs_nothing() -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("name", "others", "after", "grown"),
+    ("name", "own", "others", "after", "grown"),
     [
         (
             "one it rates above the median scanned hit joins",
+            3.0,
             [1.0],
             {3: 5.0},
             [(2, 3)],
         ),
         (
             "a weak neighbour is not paid for by a slightly better one past it, as on the logits",
+            8.0,
             [5.0, 2.0, 0.0, -2.0, -4.0, -5.0, -5.0, -6.0, -7.0, -8.0, -9.0],
             {3: -10.0, 4: -3.0},
             [(2, 2)],
@@ -298,14 +302,16 @@ def test_nothing_near_or_nothing_held_weighs_nothing() -> None:
 async def test_with_a_reranker_a_thin_range_grows_by_the_neighbours_it_scores(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
+    own: float,
     others: list[float],
     after: dict[int, float],
     grown: list[tuple[int, int]],
 ) -> None:
     """The reranker scored the ranking, so it scores the neighbours too, valued on its logits
-    around the scanned hits': the sigmoid it stores would make every weak one cost nearly 0."""
+    around the scanned hits': the sigmoid it stores would make every weak one cost nearly 0. The
+    thin range scores `own`, the other scanned hits `others`, its neighbours `after` by seq."""
     thin = msgspec.structs.replace(
-        hit("Retries back off.", _sigmoid(8.0 if len(others) > 1 else 3.0), seq=2, char_start=200),
+        hit("Retries back off.", _sigmoid(own), seq=2, char_start=200),
         start_reason=CutReason.PARAGRAPH,
         end_reason=CutReason.PARAGRAPH,
     )
@@ -333,7 +339,9 @@ async def test_with_a_reranker_a_thin_range_grows_by_the_neighbours_it_scores(
         return {key: row for key, row in found.items() if key in wanted}
 
     async def rerank(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
-        return [{**one, "_relevance_score": _sigmoid(after[one["seq"]])} for one in rows]
+        for one in rows:  # in place, as `cross_encode` scores them
+            one["_relevance_score"] = _sigmoid(after[one["seq"]])
+        return rows
 
     monkeypatch.setattr(retrieval, "_rows_at", rows_at)
     monkeypatch.setattr(retrieval, "cross_encode", rerank)
@@ -342,6 +350,83 @@ async def test_with_a_reranker_a_thin_range_grows_by_the_neighbours_it_scores(
 
     ours = [one for one in ranged.ranges if one.hits[0].document == thin.document]
     assert [(one.seq_start, one.seq_end) for one in ours] == grown, name
+
+
+@pytest.mark.anyio
+async def test_each_collections_neighbour_keeps_its_own_reranker_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One document in two collections, cut two ways: each has a chunk 3, with other text. Each
+    is scored for itself, not by the other's score under their shared (document, seq)."""
+    thin = msgspec.structs.replace(
+        hit("Retries back off.", 0.9, seq=2, char_start=200),
+        start_reason=CutReason.PARAGRAPH,
+        end_reason=CutReason.PARAGRAPH,
+    )
+    near = {
+        name: msgspec.structs.replace(thin, collection=name, seq=3, text=f"{name} text", score=0.0)
+        for name in ("backend", "frontend")
+    }
+
+    async def rows_at(where: Plan, wanted: set) -> dict:
+        return {
+            chunk_key(one): (one, {"document": one.document, "seq": 3, "text": one.text})
+            for one in near.values()
+        }
+
+    async def rerank(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
+        for one in rows:
+            one["_relevance_score"] = 0.8 if one["text"].startswith("backend") else 0.1
+        return sorted(rows, key=lambda one: one["_relevance_score"], reverse=True)
+
+    seen: list[list[float]] = []
+
+    def judged(hit_ranges: Any, scanned: Any, rows: Any, reranked: list[float], *_: Any) -> Any:
+        seen.append(reranked)
+        return Filled(hit_ranges, [], 0), "reranker"
+
+    monkeypatch.setattr(retrieval, "_rows_at", rows_at)
+    monkeypatch.setattr(retrieval, "cross_encode", rerank)
+    monkeypatch.setattr(retrieval, "_thin", judged)
+
+    await retrieval.fill_thin(
+        Scanned(hits=[thin], vectors=[None]), _plan(Reranker.CROSS_ENCODER), QUERY, QUERY
+    )
+
+    assert seen == [[0.8, 0.1]], "each row its own score, in the order the rows were read"
+
+
+@pytest.mark.anyio
+async def test_the_probes_find_is_judged_by_the_reranker_per_missing_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each hit is scored against each question whose words are missing: kept where one clears
+    the floor, scored by its best, and each question keeps its scores of the hits it cleared."""
+    ledger = hit("The ledger reconciles stock.", 7.3, seq=1)
+    weather = hit("It rains.", 6.1, seq=2)
+    pool = Pool(
+        rows={
+            ("patterns.md", 1): (None, {"framed": ledger.text}),
+            ("patterns.md", 2): (None, {"framed": weather.text}),
+        },  # ty: ignore[invalid-argument-type]
+        rankings={},
+    )
+    order = probe.Question(None, "How does stock stay right?", label="order")
+    books = probe.Question(None, "How is the ledger closed?", label="books")
+
+    async def rerank(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
+        for row in rows:
+            fits = ("ledger" in query and "ledger" in row["framed"]) or "stock" in row["framed"]
+            row["_relevance_score"] = 0.9 if fits and "stock" in query else 0.6 if fits else 0.01
+        return rows
+
+    monkeypatch.setattr(retrieval, "cross_encode", rerank)
+    wanted = {"stock": [order], "ledger": [books]}
+
+    kept, scores = await retrieval._judged([ledger, weather], pool, wanted, SearchSettings())
+
+    assert [(one.seq, one.score) for one in kept] == [(1, 0.9)], "its best question's score"
+    assert scores == {"order": {chunk_key(ledger): 0.9}, "books": {chunk_key(ledger): 0.6}}
 
 
 def test_the_budget_cuts_the_last_sections_first() -> None:

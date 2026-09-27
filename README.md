@@ -91,11 +91,10 @@ haskie is young, with much still to add, but it already covers the whole path fr
 cited answers in Claude Code. Not there yet:
 
 - **More retrieval decisions made for the agent.** Today haskie merges neighbouring hits, grows
-  or drops passages too short to stand alone, folds repeats, and groups passages by section. Next on the list, each one a round trip the agent
-  would otherwise spend:
-  - **Auto-expanding passages** when the surrounding text holds more of the answer. Today an
-    excerpt holds the matched passages of a section, and the agent opens `markdown_file` for the
-    text between them.
+  or drops passages too short to stand alone, folds repeats, groups passages by section, fills in
+  the text around and between them that answers too, and searches again for the words of a
+  question no excerpt holds. Next on the list, each one a round trip the agent would otherwise
+  spend:
   - **Trimming** the sentences of a passage that do not answer. Today an excerpt keeps
     every passage whole.
   - **Cross-document merging**, so complementary passages from several documents arrive as one

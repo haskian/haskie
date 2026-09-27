@@ -3,5 +3,5 @@
 .explore { display: grid; gap: var(--sp-6); align-content: start; }
 .explore-bar { display: flex; gap: var(--sp-2); align-items: stretch; }
 .explore-aspects { display: grid; gap: var(--sp-2); }
-.aspect-label { align-self: center; padding: 0 var(--sp-3) 0 var(--sp-4); color: var(--text-muted); }
+.aspect-label { display: flex; align-items: center; padding: 0 var(--sp-4); border-right: 1px solid var(--fog-2); color: var(--text-muted); }
 .explore-aspects > .btn { justify-self: start; }

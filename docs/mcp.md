@@ -54,7 +54,7 @@ sequenceDiagram
     end
     Note over CC: the rule says: search the collections first
     CC->>H: search_excerpts(q, session_id)
-    H-->>CC: excerpts with header, location, also_in
+    H-->>CC: excerpts with header, location, spans (each with also_in), uncovered, missing_terms
     opt nothing relevant, or "which documents?"
         CC->>H: search_sources(q, session_id)
         H-->>CC: documents, sections, collection cover

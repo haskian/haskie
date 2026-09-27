@@ -369,6 +369,10 @@ body.over .drop-overlay { opacity: 1; }
 /* a line each: the heading, the pages and lines, the chunks and where else it is */
 .hit-foot { display: grid; gap: var(--sp-1); font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--tracking-mono); text-transform: uppercase; color: var(--text-muted); }
 .hit-foot > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } /* a long line shortens, never wraps */
+/* the questions an excerpt answers, a bordered tag each; currentColor follows the tile's hover */
+.hit-questions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.question-score { opacity: 0.6; }
+.question-tag { padding: var(--sp-1) var(--sp-2); border: 1px solid currentColor; font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--tracking-mono); line-height: 1; }
 /* four lines whatever the result says: a one-word hit and a long one make the same tile */
 .hit-text { margin: 0; font-size: var(--fs-sm); line-height: 1.5; height: calc(4 * 1.5em); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .hit-body::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: linear-gradient(var(--ok), var(--ok)) 0 0 / calc(var(--score, 0) * 100%) 100% no-repeat; }

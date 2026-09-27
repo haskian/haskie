@@ -1454,6 +1454,10 @@ async def test_the_probed_excerpt_comes_past_the_budget_the_sections_were_cut_to
     assert logged["search_budget"]["cut"] == 1, "one order section cut to the budget"
     assert (logged["search_probe"]["found"], logged["search_probe"]["joined"]) == (True, False)
     assert [one["document"] for one in answer["excerpts"]] == ["orders.md", "stock.md"]
+    probed = answer["excerpts"][-1]
+    assert probed["score"] == 0.0 and [one["score"] for one in probed["spans"]] == [0.0], (
+        "its BM25 score is on another scale than the ranked excerpt's: it scores 0, last"
+    )
     assert answer["missing_terms"] == []
 
 
@@ -1718,6 +1722,9 @@ async def test_several_questions_over_collections_since_deleted_find_nothing(
     answer = response.json()
     assert answer["excerpts"] == []
     assert answer["uncovered"] == [BY_IDENTITY, BY_EVENT], "every question, unanswered"
+    too_few = {"q": [BY_IDENTITY, BY_EVENT], "session_id": "s1", "limit": 1}
+    refused = await client.get("/api/search/excerpts", params=too_few)
+    assert refused.status_code == 422, "a caller's own bad limit is refused all the same"
     one = await client.get("/api/search/excerpts", params={"q": BY_EVENT, "session_id": "s1"})
     assert one.json() == {
         "excerpts": [],
@@ -1744,6 +1751,22 @@ async def test_questions_a_search_cannot_run_are_refused_before_it_runs(
 
     assert response.status_code == 422, f"{name}: {response.text}"
     assert message in response.text, name
+
+
+async def test_a_default_limit_below_the_questions_gives_each_a_slot(
+    client: AsyncTestClient,
+) -> None:
+    """The collection's own limit is below the questions asked: a caller who set no limit, as
+    Explore and an agent do, gets a slot for each question rather than a refusal."""
+    await _notes_on_aggregates(client)
+    await client.put("/api/collections/ddd/overrides", json={"search": {"limit": 1}})
+
+    response = await client.get(
+        "/api/search/excerpts", params={"q": [BY_IDENTITY, BY_EVENT], "collections": "ddd"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(response.json()["excerpts"]) >= 2, "one slot per question at least"
 
 
 async def test_the_mcp_tool_takes_one_question_or_several(api_client: AsyncTestClient) -> None:
@@ -1900,6 +1923,8 @@ async def test_the_mcp_surface_offers_one_search_per_question(api_client: AsyncT
         ("a limit below one", {"limit": 0}),
         ("a negative weight", {"vector_weight": -1}),
         ("no candidates", {"candidates": 0}),
+        ("a reranker floor above 1", {"min_rerank_score": 1.5}),
+        ("a reranker floor below 0", {"min_rerank_score": -0.1}),
     ],
 )
 async def test_a_refused_search_override_is_never_saved(

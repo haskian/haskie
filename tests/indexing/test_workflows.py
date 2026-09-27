@@ -48,6 +48,7 @@ from conftest import (
     import_row,
     maintenance_state,
     restart_dbos,
+    search_with,
     text_pdf,
     until,
     wait_event,
@@ -371,7 +372,7 @@ async def test_attach_indexes_the_document_into_the_collection(dbos, tmp_path: P
     assert (member.status, member.error) == ("indexed", None)
     assert (await document.get(doc.name)).status == "imported", "the document's status is its own"
     assert await document.collections_of(doc.name) == ["Notes-Stuff"]
-    hits = await collection_hits(collection.name, "lancedb", SearchOverrides(limit=5))
+    hits = await search_with(collection.name, "lancedb", SearchOverrides(limit=5))
     assert hits and hits[0].headings == ["Title", "Alpha"] and hits[0].collection == "Notes-Stuff"
     assert (hits[0].line_start, hits[0].line_end) == (7, 7), "the text, not its heading"
     assert hits[0].markdown_path == doc.relative(doc.markdown), "home-relative"
@@ -413,7 +414,7 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
     assert [(t.stage, t.seq, t.status) for t in await operations.list_tasks(indexing)] == [
         ("index", 0, "SUCCESS"), ("index", 1, "SUCCESS"), ("index", 2, "SUCCESS"),
     ]  # fmt: skip
-    hit = (await collection_hits("q", "word25", SearchOverrides(limit=1)))[0]
+    hit = (await search_with("q", "word25", SearchOverrides(limit=1)))[0]
     assert (hit.page_start, hit.part) == (25, 2)
     full = pdf.markdown.read_text()
     assert full[hit.char_start : hit.char_end] == hit.text
@@ -458,9 +459,9 @@ async def test_documents_of_one_collection_index_without_conflict(dbos, tmp_path
     assert [await wait_for(i) for i in ids] == ["indexed"] * len(ids)
     counts = await Collection("serial").counts()
     assert (counts.total, counts.indexed) == (4, 4)
-    assert {
-        h.document for h in await collection_hits("serial", "D3P5", SearchOverrides(limit=1))
-    } == {"d3.pdf"}
+    assert {h.document for h in await search_with("serial", "D3P5", SearchOverrides(limit=1))} == {
+        "d3.pdf"
+    }
 
 
 async def test_workflow_ids_name_their_kind_and_their_names(dbos, tmp_path: Path) -> None:
@@ -1579,11 +1580,11 @@ async def test_delete_document_clears_every_collection_it_is_in(dbos, tmp_path: 
             name
         )
         assert {
-            h.document for h in await collection_hits(name, "lancedb", SearchOverrides(limit=5))
+            h.document for h in await search_with(name, "lancedb", SearchOverrides(limit=5))
         } == set(), name
-    assert {
-        h.document for h in await collection_hits("left", "beta", SearchOverrides(limit=5))
-    } == {other.name}
+    assert {h.document for h in await search_with("left", "beta", SearchOverrides(limit=5))} == {
+        other.name
+    }
 
 
 async def test_attaching_while_a_delete_runs_is_refused(dbos, tmp_path: Path, monkeypatch) -> None:
@@ -1684,7 +1685,7 @@ async def test_detach_waits_for_the_index_write_in_flight(
     assert await collection.member_names() == [done.name]
     assert await _rows_of(collection, slow.name) == 0, "its rows went with the membership"
     assert await _rows_of(collection, done.name) > 0, "and the other member kept its own"
-    found = await collection_hits(collection.name, "alpha", SearchOverrides(limit=5))
+    found = await search_with(collection.name, "alpha", SearchOverrides(limit=5))
     assert {h.document for h in found} == {done.name}, (
         "both documents carry 'alpha'; only the one still attached is found"
     )
