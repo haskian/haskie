@@ -1,4 +1,7 @@
 /* Page layout only; tokens and components live in design/design.css. Copied from the <style>
    block of design/explore.html. The match panel moved to design.css with the modal it is in. */
 .explore { display: grid; gap: var(--sp-6); align-content: start; }
-.explore-parts { display: grid; grid-template-columns: 2fr 1fr; gap: var(--sp-4); }
+.explore-bar { display: flex; gap: var(--sp-2); align-items: stretch; }
+.explore-aspects { display: grid; gap: var(--sp-2); }
+.aspect-label { align-self: center; padding: 0 var(--sp-3) 0 var(--sp-4); color: var(--text-muted); }
+.explore-aspects > .btn { justify-self: start; }

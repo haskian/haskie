@@ -403,6 +403,7 @@ body:has(.statusbar) { padding-top: 40px; }
 .input-group:focus-within { background: rgba(255, 255, 255, 0.18); }
 .input-group > .input, .input-group > .picker > summary { border: 0; border-radius: 0; height: 100%; }
 .input-group > .picker { border-right: 1px solid var(--fog-2); }
+.input-group > .picker:last-child { border-right: 0; }
 .input-group > .picker > summary { min-width: max-content; }
 .input-group .picker-value .sub { display: none; }
 .input-group > .picker > .picker-list { right: auto; min-width: 100%; width: max-content; }

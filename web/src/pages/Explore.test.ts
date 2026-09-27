@@ -160,15 +160,16 @@ describe('parseServerTiming', () => {
 })
 
 describe('questionsOf', () => {
-  const cases: Array<{ name: string; first: string; parts: string; expected: string[] }> = [
-    { name: 'the search box alone is one question', first: 'Why retry?', parts: '', expected: ['Why retry?'] },
-    { name: 'each line is one more part', first: 'Why retry?', parts: 'How long to wait?\nWhen to stop?', expected: ['Why retry?', 'How long to wait?', 'When to stop?'] },
-    { name: 'blank lines and spaces go', first: ' Why retry? ', parts: '\n  How long?  \n\n', expected: ['Why retry?', 'How long?'] },
-    { name: 'a repeat is asked once', first: 'Why retry?', parts: 'Why retry?\nHow long?', expected: ['Why retry?', 'How long?'] },
+  const cases: Array<{ name: string; aspects: string[]; expected: string[] }> = [
+    { name: 'one input is one question', aspects: ['Why retry?'], expected: ['Why retry?'] },
+    { name: 'each input is one more aspect, in order', aspects: ['Why retry?', 'How long to wait?', 'When to stop?'], expected: ['Why retry?', 'How long to wait?', 'When to stop?'] },
+    { name: 'blank inputs and spaces go', aspects: [' Why retry? ', '', '  How long?  ', '   '], expected: ['Why retry?', 'How long?'] },
+    { name: 'a repeat is asked once', aspects: ['Why retry?', 'Why retry? ', 'How long?'], expected: ['Why retry?', 'How long?'] },
+    { name: 'nothing typed asks nothing', aspects: [''], expected: [] },
   ]
   for (const one of cases) {
     test(one.name, () => {
-      expect(questionsOf(one.first, one.parts)).toEqual(one.expected)
+      expect(questionsOf(one.aspects)).toEqual(one.expected)
     })
   }
 })
