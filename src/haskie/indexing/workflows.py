@@ -71,7 +71,6 @@ under an explicit name (see `dbos_names`).
 
 import asyncio
 import contextlib
-import hashlib
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -1342,7 +1341,7 @@ async def delete_collection_workflow(collection: str) -> None:
         while await cancel_active_batch(collection) > 0:
             pass
         # one per delete, from its durable id, so a replay moves and removes the same folder
-        key = hashlib.sha1((DBOS.workflow_id or collection).encode()).hexdigest()[:12]
+        key = run_id(DBOS.workflow_id or "")
         async with collection_lock(collection):
             await move_aside(collection, key)
             await remove_rows(collection)

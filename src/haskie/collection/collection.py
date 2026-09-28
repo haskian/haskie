@@ -366,23 +366,23 @@ class Collection:
         forget_schema(self.index_dir)
         await home.remove_tree(self.root)
 
-    def aside(self, key: str) -> Path:
+    def _aside(self, key: str) -> Path:
         """Where a delete moves the folder before it frees the name: beside it, under a name no
         collection can take (`safe_name` strips a leading dot), one per delete (`key`)."""
         return self.root.with_name(f".{self.root.name}.deleted-{key}")
 
     async def move_aside(self, key: str) -> None:
-        """Move the folder to `aside(key)`, so the name is free with no folder under it: a create
+        """Move the folder to `_aside(key)`, so the name is free with no folder under it: a create
         or a rename onto it, once the row goes, cannot land in a folder the delete then removes.
         Idempotent: a replay finds the folder moved already."""
-        aside = anyio.Path(self.aside(key))
+        aside = anyio.Path(self._aside(key))
         forget_schema(self.index_dir)
         if await anyio.Path(self.root).exists() and not await aside.exists():
             await anyio.Path(self.root).rename(aside)
 
     async def remove_aside(self, key: str) -> None:
         """Delete the folder a delete moved aside, index table and all."""
-        await home.remove_tree(self.aside(key))
+        await home.remove_tree(self._aside(key))
 
     # --- overrides -------------------------------------------------------
 
