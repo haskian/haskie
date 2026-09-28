@@ -103,8 +103,11 @@ def test_the_judged_files_read_one_record_a_line(tmp_path: Path) -> None:
     sampled = tmp_path / "candidates.jsonl"
     sampled.write_text('{"query": "why", "texts": ["a", "b"]}\n')
 
-    assert calibrate._read(judged, Borderline) == [Borderline("why", "a"), Borderline("how", "b")]
-    assert calibrate._read(sampled, Candidates) == [Candidates("why", ["a", "b"])]
+    assert calibrate.read_jsonl(judged, Borderline) == [
+        Borderline("why", "a"),
+        Borderline("how", "b"),
+    ]
+    assert calibrate.read_jsonl(sampled, Candidates) == [Candidates("why", ["a", "b"])]
 
 
 async def test_sampling_reads_every_candidate_as_the_reranker_does_under_no_floor(
@@ -135,7 +138,7 @@ async def test_sampling_reads_every_candidate_as_the_reranker_does_under_no_floo
 
     written = await calibrate._sample(out)
 
-    (sampled,) = calibrate._read(out, Candidates)
+    (sampled,) = calibrate.read_jsonl(out, Candidates)
     assert written == 1 and sampled.query == "retry"
     assert len(sampled.texts) == len(calibrate.CANDIDATES), "ranks 10 to 30, none dropped"
     assert all(text.startswith("Part ") and "\n\nretry note" in text for text in sampled.texts)

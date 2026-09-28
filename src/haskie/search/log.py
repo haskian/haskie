@@ -234,7 +234,8 @@ async def capturing(
 ) -> AsyncIterator[Capture]:
     """Capture the search run inside the block, and write it to the log when the block ends.
 
-    A failed search is written with its error, then the error goes on. `record=False` measures
+    A failed search is written with its error, then the error goes on; so is a cancelled one,
+    which must not read as a search that found nothing. `record=False` measures
     without writing: a replay (`gaps.replay`) is a check, not a search anyone asked for. The
     session id is checked first, because a search recorded under it creates the session.
     """
@@ -243,14 +244,15 @@ async def capturing(
     capture = Capture(
         tool=tool,
         session_id=session_id,
-        asked=[Asked(question) for question in questions],
+        # stripped as `gaps.report` matches them, whichever tool asked
+        asked=[Asked(question.strip()) for question in questions],
         context=context,
     )
     token = _capture.set(capture)
     started = time.perf_counter()
     try:
         yield capture
-    except Exception as exc:
+    except BaseException as exc:
         capture.error = home.scrub(f"{type(exc).__name__}: {exc}")
         raise
     finally:
@@ -422,9 +424,13 @@ async def load(
             row.id: db.row_to(Logged, row, collections=list[str], missing_terms=list[str])
             for row in await conn.execute(statement)
         }
+        if not found:
+            return []
         # the same filters as a subquery, not the ids as parameters: a window of history can
-        # hold more searches than SQLite takes variables in one statement
-        chosen = statement.with_only_columns(searches.c.id)
+        # hold more searches than SQLite takes variables in one statement. Each statement reads
+        # on its own, so a search written in between has a higher id and is left out, and the
+        # limit picks the same searches again
+        chosen = statement.where(searches.c.id <= max(found)).with_only_columns(searches.c.id)
         questions = await conn.execute(
             select(search_questions.c.search_id, *_QUESTION)
             .where(search_questions.c.search_id.in_(chosen))
@@ -434,9 +440,9 @@ async def load(
             record = db.record(row)
             record["similarities"] = _unfloats(record["similarities"])
             record["rerank_scores"] = _unfloats(record["rerank_scores"])
-            found[record.pop("search_id")].questions.append(
-                msgspec.convert(record, LoggedQuestion, strict=False)
-            )
+            # a search pruned in between is gone from `found`
+            if (logged := found.get(record.pop("search_id"))) is not None:
+                logged.questions.append(msgspec.convert(record, LoggedQuestion, strict=False))
     return list(found.values())
 
 

@@ -95,7 +95,7 @@ trust, a missed one waits for the next search.
 Rust Programming Language" (Apache-2.0 or MIT, fetched at a pinned commit; 45 answered questions,
 40 unanswered, 30 of them near its topics) and four of haskie's docs (12 answered, 5 unanswered).
 For each question it takes the score profile a search would log, and scores every predictor in
-`gaps.FEATURES` by AUROC, the chance an answered question scores above an unanswered one.
+its `FEATURES` by AUROC, the chance an answered question scores above an unanswered one.
 
 | model | answered, lowest | unanswered, highest | bars |
 | --- | --- | --- | --- |

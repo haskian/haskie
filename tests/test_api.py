@@ -1345,6 +1345,14 @@ async def test_an_agent_reports_a_gap_on_a_question_it_asked(ready: AsyncTestCli
         )
         assert response.status_code == status and detail in response.text, (name, response.text)
 
+    await ready.get("/api/search/sources", params={"q": " alpha sources ", "session_id": "r1"})
+    sources = await ready.post(
+        "/api/gaps/report",
+        params={"session_id": "r1"},
+        json={"question": " alpha sources ", "verdict": "insufficient"},
+    )
+    assert sources.status_code == 200, "a sources question, passed back word for word"
+
 
 async def test_session_search_survives_the_deletion_of_a_collection(
     client: AsyncTestClient,

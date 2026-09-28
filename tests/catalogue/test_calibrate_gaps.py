@@ -108,6 +108,11 @@ async def test_sample_label_measure_and_write(seeded_home, tmp_path: Path) -> No
     compact = (await catalogue.embedders())["compact"]
     assert (compact.weak_match, compact.answered_match) == (0.703, None)
 
+    labels = out.read_text()
+    with pytest.raises(ValueError, match="exists and may hold labels"):
+        await calibrate_gaps._sample(out, "compact")
+    assert out.read_text() == labels, "a second sample keeps the labels"
+
 
 async def test_measure_refuses_an_unknown_profile(seeded_home, tmp_path: Path) -> None:
     out = tmp_path / "gap-questions.jsonl"
@@ -156,3 +161,18 @@ def test_the_command_reports_the_bars(tmp_path: Path) -> None:
     assert "weak_match 0.703, answered_match null" in measured.output
     assert "catches 10 of 10 unanswered" in measured.output
     assert refused.exit_code != 0 and "need 10" in refused.output
+
+
+def test_sample_replaces_labels_only_when_forced(seeded_home, tmp_path: Path) -> None:
+    out = tmp_path / "gap-questions.jsonl"
+    out.write_text('{"answered": true}\n')
+    runner = CliRunner()
+
+    kept = runner.invoke(calibrate_gaps.app, ["sample", "--out", str(out)])
+    labels = out.read_text()
+    forced = runner.invoke(calibrate_gaps.app, ["sample", "--out", str(out), "--force"])
+
+    assert kept.exit_code != 0 and "--force" in kept.output
+    assert labels == '{"answered": true}\n'
+    assert forced.exit_code == 0, forced.output
+    assert "0 questions" in forced.output and out.read_text() == "", "the empty log's sample"

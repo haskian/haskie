@@ -5,8 +5,12 @@ be computed here and compared exactly: per question, the best cosine between its
 row read, and the reranker's best score.
 """
 
+import asyncio
 import math
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
 
 import numpy as np
 import pytest
@@ -171,15 +175,64 @@ async def test_an_excerpts_search_records_each_question_on_its_own(
     assert len({one.id for one in logged.questions}) == 2, "each question has its own id"
 
 
-async def test_a_failed_search_is_recorded_with_its_error_then_raised(seeded_home) -> None:
-    with pytest.raises(InvalidInput, match="limit"):
-        async with log.capturing(log.Tool.SOURCES, ["kafka"], None):
-            raise InvalidInput("limit must be 1..100, got 0")
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        (InvalidInput("limit must be 1..100, got 0"), "InvalidInput: limit must be 1..100, got 0"),
+        # a cut-off search found nothing only because it never finished: not an `empty` gap
+        (asyncio.CancelledError(), "CancelledError: "),
+    ],
+    ids=["failed", "cancelled"],
+)
+async def test_a_search_that_did_not_finish_is_recorded_with_its_error_then_raised(
+    seeded_home, failure: BaseException, error: str
+) -> None:
+    with pytest.raises(type(failure)):
+        async with log.capturing(log.Tool.SOURCES, ["  kafka "], None):
+            raise failure
 
     (logged,) = await log.load()
-    assert logged.error == "InvalidInput: limit must be 1..100, got 0"
+    assert logged.error == error
     assert (logged.session_id, logged.result_count) == (None, 0), "recorded without a session too"
-    assert [one.question for one in logged.questions] == ["kafka"]
+    assert [one.question for one in logged.questions] == ["kafka"], "stored as report_gap matches"
+
+
+async def test_a_search_written_while_the_log_is_read_is_left_out(
+    seeded_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The searches and their questions are two reads. A search written between them is newer
+    than every search the first read found: the second leaves it out, and the limit keeps
+    picking the same searches."""
+    for question in ["first", "second"]:
+        async with log.capturing(log.Tool.SOURCES, [question], None):
+            pass
+    reading = db.connect
+
+    @asynccontextmanager
+    async def interleaved() -> AsyncIterator[Any]:
+        monkeypatch.setattr(db, "connect", reading)
+        async with reading() as conn:
+            yield _WriteBetween(conn)
+
+    monkeypatch.setattr(db, "connect", interleaved)
+    loaded = await log.load(limit=2)
+
+    assert [[q.question for q in one.questions] for one in loaded] == [["second"], ["first"]]
+    assert len(await log.load()) == 3, "the search written in between is kept"
+
+
+class _WriteBetween:
+    """A connection that has a search written by another one after its first read."""
+
+    def __init__(self, conn: Any) -> None:
+        self.conn, self.reads = conn, 0
+
+    async def execute(self, statement: Any) -> Any:
+        self.reads += 1
+        if self.reads == 2:
+            async with log.capturing(log.Tool.SOURCES, ["third"], None):
+                pass
+        return await self.conn.execute(statement)
 
 
 async def test_a_replay_measures_without_writing(seeded_home, fixed_models) -> None:

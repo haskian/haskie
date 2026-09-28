@@ -29,21 +29,31 @@ const MAX_REPLAY = 50 // the backend's cap on one replay; a bigger topic replays
 /** The questions the shelf did not answer: one tile per topic, the most asked first, one modal per topic. */
 export function Gaps({ route, counts }: PageProps<Extract<Route, { name: 'gaps' }>>) {
   const [review, setReview] = useState<GapReview>('open')
-  const [loaded, setLoaded] = useState<{ topics: GapTopic[]; now: number } | null>(null)
+  // the tab each list was read for: a list of another tab is never shown under this one's buttons
+  const [read, setRead] = useState<{ review: GapReview; topics: GapTopic[]; now: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const loaded = read?.review === review ? read : null
 
   // "2 h ago" is measured from the moment the list was read
-  const refresh = useCallback(() => api.gaps(review, DAYS, SIGNALS).then((topics) => setLoaded({ topics, now: Date.now() / 1000 })), [review])
+  const load = useCallback(() => api.gaps(review, DAYS, SIGNALS).then((topics) => ({ review, topics, now: Date.now() / 1000 })), [review])
   useEffect(() => {
-    refresh().catch((cause: unknown) => setError(errorText(cause)))
-  }, [refresh])
+    let current = true // a slow answer for a tab left since must not replace this one's
+    load()
+      .then((found) => current && setRead(found))
+      .catch((cause: unknown) => setError(errorText(cause)))
+    return () => {
+      current = false
+    }
+  }, [load])
 
   const close = useCallback(() => navigate({ name: 'gaps' }), [])
   const open = loaded?.topics.find((topic) => topicId(topic) === route.topic)
   const reviewed = useCallback(() => {
     close()
-    refresh().catch((cause: unknown) => setError(errorText(cause)))
-  }, [close, refresh])
+    load()
+      .then(setRead)
+      .catch((cause: unknown) => setError(errorText(cause)))
+  }, [close, load])
 
   return (
     <Shell current={route.name} counts={counts}>
@@ -68,7 +78,7 @@ export function Gaps({ route, counts }: PageProps<Extract<Route, { name: 'gaps' 
           ))}
       </div>
       <Modal open={open !== undefined} onClose={close} title={open?.question ?? ''} subtitle="gap">
-        {open !== undefined && loaded !== null && <TopicBody key={topicId(open)} topic={open} review={review} now={loaded.now} onReviewed={reviewed} />}
+        {open !== undefined && loaded !== null && <TopicBody key={topicId(open)} topic={open} review={loaded.review} now={loaded.now} onReviewed={reviewed} />}
       </Modal>
     </Shell>
   )

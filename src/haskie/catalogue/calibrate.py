@@ -78,7 +78,7 @@ def fit_beta(scores: list[float]) -> tuple[float, float]:
     return (mean * common, (1 - mean) * common)
 
 
-def _read[T](path: Path, kind: type[T]) -> list[T]:
+def read_jsonl[T](path: Path, kind: type[T]) -> list[T]:
     return [msgspec.json.decode(line, type=kind) for line in path.read_text().splitlines() if line]
 
 
@@ -160,8 +160,8 @@ def measure(
     write: bool = False,
 ) -> None:
     """Each reranker's floor over the borderline pairs and its curve over the candidates."""
-    pairs = [(one.query, one.text) for one in _read(borderline, Borderline)]
-    spread = [(one.query, text) for one in _read(candidates, Candidates) for text in one.texts]
+    pairs = [(one.query, one.text) for one in read_jsonl(borderline, Borderline)]
+    spread = [(one.query, text) for one in read_jsonl(candidates, Candidates) for text in one.texts]
     for name, measured, seconds in asyncio.run(_measure(model, pairs, spread, write)):
         typer.echo(
             f"('{name}', {measured.floor:.4f}, {measured.beta_a:.3f}, {measured.beta_b:.3f}, "

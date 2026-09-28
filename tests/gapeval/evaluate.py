@@ -13,7 +13,7 @@ Two shelves, both free for any use:
 Each shelf is chunked with haskie's own chunker at the default settings and embedded with the
 profile asked for. A question's ranking is its `CANDIDATES` nearest chunks by cosine, the pool a
 vector search reads, and its score profile is taken with `log.profile`, as the search log takes it.
-The reranker scores the same pool. Each feature of `gaps.FEATURES` is then scored by AUROC:
+The reranker scores the same pool. Each of `FEATURES` is then scored by AUROC:
 the chance that a random answered question scores above a random unanswered one (0.5 is a coin).
 The topic pairs of `topics.json` give the `same_topic` bar the same way.
 """
@@ -30,6 +30,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -82,8 +83,31 @@ def auroc(answered: list[float], unanswered: list[float]) -> float:
     return float(wins / (len(a) * len(u)))
 
 
-def _sigmoid(logit: float) -> float:
-    return 1.0 / (1.0 + math.exp(-logit)) if logit >= 0 else math.exp(logit) / (1 + math.exp(logit))
+def _gap12(scores: list[float]) -> float | None:
+    return scores[0] - scores[1] if len(scores) > 1 else None
+
+
+def _spread(scores: list[float]) -> float | None:
+    return float(np.std(scores[:10])) if len(scores) > 1 else None
+
+
+def _mean5(scores: list[float]) -> float | None:
+    return float(np.mean(scores[:5])) if scores else None
+
+
+# The predictors a question's logged score profile (`log.profile`) can be judged by, each a pure
+# function of its `LoggedQuestion`; None when the profile cannot say. `max` is what the Gaps page
+# judges by (`gaps._weak`); the others are measured against it.
+FEATURES: dict[str, Callable[[Any], float | None]] = {
+    "max": lambda q: q.similarities[0] if q.similarities else None,
+    "gap12": lambda q: _gap12(q.similarities),
+    "spread": lambda q: _spread(q.similarities),
+    "mean5": lambda q: _mean5(q.similarities),
+    "coherence": lambda q: q.coherence,
+    "rerank_max": lambda q: q.rerank_scores[0] if q.rerank_scores else None,
+    "rerank_gap12": lambda q: _gap12(q.rerank_scores),
+    "rerank_mean5": lambda q: _mean5(q.rerank_scores),
+}
 
 
 class Asked:
@@ -121,6 +145,7 @@ async def _index(shelf: str, model: Any) -> tuple[list[str], np.ndarray, dict[st
 def _ask(
     question: str, model: Any, texts: list[str], vectors: np.ndarray, reranker: str | None
 ) -> Asked:
+    from haskie.collection.index import _sigmoid
     from haskie.indexing import embed
     from haskie.search import log, probe
     from haskie.settings import Accelerator
@@ -170,14 +195,12 @@ async def _measure(
 def _features(measured: dict[str, dict[str, list[Asked]]]) -> list[str]:
     """AUROC of every feature per shelf, and the step-1 gate: a bar under every answered question
     of every shelf, and how many gaps it catches on each."""
-    from haskie.search import gaps
-
     lines = [
         f"{'feature':<14} "
         + " ".join(f"{s[:11]:>11}" for s in measured)
         + "   bar under all answered: caught"
     ]
-    for name, feature in gaps.FEATURES.items():
+    for name, feature in FEATURES.items():
         values = {
             shelf: {
                 group: [v for one in found[group] if (v := feature(one.logged)) is not None]

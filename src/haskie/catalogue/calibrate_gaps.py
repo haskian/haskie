@@ -4,7 +4,8 @@ the two it is borderline). Run it through `mise run calibrate-gaps`, in three st
 
 1. `sample`: writes the questions this home's searches asked under the profile, newest first, to
    `eval/gap-questions.jsonl`, each with its best cosine and the three places that came closest.
-   It reads the search log only: nothing is searched again.
+   It reads the search log only: nothing is searched again. It will not replace a file that
+   exists, which may hold labels, unless given `--force`.
 2. A person reads each question and its near misses and sets `"answered": true` or `false`, or
    deletes the line when unsure.
 3. `measure --profile NAME [--write]`: the highest low bar that flags no answered question, and
@@ -26,6 +27,7 @@ from sqlalchemy import update
 
 from haskie import db
 from haskie.catalogue import catalogue
+from haskie.catalogue.calibrate import read_jsonl
 from haskie.search import gaps, log
 from haskie.tables import embedding_profiles
 
@@ -90,10 +92,10 @@ def bars(answered: list[float], unanswered: list[float]) -> Measured:
 
 
 async def _sample(out: Path, profile: str | None) -> int:
-    found: dict[str, Labelled] = {}
-    searched = await log.load()
-    near = await log.top_results([search.id for search in searched], gaps.NEAR_MISSES)
-    for search in searched:
+    if out.exists():
+        raise ValueError(f"{out} exists and may hold labels; move it away or pass --force")
+    found: dict[str, tuple[int, Labelled]] = {}
+    for search in await log.load():
         if search.embedding is None or search.error is not None:
             continue
         if profile is not None and search.embedding != profile:
@@ -101,14 +103,21 @@ async def _sample(out: Path, profile: str | None) -> int:
         for asked in search.questions:
             if asked.id is None or asked.best_similarity is None or asked.question in found:
                 continue
-            found[asked.question] = Labelled(
-                id=asked.id,
-                question=asked.question,
-                profile=search.embedding,
-                best_similarity=asked.best_similarity,
-                near_misses=[result.location for result in near[search.id]],
+            found[asked.question] = (
+                search.id,
+                Labelled(
+                    id=asked.id,
+                    question=asked.question,
+                    profile=search.embedding,
+                    best_similarity=asked.best_similarity,
+                    near_misses=[],
+                ),
             )
-    lines = [msgspec.json.encode(one).decode() for one in list(found.values())[:QUESTIONS]]
+    kept = list(found.values())[:QUESTIONS]
+    near = await log.top_results(sorted({search_id for search_id, _ in kept}), gaps.NEAR_MISSES)
+    for search_id, one in kept:
+        one.near_misses = [result.location for result in near[search_id]]
+    lines = [msgspec.json.encode(one).decode() for _, one in kept]
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines) + ("\n" if lines else ""))
     return len(lines)
@@ -118,10 +127,8 @@ async def _measure(questions: Path, profile: str, write: bool) -> Measured:
     """The bars the labelled questions of `profile` give, stored in this home when `write`."""
     labelled = [
         one
-        for line in questions.read_text().splitlines()
-        if line.strip()
-        and (one := msgspec.json.decode(line, type=Labelled)).profile == profile
-        and one.answered is not None
+        for one in read_jsonl(questions, Labelled)
+        if one.profile == profile and one.answered is not None
     ]
     measured = bars(
         [one.best_similarity for one in labelled if one.answered],
@@ -146,9 +153,15 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 def sample(
     out: Path = Path("eval/gap-questions.jsonl"),
     profile: Annotated[str | None, typer.Option(help="Only this embedding profile's.")] = None,
+    force: Annotated[bool, typer.Option(help="Replace `out`, labels and all.")] = False,
 ) -> None:
     """Write this home's logged questions, with their best cosines and near misses, to label."""
-    written = asyncio.run(_sample(out, profile))
+    if force:
+        out.unlink(missing_ok=True)
+    try:
+        written = asyncio.run(_sample(out, profile))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     typer.echo(f'{written} questions in {out}; set "answered" to true or false on each')
 
 

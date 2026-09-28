@@ -99,43 +99,6 @@ async def bars(rerankers: set[str]) -> Bars:
     )
 
 
-# --- what a question's score profile says -----------------------------------------
-
-
-def _head(scores: list[float], count: int) -> list[float]:
-    return scores[:count]
-
-
-def _gap12(scores: list[float]) -> float | None:
-    return scores[0] - scores[1] if len(scores) > 1 else None
-
-
-def _spread(scores: list[float]) -> float | None:
-    head = _head(scores, 10)
-    return float(np.std(head)) if len(head) > 1 else None
-
-
-def _mean5(scores: list[float]) -> float | None:
-    head = _head(scores, 5)
-    return float(np.mean(head)) if head else None
-
-
-# The predictors a question's logged score profile (`log.profile`) can be judged by, each a pure
-# function of it; None when the profile cannot say. `evaluate-gaps` measures each on labelled
-# questions, and the catalogue names the one a model is judged by.
-Feature = Callable[[LoggedQuestion], float | None]
-FEATURES: dict[str, Feature] = {
-    "max": lambda q: q.similarities[0] if q.similarities else None,
-    "gap12": lambda q: _gap12(q.similarities),
-    "spread": lambda q: _spread(q.similarities),
-    "mean5": lambda q: _mean5(q.similarities),
-    "coherence": lambda q: q.coherence,
-    "rerank_max": lambda q: q.rerank_scores[0] if q.rerank_scores else None,
-    "rerank_gap12": lambda q: _gap12(q.rerank_scores),
-    "rerank_mean5": lambda q: _mean5(q.rerank_scores),
-}
-
-
 # --- judging one question ---------------------------------------------------------
 
 
