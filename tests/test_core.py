@@ -1881,6 +1881,60 @@ async def test_hybrid_search_fuses_both_rankings(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "vector", "settings", "excluded", "documents"),
+    [
+        ("full text, nothing leaving", None, SearchSettings(), frozenset(), {"a.md", "b.md"}),
+        ("full text, a.md leaving", None, SearchSettings(), frozenset({"a.md"}), {"b.md"}),
+        (
+            "vector, a.md leaving",
+            _vector(3),
+            SearchSettings(mode=SearchMode.VECTOR),
+            frozenset({"a.md"}),
+            {"b.md"},
+        ),
+        (
+            "hybrid, a.md leaving",
+            _vector(3),
+            SearchSettings(candidates=3),
+            frozenset({"a.md"}),
+            {"b.md"},
+        ),
+        (
+            "full text alone (`fts_rows`), a.md leaving",
+            "fts_rows",
+            SearchSettings(),
+            frozenset({"a.md"}),
+            {"b.md"},
+        ),
+    ],
+)
+async def test_an_excluded_document_takes_no_slot_of_a_search(
+    tmp_path: Path,
+    name: str,
+    vector: list[float] | str | None,
+    settings: SearchSettings,
+    excluded: frozenset[str],
+    documents: set[str],
+) -> None:
+    """A document on its way out of the collection is filtered before the limit, in every mode:
+    `a.md` holds the best rows for the query, and the slots they would take go to `b.md`."""
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, TINY)
+    await _fill(index, "a.md", 0, 6, vectors=True)
+    await _fill(index, "b.md", 1, 6, vectors=True)
+    await index.finish()
+
+    if vector == "fts_rows":
+        rows = await index.fts_rows("row3 lancedb", 3, excluded)
+    else:
+        assert not isinstance(vector, str)
+        rows = await index.search_rows("row3 lancedb", vector, settings, 3, excluded=excluded)
+
+    assert {row["document"] for row in rows} == documents, name
+    assert len(rows) == 3, f"{name}: filtered before the limit, not after it"
+
+
+@pytest.mark.anyio
 async def test_run_maintenance_compacts_fragments_and_settles_the_counter() -> None:
     """Twenty commits leave twenty fragments; one maintenance pass merges them and clears the
     pending counter without touching the rows."""
@@ -2761,7 +2815,9 @@ async def test_session_search_reads_its_collections_concurrently(monkeypatch) ->
     await session.set_collections("s1", ["a", "b"])
     arrived = {"a": asyncio.Event(), "b": asyncio.Event()}
 
-    async def paired(self, query, vector, settings_, limit, vectors=True) -> list[dict]:
+    async def paired(
+        self, query, vector, settings_, limit, vectors=True, excluded=()
+    ) -> list[dict]:
         arrived[self.collection].set()
         other = arrived["b" if self.collection == "a" else "a"]
         await asyncio.wait_for(other.wait(), CONCURRENT_SEARCH_SECONDS)

@@ -19,7 +19,7 @@ from typing import Any
 
 import anyio
 import msgspec
-from sqlalchemy import Row, delete, func, select, update
+from sqlalchemy import Row, delete, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -581,6 +581,28 @@ class Collection:
                     collection_documents.c.document == doc,
                 )
             )
+
+    @staticmethod
+    async def leaving(names: list[str]) -> dict[str, frozenset[str]]:
+        """The documents on their way out of each of these collections: a membership `removing`,
+        or a document `deleting`. Their rows stay in the table until the removal queued for them
+        runs, so a search leaves them out by name. One query for every collection a search
+        covers; a collection nothing is leaving is absent."""
+        member = collection_documents.c
+        async with db.connect() as conn:
+            rows = await conn.execute(
+                _MEMBERS.with_only_columns(member.collection, member.document).where(
+                    member.collection.in_(list(set(names))),
+                    or_(
+                        member.status == MemberStatus.REMOVING,
+                        documents.c.status == document.DocumentStatus.DELETING,
+                    ),
+                )
+            )
+            found: dict[str, set[str]] = {}
+            for collection, doc in rows:
+                found.setdefault(collection, set()).add(doc)
+        return {collection: frozenset(docs) for collection, docs in found.items()}
 
     async def member_names(self, after: str | None = None, limit: int | None = None) -> list[str]:
         """Names alone, ordered by name: what a caller that only iterates members needs.

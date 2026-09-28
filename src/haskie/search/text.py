@@ -138,7 +138,8 @@ async def search(
     """One page of the merged full-text ranking over `collections`, or over every collection.
 
     `total` is None: counting the whole ranking costs the same as producing it, for a number no
-    caller pages to. Searches are not audited, like every other search.
+    caller pages to. Searches are not audited, like every other search. A document on its way out
+    of a collection (`Collection.leaving`) does not answer from it, as in every other search.
     """
     check_page_size(page_size, MAX_TEXT_PAGE_SIZE)
     names = await checked_names(collections)
@@ -153,9 +154,10 @@ async def search(
 
     # read once, not once per collection
     embedding = await catalogue.embedding_model(await load_user_settings())
+    leaving = await Collection.leaving(names)
     retrieved = await gather_rows(
         [collection.index_with(embedding) for collection in chosen],
-        lambda index: index.fts_rows(q, depth),
+        lambda index: index.fts_rows(q, depth, leaving.get(index.collection, frozenset())),
     )
 
     merged = merge(retrieved)

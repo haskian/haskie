@@ -1207,6 +1207,74 @@ async def test_session_search_returns_each_passage_once(client: AsyncTestClient)
     assert shared["collection"] == "alpha", "the first collection of the session is credited"
 
 
+SEARCH_PATHS: dict[str, tuple[str, dict, str]] = {
+    # name -> (route, extra arguments, key of the list of results in the answer; "" for the root)
+    "explore chunks": ("/api/search/explore", {"granularity": "chunk"}, ""),
+    "explore passages": ("/api/search/explore", {"granularity": "passage"}, ""),
+    "excerpts": ("/api/search/excerpts", {}, "excerpts"),
+    "sources": ("/api/search/sources", {}, "documents"),
+    "text": ("/api/search/text", {}, "items"),
+}
+
+
+@pytest.mark.parametrize("path", list(SEARCH_PATHS))
+@pytest.mark.parametrize(
+    ("leaving", "found", "sources"),
+    [
+        (
+            "nothing",
+            {("notes", "guide.md"), ("notes", "keep.md")},
+            {("notes", "guide.md"), ("other", "guide.md"), ("notes", "keep.md")},
+        ),
+        (
+            "guide.md removing from notes",
+            {("other", "guide.md"), ("notes", "keep.md")},
+            {("other", "guide.md"), ("notes", "keep.md")},
+        ),
+        ("guide.md deleting", {("notes", "keep.md")}, {("notes", "keep.md")}),
+    ],
+)
+async def test_a_document_on_its_way_out_answers_no_search(
+    client: AsyncTestClient,
+    tmp_path: Path,
+    path: str,
+    leaving: str,
+    found: set[tuple[str, str]],
+    sources: set[tuple[str, str]],
+) -> None:
+    """A detach or a document delete answers once its removal is queued, and the rows stay in the
+    table until it ran: a membership `removing` does not answer from that collection, and a
+    document `deleting` from none. `guide.md` sits in both collections, so it still answers from
+    the one it is not leaving; `sources` lists every collection holding a document, and a
+    collection it is leaving does not hold it any more."""
+    await client.post("/api/init", json=NO_MODELS)
+    for name in ("notes", "other"):
+        await client.post("/api/collections", json={"name": name})
+    await stage_and_import(client, "guide.md", b"# Guide\n\nA guide to lancedb tables.\n")
+    await stage_and_import(client, "keep.md", b"# Keep\n\nWhy lancedb keeps its old versions.\n")
+    for collection, name in (("notes", "guide.md"), ("other", "guide.md"), ("notes", "keep.md")):
+        await attach_via_api(client, collection, name)
+    if leaving == "guide.md removing from notes":
+        await Collection("notes").start_removal("guide.md")
+    elif leaving == "guide.md deleting":
+        await document.set_status("guide.md", DocumentStatus.DELETING)
+
+    route, extra, key = SEARCH_PATHS[path]
+    response = await client.get(
+        route, params={"q": "lancedb", "collections": "notes,other", **extra}
+    )
+    assert response.status_code == 200, response.text
+    results = response.json()[key] if key else response.json()
+
+    if path == "sources":
+        held = {(one, row["document"]) for row in results for one in row["collections"]}
+        assert held == sources, f"{path}, {leaving}"
+    else:
+        assert {(row["collection"], row["document"]) for row in results} == found, (
+            f"{path}, {leaving}"
+        )
+
+
 async def test_documents_are_listed_with_their_collection_counts(ready: AsyncTestClient) -> None:
     """The gallery says how many collections hold each document; a member of none says 0."""
     items = (await ready.get("/api/documents")).json()["items"]

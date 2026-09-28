@@ -331,9 +331,7 @@ async def shortlist(ctx: StepContext[Search, None, retrieval.Scanned]) -> Source
     them from."""
     state = ctx.state
     how = state.plan.settings.score_fold
-    return await retrieval.shortlist(
-        ctx.inputs.hits, state.plan.names, state.limit, state.sections, how
-    )
+    return await retrieval.shortlist(ctx.inputs.hits, state.plan, state.limit, state.sections, how)
 
 
 async def rerank_excerpts(ctx: StepContext[Search, None, list[Excerpt]]) -> list[Excerpt]:

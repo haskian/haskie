@@ -119,7 +119,8 @@ Detaching deletes the document's rows from that collection's table. The request 
 membership `removing`, cancels its index and queues the removal on the collection's single writer.
 It answers at once: a compaction or another document's write may hold that writer for minutes.
 `removing` counts as active, so the UI keeps polling until the membership is gone. Until then, the
-old rows can still turn up in a search. An attach or a re-index of that document is refused
+old rows stay in the table, but a search leaves them out. The same holds for a document being
+deleted, in every collection. An attach or a re-index of that document is refused
 meanwhile, and its index can no longer change the status. A removal that fails leaves the
 membership in `error` with the reason, and detaching again retries it. Deleting a collection deletes
 its table and memberships, and keeps every document. Deleting a document detaches it from every

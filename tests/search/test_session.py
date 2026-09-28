@@ -414,7 +414,7 @@ async def test_session_search_propagates_a_broken_collection(
         await attach_document(dbos, name, doc.name)
     await session.set_collections("s", ["a", "b"])
 
-    async def boom(self, query, vector, settings_, limit, vectors=True):
+    async def boom(self, query, vector, settings_, limit, vectors=True, excluded=()):
         raise RuntimeError("index unreadable")
 
     monkeypatch.setattr(CollectionIndex, "search_rows", boom)

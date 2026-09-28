@@ -83,6 +83,9 @@ class Plan(msgspec.Struct):
     embedding: EmbeddingModel | None  # the model every index of the search embeds with
     # how the reranker's scores read, when one is on (`catalogue.calibration`)
     calibration: RerankerCalibration | None = None
+    # per collection, the documents on their way out of it (`Collection.leaving`): read once for
+    # the search, and left out of every read of it
+    leaving: dict[str, frozenset[str]] = {}
 
     @property
     def rerank_floor(self) -> float:
@@ -115,6 +118,7 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
     ]
     if not plans:
         return None
+    leaving = await Collection.leaving([one.name for one, _ in plans])
     settings = plans[0][1] if len(plans) == 1 else user.search
 
     embedding = await catalogue.embedding_model(user)
@@ -136,6 +140,7 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
             vector=vector,
             embedding=embedding,
             calibration=calibrated,
+            leaving=leaving,
         )
         for vector in vectors
     ]
@@ -177,14 +182,20 @@ async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True
 
     A collection that fails to answer fails the search: a silent hole in a merged ranking reads as
     "no match".
+
+    A document on its way out of a collection (`Plan.leaving`) does not answer from it: its rows
+    stay in the table until the removal queued for them runs.
     """
     chosen = {index.collection: settings for index, settings in where.indexes}
 
     async def read(index: CollectionIndex) -> list[dict]:
         settings = chosen[index.collection]
         wanted = None if settings.mode == SearchMode.FTS else where.vector
+        leaving = where.leaving.get(index.collection, frozenset())
         try:
-            return await index.search_rows(query, wanted, settings, candidates, vectors)
+            return await index.search_rows(
+                query, wanted, settings, candidates, vectors, excluded=leaving
+            )
         except Exception:
             _log.exception("session_collection_search_failed", collection=index.collection)
             raise
@@ -917,24 +928,29 @@ def _read_texts(hit_ranges: list[passage.HitRange]) -> list[str]:
 
 
 async def shortlist(
-    hits: list[Hit], names: list[str], limit: int, sections: int, how: ScoreFold
+    hits: list[Hit], where: Plan, limit: int, sections: int, how: ScoreFold
 ) -> Sources:
     """Which documents these hits came from, one row per document, and the collections to select
     to read them.
 
     Its score folds every chunk it matched by `how` (`passage.fold`), `sections` says where in it
     the answer sits, and `collections` names
-    which of the searched collections hold it. `Sources.collections` is the cover: the fewest
-    collections a follow-up search has to select to reach every row.
+    which of the searched collections hold it, but for one it is on its way out of
+    (`Plan.leaving`), where a follow-up search would not find it. `Sources.collections` is the
+    cover: the fewest collections a follow-up search has to select to reach every row.
     """
     # the shortlist is cut first: only a document that made it is worth a membership and a
     # description, and both are one query for the whole of it
     kept = passage.top_documents(hits, limit, how)
     docs = {group[0].document for group in kept}
     memberships, described = await asyncio.gather(
-        document.memberships(docs, names), document.descriptions_of(docs)
+        document.memberships(docs, where.names), document.descriptions_of(docs)
     )
-    found = passage.fold_sources(kept, memberships, sections, how)
+    staying = {
+        doc: [one for one in held if doc not in where.leaving.get(one, frozenset())]
+        for doc, held in memberships.items()
+    }
+    found = passage.fold_sources(kept, staying, sections, how)
     document.fill_descriptions(found.documents, described)
     return found
 

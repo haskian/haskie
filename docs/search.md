@@ -26,7 +26,9 @@ flowchart LR
    Fusion is `rrf` (reciprocal rank fusion) or `linear`. Without an embedding model everything is
    `fts`. The query is embedded once, and up to 8 collections are read in parallel. A collection
    still building its first full-text index has no BM25 half yet: `hybrid` answers with the
-   vector half alone, and `fts` finds nothing there.
+   vector half alone, and `fts` finds nothing there. A document on its way out of a collection
+   answers from none of its rows there: a membership `removing`, or a document `deleting`. One
+   query per search reads those names, and each read filters them out before its limit.
 3. **Merge** across collections by rank, because scores from two indexes are not comparable. A
    chunk that two collections share counts once: the same span of one document, whatever `seq`
    each collection's chunk settings give it. A search over one collection keeps that
