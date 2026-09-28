@@ -92,7 +92,7 @@ body[data-bg="classic"]::before, body:has(#bg-classic:checked)::before { content
 .side .label { display: block; margin-bottom: var(--sp-4); }
 .logo { display: flex; align-items: center; gap: var(--sp-2); margin-left: 1.5em; color: var(--ink); text-decoration: none; }
 .logo svg { height: 30px; width: auto; }
-.logo span { font: 700 var(--fs-lg)/1 var(--font-brand); letter-spacing: 0.06em; margin-top: 0.2em; }
+.logo span { font: 700 var(--fs-xl)/1 var(--font-brand); letter-spacing: 0.06em; margin-top: 0.2em; }
 .sections { display: grid; gap: var(--sp-8); align-content: start; }
 .section, .spec { display: grid; gap: var(--sp-3); min-width: 0; }
 .section > * { min-width: 0; } /* a long nowrap title inside shortens, never widens the column */
