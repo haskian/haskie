@@ -430,6 +430,48 @@ def test_claim_home_claims_once_and_gives_the_home_back(elsewhere: Path) -> None
         assert home.LOCK_FILE.read_text().startswith("pid "), "the next one gets in"
 
 
+@pytest.mark.parametrize(
+    ("name", "server_pid", "recorded"),
+    [
+        ("a server that is its own process", None, os.getpid()),
+        # under `--reload` the claim runs in a worker; `stop` must signal `run`, which outlives it
+        ("a worker under run --reload", 4242, 4242),
+    ],
+)
+def test_the_lock_names_the_process_stop_must_signal(
+    elsewhere: Path, monkeypatch: pytest.MonkeyPatch, name: str, server_pid, recorded: int
+) -> None:
+    home.use(elsewhere)
+    if server_pid is not None:
+        monkeypatch.setenv(home.SERVER_PID_ENV, str(server_pid))
+    else:
+        monkeypatch.delenv(home.SERVER_PID_ENV, raising=False)
+
+    with holding():
+        line = home.LOCK_FILE.read_text()
+
+    assert line.startswith(f"pid {recorded},"), name
+
+
+def test_run_exports_its_own_pid_for_the_lock(
+    elsewhere: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run` puts its pid in the environment before uvicorn starts, so a `--reload` worker that
+    claims the home records the reloader, not itself."""
+    seen: dict[str, str | None] = {}
+
+    def serve(*_args, **_kwargs) -> None:
+        seen["pid"] = os.environ.get(home.SERVER_PID_ENV)
+
+    monkeypatch.setattr("uvicorn.run", serve)
+    monkeypatch.delenv(home.SERVER_PID_ENV, raising=False)
+
+    result = runner.invoke(cli, ["run", "--home", str(elsewhere), "--reload"])
+
+    assert result.exit_code == 0, result.output
+    assert seen["pid"] == str(os.getpid())
+
+
 def test_run_refuses_in_one_line_when_the_home_is_taken(elsewhere: Path) -> None:
     """The app's startup hook is the authority, but its refusal is a lifespan traceback out of
     uvicorn; `run` asks first so the common case reads as one line."""

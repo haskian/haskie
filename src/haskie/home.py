@@ -39,6 +39,9 @@ from haskie.errors import Conflict
 HOME = Path(os.environ.get("HASKIE_HOME", Path.home() / ".haskie")).expanduser().resolve()
 # Where `run` serves, which it puts in the environment for the holder line and the app's host check
 ADDRESS_ENV = "HASKIE_ADDRESS"
+# The pid `run` itself runs as. Under `--reload` the app lives in a worker the reloader restarts, so
+# the holder line names `run`'s pid, the one `haskie stop` has to signal to end the server.
+SERVER_PID_ENV = "HASKIE_SERVER_PID"
 
 # The layout, relative to `HOME`. Every name here is readable as a module attribute
 # (`home.DB_FILE`) and derived on access, so `use()` has one global to rebind.
@@ -128,7 +131,8 @@ def claim_home() -> None:
     # `run` puts the address in the environment for this; an app started another way has none to
     # give, so the holder line says so rather than inventing one.
     address = os.environ.get(ADDRESS_ENV, "address unknown")
-    os.write(handle, f"pid {os.getpid()}, {address}".encode())
+    pid = os.environ.get(SERVER_PID_ENV, str(os.getpid()))
+    os.write(handle, f"pid {pid}, {address}".encode())
     _holding = handle
 
 

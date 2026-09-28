@@ -156,6 +156,7 @@ def run(
     # The address the startup hook records, for the next process's message. The environment is the
     # one carrier, so a `--reload` child that re-imports `home` records the same thing.
     os.environ[home.ADDRESS_ENV] = f"http://{host}:{port}"
+    os.environ[home.SERVER_PID_ENV] = str(os.getpid())
     typer.echo(f"haskie {APP_VERSION} on http://{host}:{port}  (home: {home.HOME})")
     uvicorn.run(
         "haskie.app:create_app",
