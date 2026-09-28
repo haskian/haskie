@@ -210,6 +210,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document}/similar": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** SimilarDocuments */
+        get: operations["ApiDocumentsSimilarSimilarDocuments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document}/source": {
         parameters: {
             query?: never;
@@ -358,6 +375,23 @@ export interface paths {
         get?: never;
         /** DescribeCollection */
         put: operations["ApiCollectionsDescriptionDescribeCollection"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/collections/{collection}/name": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** RenameCollection */
+        put: operations["ApiCollectionsNameRenameCollection"];
         post?: never;
         delete?: never;
         options?: never;
@@ -884,6 +918,8 @@ export interface components {
             updated_at: number;
             /** @default  */
             description: string;
+            /** @default  */
+            md5: string;
         };
         /** DocumentCounts */
         DocumentCounts: {
@@ -1129,6 +1165,8 @@ export interface components {
             updated_at: number;
             /** @default  */
             description: string;
+            /** @default  */
+            md5: string;
             /** @default 0 */
             collections: number;
         };
@@ -1180,6 +1218,11 @@ export interface components {
             state: components["schemas"]["ModelState"];
             error?: string | null;
             device?: components["schemas"]["Device"] | null;
+        };
+        /** Neighbour */
+        Neighbour: {
+            document: string;
+            similarity: number;
         };
         /** Operation */
         Operation: {
@@ -1455,6 +1498,10 @@ export interface components {
          * @enum {string}
          */
         Relation: "duplicate" | "contained" | "equivalent";
+        /** Rename */
+        Rename: {
+            name: string;
+        };
         /** Rendered */
         Rendered: {
             html: string;
@@ -1753,6 +1800,11 @@ export interface components {
             collections: string[];
             last_at: number | null;
         };
+        /** Similar */
+        Similar: {
+            identical: string[];
+            nearest: components["schemas"]["Neighbour"][];
+        };
         /** Source */
         Source: {
             collection: string;
@@ -1804,6 +1856,7 @@ export interface components {
             staging_id: string;
             filename: string;
             size: number;
+            duplicates: string[];
         };
         /** Status */
         Status: {
@@ -2335,6 +2388,43 @@ export interface operations {
             };
         };
     };
+    ApiDocumentsSimilarSimilarDocuments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Similar"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
     ApiDocumentsSourceGetSource: {
         parameters: {
             query?: never;
@@ -2750,6 +2840,47 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["Describe"];
+            };
+        };
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CollectionInfo"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiCollectionsNameRenameCollection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Rename"];
             };
         };
         responses: {

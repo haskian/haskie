@@ -364,6 +364,8 @@ body.over .drop-overlay { opacity: 1; }
 .list-item > .icon { width: 14px; height: 14px; flex: none; opacity: 0.6; }
 .list-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
 .list-text .sub { font-size: var(--fs-xs); color: var(--text-muted); }
+/* a notice: something to read before acting, ruled in the accent colour */
+.notice { margin: 0; padding: var(--sp-2) var(--sp-3); border-left: 2px solid var(--accent); font-size: var(--fs-sm); }
 /* hit: search result tile; --score drives the bottom bar */
 .hits { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(450px, 100%), 1fr)); gap: var(--sp-4); } /* 50% wider than it was; a container narrower than one tile gets one tile its width */
 .hit { display: grid; grid-template-columns: minmax(0, 1fr); cursor: pointer; } /* the head sits right on top of the box, as a job's does */
@@ -399,6 +401,8 @@ body.over .drop-overlay { opacity: 1; }
 .hint-rows { display: grid; grid-template-columns: max-content max-content max-content; gap: 2px var(--sp-4); white-space: nowrap; }
 .statusbar .hint .muted { color: var(--text-muted); }
 .hint-rows .code { font-size: var(--fs-sm); text-align: right; }
+/* branches that ran side by side: one block under a rule, on the columns of the rows around it */
+.hint-parallel { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; gap: 2px var(--sp-4); margin: var(--sp-1) 0; padding-left: var(--sp-3); border-left: 1px solid rgba(255, 255, 255, 0.35); }
 .statusbar .muted { color: rgba(255, 255, 255, 0.5); }
 body:has(.statusbar) { padding-top: 40px; }
 /* picker: details-based dropdown, each option carries a description */

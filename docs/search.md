@@ -44,6 +44,11 @@ step's time goes into `Server-Timing`. A search answers with that lineage, in pi
 its `X-Score-Lineage` header: JSON, percent-encoded, one `{step, label, rule}` per step. A step
 that left the scores alone says nothing. The web UI shows it beside a result's score.
 
+An excerpts search of several questions ranks each question at once, side by side. Each step of
+those runs carries `branch=Q1`, `branch=Q2` and so on in `Server-Timing`, numbered in the order
+the questions were asked; a shared step carries none. The web UI draws the branches as one block, and its server total adds the slowest branch
+only, since they ran at the same time.
+
 The ranking scans deeper than the answer. A folded repeat frees its slot for the next result,
 several chunks go into one passage, several passages into one excerpt, and many chunks into one
 source row.

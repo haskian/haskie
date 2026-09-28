@@ -28,6 +28,9 @@ if TYPE_CHECKING:  # every helper below imports haskie when it runs, not when py
 TEARDOWN_GRACE_SECONDS = 2.0  # how long a cancelled step may still be running at teardown
 TEARDOWN_POLL_SECONDS = 0.05
 DELAY_SWEEP_SECONDS = 0.05  # how often a debounced workflow is promoted (see `_sweep_delayed`)
+# The first run of a home that needs no model: full-text search, no reranker. The suite downloads
+# nothing, so a test that searches starts here unless it is about a model.
+NO_MODELS = {"profile": "none", "search": {"reranker": "none"}}
 
 # Still on its way, including a debounced run waiting out its period (DELAYED). Only the suite
 # waits on that: the app counts `dbos_names.ACTIVE_STATUS`, where a debounce is not yet work.

@@ -115,9 +115,10 @@ haskie install claude       # MCP server, skill, rule and SessionStart hook for 
 haskie run                  # web UI, REST API and MCP on http://127.0.0.1:8451
 ```
 
-Open http://127.0.0.1:8451. The first screen asks for an embedding model and the search defaults.
-The default model is bge-small (English, about 130 MB). Pick a multilingual one for other
-languages, or none for keyword search only. The model applies to every collection, and changing
+Open http://127.0.0.1:8451, or run `haskie init`, which starts the server and opens it for you.
+The first screen asks for an embedding model and the search defaults: by default the
+cross-encoder reranker is on. The default model is bge-small (English, about 130 MB). Pick a
+multilingual one for other languages, or none for keyword search only. The model applies to every collection, and changing
 it later means running *Index all* in each one.
 
 - **Extras:** install `"haskie[gpu]"` to run embeddings and
@@ -139,8 +140,9 @@ it later means running *Index all* in each one.
 
 ## From files to answers
 
-1. **Documents.** Drop files onto the page. haskie converts them to markdown (text formats are
-   read as they are) and embeds them in the background, with a side-by-side preview.
+1. **Documents.** Drop a file onto the page, one at a time. haskie converts it to markdown (text
+   formats are read as they are) and embeds it in the background, with a side-by-side preview.
+   It warns when the same file is already imported, and shows the nearest documents once done.
 2. **Collections.** Create one per topic and add its documents. Give it a one-line description.
    The agent reads it to choose where to look.
 3. **Explore.** Search and see exactly what your agent gets: *Excerpts* and *Sources*. Switch to

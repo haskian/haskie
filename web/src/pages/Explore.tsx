@@ -174,7 +174,8 @@ export function Explore({ route, counts }: PageProps) {
                 onChange={(next) => setAspect(at, next)}
                 placeholder={at === 0 ? 'Search your collections' : 'Another aspect, searched on its own'}
                 onSubmit={() => void submit()}
-                onClear={at === 0 ? clear : undefined}
+                onClear={at === 0 ? clear : () => setAspects((all) => all.filter((_, i) => i !== at))}
+                clearLabel={at === 0 ? 'Clear' : 'Remove aspect'}
                 busy={at === 0 && busy}
                 scope={<span className="mono aspect-label">Q{at + 1}</span>}
               />

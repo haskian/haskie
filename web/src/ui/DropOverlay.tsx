@@ -8,15 +8,21 @@ import { useEffect } from 'react'
 export function DropOverlay({ onFiles }: { onFiles: (files: File[]) => void }) {
   useEffect(() => {
     let depth = 0
+    // a dragged link or piece of text is left to the browser: only files are taken
+    const files = (event: DragEvent) => event.dataTransfer?.types.includes('Files') ?? false
     const enter = (event: DragEvent) => {
+      if (!files(event)) return
       event.preventDefault()
       if (depth++ === 0) document.body.classList.add('over')
     }
-    const over = (event: DragEvent) => event.preventDefault()
-    const leave = () => {
-      if (--depth === 0) document.body.classList.remove('over')
+    const over = (event: DragEvent) => {
+      if (files(event)) event.preventDefault()
+    }
+    const leave = (event: DragEvent) => {
+      if (files(event) && --depth === 0) document.body.classList.remove('over')
     }
     const drop = (event: DragEvent) => {
+      if (!files(event)) return
       event.preventDefault()
       depth = 0
       document.body.classList.remove('over')
@@ -38,7 +44,7 @@ export function DropOverlay({ onFiles }: { onFiles: (files: File[]) => void }) {
   return (
     <div className="drop-overlay" aria-hidden="true">
       <Upload className="icon" />
-      Drop files to upload
+      Drop a file to add it
     </div>
   )
 }

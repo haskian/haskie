@@ -13,9 +13,10 @@ import {
   type DocumentStatus,
   type Document,
   type EmbeddingEntry,
+  type Similar,
   type Staged,
 } from "../api";
-import type { PageProps } from "../App";
+import type { DroppedProps, PageProps } from "../App";
 import { errorText, bytes, dateTime, day, matchesText, needleOf } from "../format";
 import { useOperation } from "../hooks/useOperation";
 import { useOptions } from "../hooks/useOptions";
@@ -27,7 +28,6 @@ import {
   documentIcon,
   DescriptionBox,
   DocumentPanes,
-  DropOverlay,
   GallerySection,
   groupByRange,
   Kv,
@@ -41,6 +41,7 @@ import {
 import "./Documents.css";
 import { embeddingLabel } from "./documents/embedding";
 import { groupByDay, groupByStatus } from "./documents/group";
+import { Duplicates, JustImported, SimilarDocuments } from "./documents/Similar";
 
 type GroupBy = "status" | "name" | "day";
 const GROUPS: { id: GroupBy; label: string }[] = [
@@ -54,12 +55,17 @@ type StagedFile = Staged & { name: string }; // the name the document will get; 
 export function Documents({
   route,
   counts,
-}: PageProps<Extract<Route, { name: "documents" }>>) {
+  dropped,
+  onDropHandled,
+}: PageProps<Extract<Route, { name: "documents" }>> & DroppedProps) {
   const [groupBy, setGroupBy] = useState<GroupBy>("status");
   const [search, setSearch] = useState("");
   const [path, setPath] = useState("");
   const [adding, setAdding] = useState(false);
-  const [staged, setStaged] = useState<StagedFile[]>([]); // uploaded, named, not yet imported
+  // One book at a time, so each gets looked at: the upload waiting to be named and imported,
+  // then the book just imported, followed until its nearest documents are known.
+  const [staged, setStaged] = useState<StagedFile | null>(null);
+  const [imported, setImported] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const options = useOptions();
@@ -75,49 +81,51 @@ export function Documents({
   );
   usePoll(active, refresh);
 
-  // Upload is two steps per file: the bytes are staged, then named and imported. Staging happens
-  // on drop, one file at a time so a batch of large files does not open a request each; the
-  // import waits for the names to be confirmed in the modal.
+  // Upload is two steps: the bytes are staged, which also says whether the same file is already
+  // imported, then the book is named and imported. A new upload replaces one not yet imported.
   const upload = useCallback(
     (files: File[]) =>
       run(async () => {
         setAdding(true);
-        for (const file of files) {
-          const one = await api.stageUpload(file);
-          setStaged((rows) => [...rows, { ...one, name: one.filename }]);
-        }
+        if (files.length !== 1) throw new Error("One book at a time: add a single file.");
+        const one = await api.stageUpload(files[0]);
+        setStaged({ ...one, name: one.filename });
       }),
     [run],
   );
 
+  // A drop on any page lands here. The ref keeps one drop to one upload: StrictMode runs an
+  // effect twice in development, before the cleared `dropped` comes back down.
+  const handledDrop = useRef<File[] | null>(null);
+  useEffect(() => {
+    if (dropped === null || dropped === handledDrop.current) return;
+    handledDrop.current = dropped;
+    onDropHandled();
+    void upload(dropped);
+  }, [dropped, onDropHandled, upload]);
+
   const importStaged = () =>
     run(async () => {
-      await Promise.all(
-        staged.map((one) =>
-          api.importStaged({ staging_id: one.staging_id, name: one.name.trim() }),
-        ),
-      );
-      setStaged([]);
-      setAdding(false);
+      if (staged === null) return;
+      const row = await api.importStaged({ staging_id: staged.staging_id, name: staged.name.trim() });
+      setStaged(null);
+      setImported(row.name);
     });
-
-  const rename = (id: string, name: string) =>
-    setStaged((rows) =>
-      rows.map((one) => (one.staging_id === id ? { ...one, name } : one)),
-    );
-  // dropping a row only forgets it here; the staged bytes age out on the server.
-  const forget = (id: string) =>
-    setStaged((rows) => rows.filter((one) => one.staging_id !== id));
-  const namesOk =
-    staged.length > 0 && staged.every((one) => one.name.trim() !== "");
 
   const importPath = (event: FormEvent) => {
     event.preventDefault();
     void run(async () => {
-      await api.importPath(path.trim());
+      const row = await api.importPath(path.trim());
       setPath("");
-      setAdding(false);
+      setImported(row.name);
     });
+  };
+
+  const repeats = staged !== null && staged.duplicates.length > 0;
+
+  const closeAdding = () => {
+    setAdding(false);
+    setImported(null);
   };
 
   const closeModal = useCallback(() => navigate({ name: "documents" }), []);
@@ -163,9 +171,9 @@ export function Documents({
         <GallerySection label="New" large>
           <Tile
             icon={Plus}
-            name="Add documents"
+            name="Add a document"
             sub="Upload or import"
-            hint="Drop files anywhere, upload, or import a path."
+            hint="Drop a file anywhere, upload it, or import a path."
             add
             onClick={() => setAdding(true)}
           />
@@ -201,17 +209,15 @@ export function Documents({
           </button>
         )}
       </div>
-      <DropOverlay onFiles={upload} />
       <Modal
         open={adding}
-        onClose={() => setAdding(false)}
-        title="Add documents"
+        onClose={closeAdding}
+        title="Add a document"
         subtitle="import"
       >
         <div className="add-documents">
           <input
             type="file"
-            multiple
             hidden
             ref={fileInput}
             onChange={(event) => {
@@ -221,7 +227,7 @@ export function Documents({
             }}
           />
           <div className="field">
-            <span className="label">Files</span>
+            <span className="label">File</span>
             <div className="row">
               <button
                 className="btn"
@@ -230,57 +236,62 @@ export function Documents({
                 onClick={() => fileInput.current?.click()}
               >
                 <Upload className="icon" />
-                Choose files
+                Choose a file
               </button>
-              <span className="muted">or drop them anywhere on the page</span>
+              <span className="muted">or drop it anywhere on the page</span>
             </div>
           </div>
-          {staged.length > 0 && (
+          {staged !== null && (
             <div className="field">
-              <span className="label">Ready to import · {staged.length}</span>
-              {/* Nothing is converted or embedded until the names below are confirmed. */}
+              <span className="label">Ready to import</span>
+              {/* Nothing is converted or embedded until the name below is confirmed. */}
               <ul className="list staged">
-                {staged.map((one) => (
-                  <li key={one.staging_id} className="list-item">
-                    <input
-                      className="input"
-                      value={one.name}
-                      aria-label="Document name"
-                      onChange={(event) =>
-                        rename(one.staging_id, event.target.value)
-                      }
-                    />
-                    <span className="mono muted">{bytes.format(one.size)}</span>
-                    <button
-                      className="btn btn-ghost"
-                      type="button"
-                      aria-label="Remove"
-                      onClick={() => forget(one.staging_id)}
-                    >
-                      <X className="icon" />
-                    </button>
-                  </li>
-                ))}
+                <li className="list-item">
+                  <input
+                    className="input"
+                    value={staged.name}
+                    aria-label="Document name"
+                    onChange={(event) => setStaged({ ...staged, name: event.target.value })}
+                  />
+                  <span className="mono muted">{bytes.format(staged.size)}</span>
+                  {/* only forgotten here; the staged bytes age out on the server */}
+                  <button
+                    className="btn btn-ghost"
+                    type="button"
+                    aria-label="Remove"
+                    onClick={() => setStaged(null)}
+                  >
+                    <X className="icon" />
+                  </button>
+                </li>
               </ul>
+              {repeats && (
+                <Duplicates names={staged.duplicates} advice="Importing it again only adds a copy." />
+              )}
               <div className="row">
                 <button
-                  className="btn btn-primary"
+                  className={repeats ? "btn" : "btn btn-primary"}
                   type="button"
-                  disabled={busy || !namesOk}
+                  disabled={busy || staged.name.trim() === ""}
                   onClick={importStaged}
                 >
-                  Import {staged.length}{" "}
-                  {staged.length === 1 ? "document" : "documents"}
+                  {repeats ? "Import anyway" : "Import"}
                 </button>
+                {repeats && (
+                  <button className="btn btn-primary" type="button" onClick={() => setStaged(null)}>
+                    Discard
+                  </button>
+                )}
               </div>
             </div>
           )}
+          {imported !== null && <JustImported key={imported} name={imported} />}
           {/* A form, so Enter imports the way the browser already does it. */}
           <form className="field" onSubmit={importPath}>
             <span className="label">Path</span>
             <input
               className="input"
-              placeholder="File or folder the server can read"
+              placeholder="A file the server can read"
               value={path}
               onChange={(event) => setPath(event.target.value)}
             />
@@ -313,10 +324,12 @@ const RETRYABLE: readonly DocumentStatus[] = ["error", "cancelled"];
 
 const CONTENT_TAB = "modal-content";
 const COLLECTIONS_TAB = "modal-collections";
+const SIMILAR_TAB = "modal-similar";
 const IMPORT_TAB = "modal-import";
 const MODAL_TABS: TabDef[] = [
   { id: CONTENT_TAB, label: "Content" },
   { id: COLLECTIONS_TAB, label: "Collections" },
+  { id: SIMILAR_TAB, label: "Similar" },
   { id: IMPORT_TAB, label: "Info" },
 ];
 
@@ -334,6 +347,7 @@ function DocumentModal({
   const [row, setRow] = useState<Document | null>(null);
   const [collections, setCollections] = useState<string[]>([]);
   const [embeddings, setEmbeddings] = useState<EmbeddingEntry[]>([]);
+  const [similar, setSimilar] = useState<Similar | null>(null);
 
   // The three reads the modal needs, in one round: the row itself, who holds it, what is cached.
   const load = useCallback((): Promise<void> => {
@@ -354,6 +368,14 @@ function DocumentModal({
   useEffect(() => {
     load().catch((cause: unknown) => setError(errorText(cause)));
   }, [load, setError]);
+
+  // Read when the tab is first opened: it compares every document's vector, which the other
+  // tabs do not need.
+  const similarOpen = tab === SIMILAR_TAB;
+  useEffect(() => {
+    if (!similarOpen || doc === null || similar !== null) return;
+    api.similarDocuments(doc).then(setSimilar).catch((cause: unknown) => setError(errorText(cause)));
+  }, [similarOpen, doc, similar, setError]);
 
   // A deletion is accepted (202) and runs in the background: the modal follows it, then
   // closes and lets the listing re-read itself.
@@ -442,6 +464,9 @@ function DocumentModal({
             ))}
           </ul>
         )}
+      </div>
+      <div id={SIMILAR_TAB} role="tabpanel" hidden={tab !== SIMILAR_TAB}>
+        {similar !== null && <SimilarDocuments similar={similar} />}
       </div>
       <div id={IMPORT_TAB} role="tabpanel" hidden={tab !== IMPORT_TAB}>
         <div className="split">

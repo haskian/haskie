@@ -1704,6 +1704,44 @@ async def test_detach_rejects_an_unknown_membership(dbos, tmp_path: Path) -> Non
         await dbos.start_delete_document("ghost.md")
 
 
+async def test_rename_is_refused_while_an_index_write_holds_the_old_name(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """The index write in flight would put the old folder back after the move, so the rename
+    waits for it to finish; then the members and the table move with the name. The maintenance
+    that write asked for was debounced under the old name, so the rename asks again."""
+    await _use(dbos, workers=4, batch_pages=1, index_group_parts=1, maintenance_idle_seconds=NEVER)
+    old = await Collection.create("old")
+    slow = await import_document(dbos, "slow.pdf", text_pdf(["alpha", "beta"]), tmp_path)
+    gate = Gate()
+    monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
+    in_flight = await dbos.attach("old", slow.name)
+    assert await wait_event(gate.entered)
+
+    with pytest.raises(Conflict, match="collection is busy with idx-col:old:slow.pdf:"):
+        await dbos.rename_collection("old", "new")
+    assert await Collection.names() == ["old"], "a refused rename changes nothing"
+    assert (await dbos.rename_collection("old", "old")).name == "old", "the same name is no work"
+
+    gate.release.set()
+    await await_terminal([in_flight])
+    assert (await maintenance_state("old")).pending_documents == 1
+    await _use(dbos, workers=4, batch_pages=1, index_group_parts=1, maintenance_documents=1)
+    renamed = await dbos.rename_collection("old", "new")
+
+    assert await Collection.names() == ["new"]
+    assert not old.root.exists() and renamed.index_dir.is_dir(), "the table moved with the name"
+    assert await renamed.member_names() == [slow.name]
+    found = await search_with("new", "alpha", SearchOverrides(limit=5))
+    assert {(hit.collection, hit.document) for hit in found} == {("new", slow.name)}
+
+    async def maintained() -> bool:
+        return (await maintenance_state("new")).pending_documents == 0
+
+    await until(maintained, "the renamed collection's pending document was never maintained")
+    await _drain()
+
+
 async def test_delete_collection_cancels_every_document_in_flight(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:

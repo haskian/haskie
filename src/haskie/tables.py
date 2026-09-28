@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     MetaData,
     Table,
     Text,
@@ -66,9 +67,12 @@ documents = Table(
     Column("created_at", Float, nullable=False, server_default=ZERO),
     Column("updated_at", Float, nullable=False, server_default=ZERO),
     Column("description", Text, nullable=False, server_default=""),
+    # MD5 of the original file's bytes: an upload with the same hash is the same file again
+    Column("md5", Text, nullable=False),
     Index("idx_documents_status", "status", "name"),
     Index("idx_documents_updated", "updated_at", "name"),
     Index("idx_documents_size", "size", "name"),
+    Index("idx_documents_md5", "md5"),
 )
 
 collection_documents = Table(
@@ -107,6 +111,9 @@ embeddings = Table(
     Column("rows", Integer, nullable=False, server_default=ZERO),
     Column("bytes", Integer, nullable=False, server_default=ZERO),
     Column("created_at", Float, nullable=False, server_default=ZERO),
+    # the document as one vector: the mean of its unit chunk vectors, normalized, as float32
+    # bytes; what `embed_cache.nearest` compares documents by. Null without an embedding model
+    Column("vector", LargeBinary),
     Index("idx_embeddings_document", "document"),
 )
 
@@ -202,5 +209,6 @@ staging = Table(
     Column("staging_id", Text, primary_key=True),
     Column("filename", Text, nullable=False),
     Column("size", Integer, nullable=False),
+    Column("md5", Text, nullable=False),  # of the bytes, carried to the import
     Column("created_at", Float, nullable=False, server_default=ZERO),
 )

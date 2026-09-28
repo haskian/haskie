@@ -1,5 +1,5 @@
 import { Minus, Plus, RefreshCw, Trash2 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import {
   api,
   MAX_PAGE_SIZE,
@@ -31,25 +31,38 @@ export function CollectionModal({
   name,
   onClose,
   onChanged,
+  onRenamed,
 }: {
   name: string | undefined
   onClose: () => void
   onChanged: () => Promise<unknown>
+  onRenamed: (to: string) => void
 }) {
   return (
     <Modal open={name !== undefined} onClose={onClose} title={name ?? ''} subtitle="collection">
-      {name !== undefined && <CollectionBody key={name} name={name} onClose={onClose} onChanged={onChanged} />}
+      {name !== undefined && <CollectionBody key={name} name={name} onClose={onClose} onChanged={onChanged} onRenamed={onRenamed} />}
     </Modal>
   )
 }
 
-function CollectionBody({ name, onClose, onChanged }: { name: string; onClose: () => void; onChanged: () => Promise<unknown> }) {
+function CollectionBody({
+  name,
+  onClose,
+  onChanged,
+  onRenamed,
+}: {
+  name: string
+  onClose: () => void
+  onChanged: () => Promise<unknown>
+  onRenamed: (to: string) => void
+}) {
   const [info, setInfo] = useState<CollectionInfo | null>(null)
   const [members, setMembers] = useState<Member[]>([])
   const [imported, setImported] = useState<Document[]>([])
   const [options, setOptions] = useState<Options | null>(null)
   const [tab, setTab] = useState<string>(TABS[0].id)
   const [filter, setFilter] = useState('')
+  const [draftName, setDraftName] = useState(name)
 
   // what background work moves: the counts in the header, and how far each member got
   const refreshInfo = useCallback(
@@ -105,6 +118,20 @@ function CollectionBody({ name, onClose, onChanged }: { name: string; onClose: (
   const startBulk = (start: () => Promise<BulkStarted>): void => {
     setError(null)
     bulk.start(start).catch((cause: unknown) => setError(errorText(cause)))
+  }
+
+  // Not through `run`: its re-read would ask for the old name. The route moves to the new one,
+  // and the modal remounts there.
+  const rename = (event: FormEvent): void => {
+    event.preventDefault()
+    setError(null)
+    api
+      .renameCollection(name, draftName.trim())
+      .then(async (renamed) => {
+        await onChanged()
+        onRenamed(renamed.name)
+      })
+      .catch((cause: unknown) => setError(errorText(cause)))
   }
 
   const candidates = useMemo(() => candidateDocuments(imported, members), [imported, members])
@@ -214,25 +241,19 @@ function CollectionBody({ name, onClose, onChanged }: { name: string; onClose: (
               <RefreshCw className="icon" />
               Index all
             </button>
-            <button
-              className="btn btn-ghost"
-              type="button"
-              disabled={bulk.running}
-              onClick={() => {
-                if (window.confirm(`Delete collection "${name}"? Its documents stay; only this index goes.`)) {
-                  startBulk(() => api.deleteCollection(name))
-                }
-              }}
-            >
-              <Trash2 className="icon" />
-              Delete collection
-            </button>
-            {bulk.operation !== null && <BulkStatus operation={bulk.operation} />}
+            {bulk.operation?.kind === 'index_collection' && <BulkStatus operation={bulk.operation} />}
           </SettingsForm>
         )}
       </div>
 
       <div id={TABS[3].id} role="tabpanel" className="modal-panel collection-panel" hidden={tab !== TABS[3].id}>
+        {/* A form, so Enter renames the way the browser already does it. */}
+        <form className="input-group" onSubmit={rename}>
+          <input className="input" aria-label="Collection name" value={draftName} onChange={(event) => setDraftName(event.target.value)} />
+          <button className="btn" type="submit" disabled={bulk.running || draftName.trim() === '' || draftName.trim() === name}>
+            Rename
+          </button>
+        </form>
         <div className="split">
           <section className="pane">
             <span className="pane-head mono muted">Details</span>
@@ -250,6 +271,22 @@ function CollectionBody({ name, onClose, onChanged }: { name: string; onClose: (
               />
             </div>
           </section>
+        </div>
+        <div className="row row-loose">
+          <button
+            className="btn btn-ghost"
+            type="button"
+            disabled={bulk.running}
+            onClick={() => {
+              if (window.confirm(`Delete collection "${name}"? Its documents stay; only this index goes.`)) {
+                startBulk(() => api.deleteCollection(name))
+              }
+            }}
+          >
+            <Trash2 className="icon" />
+            Delete collection
+          </button>
+          {bulk.operation?.kind === 'delete_collection' && <BulkStatus operation={bulk.operation} />}
         </div>
       </div>
 

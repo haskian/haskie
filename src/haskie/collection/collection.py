@@ -36,7 +36,7 @@ from haskie.settings import (
     SearchSettings,
     load_user_settings,
 )
-from haskie.tables import collection_documents, collections, documents
+from haskie.tables import collection_documents, collections, documents, session_collections
 
 
 class MemberStatus(StrEnum):
@@ -251,6 +251,60 @@ class Collection:
         collection that holds them."""
         await self.remove_rows()
         await self.remove_tree()
+
+    async def rename(self, name: str) -> "Collection":
+        """The collection under `name`: its row, its memberships, every session that chose it,
+        and its folder, moved in one transaction. Refused while a member document is being
+        deleted: its removal from this collection is already queued under the old name, and would
+        find nothing there to remove.
+
+        The key is the name, and the foreign keys pointing at it do not cascade an update, so the
+        row is copied under the new name, the references are moved over, and the old row goes.
+        The folder moves last, inside the transaction: a move that fails rolls the rows back.
+        The index table holds no collection name (`CollectionIndex` adds it on read), so it moves
+        as it is. Nothing may be writing it: `workflows.rename_collection` checks that first."""
+        renamed = Collection(document.safe_name(name))
+        member = collection_documents.c
+        async with db.connect() as conn:
+            deleting = await conn.scalar(
+                _MEMBERS.with_only_columns(documents.c.name)
+                .where(member.collection == self.name)
+                .where(documents.c.status == document.DocumentStatus.DELETING)
+                .limit(1)
+            )
+            if deleting is not None:
+                raise Conflict(
+                    f"document {deleting} is being deleted; rename it once that finishes"
+                )
+            row = (
+                await conn.execute(select(collections).where(collections.c.name == self.name))
+            ).first()
+            if row is None:
+                raise NotFound(f"collection not found: {self.name}")
+            copied = await conn.execute(
+                insert(collections)
+                .values({**db.record(row), "name": renamed.name})
+                .on_conflict_do_nothing()
+            )
+            if copied.rowcount != 1:
+                raise Conflict(f"collection already exists: {renamed.name}")
+            for table in (collection_documents, session_collections):
+                await conn.execute(
+                    update(table)
+                    .where(table.c.collection == self.name)
+                    .values(collection=renamed.name)
+                )
+            await conn.execute(delete(collections).where(collections.c.name == self.name))
+            forget_schema(self.index_dir)
+            # A folder under the new name has no row (the insert above claimed the name), so it is
+            # a leftover of a crash, unless it is this one: on a case-insensitive disk `a` and `A`
+            # can share a shard.
+            target = anyio.Path(renamed.root)
+            if await target.exists() and not await target.samefile(self.root):
+                await renamed.remove_tree()
+            await anyio.Path(renamed.root.parent).mkdir(parents=True, exist_ok=True)
+            await anyio.Path(self.root).rename(renamed.root)
+        return renamed
 
     async def remove_rows(self) -> None:
         """Row delete cascades to the memberships and to every session that chose the collection

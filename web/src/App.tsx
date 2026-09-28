@@ -10,8 +10,8 @@ import { Operations } from './pages/Operations'
 import { Sessions } from './pages/Sessions'
 import { Settings } from './pages/Settings'
 import { applyBackground } from './pages/settings/background'
-import { useRoute, type Route } from './router'
-import { Statusbar, type NavCounts } from './ui'
+import { navigate, useRoute, type Route } from './router'
+import { DropOverlay, Statusbar, type NavCounts } from './ui'
 
 const STATUS_POLL_MS = 5000
 
@@ -19,6 +19,13 @@ export default function App() {
   const route = useRoute()
   const [status, setStatus] = useState<Status | null>(null)
   const [counts, setCounts] = useState<NavCounts>({ documents: null, collections: null })
+  // A file dropped on any page is added the way the Documents page adds one, in its modal.
+  const [dropped, setDropped] = useState<File[] | null>(null)
+  const drop = useCallback((files: File[]) => {
+    setDropped(files)
+    navigate({ name: 'documents' })
+  }, [])
+  const dropHandled = useCallback(() => setDropped(null), [])
 
   const refresh = useCallback(
     () =>
@@ -51,10 +58,17 @@ export default function App() {
 
   return (
     <>
-      <Page route={route} counts={counts} refreshStatus={refresh} />
+      <Page route={route} counts={counts} refreshStatus={refresh} dropped={dropped} onDropHandled={dropHandled} />
       <Statusbar status={status} />
+      <DropOverlay onFiles={drop} />
     </>
   )
+}
+
+/** Files dropped on the window, waiting for the Documents page to add them. */
+export interface DroppedProps {
+  dropped: File[] | null
+  onDropHandled: () => void
 }
 
 /** What every page gets: its route, and the nav counts it hands to `Shell`. */
@@ -65,12 +79,12 @@ export interface PageProps<R extends Route = Route> {
 }
 
 // Each page renders `Shell` itself, so its side sections and content share one component's state.
-function Page({ route, counts, refreshStatus }: PageProps) {
+function Page({ route, counts, refreshStatus, dropped, onDropHandled }: PageProps & DroppedProps) {
   switch (route.name) {
     case 'explore':
       return <Explore route={route} counts={counts} refreshStatus={refreshStatus} />
     case 'documents':
-      return <Documents route={route} counts={counts} refreshStatus={refreshStatus} />
+      return <Documents route={route} counts={counts} refreshStatus={refreshStatus} dropped={dropped} onDropHandled={onDropHandled} />
     case 'collections':
       return <Collections route={route} counts={counts} refreshStatus={refreshStatus} />
     case 'operations':
