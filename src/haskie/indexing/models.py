@@ -92,6 +92,15 @@ async def warm_model(kind: ModelKind, name: str) -> None:
     await cpu.on_cpu(warm, name, accelerator)
 
 
+async def load_here(models: list[tuple[ModelKind, str]]) -> None:
+    """Load models in this process and mark them ready, with no DBOS: for a command-line tool that
+    searches or scores with the app's own code but runs no server (`catalogue.calibrate`), where
+    no download workflow will ever mark them. A cold disk cache downloads here."""
+    for kind, name in models:
+        await warm_model(kind, name)
+        _mark_ready(_model_id(kind, name))
+
+
 @DBOS.step(
     retries_allowed=True,
     max_attempts=5,
@@ -114,7 +123,7 @@ async def ensure_model(kind: ModelKind, name: str) -> ModelState:
     return ModelState.READY
 
 
-async def _required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
+async def required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
     """Every model this installation needs, in a stable order and without duplicates.
 
     A collection may override the reranker model, and a search of that collection then loads it,
@@ -172,7 +181,7 @@ async def ensure_models(settings: UserSettings) -> list[ModelStatus]:
 
     One query for every record, not one per model: the same read decides what to enqueue and
     answers the statuses this returns."""
-    wanted = await _required(settings)
+    wanted = await required(settings)
     records = await _download_records(wanted)
     for kind, name in wanted:
         workflow_id = _model_id(kind, name)
@@ -268,7 +277,7 @@ async def model_statuses() -> list[ModelStatus]:
     """One status per required model. `ensure_models` builds the same list off the records it
     just read, rather than reading them again."""
     settings = await load_user_settings()
-    wanted = await _required(settings)
+    wanted = await required(settings)
     return _statuses(wanted, await _download_records(wanted), settings)
 
 

@@ -173,7 +173,7 @@ async def test_embed_stage_precomputes_vectors_and_hybrid_search_uses_them(
         )
     )
     await models.ensure_models(user)
-    for kind, name in await models._required(user):
+    for kind, name in await models.required(user):
         await wait_for(models._model_id(kind, name))
     assert {(m.kind, m.state) for m in await models.model_statuses()} == {
         ("embedding", "ready"),
@@ -328,7 +328,7 @@ async def test_required_models_follow_the_settings(
 
     monkeypatch.setattr(models, "_collection_rerankers", overrides)
 
-    assert await models._required(user) == expected, name
+    assert await models.required(user) == expected, name
 
 
 async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> None:
@@ -376,7 +376,7 @@ async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> N
 
     await models.ensure_models(user)
     await await_terminal(
-        [models._model_id(kind, name) for kind, name in await models._required(user)]
+        [models._model_id(kind, name) for kind, name in await models.required(user)]
     )
 
     downloads = (await operations.list_operations("download")).items
