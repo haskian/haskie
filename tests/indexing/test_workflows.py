@@ -1060,6 +1060,61 @@ async def test_concurrent_attaches_converge_on_one_embedding_run(
     await _drain()
 
 
+@pytest.mark.parametrize(
+    ("cancel", "owner_error", "owner_member"),
+    [
+        # the owner's cancel cascades into the run it started: the waiter did not ask for it
+        ("detach the owner", DBOSAwaitedWorkflowCancelledError, None),
+        # someone cancelled the run itself: the owner's own run is gone, and it fails
+        ("cancel the run", workflows.PipelineError, "error"),
+    ],
+)
+async def test_a_waiter_outlives_the_cancel_of_the_embedding_run_it_shares(
+    dbos,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel: str,
+    owner_error: type[Exception],
+    owner_member: str | None,
+) -> None:
+    """The second collection waits on the first one's `emb:` run (deduplicated by the cache id),
+    but the run is the first one's child. When that run is cancelled, the waiter asks again under
+    its own id instead of failing an index nobody cancelled."""
+    await _use(dbos, workers=4, batch_pages=1)
+    for name in ("one", "two"):
+        await (await Collection.create(name)).set_overrides(CollectionOverrides(chunk_size=60))
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    gate = Gate()
+    monkeypatch.setattr(pipeline, "embed_batch", gate.wrap(pipeline.embed_batch))
+    first = await dbos.attach("one", doc.name)
+    assert await wait_event(gate.entered), "the first attach never reached the embed step"
+    second = await dbos.attach("two", doc.name)
+
+    async def asked() -> bool:
+        return dbos_names.EMBED_WORKFLOW in await _steps(second)
+
+    await until(asked, "the second attach never asked for the embedding")
+    shared = _embed_id(first, doc.name)
+    if cancel == "detach the owner":
+        await dbos.detach("one", doc.name)
+    else:
+        await workflows.cancel_operation(shared)
+    gate.release.set()
+
+    assert await wait_for(second) == "indexed", "the waiter indexed with a run of its own"
+    with pytest.raises(owner_error):
+        await wait_for(first)
+    await _drain()
+    assert await _statuses([shared, _embed_id(second, doc.name)]) == ["CANCELLED", "SUCCESS"]
+    assert gate.calls == [0, 0], "the cancelled run's one batch, then the waiter's own"
+    assert (await Collection("two").member(doc.name)).status == "indexed"
+    assert (await collection_hits("two", "lancedb"))[0].document == doc.name
+    if owner_member is None:
+        assert await Collection("one").member_names() == [], "the detach took the membership"
+    else:
+        assert (await Collection("one").member(doc.name)).status == owner_member
+
+
 async def _import_id(doc: str) -> str:
     """The import of one document: the only `imp:` workflow it has in these tests."""
     (found,) = await DBOS.list_workflows_async(

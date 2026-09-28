@@ -113,7 +113,9 @@ you need the machine back.
   `adopt_orphans` moves work recorded under another version onto this one and enqueues it again,
   each workflow on its own queue.
 - **Deduplication:** one active import per document, one active index per membership, one
-  embedding run per cache id.
+  embedding run per cache id. Two collections with the same chunk settings share one run. The
+  run belongs to the operation that asked first. When a cancel of that operation also cancels
+  the run, the other collection starts a run of its own.
 - **Cancellation** works on running operations, from the Operations view or
   `DELETE /api/operations/{id}`. A cancelled import or index is marked `cancelled`.
 

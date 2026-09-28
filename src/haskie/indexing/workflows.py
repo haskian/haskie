@@ -93,8 +93,10 @@ from dbos import (
     WorkflowHandleAsync,
 )
 
-# Retention has no public entry point in DBOS 3.0: the collector takes the instance itself.
+# DBOS 3.0 exports neither the error of awaiting a cancelled workflow nor a retention entry point
+# (the collector takes the instance itself).
 from dbos._dbos import _get_dbos_instance
+from dbos._error import DBOSAwaitedWorkflowCancelledError
 from dbos._workflow_commands import garbage_collect
 
 from haskie import APP_VERSION, audit, db, home, logs, shutdown, sysdb
@@ -898,18 +900,32 @@ async def _ensure_embedding(ctx: Context) -> str:
     """The cache id of the embedding `ctx` calls for, computing it through `ensure_embedding`
     when it is missing. Deduplicated by the cache id: two callers wanting the same embedding at
     once share one run instead of computing it twice (and racing on the write). The child id is
-    derived from this workflow's, so a replay re-attaches to the run it already started."""
+    derived from this workflow's, so a replay re-attaches to the run it already started.
+
+    A shared run is the child of whoever asked first, so cancelling that caller cascades into it,
+    and every other caller would fail with it. A caller waiting on someone else's run therefore
+    asks again when it is cancelled: its own id was never used, and the cancel freed the
+    deduplication id, so the next ask starts a run of its own (or joins a newer shared one). A
+    caller that was cancelled itself stops at that ask, which DBOS refuses from a cancelled
+    workflow. A cancel of its own run is final."""
     params = embed_cache.params(ctx.document, ctx.chunking, ctx.embedding)
-    with (
-        SetWorkflowID(f"{EMBED_PREFIX}:{ctx.document.name}:{run_id(DBOS.workflow_id or '')}"),
-        SetEnqueueOptions(
-            deduplication_id=embed_cache.key(params), duplication_policy="return-existing"
-        ),
-    ):
-        handle = await DBOS.enqueue_workflow_async(
-            EMBEDDING_QUEUE, ensure_embedding, ctx.document.name, params
-        )
-    return await handle.get_result(polling_interval_sec=TASK_POLL)
+    own = f"{EMBED_PREFIX}:{ctx.document.name}:{run_id(DBOS.workflow_id or '')}"
+    while True:
+        with (
+            SetWorkflowID(own),
+            SetEnqueueOptions(
+                deduplication_id=embed_cache.key(params), duplication_policy="return-existing"
+            ),
+        ):
+            handle = await DBOS.enqueue_workflow_async(
+                EMBEDDING_QUEUE, ensure_embedding, ctx.document.name, params
+            )
+        try:
+            return await handle.get_result(polling_interval_sec=TASK_POLL)
+        except DBOSAwaitedWorkflowCancelledError:
+            if handle.workflow_id == own:
+                raise
+            _log.info("shared_embedding_cancelled", embedding=handle.workflow_id)
 
 
 @contextlib.asynccontextmanager
