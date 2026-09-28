@@ -109,7 +109,7 @@ from haskie.collection.collection import Collection, MemberStatus
 from haskie.cpu import configure_cpu_budget, open_pool, shutdown_pool
 from haskie.document import document
 from haskie.document.document import Document, DocumentStatus, configure_preview_slots
-from haskie.errors import Conflict, InvalidInput, NotFound, PermanentError
+from haskie.errors import Conflict, InvalidInput, NotFound, PermanentError, Unavailable
 from haskie.indexing import embed_cache, models, pipeline, serializer
 from haskie.indexing.dbos_names import (
     ACTIVE_STATUS,
@@ -663,10 +663,11 @@ async def plan(stage: Stage, ctx: Context) -> list[Batch]:
 async def _guarded(call: Awaitable[int | None]) -> BatchResult:
     """Await one pipeline call inside a retried step: retry anything transient, report a
     `PermanentError` as a value so DBOS does not retry a failure that cannot change, and a model
-    still on its way as a value so the workflow body can wait for it."""
+    still on its way as a value so the workflow body can wait for it. A model that failed to
+    load (`Unavailable`) is permanent too: it stays failed until a restart or a settings save."""
     try:
         return BatchResult(value=await call)
-    except PermanentError as exc:
+    except (PermanentError, Unavailable) as exc:
         return BatchResult(permanent_error=f"{type(exc).__name__}: {exc}")
     except models.ModelLoading:
         return BatchResult(model_loading=True)
@@ -675,8 +676,8 @@ async def _guarded(call: Awaitable[int | None]) -> BatchResult:
 async def _awaiting_model(step: Callable[[], Awaitable[BatchResult]]) -> BatchResult:
     """Run one step until it stops reporting the embedding model on its way, with a durable sleep
     between two runs. In the workflow body: the sleep holds no step, no CPU slot and no thread,
-    and a crash resumes it. A model that failed raises out of the step instead, and fails the
-    workflow."""
+    and a crash resumes it. A model that failed comes back as a permanent error instead, which
+    `_value` fails the workflow with."""
     while (result := await step()).model_loading:
         await DBOS.sleep_async(MODEL_WAIT_SECONDS)
     return result

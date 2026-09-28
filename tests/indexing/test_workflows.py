@@ -1222,7 +1222,7 @@ async def test_an_import_whose_embedding_model_failed_ends_in_error(
     dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Only a model still downloading or warming is waited for: a failed download ends the
-    import in `error`, as before."""
+    import in `error`, as before, and at once: waiting or retrying would not change it."""
 
     async def load_model(kind: str, name: str) -> None:
         raise RuntimeError("no such model")
@@ -1231,12 +1231,21 @@ async def test_an_import_whose_embedding_model_failed_ends_in_error(
     embedded = _record_embeds(monkeypatch)
     await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
     await await_terminal([download])
+    asked: list[str] = []
+    require_ready = models.require_ready
+
+    async def counted(kind: models.ModelKind, name: str) -> None:
+        asked.append(name)
+        await require_ready(kind, name)
+
+    monkeypatch.setattr(models, "require_ready", counted)
     doc = await import_row("a.md", MD, tmp_path)
     job_id = await dbos.start_import(doc.name)
 
     with pytest.raises(workflows.PipelineError, match="failed to load: .*no such model"):
         await wait_for(job_id)
     assert (await document.get(doc.name)).status == "error"
+    assert len(asked) == 1, "a failed model is permanent: the step is not retried"
     assert "plan" not in await _steps(workflows.embed_id(job_id, doc.name)), (
         "it never reached embedding"
     )
