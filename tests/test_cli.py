@@ -839,6 +839,53 @@ def test_install_hook_refuses_a_settings_file_it_cannot_parse(
     assert settings_file.read_text() == "{not json", "left exactly as it was"
 
 
+@dataclass
+class KeptFileCase:
+    mode: int | None  # the existing file's mode; None when there is no file yet
+    linked: bool  # whether settings.json is a link into a dotfiles directory
+    expect_mode: int | None  # None: what a new file gets under the process umask
+
+
+KEPT_FILE_CASES = {
+    "no file yet gets the default mode": KeptFileCase(mode=None, linked=False, expect_mode=None),
+    "a private file stays private": KeptFileCase(mode=0o600, linked=False, expect_mode=0o600),
+    "a read-only file is still rewritten": KeptFileCase(
+        mode=0o400, linked=False, expect_mode=0o400
+    ),
+    "a linked file stays linked": KeptFileCase(mode=0o600, linked=True, expect_mode=0o600),
+}
+
+
+@pytest.mark.parametrize("case", KEPT_FILE_CASES.values(), ids=list(KEPT_FILE_CASES))
+def test_install_hook_keeps_the_settings_file_what_it_was(
+    case: KeptFileCase, claude_workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rewrite is a rename, which replaces whatever sits at the path. A settings file that is a
+    link into a dotfiles repository must stay one, and one kept private (it can hold API keys) must
+    not come back world-readable."""
+    settings_file = claude.settings_path(Scope.PROJECT)
+    settings_file.parent.mkdir(parents=True)
+    real = tmp_path / "dotfiles" / "settings.json" if case.linked else settings_file
+    if case.mode is not None:
+        real.parent.mkdir(parents=True, exist_ok=True)
+        real.write_text('{"env": {"API_KEY": "sk-test"}}')
+        real.chmod(case.mode)
+    if case.linked:
+        settings_file.symlink_to(real)
+
+    claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8451/mcp")
+
+    assert settings_file.is_symlink() is case.linked
+    umask = os.umask(0)
+    os.umask(umask)
+    expect_mode = 0o666 & ~umask if case.expect_mode is None else case.expect_mode
+    assert stat.S_IMODE(real.stat().st_mode) == expect_mode
+    written = json.loads(real.read_text())
+    assert claude.HOOK_MARKER in written["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    if case.mode is not None:
+        assert written["env"] == {"API_KEY": "sk-test"}, "the rest of the file survives"
+
+
 def _served_tools() -> set[str]:
     return {
         name

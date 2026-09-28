@@ -20,6 +20,7 @@ the answer". The rule says *when*; the skill says *how*.
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
@@ -134,8 +135,20 @@ def _write(destination: Path, text: str) -> Path:
     Atomic, because Claude Code reads these files while we write them and half of one is worse
     than none: a broken skill, or a settings file that takes the rest of its contents with it.
     """
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    home.atomic_write_sync(destination, text)
+    # The file the rename replaces is the one a link points at, not the link: a settings file
+    # linked in from a dotfiles repository must stay linked, and a private one must stay private.
+    target = destination.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode: int | None = stat.S_IMODE(target.stat().st_mode)
+    except FileNotFoundError:
+        mode = None
+    with home.atomic_replace(target) as tmp, open(tmp, "w", encoding="utf-8") as stream:
+        # On the open descriptor and before the text: never readable wider than the file it
+        # replaces, and a read-only file still gets written.
+        if mode is not None:
+            os.fchmod(stream.fileno(), mode)
+        stream.write(text)
     return destination
 
 
