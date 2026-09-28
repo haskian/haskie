@@ -6,7 +6,7 @@ import msgspec
 from litestar import get, post, put
 
 from haskie import audit
-from haskie.api.common import Days, days_ago
+from haskie.api.common import Days, RequiredSessionId, days_ago
 from haskie.paging import one_of
 from haskie.search import gaps
 
@@ -77,7 +77,7 @@ async def replay_gaps(data: GapReplay) -> list[gaps.ReplayedGap]:
 
 @post("/api/gaps/report", status_code=200, mcp_tool="report_gap")
 @audit.audited("gaps.report")
-async def report_gap(session_id: str, data: GapReport) -> gaps.Reported:
+async def report_gap(session_id: RequiredSessionId, data: GapReport) -> gaps.Reported:
     """Say that a search you just ran did not answer your question: the gap then shows to the
     user as one the collections should close.
 

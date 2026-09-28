@@ -40,14 +40,14 @@ Limit = Annotated[int | None, Parameter(ge=1, le=MAX_SCAN)]
 MAX_DAYS = 366  # a window of history: Insights charts and Gaps read at most a year back
 Days = Annotated[int, Parameter(ge=1, le=MAX_DAYS)]
 
+# A conversation's id, refused before the handler runs: refused inside it, after the change the
+# id would record, the change stands while the caller reads a 422, and its retry meets a
+# conflict. `SessionId | None` would drop the bounds, so the optional form is its own alias.
+_SESSION_ID = Parameter(min_length=1, max_length=session.MAX_SESSION_ID)
+SessionId = Annotated[str | None, _SESSION_ID]
+RequiredSessionId = Annotated[str, _SESSION_ID]
+
 
 def days_ago(days: int) -> float:
     """Unix seconds `days` days ago: where a window of history begins."""
     return time.time() - days * 86400
-
-
-def checked_session(session_id: str | None) -> None:
-    """Refuse a bad `session_id` before the change it would record: refused after, the change
-    stands while the caller reads a 422, and its retry meets a conflict."""
-    if session_id is not None:
-        session.checked(session_id)

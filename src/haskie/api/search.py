@@ -9,7 +9,7 @@ from litestar import get, put
 from litestar.params import Parameter
 
 from haskie import audit
-from haskie.api.common import Days, Limit, days_ago
+from haskie.api.common import Days, Limit, RequiredSessionId, SessionId, days_ago
 from haskie.collection.index import Hit
 from haskie.indexing import operations
 from haskie.paging import DEFAULT_PAGE_SIZE, Page
@@ -37,7 +37,7 @@ async def list_sessions() -> list[session.SessionSummary]:
 
 @put("/api/sessions/{session_id:str}", mcp_tool="set_session_collections")
 @audit.audited("session.collections.set")
-async def put_session(session_id: str, data: SessionCollections) -> list[str]:
+async def put_session(session_id: RequiredSessionId, data: SessionCollections) -> list[str]:
     """Choose which collections a session searches. Call before `search_excerpts` with that
     session id."""
     chosen = await session.set_collections(session_id, data.collections)
@@ -55,7 +55,7 @@ async def put_session(session_id: str, data: SessionCollections) -> list[str]:
 async def explore(
     q: str,
     granularity: Granularity = Granularity.CHUNK,
-    session_id: str | None = None,
+    session_id: SessionId = None,
     collections: str | None = None,
     limit: Limit = None,
 ) -> list[Hit] | list[Passage]:
@@ -86,7 +86,7 @@ async def explore(
 async def search_excerpts(
     q: list[str],
     context: str | None = None,
-    session_id: str | None = None,
+    session_id: SessionId = None,
     collections: str | None = None,
     limit: Limit = None,
 ) -> Answer:
@@ -165,7 +165,7 @@ async def search_excerpts(
 @get("/api/search/sources", mcp_tool="search_sources")
 async def search_sources(
     q: str,
-    session_id: str | None = None,
+    session_id: SessionId = None,
     collections: str | None = None,
     limit: Limit = None,
     sections: int | None = None,

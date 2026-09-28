@@ -368,7 +368,18 @@ def _requested(lines: list[dict]) -> list[str]:
         (
             "session id longer than the cap -> unprocessable",
             "PUT", f"/api/sessions/{LONG_SESSION_ID}", {"collections": []}, None,
-            422, "session id must be 1..128 characters",
+            422, "Expected `str` of length <= 128",
+        ),
+        (
+            "empty session id on a search -> unprocessable",
+            "GET", "/api/search/excerpts?q=alpha&session_id=", None, None,
+            422, "session_id=: Expected `str` of length >= 1",
+        ),
+        (
+            "session id longer than the cap on a gap report -> unprocessable",
+            "POST", f"/api/gaps/report?session_id={LONG_SESSION_ID}",
+            {"question": "alpha", "verdict": "partial"}, None,
+            422, "Expected `str` of length <= 128",
         ),
         (
             "more collections than a session may hold -> unprocessable",
@@ -497,6 +508,11 @@ async def test_rejected_settings_are_never_stored(ready: AsyncTestClient) -> Non
 
 
 @pytest.mark.parametrize(
+    ("session_id", "refusal"),
+    [(LONG_SESSION_ID, "Expected `str` of length <= 128"), ("", "Expected `str` of length >= 1")],
+    ids=["too long", "empty"],
+)
+@pytest.mark.parametrize(
     ("name", "method", "path", "body", "probe"),
     [
         (
@@ -525,6 +541,8 @@ async def test_a_bad_session_id_is_refused_before_the_change_it_would_record(
     path: str,
     body: dict | None,
     probe: str,
+    session_id: str,
+    refusal: str,
 ) -> None:
     """Refused after the change, the caller would read a 422 for work done, and its retry a 409."""
     await ready.post("/api/collections", json={"name": "other"})
@@ -534,10 +552,10 @@ async def test_a_bad_session_id_is_refused_before_the_change_it_would_record(
         body = {key: value.format(source=source) for key, value in body.items()}
     before = await ready.get(probe)
 
-    response = await ready.request(method, path, json=body, params={"session_id": LONG_SESSION_ID})
+    response = await ready.request(method, path, json=body, params={"session_id": session_id})
 
     assert response.status_code == 422, f"{name}: {response.text}"
-    assert "session id must be 1..128 characters" in response.text, name
+    assert f"session_id={session_id}: {refusal}" in response.text, name
     after = await ready.get(probe)
     assert (after.status_code, after.json()) == (before.status_code, before.json()), name
 

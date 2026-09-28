@@ -19,7 +19,7 @@ from litestar.params import Body
 from litestar.response import File, Stream
 
 from haskie import audit, cpu, logs
-from haskie.api.common import PAGED, BulkStarted, Describe, checked_session
+from haskie.api.common import PAGED, BulkStarted, Describe, SessionId
 from haskie.catalogue import catalogue
 from haskie.document import convert, render
 from haskie.document import document as documents
@@ -96,7 +96,7 @@ async def stage_document(
 
 @post("/api/documents/import", mcp_tool="add_document")
 @audit.audited("document.import")
-async def import_document(data: ImportRequest, session_id: str | None = None) -> Document:
+async def import_document(data: ImportRequest, session_id: SessionId = None) -> Document:
     """Import a staged upload (`staging_id`) or a local file by absolute path (`path`).
 
     The name is fixed here and never changes: `name` renames the document, but the original
@@ -106,7 +106,6 @@ async def import_document(data: ImportRequest, session_id: str | None = None) ->
     Args:
         session_id: The conversation's id; the import and its operation then show in that session.
     """
-    checked_session(session_id)
     if data.staging_id is not None and data.path is None:
         row = await documents.import_staged(data.staging_id, data)
     elif data.path is not None and data.staging_id is None:
@@ -317,7 +316,7 @@ async def get_lines(document: str, line_start: int, line_end: int) -> Lines:
 @put("/api/documents/{document:str}/description", mcp_tool="describe_document")
 @audit.audited("document.describe")
 async def describe_document(
-    document: str, data: Describe, session_id: str | None = None
+    document: str, data: Describe, session_id: SessionId = None
 ) -> Document:
     """Replace what the document is said to be. Empty clears it.
 
@@ -327,7 +326,6 @@ async def describe_document(
     Args:
         session_id: The conversation's id; the change then shows in that session's history.
     """
-    checked_session(session_id)
     described = await documents.describe(document, data.description)
     await session.record(session_id, session.Action.DESCRIBE, document)
     return described

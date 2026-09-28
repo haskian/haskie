@@ -10,7 +10,7 @@ import msgspec
 from litestar import delete, get, post, put
 
 from haskie import audit, logs
-from haskie.api.common import PAGED, BulkStarted, Describe, checked_session
+from haskie.api.common import PAGED, BulkStarted, Describe, SessionId
 from haskie.catalogue import catalogue
 from haskie.collection.collection import (
     Collection,
@@ -158,7 +158,7 @@ async def list_collection_documents(
 )
 @audit.audited("collection.attach")
 async def add_document(
-    collection: str, data: AddDocument, session_id: str | None = None
+    collection: str, data: AddDocument, session_id: SessionId = None
 ) -> BulkStarted:
     """Attach an imported document to this collection and queue its index.
 
@@ -169,7 +169,6 @@ async def add_document(
     Args:
         session_id: The conversation's id; the attach and its operation then show in that session.
     """
-    checked_session(session_id)
     audit.attach(document=data.document)
     logs.bind(document=data.document)
     operation_id = await workflows.attach(collection, data.document)
@@ -189,7 +188,7 @@ async def add_document(
     mcp_tool="remove_document_from_collection",
 )
 @audit.audited("collection.detach")
-async def remove_document(collection: str, document: str, session_id: str | None = None) -> None:
+async def remove_document(collection: str, document: str, session_id: SessionId = None) -> None:
     """Take one document out of this collection: its rows here go, the document stays.
 
     Queued, not waited out: the removal runs on the collection's single writer, behind any index
@@ -200,7 +199,6 @@ async def remove_document(collection: str, document: str, session_id: str | None
     Args:
         session_id: The conversation's id; the detach then shows in that session's history.
     """
-    checked_session(session_id)
     await workflows.detach(collection, document)
     await session.record(
         session_id,

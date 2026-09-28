@@ -280,6 +280,18 @@ async def test_every_read_tool_answers(
             "days=367: Expected `int` <= 366",
         ),
         ("more searches than a page holds", "list_searches", {"limit": 201}, "limit"),
+        (
+            "an empty session id",
+            "search_excerpts",
+            {"q": [BY_RETRY], "session_id": ""},
+            "session_id=: Expected `str` of length >= 1",
+        ),
+        (
+            "a session id past the cap, before the change it would record",
+            "describe_document",
+            {"document": "retries.md", "description": "changed", "session_id": "s" * 129},
+            "Expected `str` of length <= 128",
+        ),
         ("a review nobody can decide", "review_gaps", {"ids": [1], "review": "maybe"}, "review"),
         ("too many gaps to replay at once", "replay_gaps", {"ids": list(range(51))}, "at most 50"),
     ],
