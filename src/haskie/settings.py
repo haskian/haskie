@@ -409,8 +409,8 @@ PREVIEW_WORKERS = Meta(
     title="Preview builds",
     description=(
         "Maximum number of document previews built at the same time when they are first opened; "
-        "further requests wait, so a burst of opens does not start dozens of PDF parses. Outside "
-        "the CPU budget: a preview is built for a reader who is waiting for it."
+        "further requests wait, so a burst of opens does not start dozens of PDF parses. Each "
+        "build still takes a slot of the CPU budget, so a preview can wait behind indexing."
     ),
 )
 AUDIT_RETENTION = Meta(
