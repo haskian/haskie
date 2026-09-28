@@ -225,6 +225,16 @@ def _requested(lines: list[dict]) -> list[str]:
             422, "Expected `int` >= 1",
         ),
         (
+            "explore limit past the scan depth -> unprocessable",
+            "GET", "/api/search/explore?session_id=s1&q=alpha&limit=201", None, None,
+            422, "Expected `int` <= 200",
+        ),
+        (
+            "excerpts limit past the scan depth -> unprocessable",
+            "GET", "/api/search/excerpts?session_id=s1&q=alpha&limit=100000", None, None,
+            422, "Expected `int` <= 200",
+        ),
+        (
             "tasks of an unknown job -> not found",
             "GET", "/api/jobs/ghost/tasks", None, None,
             404, "job not found: ghost",
@@ -417,6 +427,17 @@ async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClie
 
     assert response.status_code == 503
     assert response.headers["Retry-After"] == errors.NotReady.headers["Retry-After"]
+
+
+async def test_a_limit_at_the_scan_depth_is_searched(ready: AsyncTestClient) -> None:
+    """The top of the shared `limit` bound (`flow.MAX_SCAN`) is a search, not a rejection; one
+    past it is in the error table."""
+    response = await ready.get(
+        "/api/search/explore", params={"q": "alpha", "session_id": "s1", "limit": 200}
+    )
+
+    assert response.status_code == 200, response.text
+    assert [hit["text"] for hit in response.json()] == ["alpha body about lancedb"]
 
 
 async def test_rejected_settings_are_never_stored(ready: AsyncTestClient) -> None:

@@ -9,6 +9,7 @@ from litestar.params import Parameter
 
 from haskie.errors import InvalidInput
 from haskie.paging import page_request
+from haskie.search.flow import MAX_SCAN
 
 # The four paging query arguments, declared once. Litestar reads a provider's own parameters from
 # the query string, so a handler that asks for `page: PageRequest` takes `cursor`, `page_size`,
@@ -31,8 +32,10 @@ class Describe(msgspec.Struct):
     description: str
 
 
-# A search returns at least one result or none at all; the bound rides along into the schema.
-Limit = Annotated[int | None, Parameter(ge=1)]
+# A search returns at least one result or none at all, and no more than it scans: an explicit
+# limit sets the scan depth, so above `MAX_SCAN` it would make every collection return, and the
+# reranker score, that many chunks. The bounds ride along into the schema.
+Limit = Annotated[int | None, Parameter(ge=1, le=MAX_SCAN)]
 
 MAX_DAYS = 366  # a window of history: Insights charts and Gaps read at most a year back
 
