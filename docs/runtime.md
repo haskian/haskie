@@ -33,6 +33,9 @@ flowchart TB
   preview go one step further, to a process pool (`cpu.off_interpreter`), while the thread holds the slot. A pipeline
   step holds a slot for its CPU part only, never for the IO around it. The pool is pebble's: a
   parser that crashes its worker fails only its own call, and a new worker takes its place.
+  One exception runs on the event loop: stemming a search's answer (`probe.vocabulary`). It
+  remembers every word it stemmed, so it costs well under a millisecond once a server has seen
+  the words, and waiting for a slot that indexing holds would cost more.
 - **A budget change applies to running work.** A resize counts the slots already held, so a
   raise from 2 to 3 admits one more job, not three. The process pool has one worker per slot. A
   pool of the old size takes no new work, finishes what it took, and exits. The next extraction
