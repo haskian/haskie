@@ -1,7 +1,7 @@
 ---
 name: haskie
 description: >-
-  Search the user's own curated document collections instead of answering from the web or from memory. Use whenever a question touches a topic they have collected sources on{topics}; when they say "my documents", "my collection", "what do my sources say"; or when they want an answer cited to something they own.
+  Search the user's own curated document collections instead of answering from the web or from memory. Use when they say "my documents", "my collection", "what do my sources say"; when they want an answer cited to something they own; or whenever a question touches a topic they have collected sources on{topics}.
 ---
 
 # haskie: the user's own sources
@@ -106,27 +106,15 @@ Every write takes `session_id`, so the change shows in the conversation's histor
 
 haskie keeps every search, so the collections can grow where they fall short.
 
-- **`list_searches(session_id?, days?, limit?)`** → the searches of the last `days` days (7 by
-  default), newest first, at most `limit` (50, at most 200). Each has its `questions`, each with
-  `best_similarity`, `best_rerank` and `uncovered`, and its `results` cited by `header` and
-  `location`. A failed search has an `error`. Use it to recall what this conversation already
+- **`list_searches(session_id?, days?, limit?)`**: to recall what this conversation already
   searched.
-- **`list_gaps(review?, days?, signals?)`** → the questions no collection answers, grouped by
-  topic, the most asked first. Each question has a `signal` (`reported`, `empty`, `uncovered` or
-  `weak`), its `id`, and `near_misses`: what came closest. `borderline` (maybe answered: the best
-  match sits between the bars) is left out unless `signals` names it. Tell the user which topics
-  keep coming back; they are what to add next.
-- **`replay_gaps(ids)`** → each gap question asked again over every collection, at most 50:
-  `signal` null means it is answered now, and `results` cites where. Nothing is logged.
-- **`report_gap(session_id, question, verdict, missing?)`** → the question's `id` and `verdict`.
-  Call it when the excerpts of a search you just ran do not let a careful reader answer the
-  question from them alone (`insufficient`), or answer only part (`partial`). `question` is the
-  question as you passed it, in this session, in the last hour. `missing` is what they lacked, at
-  most 300 characters. The question's signal is then `reported`, whatever its scores say. Not for a
-  question answered in other words.
-- **`review_gaps(ids, review)`** → how many questions it reached. `resolved` after a document now
-  answers them, `dismissed` when the collections are not meant to, `open` to take it back. Resolve
-  a gap only after `replay_gaps` shows it answered.
+- **`list_gaps(review?, days?, signals?)`**: when the user asks what the collections lack. Tell
+  them which topics keep coming back; they are what to add next.
+- **`replay_gaps(ids)`**: to check whether the collections answer a gap now.
+- **`report_gap(session_id, question, verdict, missing?)`**: right after a search whose excerpts
+  do not answer the question, or answer only part of it.
+- **`review_gaps(ids, review)`**: to resolve a gap once `replay_gaps` shows it answered, or to
+  dismiss one the collections are not meant to answer.
 
 ## Errors
 
@@ -135,8 +123,10 @@ A failed call is a tool error with a status code and a message that names the pr
 - **503**: an embedding or reranker model is still downloading or warming. Wait and retry. If the
   message says the model failed to load, retrying will not help: tell the user.
 - **404**: no such collection or document, including a name in `collections`, or a document that
-  is not in the collection. Check the name with `list_collections` or `list_documents`.
-- **409**: the document name is taken, or the document is not `imported` yet.
+  is not in the collection. Check the name with `list_collections` or `list_documents`. From
+  `report_gap`: no search in this session asked that question, word for word, in the last hour.
+- **409**: the document name is taken, or the document is not `imported` yet. From `report_gap`:
+  that search failed, so there is nothing to judge.
 - **422**: a bad argument. For example: `limit` out of range or below the number of parts, no
   parts or more than 5, a question over 500 characters, a `context` over 200 characters, a page
   size over 1000, an unknown `status` or `sort`, a `path` that is relative or missing, or a file

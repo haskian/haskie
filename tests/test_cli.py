@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import signal
 import sqlite3
 import stat
@@ -29,7 +30,7 @@ from haskie import APP_VERSION, claude, db, home
 from haskie import cli as cli_module
 from haskie.claude import Scope
 from haskie.cli import cli
-from haskie.collection.collection import Collection
+from haskie.collection.collection import Collection, CollectionSummary, DocumentCounts
 from haskie.errors import Conflict, InvalidInput
 
 runner = CliRunner()
@@ -795,6 +796,13 @@ INSTALL_CASES = {
         expect_in_skill=["adr: Architecture decisions"],
         expect_in_output="registered the haskie MCP server",
     ),
+    "trailing punctuation gives way to the separator": InstallCase(
+        scope=Scope.PROJECT,
+        claude_on_path=True,
+        collections=[("Software-Architecture", "DDD, event-driven,")],
+        expect_in_skill=["Software-Architecture: DDD, event-driven."],
+        expect_in_output="registered the haskie MCP server",
+    ),
     "an empty home still installs": InstallCase(
         scope=Scope.PROJECT,
         claude_on_path=True,
@@ -888,6 +896,46 @@ def test_install_claude_leaves_stdin_to_the_script_that_runs_it(
     assert result.exit_code == 0, _text(result)
     assert "session id is" not in _text(result), "stdin was not read as a hook payload"
     assert served == [(claude.MCP_URL, True)], "brings the server up and waits for it"
+
+
+SKILL_DESCRIPTION_CAP = 1536  # where Claude Code cuts a skill description in its listing
+
+
+def test_a_long_trigger_line_keeps_the_fixed_triggers() -> None:
+    """Claude Code cuts the description at its cap, so the collections go last: a home with many
+    described collections loses its last topics, never "my documents"."""
+    essay = "Every book and paper on roasting, brewing and tasting coffee, " * 4
+    collections = [
+        CollectionSummary(
+            name=f"shelf-{n}", counts=DocumentCounts(), created_at=0.0, description=essay
+        )
+        for n in range(20)
+    ]
+
+    skill = claude.render_skill(collections)
+
+    description = skill.split("description: >-\n", 1)[1].split("\n---\n", 1)[0]
+    assert len(description) > SKILL_DESCRIPTION_CAP, "long enough to be cut"
+    assert '"my documents"' in description[:SKILL_DESCRIPTION_CAP]
+    assert "cited to something they own" in description[:SKILL_DESCRIPTION_CAP]
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://127.0.0.1:8451/mcp", "http://127.0.0.1:8451/mcp?a=1&b=2", "http://host/my mcp"],
+    ids=["a plain url", "a url with a shell operator", "a url with a space"],
+)
+def test_a_url_stays_one_argument(url: str, claude_workspace: Path, tmp_path: Path) -> None:
+    """The hook and the by-hand line are both run by a shell, so a URL that holds `&` or a space
+    must reach haskie and `claude` as one argument, not split into a second command."""
+    home_dir = tmp_path / "my home"
+
+    hooked = shlex.split(claude.hook_command(home_dir, url))
+    manual = claude.register_mcp(url, Scope.PROJECT)  # no `claude` on the workspace's PATH
+
+    assert hooked[-6:] == ["ensure", "--home", str(home_dir), "--url", url, "--no-wait"]
+    assert manual is not None
+    assert shlex.split(manual)[-2:] == ["haskie", url]
 
 
 @dataclass
@@ -1001,18 +1049,40 @@ def test_install_hook(case: HookCase, claude_workspace: Path, tmp_path: Path) ->
         assert settings[case.keeps] == "opus", "an unrelated setting survives"
 
 
-def test_install_hook_refuses_a_settings_file_it_cannot_parse(
-    claude_workspace: Path, tmp_path: Path
+UNREADABLE_SETTINGS = {
+    "not JSON": ("{not json", "is not valid JSON"),
+    "not UTF-8": ('{"model": "\xff"}', "is not valid JSON"),
+    "not an object": ("[]", "hooks.SessionStart"),
+    "hooks is null": ('{"hooks": null}', "hooks.SessionStart"),
+    "SessionStart is an object": ('{"hooks": {"SessionStart": {}}}', "hooks.SessionStart"),
+    "a matcher is not an object": ('{"hooks": {"SessionStart": ["mine"]}}', "hooks.SessionStart"),
+    "a matcher's hooks is not a list": (
+        '{"hooks": {"SessionStart": [{"hooks": "mine"}]}}',
+        "hooks.SessionStart",
+    ),
+    "a hook is not an object": (
+        '{"hooks": {"SessionStart": [{"hooks": ["mine"]}]}}',
+        "hooks.SessionStart",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("before", "expect_error"), UNREADABLE_SETTINGS.values(), ids=list(UNREADABLE_SETTINGS)
+)
+def test_install_hook_refuses_a_settings_file_it_cannot_follow(
+    before: str, expect_error: str, claude_workspace: Path, tmp_path: Path
 ) -> None:
-    """Rewriting a file we could not read would throw the user's settings away."""
+    """Rewriting a file we could not read would throw the user's settings away, and every failure
+    here must be a `HaskieError`, never a bare `AttributeError`."""
     settings_file = claude.settings_path(Scope.PROJECT)
     settings_file.parent.mkdir(parents=True)
-    settings_file.write_text("{not json")
+    settings_file.write_bytes(before.encode("latin-1"))
 
-    with pytest.raises(InvalidInput, match="not valid JSON"):
+    with pytest.raises(InvalidInput, match=expect_error):
         claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8451/mcp")
 
-    assert settings_file.read_text() == "{not json", "left exactly as it was"
+    assert settings_file.read_bytes() == before.encode("latin-1"), "left exactly as it was"
 
 
 @dataclass
@@ -1123,3 +1193,26 @@ def test_haskie_port_moves_the_default_url(port: str | None, expected: str) -> N
         check=True,
     ).stdout.strip()
     assert printed == expected
+
+
+@pytest.mark.parametrize(
+    ("config_dir", "expected"),
+    [(None, "home/.claude"), ("", "home/.claude"), ("~/work-claude", "home/work-claude")],
+    ids=["unset: ~/.claude", "empty: ~/.claude", "CLAUDE_CONFIG_DIR: where Claude Code moved it"],
+)
+def test_claude_config_dir_moves_the_user_scope(
+    config_dir: str | None, expected: str, tmp_path: Path
+) -> None:
+    """Read once at import, so only a fresh interpreter shows it."""
+    env = {key: value for key, value in os.environ.items() if key != "CLAUDE_CONFIG_DIR"}
+    env["HOME"] = str(tmp_path / "home")
+    if config_dir is not None:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    printed = subprocess.run(
+        [sys.executable, "-c", "from haskie import claude; print(claude.USER_CLAUDE)"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert printed == str(tmp_path / expected)

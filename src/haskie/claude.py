@@ -17,6 +17,7 @@ system prompt of every session, which is how Context7 gets consulted "even when 
 the answer". The rule says *when*; the skill says *how*.
 """
 
+import json
 import os
 import shlex
 import shutil
@@ -42,7 +43,9 @@ class Scope(StrEnum):  # where Claude Code keeps a setting: this user, or this p
 
 
 SKILL_NAME = "haskie"
-USER_CLAUDE = Path.home() / ".claude"
+# Claude Code moves every `~/.claude` path under `CLAUDE_CONFIG_DIR` when it is set, so the skill,
+# rule and hook must follow it or land where it never reads them.
+USER_CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
 # The skill and the rule are markdown, laid out under `claude_code/` exactly as they land under
 # `.claude/`, with `{topics}` and `{announcement}` for what only install time knows.
 TEMPLATES = files("haskie") / "claude_code"
@@ -112,7 +115,7 @@ def _topics(collections: "list[CollectionSummary]") -> str:
         # because trailing punctuation would collide with the separator: "…defects.; adr".
         summary = textwrap.shorten(
             collection.description, DESCRIPTION_BUDGET, placeholder="…"
-        ).rstrip(" .;")
+        ).rstrip(" .,;:")
         described.append(f"{collection.name}: {summary}" if summary else collection.name)
     return " — currently " + "; ".join(described)
 
@@ -183,7 +186,7 @@ def register_mcp(url: str, scope: Scope) -> str | None:
     arguments = ["mcp", "add", "-s", scope, "--transport", "http", SKILL_NAME, url]
     claude_cli = shutil.which("claude")
     if claude_cli is None:
-        return "claude " + " ".join(arguments)
+        return shlex.join(["claude", *arguments])
     # Remove first, so re-running updates the entry instead of failing on the name. No entry is
     # the normal case, so that failure is the expected one.
     subprocess.run(
@@ -197,8 +200,9 @@ def register_mcp(url: str, scope: Scope) -> str | None:
 
 def hook_command(home_dir: Path, url: str) -> str:
     """The SessionStart command, as one shell string: that is the shape Claude Code runs."""
-    invocation = " ".join(shlex.quote(part) for part in own_command())
-    return f"{invocation} ensure --home {shlex.quote(str(home_dir))} --url {url} --no-wait"
+    return shlex.join(
+        [*own_command(), "ensure", "--home", str(home_dir), "--url", url, "--no-wait"]
+    )
 
 
 def install_hook(scope: Scope, home_dir: Path, url: str) -> bool:
@@ -211,17 +215,15 @@ def install_hook(scope: Scope, home_dir: Path, url: str) -> bool:
     Returns whether this call added the hook. Reads and rewrites the file as a whole, so an
     existing settings file keeps everything else in it.
     """
-    import msgspec  # only this writes a settings file; `cli` imports this module on every run
-
     settings_file = settings_path(scope)
     command = hook_command(home_dir, url)
-    settings: dict[str, Any] = {}
+    settings: Any = {}
     if settings_file.is_file():
         try:
-            settings = msgspec.json.decode(settings_file.read_bytes(), type=dict[str, Any])
-        except msgspec.DecodeError as exc:
+            settings = json.loads(settings_file.read_bytes())
+        except ValueError as exc:
             raise InvalidInput(f"{settings_file} is not valid JSON: {exc}") from None
-    matchers = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
+    matchers = _session_start(settings, settings_file)
     # Matched on the shape of the command, not on the path `haskie` happens to have today: an
     # upgrade that moves the executable must still replace the hook rather than stack a copy.
     ours = [
@@ -236,8 +238,26 @@ def install_hook(scope: Scope, home_dir: Path, url: str) -> bool:
         matchers.append(
             {"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_SECONDS}]}
         )
-    _write(settings_file, msgspec.json.format(msgspec.json.encode(settings)).decode() + "\n")
+    _write(settings_file, json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
     return not ours
+
+
+def _session_start(settings: Any, settings_file: Path) -> list[dict[str, Any]]:
+    """The SessionStart matchers of a settings file, made when missing.
+
+    Refuses a file shaped otherwise, such as `{"hooks": null}`, rather than guess where the hook
+    goes in it: rewriting a file we could not follow would throw the user's settings away.
+    """
+    hooks = settings.setdefault("hooks", {}) if isinstance(settings, dict) else None
+    matchers = hooks.setdefault("SessionStart", []) if isinstance(hooks, dict) else None
+    if not isinstance(matchers, list) or not all(
+        isinstance(matcher, dict)
+        and isinstance(matcher.get("hooks", []), list)
+        and all(isinstance(hook, dict) for hook in matcher.get("hooks", []))
+        for matcher in matchers
+    ):
+        raise InvalidInput(f"{settings_file} does not hold `hooks.SessionStart` as a list of hooks")
+    return matchers
 
 
 async def read_collections() -> "list[CollectionSummary]":

@@ -166,7 +166,8 @@ chunks over time. **Settings** describes every default.
 | SessionStart hook | `~/.claude/settings.json` | runs `haskie ensure`: starts the server if it is down, and passes the session id so Sessions can record it |
 
 Run it again after adding a collection, to refresh the names. `--scope project` installs into
-`./.claude` of the directory you run it from. The hook does not wait for the server, so a session
+`./.claude` of the directory you run it from. With `CLAUDE_CONFIG_DIR` set, the user scope
+installs there instead of `~/.claude`, as Claude Code reads it. The hook does not wait for the server, so a session
 that starts while nothing is serving, such as the first after a reboot, has no haskie tools. Keep
 `haskie run` open if that session matters.
 
