@@ -82,7 +82,9 @@ so they do not leak those paths.
 
 Most listings use keyset paging. The opaque cursor carries the sort key of the last row, so a row
 added between two pages never shifts the next one. Pass `next_cursor` back as `cursor`. It is null
-on the last page. Full-text search and the operation history use an offset cursor instead: a BM25
+on the last page. The cursor carries the sort and order it was built for, so a later page needs
+neither. An omitted `sort` or `order` is read from the cursor. One passed that differs from the
+cursor's answers 422. Full-text search and the operation history use an offset cursor instead: a BM25
 query cannot filter by score, and DBOS history pages by offset.
 
 Code: `api/`, `errors.py`, `paging.py`.

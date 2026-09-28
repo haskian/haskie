@@ -77,14 +77,27 @@ def page_request(
     cursor: str | None = None,
     page_size: int = DEFAULT_PAGE_SIZE,
     sort: str | None = None,
-    order: Annotated[Order, one_of(Order)] = Order.ASC,
+    order: Annotated[Order | None, one_of(Order)] = None,
 ) -> PageRequest:
     """The one place handler query arguments become a validated request.
 
     Registered as a Litestar dependency (`api.common.PAGED`), so these four parameters are what a
     paged listing takes on the wire; a handler asks for the `PageRequest` they produce.
+
+    A cursor was built for one sort and order, so a caller passing `next_cursor` back as `cursor`
+    need not repeat them: an omitted one is read from the cursor. One passed that contradicts the
+    cursor is still refused, where the listing decodes it (`decode_cursor`).
     """
-    return PageRequest(cursor=cursor, page_size=page_size, sort=sort, order=order)
+    if cursor is not None:
+        issued = _read_cursor(cursor)
+        sort = sort or issued.s  # an empty sort is an omitted one, as `resolve_sort` reads it
+        order = order if order is not None else issued.o
+    return PageRequest(
+        cursor=cursor,
+        page_size=page_size,
+        sort=sort,
+        order=order if order is not None else Order.ASC,
+    )
 
 
 def encode_cursor(key: list[Any], sort: str, order: Order) -> str:
@@ -92,15 +105,19 @@ def encode_cursor(key: list[Any], sort: str, order: Order) -> str:
     return urlsafe_b64encode(raw).decode().rstrip("=")  # padding is noise in a URL
 
 
-def decode_cursor(cursor: str, sort: str, order: Order, width: int) -> list[Any]:
-    """The sort key inside `cursor`, rejected unless it was built for this sort, order, version
-    and keyset width: a cursor from another listing would compare the wrong columns."""
+def _read_cursor(cursor: str) -> _Cursor:
     padded = cursor + "=" * (-len(cursor) % 4)
     try:
         # binascii.Error (bad base64) and UnicodeDecodeError are both ValueError
-        decoded = msgspec.json.decode(urlsafe_b64decode(padded), type=_Cursor)
+        return msgspec.json.decode(urlsafe_b64decode(padded), type=_Cursor)
     except (msgspec.DecodeError, ValueError) as exc:
         raise InvalidInput("invalid cursor") from exc
+
+
+def decode_cursor(cursor: str, sort: str, order: Order, width: int) -> list[Any]:
+    """The sort key inside `cursor`, rejected unless it was built for this sort, order, version
+    and keyset width: a cursor from another listing would compare the wrong columns."""
+    decoded = _read_cursor(cursor)
     if (
         decoded.s != sort
         or decoded.o != order

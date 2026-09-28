@@ -156,6 +156,51 @@ def test_page_request_accepts_page_size(name: str, page_size: int | None, expect
     assert (request.cursor, request.sort, request.order) == (None, None, "asc"), "defaults"
 
 
+SIZE_DESC = encode_cursor([30, "doc-02"], "size", Order.DESC)
+
+
+@pytest.mark.parametrize(
+    ("name", "cursor", "sort", "order", "expected"),
+    [
+        ("no cursor: nothing to read, ascending", None, None, None, (None, Order.ASC)),
+        ("no cursor: what was passed", None, "size", Order.DESC, ("size", Order.DESC)),
+        ("cursor alone: its sort and order", SIZE_DESC, None, None, ("size", Order.DESC)),
+        ("an empty sort is an omitted one", SIZE_DESC, "", None, ("size", Order.DESC)),
+        ("order omitted: the cursor's", SIZE_DESC, "size", None, ("size", Order.DESC)),
+        ("sort omitted: the cursor's", SIZE_DESC, None, Order.DESC, ("size", Order.DESC)),
+        # kept as passed, so `decode_cursor` refuses the contradiction (next test)
+        ("a contradicting sort stays", SIZE_DESC, "name", None, ("name", Order.DESC)),
+        ("a contradicting order stays", SIZE_DESC, None, Order.ASC, ("size", Order.ASC)),
+    ],
+)
+def test_page_request_reads_an_omitted_sort_and_order_from_the_cursor(
+    name: str,
+    cursor: str | None,
+    sort: str | None,
+    order: Order | None,
+    expected: tuple[str | None, Order],
+) -> None:
+    request = page_request(cursor=cursor, sort=sort, order=order)
+    assert (request.sort, request.order) == expected, name
+
+
+@pytest.mark.parametrize(
+    ("name", "sort", "order"),
+    [("another sort", "name", None), ("the other order", None, Order.ASC)],
+)
+def test_a_cursor_contradicting_a_passed_sort_or_order_is_refused(
+    name: str, sort: str | None, order: Order | None
+) -> None:
+    request = page_request(cursor=SIZE_DESC, sort=sort, order=order)
+    with pytest.raises(InvalidInput, match="cursor does not match sort/order"):
+        _keyset(request.sort or "name", request)
+
+
+def test_page_request_refuses_a_cursor_it_cannot_read() -> None:
+    with pytest.raises(InvalidInput, match="invalid cursor"):
+        page_request(cursor="!!!!")
+
+
 # --- sort whitelist ---------------------------------------------------------------
 
 

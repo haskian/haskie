@@ -144,6 +144,35 @@ async def test_documents_sort_by_size_desc_with_ties(
     assert walked == sorted(walked, reverse=True), "sizes never rise again inside the walk"
 
 
+@pytest.mark.parametrize(
+    ("name", "repeated"),
+    [
+        ("sort and order omitted: both come from the cursor", {}),
+        ("order omitted: it comes from the cursor", {"sort": "size"}),
+        ("sort omitted: it comes from the cursor", {"order": "desc"}),
+        ("both repeated as the cursor was built", {"sort": "size", "order": "desc"}),
+    ],
+)
+async def test_next_cursor_alone_continues_the_sort_it_was_built_for(
+    api_client: AsyncTestClient, sources: Path, name: str, repeated: dict[str, str]
+) -> None:
+    """The docs say to pass `next_cursor` back as `cursor`; that must be enough for page two of a
+    sort that is not the default, whatever the caller repeats of the first request."""
+    sizes = {f"doc-{i}.md": SIZES[i % len(SIZES)] for i in range(9)}
+    for document_name, size in sizes.items():
+        await _import(sources, document_name, b"x" * size)
+    first = await get_page(api_client, "/api/documents", page_size=4, sort="size", order="desc")
+
+    names = [item["name"] for item in first["items"]]
+    cursor = first["next_cursor"]
+    while cursor is not None:
+        page = await get_page(api_client, "/api/documents", page_size=4, cursor=cursor, **repeated)
+        names.extend(item["name"] for item in page["items"])
+        cursor = page["next_cursor"]
+
+    assert names == sorted(sizes, key=lambda n: (sizes[n], n), reverse=True), name
+
+
 async def test_documents_status_filter_and_total(
     api_client: AsyncTestClient, sources: Path
 ) -> None:
@@ -342,6 +371,12 @@ async def test_the_paging_arguments_are_inputs_of_the_listing_mcp_tools(
             "cursor read in the other direction",
             "/api/collections",
             {"cursor": "_COLLECTION_CURSOR_", "order": "desc"},
+            "cursor does not match sort/order",
+        ),
+        (
+            "cursor read by another sort of its own listing",
+            "/api/collections",
+            {"cursor": "_COLLECTION_CURSOR_", "sort": "created_at"},
             "cursor does not match sort/order",
         ),
         ("unknown collection sort", "/api/collections", {"sort": "bogus"}, "unknown sort 'bogus'"),
