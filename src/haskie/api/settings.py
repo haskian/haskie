@@ -25,6 +25,7 @@ from haskie.settings import (
     SearchSettings,
     UserSettings,
     docs,
+    first_run_search,
     init_user_settings,
     load_user_settings,
     load_user_settings_or_none,
@@ -46,7 +47,7 @@ class Init(msgspec.Struct):
     its default and is changed in the settings later."""
 
     profile: str  # a key of `Options.embedding_profiles`
-    search: SearchSettings = msgspec.field(default_factory=SearchSettings)
+    search: SearchSettings = msgspec.field(default_factory=first_run_search)
 
 
 class Options(msgspec.Struct):
@@ -121,7 +122,8 @@ async def post_init(data: Init) -> UserSettings:
 
 @get("/api/settings")
 async def get_settings() -> UserSettings:
-    return await load_user_settings()
+    """The stored settings; before the first run, the ones it starts from."""
+    return await load_user_settings_or_none() or UserSettings(search=first_run_search())
 
 
 @put("/api/settings")

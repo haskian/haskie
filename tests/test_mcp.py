@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import attach_via_api, stage_and_import, wait_for, wait_import
+from conftest import NO_MODELS, attach_via_api, stage_and_import, wait_for, wait_import
 from litestar.testing import AsyncTestClient
 
 from haskie.app import MCP_PATH
@@ -85,7 +85,7 @@ async def _call(client: AsyncTestClient, name: str, arguments: dict) -> tuple[bo
 async def library(client: AsyncTestClient) -> AsyncTestClient:
     """An initialized full-text app with one collection holding two indexed notes, the state an
     agent finds on a first call."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     for name, body in (("retries.md", RETRIES), ("ordering.md", ORDERING)):
         await stage_and_import(client, name, body.encode())

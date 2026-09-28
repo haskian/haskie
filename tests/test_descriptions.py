@@ -14,7 +14,7 @@ from litestar.testing import AsyncTestClient
 from haskie import app as app_module
 from haskie.document import document
 
-from conftest import attach_via_api, stage_and_import, wait_import  # isort: skip
+from conftest import NO_MODELS, attach_via_api, stage_and_import, wait_import  # isort: skip
 
 pytestmark = pytest.mark.anyio
 
@@ -34,7 +34,7 @@ async def client(
     """The lifespan runs here, so DBOS is started and stopped by the app itself."""
     monkeypatch.setattr(app_module, "WEB_DIST", tmp_path / "no-web-build")
     async with AsyncTestClient(app_module.create_app()) as client:
-        await client.post("/api/init", json={"profile": "none"})
+        await client.post("/api/init", json=NO_MODELS)
         yield client
 
 

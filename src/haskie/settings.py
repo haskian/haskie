@@ -543,6 +543,13 @@ class SearchSettings(msgspec.Struct):
         _check_search(self)
 
 
+def first_run_search() -> SearchSettings:
+    """What a first run starts from: a cross-encoder reranks, since it orders results better than
+    retrieval alone. `SearchSettings()` itself keeps none, so settings nobody picked (before the
+    first run, or a stored row that no longer decodes) need no model at all."""
+    return SearchSettings(reranker=Reranker.CROSS_ENCODER)
+
+
 class SearchOverrides(msgspec.Struct):
     """Per-collection search overrides. None means "use user default"."""
 

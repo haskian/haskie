@@ -47,6 +47,7 @@ from haskie.settings import (
 )
 
 from conftest import (  # isort: skip
+    NO_MODELS,
     api_app,
     attach_via_api,
     audit_lines,
@@ -78,7 +79,7 @@ async def ready(client: AsyncTestClient, tmp_path: Path) -> AsyncTestClient:
     costs no pipeline run; what the error table needs is the shape of the data, not how it got
     there.
     """
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     source = tmp_path / "guide.md"
     source.write_text(MD)
@@ -618,12 +619,12 @@ async def test_a_write_naming_a_model_the_catalogue_lacks_stores_nothing(
     ("name", "body", "expected"),
     [
         (
-            "the profile alone: hybrid search, no reranker",
+            "the profile alone: hybrid search, reranked by the smallest cross-encoder",
             {"profile": "none"},
-            ("hybrid", "none", "Xenova/ms-marco-MiniLM-L-6-v2"),
+            ("hybrid", "cross-encoder", "Xenova/ms-marco-MiniLM-L-6-v2"),
         ),
         (
-            "the search picked with it is stored with it",
+            "the search picked with it is stored as given, what it leaves out as no reranker",
             {
                 "profile": "none",
                 "search": {"mode": "fts", "reranker_model": "BAAI/bge-reranker-base"},
@@ -642,6 +643,22 @@ async def test_init_stores_the_search_it_was_given(
     assert (search["mode"], search["reranker"], search["reranker_model"]) == expected, name
 
 
+async def test_the_first_run_starts_from_a_cross_encoder_and_then_reads_what_was_picked(
+    client: AsyncTestClient,
+) -> None:
+    """Before the first run, the settings are the ones it starts from, which the first-run page
+    shows: a cross-encoder reranks. After it, they are what was picked."""
+    before = (await client.get("/api/settings")).json()["search"]
+    await client.post("/api/init", json=NO_MODELS)
+    after = (await client.get("/api/settings")).json()["search"]
+
+    assert (before["reranker"], before["reranker_model"]) == (
+        "cross-encoder",
+        "Xenova/ms-marco-MiniLM-L-6-v2",
+    ), "the smallest cross-encoder, by default"
+    assert after["reranker"] == "none", "the pick, once there is one"
+
+
 # --- the two-call intake --------------------------------------------------------------
 
 
@@ -650,7 +667,7 @@ async def test_staging_commits_nothing_and_import_commits_the_name(
 ) -> None:
     """Upload and import are two calls on purpose: the bytes land first, the name is fixed only
     when the caller says so, and a name already taken is refused with the upload still staged."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
 
     staged = await client.post(
         "/api/documents/staging", files={"data": ("guide.md", MD.encode(), "text/markdown")}
@@ -702,7 +719,7 @@ async def test_staging_commits_nothing_and_import_commits_the_name(
 
 async def test_import_by_path_copies_the_file(client: AsyncTestClient, tmp_path: Path) -> None:
     """The other source: a file already on this machine, imported without an upload."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     source = tmp_path / "paper.md"
     source.write_text(MD)
 
@@ -715,7 +732,7 @@ async def test_import_by_path_copies_the_file(client: AsyncTestClient, tmp_path:
 
 
 async def test_a_failed_import_can_be_re_run(client: AsyncTestClient, tmp_path: Path) -> None:
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     row = await stage_and_import(client, "guide.md", MD.encode())
     await document.set_status(row["name"], DocumentStatus.ERROR, "converter fell over")
 
@@ -735,7 +752,7 @@ async def test_an_upload_names_the_documents_it_repeats(
     """Staging names every document that already holds the same bytes, before anything is
     imported. Once imported, `similar` names them again, and the nearest by document vector
     under the embedding model; full-text only has no vectors to compare."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await stage_and_import(client, "guide.md", MD.encode())
     await stage_and_import(client, "other.md", b"# Other\n\nsomething else entirely\n")
 
@@ -776,7 +793,7 @@ async def test_an_upload_names_the_documents_it_repeats(
 
 
 async def test_attach_list_and_detach_a_member(client: AsyncTestClient) -> None:
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "guide.md", MD.encode())
 
@@ -808,7 +825,7 @@ async def test_attach_list_and_detach_a_member(client: AsyncTestClient) -> None:
 
 async def test_one_document_serves_two_collections(client: AsyncTestClient) -> None:
     """The point of the whole model: a document is imported once and held by many collections."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     for name in ("alpha", "beta"):
         await client.post("/api/collections", json={"name": name})
     await stage_and_import(client, "guide.md", MD.encode())
@@ -832,7 +849,7 @@ async def test_the_operations_listing_names_its_sections_and_its_activity(
 ) -> None:
     """The three collection-free routes answer beside `/api/operations/{id}`: `kinds` and
     `activity` are their own path segments, so neither is read as an operation id."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "guide.md", MD.encode())
     await attach_via_api(client, "notes", "guide.md")
@@ -858,7 +875,7 @@ async def test_the_operations_listing_names_its_sections_and_its_activity(
 
 
 async def test_deleting_a_collection_keeps_its_documents(client: AsyncTestClient) -> None:
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     for name in ("kept", "dropped"):
         await client.post("/api/collections", json={"name": name})
     await stage_and_import(client, "guide.md", MD.encode())
@@ -889,7 +906,7 @@ async def test_renaming_a_collection_moves_everything_that_names_it(
 ) -> None:
     """Members, settings, description, the index and every session that chose it follow the new
     name; the old name is gone."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes", "description": "what I read"})
     await client.put("/api/collections/notes/overrides", json={"search": {"limit": 7}})
     await stage_and_import(client, "guide.md", MD.encode())
@@ -923,7 +940,7 @@ async def test_renaming_a_collection_moves_everything_that_names_it(
 async def test_a_rename_refused_changes_nothing(
     client: AsyncTestClient, name: str, path: str, body: str, status: int, detail: str | None
 ) -> None:
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     for existing in ("notes", "other"):
         await client.post("/api/collections", json={"name": existing})
 
@@ -939,7 +956,7 @@ async def test_a_rename_refused_changes_nothing(
 async def test_deleting_a_document_removes_it_from_every_collection(
     client: AsyncTestClient,
 ) -> None:
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     for name in ("alpha", "beta"):
         await client.post("/api/collections", json={"name": name})
     await stage_and_import(client, "guide.md", MD.encode())
@@ -962,7 +979,7 @@ async def test_deleting_a_document_removes_it_from_every_collection(
 
 async def test_reading_one_document(client: AsyncTestClient) -> None:
     """The viewer panes, which are document-scoped now: no collection appears in any of them."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await stage_and_import(client, "guide.md", MD.encode())
 
     streamed = await client.get("/api/documents/guide.md/markdown?full=true")
@@ -1008,7 +1025,7 @@ async def test_reading_lines_of_one_document(
     client: AsyncTestClient, name: str, params: dict, status: int, text: str | None
 ) -> None:
     """What the web UI reads when an `also_in` place is opened: its lines, and no more."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await stage_and_import(client, "guide.md", MD.encode())
 
     response = await client.get("/api/documents/guide.md/lines", params=params)
@@ -1019,7 +1036,7 @@ async def test_reading_lines_of_one_document(
 
 
 async def test_reading_lines_of_a_document_nobody_imported(client: AsyncTestClient) -> None:
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
 
     response = await client.get(
         "/api/documents/ghost.md/lines", params={"line_start": 1, "line_end": 2}
@@ -1039,7 +1056,7 @@ def _explore(session_id: str, q: str, granularity: str = "chunk") -> dict[str, s
 async def test_session_search_returns_each_passage_once(client: AsyncTestClient) -> None:
     """A document in two collections of one session is two copies of the same chunk. A caller
     searching passages wants it once, credited to the first collection it chose."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     for name in ("alpha", "beta"):
         await client.post("/api/collections", json={"name": name})
     await stage_and_import(client, "shared.md", b"# Shared\n\nshared token about lancedb\n")
@@ -1147,7 +1164,7 @@ async def test_session_history_holds_every_action_newest_first(
 async def test_session_search_survives_the_deletion_of_a_collection(
     client: AsyncTestClient,
 ) -> None:
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     for name in ("kept", "dropped"):
         await client.post("/api/collections", json={"name": name})
         await stage_and_import(client, f"{name}.md", f"# {name}\n\nshared {name}\n".encode())
@@ -1229,7 +1246,7 @@ async def _member(collection: str, doc: str) -> None:
 async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
     """One collection holding `guide.md` as two consecutive chunks that overlap each other, plus
     a third chunk of the section below that the query never matches."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "guide.md", PASSAGE_MD.encode())
     markdown = await _markdown_of("guide.md")
@@ -1293,7 +1310,7 @@ async def test_a_search_answers_with_the_time_each_step_took(
     """`Server-Timing`, the W3C header browsers show beside a request: one entry per step, in the
     order the steps ran, each with how long it took and what it is. A step of one of several runs
     side by side names its branch; the branches finish interleaved, so each is in order alone."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "guide.md", MD.encode())
     await attach_via_api(client, "notes", "guide.md")
@@ -1336,7 +1353,7 @@ async def test_a_search_answers_with_its_score_lineage(
 ) -> None:
     """`X-Score-Lineage`: each step that set or changed a score, in the order it ran, and how.
     JSON, percent-encoded, because the formulas are not Latin-1."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "guide.md", MD.encode())
     await attach_via_api(client, "notes", "guide.md")
@@ -1438,7 +1455,7 @@ async def test_the_passages_of_one_section_come_back_as_one_excerpt(
 ) -> None:
     """Two passages of one section are two results as passages, and one excerpt: the section,
     with `[…]` where the paragraph between them did not match. The other section is the other."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "sections.md", SECTIONS_MD.encode())
     await _member("notes", "sections.md")
@@ -1477,7 +1494,7 @@ async def test_the_text_between_and_around_kept_passages_is_filled_when_it_answe
     """One excerpt asked for scans four chunks, so the ranking keeps four of the six paragraphs.
     The two it left out match the question as well as those it kept, so the excerpt reads the
     whole section, one passage with no `[…]`, while the passage granularity stays the ranking's."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "fill.md", FILL_MD.encode())
     await _member("notes", "fill.md")
@@ -1520,7 +1537,7 @@ async def test_a_word_no_excerpt_holds_is_searched_for_once_more(
     is not in it.
     The probe searches that word alone, and its best passage joins as one excerpt past the limit;
     the answer then lacks no word of the question."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "shop"})
     for name, body in (("orders.md", ORDERS_MD), ("stock.md", STOCK_MD)):
         await stage_and_import(client, name, body.encode())
@@ -1547,7 +1564,7 @@ async def test_the_probed_excerpt_comes_past_the_budget_the_sections_were_cut_to
 ) -> None:
     """Two order sections rank, the budget keeps one of them, and "inventory" is in neither: the
     probe's passage still joins, past the budget, since the cut came before it."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "shop"})
     for name, body in (("orders.md", ORDERS_MD), ("stock.md", STOCK_MD)):
         await stage_and_import(client, name, body.encode())
@@ -1596,7 +1613,7 @@ THIN_MD = (
 async def _guide_with_a_lead_in(client: AsyncTestClient) -> list[Chunk]:
     """`thin.md` in `notes`, cut by the real chunker: the storage section, the lead-in right after
     its heading, and the table under the lead-in."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "thin.md", THIN_MD.encode())
     await _member("notes", "thin.md")
@@ -1655,7 +1672,7 @@ BY_EVENT = "Which domain events carry each change?"
 
 
 async def _notes_on_aggregates(client: AsyncTestClient) -> None:
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "ddd"})
     for name, body in (
         ("references.md", REFERENCES),
@@ -1740,7 +1757,7 @@ async def test_a_question_nothing_answers_is_named_with_the_words_it_used(
 async def test_the_answer_budget_cuts_the_last_sections(client: AsyncTestClient, caplog) -> None:
     """A collection whose answers may hold 100 characters: the best section stays, however long,
     and the next one is cut, which the search logs."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "sections.md", SECTIONS_MD.encode())
     await _member("notes", "sections.md")
@@ -1896,7 +1913,7 @@ async def test_the_mcp_tool_takes_one_question_or_several(api_client: AsyncTestC
 async def _two_collections_sharing_a_document(client: AsyncTestClient) -> str:
     """`shared.md` in both collections and `beta-only.md` in one: two documents that only `beta`
     covers on its own. Returns the markdown of the shared document."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     for name in ("alpha", "beta"):
         await client.post("/api/collections", json={"name": name})
     await stage_and_import(client, "shared.md", PASSAGE_MD.encode())
@@ -1961,7 +1978,7 @@ async def test_sources_bound_their_limit_and_their_sections(client: AsyncTestCli
 
 async def _scoped_collections(client: AsyncTestClient) -> None:
     """One document per collection and a session that selected only `alpha`."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     for name in ("alpha", "beta"):
         await client.post("/api/collections", json={"name": name})
         await stage_and_import(client, f"{name}.md", f"# {name}\n\nshared {name}\n".encode())
@@ -2032,7 +2049,7 @@ async def test_the_mcp_surface_offers_one_search_per_question(api_client: AsyncT
 async def test_a_growth_bias_at_either_end_is_saved_and_searched_with(
     client: AsyncTestClient, bias: float
 ) -> None:
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
 
     body = {"search": {"grow_bias": bias}}
@@ -2063,7 +2080,7 @@ async def test_a_refused_search_override_is_never_saved(
 ) -> None:
     """Refused as it is read, before anything is written: a value no search can run with would
     otherwise be stored, and every later read of the collection would fail on it."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await client.put("/api/collections/notes/overrides", json={"search": {"limit": 3}})
 
@@ -2084,7 +2101,7 @@ async def test_the_original_opens_under_its_own_name_and_media_type(
 ) -> None:
     """The UI's "Open original" opens this URL in a new tab: a PDF has to arrive as a PDF,
     named for the document, or the browser downloads a nameless file instead of showing it."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await stage_and_import(client, "paper.pdf", text_pdf(["Facility location covers the pool"]))
 
     source = await client.get("/api/documents/paper.pdf/source")
@@ -2099,7 +2116,7 @@ async def test_the_original_opens_under_its_own_name_and_media_type(
 
 
 async def test_every_audited_route_appends_one_record(client: AsyncTestClient) -> None:
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.put("/api/settings", json={"search": {"limit": 7}})
     await client.post("/api/collections", json={"name": "notes"})
     await client.put("/api/collections/notes/overrides", json={"chunk_size": 400})
@@ -2202,7 +2219,7 @@ async def test_an_import_records_the_file_name_but_never_the_path(
     source = tmp_path / "private" / "salary.md"
     source.parent.mkdir()
     source.write_text(MD)
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
 
     assert (
         await client.post("/api/documents/import", json={"path": str(source)})
@@ -2412,7 +2429,7 @@ async def _text_collections(client: AsyncTestClient, *names: str) -> None:
     The term is repeated once more per document, so no two chunks of one collection score the same
     and the ranking a page cuts is the same ranking every time it is recomputed.
     """
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     for name in names:
         await client.post("/api/collections", json={"name": name})
         for i in range(TEXT_DOCS):
@@ -2473,7 +2490,7 @@ async def test_text_search_spans_all_collections_by_default(client: AsyncTestCli
 async def test_text_search_returns_a_shared_document_once(client: AsyncTestClient) -> None:
     """One document in two collections holds the same chunk in both tables; the merge keeps it
     once, so a page is a page of passages rather than of memberships."""
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     for name in ("alpha", "beta"):
         await client.post("/api/collections", json={"name": name})
     await stage_and_import(client, "shared.md", b"# Shared\n\nhaskell everywhere\n")
@@ -2579,7 +2596,7 @@ async def test_text_search_answers_an_empty_page_past_the_last_hit(
 async def test_text_search_validates_page_size_and_cursor(
     client: AsyncTestClient, name: str, params: dict, status: int, detail: str
 ) -> None:
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     for collection in ("alpha", "beta"):  # the collections the cursors above were issued for
         await client.post("/api/collections", json={"name": collection})
 
@@ -2609,7 +2626,7 @@ async def test_search_trend_lists_every_recent_search_oldest_first(ready: AsyncT
 async def test_chunk_trend_lists_imports_and_indexes_and_bounds_its_window(
     client: AsyncTestClient,
 ) -> None:
-    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "guide.md", MD.encode())
     await attach_via_api(client, "notes", "guide.md")
