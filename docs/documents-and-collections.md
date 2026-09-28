@@ -66,8 +66,9 @@ stateDiagram-v2
 ```
 
 Any failure lands in `error`: a parser error, an OCR policy failure, or retries run out. A
-re-import runs from `queued`, `error` or `cancelled`. A delete is accepted in any state. The
-original suffix is kept in the name, because it decides the route:
+re-import runs from `queued`, `error` or `cancelled`, with the `parser` and `skip_ocr_pages` the
+document was imported with: to change either, delete it and import it again. A delete is accepted
+in any state. The original suffix is kept in the name, because it decides the route:
 
 - PDFs convert page by page with pdf-inspector.
 - Text and HTML files are read as they are.

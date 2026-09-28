@@ -26,7 +26,7 @@ import hashlib
 import re
 import shutil
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
@@ -43,7 +43,7 @@ from haskie import cpu, db, home
 from haskie.document import convert
 from haskie.errors import Conflict, InvalidInput, NotFound, NotReady, PermanentError
 from haskie.paging import Page, PageRequest, count_of, keyset, resolve_sort
-from haskie.settings import Parser, load_user_settings
+from haskie.settings import Parser, PipelineSettings, load_user_settings
 from haskie.tables import collection_documents, documents, staging
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
@@ -369,15 +369,15 @@ async def _create(name: str, size: int, md5: str, options: ImportOptions) -> Doc
     return await get(name)
 
 
-async def _place(document: Document, move: bool, source: Path) -> Document:
-    """Put the file where the row says it is; the row goes if that fails, so a failed import
-    leaves neither a phantom row nor a name that cannot be used again."""
+async def _place(
+    document: Document, source: Path, transfer: Callable[[Path, Path], object]
+) -> Document:
+    """Put the file where the row says it is, by `transfer` (`shutil.move` or `shutil.copyfile`);
+    the row goes if that fails, so a failed import leaves neither a phantom row nor a name that
+    cannot be used again."""
     try:
         await anyio.Path(document.root).mkdir(parents=True, exist_ok=True)
-        if move:
-            await anyio.to_thread.run_sync(shutil.move, source, document.original)
-        else:
-            await anyio.to_thread.run_sync(shutil.copyfile, source, document.original)
+        await anyio.to_thread.run_sync(transfer, source, document.original)
     except BaseException:
         await remove_files(document.name)
         await remove_row(document.name)
@@ -405,7 +405,7 @@ async def import_staged(staging_id: str, options: ImportOptions | None = None) -
     final = stored_name(row.filename, options.name)
     size = (await anyio.Path(source).stat()).st_size
     document = await _create(final, size, row.md5, options)
-    placed = await _place(document, True, source)
+    placed = await _place(document, source, shutil.move)
     async with db.connect() as conn:
         await conn.execute(delete(staging).where(staging.c.staging_id == staging_id))
     return placed
@@ -433,7 +433,7 @@ async def import_path(path: str, options: ImportOptions | None = None) -> Docume
         md5 = await anyio.to_thread.run_sync(_md5_of_file, source)
     document = await _create(final, size, md5, options)
     with _reading(source):
-        return await _place(document, False, source)
+        return await _place(document, source, shutil.copyfile)
 
 
 @contextmanager
@@ -563,10 +563,10 @@ _preview_locks: dict[str, anyio.Lock] = {}
 # request. The limiter admits `pipeline.preview_workers` of them; the rest wait, and a reader
 # that waited this long is told to retry instead of holding its request open forever.
 PREVIEW_WAIT_SECONDS = 60
-# 2 is the default of `PipelineSettings.preview_workers`. An anyio limiter, unlike the CPU budget:
-# every preview waits on Litestar's event loop, as `_preview_locks` describes. Its size may change
-# under running builds, and it counts them: from 2 to 3 under load admits one more build, not three.
-_preview_slots = anyio.CapacityLimiter(2)
+# An anyio limiter, unlike the CPU budget: every preview waits on Litestar's event loop, as
+# `_preview_locks` describes. Its size may change under running builds, and it counts them: from 2
+# to 3 under load admits one more build, not three.
+_preview_slots = anyio.CapacityLimiter(PipelineSettings().preview_workers)
 
 
 def configure_preview_slots(workers: int) -> None:

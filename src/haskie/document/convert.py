@@ -112,7 +112,11 @@ def check_ocr_policy(ocr_pages: int, total_pages: int, skip_ocr_pages: bool) -> 
     if total_pages and ocr_pages == total_pages:
         raise PermanentError(f"all {total_pages} pages need OCR")
     if ocr_pages and not skip_ocr_pages:
-        raise PermanentError(f"{ocr_pages} of {total_pages} pages need OCR (enable skip_ocr_pages)")
+        # a re-import keeps the document's own setting, so only a new import can turn it on
+        raise PermanentError(
+            f"{ocr_pages} of {total_pages} pages need OCR "
+            "(delete the document and import it again with skip_ocr_pages on)"
+        )
 
 
 def pdf_pages_markdown(
@@ -162,11 +166,8 @@ def build_preview(
         home.atomic_write_sync(out_dir / "source", source.read_bytes())
         return Preview(kind=PreviewKind.TEXT)
     # office/epub/rtf/odt: browsers cannot render these; show the markdown as HTML instead
-    html = (
-        source.read_text(errors="replace")
-        if suffix in HTML_SUFFIXES
-        else pyromark.html(full_markdown)
-    )
+    # an HTML file's "markdown" is its own text (`to_markdown`), so it is not read a second time
+    html = full_markdown if suffix in HTML_SUFFIXES else pyromark.html(full_markdown)
     home.atomic_write_sync(out_dir / "source", html)
     return Preview(kind=PreviewKind.HTML)
 
