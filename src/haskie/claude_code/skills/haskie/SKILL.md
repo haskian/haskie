@@ -75,7 +75,7 @@ Paged tools take `page_size` (default 100, at most 1000), `cursor`, `sort` and `
 - **`list_collection_documents(collection, status?, sort: name|size|status|updated_at)`** → one
   membership per document: the `document` row, `status`, `error`, `added_at`, `updated_at`.
   `status` is how far this collection got indexing it (`pending`, `indexing`, `indexed`, `error`,
-  `cancelled`), not the import status.
+  `cancelled`), or `removing` while a detach clears it out. It is not the import status.
 - **`list_documents(status?, sort: name|size|status|updated_at)`** → document rows, each with
   `collections`: how many hold it. `status` is one of `queued`, `converting`, `embedding`,
   `imported`, `error`, `cancelled`, `deleting`.
@@ -94,7 +94,8 @@ Every write takes `session_id`, so the change shows in the conversation's histor
   `imported` first. It is searchable there once its membership reads `indexed`: poll
   `list_collection_documents`.
 - **`remove_document_from_collection(collection, document)`** → nothing. It detaches only; the
-  document stays imported.
+  document stays imported. It answers once the removal is queued: the membership reads `removing`
+  until it is gone.
 - **`describe_document(document, description)`** → the updated row. An empty description clears it.
   `search_sources` shows the description beside each document, so write one for anything an agent
   must choose between.
