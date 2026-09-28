@@ -16,7 +16,7 @@ import sys
 import threading
 import types
 import zipfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import timedelta
 from pathlib import Path
 
@@ -930,102 +930,95 @@ async def test_a_failed_preview_build_is_never_retried_side_by_side() -> None:
     assert document._preview_locks == {}, "the last one out drops the lock"
 
 
+class PreviewBuilds:
+    """`convert.build_preview`, counted and held: each build signals `entered` as it starts and
+    waits for `release`, so a test knows how many parses run at once."""
+
+    def __init__(self) -> None:
+        self.real = convert.build_preview
+        self.entered = threading.Semaphore(0)  # one release per build entered
+        self.release = threading.Event()
+        self.counted = threading.Lock()
+        self.live = 0
+        self.peak = 0
+        self.built: list[str] = []
+
+    def __call__(self, *args, **kwargs):
+        with self.counted:
+            self.live += 1
+            self.peak = max(self.peak, self.live)
+            self.built.append(args[0])
+        self.entered.release()
+        assert self.release.wait(timeout=30)
+        try:
+            return self.real(*args, **kwargs)
+        finally:
+            with self.counted:
+                self.live -= 1
+
+    async def wait_entered(self, builds: int) -> None:
+        for _ in range(builds):
+            await anyio.to_thread.run_sync(self.entered.acquire)
+
+
+@pytest.fixture
+def preview_builds(monkeypatch: pytest.MonkeyPatch) -> Iterator[PreviewBuilds]:
+    """Held preview builds, with the preview pool as the only ceiling on them. The pool size a
+    test sets is put back afterwards."""
+    from haskie import cpu
+
+    # a build holds a CPU slot too, so the budget must not be the ceiling under test here
+    monkeypatch.setattr(cpu, "_cpu_slots", cpu.SlotBudget(4))
+    builds = PreviewBuilds()
+    monkeypatch.setattr(convert, "build_preview", builds)
+    try:
+        yield builds
+    finally:
+        document.configure_preview_slots(PipelineSettings().preview_workers)
+
+
 @pytest.mark.parametrize(("name", "workers"), [("one at a time", 1), ("two at a time", 2)])
 @pytest.mark.anyio
 async def test_ensure_preview_bounds_concurrent_builds(
-    monkeypatch: pytest.MonkeyPatch, name: str, workers: int
+    preview_builds: PreviewBuilds, name: str, workers: int
 ) -> None:
     """Four readers open four different documents at once; only `preview_workers` parses run.
 
     The stripe lock is per document, so nothing but the semaphore holds these four apart.
     """
-    from haskie import cpu
-
-    # a build holds a CPU slot too, so the budget must not be the ceiling under test here
-    monkeypatch.setattr(cpu, "_cpu_slots", cpu.SlotBudget(4))
     names = [(await import_row(f"doc-{i}.md")).name for i in range(4)]
-    entered, release, counted = threading.Semaphore(0), threading.Event(), threading.Lock()
-    live, peak, builds = 0, 0, []
-    real = convert.build_preview
-
-    def gated(*args, **kwargs):
-        nonlocal live, peak
-        with counted:
-            live += 1
-            peak = max(peak, live)
-            builds.append(args[0])
-        entered.release()
-        assert release.wait(timeout=30)
-        try:
-            return real(*args, **kwargs)
-        finally:
-            with counted:
-                live -= 1
-
     document.configure_preview_slots(workers)
-    try:
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(convert, "build_preview", gated)
-            async with anyio.create_task_group() as readers:
-                for doc in names:
-                    readers.start_soon(document.ensure_preview, doc)
-                for _ in range(workers):  # every slot of the pool is now inside a build
-                    await anyio.to_thread.run_sync(entered.acquire)
-                assert document._preview_slots.available_tokens == 0, f"{name}: no slot left"
-                release.set()
-    finally:
-        document.configure_preview_slots(PipelineSettings().preview_workers)
+    async with anyio.create_task_group() as readers:
+        for doc in names:
+            readers.start_soon(document.ensure_preview, doc)
+        await preview_builds.wait_entered(workers)  # every slot of the pool is now inside a build
+        assert document._preview_slots.available_tokens == 0, f"{name}: no slot left"
+        preview_builds.release.set()
 
-    assert len(builds) == 4, f"{name}: every document was built, once"
-    assert peak == workers, f"{name}: never more parses at once than the pool admits"
+    assert len(preview_builds.built) == 4, f"{name}: every document was built, once"
+    assert preview_builds.peak == workers, f"{name}: never more parses at once than the pool admits"
 
 
 @pytest.mark.anyio
 async def test_resizing_the_preview_pool_counts_the_builds_already_running(
-    monkeypatch: pytest.MonkeyPatch,
+    preview_builds: PreviewBuilds,
 ) -> None:
     """Two builds run and two wait; raising the pool from 2 to 3 admits one more, not three."""
-    from haskie import cpu
-
-    monkeypatch.setattr(cpu, "_cpu_slots", cpu.SlotBudget(4))  # not the ceiling under test
     names = [(await import_row(f"doc-{i}.md")).name for i in range(4)]
-    entered, release, counted = threading.Semaphore(0), threading.Event(), threading.Lock()
-    live, peak = 0, 0
-    real = convert.build_preview
-
-    def gated(*args, **kwargs):
-        nonlocal live, peak
-        with counted:
-            live += 1
-            peak = max(peak, live)
-        entered.release()
-        assert release.wait(timeout=30)
-        try:
-            return real(*args, **kwargs)
-        finally:
-            with counted:
-                live -= 1
-
     document.configure_preview_slots(2)
-    try:
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(convert, "build_preview", gated)
-            async with anyio.create_task_group() as readers:
-                for doc in names:
-                    readers.start_soon(document.ensure_preview, doc)
-                for _ in range(2):
-                    await anyio.to_thread.run_sync(entered.acquire)
+    async with anyio.create_task_group() as readers:
+        for doc in names:
+            readers.start_soon(document.ensure_preview, doc)
+        await preview_builds.wait_entered(2)
 
-                document.configure_preview_slots(3)
+        document.configure_preview_slots(3)
 
-                await anyio.to_thread.run_sync(entered.acquire)  # the one it admits
-                await anyio.sleep(0.1)  # time enough for any it wrongly admits to enter too
-                assert live == 3, "one more build, beside the two already running"
-                release.set()
-    finally:
-        document.configure_preview_slots(PipelineSettings().preview_workers)
+        await preview_builds.wait_entered(1)  # the one it admits
+        await anyio.sleep(0.1)  # time enough for any it wrongly admits to enter too
+        assert preview_builds.live == 3, "one more build, beside the two already running"
+        preview_builds.release.set()
 
-    assert peak == 3, "never more builds at once than the resized pool admits"
+    assert preview_builds.peak == 3, "never more builds at once than the resized pool admits"
 
 
 @pytest.mark.anyio
