@@ -34,14 +34,17 @@ from conftest import (
     MD,
     WAIT,
     WAITING_STATUS,
+    Gate,
     attach_document,
     audit_lines,
     await_terminal,
+    batch_of,
     collection_hits,
     compact_model,
     counted_list_workflows,
     delete_collection,
     delete_document,
+    doc_of,
     document_names,
     events,
     forget_settings,
@@ -60,14 +63,14 @@ from dbos._error import DBOSAwaitedWorkflowCancelledError
 from dbos._registrations import get_dbos_func_name
 from sqlalchemy import func, insert, select, update
 
-from haskie import audit, cpu, db, home, paging, settings, shutdown
+from haskie import audit, db, home, paging, settings, shutdown
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection
 from haskie.collection.index import CollectionIndex
 from haskie.document import convert, document
-from haskie.document.document import Document, DocumentStatus
+from haskie.document.document import DocumentStatus
 from haskie.errors import (
     Conflict,
     InvalidInput,
@@ -247,67 +250,6 @@ async def _rows_of(collection: Collection, doc: str) -> int:
     leave none of, whichever way the write in flight was ordered against it."""
     table = await (await collection.index())._existing()
     return 0 if table is None else await table.count_rows(f"document = '{doc}'")
-
-
-def _batch_of(args: tuple) -> Batch | None:
-    """The micro-batch one pipeline call was given. The three stage steps take it in three
-    different positions (`convert_batch`, `embed_batch`, `index_batch`), so it is found by type
-    rather than by index: one wrapper then fits all three."""
-    for value in args:
-        if isinstance(value, Batch):
-            return value
-    return None
-
-
-def _doc_of(args: tuple) -> str:
-    """The document one pipeline call was given, by the same reasoning as `_batch_of`."""
-    for value in args:
-        if isinstance(value, Document):
-            return value.name
-    return ""
-
-
-class Gate:
-    """A pipeline step the test can hold open: `entered` fires on the first blocked call, and that
-    call returns only once `release` is set."""
-
-    def __init__(
-        self, seq: int | None = None, doc: str | None = None, *, holds_cpu: bool = False
-    ) -> None:
-        self.entered = threading.Event()
-        self.release = threading.Event()
-        self.calls: list[int] = []
-        self.seq = seq  # block only this batch; None = every batch
-        self.doc = doc  # block only this document; None = every document
-        self.holds_cpu = holds_cpu  # hold one slot of the CPU budget while blocked (see `wrap`)
-
-    def _blocks(self, doc: str, batch: Batch | None) -> bool:
-        by_seq = self.seq is None or (batch is not None and batch.seq == self.seq)
-        return by_seq and (self.doc is None or doc == self.doc)
-
-    def wrap(self, real):
-        async def blocking(*args):
-            batch = _batch_of(args)
-            self.calls.append(-1 if batch is None else batch.seq)
-            if self._blocks(_doc_of(args), batch):
-                if self.holds_cpu:
-                    await cpu.on_cpu(self._hold)
-                else:
-                    self.entered.set()
-                    assert await wait_event(self.release), "the test never released the step"
-            return await real(*args)
-
-        return blocking
-
-    def _hold(self) -> None:
-        """The same wait, taken inside `cpu.on_cpu`, so it occupies one slot of the CPU budget for
-        as long as it lasts.
-
-        A step takes its slot inside `cpu.on_cpu`, around its CPU work alone, so a gate at the
-        step's entry holds no slot at all. A test about the budget rather than about a queue asks
-        for one. Sync, and run in the worker thread `cpu.on_cpu` gave it."""
-        self.entered.set()
-        assert self.release.wait(timeout=WAIT), "the test never released the step"
 
 
 class EmbedSpy:
@@ -627,7 +569,7 @@ class Overlap:
         return await self._count(self.real, *args)
 
     async def _count(self, real, *args):
-        batch = _batch_of(args)
+        batch = batch_of(args)
         with self.lock:
             self.active += 1
             self.peak = max(self.peak, self.active)
@@ -1222,7 +1164,7 @@ async def test_an_import_waits_for_the_embedding_model(
     real = pipeline.embed_batch
 
     async def cold_at_first(*args) -> int:
-        embedded.append(_doc_of(args))
+        embedded.append(doc_of(args))
         if model == "warming when the batch runs" and len(embedded) == 1:
             models._ready.discard(download)  # what a restart does to the caches
         elif len(embedded) == 2:
@@ -1782,23 +1724,18 @@ async def test_rename_is_refused_while_a_document_delete_removes_a_member(
     await Collection.create("old")
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     await attach_document(dbos, "old", doc.name)
-    entered, release = threading.Event(), threading.Event()
-    real = CollectionIndex.delete_document
-
-    async def gated(self: CollectionIndex, name: str) -> None:
-        entered.set()
-        assert await wait_event(release), "the test never released the removal"
-        await real(self, name)
-
-    monkeypatch.setattr(CollectionIndex, "delete_document", gated)
+    gate = Gate()
+    monkeypatch.setattr(
+        CollectionIndex, "delete_document", gate.wrap(CollectionIndex.delete_document)
+    )
     job_id = await dbos.start_delete_document(doc.name)
-    assert await wait_event(entered), "the delete's removal from `old` never started"
+    assert await wait_event(gate.entered), "the delete's removal from `old` never started"
 
     with pytest.raises(Conflict, match="document a.md is being deleted"):
         await dbos.rename_collection("old", "new")
     assert await Collection.names() == ["old"], "a refused rename changes nothing"
 
-    release.set()
+    gate.release.set()
     await wait_for(job_id)
     assert await document_names() == [], "the removal found the membership under the old name"
     assert (await dbos.rename_collection("old", "new")).name == "new"
@@ -2572,15 +2509,8 @@ async def test_a_collection_operation_names_which_of_the_three_it_is(
     await Collection.create("shelf")
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     await attach_document(dbos, "shelf", doc.name)
-    counting, release = threading.Event(), threading.Event()
-    real = workflows.count_members
-
-    async def held(collection: str) -> int:
-        counting.set()
-        assert await wait_event(release), "the test never released the count"
-        return await real(collection)
-
-    monkeypatch.setattr(workflows, "count_members", held)
+    counting = Gate()
+    monkeypatch.setattr(workflows, "count_members", counting.wrap(workflows.count_members))
     if operation.startswith("index all"):
         operation_id = await dbos.start_index_collection("shelf")
     elif operation == "delete collection":
@@ -2588,15 +2518,15 @@ async def test_a_collection_operation_names_which_of_the_three_it_is(
     else:
         operation_id = await dbos.start_delete_document(doc.name)
     if operation == "index all, before its first page":
-        assert await wait_event(counting), "the bulk index never started"
+        assert await wait_event(counting.entered), "the bulk index never started"
     else:
-        release.set()
+        counting.release.set()
         await wait_for(operation_id)
 
     (row,) = (await operations.list_operations("collection", page_size=10)).items
 
     assert (row.id, row.detail) == (operation_id, expected)
-    release.set()
+    counting.release.set()
     await await_terminal([operation_id])
     await _drain()
 

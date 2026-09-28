@@ -52,6 +52,7 @@ from haskie.tables import searches
 
 from conftest import (  # isort: skip
     LOOPBACK_URL,
+    Gate,
     NO_MODELS,
     api_app,
     attach_via_api,
@@ -886,26 +887,21 @@ async def test_attach_list_and_detach_a_member(
     (hit,) = (await client.get("/api/search/explore", params=in_notes)).json()
     assert (hit["collection"], hit["document"]) == ("notes", "guide.md")
 
-    entered, release = threading.Event(), threading.Event()
-    delete_rows = CollectionIndex.delete_document
-
-    async def held(self: CollectionIndex, doc: str) -> None:
-        entered.set()
-        assert await wait_event(release), "the test never released the removal"
-        await delete_rows(self, doc)
-
-    monkeypatch.setattr(CollectionIndex, "delete_document", held)
+    removal = Gate()
+    monkeypatch.setattr(
+        CollectionIndex, "delete_document", removal.wrap(CollectionIndex.delete_document)
+    )
 
     detached = await client.delete("/api/collections/notes/documents/guide.md")
 
     assert detached.status_code == 204, detached.text
-    assert await wait_event(entered), "the removal never ran"
+    assert await wait_event(removal.entered), "the removal never ran"
     removing = (
         await client.get("/api/collections/notes/documents", params={"status": "removing"})
     ).json()["items"]
     assert [(m["document"]["name"], m["status"]) for m in removing] == [("guide.md", "removing")]
     assert (await client.get("/api/collections/notes")).json()["counts"]["active"] == 1
-    release.set()
+    removal.release.set()
 
     async def gone() -> bool:
         return (await client.get("/api/collections/notes/documents")).json()["items"] == []

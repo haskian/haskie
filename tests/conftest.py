@@ -23,6 +23,7 @@ if TYPE_CHECKING:  # every helper below imports haskie when it runs, not when py
     from haskie.catalogue.catalogue import EmbeddingModel
     from haskie.collection.index import CollectionIndex, Hit
     from haskie.indexing.chunk import Chunk
+    from haskie.indexing.pipeline import Batch
     from haskie.search.collapse import Scan
     from haskie.settings import SearchOverrides, SearchSettings
 
@@ -299,6 +300,73 @@ async def wait_event(event: threading.Event, timeout: float = WAIT) -> bool:
     """Wait for a `threading.Event` without blocking the caller's loop. Two loops are involved -
     the test's and DBOS's background one - so the blocking wait goes to a worker thread."""
     return await anyio.to_thread.run_sync(functools.partial(event.wait, timeout))
+
+
+def batch_of(args: tuple) -> "Batch | None":
+    """The micro-batch one pipeline call was given. The three stage steps take it in three
+    different positions (`convert_batch`, `embed_batch`, `index_batch`), so it is found by type
+    rather than by index: one wrapper then fits all three."""
+    from haskie.indexing.pipeline import Batch
+
+    for value in args:
+        if isinstance(value, Batch):
+            return value
+    return None
+
+
+def doc_of(args: tuple) -> str:
+    """The document one pipeline call was given, by the same reasoning as `batch_of`."""
+    from haskie.document.document import Document
+
+    for value in args:
+        if isinstance(value, Document):
+            return value.name
+    return ""
+
+
+class Gate:
+    """A step the test can hold open: `entered` fires on the first blocked call, and that call
+    returns only once `release` is set. It wraps any async function, a method included."""
+
+    def __init__(
+        self, seq: int | None = None, doc: str | None = None, *, holds_cpu: bool = False
+    ) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls: list[int] = []
+        self.seq = seq  # block only this batch; None = every batch
+        self.doc = doc  # block only this document; None = every document
+        self.holds_cpu = holds_cpu  # hold one slot of the CPU budget while blocked (see `wrap`)
+
+    def _blocks(self, doc: str, batch: "Batch | None") -> bool:
+        by_seq = self.seq is None or (batch is not None and batch.seq == self.seq)
+        return by_seq and (self.doc is None or doc == self.doc)
+
+    def wrap(self, real):
+        from haskie import cpu
+
+        async def blocking(*args):
+            batch = batch_of(args)
+            self.calls.append(-1 if batch is None else batch.seq)
+            if self._blocks(doc_of(args), batch):
+                if self.holds_cpu:
+                    await cpu.on_cpu(self._hold)
+                else:
+                    self.entered.set()
+                    assert await wait_event(self.release), "the test never released the step"
+            return await real(*args)
+
+        return blocking
+
+    def _hold(self) -> None:
+        """The same wait, taken inside `cpu.on_cpu`, so it occupies one slot of the CPU budget for
+        as long as it lasts.
+
+        A step takes its slot inside `cpu.on_cpu`, around its CPU work alone, so a gate at the
+        step's entry holds no slot at all. A test about the budget rather than about a queue asks
+        for one. Sync, and run in the worker thread `cpu.on_cpu` gave it."""
+        self.entered.set()
+        assert self.release.wait(timeout=WAIT), "the test never released the step"
 
 
 async def await_terminal(workflow_ids: list[str]) -> None:
