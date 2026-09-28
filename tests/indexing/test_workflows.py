@@ -1357,10 +1357,10 @@ async def test_maintenance_skips_a_collection_deleted_while_it_waited(dbos, tmp_
     """A run may sit in the queue while the collection is deleted, so it never asks for the
     collection before it has checked that there still is one."""
     await _use(dbos, workers=2, batch_pages=10, maintenance_idle_seconds=NEVER)
-    collection = await Collection.create("vanish")
+    await Collection.create("vanish")
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     await attach_document(dbos, "vanish", doc.name)
-    await collection.delete()
+    await delete_collection(dbos, "vanish")
 
     report = await wait_for(
         (await workflows.MAINTAIN.debounce_async("vanish", 0.0, "vanish")).workflow_id

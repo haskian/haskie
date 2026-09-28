@@ -300,15 +300,6 @@ class Collection:
             raise NotFound(f"collection not found: {name}")
         return cls(name)
 
-    async def delete(self) -> None:
-        """Delete the collection. `delete_*` is the whole operation, `remove_*` is one step of it.
-
-        Rows first, then the folder, as `workflows.delete_collection_workflow` runs them. No
-        document is touched: the documents stay, in their folders and in every other
-        collection that holds them."""
-        await self.remove_rows()
-        await self.remove_tree()
-
     async def rename(self, name: str) -> "Collection":
         """The collection under `name`: its row, its memberships, every session that chose it,
         and its folder, moved in one transaction. Refused while a member document is being
