@@ -47,8 +47,12 @@ def stem(word: str) -> str:
 
 
 def vocabulary(texts: Iterable[str]) -> set[str]:
-    """The stems of every word of `texts`: a text holds a word when it holds its stem."""
-    return {stem(word) for text in texts for word in WORD.findall(text.lower())}
+    """The stems of every word of `texts`: a text holds a word when it holds its stem.
+
+    Each distinct word is stemmed once: the stemmer is pure Python, and an answer of 36,000
+    characters repeats most of its words several times."""
+    words = {word for text in texts for word in WORD.findall(text.lower())}
+    return {stem(word) for word in words}
 
 
 def missing(questions: list[Question], covered: Iterable[str]) -> dict[str, list[Question]]:

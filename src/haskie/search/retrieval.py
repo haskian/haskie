@@ -752,7 +752,8 @@ async def probe_gaps(
     scored against each question whose words are missing, dropped under the floor, tagged with
     the questions it clears it for. Without one, its BM25 score is on another scale than the
     ranked passages', so it scores 0 and is tagged by the words it holds (`probe.tags`)."""
-    wanted = probe.missing(questions, probe.covered(groups))
+    # stems every word of the kept sections
+    wanted = await cpu.on_cpu(probe.missing, questions, probe.covered(groups))
     if not wanted:
         return groups
     held = {chunk_key(hit) for one in groups for hit in one.hits}

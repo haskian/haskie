@@ -45,6 +45,46 @@ def test_a_text_holds_a_word_or_a_form_of_it(
 
 
 @pytest.mark.parametrize(
+    ("name", "texts", "stemmed", "expected"),
+    [
+        ("no text, nothing stemmed", [], set(), set()),
+        (
+            "a word repeated in one text is stemmed once",
+            ["Orders ship. Orders keep. Orders wait."],
+            {"orders", "ship", "keep", "wait"},
+            {"order", "ship", "keep", "wait"},
+        ),
+        (
+            "one word in several texts and cases is stemmed once",
+            ["Inventory", "the inventory keeps", "INVENTORY"],
+            {"inventory", "the", "keeps"},
+            {"inventori", "the", "keep"},
+        ),
+    ],
+)
+def test_the_vocabulary_stems_each_distinct_word_once(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    texts: list[str],
+    stemmed: set[str],
+    expected: set[str],
+) -> None:
+    """The stemmer is pure Python and an answer runs to about 36,000 characters, most of its
+    words many times over."""
+    calls: list[str] = []
+    real = probe.stem
+
+    def counted(word: str) -> str:
+        calls.append(word)
+        return real(word)
+
+    monkeypatch.setattr(probe, "stem", counted)
+
+    assert probe.vocabulary(texts) == expected, name
+    assert sorted(calls) == sorted(stemmed), f"{name}: each distinct word once"
+
+
+@pytest.mark.parametrize(
     ("name", "questions", "covered", "expected"),
     [
         (

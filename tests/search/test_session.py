@@ -370,6 +370,37 @@ async def test_with_a_reranker_a_question_tags_only_what_it_judged_an_answer(
     assert answer.uncovered == [asked[2]], "nothing about a tax, so it is not answered"
 
 
+async def test_an_excerpts_search_stems_its_answer_off_the_event_loop(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """The stemmer is pure Python, and an excerpts search stems the kept sections for the probe
+    and the whole answer for its report. Both run in a worker thread, so a search of a long
+    answer does not hold every other request on the event loop behind it."""
+    import threading
+
+    from haskie.search import probe
+
+    await Collection.create("pay")
+    body = "# Retries\n\nRetry a failed payment with backoff.\n\n# Refunds\n\nRefund a payment.\n"
+    doc = await import_document(dbos, "pay.md", body, tmp_path)
+    await attach_document(dbos, "pay", doc.name)
+    loop_thread = threading.get_ident()
+    stemmed_on: list[int] = []
+    real = probe.vocabulary
+
+    def recorded(texts):
+        stemmed_on.append(threading.get_ident())
+        return real(texts)
+
+    monkeypatch.setattr(probe, "vocabulary", recorded)
+
+    answer = await flow.answers(["pay"], aspects.questions(["Why retry a payment?"], None))
+
+    assert answer.excerpts, "the search found the section it stems"
+    assert len(stemmed_on) == 2, "once for the probe, once for the report"
+    assert loop_thread not in stemmed_on, "neither on the event loop"
+
+
 async def test_session_search_propagates_a_broken_collection(
     dbos, tmp_path: Path, monkeypatch, caplog
 ) -> None:

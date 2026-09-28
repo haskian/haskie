@@ -45,6 +45,7 @@ import msgspec
 from pydantic_graph import Graph, GraphBuilder, StepContext
 from pydantic_graph.step import StepFunction
 
+from haskie import cpu
 from haskie.collection.index import Hit
 from haskie.paging import check_page_size
 from haskie.search import aspects, log, probe, retrieval, scoring, section
@@ -437,7 +438,8 @@ async def answers(names: list[str], asked: aspects.Questions, limit: int | None 
     found = await ANSWERED.run(
         state=msgspec.structs.replace(states[0], branch=None), inputs=list(ranged)
     )
-    return probe.report(found, states[0].questions)
+    # stems every word of the answer, up to about 36,000 characters of it
+    return await cpu.on_cpu(probe.report, found, states[0].questions)
 
 
 async def sources(
