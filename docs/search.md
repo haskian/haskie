@@ -24,7 +24,9 @@ flowchart LR
 1. **Scope.** The `collections` argument, else the session's collections, else all of them.
 2. **Retrieve.** Each collection runs `hybrid` (vector and BM25, fused), `vector` or `fts`.
    Fusion is `rrf` (reciprocal rank fusion) or `linear`. Without an embedding model everything is
-   `fts`. The query is embedded once, and up to 8 collections are read in parallel.
+   `fts`. The query is embedded once, and up to 8 collections are read in parallel. A collection
+   still building its first full-text index has no BM25 half yet: `hybrid` answers with the
+   vector half alone, and `fts` finds nothing there.
 3. **Merge** across collections by rank, because scores from two indexes are not comparable. A
    chunk that two collections share counts once. A search over one collection keeps that
    collection's own scores.
@@ -353,7 +355,7 @@ refused (422).
 `collections`, with no model and nothing to set up. It ignores the session's selection. Scores
 are raw BM25, because one scorer with one tokenizer puts every collection on one scale. It is
 paged with an offset cursor bound to the query (at most 1,000 results deep). A collection still
-building its first full-text index contributes nothing instead of making the query wait.
+building its first full-text index contributes nothing: LanceDB refuses a BM25 query without it.
 
 ## Settings
 

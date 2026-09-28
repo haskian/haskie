@@ -561,16 +561,23 @@ class CollectionIndex:
 
         `vectors` False leaves the vector column out of a lexical read, for a caller that only
         wants the chunks: the probe for missing words (`search.retrieval.probe_gaps`).
+
+        A table with rows and no full-text index yet, a collection in the middle of its first
+        index, answers what it can: LanceDB refuses any full-text query without the index, so a
+        lexical query finds nothing and a hybrid one falls back to its vector half.
         """
         table = await self._readable()
         if table is None:
             return []
+        lexical = await self.has_index(FTS_COLUMN)
         if vector is None or not await self.has_vector_column():
+            if not lexical:
+                return []
             found = await table.search(query, query_type="fts")
             if not vectors:
                 found = found.select([*PLAIN_SCHEMA.names, "_score"])
             return _rows(await found.limit(limit).to_arrow())
-        if settings.mode == SearchMode.VECTOR:
+        if settings.mode == SearchMode.VECTOR or not lexical:
             found = _tuned(await table.search(vector, query_type="vector"), settings)
             return _rows(await found.limit(limit).to_arrow())
         # the async API builds a hybrid query out of its two halves instead of `query_type=hybrid`
@@ -587,9 +594,8 @@ class CollectionIndex:
         with. `[]` when it cannot answer one at all — no table, no rows, or no full-text index
         yet, which is what a collection in the middle of its first index looks like.
 
-        A missing full-text index is a real answer here, not a scan: a cross-collection search
-        asks every collection at once (see search/text.py), and one still building its index would
-        make the whole query wait for it. `search_rows` is the opposite trade for one collection.
+        LanceDB refuses a full-text query without the index rather than scanning, so a
+        collection still building its index answers nothing here, as it does in `search_rows`.
         """
         table = await self._readable()
         if table is None or not await self.has_index(FTS_COLUMN):

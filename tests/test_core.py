@@ -2161,7 +2161,7 @@ async def test_fts_rows_is_empty_without_an_fts_index(tmp_path: Path) -> None:
         for seq, c in enumerate(chunk.split("# H\n\nlancedb chapter one\n", ChunkSettings()), 1)
     ]
     await index.add_parts("d.md", "documents/d.md", "documents/d.md.md", _aparts([(0, rows)]))
-    assert await index.has_index("text") is False, "written, not indexed: the state under test"
+    assert await index.has_index(FTS_COLUMN) is False, "written, not indexed: the state under test"
     assert await index.fts_rows("lancedb", 10) == [], "rows are there, the full-text index is not"
 
     await index.finish()
@@ -2219,6 +2219,51 @@ async def test_search_rows_returns_raw_rows_without_cutting(tmp_path: Path) -> N
     assert len(await index.search_rows("lancedb", None, settings, 100)) == 6, "no more than exist"
     missing = CollectionIndex(tmp_path / "missing", "notes", tmp_path, None)
     assert await missing.search_rows("lancedb", None, settings, 4) == [], "no table, no rows"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "settings", "vector", "built", "expected"),
+    [
+        ("lexical before the index: nothing", SearchSettings(), None, False, (0, None)),
+        ("hybrid before the index: its vector half", SearchSettings(), 2, False, (2, "_distance")),
+        (
+            "vector before the index: as ever",
+            SearchSettings(mode=SearchMode.VECTOR),
+            2,
+            False,
+            (2, "_distance"),
+        ),
+        ("lexical after the index: BM25", SearchSettings(), None, True, (2, "_score")),
+        ("hybrid after the index: fused", SearchSettings(), 2, True, (4, "_relevance_score")),
+    ],
+)
+async def test_search_rows_answers_what_a_table_without_its_fts_index_can(
+    tmp_path: Path,
+    name: str,
+    settings: SearchSettings,
+    vector: int | None,
+    built: bool,
+    expected: tuple[int, str | None],
+) -> None:
+    """A collection in the middle of its first index has rows and no full-text index. LanceDB
+    refuses any full-text query then, so a search must not send one and fail with it."""
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, TINY)
+    await _fill(index, "a.md", 0, 4, vectors=True)
+    if built:
+        await index.finish()
+    assert await index.has_index(FTS_COLUMN) is built, f"{name}: the state under test"
+    settings = msgspec.structs.replace(settings, candidates=4)
+
+    rows = await index.search_rows(
+        "lancedb", None if vector is None else _vector(vector), settings, limit=2
+    )
+
+    count, column = expected
+    assert len(rows) == count, name
+    assert all(column in row for row in rows), f"{name}: scored by {column}"
+    if vector is not None:
+        assert rows[0]["text"].endswith(f"row{vector} lancedb"), f"{name}: the nearest row first"
 
 
 # --- pipeline ----------------------------------------------------------------------
