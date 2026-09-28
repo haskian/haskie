@@ -2410,6 +2410,53 @@ async def test_a_document_delete_is_listed_as_a_collection_operation_with_no_col
     )
 
 
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        ("index all", {"bulk": "index_collection", "done": 1, "total": 1}),
+        # no page queued yet, so no progress event to read
+        ("index all, before its first page", {"bulk": "index_collection"}),
+        ("delete collection", {"bulk": "delete_collection"}),
+        ("delete document", {"bulk": "delete_document"}),
+    ],
+)
+async def test_a_collection_operation_names_which_of_the_three_it_is(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, expected: dict
+) -> None:
+    """The three whole-thing workflows share the `collection` kind, so `detail.bulk` is what the
+    Operations view tells an index from a delete by: its tag and its bar follow it."""
+    await Collection.create("shelf")
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await attach_document(dbos, "shelf", doc.name)
+    counting, release = threading.Event(), threading.Event()
+    real = workflows.count_members
+
+    async def held(collection: str) -> int:
+        counting.set()
+        assert await wait_event(release), "the test never released the count"
+        return await real(collection)
+
+    monkeypatch.setattr(workflows, "count_members", held)
+    if operation.startswith("index all"):
+        operation_id = await dbos.start_index_collection("shelf")
+    elif operation == "delete collection":
+        operation_id = await dbos.start_delete_collection("shelf")
+    else:
+        operation_id = await dbos.start_delete_document(doc.name)
+    if operation == "index all, before its first page":
+        assert await wait_event(counting), "the bulk index never started"
+    else:
+        release.set()
+        await wait_for(operation_id)
+
+    (row,) = (await operations.list_operations("collection", page_size=10)).items
+
+    assert (row.id, row.detail) == (operation_id, expected)
+    release.set()
+    await await_terminal([operation_id])
+    await _drain()
+
+
 def test_the_names_the_operations_view_spells_out_are_the_ones_dbos_records() -> None:
     """Every name `operations` selects by and groups by is pinned against the registration DBOS
     made: a mismatch is a silent miss in a query, not an error."""

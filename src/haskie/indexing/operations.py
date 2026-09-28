@@ -531,19 +531,25 @@ def _title(kind: OperationKind, status) -> str:
 
 
 async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | None]:
-    """The numbers only this kind has. A bulk index publishes its progress as a DBOS event, which
-    is read without waiting: an operation that has not finished its first page yet simply has none.
+    """The numbers only this kind has. A collection operation names which of the three it is
+    (`bulk`), since the kind alone does not. A bulk index also publishes its progress as a DBOS
+    event, which is read without waiting: an operation that has not finished its first page yet
+    simply has none.
 
     Async because that read is one, even with no wait: the event lives in the system database."""
     if kind == OperationKind.DOWNLOAD:
         return {"warm": models.is_warm(status.workflow_id)}
-    if kind == OperationKind.COLLECTION:
-        progress = await DBOS.get_event_async(
-            status.workflow_id, workflows.PROGRESS_EVENT, timeout_seconds=0
-        )
-        if isinstance(progress, workflows.BulkProgress):
-            return {"done": progress.done, "total": progress.total}
-    return {}
+    if kind != OperationKind.COLLECTION:
+        return {}
+    bulk = _bulk_kind(status.name)
+    if bulk != BulkKind.INDEX_COLLECTION:
+        return {"bulk": bulk}
+    progress = await DBOS.get_event_async(
+        status.workflow_id, workflows.PROGRESS_EVENT, timeout_seconds=0
+    )
+    if isinstance(progress, workflows.BulkProgress):
+        return {"bulk": bulk, "done": progress.done, "total": progress.total}
+    return {"bulk": bulk}
 
 
 def _stage_run(status, children: list, done_by_child: dict[str, int]) -> _StageRun:
