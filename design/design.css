@@ -91,8 +91,8 @@ body[data-bg="classic"]::before, body:has(#bg-classic:checked)::before { content
 .side { padding-left: 60px; align-self: start; position: sticky; top: 72px; display: grid; gap: var(--sp-8); }
 .side .label { display: block; margin-bottom: var(--sp-4); }
 .logo { display: flex; align-items: center; gap: var(--sp-2); margin-left: 1.5em; color: var(--ink); text-decoration: none; }
-.logo svg { height: 30px; width: auto; }
-.logo span { font: 700 var(--fs-xl)/1 var(--font-brand); letter-spacing: 0.06em; margin-top: 0.2em; }
+.logo svg { height: 20px; width: auto; }
+.logo span { font: 700 22px/1 var(--font-brand); letter-spacing: 0.06em; margin-top: 7px; }
 .sections { display: grid; gap: var(--sp-8); align-content: start; }
 .section, .spec { display: grid; gap: var(--sp-3); min-width: 0; }
 .section > * { min-width: 0; } /* a long nowrap title inside shortens, never widens the column */
