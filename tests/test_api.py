@@ -402,6 +402,47 @@ async def test_route_errors(
 
 
 @pytest.mark.parametrize(
+    ("name", "method", "path", "rejected_by", "documented"),
+    [
+        (
+            "a query that does not decode answers the 422 the document declares",
+            "get", "/api/search/explore", "?q=alpha&limit=0", {"200", "422"},
+        ),
+        (
+            "a body that does not decode answers the 422 the document declares",
+            "put", "/api/settings", {"search": "not an object"}, {"200", "422"},
+        ),
+        (
+            "a route with nothing to validate declares no rejection",
+            "get", "/api/status", None, {"200"},
+        ),
+    ],
+)  # fmt: skip
+async def test_the_openapi_document_declares_the_rejections_answered(
+    ready: AsyncTestClient,
+    name: str,
+    method: str,
+    path: str,
+    rejected_by: str | dict | None,
+    documented: set[str],
+) -> None:
+    """Litestar documents its own 400 `{status_code, detail, extra}`; a client built from the
+    document must read the 422 `{detail}` that `validation_error` actually answers."""
+    responses = (await ready.get("/schema/openapi.json")).json()["paths"][path][method]["responses"]
+
+    assert set(responses) == documented, name
+    if rejected_by is None:
+        return
+    declared = responses["422"]["content"]["application/json"]["schema"]
+    if isinstance(rejected_by, str):
+        rejected = await ready.request(method, path + rejected_by)
+    else:
+        rejected = await ready.request(method, path, json=rejected_by)
+    assert rejected.status_code == 422, f"{name}: {rejected.text}"
+    assert set(rejected.json()) == set(declared["properties"]) == set(declared["required"]), name
+
+
+@pytest.mark.parametrize(
     ("name", "path", "expected"),
     [
         ("a matched route carries the id it logged under", "/api/status", True),

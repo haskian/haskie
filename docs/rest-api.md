@@ -66,8 +66,14 @@ Errors are part of the contract. Each type in `errors.py` carries its status cod
 | `NotFound` | 404 | no such collection, document or operation |
 | `Conflict` | 409 | the state does not allow it: a name taken, a document not imported yet, a home already initialized |
 | `InvalidInput` | 422 | a bad argument |
+| `ValidationException` (Litestar's) | 422 | a parameter or body that does not decode: a wrong type, a missing field, a value out of bounds |
 | `PermanentError` | 422 | the file cannot be processed as it is |
 | `NotReady` | 503, `Retry-After: 2` | a model is downloading, warming or failed to load, or every preview builder is busy |
+
+Each of these answers `{"detail": "<message>"}` and nothing else. Litestar documents a route that
+validates its input with its own 400 `{status_code, detail, extra}` body. `app.RejectingOperation`
+replaces that with the 422 `{detail}` haskie answers, so a client built from the OpenAPI document
+reads a rejection right.
 
 Messages are written for the user. `home.scrub` replaces the home and user directories in them,
 so they do not leak those paths.

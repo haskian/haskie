@@ -5,16 +5,20 @@ every request: the request context, the error mapping, and how the application i
 """
 
 import os
+from copy import copy
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 import msgspec
-from litestar import Litestar, Request, Response
+from litestar import Litestar, MediaType, Request, Response
 from litestar.datastructures import Headers, MutableScopeHeaders
 from litestar.exceptions import HTTPException, ValidationException
 from litestar.exceptions.responses import create_exception_response
+from litestar.handlers import HTTPRouteHandler
 from litestar.openapi import OpenAPIConfig
+from litestar.openapi.spec import OpenAPIMediaType, OpenAPIResponse, OpenAPIType, Operation, Schema
 from litestar.static_files import create_static_files_router
 from litestar.types import (
     ASGIApp,
@@ -199,6 +203,42 @@ EXCEPTION_HANDLERS: ExceptionHandlersMap = {
     Exception: internal_error,
 }
 
+# What `validation_error` and an `InvalidInput` answer, for the OpenAPI document. Inline rather than
+# a component: Litestar replaces the configured component schemas with the ones it generates.
+REJECTED = OpenAPIResponse(
+    description="The request is invalid: a parameter or body that does not decode, or a value "
+    "the handler refuses.",
+    content={
+        MediaType.JSON: OpenAPIMediaType(
+            schema=Schema(
+                type=OpenAPIType.OBJECT,
+                required=["detail"],
+                properties={"detail": Schema(type=OpenAPIType.STRING)},
+            )
+        )
+    },
+)
+
+
+@dataclass
+class RejectingOperation(Operation):
+    """An operation as haskie answers it. Litestar documents every route that validates its input
+    with its own 400 `{status_code, detail, extra}` body, and offers no app-wide way to change
+    that; `validation_error` answers 422 `{detail}`, so that is what the document says instead."""
+
+    def __post_init__(self) -> None:
+        # the handlers declare no `raises`, so a 400 here is only ever Litestar's validation one
+        if self.responses is not None and self.responses.pop("400", None) is not None:
+            self.responses["422"] = REJECTED
+
+
+def documented(handler: HTTPRouteHandler) -> HTTPRouteHandler:
+    """`handler` with the operation class that documents its rejections truthfully. A copy,
+    because the handler objects are module globals and Litestar copies what it registers anyway."""
+    rejecting = copy(handler)
+    rejecting.operation_class = RejectingOperation
+    return rejecting
+
 
 # --- app --------------------------------------------------------------------
 
@@ -216,7 +256,9 @@ def create_app() -> Litestar:
     """Factory so logging is configured before Litestar builds anything; `app` below keeps
     `litestar --app haskie.app:app` working."""
     logs.configure()
-    route_handlers: list[ControllerRouterHandler] = list(ROUTE_HANDLERS)
+    route_handlers: list[ControllerRouterHandler] = [
+        documented(handler) for handler in ROUTE_HANDLERS
+    ]
     if WEB_DIST.is_dir():
         route_handlers.append(
             create_static_files_router("/", directories=[WEB_DIST], html_mode=True)
