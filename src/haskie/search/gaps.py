@@ -42,7 +42,7 @@ from haskie.collection.collection import Collection
 from haskie.errors import Conflict, InvalidInput, NotFound
 from haskie.search import aspects, collapse, flow, log, retrieval, session
 from haskie.search.collapse import WORD
-from haskie.search.log import LoggedQuestion, LoggedResult
+from haskie.search.log import LoggedQuestion, LoggedResult, Searched
 from haskie.tables import search_questions, searches
 
 NEAR_MISSES = 3  # results shown per gap question: what came closest, not a page to read
@@ -99,11 +99,6 @@ async def bars(rerankers: set[str]) -> Bars:
 
 
 # --- judging one question ---------------------------------------------------------
-
-
-# what a detector reads a question's search from: a logged search, or a capture that was never
-# written (a replay)
-Searched = log.Logged | log.Capture
 
 
 def _reported(_: Searched, asked: LoggedQuestion, __: Bars) -> Signal | None:

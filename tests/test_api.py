@@ -23,9 +23,10 @@ from urllib.parse import unquote
 import pytest
 import structlog
 from litestar.testing import AsyncTestClient, RequestFactory
+from sqlalchemy import update
 
 from haskie import app as app_module
-from haskie import audit, errors, home, logs
+from haskie import audit, db, errors, home, logs
 from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection, MemberStatus
 from haskie.document import document
@@ -34,7 +35,7 @@ from haskie.indexing import embed_cache, gguf_models, mlx_models
 from haskie.indexing.chunk import Chunk, Piece, split
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order
-from haskie.search import log
+from haskie.search import gaps, log
 from haskie.settings import (
     DEFAULT_RERANKER,
     Accelerator,
@@ -46,6 +47,7 @@ from haskie.settings import (
     UserSettings,
     save_user_settings,
 )
+from haskie.tables import searches
 
 from conftest import (  # isort: skip
     NO_MODELS,
@@ -1352,6 +1354,33 @@ async def test_an_agent_reports_a_gap_on_a_question_it_asked(ready: AsyncTestCli
         json={"question": " alpha sources ", "verdict": "insufficient"},
     )
     assert sources.status_code == 200, "a sources question, passed back word for word"
+
+    async with db.connect() as conn:  # the search, asked just over an hour ago
+        await conn.execute(update(searches).values(ts=time.time() - gaps.REPORT_WINDOW - 1))
+    stale = await ready.post(
+        "/api/gaps/report",
+        params={"session_id": "r1"},
+        json={"question": "alpha body", "verdict": "insufficient"},
+    )
+    assert stale.status_code == 404, "only a search of the last hour is reported on"
+
+
+@pytest.mark.parametrize(
+    ("path", "params"),
+    [
+        ("/api/search/explore", {}),
+        ("/api/search/sources", {}),
+        ("/api/search/text", {}),
+    ],
+)
+async def test_a_blank_question_is_refused_and_not_logged(
+    ready: AsyncTestClient, path: str, params: dict
+) -> None:
+    """A blank search finds nothing, so it would show on the Gaps page as an unnamed gap."""
+    refused = await ready.get(path, params={"q": "   ", **params})
+
+    assert refused.status_code == 422 and "q is empty" in refused.text, refused.text
+    assert await log.load() == []
 
 
 async def test_session_search_survives_the_deletion_of_a_collection(

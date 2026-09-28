@@ -1310,7 +1310,6 @@ export interface components {
             id?: number | null;
             similarities?: number[];
             rerank_scores?: number[];
-            coherence?: number | null;
             best_similarity?: number | null;
             best_rerank?: number | null;
             /** @default false */
@@ -1336,22 +1335,23 @@ export interface components {
         };
         /** LoggedSearch */
         LoggedSearch: {
+            tool: components["schemas"]["Tool"];
+            session_id: string | null;
+            context?: string | null;
+            collections?: string[];
+            mode?: components["schemas"]["SearchMode"] | null;
+            embedding?: string | null;
+            reranker?: string | null;
+            min_rerank_score?: number | null;
+            result_limit?: number | null;
+            /** @default 0 */
+            result_count: number;
+            missing_terms?: string[];
+            error?: string | null;
             id: number;
             ts: number;
-            session_id: string | null;
             actor: string;
-            tool: components["schemas"]["Tool"];
-            context: string | null;
-            collections: string[];
-            mode: components["schemas"]["SearchMode"] | null;
-            embedding: string | null;
-            reranker: string | null;
-            min_rerank_score: number | null;
-            result_limit: number | null;
-            result_count: number;
             duration_ms: number;
-            error: string | null;
-            missing_terms: string[];
             questions?: components["schemas"]["LoggedQuestion"][];
             results?: components["schemas"]["LoggedResult"][];
         };

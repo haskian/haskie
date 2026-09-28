@@ -71,7 +71,7 @@ async def explore(
     result it repeats: it is listed in that result's `also_in` rather than on its own, and its
     slot goes to the next result down.
     """
-    q = q.strip()  # as `report_gap` matches it
+    q = aspects.question(q)  # stripped as `report_gap` matches it
     async with log.capturing(log.Tool.EXPLORE, [q], session_id) as capture:
         names = await retrieval.scope(session_id, collections)
         if granularity == Granularity.PASSAGE:
@@ -186,7 +186,7 @@ async def search_sources(
     Args:
         session_id: The conversation's id; the search then shows in that session's history.
     """
-    q = q.strip()  # as `report_gap` matches it
+    q = aspects.question(q)  # stripped as `report_gap` matches it
     async with log.capturing(log.Tool.SOURCES, [q], session_id) as capture:
         names = await retrieval.scope(session_id, collections)
         found = await flow.sources(names, q, limit, sections)
@@ -263,7 +263,7 @@ async def search_text(
         session_id: The conversation's id; the search then shows in that session's history.
     """
     # one search per query, not one per page of it
-    q = q.strip()  # as `report_gap` matches it
+    q = aspects.question(q)  # stripped as `report_gap` matches it
     async with log.capturing(log.Tool.TEXT, [q], session_id, record=cursor is None) as capture:
         page = await text.search(q, text.split_collections(collections), page_size, cursor)
         capture.answer(page.items)

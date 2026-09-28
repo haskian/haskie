@@ -57,7 +57,7 @@ from conftest import (
 from dbos import DBOS, SetWorkflowID
 from dbos._error import DBOSAwaitedWorkflowCancelledError
 from dbos._registrations import get_dbos_func_name
-from sqlalchemy import insert, update
+from sqlalchemy import func, insert, select, update
 
 from haskie import audit, cpu, db, home, paging, settings, shutdown
 from haskie.catalogue import catalogue
@@ -76,6 +76,7 @@ from haskie.indexing import chunk, dbos_names, embed_cache, models, operations, 
 from haskie.indexing.pipeline import Batch
 from haskie.indexing.workflows import Stage
 from haskie.paging import Order
+from haskie.search import log
 from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
@@ -86,7 +87,7 @@ from haskie.settings import (
     load_user_settings,
     save_user_settings,
 )
-from haskie.tables import collection_documents, staging
+from haskie.tables import collection_documents, searches, staging
 from haskie.tables import settings as settings_table
 
 pytestmark = pytest.mark.anyio
@@ -2391,34 +2392,60 @@ async def test_start_registers_the_nightly_schedule(dbos) -> None:
     assert len(await registered()) == 1
 
 
-async def test_start_prunes_the_audit_trail_once(dbos) -> None:
+async def _old_and_new_search() -> None:
+    """Two logged searches: one asked in 2020, one just now."""
+    for question in ["old", "new"]:
+        async with log.capturing(log.Tool.SOURCES, [question], None):
+            pass
+    async with db.connect() as conn:
+        await conn.execute(
+            update(searches)
+            .where(searches.c.id == select(func.min(searches.c.id)).scalar_subquery())
+            .values(ts=datetime(2020, 1, 1).timestamp())
+        )
+
+
+async def _logged_questions() -> list[str]:
+    return [asked.question for search in await log.load() for asked in search.questions]
+
+
+async def test_start_prunes_the_audit_trail_and_the_search_log_once(dbos) -> None:
     """A desktop session rarely lives until 03:17, so the boot prunes as well, with the retention
     the user set."""
-    await save_user_settings(UserSettings(retention=RetentionSettings(audit_days=1)))
+    await save_user_settings(UserSettings(retention=RetentionSettings(audit_days=1, search_days=1)))
     old = home.AUDIT_DIR / "audit-2020-01-01.jsonl"
     old.write_text("{}\n")
     today = audit.path()
     today.write_text("{}\n")
+    await _old_and_new_search()
 
     await restart_dbos()
 
     assert not old.exists(), "a file older than the retention is gone after one boot"
     assert today.exists(), "today's file is inside every window"
+    assert await _logged_questions() == ["new"], "so is a search older than the retention"
 
 
-async def test_daily_maintenance_prunes_the_audit_trail(dbos) -> None:
+@pytest.mark.parametrize(("search_days", "kept"), [(1, ["new"]), (0, ["new", "old"])])
+async def test_daily_maintenance_prunes_the_audit_trail_and_the_search_log(
+    dbos, search_days: int, kept: list[str]
+) -> None:
     """The scheduled workflow does the same work on its own clock. It ignores the two arguments
-    every DBOS schedule passes."""
-    await save_user_settings(UserSettings(retention=RetentionSettings(audit_days=1)))
+    every DBOS schedule passes. A search retention of 0 keeps every search."""
+    await save_user_settings(
+        UserSettings(retention=RetentionSettings(audit_days=1, search_days=search_days))
+    )
     old = home.AUDIT_DIR / "audit-2020-01-01.jsonl"
     old.write_text("{}\n")
-    kept = audit.path()
-    kept.write_text("{}\n")
+    today = audit.path()
+    today.write_text("{}\n")
+    await _old_and_new_search()
 
     await workflows.daily_maintenance(datetime.now(UTC), None)
 
     assert not old.exists()
-    assert kept.exists()
+    assert today.exists()
+    assert await _logged_questions() == kept
 
 
 async def test_daily_maintenance_purges_the_history_past_the_retention(

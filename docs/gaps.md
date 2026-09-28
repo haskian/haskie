@@ -22,10 +22,10 @@ context variable, so no step passes it along. Two places observe what they alrea
 - the flow's plan, or the full-text listing: the collections searched, the mode that ran, and
   the limit;
 - the flow's `rerank` step, which every ranked search runs once per question: the question's
-  query vector, the profile it was embedded under, and its score profile (`log.profile`): the 20
-  best cosines between the query and the rows read, the reranker's 20 best scores before its
-  floor dropped any, and the coherence of the 10 nearest rows (their mean cosine to each other).
-  The best cosine and the best reranker score are the heads of those lists.
+  query vector, the profile it was embedded under, and its score profile: the 20 best cosines
+  between the query and the rows read (`log.similarities`), and the reranker's 20 best scores
+  before its floor dropped any. The best cosine and the best reranker score are the heads of
+  those lists.
 
 The best cosine is measured on the vectors, not read off a score column. A hybrid query's fusion
 keeps only a rank score, and a rank says nothing about how close the best row came.

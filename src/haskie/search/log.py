@@ -120,35 +120,15 @@ def _result(place: Place, position: int, parent: int | None) -> LoggedResult:
 
 
 PROFILE = 20  # scores kept per ranking: the head of the list, where an answer would be
-COHERENT = 10  # nearest rows whose likeness to each other `coherence` averages
 
 
-class ScoreProfile(msgspec.Struct, frozen=True):
-    """How one question's ranking scored, the raw signals `search.gaps` judges it by."""
-
-    similarities: list[float]  # the best cosines of the query to the rows read, best first
-    coherence: float | None  # the mean cosine between the `COHERENT` nearest rows, pair by pair
-
-
-def profile(query: Sequence[float], rows: Sequence[Sequence[float]]) -> ScoreProfile:
-    """The score profile of a query against the vectors of the rows its ranking read.
-
-    Pure, so the search log (`observe_ranking`) and an offline evaluation measure the same way.
-    Coherence is the literature's dense post-retrieval predictor: the nearest rows of an answered
-    question tend to be about one thing, those of an unanswered one scatter.
-    """
+def similarities(query: Sequence[float], rows: Sequence[Sequence[float]]) -> list[float]:
+    """The `PROFILE` best cosines of a query to the vectors of the rows its ranking read, best
+    first. Pure, so the search log (`observe_ranking`) and an offline evaluation measure alike."""
     if not rows:
-        return ScoreProfile(similarities=[], coherence=None)
-    units = collapse.unit_rows(rows)
-    cosines = units @ collapse.unit_rows([query])[0]
-    order = np.argsort(-cosines)
-    nearest = units[order[:COHERENT]]
-    coherence = None
-    if len(nearest) > 1:
-        pairs = nearest @ nearest.T
-        count = len(nearest)
-        coherence = float((pairs.sum() - np.trace(pairs)) / (count * (count - 1)))
-    return ScoreProfile(similarities=cosines[order[:PROFILE]].tolist(), coherence=coherence)
+        return []
+    cosines = collapse.unit_rows(rows) @ collapse.unit_rows([query])[0]
+    return sorted(cosines.tolist(), reverse=True)[:PROFILE]
 
 
 class LoggedQuestion(msgspec.Struct):
@@ -161,7 +141,6 @@ class LoggedQuestion(msgspec.Struct):
     id: int | None = None
     similarities: list[float] = []  # the best cosines of the query to any row read, best first
     rerank_scores: list[float] = []  # the reranker's best scores before its floor, best first
-    coherence: float | None = None  # how alike the nearest rows are (`profile`)
     best_similarity: float | None = None
     best_rerank: float | None = None
     uncovered: bool = False  # several were asked, and no excerpt answers this one
@@ -184,28 +163,30 @@ class Asked(LoggedQuestion):
     vector: list[float] | None = None
 
 
-class Capture(msgspec.Struct):
-    """One search while it runs: what it was asked, what it settled, what it measured."""
+class Searched(msgspec.Struct, kw_only=True):
+    """What a search settled and what it got, while it runs (`Capture`) or read back (`Logged`):
+    what the gap detectors judge it by. One `searches` row holds each field."""
 
     tool: Tool
     session_id: str | None
-    asked: list[Asked]
-    context: str | None = None
-    collections: list[str] = []
-    mode: SearchMode | None = None
+    context: str | None = None  # the background an excerpts search's questions shared
+    collections: list[str] = []  # the collections it searched
+    mode: SearchMode | None = None  # how it ranked: hybrid, vector or fts
     embedding: str | None = None  # the profile key the queries were embedded under
     reranker: str | None = None  # the cross-encoder model, None when the search did not rerank
     # the floor the settings set in place of the reranker's own, None when they set none
     min_rerank_score: float | None = None
     result_limit: int | None = None
-    results: list[LoggedResult] = []
-    missing_terms: list[str] = []  # the words of its questions no excerpt held
-    error: str | None = None
+    result_count: int = 0  # the results the caller got, without the places folded into them
+    missing_terms: list[str] = []  # the words of its questions no excerpt held; excerpts only
+    error: str | None = None  # why it failed; a failed search returned nothing
 
-    @property
-    def result_count(self) -> int:
-        """The results the caller got, without the places folded into them."""
-        return sum(result.parent is None for result in self.results)
+
+class Capture(Searched, kw_only=True):
+    """One search while it runs: what it was asked, what it settled, what it measured."""
+
+    asked: list[Asked]
+    results: list[LoggedResult] = []
 
     def answer(
         self,
@@ -216,6 +197,7 @@ class Capture(msgspec.Struct):
         """What the caller got back, the questions no excerpt answers, and the words of the
         questions no excerpt holds."""
         self.results = flatten(found)
+        self.result_count = sum(result.parent is None for result in self.results)
         self.missing_terms = list(missing_terms)
         for one in self.asked:
             one.uncovered = one.question in uncovered
@@ -298,8 +280,7 @@ def observe_ranking(question: str, where: Plan, pool: Pool) -> None:
     if where.vector is not None:
         asked.vector = where.vector
         stored = [row["vector"] for _, row in pool.rows.values() if row.get("vector") is not None]
-        measured = profile(where.vector, stored)
-        asked.similarities, asked.coherence = measured.similarities, measured.coherence
+        asked.similarities = similarities(where.vector, stored)
     asked.__post_init__()  # the heads of the lists just set
 
 
@@ -330,7 +311,6 @@ async def _write(capture: Capture, duration_ms: int) -> None:
                     "actor": actor,
                     "collections": db.dumps(capture.collections),
                     "missing_terms": db.dumps(capture.missing_terms),
-                    "result_count": capture.result_count,
                     "duration_ms": duration_ms,
                 }
             )
@@ -346,7 +326,6 @@ async def _write(capture: Capture, duration_ms: int) -> None:
                     "query_vector": _vector_bytes(one.vector),
                     "similarities": _floats(one.similarities),
                     "rerank_scores": _floats(one.rerank_scores),
-                    "coherence": one.coherence,
                     "uncovered": one.uncovered,
                 }
                 for position, one in enumerate(capture.asked)
@@ -365,29 +344,17 @@ async def _write(capture: Capture, duration_ms: int) -> None:
 # --- reading the log ----------------------------------------------------------------
 
 
-class Logged(msgspec.Struct):
+class Logged(Searched, kw_only=True):
     """One search as the log holds it, with each question it asked."""
 
     id: int
     ts: float  # unix seconds
-    session_id: str | None
     actor: str  # who ran it: "mcp" for an agent, "web" for the UI or a script
-    tool: Tool
-    context: str | None  # the background an excerpts search's questions shared
-    collections: list[str]  # the collections it searched
-    mode: SearchMode | None  # how it ranked: hybrid, vector or fts
-    embedding: str | None  # the embedding profile its queries were embedded under
-    reranker: str | None  # the cross-encoder model, None when it did not rerank
-    min_rerank_score: float | None  # the settings' floor in place of the reranker's own
-    result_limit: int | None
-    result_count: int  # results returned, the places folded into them aside
     duration_ms: int
-    error: str | None  # why it failed; a failed search returned nothing
-    missing_terms: list[str]  # the words of its questions no excerpt held; excerpts only
     questions: list[LoggedQuestion] = []
 
 
-class LoggedSearch(Logged):
+class LoggedSearch(Logged, kw_only=True):
     """One search as a caller reads it: its questions, and the results it returned."""
 
     results: list[LoggedResult] = []  # best first, without the places folded into them

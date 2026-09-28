@@ -13,10 +13,10 @@ Two shelves, both free for any use:
 
 Each shelf is chunked with haskie's own chunker at the default settings and embedded with the
 profile asked for. A question's ranking is its `CANDIDATES` nearest chunks by cosine, the pool a
-vector search reads, and its score profile is taken with `log.profile`, as the search log takes it.
-The reranker scores the same pool. Each of `FEATURES` is then scored by AUROC:
-the chance that a random answered question scores above a random unanswered one (0.5 is a coin).
-The topic pairs of `topics.json` give the `same_topic` bar the same way.
+vector search reads, and its cosines are taken with `log.similarities`, as the search log takes
+them. The reranker scores the same pool. Each of `FEATURES` is then scored by AUROC: the chance that
+a random answered question scores above a random unanswered one (0.5 is a coin). The topic pairs of
+`topics.json` give the `same_topic` bar the same way.
 """
 
 import argparse
@@ -106,18 +106,33 @@ def _mean5(scores: list[float]) -> float | None:
     return float(np.mean(scores[:5])) if scores else None
 
 
-# The predictors a question's logged score profile (`log.profile`) can be judged by, each a pure
-# function of its `LoggedQuestion`; None when the profile cannot say. `max` is what the Gaps page
-# judges by (`gaps._weak`); the others are measured against it.
+COHERENT = 10  # nearest rows whose likeness to each other `coherence` averages
+
+
+def _coherence(nearest: np.ndarray) -> float | None:
+    """The mean cosine between the nearest rows, pair by pair: the literature's dense
+    post-retrieval predictor. An answered question's nearest rows tend to be about one thing."""
+    if len(nearest) < 2:
+        return None
+    from haskie.search import collapse
+
+    units = collapse.unit_rows(list(nearest))
+    pairs = units @ units.T
+    return float((pairs.sum() - np.trace(pairs)) / (len(units) * (len(units) - 1)))
+
+
+# The predictors a question's score profile (`log.similarities`, the reranker's scores) can be
+# judged by, each a pure function of one `Asked`; None when the profile cannot say. `max` is what
+# the Gaps page judges by (`gaps._weak`); the others are measured against it.
 FEATURES: dict[str, Callable[[Any], float | None]] = {
-    "max": lambda q: q.similarities[0] if q.similarities else None,
-    "gap12": lambda q: _gap12(q.similarities),
-    "spread": lambda q: _spread(q.similarities),
-    "mean5": lambda q: _mean5(q.similarities),
-    "coherence": lambda q: q.coherence,
-    "rerank_max": lambda q: q.rerank_scores[0] if q.rerank_scores else None,
-    "rerank_gap12": lambda q: _gap12(q.rerank_scores),
-    "rerank_mean5": lambda q: _mean5(q.rerank_scores),
+    "max": lambda one: one.logged.similarities[0] if one.logged.similarities else None,
+    "gap12": lambda one: _gap12(one.logged.similarities),
+    "spread": lambda one: _spread(one.logged.similarities),
+    "mean5": lambda one: _mean5(one.logged.similarities),
+    "coherence": lambda one: one.coherence,
+    "rerank_max": lambda one: one.logged.rerank_scores[0] if one.logged.rerank_scores else None,
+    "rerank_gap12": lambda one: _gap12(one.logged.rerank_scores),
+    "rerank_mean5": lambda one: _mean5(one.logged.rerank_scores),
 }
 
 
@@ -125,8 +140,11 @@ class Asked:
     """One question put to one shelf: its logged score profile, its three nearest chunks (what the
     Gaps page cites as near misses) and the words of it the five nearest chunks do not hold."""
 
-    def __init__(self, logged: Any, nearest: list[int], missing: list[str]) -> None:
+    def __init__(
+        self, logged: Any, nearest: list[int], missing: list[str], coherence: float | None
+    ) -> None:
         self.logged, self.nearest, self.missing = logged, nearest, missing
+        self.coherence = coherence
 
 
 async def _index(shelf: str, model: Any) -> tuple[list[str], np.ndarray, dict[str, Any]]:
@@ -165,17 +183,15 @@ def _ask(
     pool = np.argsort(-(collapse.unit_rows(list(vectors)) @ collapse.unit_rows([query])[0]))[
         :CANDIDATES
     ]
-    found = log.profile(query.tolist(), vectors[pool].tolist())
+    found = log.similarities(query.tolist(), vectors[pool].tolist())
     scores: list[float] = []
     if reranker is not None:
         logits = embed.rerank_scores(reranker, Accelerator.CPU, question, [texts[i] for i in pool])
         scores = sorted((_sigmoid(one) for one in logits), reverse=True)[: log.PROFILE]
     asked = probe.Question(vector=None, asked=question)
     missing = list(probe.missing([asked], [texts[i] for i in pool[:5]]))
-    logged = log.LoggedQuestion(
-        question, similarities=found.similarities, rerank_scores=scores, coherence=found.coherence
-    )
-    return Asked(logged, [int(i) for i in pool[:3]], missing)
+    logged = log.LoggedQuestion(question, similarities=found, rerank_scores=scores)
+    return Asked(logged, [int(i) for i in pool[:3]], missing, _coherence(vectors[pool[:COHERENT]]))
 
 
 async def _measure(
@@ -215,7 +231,7 @@ def _features(measured: dict[str, dict[str, list[Asked]]]) -> list[str]:
     for name, feature in FEATURES.items():
         values = {
             shelf: {
-                group: [v for one in found[group] if (v := feature(one.logged)) is not None]
+                group: [v for one in found[group] if (v := feature(one)) is not None]
                 for group in ("answered", "unanswered")
             }
             for shelf, found in measured.items()
@@ -376,7 +392,7 @@ def main() -> None:
                         "question": one.logged.question,
                         "similarities": one.logged.similarities[:5],
                         "rerank_scores": one.logged.rerank_scores[:5],
-                        "coherence": one.logged.coherence,
+                        "coherence": one.coherence,
                         "nearest": one.nearest,
                         "missing": one.missing,
                     }

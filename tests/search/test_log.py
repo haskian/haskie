@@ -124,7 +124,6 @@ async def test_a_search_records_its_scope_answer_and_signals(seeded_home, fixed_
     cosines = sorted(float(np.dot(QUERIES["idempotent retries"], v)) for v in VECTORS.values())
     assert asked.similarities == pytest.approx(cosines[::-1], abs=1e-6), "both rows, best first"
     assert asked.rerank_scores == pytest.approx([1 / (1 + math.exp(-x)) for x in (2.5, 1.5)])
-    assert asked.coherence == pytest.approx(float(np.dot(VECTORS["a"], VECTORS["b"])), abs=1e-6)
     assert asked.id is not None
     stored = (await log.vectors([asked.id]))[asked.id]
     assert stored == pytest.approx(QUERIES["idempotent retries"], abs=1e-6), "float32, read apart"

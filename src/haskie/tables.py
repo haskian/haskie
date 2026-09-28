@@ -183,12 +183,10 @@ search_questions = Table(
     Column("search_id", Integer, ForeignKey("searches.id", ondelete="CASCADE"), nullable=False),
     Column("position", Integer, nullable=False),
     Column("question", Text, nullable=False),
-    # the score profile of its ranking (`log.ScoreProfile`): the best cosines of the query to the
-    # rows read and the reranker's best scores before its floor, each float32 and best first, and
-    # how alike the nearest rows are to each other
+    # the score profile of its ranking: the best cosines of the query to the rows read and the
+    # reranker's best scores before its floor, each float32 and best first (`log.PROFILE`)
     Column("similarities", LargeBinary),
     Column("rerank_scores", LargeBinary),
-    Column("coherence", Float),
     Column("uncovered", Integer, nullable=False, server_default=ZERO),  # no excerpt answers it
     Column("review", Text, CheckConstraint("review in ('dismissed', 'resolved')")),
     # the agent's own verdict on what the search gave it (`gaps.report`), and what it lacked

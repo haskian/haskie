@@ -92,10 +92,13 @@ erDiagram
         int id PK
         int search_id
         text question
-        blob query_vector
-        real best_similarity
-        real best_rerank
+        blob similarities
+        blob rerank_scores
+        int uncovered
         text review
+        text agent_verdict
+        text agent_note
+        blob query_vector
     }
     search_results {
         int search_id PK

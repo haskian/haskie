@@ -395,34 +395,22 @@ def test_an_excerpt_flattens_its_passages_repeats_under_itself() -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "rows", "similarities", "coherence"),
+    ("name", "rows", "similarities"),
     [
-        ("no rows read", [], [], None),
-        ("one row: no pair to be alike", [[1.0, 0.0]], [1.0], None),
-        (
-            "best first, and the nearest rows alike",
-            [[0.0, 1.0], [1.0, 0.0], [1.0, 0.1]],
-            [1.0, 0.995, 0.0],
-            (0.995 + 0.0 + 0.0995) / 3,
-        ),
-        ("a zero vector scores 0, never divides by 0", [[0.0, 0.0], [2.0, 0.0]], [1.0, 0.0], 0.0),
+        ("no rows read", [], []),
+        ("best first", [[0.0, 1.0], [1.0, 0.0], [1.0, 0.1]], [1.0, 0.995, 0.0]),
+        ("a zero vector scores 0, never divides by 0", [[0.0, 0.0], [2.0, 0.0]], [1.0, 0.0]),
+        ("the head of a long ranking", [[1.0, float(n)] for n in range(50)], None),
     ],
 )
-def test_the_profile_of_a_ranking(
-    name: str, rows: list[list[float]], similarities: list[float], coherence: float | None
+def test_the_similarities_of_a_ranking(
+    name: str, rows: list[list[float]], similarities: list[float] | None
 ) -> None:
-    found = log.profile([1.0, 0.0], rows)
-    assert found.similarities == pytest.approx(similarities, abs=1e-3), name
-    assert (found.coherence is None) == (coherence is None), name
-    if coherence is not None:
-        assert found.coherence == pytest.approx(coherence, abs=1e-3), name
-
-
-def test_the_profile_keeps_the_head_of_a_long_ranking() -> None:
-    rows = [[1.0, float(n)] for n in range(50)]
-    found = log.profile([1.0, 0.0], rows)
-    assert len(found.similarities) == log.PROFILE
-    assert found.similarities == sorted(found.similarities, reverse=True)
+    found = log.similarities([1.0, 0.0], rows)
+    if similarities is None:
+        assert len(found) == log.PROFILE and found == sorted(found, reverse=True), name
+    else:
+        assert found == pytest.approx(similarities, abs=1e-3), name
 
 
 def test_best_scores_are_the_heads_of_the_lists() -> None:
