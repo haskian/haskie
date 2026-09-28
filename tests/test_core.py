@@ -16,7 +16,8 @@ import sys
 import threading
 import types
 import zipfile
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
 from pathlib import Path
 
@@ -1361,27 +1362,69 @@ async def test_member_counts_group_by_status() -> None:
     assert await empty.counts() == DocumentCounts(), "a collection without members"
 
 
+def _mark(status: MemberStatus) -> Callable[[Collection, str], Awaitable[None]]:
+    return lambda collection, doc: collection.set_member_status(doc, status)
+
+
+def _fail_removal(collection: Collection, doc: str) -> Awaitable[None]:
+    return collection.fail_removal(doc, "removal failed: boom")
+
+
 @pytest.mark.parametrize(
-    ("change", "detached", "status", "error"),
+    ("detached", "change", "outcome", "status", "error"),
     [
         # a cancelled index still finishing, and the cancel itself, write the status too late
-        ("index", True, "removing", None),
-        ("cancel", True, "removing", None),
+        pytest.param(
+            True, _mark(MemberStatus.INDEXED), nullcontext(), "removing", None, id="index"
+        ),
+        pytest.param(
+            True, _mark(MemberStatus.CANCELLED), nullcontext(), "removing", None, id="cancel"
+        ),
         # a failed removal is the one write that ends `removing`, short of the row going
-        ("fail the removal", True, "error", "removal failed: boom"),
+        pytest.param(
+            True,
+            _fail_removal,
+            nullcontext(),
+            "error",
+            "removal failed: boom",
+            id="fail the removal",
+        ),
         # a delete's removal never marked the member: its failure leaves the status alone
-        ("fail the removal", False, "indexed", None),
+        pytest.param(
+            False, _fail_removal, nullcontext(), "indexed", None, id="fail an unmarked removal"
+        ),
         # attaching again is refused and leaves the membership as it was
-        ("attach", True, "removing", None),
-        ("attach", False, "indexed", None),
+        pytest.param(
+            True,
+            Collection.add,
+            pytest.raises(Conflict, match="being removed from collection going"),
+            "removing",
+            None,
+            id="attach while removing",
+        ),
+        # attaching a member again is a no-op
+        pytest.param(False, Collection.add, nullcontext(), "indexed", None, id="attach again"),
         # detaching again marks it again; a stranger is not found and marks nothing
-        ("detach", True, "removing", None),
-        ("detach a stranger", True, "removing", None),
+        pytest.param(
+            True, Collection.start_removal, nullcontext(), "removing", None, id="detach again"
+        ),
+        pytest.param(
+            True,
+            lambda collection, doc: collection.start_removal("ghost.md"),
+            pytest.raises(NotFound, match="document not in collection going: ghost.md"),
+            "removing",
+            None,
+            id="detach a stranger",
+        ),
     ],
 )
 @pytest.mark.anyio
 async def test_a_removing_membership_keeps_its_status_until_its_removal_ends(
-    change: str, detached: bool, status: str, error: str | None
+    detached: bool,
+    change: Callable[[Collection, str], Awaitable[None]],
+    outcome: AbstractContextManager,
+    status: str,
+    error: str | None,
 ) -> None:
     """A detach answers once its removal is queued, and the listing shows `removing` until it ran:
     no index status may overwrite that, or a poll would stop following a member still going."""
@@ -1392,22 +1435,8 @@ async def test_a_removing_membership_keeps_its_status_until_its_removal_ends(
     if detached:
         await collection.start_removal(doc.name)
 
-    if change == "index":
-        await collection.set_member_status(doc.name, MemberStatus.INDEXED)
-    elif change == "cancel":
-        await collection.set_member_status(doc.name, MemberStatus.CANCELLED)
-    elif change == "fail the removal":
-        await collection.fail_removal(doc.name, "removal failed: boom")
-    elif change == "attach" and detached:
-        with pytest.raises(Conflict, match="being removed from collection going"):
-            await collection.add(doc.name)
-    elif change == "attach":
-        await collection.add(doc.name)  # attaching a member again is a no-op
-    elif change == "detach":
-        await collection.start_removal(doc.name)
-    else:
-        with pytest.raises(NotFound, match="document not in collection going: ghost.md"):
-            await collection.start_removal("ghost.md")
+    with outcome:
+        await change(collection, doc.name)
 
     member = await collection.member(doc.name)
     assert (member.status, member.error) == (status, error)
