@@ -3260,13 +3260,29 @@ def test_migrate_creates_the_schema_once_and_refuses_every_other_home(
         assert _tables(conn) == {"libraries"}, f"{name}: nothing created and nothing dropped"
         assert conn.execute("select count(*) from libraries").fetchone() == (1,), f"{name}: rows"
     else:
-        assert db.migrate(conn) == db.SCHEMA_VERSION, name
+        db.migrate(conn)
         assert conn.execute("pragma user_version").fetchone() == (db.SCHEMA_VERSION,), name
         assert conn.execute("pragma journal_mode").fetchone() == ("wal",), f"{name}: WAL, for good"
         assert ("sessions" in _tables(conn)) is (outcome == "created"), (
             f"{name}: the script runs on a fresh file and never again"
         )
     conn.close()
+
+
+# The schema `tables.py` generates at this `SCHEMA_VERSION`: a SHA-256 of its DDL statements,
+# sorted, because a table's indexes are a set and come out in no fixed order.
+SCHEMA_PIN = (24, "b44a4ff4d1bc1b1838df032f1ac35ff1e8c3155fcc8fcef92b9fe2a5595ca19d")
+
+
+def test_a_table_change_comes_with_a_new_schema_version() -> None:
+    """A table change that keeps the version would open an older home as it is, and fail
+    mid-query on the first column it lacks, instead of refusing the home at startup."""
+    statements = sorted(db.schema_ddl().split(";\n"))
+    digest = hashlib.sha256(";\n".join(statements).encode()).hexdigest()
+
+    assert (db.SCHEMA_VERSION, digest) == SCHEMA_PIN, (
+        "the schema changed: bump db.SCHEMA_VERSION, then pin both here"
+    )
 
 
 def test_a_fresh_home_has_exactly_the_tables_indexes_and_columns_of_the_metadata(

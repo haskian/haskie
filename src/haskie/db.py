@@ -34,16 +34,8 @@ SCHEMA_VERSION = 24
 """`pragma user_version` of the schema in `tables.py`.
 
 A home stamped with it has these tables and columns and is opened as it is. Any other stamp is a
-shape this build cannot read, so the home is refused (see `migrate`). Against the last release (23),
-searches move out of `session_events` into the search log (`searches`, `search_questions`,
-`search_results`), and the embedding profiles gain the cosines the Gaps page judges by
-(`weak_match`, `answered_match`, `same_topic`). Against 22, a document and a staged upload keep the
-MD5 of their bytes (`md5`), and an embedding cache row keeps the document's mean vector
-(`embeddings.vector`). Against 21, where two parts of a document meet is cut `part` or `heading`,
-not `edge` (`CutReason.PART`). Against 20, the catalogue holds each reranker's calibration
-(`reranker_calibration`). Against 19, a piece without a word (`---`, a stray symbol, a page marker
-alone) makes no chunk (`chunk.pack`): every document chunks differently, and a search no longer
-checks for such chunks, so an index written the old way would return them.
+shape this build cannot read, so the home is refused (see `migrate`). The commit that bumps it says
+what changed.
 
 A cache file or LanceDB table written the old way must never be read by this build.
 
@@ -83,15 +75,15 @@ _migrated: set[Path] = set()
 _migrate_lock = threading.Lock()  # both event loops get here through worker threads of their own
 
 
-def migrate(conn: sqlite3.Connection) -> int:
-    """Create the schema on a fresh file; returns the version the file is at.
+def migrate(conn: sqlite3.Connection) -> None:
+    """Create the schema on a fresh file, and leave a file at `SCHEMA_VERSION` as it is.
 
     A home stamped with anything else was written by a build whose storage shape this one cannot
     read, and there is no path from it. It is refused with `user_version` untouched and the user is
     told to destroy it, rather than losing its rows to a silent drop."""
     (version,) = conn.execute("pragma user_version").fetchone()
     if version == SCHEMA_VERSION:
-        return SCHEMA_VERSION
+        return
     if version != 0:
         raise HaskieError(INCOMPATIBLE_HOME_MESSAGE)
     conn.execute("pragma journal_mode = wal")  # persistent; needs an exclusive lock, so once
@@ -99,7 +91,6 @@ def migrate(conn: sqlite3.Connection) -> int:
     conn.executescript(SEED.read_text(encoding="utf-8"))
     conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
     conn.commit()
-    return SCHEMA_VERSION
 
 
 def _migrate_sync() -> None:
@@ -142,7 +133,8 @@ async def migrate_once() -> None:
 
 def _set_pragmas(dbapi_connection: Any, _record: Any) -> None:
     # the adapter's own `execute`: one round trip to the driver thread, where a cursor takes three
-    dbapi_connection.execute("pragma synchronous = normal")  # durable across crashes in WAL mode
+    # consistent across crashes in WAL mode; a power cut may roll back the last commits
+    dbapi_connection.execute("pragma synchronous = normal")
     dbapi_connection.execute("pragma foreign_keys = on")  # per connection
 
 
