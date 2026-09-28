@@ -209,12 +209,28 @@ async def similar_documents(document: str) -> Similar:
     return Similar(identical=identical, nearest=nearest)
 
 
+# A document's own bytes are served on haskie's origin, where an HTML or SVG file would run its
+# script against an API that authenticates no one. `sandbox` gives the response an opaque origin
+# and no script, however it is opened: in the pane, in a new tab, or from a link. PDF is left out:
+# the sandbox blocks the browser's PDF viewer, which runs a PDF's script in its own sandbox anyway.
+UNTRUSTED_HEADERS = {"Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"}
+
+
+def _untrusted_headers(is_pdf: bool) -> dict[str, str]:
+    return {} if is_pdf else UNTRUSTED_HEADERS
+
+
 @get("/api/documents/{document:str}/source")
 async def get_source(document: str) -> File:
     row = await documents.get(document)
     # named after the document, not the stored `original.*`: the name is what the media type is
     # guessed from, and what a browser that saves it calls the file
-    return File(path=row.source_path(), filename=row.name, content_disposition_type="inline")
+    return File(
+        path=row.source_path(),
+        filename=row.name,
+        content_disposition_type="inline",
+        headers=_untrusted_headers(Path(row.name).suffix.lower() == ".pdf"),
+    )
 
 
 PREVIEW_MEDIA = {
@@ -234,6 +250,7 @@ async def get_preview(document: str) -> File:
         filename=document if media is None else None,
         media_type=media,
         content_disposition_type="inline",
+        headers=_untrusted_headers(preview.kind == convert.PreviewKind.PDF),
     )
 
 

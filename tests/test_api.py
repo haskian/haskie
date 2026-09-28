@@ -1009,6 +1009,37 @@ async def test_reading_one_document(client: AsyncTestClient) -> None:
     assert described.json()["description"] == "the guide"
 
 
+ATTACK_HTML = b"<html><body><script>fetch('/api/documents')</script>page</body></html>"
+ATTACK_SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+
+
+@pytest.mark.parametrize(
+    ("name", "body", "sandboxed"),
+    [
+        pytest.param("page.html", ATTACK_HTML, True, id="html-runs-no-script"),
+        pytest.param("logo.svg", ATTACK_SVG, True, id="svg-runs-no-script"),
+        pytest.param("guide.md", MD.encode(), True, id="text-is-sandboxed-too"),
+        pytest.param("paper.pdf", text_pdf(["one"]), False, id="pdf-keeps-its-viewer"),
+    ],
+)
+async def test_a_documents_own_bytes_are_served_sandboxed(
+    client: AsyncTestClient, name: str, body: bytes, sandboxed: bool
+) -> None:
+    """The source and the preview carry the file's own bytes on haskie's origin, where a script
+    in them would reach an API that authenticates no one: `sandbox` takes the origin away."""
+    await client.post("/api/init", json=NO_MODELS)
+    await stage_and_import(client, name, body)
+
+    for route in ("source", "preview"):
+        response = await client.get(f"/api/documents/{name}/{route}")
+
+        assert response.status_code == 200, (route, response.text)
+        csp = response.headers.get("content-security-policy")
+        assert csp == ("sandbox" if sandboxed else None), route
+        nosniff = response.headers.get("x-content-type-options")
+        assert nosniff == ("nosniff" if sandboxed else None), route
+
+
 @pytest.mark.parametrize(
     ("name", "params", "status", "text"),
     [
