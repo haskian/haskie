@@ -476,7 +476,23 @@ def destroy(
 
     asyncio.run(home.remove_tree(root))
     db.invalidate_migrations()  # the file this process migrated is gone; a new one starts over
+    # `remove_tree` logs what it cannot delete and carries on, so only a look afterwards knows.
+    if os.path.lexists(root):
+        typer.echo(f"could not delete all of {root}; still there: {_left_over(root)}", err=True)
+        raise typer.Exit(code=1)
     typer.echo(f"deleted {root}")
+
+
+LEFT_SHOWN = 5  # enough to see where the failure is, few enough to stay one line
+
+
+def _left_over(root: Path) -> str:
+    """The files a failed delete left under `root`, the first few by name."""
+    left = sorted(str(path.relative_to(root)) for path in root.rglob("*") if not path.is_dir())
+    if not left:
+        return "empty directories"
+    more = f" and {len(left) - LEFT_SHOWN} more" if len(left) > LEFT_SHOWN else ""
+    return ", ".join(left[:LEFT_SHOWN]) + more
 
 
 def _entries(root: Path) -> list[str]:

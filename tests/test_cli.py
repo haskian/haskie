@@ -297,6 +297,52 @@ def test_destroy_refuses_a_home_a_server_holds(elsewhere: Path) -> None:
     assert (elsewhere / "haskie.db").is_file(), "nothing deleted"
 
 
+@dataclass
+class LeftOverCase:
+    files: list[str]  # what sits in a directory destroy may not write into
+    directories: list[str]  # empty directories beside them
+    expect_left: str
+
+
+LEFT_OVER_CASES = {
+    "a file it cannot delete is named": LeftOverCase(
+        files=["guide.md"], directories=[], expect_left="still there: documents/pinned/guide.md"
+    ),
+    "past the first few, a count": LeftOverCase(
+        files=[f"part-{n}.md" for n in range(cli_module.LEFT_SHOWN + 2)],
+        directories=[],
+        expect_left="documents/pinned/part-4.md and 2 more",
+    ),
+    "only directories left": LeftOverCase(
+        files=[], directories=["empty"], expect_left="still there: empty directories"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", LEFT_OVER_CASES.values(), ids=list(LEFT_OVER_CASES))
+def test_destroy_fails_when_something_is_left(case: LeftOverCase, elsewhere: Path) -> None:
+    """`remove_tree` logs what it cannot delete and carries on, so `destroy` looks afterwards: a
+    home still on disk is a failure, and the message says what is left."""
+    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    pinned = elsewhere / "documents" / "pinned"
+    pinned.mkdir()
+    for name in case.files:
+        (pinned / name).write_text("# kept\n")
+    for name in case.directories:
+        (pinned / name).mkdir()
+    pinned.chmod(0o500)  # nothing inside can be unlinked
+    try:
+        result = runner.invoke(cli, ["destroy", "--home", str(elsewhere), "--yes"])
+    finally:
+        pinned.chmod(0o700)
+
+    assert result.exit_code == 1, _text(result)
+    assert f"deleted {elsewhere.resolve()}" not in result.stdout, "never claims it is gone"
+    assert f"could not delete all of {elsewhere.resolve()}" in result.stderr
+    assert case.expect_left in result.stderr
+    assert elsewhere.is_dir()
+
+
 def test_destroy_on_a_missing_home_says_so(tmp_path: Path) -> None:
     never = tmp_path / "never-created"
 
