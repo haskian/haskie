@@ -19,7 +19,7 @@ from typing import Any
 
 import anyio
 import msgspec
-from sqlalchemy import Row, delete, func, or_, select, update
+from sqlalchemy import Row, delete, func, not_, or_, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -49,6 +49,13 @@ class MemberStatus(StrEnum):
 
 
 MEMBER_STATUSES: tuple[MemberStatus, ...] = tuple(MemberStatus)
+# A document on its way out of a collection, by either road: its membership is being removed, or
+# the document is being deleted. Its rows stay in the table until the removal queued for them runs,
+# so a search reads around it. `leaving` finds such documents, `holding` keeps them out.
+LEAVING = (
+    collection_documents.c.status == MemberStatus.REMOVING,
+    documents.c.status == document.DocumentStatus.DELETING,
+)
 # being written into or taken out of the collection right now: the states a poll waits on
 ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = (
     MemberStatus.PENDING,
@@ -354,6 +361,24 @@ class Collection:
             return {name: _overrides(raw) for name, raw in rows}
 
     @staticmethod
+    async def for_search(
+        names: list[str], embedding: EmbeddingModel | None
+    ) -> dict[str, tuple[CollectionIndex, CollectionOverrides]]:
+        """The index of each of these collections, with its overrides, once each and in the order
+        given: what a search reads. Each index leaves out the documents on their way out of its
+        collection (`leaving`). A name with no row is absent, as in `load_overrides`."""
+        found = await Collection.load_overrides(names)
+        leaving = await Collection.leaving(list(found))
+        return {
+            name: (
+                Collection(name).index_with(embedding, leaving.get(name, frozenset())),
+                found[name],
+            )
+            for name in dict.fromkeys(names)
+            if name in found
+        }
+
+    @staticmethod
     async def reranker_overrides() -> list[str]:
         """Every reranker model a collection overrides, in name order and without duplicates.
 
@@ -474,10 +499,13 @@ class Collection:
     async def index(self) -> CollectionIndex:
         return self.index_with(await catalogue.embedding_model(await load_user_settings()))
 
-    def index_with(self, embedding: EmbeddingModel | None) -> CollectionIndex:
+    def index_with(
+        self, embedding: EmbeddingModel | None, leaving: frozenset[str] = frozenset()
+    ) -> CollectionIndex:
         """Variant without the settings read, for steps that already hold the embedding model.
+        A search passes the documents `leaving` the collection, which its reads then leave out.
         Sync, like the `CollectionIndex` constructor it calls: opening the table is what awaits."""
-        return CollectionIndex(self.index_dir, self.name, home.HOME, embedding)
+        return CollectionIndex(self.index_dir, self.name, home.HOME, embedding, leaving)
 
     # --- members ---------------------------------------------------------
 
@@ -589,25 +617,41 @@ class Collection:
 
     @staticmethod
     async def leaving(names: list[str]) -> dict[str, frozenset[str]]:
-        """The documents on their way out of each of these collections: a membership `removing`,
-        or a document `deleting`. Their rows stay in the table until the removal queued for them
-        runs, so a search leaves them out by name. One query for every collection a search
-        covers; a collection nothing is leaving is absent."""
+        """The documents on their way out of each of these collections (`LEAVING`), which a
+        search leaves out by name. One query for every collection a search covers; a collection
+        nothing is leaving is absent."""
         member = collection_documents.c
         async with db.connect() as conn:
             rows = await conn.execute(
                 _MEMBERS.with_only_columns(member.collection, member.document).where(
-                    member.collection.in_(list(set(names))),
-                    or_(
-                        member.status == MemberStatus.REMOVING,
-                        documents.c.status == document.DocumentStatus.DELETING,
-                    ),
+                    member.collection.in_(list(set(names))), or_(*LEAVING)
                 )
             )
             found: dict[str, set[str]] = {}
             for collection, doc in rows:
                 found.setdefault(collection, set()).add(doc)
         return {collection: frozenset(docs) for collection, docs in found.items()}
+
+    @staticmethod
+    async def holding(docs: set[str], names: list[str]) -> dict[str, list[str]]:
+        """Which of the collections `names` hold each of `docs`, in name order, but for one it is
+        on its way out of (`LEAVING`), where a search no longer finds it. A document none of them
+        hold is absent. One query for a whole search result: a search that folds hits to
+        documents needs every membership at once."""
+        if not docs or not names:
+            return {}
+        member = collection_documents.c
+        async with db.connect() as conn:
+            rows = await conn.execute(
+                _MEMBERS.with_only_columns(member.document, member.collection)
+                .where(member.document.in_(list(docs)), member.collection.in_(list(set(names))))
+                .where(*(not_(one) for one in LEAVING))
+                .order_by(member.document, member.collection)
+            )
+        held: dict[str, list[str]] = {}
+        for doc, collection in rows:
+            held.setdefault(doc, []).append(collection)
+        return held
 
     async def member_names(self, after: str | None = None, limit: int | None = None) -> list[str]:
         """Names alone, ordered by name: what a caller that only iterates members needs.

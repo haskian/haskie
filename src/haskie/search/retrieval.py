@@ -83,9 +83,6 @@ class Plan(msgspec.Struct):
     embedding: EmbeddingModel | None  # the model every index of the search embeds with
     # how the reranker's scores read, when one is on (`catalogue.calibration`)
     calibration: RerankerCalibration | None = None
-    # per collection, the documents on their way out of it (`Collection.leaving`): read once for
-    # the search, and left out of every read of it
-    leaving: dict[str, frozenset[str]] = {}
 
     @property
     def rerank_floor(self) -> float:
@@ -109,21 +106,18 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
     every search.
     """
     user = await load_user_settings()
-    found = await Collection.load_overrides(names)
+    embedding = await catalogue.embedding_model(user)
+    found = await Collection.for_search(names, embedding)
     for name in names:
         if name not in found:
             _log.warning("session_collection_missing", collection=name)
-    plans = [
-        (Collection(name), found[name].resolve_search(user)) for name in names if name in found
-    ]
-    if not plans:
+    indexes = [(index, overrides.resolve_search(user)) for index, overrides in found.values()]
+    if not indexes:
         return None
-    leaving = await Collection.leaving([one.name for one, _ in plans])
-    settings = plans[0][1] if len(plans) == 1 else user.search
+    settings = indexes[0][1] if len(indexes) == 1 else user.search
 
-    embedding = await catalogue.embedding_model(user)
     vectors: list[list[float] | None] = [None] * len(queries)
-    if embedding is not None and any(one.mode != SearchMode.FTS for _, one in plans):
+    if embedding is not None and any(one.mode != SearchMode.FTS for _, one in indexes):
         await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
         vectors = await cpu.on_cpu(_embed_all, embedding, queries)
     calibrated = None
@@ -131,7 +125,6 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
         # before the fan-out
         await models.require_ready(models.ModelKind.RERANKER, settings.reranker_model)
         calibrated = await catalogue.calibration(settings.reranker_model)
-    indexes = [(one.index_with(embedding), where) for one, where in plans]
     await asyncio.gather(*(index.open() for index, _ in indexes))
     return [
         Plan(
@@ -140,7 +133,6 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
             vector=vector,
             embedding=embedding,
             calibration=calibrated,
-            leaving=leaving,
         )
         for vector in vectors
     ]
@@ -183,19 +175,16 @@ async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True
     A collection that fails to answer fails the search: a silent hole in a merged ranking reads as
     "no match".
 
-    A document on its way out of a collection (`Plan.leaving`) does not answer from it: its rows
-    stay in the table until the removal queued for them runs.
+    A document on its way out of a collection does not answer from it (`CollectionIndex.leaving`):
+    its rows stay in the table until the removal queued for them runs.
     """
     chosen = {index.collection: settings for index, settings in where.indexes}
 
     async def read(index: CollectionIndex) -> list[dict]:
         settings = chosen[index.collection]
         wanted = None if settings.mode == SearchMode.FTS else where.vector
-        leaving = where.leaving.get(index.collection, frozenset())
         try:
-            return await index.search_rows(
-                query, wanted, settings, candidates, vectors, excluded=leaving
-            )
+            return await index.search_rows(query, wanted, settings, candidates, vectors)
         except Exception:
             _log.exception("session_collection_search_failed", collection=index.collection)
             raise
@@ -936,21 +925,17 @@ async def shortlist(
     Its score folds every chunk it matched by `how` (`passage.fold`), `sections` says where in it
     the answer sits, and `collections` names
     which of the searched collections hold it, but for one it is on its way out of
-    (`Plan.leaving`), where a follow-up search would not find it. `Sources.collections` is the
+    (`Collection.holding`), where a follow-up search would not find it. `Sources.collections` is the
     cover: the fewest collections a follow-up search has to select to reach every row.
     """
     # the shortlist is cut first: only a document that made it is worth a membership and a
     # description, and both are one query for the whole of it
     kept = passage.top_documents(hits, limit, how)
     docs = {group[0].document for group in kept}
-    memberships, described = await asyncio.gather(
-        document.memberships(docs, where.names), document.descriptions_of(docs)
+    held, described = await asyncio.gather(
+        Collection.holding(docs, where.names), document.descriptions_of(docs)
     )
-    staying = {
-        doc: [one for one in held if doc not in where.leaving.get(one, frozenset())]
-        for doc, held in memberships.items()
-    }
-    found = passage.fold_sources(kept, staying, sections, how)
+    found = passage.fold_sources(kept, held, sections, how)
     document.fill_descriptions(found.documents, described)
     return found
 

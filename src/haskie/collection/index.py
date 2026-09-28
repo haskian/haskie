@@ -259,13 +259,21 @@ def _fusion(settings: SearchSettings):
 
 class CollectionIndex:
     def __init__(
-        self, path: Path, collection: str, home: Path, embedding: EmbeddingModel | None
+        self,
+        path: Path,
+        collection: str,
+        home: Path,
+        embedding: EmbeddingModel | None,
+        leaving: frozenset[str] = frozenset(),
     ) -> None:
         """Sync and IO-free: opening the table is what `_existing` / `_for_write` do, awaited."""
         self.path = path
         self.collection = collection
         self.home = home  # stored paths are relative to it (see Document.relative)
         self.embedding = embedding
+        # the documents on their way out of the collection when a search opened this index
+        # (`Collection.leaving`): no search read answers with their rows (see `_excluding`)
+        self.leaving = leaving
         self._conn: lancedb.AsyncConnection | None = None  # one connection per index instance
         self._cached: lancedb.AsyncTable | None = None  # one handle per index instance
 
@@ -554,7 +562,6 @@ class CollectionIndex:
         settings: SearchSettings,
         limit: int,
         vectors: bool = True,
-        excluded: frozenset[str] = frozenset(),
     ) -> list[dict]:
         """Retrieval only: at most `limit` raw LanceDB rows, neither cut to `settings.limit` nor
         rescored by a cross-encoder.
@@ -567,8 +574,6 @@ class CollectionIndex:
         `vectors` False leaves the vector column out of a lexical read, for a caller that only
         wants the chunks: the probe for missing words (`search.retrieval.probe_gaps`).
 
-        `excluded` names documents whose rows must not answer (see `_excluding`).
-
         A table with rows and no full-text index yet, a collection in the middle of its first
         index, answers what it can: LanceDB refuses any full-text query without the index, so a
         lexical query finds nothing and a hybrid one falls back to its vector half.
@@ -580,16 +585,17 @@ class CollectionIndex:
         if vector is None or not await self.has_vector_column():
             if not lexical:
                 return []
-            found = _excluding(await table.search(query, query_type="fts"), excluded)
+            found = _excluding(await table.search(query, query_type="fts"), self.leaving)
             if not vectors:
                 found = found.select([*PLAIN_SCHEMA.names, "_score"])
             return _rows(await found.limit(limit).to_arrow())
         if settings.mode == SearchMode.VECTOR or not lexical:
             found = _tuned(await table.search(vector, query_type="vector"), settings)
-            found = _excluding(found, excluded)
+            found = _excluding(found, self.leaving)
             return _rows(await found.limit(limit).to_arrow())
         # the async API builds a hybrid query out of its two halves instead of `query_type=hybrid`
-        hybrid = _excluding(table.query().nearest_to(vector).nearest_to_text(query), excluded)
+        hybrid = table.query().nearest_to(vector).nearest_to_text(query)
+        hybrid = _excluding(hybrid, self.leaving)
         return _rows(
             await _tuned(hybrid, settings)
             .limit(max(settings.candidates, limit))
@@ -597,11 +603,9 @@ class CollectionIndex:
             .to_arrow()
         )
 
-    async def fts_rows(
-        self, query: str, limit: int, excluded: frozenset[str] = frozenset()
-    ) -> list[dict]:
+    async def fts_rows(self, query: str, limit: int) -> list[dict]:
         """Lexical retrieval alone: at most `limit` BM25 rows, whatever this index could answer
-        with, none of them of an `excluded` document (see `_excluding`). `[]` when it cannot
+        with, none of them of a document `leaving` (see `_excluding`). `[]` when it cannot
         answer one at all — no table, no rows, or no full-text index yet, which is what a
         collection in the middle of its first index looks like.
 
@@ -611,7 +615,7 @@ class CollectionIndex:
         table = await self._readable()
         if table is None or not await self.has_index(FTS_COLUMN):
             return []
-        found = _excluding(await table.search(query, query_type="fts"), excluded)
+        found = _excluding(await table.search(query, query_type="fts"), self.leaving)
         return _rows(await found.limit(limit).to_arrow())
 
     async def rows_at(self, keys: Iterable[RowKey], vectors: bool) -> list[dict]:
@@ -770,7 +774,7 @@ def _rows(found: pa.Table) -> list[dict]:
 
 def _excluding(builder: Any, documents: frozenset[str]) -> Any:
     """A query that leaves the rows of `documents` out: those of a document on its way out of the
-    collection (`Collection.leaving`), whose rows stay until the removal queued for them runs.
+    collection (`CollectionIndex.leaving`), whose rows stay until the removal queued for them runs.
 
     A filter on the query rather than on its answer: LanceDB applies it before the limit, so a
     document that leaves does not take the slots of the ones that stay. No filter at all when

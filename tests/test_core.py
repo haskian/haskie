@@ -1141,6 +1141,61 @@ async def test_load_settings_reads_every_collection_it_was_asked_for_in_one_quer
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("way_out", "leaving", "held"),
+    [
+        (
+            "nothing",
+            {"notes": frozenset(), "other": frozenset()},
+            {"guide.md": ["notes", "other"], "keep.md": ["notes"]},
+        ),
+        (
+            "guide.md removing from notes",
+            {"notes": frozenset({"guide.md"}), "other": frozenset()},
+            {"guide.md": ["other"], "keep.md": ["notes"]},
+        ),
+        (
+            "guide.md deleting",
+            {"notes": frozenset({"guide.md"}), "other": frozenset({"guide.md"})},
+            {"keep.md": ["notes"]},
+        ),
+    ],
+)
+async def test_a_search_reads_one_rule_for_a_document_on_its_way_out(
+    way_out: str, leaving: dict[str, frozenset[str]], held: dict[str, list[str]]
+) -> None:
+    """A membership `removing` or a document `deleting` (`LEAVING`) is what each search index
+    leaves out (`for_search`) and what `holding` no longer counts. A collection the search does
+    not cover holds nothing, and a document none of them holds is absent."""
+    for name in ("notes", "other", "unsearched"):
+        await Collection.create(name)
+    for name in ("guide.md", "keep.md", "lonely.md"):
+        await import_row(name)
+        await document.set_status(name, DocumentStatus.IMPORTED)
+    for collection, doc in (
+        ("notes", "guide.md"),
+        ("other", "guide.md"),
+        ("notes", "keep.md"),
+        ("unsearched", "keep.md"),
+    ):
+        await Collection(collection).add(doc)
+    if way_out == "guide.md removing from notes":
+        await Collection("notes").start_removal("guide.md")
+    elif way_out == "guide.md deleting":
+        await document.set_status("guide.md", DocumentStatus.DELETING)
+    names = ["notes", "other", "ghost"]
+    docs = {"guide.md", "keep.md", "lonely.md"}
+
+    found = await Collection.for_search(names, None)
+
+    assert list(found) == ["notes", "other"], f"{way_out}: in the order given, a ghost absent"
+    assert {name: index.leaving for name, (index, _) in found.items()} == leaving, way_out
+    assert await Collection.holding(docs, names) == held, way_out
+    assert await Collection.holding(set(), names) == {}, "no document asked for"
+    assert await Collection.holding(docs, []) == {}, "no collection searched"
+
+
+@pytest.mark.anyio
 async def test_reranker_overrides_lists_every_model_a_collection_chose() -> None:
     """The model downloads have to cover the overrides too, so they are read in one query."""
     chosen = "Xenova/ms-marco-MiniLM-L-12-v2"
@@ -1882,7 +1937,7 @@ async def test_hybrid_search_fuses_both_rankings(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("name", "vector", "settings", "excluded", "documents"),
+    ("name", "vector", "settings", "leaving", "documents"),
     [
         ("full text, nothing leaving", None, SearchSettings(), frozenset(), {"a.md", "b.md"}),
         ("full text, a.md leaving", None, SearchSettings(), frozenset({"a.md"}), {"b.md"}),
@@ -1909,26 +1964,28 @@ async def test_hybrid_search_fuses_both_rankings(
         ),
     ],
 )
-async def test_an_excluded_document_takes_no_slot_of_a_search(
+async def test_a_leaving_document_takes_no_slot_of_a_search(
     tmp_path: Path,
     name: str,
     vector: list[float] | str | None,
     settings: SearchSettings,
-    excluded: frozenset[str],
+    leaving: frozenset[str],
     documents: set[str],
 ) -> None:
-    """A document on its way out of the collection is filtered before the limit, in every mode:
-    `a.md` holds the best rows for the query, and the slots they would take go to `b.md`."""
-    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, TINY)
-    await _fill(index, "a.md", 0, 6, vectors=True)
-    await _fill(index, "b.md", 1, 6, vectors=True)
-    await index.finish()
+    """A document on its way out of the collection, as the index was opened with it, is filtered
+    before the limit, in every mode: `a.md` holds the best rows for the query, and the slots they
+    would take go to `b.md`."""
+    writer = CollectionIndex(tmp_path / "index", "notes", tmp_path, TINY)
+    await _fill(writer, "a.md", 0, 6, vectors=True)
+    await _fill(writer, "b.md", 1, 6, vectors=True)
+    await writer.finish()
+    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, TINY, leaving)
 
     if vector == "fts_rows":
-        rows = await index.fts_rows("row3 lancedb", 3, excluded)
+        rows = await index.fts_rows("row3 lancedb", 3)
     else:
         assert not isinstance(vector, str)
-        rows = await index.search_rows("row3 lancedb", vector, settings, 3, excluded=excluded)
+        rows = await index.search_rows("row3 lancedb", vector, settings, 3)
 
     assert {row["document"] for row in rows} == documents, name
     assert len(rows) == 3, f"{name}: filtered before the limit, not after it"
@@ -2815,9 +2872,7 @@ async def test_session_search_reads_its_collections_concurrently(monkeypatch) ->
     await session.set_collections("s1", ["a", "b"])
     arrived = {"a": asyncio.Event(), "b": asyncio.Event()}
 
-    async def paired(
-        self, query, vector, settings_, limit, vectors=True, excluded=()
-    ) -> list[dict]:
+    async def paired(self, query, vector, settings_, limit, vectors=True) -> list[dict]:
         arrived[self.collection].set()
         other = arrived["b" if self.collection == "a" else "a"]
         await asyncio.wait_for(other.wait(), CONCURRENT_SEARCH_SECONDS)

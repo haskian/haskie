@@ -549,27 +549,6 @@ async def collections_of(name: str) -> list[str]:
         return list(held)
 
 
-async def memberships(docs: set[str], collections: list[str]) -> dict[str, list[str]]:
-    """Which of `collections` hold each of `docs`, in name order; a document none of them hold is
-    absent. One query for a whole search result, the way `descriptions_of` is one for its
-    descriptions: a search that folds hits to documents needs every membership at once."""
-    if not docs or not collections:
-        return {}
-    wanted = list(docs)
-    names = list(set(collections))
-    async with db.connect() as conn:
-        member = collection_documents.c
-        rows = await conn.execute(
-            select(member.document, member.collection)
-            .where(member.document.in_(wanted), member.collection.in_(names))
-            .order_by(member.document, member.collection)
-        )
-    held: dict[str, list[str]] = {}
-    for name, collection in rows:
-        held.setdefault(name, []).append(collection)
-    return held
-
-
 # --- preview ------------------------------------------------------------------
 
 # One lock per document being built, so two readers of the same document build the preview once.

@@ -139,25 +139,23 @@ async def search(
 
     `total` is None: counting the whole ranking costs the same as producing it, for a number no
     caller pages to. Searches are not audited, like every other search. A document on its way out
-    of a collection (`Collection.leaving`) does not answer from it, as in every other search.
+    of a collection does not answer from it (`Collection.for_search`), as in every search.
     """
     check_page_size(page_size, MAX_TEXT_PAGE_SIZE)
     names = await checked_names(collections)
-    chosen = [Collection(name) for name in names]
     offset = parse_cursor(cursor, q, names, page_size)
     log.observe_scope(None, names, SearchMode.FTS, page_size)
     depth = offset + page_size
     if depth > MAX_DEPTH:
         raise InvalidInput(f"cannot read past {MAX_DEPTH} results; narrow the query instead")
-    if not chosen:
+    if not names:
         return Page(items=[], next_cursor=None, total=None)
 
     # read once, not once per collection
     embedding = await catalogue.embedding_model(await load_user_settings())
-    leaving = await Collection.leaving(names)
+    found = await Collection.for_search(names, embedding)
     retrieved = await gather_rows(
-        [collection.index_with(embedding) for collection in chosen],
-        lambda index: index.fts_rows(q, depth, leaving.get(index.collection, frozenset())),
+        [index for index, _ in found.values()], lambda index: index.fts_rows(q, depth)
     )
 
     merged = merge(retrieved)
