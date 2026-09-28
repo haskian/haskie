@@ -65,7 +65,10 @@ always equals the previous chunk's end reason.
 
 Where each reason comes from:
 
-- `chunk.pack` ends every section but the last at `heading`, and the last at `edge`.
+- `chunk.pack` ends every section but the last at `heading`, and the last at `edge` in the
+  document's last part. Elsewhere it ends at `heading` when the next part opens with one
+  (`chunk.opens_with_heading`), else at `part`. `chunk.locate` starts a part's first chunk the same
+  way, from the part before it. `pipeline.plan_embed` reads every part first to know both.
 - `segment.sentences` numbers each piece's paragraph. `segment.pack` ends a group of paragraphs
   that `_merge` did not join at `paragraph`.
 - `segment.fit` cuts a piece longer than a chunk. `_fill` and `_cut` name the `length_*` cuts.
@@ -75,7 +78,11 @@ flowchart TD
     gap(["gap between piece X and piece Y"])
 
     gap --> more{"Is there a Y?"}
-    more -- "no: the text ends" --> edge["<b>edge</b><br/>start or end of the text chunked:<br/>the document, or one part of it"]
+    more -- "no: the text ends" --> last{"Is it the document's last part?"}
+    last -- yes --> edge["<b>edge</b><br/>start or end of the document"]
+    last -- no --> opens{"Does the next part open<br/>with a heading?"}
+    opens -- yes --> heading
+    opens -- no --> part["<b>part</b><br/>the next part goes on:<br/>the section may too"]
 
     more -- yes --> head{"Does Y open a new section?<br/>a heading after content,<br/>or one no deeper than the one before"}
     head -- yes --> heading["<b>heading</b><br/>sections never share a chunk,<br/>and a heading is never in a chunk's text"]
@@ -100,13 +107,14 @@ flowchart TD
 
     classDef reason fill:#fde8d7,stroke:#c2410c,color:#111
     classDef keep fill:#eef2f5,stroke:#64748b,color:#111
-    class edge,heading,paragraph,oversize,block,sentence reason
+    class edge,part,heading,paragraph,oversize,block,sentence reason
     class nocut1,nocut2,nocut3,nocut4 keep
 ```
 
 | reason | where the cut is | as `start_reason`, the chunk after | as `end_reason`, the chunk before |
 |---|---|---|---|
-| `edge` | the start or end of the text | the first chunk of the document or of a part | the last chunk |
+| `edge` | the start or end of the document | the first chunk | the last chunk |
+| `part` | where one part meets the next, mid-section | a later part goes on with the section | the section goes on in the next part |
 | `heading` | before a heading | it opens with its heading path | its section ends here |
 | `paragraph` | at a blank line | it starts a new paragraph | a paragraph ended here |
 | `length_block` | between two blocks of one paragraph | it begins at a block | it ends on a whole block |

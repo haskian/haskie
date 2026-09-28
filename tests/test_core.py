@@ -68,7 +68,7 @@ from haskie.errors import (
 )
 from haskie.indexing import chunk, embed, embed_cache, pipeline
 from haskie.indexing.chunk import Chunk, Piece, Position
-from haskie.indexing.segment import PieceType
+from haskie.indexing.segment import CutReason, PieceType
 from haskie.paging import Order, PageRequest
 from haskie.settings import (
     Accelerator,
@@ -2177,7 +2177,8 @@ async def _index(
 @pytest.mark.anyio
 async def test_a_part_is_embedded_under_the_headings_an_earlier_part_opened() -> None:
     """A PDF converts ten pages a part: a chapter opened in one part still frames the chunks
-    of the next, both in the chunk's headings and in what the model embeds."""
+    of the next, both in the chunk's headings and in what the model embeds. Where the two parts
+    meet is a part boundary, not the document's edge: the section goes on across it."""
     doc = await import_row("g.md")
     parts = ["# Replication\n\n## Leaders\n\nOne leader takes writes.", "Followers apply the log."]
     doc.parts_dir.mkdir(parents=True, exist_ok=True)
@@ -2188,12 +2189,65 @@ async def test_a_part_is_embedded_under_the_headings_an_earlier_part_opened() ->
     batches = await pipeline.plan_embed(doc)
 
     assert [[text for _, text in b.opened] for b in batches] == [[], ["Replication", "Leaders"]]
-    await pipeline.embed_batch(doc, batches[1], "cache", SMALL, None)
-    rows = msgspec.json.decode(
-        embed_cache.rows_path(doc.name, "cache", 1).read_bytes(), type=list[Row]
+    assert [(b.start_reason, b.end_reason) for b in batches] == [
+        (CutReason.EDGE, CutReason.PART),
+        (CutReason.PART, CutReason.EDGE),
+    ]
+    for batch in batches:
+        await pipeline.embed_batch(doc, batch, "cache", SMALL, None)
+    first, rows = (
+        msgspec.json.decode(
+            embed_cache.rows_path(doc.name, "cache", seq).read_bytes(), type=list[Row]
+        )
+        for seq in (0, 1)
     )
     assert [row.chunk.headings for row in rows] == [["Replication", "Leaders"]]
     assert rows[0].chunk.char_start == len(parts[0]) + len(pipeline.JOINER)
+    reasons = [(row.chunk.start_reason, row.chunk.end_reason) for row in [*first, *rows]]
+    assert reasons == [(CutReason.EDGE, CutReason.PART), (CutReason.PART, CutReason.EDGE)]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "second", "meets"),
+    [
+        ("text goes on: the section crosses the boundary", "More of it.", CutReason.PART),
+        (
+            "the next part opens with a heading, behind its page marker: the section ends",
+            "<!-- page 11 -->\n\n# Chapter 4\n\nMore.",
+            CutReason.HEADING,
+        ),
+    ],
+)
+async def test_where_two_parts_meet_is_cut_for_what_comes_next(
+    name: str, second: str, meets: CutReason
+) -> None:
+    """A PDF chapter often starts on a new page, so a part often opens with its heading. The cut
+    between the two parts is then a heading on both sides, and a short section just before it is
+    whole: nothing grows across the heading."""
+    doc = await import_row("g.md")
+    parts = ["# Chapter 3\n\nA short note.", second]
+    doc.parts_dir.mkdir(parents=True, exist_ok=True)
+    for seq, text in enumerate(parts):
+        doc.part_path(seq).write_text(text)
+    doc.markdown.write_text(pipeline.JOINER.join(parts))
+
+    batches = await pipeline.plan_embed(doc)
+    for batch in batches:
+        await pipeline.embed_batch(doc, batch, "cache", SMALL, None)
+    rows = [
+        row
+        for seq in (0, 1)
+        for row in msgspec.json.decode(
+            embed_cache.rows_path(doc.name, "cache", seq).read_bytes(), type=list[Row]
+        )
+    ]
+
+    assert [(b.start_reason, b.end_reason) for b in batches] == [
+        (CutReason.EDGE, meets),
+        (meets, CutReason.EDGE),
+    ], name
+    assert (rows[0].chunk.end_reason, rows[1].chunk.start_reason) == (meets, meets), name
 
 
 @pytest.mark.anyio

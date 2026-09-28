@@ -1,7 +1,9 @@
 import type { SearchOverrides, SearchSettings } from '../api'
 
-/** The keys of `T` that hold a number, so a table of number fields cannot name a string one. */
-export type NumericKeys<T> = { [K in keyof T]: T[K] extends number ? K : never }[keyof T]
+/** The keys of `T` that hold a `V`, so a table of number fields cannot name a string one. */
+export type KeysOf<T, V> = { [K in keyof T]: T[K] extends V ? K : never }[keyof T]
+
+export type NumericKeys<T> = KeysOf<T, number>
 
 /**
  * What a search number input accepts. One table, so the user settings page and a collection's

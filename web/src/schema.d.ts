@@ -857,7 +857,7 @@ export interface components {
          * @default edge
          * @enum {string}
          */
-        CutReason: "edge" | "heading" | "paragraph" | "length_block" | "length_sentence" | "length_oversize";
+        CutReason: "edge" | "part" | "heading" | "paragraph" | "length_block" | "length_sentence" | "length_oversize";
         /** Describe */
         Describe: {
             description: string;
@@ -993,7 +993,7 @@ export interface components {
         };
         /**
          * FillValues
-         * @description How a chunk next to a passage is judged worth taking. relative: its score against the kept chunks, 0 at their median and 1 at their best, by the reranker, the query vector or the question's words. absolute (experiment, with a reranker on): the reranker's score spread by its calibrated curve, minus 0.18, as dsRAG's Relevant Segment Extraction values a chunk.
+         * @description How a chunk next to a passage is judged worth taking. relative: its score against the ranked chunks, 0 at their median and 1 at their best. A short passage is judged against the chunks the search scanned, by the reranker when one is on; an excerpt's text around its passages against the passages kept, by the query vector or the question's words, since asking the reranker there would take seconds. absolute (experiment, with a reranker on): the reranker judges both, its score spread by its calibrated curve, minus 0.18, as dsRAG's Relevant Segment Extraction values a chunk.
          * @default relative
          * @enum {string}
          */
@@ -1597,17 +1597,17 @@ export interface components {
             rerank_excerpts?: boolean | null;
             /**
              * Values for growing and filling
-             * @description How a chunk next to a passage is judged worth taking. relative: its score against the kept chunks, 0 at their median and 1 at their best, by the reranker, the query vector or the question's words. absolute (experiment, with a reranker on): the reranker's score spread by its calibrated curve, minus 0.18, as dsRAG's Relevant Segment Extraction values a chunk.
+             * @description How a chunk next to a passage is judged worth taking. relative: its score against the ranked chunks, 0 at their median and 1 at their best. A short passage is judged against the chunks the search scanned, by the reranker when one is on; an excerpt's text around its passages against the passages kept, by the query vector or the question's words, since asking the reranker there would take seconds. absolute (experiment, with a reranker on): the reranker judges both, its score spread by its calibrated curve, minus 0.18, as dsRAG's Relevant Segment Extraction values a chunk.
              */
             fill_values?: components["schemas"]["FillValues"] | null;
             /**
              * Lowest reranker score
-             * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. Empty: the chosen reranker's own floor, calibrated on borderline pairs (mise run calibrate-rerankers). 0 keeps every chunk.
+             * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. 0 keeps every chunk. Empty in the user settings: the chosen reranker's own floor, 0.05 until it is calibrated on borderline pairs of your collections (python -m haskie.catalogue.calibrate). Empty for a collection: the user setting.
              */
             min_rerank_score?: number | null;
             /**
              * Shortest passage (characters)
-             * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question (see Chunks a passage may grow by). One that finds none is dropped, unless it is the best result. 0 turns this off.
+             * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question (see Chunks a passage may grow by). One that grows by none is dropped, unless it is the best result, or its excerpt's section holds another passage. A whole short section is kept as it is. 0 turns this off.
              */
             min_passage_chars?: number | null;
             /**
@@ -1617,7 +1617,7 @@ export interface components {
             max_passage_grow?: number | null;
             /**
              * Growth bias
-             * @description Added to the value of every chunk a passage could grow by, -1 to 1 (see Values for growing and filling). A stretch of chunks is taken when its values sum above 0, so above 0 passages grow more eagerly, taking weaker chunks, and below 0 only by stronger ones. At -1 nothing grows, and a short passage is dropped unless it is the best result.
+             * @description Added to the value of every chunk a passage could grow by, -1 to 1 (see Values for growing and filling). A stretch of chunks is taken when its values sum above 0, so above 0 passages grow more eagerly, taking weaker chunks, and below 0 only by stronger ones. At -1 nothing grows, so every short passage is dropped that Shortest passage would drop.
              */
             grow_bias?: number | null;
             /**
@@ -1700,12 +1700,12 @@ export interface components {
             fill_values?: components["schemas"]["FillValues"];
             /**
              * Lowest reranker score
-             * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. Empty: the chosen reranker's own floor, calibrated on borderline pairs (mise run calibrate-rerankers). 0 keeps every chunk.
+             * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. 0 keeps every chunk. Empty in the user settings: the chosen reranker's own floor, 0.05 until it is calibrated on borderline pairs of your collections (python -m haskie.catalogue.calibrate). Empty for a collection: the user setting.
              */
             min_rerank_score?: number | null;
             /**
              * Shortest passage (characters)
-             * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question (see Chunks a passage may grow by). One that finds none is dropped, unless it is the best result. 0 turns this off.
+             * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question (see Chunks a passage may grow by). One that grows by none is dropped, unless it is the best result, or its excerpt's section holds another passage. A whole short section is kept as it is. 0 turns this off.
              * @default 300
              */
             min_passage_chars: number;
@@ -1717,7 +1717,7 @@ export interface components {
             max_passage_grow: number;
             /**
              * Growth bias
-             * @description Added to the value of every chunk a passage could grow by, -1 to 1 (see Values for growing and filling). A stretch of chunks is taken when its values sum above 0, so above 0 passages grow more eagerly, taking weaker chunks, and below 0 only by stronger ones. At -1 nothing grows, and a short passage is dropped unless it is the best result.
+             * @description Added to the value of every chunk a passage could grow by, -1 to 1 (see Values for growing and filling). A stretch of chunks is taken when its values sum above 0, so above 0 passages grow more eagerly, taking weaker chunks, and below 0 only by stronger ones. At -1 nothing grows, so every short passage is dropped that Shortest passage would drop.
              * @default 0
              */
             grow_bias: number;

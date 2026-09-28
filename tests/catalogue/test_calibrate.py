@@ -6,11 +6,19 @@ import statistics
 from pathlib import Path
 
 import pytest
+from conftest import attach_document, import_document
 
 from haskie.catalogue import calibrate, catalogue
 from haskie.catalogue.calibrate import Borderline, Candidates, fit_beta, floor
-from haskie.indexing import embed
-from haskie.settings import Accelerator
+from haskie.collection.collection import Collection
+from haskie.indexing import embed, models
+from haskie.settings import (
+    Accelerator,
+    Reranker,
+    SearchSettings,
+    UserSettings,
+    save_user_settings,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -72,7 +80,11 @@ async def test_measuring_stores_the_floor_and_curve_a_search_reads(
     def rerank_scores(model: str, accelerator: Accelerator, q: str, ts: list[str]) -> list[float]:
         return [logits[text] for text in ts]
 
+    async def ready(kind: str, model: str) -> None:
+        return None
+
     monkeypatch.setattr(embed, "rerank_scores", rerank_scores)
+    monkeypatch.setattr(models, "require_ready", ready)
     pairs = [("why", "borderline one"), ("how", "borderline two")]
     spread = [("why", "far"), ("why", "near"), ("how", "far")]
 
@@ -92,3 +104,38 @@ def test_the_judged_files_read_one_record_a_line(tmp_path: Path) -> None:
 
     assert calibrate._read(judged, Borderline) == [Borderline("why", "a"), Borderline("how", "b")]
     assert calibrate._read(sampled, Candidates) == [Candidates("why", ["a", "b"])]
+
+
+async def test_sampling_reads_every_candidate_as_the_reranker_does_under_no_floor(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reranker on, with a floor of 0.9 no chunk reaches: a search keeps nothing, but the sample
+    still writes the chunks ranked 10 to 30, since a floor measured on chunks over the old one
+    could only rise. Each is written as the reranker reads it, its heading path first."""
+
+    async def ready(kind: str, model: str) -> None:
+        return None
+
+    def rerank_scores(model: str, accelerator: Accelerator, q: str, ts: list[str]) -> list[float]:
+        return [-3.0 - n / 100 for n, _ in enumerate(ts)]  # every sigmoid under 0.05
+
+    async def asked(limit: int) -> list[str]:
+        return ["retry"]
+
+    monkeypatch.setattr(models, "require_ready", ready)
+    monkeypatch.setattr(embed, "rerank_scores", rerank_scores)
+    monkeypatch.setattr(calibrate, "_asked", asked)
+    search = SearchSettings(reranker=Reranker.CROSS_ENCODER, min_rerank_score=0.9)
+    await save_user_settings(UserSettings(search=search))
+    await Collection.create("notes")
+    body = "".join(f"# Part {i}\n\nretry note number {i}\n\n" for i in range(40))
+    doc = await import_document(dbos, "guide.md", body, tmp_path)
+    await attach_document(dbos, "notes", doc.name)
+    out = tmp_path / "candidates.jsonl"
+
+    written = await calibrate._sample(out)
+
+    (sampled,) = calibrate._read(out, Candidates)
+    assert written == 1 and sampled.query == "retry"
+    assert len(sampled.texts) == len(calibrate.CANDIDATES), "ranks 10 to 30, none dropped"
+    assert all(text.startswith("Part ") and "\n\nretry note" in text for text in sampled.texts)

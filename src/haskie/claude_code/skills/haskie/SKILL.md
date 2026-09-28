@@ -45,7 +45,8 @@ An excerpt is one section of one document: the largest heading that fits a few p
 every passage of that section the search matched, in document order, plus the text around and
 between them that matches as well. A passage is matching chunks that sit next to each other.
 Chunks are cut at headings, blank lines, blocks and sentences, so a passage starts and ends where
-the author did. Excerpts come best first.
+the author did. Excerpts come best first; for several parts, in the order the parts took turns,
+so the first is not always the strongest.
 
 - cite: `document`, `header` (the section's heading path, "parent > … > heading") and `location`
   ("doc p.3-4 L10-20", first passage to last). Cite one passage by its span's `header` and

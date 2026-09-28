@@ -12,14 +12,17 @@ the offsets, lines and cut reasons it really has:
     seq 6  heading -> edge               "## Notes", a whole section
 """
 
+import msgspec
 import pytest
 from conftest import chunk_hit
 
 from haskie.collection.index import ChunkKey
 from haskie.indexing.chunk import split
+from haskie.indexing.segment import CutReason
 from haskie.search import fill, thin
 from haskie.search.fill import Candidate
 from haskie.search.passage import HitRange, ranges
+from haskie.search.section import Group, Section
 from haskie.settings import ChunkSettings, ScoreFold
 
 HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
@@ -59,8 +62,12 @@ HITS = {
 }
 
 
-def _range(*seqs: int) -> HitRange:
-    (found,) = ranges([HITS[seq] for seq in seqs], how=HARMONIC)
+def _range(*seqs: int, end_reason: CutReason | None = None) -> HitRange:
+    """The range of chunks `seqs`; with `end_reason`, as if its last chunk were cut there."""
+    hits = [HITS[seq] for seq in seqs]
+    if end_reason is not None:
+        hits[-1] = msgspec.structs.replace(hits[-1], end_reason=end_reason)
+    (found,) = ranges(hits, how=HARMONIC)
     return found
 
 
@@ -221,6 +228,15 @@ def _neighbours(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
             (0, 0),
         ),
         ("the check turned off", [_range(1)], {2: MATCH}, 0, 2, [(1, 1, False)], (0, 0)),
+        (
+            "a short section cut at a part boundary goes on in the next part: thin, not whole",
+            [_range(2), _range(6, end_reason=CutReason.PART)],
+            {},
+            200,
+            2,
+            [(2, 2, False), (6, 6, True)],
+            (0, 1),
+        ),
     ],
 )
 def test_a_thin_range_grows_by_matching_neighbours_or_goes(
@@ -337,6 +353,52 @@ def test_judging_marks_what_could_grow_and_grows_nothing() -> None:
 
     filled = thin.fill(found, _neighbours({2: MATCH, 3: -1.0}), 300, 2, grows=False, how=HARMONIC)
 
-    shape = [(one.seq_start, one.seq_end, one.alone) for one in filled.ranges]
-    assert shape == [(1, 1, False), (4, 4, True), (6, 6, False)], "best first, ties by place"
+    shape = [(one.seq_start, one.seq_end, one.alone, one.owed) for one in filled.ranges]
+    assert shape == [(1, 1, False, True), (4, 4, True, False), (6, 6, False, False)], (
+        "best first, ties by place; the lead-in stands on the growth it is owed"
+    )
     assert (filled.added, filled.grown) == ([], 1), "judged to grow, grown by nothing"
+
+
+def _owed(seq: int) -> HitRange:
+    return msgspec.structs.replace(_range(seq), owed=True)
+
+
+def _group(*found: HitRange) -> Group:
+    return Group(COLLECTION, DOC, Section(("Retries",), 1, 6), list(found))
+
+
+def test_a_range_the_fill_still_owes_growth_goes_as_a_thin_passage_does() -> None:
+    """The judge let each owed range stand for the fill to grow; none of these grew. With no run
+    worth taking beside it, it is alone: a group of it alone is no excerpt, and in a group with
+    another passage it stays, alone, as a short passage inside a section does. One the fill found
+    a run for, but the answer's budget could not pay for, keeps standing; what the fill offered
+    another group does not count."""
+    groups = [
+        _group(_range(6)),
+        _group(_owed(4)),
+        _group(_range(2), _owed(4)),
+        _group(_owed(1)),
+    ]
+
+    # chunks 3 and 5, beside chunk 4, offered to the first group: no run for another group's range
+    settled = thin.settle(groups, offered=[{_key(3), _key(5)}, set(), set(), {_key(2)}])
+
+    shape = [[(one.seq_start, one.alone, one.owed) for one in group.ranges] for group in settled]
+    assert shape == [
+        [(6, False, False)],
+        [(2, False, False), (4, True, False)],
+        [(1, False, False)],
+    ]
+
+
+def test_a_range_the_fill_grew_owes_nothing() -> None:
+    """The fill rebuilds a range it grows (`passage.rejoin`) from the range and the chunks it took,
+    which owe nothing, so the rebuilt range owes nothing either and stands."""
+    grown = fill.apply(_group(_owed(1)), [Candidate(HITS[2], MATCH)], how=HARMONIC)
+
+    (settled,) = thin.settle([_group(_range(6)), grown], offered=[set(), set()])[1:]
+
+    assert [(one.seq_start, one.seq_end, one.alone, one.owed) for one in settled.ranges] == [
+        (1, 2, False, False)
+    ]

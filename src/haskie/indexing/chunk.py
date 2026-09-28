@@ -45,7 +45,9 @@ from haskie.indexing import segment
 from haskie.indexing.segment import CutReason, Packed, PieceType, Span, SpanKind
 from haskie.settings import Chunker, ChunkSettings
 
-CHUNK_VERSION = 3  # see the module docstring; 3: e5's query and passage prefixes
+# see the module docstring; 3: e5's query and passage prefixes; 4: a part boundary is `part` or
+# `heading`, not `edge`
+CHUNK_VERSION = 4
 HEADING_SEP = " > "  # between two headings of a heading path: "Part I > Chapter 2 > Retries"
 WORD = re.compile(r"\w")  # what a piece needs one of to say anything
 type Opened = tuple[int, str]  # a heading still open: its level, 1 to 6, and its text
@@ -153,6 +155,9 @@ class Chunking(msgspec.Struct, frozen=True):
     byte_offset: int
     # the headings still open where `text` starts, opened in an earlier part
     opened: tuple[Opened, ...] = ()
+    # why the first chunk starts and the last one ends: the document's edge, or a part boundary
+    start_reason: CutReason = CutReason.EDGE
+    end_reason: CutReason = CutReason.EDGE
 
 
 # --- the steps --------------------------------------------------------------------
@@ -206,7 +211,7 @@ def pack(run: Chunking, found: list[Section]) -> list[Packed]:
     """Each section's pieces packed into chunks along its paragraphs (`segment.pack`). Every chunk
     of a section shares its frame, so each gets the chunk size less that frame. `segment.fit`
     first cuts any piece longer than that. Every section but the last ends at the next one's
-    heading; the last ends at the edge of the text.
+    heading; the last ends at the edge of the document, or where the next part begins.
 
     A section of headings alone packs into no chunk, so its headings ride on the next chunk
     instead, where `locate` reads the heading paths from: `# Part II` over an empty `## Ch 5`
@@ -215,7 +220,7 @@ def pack(run: Chunking, found: list[Section]) -> list[Packed]:
     is one of headings alone."""
     size = run.settings.chunk_size
     short = size * run.settings.chunk_merge_below / 100  # of the whole size, whatever the frame
-    ends: list[CutReason] = [CutReason.HEADING] * (len(found) - 1) + [CutReason.EDGE]
+    ends: list[CutReason] = [CutReason.HEADING] * (len(found) - 1) + [run.end_reason]
     packed: list[Packed] = []
     carried: list[Span] = []  # the headings of sections that made no chunk
     for section, end in zip(found, ends, strict=False):
@@ -274,11 +279,24 @@ def split(
     char_offset: int = 0,
     byte_offset: int = 0,
     opened: Sequence[Opened] = (),
+    start_reason: CutReason = CutReason.EDGE,
+    end_reason: CutReason = CutReason.EDGE,
 ) -> list[Chunk]:
     """`text` as chunks. The pipeline chunks a document one part at a time, so `line_offset`,
-    `char_offset` and `byte_offset` count what comes before `text` in the whole document, and
-    `opened` holds the headings still open where it starts (see `open_headings`)."""
-    run = Chunking(text, settings, line_offset, char_offset, byte_offset, tuple(opened))
+    `char_offset` and `byte_offset` count what comes before `text` in the whole document,
+    `opened` holds the headings still open where it starts (see `open_headings`), and
+    `start_reason` and `end_reason` say whether its ends are the document's (`EDGE`) or where
+    another part meets it (`PART`)."""
+    run = Chunking(
+        text,
+        settings,
+        line_offset,
+        char_offset,
+        byte_offset,
+        tuple(opened),
+        start_reason,
+        end_reason,
+    )
     value: Any = None
     for step in pipeline(settings):
         value = step(run, value)
@@ -297,6 +315,17 @@ def open_headings(text: str, opened: Sequence[Opened] = ()) -> list[Opened]:
         if block.kind == SpanKind.HEADING:
             _open(stack, (block.level, block.title))
     return stack
+
+
+def opens_with_heading(text: str) -> bool:
+    """Whether `text` opens with a heading, before a word of its own: then the part before it
+    ends at a heading (`CutReason.HEADING`), not partway through a section (`PART`)."""
+    for block in segment.blocks(text):
+        if block.kind == SpanKind.HEADING:
+            return True
+        if WORD.search(without_markers(text[block.start : block.end])):
+            return False
+    return False
 
 
 def _shortened(path: list[str], size: int) -> list[str]:
@@ -368,9 +397,8 @@ def locate(run: Chunking, packed: list[Packed]) -> list[Chunk]:
     # encodes every character once, the gap before a chunk and then the chunk itself.
     char_at = byte_at = 0
     chunks: list[Chunk] = []
-    start_reason: CutReason = (
-        CutReason.EDGE
-    )  # each chunk starts at the cut the one before it ends at
+    # each chunk starts at the cut the one before it ends at
+    start_reason = run.start_reason
     for chunk in packed:
         pieces = chunk.pieces
         last = pieces[-1]

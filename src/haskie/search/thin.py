@@ -29,6 +29,7 @@ from haskie.indexing.segment import CutReason
 from haskie.search.collapse import MIN_WORDS, WORD
 from haskie.search.fill import Candidate, grow
 from haskie.search.passage import HitRange, ends_section, part, rejoin
+from haskie.search.section import Group
 from haskie.settings import ScoreFold
 
 # The words of a question that say nothing about its topic. A short list on purpose: the question
@@ -40,7 +41,8 @@ STOPWORDS = frozenset(
     "one two more most other such only own same very just also".split()
 )
 
-# Where a whole section begins and ends: at a heading, or at the edge of the text chunked
+# Where a whole section begins and ends: at a heading, or at the document's edge. A part boundary
+# (`CutReason.PART`) is neither: the section goes on in the next part.
 _BOUNDS = frozenset({CutReason.HEADING, CutReason.EDGE})
 
 
@@ -96,9 +98,9 @@ def fill(
     marked `alone`, unless it is the first of `hit_ranges`, the best the search found. A thin
     range that is a whole section is kept as it is.
 
-    `grows` False only judges: a thin range with a run worth taking stands, but takes nothing,
-    for a later step to grow it once (the fill of an excerpts search, `fill.fills`), so no passage
-    grows twice.
+    `grows` False only judges: a thin range with a run worth taking stands, `owed`, but takes
+    nothing, for a later step to grow it once (the fill of an excerpts search, `fill.fills`), so
+    no passage grows twice.
 
     The ranges are rebuilt at the end (`passage.rejoin`), so two ranges a neighbour now joins
     become one, and a neighbour scores 0: a range's score says how strongly it matched, not how
@@ -118,6 +120,8 @@ def fill(
                 grown += 1
                 if grows:
                     added.update((chunk_key(hit), hit) for hit in took)
+                elif position > 0:
+                    hit_range = msgspec.structs.replace(hit_range, owed=True)
             elif position > 0:
                 hit_range = msgspec.structs.replace(hit_range, alone=True)
         kept.append(hit_range)
@@ -125,6 +129,39 @@ def fill(
     joined = [hit for key, hit in added.items() if key not in held]
     rebuilt = rejoin([*kept, *(part(hit) for hit in joined)], how)
     return Filled(ranges=rebuilt, added=joined, grown=grown)
+
+
+def settle(groups: list[Group], offered: list[set[ChunkKey]]) -> list[Group]:
+    """The groups after the fill: each range still `owed` that the fill found no run worth taking
+    next to (`offered`, each group's own) marked `alone`, and each group then no excerpt
+    (`Group.standing`) dropped. Its slot is not handed on: the sections were counted before the
+    fill, and so were the answer's budget and the words the probe looks for.
+
+    An excerpts search only judges a thin range (`fill` with `grows` off): past the best range, it
+    stands, owed, when a run worth taking is next to it, valued against the scanned hits. The fill
+    values the same chunks against the kept ones, whose median is higher, and may find none worth
+    taking. The range is then as short as one the passages answer drops, and goes the same way.
+    One the fill found a run for keeps standing, even when the answer's budget could not pay for
+    it; one it grew is rebuilt, and owes nothing (`passage.rejoin`)."""
+    settled: list[Group] = []
+    for one, near in zip(groups, offered, strict=True):
+        if any(hit_range.owed for hit_range in one.ranges):
+            ranges = [_settled(hit_range, near) for hit_range in one.ranges]
+            one = msgspec.structs.replace(one, ranges=ranges)
+        if one.standing:
+            settled.append(one)
+    return settled
+
+
+def _settled(hit_range: HitRange, offered: set[ChunkKey]) -> HitRange:
+    if not hit_range.owed:
+        return hit_range
+    first, last = hit_range.hits[0], hit_range.hits[-1]
+    beside = {
+        (first.collection, first.document, first.seq - 1),
+        (last.collection, last.document, last.seq + 1),
+    }
+    return msgspec.structs.replace(hit_range, owed=False, alone=not beside & offered)
 
 
 def terms(text: str) -> list[str]:

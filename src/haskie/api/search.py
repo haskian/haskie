@@ -88,8 +88,8 @@ async def search_excerpts(
     collections: str | None = None,
     limit: Limit = None,
 ) -> Answer:
-    """What the sources say about a question, one section of a document per excerpt, best first,
-    and what they leave out.
+    """What the sources say about a question, one section of a document per excerpt, and what
+    they leave out: best first for one question, in the order the parts took turns for several.
 
     The answer is `excerpts`, `uncovered` and `missing_terms`. `uncovered` lists the questions no
     excerpt answers, when several were asked. `missing_terms` lists the words of the questions

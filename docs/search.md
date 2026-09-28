@@ -165,8 +165,13 @@ to `max_passage_grow` (3) chunks whose values sum highest, when that is above 0.
 past a heading. A neighbour's value is its score around the scanned hits' own: 0 for one as good as
 the median, 1 for one as good as the best, scored by the reranker when one is on, else by the
 cosine to the query vector, else by the share of the question's words it holds, then moved by
-`grow_bias`. The floor is this search's own, so it needs no calibration per model. An excerpts search only judges it here, whether
-a run worth taking is next to it, and leaves the growing to the fill.
+`grow_bias`. The floor is this search's own, so it needs no calibration per model. An excerpts
+search only judges it here, whether a run worth taking is next to it, and leaves the growing to
+the fill. Such a passage stands `owed` its growth. The fill values the same chunks against the
+kept passages rather than the scanned hits, and may find none worth taking. An owed passage with
+no run worth taking beside it is then alone after all (`thin.settle`), as a thin passage that took
+nothing is below. One the fill found a run for keeps standing, even when the budget ran out. The
+slot of a section dropped so is not handed on: the sections were counted before the fill.
 
 A thin passage that took nothing is too short to stand alone. As a passage it is dropped, and its
 slot goes to the next result. As part of an excerpt it stays when another passage of its section is
@@ -175,7 +180,8 @@ around them matches:
 
 - the best result of the search, because a short exact answer is still an answer;
 - a whole section, with a heading or the document's edge on both sides, such as a short note.
-  Nothing of it is missing.
+  Nothing of it is missing. Where one part of a PDF ends and the next begins (`part`, see
+  [chunking](chunking.md)) is no such edge: the section goes on in the next part.
 
 The neighbours are read only when a passage is thin, in one LanceDB query per collection. Each
 search logs `search_thin` with the signal used and how many passages grew, stayed alone and were
@@ -347,14 +353,15 @@ building its first full-text index contributes nothing instead of making the que
 ## Settings
 
 `limit`, `candidates`, `mode`, `fusion`, `rrf_k`, `vector_weight`, `bm25_weight`, `nprobes`,
-`refine_factor`, `reranker`, `reranker_model`, `min_passage_chars`, `max_passage_grow`,
-`grow_bias`, `fill_values`, `max_section_chars` and `max_answer_chars` each have a user default
-and a description in the UI, and a collection can override them. The UI groups the ones that
-decide how passages expand under Expansion: `min_passage_chars`, `max_passage_grow`,
-`fill_values`, `grow_bias`, `max_section_chars` and `max_answer_chars`. In the shared ranking, each collection retrieves with its own
-overrides. The settings of the merged ranking (`rrf_k`, `candidates`, the reranker) come from the
-collection only when it is the one collection in scope, and from the user otherwise. `limit` comes
-from the call, else from the same place. No route takes search settings per call: a search with
+`refine_factor`, `reranker`, `reranker_model`, `rerank_with_context`, `min_rerank_score`,
+`rerank_excerpts`, `score_fold`, `min_passage_chars`, `max_passage_grow`, `grow_bias`,
+`fill_values`, `max_section_chars` and `max_answer_chars` each have a user default and a
+description in the UI, and a collection can override them. The UI groups the ones that decide how
+passages expand under Expansion: `min_passage_chars`, `max_passage_grow`, `fill_values`,
+`grow_bias`, `max_section_chars` and `max_answer_chars`. In the shared ranking, each collection
+retrieves with its own overrides. The settings of the merged ranking (`rrf_k`, `candidates`, the
+reranker) come from the collection only when it is the one collection in scope, and from the user
+otherwise. `limit` comes from the call, else from the same place. No route takes search settings per call: a search with
 other settings is a search of a collection whose overrides say so.
 
 Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/collapse.py`,

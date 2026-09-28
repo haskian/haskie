@@ -197,6 +197,26 @@ async def test_in_an_excerpt_a_short_passage_grows_once_by_the_fill(tmp_path: Pa
 
 
 @pytest.mark.anyio
+async def test_a_short_passage_the_fill_grows_by_nothing_goes(tmp_path: Path) -> None:
+    """Scanned: chunk 7 (a whole section, the best range, scored 0.3 by its scanned vector) and
+    chunk 5 (1.0), so the judge's median is 0.65: chunk 6 (0.7) is worth taking, and chunk 5
+    stands, owed its growth. The fill values chunk 6 against the kept chunks' stored vectors
+    (both 1.0) instead, where it is worth -1, and takes nothing: chunk 5 goes, as the passages
+    answer drops a thin passage, and the best range's section stays."""
+    where, hits = await _index(tmp_path, VECTORS)
+    best = msgspec.structs.replace(hits[7], score=2.0)
+    scanned = Scanned(hits=[best, hits[5]], vectors=[[0.3, 0.954], ON])
+
+    judged = await retrieval.fill_thin(scanned, where, QUERY, QUERY, grows=False)
+    groups = await retrieval.sections(judged.ranges, where, limit=5)
+    filled = await retrieval.fill(groups, _asked(), where)
+
+    assert [(one.seq_start, one.owed) for one in judged.ranges] == [(7, False), (5, True)]
+    assert len(groups) == 2, "both sections placed before the fill"
+    assert [one.section.path for one in filled] == [("Guide", "Other")]
+
+
+@pytest.mark.anyio
 async def test_a_lexical_read_leaves_vectors_out_only_when_asked(tmp_path: Path) -> None:
     """The probe's full-text search only wants the chunks, so its rows carry no vector but keep
     their score; any other full-text read keeps the vectors the fold compares by."""

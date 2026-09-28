@@ -58,9 +58,10 @@ export function SearchField({
         </Field>
       )
     case 'rerank_excerpts':
+    case 'rerank_with_context':
       return (
         <div className="field">
-          <Toggle label={doc.title} checked={search.rerank_excerpts} onChange={(rerank_excerpts) => onChange({ ...search, rerank_excerpts })} />
+          <Toggle label={doc.title} checked={search[name]} onChange={(checked) => onChange({ ...search, [name]: checked })} />
           <span className="faint">{doc.description}</span>
         </div>
       )
@@ -109,13 +110,6 @@ export function SearchField({
           />
           <ModelFacts name={search.reranker_model} metadata={options.reranker_metadata[search.reranker_model]} />
         </Field>
-      )
-    case 'rerank_with_context':
-      return (
-        <div className="field">
-          <Toggle label={doc.title} checked={search.rerank_with_context} onChange={(rerank_with_context) => onChange({ ...search, rerank_with_context })} />
-          <span className="faint">{doc.description}</span>
-        </div>
       )
     default: {
       const bounds = SEARCH_BOUNDS[name]

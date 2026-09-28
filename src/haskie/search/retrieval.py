@@ -680,7 +680,15 @@ def _fill(
         added=sum(len(one.chunks) for one in chosen),
         chars=sum(one.chars for one in chosen),
     )
-    return [filling.apply(one, taken.get(at, []), how) for at, one in enumerate(groups)]
+    offered: list[set[ChunkKey]] = [set() for _ in groups]
+    for one in found:
+        offered[one.group].update(chunk_key(chunk.hit) for chunk in one.chunks)
+    filled = [filling.apply(one, taken.get(at, []), how) for at, one in enumerate(groups)]
+    settled = thin.settle(filled, offered)
+    owed = sum(hit_range.owed for one in groups for hit_range in one.ranges)
+    if owed:
+        _log.info("search_settle", owed=owed, dropped=len(groups) - len(settled))
+    return settled
 
 
 def _weigh(

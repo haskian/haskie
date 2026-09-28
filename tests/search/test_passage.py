@@ -12,7 +12,7 @@ import pytest
 from conftest import chunk_hit, hit
 
 from haskie.collection.index import Hit, Overlap, Overlaps, Relation, location
-from haskie.indexing.chunk import Chunk, split
+from haskie.indexing.chunk import Chunk, open_headings, split
 from haskie.indexing.segment import CutReason
 from haskie.search.passage import (
     HitRange,
@@ -653,8 +653,23 @@ herd instead, because every client that failed at once also retries at once.
 def test_every_chunk_is_quoted_as_it_was_cut() -> None:
     """Whatever the reason a chunk starts or ends where it does, its passage is its own text:
     nothing from the chunk before or after it joins. Snapping to line or sentence ends used to
-    add text past a sentence cut, from a neighbour the query never matched."""
-    chunks = split(EVERY_CUT, ChunkSettings(chunk_size=300))
+    add text past a sentence cut, from a neighbour the query never matched. The fixture is
+    chunked in two parts, as a PDF is, so a part boundary is one of the cuts."""
+    settings = ChunkSettings(chunk_size=300)
+    at = EVERY_CUT.index("## Long")
+    first, rest = EVERY_CUT[:at], EVERY_CUT[at:]
+    chunks = [
+        *split(first, settings, end_reason=CutReason.PART),
+        *split(
+            rest,
+            settings,
+            line_offset=first.count("\n"),
+            char_offset=len(first),
+            byte_offset=len(first.encode()),
+            opened=open_headings(first),
+            start_reason=CutReason.PART,
+        ),
+    ]
     reasons = {chunk.start_reason for chunk in chunks} | {chunk.end_reason for chunk in chunks}
 
     passages = [

@@ -23,7 +23,8 @@ export function headingOf(match: Match): string {
 /** What each of the chunker's cut rules means (see `docs/chunking.md`), for the edges of a
  *  chunk on screen. Typed by the API's own enum, so a new rule fails the build until it is named. */
 export const CUT_REASONS: Record<Hit['start_reason'], string> = {
-  edge: 'start or end of the text',
+  edge: 'start or end of the document',
+  part: 'where one converted part of the document meets the next',
   heading: 'a heading starts a new section',
   paragraph: 'a blank line between paragraphs',
   length_block: 'chunk full, cut between two blocks',

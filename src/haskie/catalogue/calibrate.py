@@ -3,7 +3,9 @@
 (`fill_values = absolute`). Run it through `mise run calibrate-rerankers`, in three steps:
 
 1. `sample`: draws up to 40 distinct questions from the searches this home recorded, searches each
-   again, and writes the chunks ranked 10 to 30 as candidates to `eval/candidates.jsonl`.
+   again with no reranker floor, and writes the chunks ranked 10 to 30 as candidates to
+   `eval/candidates.jsonl`, each as the reranker reads it: its heading path, then its text. Under
+   a floor, every candidate would score above it, and each calibration could only raise it.
 2. A person reads each question's candidates and copies one that is borderline relevant, as
    `{"query": ..., "text": ...}`, one line a question, into `eval/borderline.jsonl`.
 3. `measure`: scores every borderline pair with each reranker named, and every candidate pair
@@ -19,7 +21,6 @@ The pure parts (`floor`, `fit_beta`) are separate from the IO so they can be tes
 
 import asyncio
 import json
-import math
 import statistics
 import time
 from datetime import date
@@ -33,9 +34,11 @@ from sqlalchemy import select
 from haskie import db
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import RerankerCalibration
+from haskie.collection.index import FTS_COLUMN, cross_encode, row_score
+from haskie.indexing.chunk import framed
 from haskie.search import flow, retrieval
 from haskie.search.session import Action
-from haskie.settings import load_user_settings
+from haskie.settings import Reranker, SearchSettings
 from haskie.tables import reranker_calibration, session_events
 
 QUESTIONS = 40  # Cohere asks for 30 to 50 representative queries
@@ -102,8 +105,9 @@ async def _sample(out: Path) -> int:
     names = await retrieval.scope(None, None)
     lines = []
     for query in await _asked(QUESTIONS):
-        hits = await flow.chunks(names, query, limit=CANDIDATES.stop)
-        texts = [hit.text for hit in hits[CANDIDATES.start : CANDIDATES.stop]]
+        hits = await flow.chunks(names, query, limit=CANDIDATES.stop, rerank_floor=0.0)
+        found = hits[CANDIDATES.start : CANDIDATES.stop]
+        texts = [framed(hit.frame, hit.text) for hit in found]
         if texts:
             lines.append(msgspec.json.encode(Candidates(query, texts)).decode())
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -112,14 +116,18 @@ async def _sample(out: Path) -> int:
 
 
 async def _scores(model: str, pairs: list[tuple[str, str]]) -> list[float]:
-    """Each pair's reranker score, as a search scores it: the sigmoid of the logit."""
-    from haskie.indexing.embed import rerank_scores
-
-    accelerator = (await load_user_settings()).pipeline.accelerator
-    found: list[float] = []
-    for query, text in pairs:
-        (logit,) = rerank_scores(model, accelerator, query, [text])
-        found.append(1 / (1 + math.exp(-logit)) if logit > -700 else 0.0)
+    """Each pair's reranker score, as a search scores it (`cross_encode`): one pass a question,
+    over its texts."""
+    settings = SearchSettings(reranker=Reranker.CROSS_ENCODER, reranker_model=model)
+    by_query: dict[str, list[int]] = {}
+    for at, (query, _) in enumerate(pairs):
+        by_query.setdefault(query, []).append(at)
+    found = [0.0] * len(pairs)
+    for query, ats in by_query.items():
+        rows = [{FTS_COLUMN: pairs[at][1]} for at in ats]
+        await cross_encode(query, rows, settings)  # scores the rows in place
+        for at, row in zip(ats, rows, strict=True):
+            found[at] = row_score(row)
     return found
 
 

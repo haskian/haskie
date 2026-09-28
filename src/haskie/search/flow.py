@@ -380,13 +380,17 @@ SOURCES = _chain(Sources, *RANKING, shortlist)
 # --- what a caller asks for -------------------------------------------------------
 
 
-async def chunks(names: list[str], query: str, limit: int | None = None) -> list[Hit]:
+async def chunks(
+    names: list[str], query: str, limit: int | None = None, rerank_floor: float | None = None
+) -> list[Hit]:
     """The `limit` best matching chunks of `names`, best first.
 
     The merged `Hit.score` is an RRF score, or the cross-encoder's when a reranker is on; a single
     collection keeps its own scores, because there is nothing to compare them with.
+    `rerank_floor` replaces the score a reranker drops chunks under: calibrating that floor needs
+    the chunks under it too (`catalogue.calibrate`).
     """
-    state = await _search(names, query, limit, deeper=CHUNK_SCAN)
+    state = await _search(names, query, limit, deeper=CHUNK_SCAN, rerank_floor=rerank_floor)
     return await CHUNKS.run(state=state) if state else []
 
 
@@ -433,9 +437,11 @@ async def _search(
     limit: int | None,
     deeper: int,
     sections: int | None = None,
+    rerank_floor: float | None = None,
 ) -> Search | None:
     """One search, planned but not yet run, or None when nothing is left to search."""
-    found = await _searches(names, aspects.Questions(questions=[query]), limit, deeper, sections)
+    asked = aspects.Questions(questions=[query])
+    found = await _searches(names, asked, limit, deeper, sections, rerank_floor)
     return found[0] if found else None
 
 
@@ -445,6 +451,7 @@ async def _searches(
     limit: int | None,
     deeper: int,
     sections: int | None = None,
+    rerank_floor: float | None = None,
 ) -> list[Search] | None:
     """One search per query over the same collections, planned but not yet run, or None when
     nothing is left to search.
@@ -457,6 +464,14 @@ async def _searches(
         plans = await retrieval.plan(names, asked.framed)
     if plans is None:
         return None
+    if rerank_floor is not None:
+        plans = [
+            msgspec.structs.replace(
+                where,
+                settings=msgspec.structs.replace(where.settings, min_rerank_score=rerank_floor),
+            )
+            for where in plans
+        ]
     # the collection's own limit when it is the only one searched, else the user's (`plan`), and
     # a slot for each question at least: a caller who set no limit cannot be refused for it
     limit = limit or max(plans[0].settings.limit, len(asked.questions))

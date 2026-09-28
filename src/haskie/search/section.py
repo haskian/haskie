@@ -110,6 +110,12 @@ class Group(msgspec.Struct):
         return [hit for hit_range in self.ranges for hit in hit_range.hits]
 
     @property
+    def standing(self) -> bool:
+        """Whether it is an excerpt: a section whose passages are all too short to stand alone
+        (`HitRange.alone`) is none."""
+        return not all(hit_range.alone for hit_range in self.ranges)
+
+    @property
     def chars(self) -> int:
         """How long its passages are together."""
         return sum(hit_range.char_end - hit_range.char_start for hit_range in self.ranges)
@@ -147,14 +153,10 @@ def group(
         if outline is not None:
             where = section_of(outline, first.seq, max_chars)
             placed.append(((first.collection, first.document, where), hit_range))
-    standing = {key for key, hit_range in placed if not hit_range.alone}
     groups: dict[tuple[str, str, Section], Group] = {}
     for key, hit_range in placed:
-        if key in groups:
-            groups[key].ranges.append(hit_range)
-        elif key in standing and len(groups) < limit:
-            groups[key] = Group(*key, ranges=[hit_range])
-    return list(groups.values())
+        groups.setdefault(key, Group(*key, ranges=[])).ranges.append(hit_range)
+    return [one for one in groups.values() if one.standing][:limit]
 
 
 def documents(hit_ranges: list[HitRange], limit: int) -> set[Place]:

@@ -58,7 +58,9 @@ class PieceType(StrEnum):
 
 
 # Why a chunk starts or ends where it does, the rule that drew the line:
-#   edge             the start or end of the text chunked (the document, or one part of it)
+#   edge             the start or end of the document
+#   part             where one part of a document ends and the next begins: the section may
+#                    go on across it (a PDF is converted and chunked a few pages at a time)
 #   heading          a heading opens the next section
 #   paragraph        a blank line, and the paragraphs on either side were not merged
 #   length_block     the chunk was full: cut between two blocks of one paragraph (list items, a
@@ -67,6 +69,7 @@ class PieceType(StrEnum):
 #   length_oversize  one sentence, table or code block longer than a chunk: cut at a line or word
 class CutReason(StrEnum):
     EDGE = "edge"
+    PART = "part"
     HEADING = "heading"
     PARAGRAPH = "paragraph"
     LENGTH_BLOCK = "length_block"
@@ -357,8 +360,8 @@ def pack(pieces: list[Span], size: int, short: float, end_reason: CutReason) -> 
     converter read as headings. `chunk.pack` carries its headings on to the next chunk's path.
 
     The section's last chunk ends for `end_reason`, the rule of the cut after the section: a
-    heading, or the edge of the text. Every other chunk ends at a paragraph (between two groups
-    `_merge` did not join) or where `_fill` found it full.
+    heading, the document's edge, or where the next part begins. Every other chunk ends at a
+    paragraph (between two groups `_merge` did not join) or where `_fill` found it full.
     """
     head = 0
     while head < len(pieces) and pieces[head].kind == SpanKind.HEADING:

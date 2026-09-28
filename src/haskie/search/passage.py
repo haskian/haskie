@@ -106,6 +106,9 @@ class HitRange(msgspec.Struct):
     # too short to stand alone, and nothing around it matched (`thin`): a passage of its own goes,
     # while it stays inside an excerpt whose section holds another passage (`section.group`)
     alone: bool = False
+    # too short to stand alone, but a run worth taking is next to it: an excerpts search judged it
+    # and left the growing to the fill, which may take nothing after all (`thin.settle`)
+    owed: bool = False
 
     @property
     def best(self) -> Hit:
@@ -131,8 +134,8 @@ def pages(hits: list[Hit]) -> tuple[int | None, int | None]:
 def ends_section(hit: Hit) -> bool:
     """Whether a heading follows the chunk: the next chunk opens another section.
 
-    A part boundary (`edge` between two batches of a PDF) is no section end: the section goes on
-    in the next part.
+    A part boundary (`part`, between two batches of a PDF) is no section end: the section goes on
+    in the next part. One the next part opens with a heading is cut as `heading`.
     """
     return hit.end_reason == CutReason.HEADING
 
@@ -190,8 +193,8 @@ def rejoin(parts: list[HitRange], how: ScoreFold) -> list[HitRange]:
 
     A chunk several parts hold counts once, as the first of them has it. Each rebuilt range
     carries what its parts carried: their folded places, their questions in the order the parts
-    are listed, and `alone` (`thin`) only when every one of them was. A part never splits, since
-    its chunks continue each other, so each lands whole in one rebuilt range.
+    are listed, and `alone` and `owed` (`thin`) only when every one of them was. A part never
+    splits, since its chunks continue each other, so each lands whole in one rebuilt range.
     """
     hits: dict[ChunkKey, Hit] = {}
     for one in parts:
@@ -213,6 +216,7 @@ def rejoin(parts: list[HitRange], how: ScoreFold) -> list[HitRange]:
                 aspects=list(dict.fromkeys(label for kept in held for label in kept.aspects)),
                 aspect_scores=best_of([kept.aspect_scores for kept in held]),
                 alone=all(kept.alone for kept in held),
+                owed=all(kept.owed for kept in held),
             )
         )
     return rebuilt

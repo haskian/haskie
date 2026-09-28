@@ -182,7 +182,7 @@ a `session_id`, so Sessions can replay the conversation.
 
 | tool | what it does |
 | --- | --- |
-| `search_excerpts` | **The main search.** Passages ready to quote, best first, each with `header` and `location`. Repeats fold into `also_in`. Takes up to 5 parts of one question, and tags each excerpt with the parts it answers |
+| `search_excerpts` | **The main search.** Passages ready to quote, best first (in turns for several parts), each with `header` and `location`. Repeats fold into `also_in`. Takes up to 5 parts of one question, and tags each excerpt with the parts it answers |
 | `search_sources` | Which documents and collections cover a topic. One row per document, with its best sections |
 | `set_session_collections` | Limits the rest of the conversation to the collections `search_sources` suggested |
 | `list_collections`, `get_collection`, `list_collection_documents` | Browse collections and their descriptions |
