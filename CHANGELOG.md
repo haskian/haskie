@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.13.0 - 2026-09-28
+#### Features
+- publish to PyPI and switch to the new k logo (#22) - (4992d4d) - Črtomir Majer
+
+- - -
+
 ## v0.12.0 - 2026-09-28
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>(**search**) excerpts as sections, several questions per search, and scored answers (#21) - (f6ef412) - Črtomir Majer
