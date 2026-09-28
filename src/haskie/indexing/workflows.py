@@ -869,6 +869,12 @@ def run_id(workflow_id: str) -> str:
     return workflow_id.rsplit(":", 1)[-1]
 
 
+def embed_id(parent_id: str, doc: str) -> str:
+    """The id of the `ensure_embedding` run one import or index workflow asks for as its own (see
+    `_ensure_embedding`); `operations` folds that run into its parent by it."""
+    return f"{EMBED_PREFIX}:{doc}:{run_id(parent_id)}"
+
+
 def _slice_count(stage: Stage, ctx: Context) -> int:
     """Slices this stage may be cut into. The index stage is never sliced (see `INDEX_QUEUE`)."""
     return 1 if stage == Stage.INDEX else resolve_parallelism(ctx.pipeline, stage)
@@ -938,7 +944,7 @@ async def _ensure_embedding(ctx: Context) -> str:
     caller that was cancelled itself stops at that ask, which DBOS refuses from a cancelled
     workflow. A cancel of its own run is final."""
     params = embed_cache.params(ctx.document, ctx.chunking, ctx.embedding)
-    own = f"{EMBED_PREFIX}:{ctx.document.name}:{run_id(DBOS.workflow_id or '')}"
+    own = embed_id(DBOS.workflow_id or "", ctx.document.name)
     while True:
         with (
             SetWorkflowID(own),
@@ -1014,8 +1020,8 @@ async def ensure_embedding(doc: str, params: embed_cache.Params) -> str:
 
     The chunk settings come from `params`, not from any collection: the collection's settings may
     change between the enqueue and the run, and what was asked for is what the id names. The
-    embedding model is the global one, so a model changed meanwhile fails the run: the parent
-    asks again under the new model."""
+    embedding model is the global one, so a model changed meanwhile fails the run, and the parent
+    with it: a reindex asks again under the new model."""
     with logs.bound(workflow_id=DBOS.workflow_id, document=doc):
         found = await cache_lookup(params)
         if found is not None:

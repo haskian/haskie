@@ -127,12 +127,13 @@ def record(
     """One Arrow record for a chunk: its own fields, plus the columns the table adds around it.
 
     Both tables that hold chunks build their rows here - the parquet cache (`embed_cache`) and a
-    collection's LanceDB table (`index`) - so a new field on `Chunk` reaches both. The record
-    carries the pieces and the text joined from them, and each table's schema takes the one it
-    stores: the cache keeps the pieces, the index the text its full-text search reads and the
-    `layout` of the pieces in it. `dims` is the width of the table's vector column, or None for a
-    table without one; pyarrow would write a null for a missing vector, so a row without one is
-    refused here instead.
+    collection's LanceDB table (`index`) - so both see the same fields. Each table's schema
+    (`embed_cache._PLAIN`, `index.PLAIN_SCHEMA`) drops a key it does not name, so a new field on
+    `Chunk` must be added to both schemas to be stored. The record carries the pieces and the text
+    joined from them, and each table's schema takes the one it stores: the cache keeps the pieces,
+    the index the text its full-text search reads and the `layout` of the pieces in it. `dims` is
+    the width of the table's vector column, or None for a table without one; pyarrow would write a
+    null for a missing vector, so a row without one is refused here instead.
     """
     joined = {"text": chunk.text, "layout": msgspec.to_builtins(chunk.layout)}
     values = msgspec.to_builtins(chunk) | joined | columns
@@ -285,8 +286,9 @@ def split(
     """`text` as chunks. The pipeline chunks a document one part at a time, so `line_offset`,
     `char_offset` and `byte_offset` count what comes before `text` in the whole document,
     `opened` holds the headings still open where it starts (see `open_headings`), and
-    `start_reason` and `end_reason` say whether its ends are the document's (`EDGE`) or where
-    another part meets it (`PART`)."""
+    `start_reason` and `end_reason` say why its ends are cut: the document's own (`EDGE`), else
+    where another part meets it, at a heading the later part opens with (`HEADING`) or partway
+    through a section (`PART`)."""
     run = Chunking(
         text,
         settings,
@@ -368,21 +370,12 @@ def _heading_paths(run: Chunking, pieces: list[Span]) -> tuple[list[int], list[l
     return offsets, paths
 
 
-def _newlines(text: str) -> list[int]:
-    found: list[int] = []
-    at = text.find("\n")
-    while at != -1:
-        found.append(at)
-        at = text.find("\n", at + 1)
-    return found
-
-
 def locate(run: Chunking, packed: list[Packed]) -> list[Chunk]:
     """The chunks with their offsets, lines, pages and heading paths."""
     text = run.text
     offsets, paths = _heading_paths(run, [h for chunk in packed for h in chunk.headings])
     before_any = [title for _, title in run.opened]  # ahead of this part's first heading
-    newlines = _newlines(text)
+    newlines = [m.start() for m in re.finditer("\n", text)]
     markers = [(m.start(), int(m.group(1))) for m in PAGE_MARKER.finditer(text)]
     marker_offsets = [m[0] for m in markers]
 

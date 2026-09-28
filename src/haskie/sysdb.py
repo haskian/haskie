@@ -31,7 +31,8 @@ workflow_status = table(
 )
 operation_outputs = table("operation_outputs", column("workflow_uuid"), column("function_name"))
 
-# SQLite allows 999 bound parameters by default; one query per page keeps every list under it.
+# SQLite builds before 3.32 allow only 999 bound parameters, and a custom build may set the limit
+# as low; one query per page keeps every list under that floor on any build.
 SYSDB_PAGE = 500
 
 

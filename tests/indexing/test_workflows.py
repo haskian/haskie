@@ -121,11 +121,6 @@ async def _add_member(collection: Collection, doc: str) -> None:
         )
 
 
-def _embed_id(workflow_id: str, doc: str) -> str:
-    """The `emb:` child one `imp:` or `idx-col:` workflow asks for (see `_ensure_embedding`)."""
-    return f"{workflows.EMBED_PREFIX}:{doc}:{workflows.run_id(workflow_id)}"
-
-
 async def _steps(workflow_id: str) -> list[str]:
     """The step names one workflow recorded, in order. DBOS writes the row when a step finishes,
     so this is what really ran rather than what the body would have run."""
@@ -361,7 +356,7 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
         ("convert", 0, 0, 10, "SUCCESS"), ("convert", 1, 10, 20, "SUCCESS"),
         ("convert", 2, 20, 25, "SUCCESS"),
     ]  # fmt: skip
-    embedding = _embed_id(first, pdf.name)
+    embedding = workflows.embed_id(first, pdf.name)
     assert [(t.stage, t.seq, t.status) for t in await operations.list_tasks(embedding)] == [
         ("embed", 0, "SUCCESS"), ("embed", 1, "SUCCESS"), ("embed", 2, "SUCCESS"),
     ]  # fmt: skip
@@ -432,7 +427,7 @@ async def test_workflow_ids_name_their_kind_and_their_names(dbos, tmp_path: Path
     assert await wait_for(index_id) == "indexed"
 
     assert sorted(await _workflow_ids(dbos_names.EMBED_WORKFLOW)) == sorted(
-        {_embed_id(import_id, doc.name), _embed_id(index_id, doc.name)}
+        {workflows.embed_id(import_id, doc.name), workflows.embed_id(index_id, doc.name)}
     ), "each parent derives its embedding child's id from its own run"
     delete_id = await dbos.start_delete_document(doc.name)
     assert delete_id.startswith(f"{workflows.DELETE_DOCUMENT_PREFIX}:a.md:"), delete_id
@@ -832,7 +827,7 @@ async def test_one_document_creates_a_bounded_number_of_workflows(dbos, tmp_path
         return Counter(s.name for s in listed)
 
     assert await named(import_id) == {dbos_names.IMPORT_WORKFLOW: 1, dbos_names.STAGE_WORKFLOW: 3}
-    embedding = _embed_id(import_id, doc.name)
+    embedding = workflows.embed_id(import_id, doc.name)
     assert await named(embedding) == {dbos_names.EMBED_WORKFLOW: 1, dbos_names.STAGE_WORKFLOW: 3}
     assert await named(index_id) == {
         dbos_names.COLLECTION_DOCUMENT_WORKFLOW: 1,
@@ -964,7 +959,7 @@ async def test_reindexing_with_unchanged_settings_hits_the_cache(
     assert await wait_for(job_id) == "indexed"
 
     assert sum(spy.calls.values()) == computed == 1, "the embed work did not run again"
-    embedding = _embed_id(job_id, doc.name)
+    embedding = workflows.embed_id(job_id, doc.name)
     steps = await _steps(embedding)
     assert "cache_lookup" in steps, f"the run never looked the cache up: {steps}"
     assert "plan" not in steps and "finalize_embed" not in steps, "it returned on the hit"
@@ -999,12 +994,14 @@ async def test_concurrent_attaches_converge_on_one_embedding_run(
     gate.release.set()
 
     assert [await wait_for(first), await wait_for(second)] == ["indexed", "indexed"]
-    shared = _embed_id(first, doc.name)
+    shared = workflows.embed_id(first, doc.name)
     ids = sorted(await _workflow_ids(dbos_names.EMBED_WORKFLOW))
-    assert ids == sorted({_embed_id(await _import_id(doc.name), doc.name), shared}), (
+    assert ids == sorted({workflows.embed_id(await _import_id(doc.name), doc.name), shared}), (
         "the import's pre-warm and one shared run, not one run per collection"
     )
-    assert _embed_id(second, doc.name) not in ids, "the second enqueue returned the first run"
+    assert workflows.embed_id(second, doc.name) not in ids, (
+        "the second enqueue returned the first run"
+    )
     assert gate.calls == [0], "and the embed step ran exactly once"
     assert {e.chunk_size for e in await embed_cache.entries(doc.name)} == {
         (await load_user_settings()).conversion.chunk_size,
@@ -1047,7 +1044,7 @@ async def test_a_waiter_outlives_the_cancel_of_the_embedding_run_it_shares(
         return dbos_names.EMBED_WORKFLOW in await _steps(second)
 
     await until(asked, "the second attach never asked for the embedding")
-    shared = _embed_id(first, doc.name)
+    shared = workflows.embed_id(first, doc.name)
     if cancel == "detach the owner":
         await dbos.detach("one", doc.name)
     else:
@@ -1058,7 +1055,10 @@ async def test_a_waiter_outlives_the_cancel_of_the_embedding_run_it_shares(
     with pytest.raises(owner_error):
         await wait_for(first)
     await _drain()
-    assert await _statuses([shared, _embed_id(second, doc.name)]) == ["CANCELLED", "SUCCESS"]
+    assert await _statuses([shared, workflows.embed_id(second, doc.name)]) == [
+        "CANCELLED",
+        "SUCCESS",
+    ]
     assert gate.calls == [0, 0], "the cancelled run's one batch, then the waiter's own"
     assert (await Collection("two").member(doc.name)).status == "indexed"
     assert (await collection_hits("two", "lancedb"))[0].document == doc.name
@@ -1109,7 +1109,7 @@ async def test_reimport_reconverts_and_drops_the_stale_cache(dbos, tmp_path: Pat
 async def test_ensure_embedding_fails_permanently_under_another_model(dbos, tmp_path: Path) -> None:
     """The cache id names the model the rows were computed with, so a run whose params no longer
     match the installed profile cannot produce them: it fails at once instead of writing rows
-    under the wrong id, and the parent asks again under the new model."""
+    under the wrong id. The parent fails with it, and a reindex asks again under the new model."""
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     row = await document.get(doc.name)
     wanted = embed_cache.params(
@@ -1170,7 +1170,7 @@ async def test_an_import_waits_for_the_embedding_model_to_download(
     await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
     doc = await import_row("a.md", MD, tmp_path)
     job_id = await dbos.start_import(doc.name)
-    run = _embed_id(job_id, doc.name)
+    run = workflows.embed_id(job_id, doc.name)
 
     async def waiting() -> bool:
         return "DBOS.sleep" in await _steps(run)
@@ -1209,7 +1209,7 @@ async def test_a_batch_waits_for_the_embedding_model_to_warm(
     await await_terminal([download])
     doc = await import_row("a.md", MD, tmp_path)
     job_id = await dbos.start_import(doc.name)
-    run = _embed_id(job_id, doc.name)
+    run = workflows.embed_id(job_id, doc.name)
 
     assert await wait_for(job_id) == "imported"
     assert "DBOS.sleep" not in await _steps(run), "the model was ready when the run asked"
@@ -1237,7 +1237,9 @@ async def test_an_import_whose_embedding_model_failed_ends_in_error(
     with pytest.raises(workflows.PipelineError, match="failed to load: .*no such model"):
         await wait_for(job_id)
     assert (await document.get(doc.name)).status == "error"
-    assert "plan" not in await _steps(_embed_id(job_id, doc.name)), "it never reached embedding"
+    assert "plan" not in await _steps(workflows.embed_id(job_id, doc.name)), (
+        "it never reached embedding"
+    )
     assert embedded == []
 
 
@@ -2426,7 +2428,9 @@ async def test_list_tasks_reports_stage_slices_still_waiting(
     gate.release.set()
     assert await wait_for(job_id) == "imported"
     assert {t.status for t in await operations.list_tasks(job_id)} == {"SUCCESS"}
-    assert len(await operations.list_tasks(_embed_id(job_id, doc.name))) == 3, "the embed job's own"
+    assert len(await operations.list_tasks(workflows.embed_id(job_id, doc.name))) == 3, (
+        "the embed job's own"
+    )
 
 
 async def test_list_tasks_merges_the_slices_of_a_stage(dbos, tmp_path: Path, monkeypatch) -> None:

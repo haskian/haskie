@@ -100,14 +100,11 @@ def params(
 
 
 def urn(p: Params) -> str:
-    """Canonical form: fixed field order, so equal params always give equal text. `document` is safe
-    inside it because `document.safe_name` allows no `;` or `:`."""
-    return (
-        f"document:{p.document};model:{p.model};chunk_size:{p.chunk_size};"
-        f"chunk_merge_below:{p.chunk_merge_below};"
-        f"chunk_frame:{'true' if p.chunk_frame else 'false'};chunker:{p.chunker};"
-        f"chunk_version:{p.chunk_version};parser:{p.parser};"
-        f"skip_ocr_pages:{'true' if p.skip_ocr_pages else 'false'}"
+    """Canonical form: `name:value` per field in declaration order, so equal params always give
+    equal text. `document` is safe inside it because `document.safe_name` allows no `;` or `:`."""
+    return ";".join(
+        f"{name}:{str(value).lower() if isinstance(value, bool) else value}"
+        for name, value in msgspec.structs.asdict(p).items()
     )
 
 

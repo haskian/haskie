@@ -241,9 +241,9 @@ KIND_BY_NAME: dict[str, OperationKind] = {
     **{name: kind for kind, names in KIND_NAMES.items() for name in names},
 }
 
-# Kind -> the id prefix that keeps one collection's operations only. Downloads and document deletes
-# belong to no collection, so a collection filter leaves the section holding them empty rather
-# than unfiltered.
+# Kind -> the id prefix that keeps one collection's operations only. Document deletes belong to no
+# collection, so a collection filter drops them from the collection section. Downloads belong to no
+# collection either, and have no prefix here: the filter leaves their section as it is.
 _COLLECTION_PREFIX: dict[OperationKind, list[str]] = {
     OperationKind.COLLECTION: [
         f"{workflows.BULK_INDEX_PREFIX}:",
@@ -416,24 +416,24 @@ def fold_operations(runs: list[_StageRun]) -> list[Operation]:
     lose it.
     """
     embeds = {run.id: run for run in runs if run.action == PipelineAction.EMBED}
-    folded = {_embed_id(run) for run in runs if run.action != PipelineAction.EMBED}
+    folded = {
+        workflows.embed_id(run.id, run.document)
+        for run in runs
+        if run.action != PipelineAction.EMBED
+    }
     out: list[Operation] = []
     for run in runs:
         if run.action == PipelineAction.EMBED:
             if run.id not in folded:
                 out.append(_document_row(run, [_job(Stage.EMBED, run)]))
             continue
-        embed = embeds.get(_embed_id(run))
+        embed = embeds.get(workflows.embed_id(run.id, run.document))
         imported = run.action == PipelineAction.IMPORT
         own = _job(Stage.CONVERT if imported else Stage.INDEX, run, embed)
         embed_job = [] if embed is None else [_job(Stage.EMBED, embed)]
         jobs = [own, *embed_job] if imported else [*embed_job, own]
         out.append(_document_row(run, jobs))
     return out
-
-
-def _embed_id(run: _StageRun) -> str:
-    return f"{workflows.EMBED_PREFIX}:{run.document}:{run.id.rsplit(':', 1)[-1]}"
 
 
 def _job(stage: Stage, run: _StageRun, embed: _StageRun | None = None) -> Job:
