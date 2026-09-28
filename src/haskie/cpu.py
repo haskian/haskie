@@ -13,7 +13,7 @@ import functools
 import multiprocessing
 import threading
 from collections.abc import Callable, Iterator
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, wait
 from contextlib import contextmanager
 from types import ModuleType
 from typing import Any, cast
@@ -92,8 +92,10 @@ THREAD_LIMIT = 256
 
 
 def configure_cpu_budget(budget: int) -> None:
-    """Resize the pool of CPU slots (from `apply_settings`)."""
+    """Resize the pool of CPU slots, and the extraction pool sized from it (from
+    `apply_settings`)."""
     _cpu_slots.resize(budget)
+    _retire_misfit_pool()
 
 
 @contextmanager
@@ -143,12 +145,67 @@ CONVERT_WORKERS: int | None = None  # None sizes the pool from the CPU budget
 _pool: ProcessPool | None = None
 _pool_closed = False  # latched by `shutdown_pool`, so nothing builds a fresh pool behind it
 _pool_lock = threading.Lock()
-# What the pool is running or holding, so `shutdown_pool` can resolve it; guarded by `_pool_lock`.
-_in_flight: set[ProcessFuture] = set()
+# Pools of an older size, finishing the work they took before a resize; guarded by `_pool_lock`.
+# Whoever takes a pool out of this set stops it: its retiring thread, or `shutdown_pool`.
+_retired: set[ProcessPool] = set()
+# What each pool is running or holding, so `shutdown_pool` can resolve it and a retired pool knows
+# when it is done; guarded by `_pool_lock`.
+_in_flight: dict[ProcessFuture, ProcessPool] = {}
 
 
 def _pool_size() -> int:
     return _cpu_slots.size if CONVERT_WORKERS is None else CONVERT_WORKERS
+
+
+def _retire_misfit_pool() -> None:
+    """Retire the extraction pool when its size no longer fits, so the next extraction builds one
+    that does. A pool keeps the size it was built with, and a raised budget would otherwise park
+    extractions, each holding a CPU slot, in the old pool's queue.
+
+    The old pool takes no new work but finishes what it already took, in a thread of its own:
+    this runs on an event loop, and one OCR batch can take minutes.
+    """
+    global _pool
+    with _pool_lock:
+        pool = _pool
+        # `workers` is pebble's own record of the size it was built with
+        if pool is None or pool._context.workers == _pool_size():
+            return
+        _pool = None
+        _retired.add(pool)
+        taken = [future for future, owner in _in_flight.items() if owner is pool]
+    pool.close()
+    threading.Thread(
+        target=_stop_when_done, args=(pool, taken), name="haskie-pool-retire", daemon=True
+    ).start()
+
+
+def _stop_when_done(pool: ProcessPool, taken: list[ProcessFuture]) -> None:
+    wait(taken)
+    with _pool_lock:
+        if pool not in _retired:
+            return  # `shutdown_pool` took it, and stops it
+        _retired.discard(pool)
+    _stop_pools([pool])
+
+
+def _stop_pools(pools: list[ProcessPool]) -> None:
+    """Stop `pools` and kill their workers, all at once, and reap them.
+
+    Stop first, so no manager starts a worker in place of the ones killed next. Then SIGKILL:
+    pebble's own stop sends SIGTERM and waits 3 s per worker, one after the other, and a worker
+    inside a parser's C code cannot run its SIGTERM handler until the call returns, so four busy
+    workers cost it 12 s. Join last, which now reaps dead workers.
+    """
+    for pool in pools:
+        pool.stop()
+    for pool in pools:
+        # `workers` is pebble's own record of its processes; it has no public way to kill them at
+        # once. `copy` is one step under the GIL, so the manager thread cannot change it midway.
+        for worker in pool._pool_manager.worker_manager.workers.copy().values():
+            worker.kill()
+    for pool in pools:
+        pool.join()
 
 
 def _convert_pool() -> ProcessPool:
@@ -188,8 +245,9 @@ def _run_in_pool[T](fn: Callable[..., T], args: tuple[Any, ...]) -> T:
     document would end up failed rather than recovered at the next boot.
     """
     with _pool_lock:
-        future = _convert_pool().schedule(fn, args=args)
-        _in_flight.add(future)
+        pool = _convert_pool()
+        future = pool.schedule(fn, args=args)
+        _in_flight[future] = pool
     try:
         return future.result()
     except (CancelledError, ProcessExpired):
@@ -200,7 +258,7 @@ def _run_in_pool[T](fn: Callable[..., T], args: tuple[Any, ...]) -> T:
         raise
     finally:
         with _pool_lock:
-            _in_flight.discard(future)
+            _in_flight.pop(future, None)
 
 
 def open_pool() -> None:
@@ -216,32 +274,24 @@ def shutdown_pool() -> None:
 
     An extraction still running is lost, not waited for: it would hold the interpreter's exit,
     deaf to Ctrl-C, and one OCR batch can take minutes. Its step is durable and runs again at the
-    next boot. The order matters:
+    next boot. That holds for a retired pool still finishing its work, too. The order matters:
 
-    1. Latch the pool closed and take what is in flight, under the lock `_run_in_pool`
-       schedules under: nothing is scheduled after, and nothing scheduled before is missed.
+    1. Latch the pool closed and take every pool and what is in flight, under the lock
+       `_run_in_pool` schedules under: nothing is scheduled after, and nothing scheduled before
+       is missed.
     2. Cancel what is in flight, so each waiting thread wakes to a cancel, which reads as
        `ShuttingDown`: a stopped pebble pool never resolves the futures it held.
-    3. Stop the pool, so its manager starts no worker in place of the ones killed next.
-    4. SIGKILL every worker at once. pebble's own stop sends SIGTERM and waits 3 s per worker,
-       one after the other, and a worker inside a parser's C code cannot run its SIGTERM handler
-       until the call returns, so four busy workers cost it 12 s.
-    5. Join, which now reaps dead workers.
+    3. Stop the pools and kill their workers at once (`_stop_pools`).
     """
     global _pool, _pool_closed
     with _pool_lock:
-        pool, _pool, _pool_closed = _pool, None, True
+        pools = [*_retired] if _pool is None else [_pool, *_retired]
+        _pool, _pool_closed = None, True
+        _retired.clear()
         in_flight = list(_in_flight)
     for future in in_flight:
         future.cancel()
-    if pool is None:
-        return
-    pool.stop()
-    # `workers` is pebble's own record of its processes; it has no public way to kill them at
-    # once. `copy` is one step under the GIL, so the manager thread cannot change it midway.
-    for worker in pool._pool_manager.worker_manager.workers.copy().values():
-        worker.kill()
-    pool.join()
+    _stop_pools(pools)
 
 
 async def off_interpreter[T](fn: Callable[..., T], /, *args: Any) -> T:

@@ -33,6 +33,10 @@ flowchart TB
   further, to a process pool (`cpu.off_interpreter`), while the thread holds the slot. A pipeline
   step holds a slot for its CPU part only, never for the IO around it. The pool is pebble's: a
   parser that crashes its worker fails only its own call, and a new worker takes its place.
+- **A budget change applies to running work.** A resize counts the slots already held, so a
+  raise from 2 to 3 admits one more job, not three. The process pool has one worker per slot. A
+  pool of the old size takes no new work, finishes what it took, and exits. The next extraction
+  builds a pool of the new size.
 - **Two loops, nothing shared.** Litestar and DBOS each run an event loop. They share no
   loop-bound primitive, so the budget is a `threading` semaphore, each loop has its own thread
   limiter, and the search fan-out builds its semaphore per call.

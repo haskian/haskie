@@ -7,6 +7,7 @@ runs, so the pickling boundary and the forkserver context stay covered.
 
 import asyncio
 import hashlib
+import multiprocessing
 import os
 import threading
 import time
@@ -16,7 +17,7 @@ from pathlib import Path
 
 import anyio
 import pytest
-from pebble import ProcessExpired
+from pebble import ProcessExpired, ProcessPool
 
 from haskie import cpu, shutdown
 from haskie.document import convert
@@ -144,6 +145,83 @@ async def test_a_worker_that_dies_fails_only_its_own_extraction() -> None:
 
     assert await beside is None, "the extraction beside the crash finished"
     assert await cpu.off_interpreter(sum, [1, 2]) == 3, "the pool takes the next call"
+
+
+def _workers(pool: ProcessPool | None) -> list[multiprocessing.Process]:
+    assert pool is not None
+    return list(pool._pool_manager.worker_manager.workers.values())
+
+
+@dataclass
+class PoolResizeCase:
+    convert_workers: int | None
+    budget: int
+    retired: bool
+
+
+POOL_RESIZE_CASES = {
+    "a raised budget retires the pool, and the next one runs at its size": PoolResizeCase(
+        None, WORKERS + 1, retired=True
+    ),
+    "the same budget keeps the pool": PoolResizeCase(None, WORKERS, retired=False),
+    "a set worker count keeps the pool whatever the budget": PoolResizeCase(
+        WORKERS, WORKERS + 1, retired=False
+    ),
+}
+
+
+@pytest.mark.parametrize("case", POOL_RESIZE_CASES.values(), ids=list(POOL_RESIZE_CASES))
+async def test_a_resized_budget_resizes_the_extraction_pool(
+    case: PoolResizeCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pool keeps the size it was built with. Left at the old size, a raised budget would park
+    extractions in the pool's queue, each holding a CPU slot. The work the old pool already took
+    finishes there."""
+    monkeypatch.setattr(cpu, "CONVERT_WORKERS", case.convert_workers)
+    taken = asyncio.create_task(cpu.off_interpreter(time.sleep, 1))
+    await _running(1)
+    old = cpu._pool
+    old_workers = _workers(old)
+
+    cpu.configure_cpu_budget(case.budget)
+
+    assert (cpu._pool is not old) is case.retired
+    assert await taken is None, "the work the old pool took finishes"
+    if not case.retired:
+        return
+    calls = [_native_call() for _ in range(case.budget)]
+    await _running(case.budget)
+    assert _workers(cpu._pool) != old_workers, "a new pool took the new work"
+
+    async def old_pool_gone() -> bool:
+        return not cpu._retired and not any(worker.is_alive() for worker in old_workers)
+
+    await until(old_pool_gone, "the retired pool outlived its work")
+    await anyio.to_thread.run_sync(cpu.shutdown_pool)
+    for call in calls:
+        with anyio.fail_after(10), pytest.raises(shutdown.ShuttingDown):
+            await call
+
+
+async def test_shutdown_kills_a_retired_pool_still_at_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retired pool finishes its work only while the process runs. At shutdown its workers die
+    with the rest, and its callers hear `ShuttingDown`."""
+    monkeypatch.setattr(cpu, "CONVERT_WORKERS", None)
+    call = _native_call()
+    await _running(1)
+    old = cpu._pool
+    old_workers = _workers(old)
+    cpu.configure_cpu_budget(WORKERS + 1)
+    assert cpu._retired == {old}, "the old pool is still at work"
+
+    started = time.monotonic()
+    await anyio.to_thread.run_sync(cpu.shutdown_pool)
+
+    assert time.monotonic() - started < 1.5, "killed, not waited for"
+    with anyio.fail_after(10), pytest.raises(shutdown.ShuttingDown):
+        await call
+    assert not any(worker.is_alive() for worker in old_workers), "no worker outlives shutdown"
+    assert not cpu._retired
 
 
 # --- a budget resized under load --------------------------------------------------
