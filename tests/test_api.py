@@ -1080,6 +1080,51 @@ async def test_a_rename_refused_changes_nothing(
     assert [one["name"] for one in listed] == ["notes", "other"], name
 
 
+@pytest.mark.parametrize(
+    ("claim", "method", "path", "body", "left"),
+    [
+        ("create", "POST", "/api/collections", {"name": "gone"}, ["gone", "other"]),
+        ("rename", "PUT", "/api/collections/other/name", {"name": "gone"}, ["gone"]),
+    ],
+)
+async def test_a_name_whose_delete_still_runs_is_refused(
+    client: AsyncTestClient,
+    monkeypatch,
+    claim: str,
+    method: str,
+    path: str,
+    body: dict,
+    left: list[str],
+) -> None:
+    """The delete removes the row before the folder, so the name is free while its folder stands.
+    A create or a rename onto it would put its folder there, and the delete's last step would then
+    remove it: refused until the delete finished, and taken after."""
+    await client.post("/api/init", json=NO_MODELS)
+    for existing in ("gone", "other"):
+        await client.post("/api/collections", json={"name": existing})
+    gate = Gate()
+    monkeypatch.setattr(Collection, "remove_tree", gate.wrap(Collection.remove_tree))
+    deleting = (await client.delete("/api/collections/gone")).json()["operation_id"]
+    assert await wait_event(gate.entered), "the delete reached its last step"
+
+    refused = await client.request(method, path, json=body)
+
+    assert refused.status_code == 409, f"{claim}: {refused.text}"
+    assert f"collection gone is still being deleted by {deleting}" in refused.json()["detail"]
+    listed = (await client.get("/api/collections")).json()["items"]
+    assert [one["name"] for one in listed] == ["other"], f"{claim}: a refused claim changes nothing"
+    assert Collection("other").root.is_dir()
+
+    gate.release.set()
+    await wait_for(deleting)
+    taken = await client.request(method, path, json=body)
+
+    assert taken.status_code in (200, 201), f"{claim}: {taken.text}"
+    listed = (await client.get("/api/collections")).json()["items"]
+    assert [one["name"] for one in listed] == left, claim
+    assert Collection("gone").root.is_dir(), f"{claim}: the folder the claim made stays"
+
+
 async def test_deleting_a_document_removes_it_from_every_collection(
     client: AsyncTestClient,
 ) -> None:
