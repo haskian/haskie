@@ -5,6 +5,8 @@ import hashlib
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -214,6 +216,35 @@ async def test_atomic_write_leaves_no_temp_file_on_failure(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("writer", WRITERS)
+async def test_atomic_write_puts_the_bytes_on_disk_before_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    """A rename can reach the disk before the bytes it names, and a power cut then leaves an empty
+    file where the old one was. So the whole payload is flushed first."""
+    target = tmp_path / "preview.md"
+    target.write_text("# Old\n")
+    steps: list[tuple[str, int]] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(descriptor: int) -> None:
+        steps.append(("fsync", os.fstat(descriptor).st_size))
+        real_fsync(descriptor)
+
+    def replace(source: Path, destination: Path) -> None:
+        steps.append(("replace", Path(source).stat().st_size))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    await _write(writer, target, "# A longer title\n")
+
+    size = len("# A longer title\n")
+    assert steps == [("fsync", size), ("replace", size)], f"{writer}: every byte, then the rename"
+    assert target.read_text() == "# A longer title\n", writer
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("name", "already_there"),
     [
@@ -235,6 +266,76 @@ async def test_ensure_home_creates_private_directories(name: str, already_there:
         assert directory.is_dir(), name
         assert directory.parent == home.HOME, name
         assert stat.S_IMODE(directory.stat().st_mode) == home.DIR_MODE, name
+
+
+@pytest.mark.parametrize(
+    ("name", "configured", "expected"),
+    [
+        ("a relative home is anchored where the process starts", "data", "{cwd}/data"),
+        ("a home under ~ is expanded", "~/haskie-home", "{user}/haskie-home"),
+    ],
+)
+def test_the_home_from_the_environment_is_absolute(
+    tmp_path: Path, name: str, configured: str, expected: str
+) -> None:
+    """`litestar run` hands `HASKIE_HOME` over as written, without the CLI's resolving. A relative
+    home would follow every later change of directory, and `scrub` would rewrite the bare word
+    `data` in every log line. The module reads it once, at import, so a fresh interpreter does."""
+    shown = subprocess.run(
+        [sys.executable, "-c", "from haskie import home; print(home.HOME)"],
+        cwd=tmp_path,
+        env={**os.environ, "HASKIE_HOME": configured},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    wanted = expected.format(cwd=tmp_path.resolve(), user=Path.home())
+    assert shown == str(Path(wanted).resolve()), name
+
+
+# --- the holder line in the home lock ---------------------------------------------
+
+HOLDER_ADDRESS = "http://127.0.0.1:8452"
+
+
+@pytest.mark.parametrize(
+    ("name", "left_behind", "written_while_held", "expected_pid"),
+    [
+        (
+            "a longer line an earlier holder left is cut to ours",
+            "pid 4194304, http://127.0.0.1:65535 (an older build said more)",
+            None,
+            "ours",
+        ),
+        ("a line that is not ours reads as no pid", None, "held, but not by haskie", None),
+        ("a pid that is not at the start reads as no pid", None, "holder pid 4194304", None),
+    ],
+)
+def test_the_holder_line(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    left_behind: str | None,
+    written_while_held: str | None,
+    expected_pid: str | None,
+) -> None:
+    """`stop` signals the pid it reads off the lock, so the line must be exactly the one
+    `claim_home` wrote: a stale tail or a foreign line must never pass for a pid to signal."""
+    if left_behind is not None:
+        home.LOCK_FILE.write_text(left_behind)
+    monkeypatch.setenv(home.ADDRESS_ENV, HOLDER_ADDRESS)
+
+    home.claim_home()
+    try:
+        if written_while_held is None:
+            assert home.LOCK_FILE.read_text() == f"pid {os.getpid()}, {HOLDER_ADDRESS}", name
+        else:
+            home.LOCK_FILE.write_text(written_while_held)  # the lock is advisory: this is allowed
+        pid = home.running_pid()
+    finally:
+        home.release_home()
+
+    assert pid == (os.getpid() if expected_pid == "ours" else None), name
 
 
 # --- home.remove_tree -------------------------------------------------------------
