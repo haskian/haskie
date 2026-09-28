@@ -701,6 +701,18 @@ async def delete_collection(dbos, collection: str) -> None:
     await wait_for(await dbos.start_delete_collection(collection))
 
 
+async def remove_collection(collection: str) -> None:
+    """The steps `delete_collection_workflow` runs, in its order, for a test with no DBOS: the
+    folder moves aside, the row goes, then the folder moved aside."""
+    from haskie.collection.collection import Collection
+
+    removed = Collection(collection)
+    key = "test"  # the workflow keys it by its own id; one delete per name here
+    await removed.move_aside(key)
+    await removed.remove_rows()
+    await removed.remove_aside(key)
+
+
 # --- the same intake over HTTP, for the API tests ----------------------------
 
 IMPORT_TIMEOUT_SECONDS = 60

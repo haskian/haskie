@@ -37,6 +37,7 @@ from conftest import (
     index_hits,
     legacy_index,
     maintenance_state,
+    remove_collection,
     text_pdf,
 )
 from sqlalchemy import event, insert, select, update
@@ -1061,9 +1062,8 @@ async def test_collection_create_get_and_delete() -> None:
     with pytest.raises(InvalidInput, match="invalid name"):
         await Collection.create("***")
 
-    misc = await Collection.get("misc")
-    await misc.remove_rows()
-    await misc.remove_tree()
+    assert (await Collection.get("misc")).root == made.root
+    await remove_collection("misc")
 
     assert await Collection.names() == [] and not made.root.exists()
 
@@ -1093,8 +1093,7 @@ async def test_collection_settings_are_read_from_the_row_every_time() -> None:
         )
     assert (await collection.overrides()).chunk_size == 42, "the row owns the value"
 
-    await collection.remove_rows()
-    await collection.remove_tree()
+    await remove_collection("stored")
     await Collection.create("stored")
     assert await (await Collection.get("stored")).overrides() == CollectionOverrides(), "clean"
     assert await Collection("ghost").overrides() == CollectionOverrides(), "and one with no row"
@@ -1523,9 +1522,7 @@ async def test_deleting_a_collection_leaves_its_documents() -> None:
     for name in ("alpha", "beta"):
         await (await Collection.create(name)).add(doc.name)
 
-    alpha = await Collection.get("alpha")
-    await alpha.remove_rows()
-    await alpha.remove_tree()
+    await remove_collection("alpha")
 
     assert await Collection.names() == ["beta"]
     assert await document_names() == ["kept.md"], "the document belongs to no collection"
@@ -1578,9 +1575,7 @@ async def test_deleting_a_collection_drops_it_from_every_session() -> None:
             ],
         )
 
-    drop = await Collection.get("drop")
-    await drop.remove_rows()
-    await drop.remove_tree()
+    await remove_collection("drop")
 
     async with db.connect() as conn:
         rows = await conn.scalars(select(tables.session_collections.c.collection))
@@ -1734,8 +1729,7 @@ async def test_deleting_a_collection_forgets_its_cached_schema() -> None:
     _table_with(collection.index_dir, PLAIN_SCHEMA)
     assert await (await collection.index()).schema_current() is True
 
-    await collection.remove_rows()
-    await collection.remove_tree()
+    await remove_collection("recycled")
     await Collection.create("recycled")  # same name, same index directory
     _table_with(collection.index_dir, pa.schema([("doc", pa.string())]))  # an older build
 
@@ -2144,8 +2138,7 @@ async def test_run_maintenance_of_a_deleted_collection_reports_it_instead_of_rai
     needs before it checks that the collection still exists."""
     collection = await Collection.create("gone")
     await _fill(collection.index_with(None), "a.md", 0, 2)
-    await collection.remove_rows()
-    await collection.remove_tree()
+    await remove_collection("gone")
 
     report = await maintenance.run(collection, None, PipelineSettings())
 
