@@ -18,8 +18,9 @@ topics no collection covers.
    places, pass each part as its own `q` in one call, and the background they share as `context`.
 3. Call `search_sources` when the question is which documents or collections cover a topic, or when
    `search_excerpts` found nothing relevant. Pass the `collections` it returns to
-   `set_session_collections`, then call `search_excerpts` again. Call `list_collections` when unsure
-   what exists.
+   `set_session_collections`, then call `search_excerpts` again. That selection scopes every later
+   search in the conversation, `search_sources` included. Before a new topic, clear it: call
+   `set_session_collections` with `[]`. Call `list_collections` when unsure what exists.
 4. Answer from the excerpts. Cite each by its `document`, `header` and `location`.
 5. Report the gaps. A part in `uncovered` or a word in `missing_terms` is something the sources do
    not say. No excerpts at all means the collections do not cover the topic. Say so, then fall back
