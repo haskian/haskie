@@ -808,6 +808,27 @@ def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
     assert "adr: Architecture decisions" in rule, "the new collection reached the rule"
 
 
+def test_install_claude_leaves_stdin_to_the_script_that_runs_it(
+    elsewhere: Path, claude_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a SessionStart hook's `ensure` reads a payload from stdin. `install claude` inside a
+    piped script must not read the script's next lines as one, nor wait on a pipe held open."""
+    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    served: list[tuple[str, bool]] = []
+    monkeypatch.setattr(cli_module, "_serve", lambda url, wait: served.append((url, wait)))
+    payload = json.dumps({"session_id": "abc-123", "source": "startup"})
+
+    result = runner.invoke(
+        cli,
+        ["install", "claude", "--home", str(elsewhere), "--scope", "project"],
+        input=payload,
+    )
+
+    assert result.exit_code == 0, _text(result)
+    assert "session id is" not in _text(result), "stdin was not read as a hook payload"
+    assert served == [(claude.MCP_URL, True)], "brings the server up and waits for it"
+
+
 @dataclass
 class RefusedInstallCase:
     old_home: bool  # a home from before collections, which `read_collections` cannot open

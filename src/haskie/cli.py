@@ -426,7 +426,9 @@ def _install_claude(url: str, scope: Scope) -> None:
     added = claude.install_hook(scope, home.HOME, url)
     settings_file = claude.settings_path(scope)
     typer.echo(f"{'added' if added else 'updated'} the SessionStart hook in {settings_file}")
-    ensure(home_dir=home.HOME, url=url)  # already-serving is its fast path, not ours
+    # `_serve`, not the `ensure` command: that one reads a hook payload from stdin, which here is
+    # the rest of a piped script. Already-serving is its fast path, not ours.
+    _serve(url, wait=True)
     typer.echo("re-run `haskie install claude` after adding a collection, to refresh the trigger")
 
 
