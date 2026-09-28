@@ -66,9 +66,9 @@ def _search(
 
 def _pool(*answered: str, empty: tuple[str, ...] = (), ranked: int = 0) -> Pool:
     """What the retrieval read: a ranking per collection, `empty` ones with no row."""
-    rankings: dict[str, list[Any]] = {name: [("a.md", 1)] for name in answered}
+    rankings: dict[str, list[Any]] = {name: [(name, "a.md", 1)] for name in answered}
     rankings |= {name: [] for name in empty}
-    scored = [(("a.md", n), 1.0) for n in range(ranked)]
+    scored = [(("c0", "a.md", n), 1.0) for n in range(ranked)]
     return Pool(rows={}, rankings=rankings, ranked=scored)
 
 
@@ -82,8 +82,12 @@ def _groups(*seqs: int) -> list[Group]:
 def _read(*columns: str | None) -> Pool:
     """What retrieval read: collection `c<n>` returned one row scored in the column `columns[n]`
     names (`_score` BM25, `_distance` vector, `_relevance_score` fused), or nothing for None."""
-    rows = {("a.md", n): (None, {column: 1.0}) for n, column in enumerate(columns) if column}
-    rankings = {f"c{n}": [("a.md", n)] if column else [] for n, column in enumerate(columns)}
+    rows = {
+        (f"c{n}", "a.md", 1): (None, {column: 1.0}) for n, column in enumerate(columns) if column
+    }
+    rankings = {
+        f"c{n}": [(f"c{n}", "a.md", 1)] if column else [] for n, column in enumerate(columns)
+    }
     return Pool(rows=rows, rankings=rankings)  # ty: ignore[invalid-argument-type]
 
 

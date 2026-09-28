@@ -32,10 +32,9 @@ from haskie.collection.index import (
     RowKey,
     chunk_key,
     cross_encode,
-    first_per_key,
+    first_per_span,
     gather_rows,
     logit,
-    row_key,
     row_score,
 )
 from haskie.document import document
@@ -157,9 +156,9 @@ class Pool(msgspec.Struct):
     row answers with is decided by the steps after it.
     """
 
-    rows: dict[RowKey, tuple[CollectionIndex, dict]]
-    rankings: dict[str, list[RowKey]]  # one per collection, in that collection's own order
-    ranked: list[tuple[RowKey, float]] = []  # merged, best first
+    rows: dict[ChunkKey, tuple[CollectionIndex, dict]]
+    rankings: dict[str, list[ChunkKey]]  # one per collection, in that collection's own order
+    ranked: list[tuple[ChunkKey, float]] = []  # merged, best first
     # the reranker's scores over the pool, best first, kept before its floor drops any: how close
     # the search came is what the search log records (`log.observe_ranking`)
     rerank_scores: list[float] = []
@@ -173,7 +172,8 @@ async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True
     chunk, not one per collection that holds it. So the first collection in the caller's order
     that returned a chunk gets the credit, and the later copies are dropped before the ranks are
     counted. Otherwise a document in two collections would be fused with itself and outrank an
-    equally good one that sits in a single collection.
+    equally good one that sits in a single collection. A chunk is its span of the document, not its
+    `seq`: two collections that chunk one document two ways give one `seq` other text.
 
     A collection that fails to answer fails the search: a silent hole in a merged ranking reads as
     "no match".
@@ -191,8 +191,8 @@ async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True
 
     retrieved = await gather_rows([index for index, _ in where.indexes], read)
     pool = Pool(rows={}, rankings={index.collection: [] for index, _ in retrieved})
-    for index, row in first_per_key((i, r) for i, rows in retrieved for r in rows):
-        key = row_key(row)
+    for index, row in first_per_span((i, r) for i, rows in retrieved for r in rows):
+        key = (index.collection, row["document"], row["seq"])
         pool.rows[key] = (index, row)
         pool.rankings[index.collection].append(key)
     return pool
@@ -236,8 +236,11 @@ async def rerank(pool: Pool, query: str, where: Plan) -> Pool:
     settings = where.settings
     if settings.reranker == Reranker.NONE:
         return pool
-    rows = [pool.rows[key][1] for key, _ in pool.ranked]
-    rescored = [(row_key(row), row_score(row)) for row in await cross_encode(query, rows, settings)]
+    keys = [key for key, _ in pool.ranked]
+    rows = [pool.rows[key][1] for key in keys]
+    await cross_encode(query, rows, settings)  # scores the rows in place
+    scored = [(key, row_score(row)) for key, row in zip(keys, rows, strict=True)]
+    rescored = sorted(scored, key=lambda pair: pair[1], reverse=True)
     # the reranker's score has a scale: under the floor it judged the chunk no answer, and a
     # search that keeps it would fill a slot, or tag a question, with it
     kept = [(key, score) for key, score in rescored if score >= where.rerank_floor]
@@ -794,7 +797,7 @@ async def _judged(
     best: dict[ChunkKey, float] = {}
     scores: dict[str, dict[ChunkKey, float]] = {}
     for question in asked:
-        rows = [dict(pool.rows[(hit.document, hit.seq)][1]) for hit in hits]
+        rows = [dict(pool.rows[chunk_key(hit)][1]) for hit in hits]
         await cross_encode(question.asked, rows, where.settings)  # scores the copies in place
         for hit, row in zip(hits, rows, strict=True):
             score, key = row_score(row), chunk_key(hit)

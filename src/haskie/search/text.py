@@ -27,10 +27,10 @@ from haskie.collection.collection import Collection
 from haskie.collection.index import (
     CollectionIndex,
     Hit,
-    first_per_key,
+    first_per_span,
     gather_rows,
-    row_key,
     row_score,
+    span_key,
 )
 from haskie.errors import InvalidInput, NotFound
 from haskie.paging import DEFAULT_PAGE_SIZE, OffsetCursor, Order, Page, check_page_size
@@ -105,12 +105,11 @@ def split_collections(raw: str | None) -> list[str] | None:
     return [name for name in names if name] or None
 
 
-def _rank_key(pair: tuple[CollectionIndex, dict]) -> tuple[float, str, int, str]:
-    """Best score first, then the identity of the chunk — (document, seq) — and the
-    collection last, so two collections holding the same chunk sort next to each other and the
-    ranking is the same every time it is recomputed."""
+def _rank_key(pair: tuple[CollectionIndex, dict]) -> tuple[float, str, int, int, str]:
+    """Best score first, then the identity of the chunk — (document, char_start, char_end) — and
+    the collection last, so the ranking is the same every time it is recomputed."""
     index, row = pair
-    return (-row_score(row), *row_key(row), index.collection)
+    return (-row_score(row), *span_key(row), index.collection)
 
 
 def merge(
@@ -122,12 +121,12 @@ def merge(
     in the same order every time the ranking is recomputed, or a page boundary would swap them and
     the walk would show one twice and the other never.
 
-    A document in two collections puts the same (document, seq) in both their rankings. The
-    sort puts those copies next to each other, best score first, so keeping the first of each
-    identity (`first_per_key`) keeps the best-scoring copy and drops the rest deterministically.
+    A document in two collections puts the same span of it in both their rankings. The sort
+    puts the copies best score first, so keeping the first of each span (`first_per_span`) keeps
+    the best-scoring copy and drops the rest deterministically.
     """
     pairs = ((index, row) for index, rows in retrieved for row in rows)
-    return first_per_key(sorted(pairs, key=_rank_key))
+    return first_per_span(sorted(pairs, key=_rank_key))
 
 
 async def search(

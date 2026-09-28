@@ -2703,6 +2703,46 @@ async def test_session_search_counts_a_passage_once_across_collections() -> None
     assert {hit.collection for hit in hits} == {"alpha"}, "the first collection that held it"
 
 
+@pytest.mark.anyio
+async def test_fan_out_counts_a_span_once_across_collections_that_chunk_it_two_ways() -> None:
+    """Two collections chunk one document with other chunk sizes: alpha a sentence per chunk,
+    beta the first two sentences as its chunk 1. Beta's chunk 1 is other text than alpha's, so it
+    stays; beta's chunk 2 is the very span of alpha's chunk 3, so it is a copy and goes."""
+    from haskie.search import retrieval
+
+    texts = [
+        "LanceDB keeps each collection as one table of chunks.",
+        "A hybrid lancedb query fuses BM25 with the vector ranking.",
+        "Compaction merges the small fragments lancedb writes leave behind.",
+    ]
+    starts = [sum(len(before) + 1 for before in texts[:at]) for at in range(len(texts))]
+    chunked = {
+        "alpha": [
+            _row(text, None, seq, start)
+            for seq, (text, start) in enumerate(zip(texts, starts, strict=True), 1)
+        ],
+        "beta": [_row("\n".join(texts[:2]), None, 1, 0), _row(texts[2], None, 2, starts[2])],
+    }
+    for name, rows in chunked.items():
+        index = (await Collection.create(name)).index_with(None)
+        await index.add_parts(
+            "shared.md", "documents/shared.md", "documents/shared.md.md", _aparts([(0, rows)])
+        )
+        await index.finish()
+    (where,) = await retrieval.plan(["alpha", "beta"], ["lancedb"]) or []
+
+    pool = await retrieval.fan_out(where, "lancedb", 10)
+
+    assert set(pool.rows) == {
+        ("alpha", "shared.md", 1),
+        ("alpha", "shared.md", 2),
+        ("alpha", "shared.md", 3),
+        ("beta", "shared.md", 1),
+    }
+    assert pool.rankings["beta"] == [("beta", "shared.md", 1)], "only what alpha did not return"
+    assert pool.rows[("beta", "shared.md", 1)][1]["text"] == "\n".join(texts[:2])
+
+
 @pytest.mark.parametrize(
     ("name", "ranked", "expected"),
     [
@@ -2732,14 +2772,26 @@ def test_rrf_merge_orders_by_rank_and_sums_duplicates(
     assert [score for _, score in merged] == pytest.approx([s for _, s in expected]), name
 
 
+CHUNK_CHARS = 100  # how long each chunk `_retrieved` writes is
+
+
 def _retrieved(rows: list[tuple]) -> tuple[CollectionIndex, list[dict]]:
     """What one collection returned, for `merge`: it only ever reads `index.collection` and the
-    rows' identity columns. A `score` of None writes no `_score` at all, as an unscored row has."""
+    rows' identity columns. A row is (collection, document, seq, score), chunk `seq` spanning the
+    `seq`-th `CHUNK_CHARS` of the document, or (…, char_start) to place it elsewhere. A `score` of
+    None writes no `_score` at all, as an unscored row has."""
     name = rows[0][0] if rows else "empty"
     index = CollectionIndex(Path("/nowhere") / name, name, Path("/nowhere"), None)
+    placed = [(*row, (row[2] - 1) * CHUNK_CHARS)[:5] for row in rows]
     return index, [
-        {"document": document, "seq": seq} | ({"_score": score} if score is not None else {})
-        for _collection, document, seq, score in rows
+        {
+            "document": document,
+            "seq": seq,
+            "char_start": start,
+            "char_end": start + CHUNK_CHARS,
+        }
+        | ({"_score": score} if score is not None else {})
+        for _collection, document, seq, score, start in placed
     ]
 
 
@@ -2772,7 +2824,17 @@ def _identity(pairs: list[tuple]) -> list[tuple[str, str, int]]:
             [("a", "d.md", 1)],
         ),
         (
-            "inside one collection: document, then seq",
+            "one document chunked two ways: the same seq over other text is another chunk",
+            [[("b", "d.md", 1, 9.0, 0)], [("a", "d.md", 1, 1.0, 50)]],
+            [("b", "d.md", 1), ("a", "d.md", 1)],
+        ),
+        (
+            "one document chunked two ways: the same span under another seq is one chunk",
+            [[("b", "d.md", 2, 9.0, 0)], [("a", "d.md", 1, 1.0, 0)]],
+            [("b", "d.md", 2)],
+        ),
+        (
+            "inside one collection: document, then where the chunk starts",
             [
                 [
                     ("a", "z.md", 1, 1.0),

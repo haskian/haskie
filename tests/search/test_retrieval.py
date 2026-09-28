@@ -423,8 +423,8 @@ async def test_the_probes_find_is_judged_by_the_reranker_per_missing_question(
     weather = hit("It rains.", 6.1, seq=2)
     pool = Pool(
         rows={
-            ("patterns.md", 1): (None, {"framed": ledger.text}),
-            ("patterns.md", 2): (None, {"framed": weather.text}),
+            chunk_key(ledger): (None, {"framed": ledger.text}),
+            chunk_key(weather): (None, {"framed": weather.text}),
         },  # ty: ignore[invalid-argument-type]
         rankings={},
     )

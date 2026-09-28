@@ -28,7 +28,8 @@ flowchart LR
    still building its first full-text index has no BM25 half yet: `hybrid` answers with the
    vector half alone, and `fts` finds nothing there.
 3. **Merge** across collections by rank, because scores from two indexes are not comparable. A
-   chunk that two collections share counts once. A search over one collection keeps that
+   chunk that two collections share counts once: the same span of one document, whatever `seq`
+   each collection's chunk settings give it. A search over one collection keeps that
    collection's own scores.
 4. **Rerank** (optional). A cross-encoder rescores the merged `candidates`.
 

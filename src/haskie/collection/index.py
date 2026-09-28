@@ -39,13 +39,17 @@ from haskie.indexing.chunk import record as chunk_record
 from haskie.logs import get_logger
 from haskie.settings import Fusion, SearchMode, SearchSettings, load_user_settings
 
-# What identifies one chunk, wherever it is stored. The collection is deliberately not part of it:
-# the same chunk of the same document is the same answer, whichever collection's table it came out
-# of, so `search.retrieval.fan_out` and `search.text.merge` both count it once.
-RowKey = tuple[str, int]
+# Where a row sits in one collection's table: what `rows_at` reads it back by.
+RowKey = tuple[str, int]  # (document, seq)
 # One chunk as a search result: the collection too, since two collections may chunk one document
 # with different settings and each numbers its own `seq` (`search.passage.ranges`).
 ChunkKey = tuple[str, str, int]  # (collection, document, seq)
+# What identifies one chunk's text, wherever it is stored. The collection is deliberately not part
+# of it: the same span of the same document is the same answer, whichever collection's table it
+# came out of, so `search.retrieval.fan_out` and `search.text.merge` both count it once. The `seq`
+# is not part of it either: two chunk settings number one span differently, and give one `seq`
+# other text.
+SpanKey = tuple[str, int, int]  # (document, char_start, char_end)
 
 
 class Row(msgspec.Struct):
@@ -790,9 +794,9 @@ def row_score(r: dict) -> float:
     return 0.0
 
 
-def row_key(row: dict) -> RowKey:
-    """(document, seq) of one result row."""
-    return (row["document"], row["seq"])
+def span_key(row: dict) -> SpanKey:
+    """(document, char_start, char_end) of one result row."""
+    return (row["document"], row["char_start"], row["char_end"])
 
 
 async def gather_rows(
@@ -816,16 +820,16 @@ async def gather_rows(
     return list(await asyncio.gather(*(read(index) for index in indexes)))
 
 
-def first_per_key(
+def first_per_span(
     pairs: Iterable[tuple[CollectionIndex, dict]],
 ) -> list[tuple[CollectionIndex, dict]]:
-    """One pair per `row_key`, keeping the first offered and the caller's order.
+    """One pair per `span_key`, keeping the first offered and the caller's order.
 
     The same document may be a member of several collections, whose tables then hold the same
     chunk. A search is about chunks, not memberships, so the copies are dropped. The caller's
     ranking decides which copy is "first" (see search.retrieval.fan_out and search.text.merge).
     """
-    unique: dict[RowKey, tuple[CollectionIndex, dict]] = {}
+    unique: dict[SpanKey, tuple[CollectionIndex, dict]] = {}
     for index, row in pairs:
-        unique.setdefault(row_key(row), (index, row))
+        unique.setdefault(span_key(row), (index, row))
     return list(unique.values())
