@@ -101,7 +101,10 @@ def listening(callback: Callable[[], object]) -> Iterator[None]:
             _listeners = tuple(listener for listener in _listeners if listener is not callback)
 
 
-WORKFLOW_GRACE = 10  # seconds running workflows get to finish before DBOS cancels them
+# Seconds DBOS waits for running workflows to finish. Past it DBOS stops waiting, not the work:
+# it stops its event loop, which cancels a workflow at its next await, but a step in a worker
+# thread runs on until it returns.
+WORKFLOW_GRACE = 10
 
 # How long the interpreter may take to exit once the main thread is done. Before it exits, Python
 # joins every non-daemon thread, and it ignores Ctrl-C while it waits. Work a shutdown abandons -

@@ -78,8 +78,10 @@ download operation.
 Every stage of a shutdown has a bound, and each stage past the first is harder than the last:
 
 1. **Requests drain.** SIGTERM or Ctrl-C stops new connections. Requests in flight get 10 seconds.
-2. **The pipeline stops.** DBOS gives running workflows 10 seconds, then cancels them. A second
-   SIGINT or SIGTERM during those seconds ends the wait at once and logs `shutdown_hurried`.
+2. **The pipeline stops.** DBOS waits up to 10 seconds for running workflows, then stops waiting.
+   It does not cancel them. It stops its event loop, which cancels a workflow at its next await,
+   but a step in a worker thread runs on until it returns. A second SIGINT or SIGTERM during
+   those seconds ends the wait at once and logs `shutdown_hurried`.
    The extraction pool closes and kills its workers at once, even in the middle of a page. An
    extraction lost this way raises `ShuttingDown`, a `BaseException`, so DBOS records no error
    and the workflow stays pending for the next boot. A hurried stop keeps the home lock until
