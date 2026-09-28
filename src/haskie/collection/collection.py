@@ -489,24 +489,29 @@ class Collection:
         the caller: one still importing has no markdown to chunk yet, and one being deleted must
         not gain a membership the delete's snapshot missed. A membership being removed refuses
         the attach too: the removal queued ahead would take the rows the new index writes.
+
+        The check and the insert are one unit of work: a delete that marks the document between
+        them would snapshot its memberships without this one, and never remove it.
         """
-        row = await document.get(doc)  # NotFound before anything is written
-        if row.status != document.DocumentStatus.IMPORTED:
-            raise Conflict(
-                f"document is {row.status}; only an imported document joins a collection: {doc}"
-            )
         now = time.time()
         member = collection_documents.c
         async with db.connect() as conn:
+            status = await conn.scalar(select(documents.c.status).where(documents.c.name == doc))
+            if status is None:
+                raise NotFound(f"document not found: {doc}")
+            if status != document.DocumentStatus.IMPORTED:
+                raise Conflict(
+                    f"document is {status}; only an imported document joins a collection: {doc}"
+                )
             await conn.execute(
                 insert(collection_documents)
                 .values(collection=self.name, document=doc, added_at=now, updated_at=now)
                 .on_conflict_do_nothing()
             )
-            status = await conn.scalar(
+            membership = await conn.scalar(
                 select(member.status).where(member.collection == self.name, member.document == doc)
             )
-        if status == MemberStatus.REMOVING:
+        if membership == MemberStatus.REMOVING:
             raise Conflict(
                 f"document is being removed from collection {self.name}; "
                 f"attach it once it is gone: {doc}"
