@@ -68,11 +68,13 @@ HomeOption = Annotated[
 
 
 def _use_home(path: Path | None) -> None:
-    """Point the process at `path` before anything reads the home layout. The environment carries
-    it too, so a `--reload` child re-reads the same root (see `home.HOME`)."""
-    if path is None:
-        return
-    resolved = str(Path(path).expanduser().resolve())
+    """Point the process at `path`, or at the default home, before anything reads the home layout.
+    The environment carries it too, so a `--reload` child re-reads the same root (see `home.HOME`).
+
+    Resolved either way: a server started from here reports the resolved root, so a default reached
+    through a link (`~/.haskie` into a synced folder) must compare as the same home.
+    """
+    resolved = str(Path(home.HOME if path is None else path).expanduser().resolve())
     os.environ["HASKIE_HOME"] = resolved
     home.use(Path(resolved))
 

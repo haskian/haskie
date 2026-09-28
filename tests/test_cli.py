@@ -35,6 +35,15 @@ from haskie.errors import Conflict, InvalidInput
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def no_home_in_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every command exports the home it uses (see `cli._use_home`), and `--home` reads it back
+    from there: without this a mise shell's `HASKIE_HOME` would reach a test, and a test's own
+    home would reach the next one. `setenv` first, so the undo restores even an unset variable."""
+    monkeypatch.setenv("HASKIE_HOME", "")
+    monkeypatch.delenv("HASKIE_HOME")
+
+
 @pytest.fixture
 def elsewhere(tmp_path: Path) -> Path:
     """A home of our own. The autouse `haskie_home` fixture puts the process back afterwards."""
@@ -153,6 +162,35 @@ def test_init_finishes_the_first_run_in_the_browser_once(
     assert serves == ([claude.MCP_URL] if served else []), name
     assert browsed == opened, name
     assert says in _text(result), name
+
+
+@pytest.mark.parametrize(
+    "given", [True, False], ids=["--home through a link", "the default home through a link"]
+)
+def test_init_knows_its_own_server_through_a_linked_home(
+    given: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`~/.haskie` may be a link into a synced folder. The server `init` starts is given the
+    resolved root and reports that back, so `init` must resolve the home it compares, whether it
+    came from `--home` or from the default, or it calls its own server another home's."""
+    import webbrowser
+
+    real = tmp_path / "synced" / "haskie"
+    real.mkdir(parents=True)
+    link = tmp_path / ".haskie"
+    link.symlink_to(real)
+    home.use(link)  # the default, as `~/.haskie` would be
+    monkeypatch.setattr(cli_module, "_serve", lambda _url, wait: None)
+    monkeypatch.setattr(cli_module, "_status", lambda _url: {"home": str(real.resolve())})
+    monkeypatch.setattr(webbrowser, "open", lambda _url: True)
+
+    result = runner.invoke(cli, ["init", *(["--home", str(link)] if given else [])])
+
+    assert result.exit_code == 0, _text(result)
+    assert "serves another home" not in _text(result)
+    assert home.HOME == real.resolve()
+    assert os.environ["HASKIE_HOME"] == str(real.resolve()), "a --reload child reads the same root"
+    assert (real / "haskie.db").is_file()
 
 
 def test_init_refuses_a_home_from_before_collections(elsewhere: Path) -> None:
