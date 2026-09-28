@@ -2738,11 +2738,20 @@ async def test_the_audit_trail_is_written_even_when_logging_is_silenced(
     client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`HASKIE_LOG_LEVEL=CRITICAL` lands on the root logger, so this sets the same thing the
-    env var configures. The file append is the durable sink: no level may drop it."""
-    monkeypatch.setattr(logging.getLogger(), "level", logging.CRITICAL)
-    assert not logging.getLogger("haskie.audit").isEnabledFor(logs.AUDIT)
+    env var configures. The file append is the durable sink: no level may drop it.
 
-    assert (await client.post("/api/collections", json={"name": "notes"})).status_code == 201
+    Through `setLevel`, both ways: it clears every logger's cached level check, which assigning
+    `level` does not, so a later test would find its loggers still silenced."""
+    root = logging.getLogger()
+    before = root.level
+    root.setLevel(logging.CRITICAL)
+    try:
+        assert not logging.getLogger("haskie.audit").isEnabledFor(logs.AUDIT)
+        created = await client.post("/api/collections", json={"name": "notes"})
+    finally:
+        root.setLevel(before)
+
+    assert created.status_code == 201
 
     (record,) = audit_lines()
     assert (record["event"], record["outcome"], record["collection"]) == (
