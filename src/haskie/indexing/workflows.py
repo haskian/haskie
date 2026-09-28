@@ -1465,10 +1465,9 @@ async def _enqueue_index(collection: str, doc: str, workflow_id: str | None = No
 async def start_index_collection_document(collection: str, doc: str) -> str:
     """Queue the index of one member into its collection; a second call while it runs returns the
     same operation. Both names are checked before anything is queued, and a member being removed
-    is refused: its removal, queued ahead, would take the rows this index writes."""
-    member = await (await Collection.get(collection)).member(doc)  # NotFound before the enqueue
-    if member.status == MemberStatus.REMOVING:
-        raise Conflict(f"document is being removed from collection {collection}: {doc}")
+    is refused (`Collection.member_to_index`)."""
+    # NotFound or Conflict before the enqueue
+    await (await Collection.get(collection)).member_to_index(doc)
     return await _enqueue_index(collection, doc)
 
 

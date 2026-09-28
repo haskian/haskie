@@ -1869,6 +1869,11 @@ async def test_the_removal_waits_for_the_index_write_in_flight(
 
 
 DETACH_ANSWERS_WITHIN = 5.0  # the partition stays held until the test lets go: waiting on it hangs
+# one guard answers an attach and a re-index of a member being removed, with one message
+REMOVING_REFUSED = (
+    "document is being removed from collection busy; attach or index it again once it is gone: "
+    "done.md"
+)
 
 
 @pytest.mark.parametrize(
@@ -1922,10 +1927,10 @@ async def test_detach_answers_while_the_partition_is_held(
         if meanwhile == "detach again":
             removals.append(await dbos.detach("busy", done.name))
         elif meanwhile == "attach again":
-            with pytest.raises(Conflict, match="being removed from collection busy"):
+            with pytest.raises(Conflict, match=REMOVING_REFUSED):
                 await dbos.attach("busy", done.name)
         elif meanwhile == "re-index":
-            with pytest.raises(Conflict, match="being removed from collection busy: done.md"):
+            with pytest.raises(Conflict, match=REMOVING_REFUSED):
                 await dbos.start_index_collection_document("busy", done.name)
         elif meanwhile == "delete the document":
             jobs.append(await dbos.start_delete_document(done.name))
