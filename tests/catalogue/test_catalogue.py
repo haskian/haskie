@@ -238,7 +238,7 @@ async def test_the_schema_refuses_a_row_the_catalogue_cannot_mean(name: str, sql
                 accelerator=Accelerator.CPU,
                 duplicate=DuplicateCosine(chunk=0.92, passage=0.95),
                 profile="compact",
-                weak_match=0.69,
+                weak_match=0.67,
                 answered_match=0.775,
                 same_topic=0.70,
             ),

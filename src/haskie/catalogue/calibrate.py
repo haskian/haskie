@@ -22,6 +22,7 @@ The pure parts (`floor`, `fit_beta`) are separate from the IO so they can be tes
 import asyncio
 import statistics
 import time
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 from typing import Annotated
@@ -82,6 +83,14 @@ def read_jsonl[T](path: Path, kind: type[T]) -> list[T]:
     return [msgspec.json.decode(line, type=kind) for line in path.read_text().splitlines() if line]
 
 
+def write_jsonl(path: Path, items: Sequence[msgspec.Struct], *, replace: bool = True) -> None:
+    """One JSON line per item. `replace=False` raises `FileExistsError` rather than replace a file
+    that exists, and checks and creates it in one step."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w" if replace else "x") as out:
+        out.writelines(msgspec.json.encode(one).decode() + "\n" for one in items)
+
+
 async def _sample(out: Path) -> int:
     names = await retrieval.scope(None, None)
     lines = []
@@ -90,9 +99,8 @@ async def _sample(out: Path) -> int:
         found = hits[CANDIDATES.start : CANDIDATES.stop]
         texts = [framed(hit.frame, hit.text) for hit in found]
         if texts:
-            lines.append(msgspec.json.encode(Candidates(query, texts)).decode())
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(lines) + "\n")
+            lines.append(Candidates(query, texts))
+    write_jsonl(out, lines)
     return len(lines)
 
 

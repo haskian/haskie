@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from enum import StrEnum
 
+import anyio
 import msgspec
 import numpy as np
 from sqlalchemy import delete, func, insert, select
@@ -244,8 +245,7 @@ async def capturing(
     capture = Capture(
         tool=tool,
         session_id=session_id,
-        # stripped as `gaps.report` matches them, whichever tool asked
-        asked=[Asked(question.strip()) for question in questions],
+        asked=[Asked(question) for question in questions],
         context=context,
     )
     token = _capture.set(capture)
@@ -258,7 +258,9 @@ async def capturing(
     finally:
         _capture.reset(token)
         if record:
-            await _write(capture, int((time.perf_counter() - started) * 1000))
+            # a cancelled search is still written: the cancellation must not cut the write short
+            with anyio.CancelScope(shield=True):
+                await _write(capture, int((time.perf_counter() - started) * 1000))
 
 
 def observe_scope(where: Plan | None, collections: list[str], mode: SearchMode, limit: int) -> None:
@@ -391,9 +393,10 @@ class LoggedSearch(Logged):
     results: list[LoggedResult] = []  # best first, without the places folded into them
 
 
-# the columns a `LoggedQuestion` is read from; its best scores are derived, not stored
+# the columns a `LoggedQuestion` is read from, labelled apart from the search's own; its best
+# scores are derived, not stored
 _QUESTION = tuple(
-    search_questions.c[name]
+    search_questions.c[name].label(f"question_{name}")
     for name in LoggedQuestion.__struct_fields__
     if name in search_questions.c
 )
@@ -419,30 +422,30 @@ async def load(
         statement = statement.where(searches.c.id.in_(asked))
     if limit is not None:
         statement = statement.limit(limit)
+    # one statement, so the searches and their questions are read from one snapshot
+    chosen = statement.subquery()
+    joined = (
+        select(chosen, *_QUESTION)
+        .outerjoin(search_questions, search_questions.c.search_id == chosen.c.id)
+        .order_by(chosen.c.ts.desc(), chosen.c.id.desc(), search_questions.c.position)
+    )
+    found: dict[int, Logged] = {}
     async with db.connect() as conn:
-        found = {
-            row.id: db.row_to(Logged, row, collections=list[str], missing_terms=list[str])
-            for row in await conn.execute(statement)
-        }
-        if not found:
-            return []
-        # the same filters as a subquery, not the ids as parameters: a window of history can
-        # hold more searches than SQLite takes variables in one statement. Each statement reads
-        # on its own, so a search written in between has a higher id and is left out, and the
-        # limit picks the same searches again
-        chosen = statement.where(searches.c.id <= max(found)).with_only_columns(searches.c.id)
-        questions = await conn.execute(
-            select(search_questions.c.search_id, *_QUESTION)
-            .where(search_questions.c.search_id.in_(chosen))
-            .order_by(search_questions.c.search_id, search_questions.c.position)
-        )
-        for row in questions:
-            record = db.record(row)
+        for row in await conn.execute(joined):
+            logged = found.get(row.id)
+            if logged is None:
+                logged = found[row.id] = db.row_to(
+                    Logged, row, collections=list[str], missing_terms=list[str]
+                )
+            record = {
+                column.name.removeprefix("question_"): row._mapping[column.name]
+                for column in _QUESTION
+            }
+            if record["question"] is None:  # a search that asked nothing
+                continue
             record["similarities"] = _unfloats(record["similarities"])
             record["rerank_scores"] = _unfloats(record["rerank_scores"])
-            # a search pruned in between is gone from `found`
-            if (logged := found.get(record.pop("search_id"))) is not None:
-                logged.questions.append(msgspec.convert(record, LoggedQuestion, strict=False))
+            logged.questions.append(msgspec.convert(record, LoggedQuestion, strict=False))
     return list(found.values())
 
 

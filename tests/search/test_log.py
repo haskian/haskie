@@ -8,10 +8,8 @@ row read, and the reranker's best score.
 import asyncio
 import math
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from typing import Any
 
+import anyio
 import numpy as np
 import pytest
 from conftest import one_part
@@ -188,51 +186,24 @@ async def test_a_search_that_did_not_finish_is_recorded_with_its_error_then_rais
     seeded_home, failure: BaseException, error: str
 ) -> None:
     with pytest.raises(type(failure)):
-        async with log.capturing(log.Tool.SOURCES, ["  kafka "], None):
+        async with log.capturing(log.Tool.SOURCES, ["kafka"], None):
             raise failure
 
     (logged,) = await log.load()
     assert logged.error == error
     assert (logged.session_id, logged.result_count) == (None, 0), "recorded without a session too"
-    assert [one.question for one in logged.questions] == ["kafka"], "stored as report_gap matches"
+    assert [one.question for one in logged.questions] == ["kafka"]
 
 
-async def test_a_search_written_while_the_log_is_read_is_left_out(
-    seeded_home, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The searches and their questions are two reads. A search written between them is newer
-    than every search the first read found: the second leaves it out, and the limit keeps
-    picking the same searches."""
-    for question in ["first", "second"]:
-        async with log.capturing(log.Tool.SOURCES, [question], None):
-            pass
-    reading = db.connect
+async def test_a_search_cancelled_by_its_scope_is_still_written(seeded_home) -> None:
+    """A scope's cancellation reaches every await inside it, the log's write included."""
+    with anyio.CancelScope() as scope:
+        async with log.capturing(log.Tool.SOURCES, ["kafka"], None):
+            scope.cancel()
+            await anyio.sleep(1)
 
-    @asynccontextmanager
-    async def interleaved() -> AsyncIterator[Any]:
-        monkeypatch.setattr(db, "connect", reading)
-        async with reading() as conn:
-            yield _WriteBetween(conn)
-
-    monkeypatch.setattr(db, "connect", interleaved)
-    loaded = await log.load(limit=2)
-
-    assert [[q.question for q in one.questions] for one in loaded] == [["second"], ["first"]]
-    assert len(await log.load()) == 3, "the search written in between is kept"
-
-
-class _WriteBetween:
-    """A connection that has a search written by another one after its first read."""
-
-    def __init__(self, conn: Any) -> None:
-        self.conn, self.reads = conn, 0
-
-    async def execute(self, statement: Any) -> Any:
-        self.reads += 1
-        if self.reads == 2:
-            async with log.capturing(log.Tool.SOURCES, ["third"], None):
-                pass
-        return await self.conn.execute(statement)
+    (logged,) = await log.load()
+    assert logged.error is not None and logged.error.startswith("CancelledError")
 
 
 async def test_a_replay_measures_without_writing(seeded_home, fixed_models) -> None:

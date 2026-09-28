@@ -8,7 +8,8 @@ Two shelves, both free for any use:
 - `rust-book`: "The Rust Programming Language" (Apache-2.0 or MIT), fetched at the commit pinned in
   `rust_book.json` into a cache, never committed (see `NOTICE`). Code listings are `{{#include}}`
   lines in its source, so the prose is what gets indexed.
-- `haskie-docs`: four of this repository's own docs.
+- `haskie-docs`: four of this repository's own docs, at the commit pinned in `haskie_docs.json`
+  (`DOCS_COMMIT` reads another), since every edit to them moves the scores.
 
 Each shelf is chunked with haskie's own chunker at the default settings and embedded with the
 profile asked for. A question's ranking is its `CANDIDATES` nearest chunks by cosine, the pool a
@@ -26,6 +27,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -71,7 +73,16 @@ def _shelf(name: str) -> tuple[str, dict[str, Any]]:
         labels = json.loads((HERE / "rust_book.json").read_text())
         return _book(labels["commit"]), labels
     labels = json.loads((HERE / "haskie_docs.json").read_text())
-    return "\n\n".join((REPO / path).read_text() for path in labels["files"]), labels
+    commit = os.environ.get("DOCS_COMMIT", labels["commit"])
+    return "\n\n".join(_at(commit, path) for path in labels["files"]), labels
+
+
+def _at(commit: str, path: str) -> str:
+    """One of haskie's docs as it read at `commit`: the docs change, the measured bars do not."""
+    shown = subprocess.run(
+        ["git", "show", f"{commit}:{path}"], cwd=REPO, capture_output=True, text=True, check=True
+    )
+    return shown.stdout
 
 
 def auroc(answered: list[float], unanswered: list[float]) -> float:
@@ -147,12 +158,13 @@ def _ask(
 ) -> Asked:
     from haskie.collection.index import _sigmoid
     from haskie.indexing import embed
-    from haskie.search import log, probe
+    from haskie.search import collapse, log, probe
     from haskie.settings import Accelerator
 
     query = np.asarray(embed.embed_query(model, question))
-    units = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
-    pool = np.argsort(-(units @ (query / np.linalg.norm(query))))[:CANDIDATES]
+    pool = np.argsort(-(collapse.unit_rows(list(vectors)) @ collapse.unit_rows([query])[0]))[
+        :CANDIDATES
+    ]
     found = log.profile(query.tolist(), vectors[pool].tolist())
     scores: list[float] = []
     if reranker is not None:

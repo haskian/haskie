@@ -32,28 +32,33 @@ export function Gaps({ route, counts }: PageProps<Extract<Route, { name: 'gaps' 
   // the tab each list was read for: a list of another tab is never shown under this one's buttons
   const [read, setRead] = useState<{ review: GapReview; topics: GapTopic[]; now: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [version, setVersion] = useState(0) // bumped to read the list again
   const loaded = read?.review === review ? read : null
 
-  // "2 h ago" is measured from the moment the list was read
-  const load = useCallback(() => api.gaps(review, DAYS, SIGNALS).then((topics) => ({ review, topics, now: Date.now() / 1000 })), [review])
   useEffect(() => {
-    let current = true // a slow answer for a tab left since must not replace this one's
-    load()
-      .then((found) => current && setRead(found))
-      .catch((cause: unknown) => setError(errorText(cause)))
+    let current = true // a slow answer for a tab or a read since replaced must not overwrite this one's
+    api
+      .gaps(review, DAYS, SIGNALS)
+      // "2 h ago" is measured from the moment the list was read
+      .then((topics) => {
+        if (!current) return
+        setRead({ review, topics, now: Date.now() / 1000 })
+        setError(null)
+      })
+      .catch((cause: unknown) => {
+        if (current) setError(errorText(cause))
+      })
     return () => {
       current = false
     }
-  }, [load])
+  }, [review, version])
 
   const close = useCallback(() => navigate({ name: 'gaps' }), [])
   const open = loaded?.topics.find((topic) => topicId(topic) === route.topic)
   const reviewed = useCallback(() => {
     close()
-    load()
-      .then(setRead)
-      .catch((cause: unknown) => setError(errorText(cause)))
-  }, [close, load])
+    setVersion((n) => n + 1)
+  }, [close])
 
   return (
     <Shell current={route.name} counts={counts}>

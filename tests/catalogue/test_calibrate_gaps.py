@@ -109,7 +109,7 @@ async def test_sample_label_measure_and_write(seeded_home, tmp_path: Path) -> No
     assert (compact.weak_match, compact.answered_match) == (0.703, None)
 
     labels = out.read_text()
-    with pytest.raises(ValueError, match="exists and may hold labels"):
+    with pytest.raises(FileExistsError):
         await calibrate_gaps._sample(out, "compact")
     assert out.read_text() == labels, "a second sample keeps the labels"
 

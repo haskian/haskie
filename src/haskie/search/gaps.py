@@ -31,7 +31,6 @@ import asyncio
 import time
 from collections.abc import Callable, Sequence
 from enum import StrEnum
-from typing import Protocol
 
 import msgspec
 import numpy as np
@@ -102,20 +101,9 @@ async def bars(rerankers: set[str]) -> Bars:
 # --- judging one question ---------------------------------------------------------
 
 
-class Searched(Protocol):
-    """What a detector reads of the search a question was asked in: a logged search, or a
-    capture that was never written (a replay)."""
-
-    @property
-    def result_count(self) -> int: ...
-    @property
-    def embedding(self) -> str | None: ...
-    @property
-    def reranker(self) -> str | None: ...
-    @property
-    def min_rerank_score(self) -> float | None: ...
-    @property
-    def error(self) -> str | None: ...
+# what a detector reads a question's search from: a logged search, or a capture that was never
+# written (a replay)
+Searched = log.Logged | log.Capture
 
 
 def _reported(_: Searched, asked: LoggedQuestion, __: Bars) -> Signal | None:
@@ -337,10 +325,12 @@ async def load(
         if asked.review == stored and (found := signal(search, asked, judged)) in signals
     ]
     # the vectors of the gaps only: most questions are answered, and a vector is kilobytes
-    vectors = await log.vectors([gap.asked.id for gap in gaps if gap.asked.id is not None])
+    vectors, near = await asyncio.gather(
+        log.vectors([gap.asked.id for gap in gaps if gap.asked.id is not None]),
+        log.top_results(sorted({gap.search.id for gap in gaps}), NEAR_MISSES),
+    )
     for gap in gaps:
         gap.vector = vectors.get(gap.asked.id) if gap.asked.id is not None else None
-    near = await log.top_results(sorted({gap.search.id for gap in gaps}), NEAR_MISSES)
     return await cpu.on_cpu(topics, gaps, near, judged)
 
 

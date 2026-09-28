@@ -183,7 +183,6 @@ search_questions = Table(
     Column("search_id", Integer, ForeignKey("searches.id", ondelete="CASCADE"), nullable=False),
     Column("position", Integer, nullable=False),
     Column("question", Text, nullable=False),
-    Column("query_vector", LargeBinary),  # float32, the search's `embedding` dimensions
     # the score profile of its ranking (`log.ScoreProfile`): the best cosines of the query to the
     # rows read and the reranker's best scores before its floor, each float32 and best first, and
     # how alike the nearest rows are to each other
@@ -195,6 +194,9 @@ search_questions = Table(
     # the agent's own verdict on what the search gave it (`gaps.report`), and what it lacked
     Column("agent_verdict", Text, CheckConstraint("agent_verdict in ('insufficient', 'partial')")),
     Column("agent_note", Text),
+    # float32, the search's `embedding` dimensions; last, since a row's columns past a blob this
+    # big are read from overflow pages, and most reads skip it
+    Column("query_vector", LargeBinary),
     Index("idx_search_questions_search", "search_id", "position", unique=True),
 )
 

@@ -27,7 +27,7 @@ from sqlalchemy import update
 
 from haskie import db
 from haskie.catalogue import catalogue
-from haskie.catalogue.calibrate import read_jsonl
+from haskie.catalogue.calibrate import read_jsonl, write_jsonl
 from haskie.search import gaps, log
 from haskie.tables import embedding_profiles
 
@@ -91,9 +91,7 @@ def bars(answered: list[float], unanswered: list[float]) -> Measured:
     )
 
 
-async def _sample(out: Path, profile: str | None) -> int:
-    if out.exists():
-        raise ValueError(f"{out} exists and may hold labels; move it away or pass --force")
+async def _sample(out: Path, profile: str | None, replace: bool = False) -> int:
     found: dict[str, tuple[int, Labelled]] = {}
     for search in await log.load():
         if search.embedding is None or search.error is not None:
@@ -117,10 +115,8 @@ async def _sample(out: Path, profile: str | None) -> int:
     near = await log.top_results(sorted({search_id for search_id, _ in kept}), gaps.NEAR_MISSES)
     for search_id, one in kept:
         one.near_misses = [result.location for result in near[search_id]]
-    lines = [msgspec.json.encode(one).decode() for _, one in kept]
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(lines) + ("\n" if lines else ""))
-    return len(lines)
+    write_jsonl(out, [one for _, one in kept], replace=replace)
+    return len(kept)
 
 
 async def _measure(questions: Path, profile: str, write: bool) -> Measured:
@@ -156,12 +152,10 @@ def sample(
     force: Annotated[bool, typer.Option(help="Replace `out`, labels and all.")] = False,
 ) -> None:
     """Write this home's logged questions, with their best cosines and near misses, to label."""
-    if force:
-        out.unlink(missing_ok=True)
     try:
-        written = asyncio.run(_sample(out, profile))
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+        written = asyncio.run(_sample(out, profile, replace=force))
+    except FileExistsError as exc:
+        raise typer.BadParameter(f"{out} exists and may hold labels; pass --force") from exc
     typer.echo(f'{written} questions in {out}; set "answered" to true or false on each')
 
 
