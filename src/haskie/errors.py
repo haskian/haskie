@@ -34,7 +34,7 @@ class Conflict(HaskieError):
 
 class InvalidInput(HaskieError, ValueError):
     """Also a ValueError: msgspec only turns a ValueError raised in `__post_init__` into a
-    decode-time `ValidationError`, and callers that predate this module catch ValueError."""
+    decode-time `ValidationError`."""
 
     status_code = 422
 

@@ -68,7 +68,7 @@ def test_scrub_replaces_absolute_paths(name: str, template: str, expected: str) 
 
 
 def test_invalid_input_is_also_a_value_error() -> None:
-    """Callers written before `errors` (and msgspec's decode-time wrapping) catch ValueError."""
+    """msgspec wraps only a ValueError raised in `__post_init__` as a decode-time error."""
     assert issubclass(errors.InvalidInput, ValueError)
 
 
@@ -1050,6 +1050,20 @@ async def test_audited_skips_unset_optional_parameters() -> None:
     (line,) = audit_lines()
     assert line["session_id"] == "s-1"
     assert "collection" not in line
+
+
+@pytest.mark.anyio
+async def test_audited_copies_every_record_field_a_handler_takes() -> None:
+    """`operation_id` too: a handler that takes one needs no `attach` for it."""
+
+    @audit.audited("operation.cancel")
+    async def handler(operation_id: str) -> None: ...
+
+    await handler("op-1")
+
+    (line,) = audit_lines()
+    assert line["operation_id"] == "op-1"
+    assert "detail" not in line
 
 
 # --- audit retention --------------------------------------------------------------
