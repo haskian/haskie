@@ -1,6 +1,7 @@
 -- The model catalogue a fresh home starts with: every model the runtimes can load, with its
 -- metadata, and every embedding profile. Run once, right after `db.schema_ddl()` (see `db.migrate`), so
--- the database is where the catalogue lives from then on, not this file.
+-- the database is where the catalogue lives from then on, not this file. An edit here reaches only
+-- a home created after it: an existing home keeps the catalogue it was seeded with.
 --
 -- Parameter counts are the published weights' own totals. `context_tokens` is the longest input
 -- the model states it reads; the loaders may cut inputs shorter (`mlx_models`, `gguf_models`,
@@ -61,7 +62,7 @@ values
 --   heading paths scored 0.927, which is why a copy the words find folds anyway
 --   (`search.collapse.Embedded`).
 -- - passage above chunk: a mean vector is smoother than its chunks, so means of related spans sit
---   closer together (inference, redundancy-diversity-coverage.md §3.4).
+--   closer together (our inference; none of the sources below measures it).
 -- - e5 above bge: unrelated pairs average a raw cosine of 0.707 for multilingual-e5-large against
 --   0.308 for bge-large [4], and the e5 card puts its scores "around 0.7 to 1.0" [5]. The size of
 --   the step (0.97, 0.98) is judgement, not a formula. bge-small and bge-base were not measured

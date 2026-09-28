@@ -180,8 +180,8 @@ async def _records(statement: Select[Any]) -> list[dict[str, Any]]:
         return [db.record(row) for row in await conn.execute(statement)]
 
 
-# nothing writes the catalogue after the seed, so each database file's profiles are read once:
-# every search and indexing step resolves its model here
+# each database file's profiles are read once, since every search and indexing step resolves its
+# model here: a process sees gap bars `calibrate_gaps --write` stores only after a restart
 _embedders: dict[Path, dict[str, EmbeddingModel]] = {}
 
 
@@ -234,12 +234,9 @@ async def calibration(model: str) -> RerankerCalibration:
     """How `model`'s scores read; the uncalibrated defaults for a model the catalogue has no row
     for, as a reranker added after the seed has."""
     records = await _records(
-        select(
-            reranker_calibration.c.floor,
-            reranker_calibration.c.beta_a,
-            reranker_calibration.c.beta_b,
-            reranker_calibration.c.source,
-        ).where(reranker_calibration.c.model == model)
+        select(*db.columns_of(reranker_calibration, RerankerCalibration)).where(
+            reranker_calibration.c.model == model
+        )
     )
     return msgspec.convert(records[0], RerankerCalibration) if records else UNCALIBRATED
 

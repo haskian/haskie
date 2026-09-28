@@ -128,6 +128,8 @@ async def _measure(
     models: list[str], pairs: list[tuple[str, str]], spread: list[tuple[str, str]], write: bool
 ) -> list[tuple[str, RerankerCalibration, float]]:
     """Each model's calibration, and the seconds it took; stored in this home when `write`."""
+    if not pairs:  # checked first: the candidates take far longer to score than this to read
+        raise typer.BadParameter("no borderline pairs to set a floor from")
     known = await catalogue.rerankers()
     source = f"calibrated {date.today().isoformat()} on {len(pairs)} borderline pairs"
     found = []

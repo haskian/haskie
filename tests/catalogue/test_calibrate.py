@@ -6,6 +6,7 @@ import statistics
 from pathlib import Path
 
 import pytest
+import typer
 from conftest import attach_document, import_document
 
 from haskie.catalogue import calibrate, catalogue
@@ -96,6 +97,26 @@ async def test_measuring_stores_the_floor_and_curve_a_search_reads(
     assert loaded == [MODEL, MODEL], (
         "the model is loaded here, where no server does it, and the search's own check passes"
     )
+
+
+async def test_measuring_no_borderline_pairs_is_refused_before_any_scoring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty borderline file gives no floor, so no candidate is reranked for nothing."""
+    scored: list[str] = []
+
+    def rerank_scores(model: str, accelerator: Accelerator, q: str, ts: list[str]) -> list[float]:
+        scored.extend(ts)
+        return [0.0 for _ in ts]
+
+    monkeypatch.setattr(embed, "rerank_scores", rerank_scores)
+    monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: None)
+
+    with pytest.raises(typer.BadParameter, match="no borderline pairs"):
+        await calibrate._measure([MODEL], [], [("why", "far")], write=True)
+
+    assert scored == [], "refused before the candidates were scored"
+    assert await catalogue.calibration(MODEL) == catalogue.UNCALIBRATED, "nothing written"
 
 
 def test_the_judged_files_read_one_record_a_line(tmp_path: Path) -> None:
