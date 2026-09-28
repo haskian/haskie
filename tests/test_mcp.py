@@ -111,6 +111,10 @@ async def test_the_tools_an_agent_is_offered(client: AsyncTestClient) -> None:
     for name, one in tools.items():
         assert len(one["description"]) > 40, f"{name}: an agent chooses a tool by its description"
         assert one["inputSchema"]["type"] == "object", name
+        for argument, schema in one["inputSchema"]["properties"].items():
+            # litestar-mcp types an enum as a bare object, so its values ride in the description
+            if "<enum" in json.dumps(schema):
+                assert schema.get("description", "").startswith("One of: "), (name, argument)
     search = tools["search_excerpts"]["inputSchema"]
     assert search["properties"]["q"] == {"type": "array", "items": {"type": "string"}}
     assert search["required"] == ["q"]
@@ -269,7 +273,12 @@ async def test_every_read_tool_answers(
             "document not found",
         ),
         ("a file that does not exist", "add_document", {"path": "/nowhere/at/all.md"}, "all.md"),
-        ("a log reaching back past a year", "list_searches", {"days": 367}, "days must be 1..366"),
+        (
+            "a log reaching back past a year",
+            "list_searches",
+            {"days": 367},
+            "days=367: Expected `int` <= 366",
+        ),
         ("more searches than a page holds", "list_searches", {"limit": 201}, "limit"),
         ("a review nobody can decide", "review_gaps", {"ids": [1], "review": "maybe"}, "review"),
         ("too many gaps to replay at once", "replay_gaps", {"ids": list(range(51))}, "at most 50"),

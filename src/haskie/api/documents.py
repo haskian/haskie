@@ -19,7 +19,7 @@ from litestar.params import Body
 from litestar.response import File, Stream
 
 from haskie import audit, cpu, logs
-from haskie.api.common import PAGED, BulkStarted, Describe
+from haskie.api.common import PAGED, BulkStarted, Describe, checked_session
 from haskie.catalogue import catalogue
 from haskie.document import convert, render
 from haskie.document import document as documents
@@ -64,7 +64,7 @@ MAX_RENDERED = 100_000  # characters: an excerpt is at most a few sections (`max
 class Markdown(msgspec.Struct):
     """Markdown to render, as a search result quotes it."""
 
-    markdown: str
+    markdown: Annotated[str, msgspec.Meta(max_length=MAX_RENDERED)]
 
 
 class Rendered(msgspec.Struct):
@@ -75,8 +75,6 @@ class Rendered(msgspec.Struct):
 async def render_markdown(data: Markdown) -> Rendered:
     """A search result's text as HTML, rendered as the document viewer renders a page: raw HTML is
     stripped first, so the text a document holds cannot inject markup."""
-    if len(data.markdown) > MAX_RENDERED:
-        raise InvalidInput(f"markdown must be at most {MAX_RENDERED} characters")
     return Rendered(html=await cpu.on_cpu(render.fragment_html, data.markdown))
 
 
@@ -108,6 +106,7 @@ async def import_document(data: ImportRequest, session_id: str | None = None) ->
     Args:
         session_id: The conversation's id; the import and its operation then show in that session.
     """
+    checked_session(session_id)
     if data.staging_id is not None and data.path is None:
         row = await documents.import_staged(data.staging_id, data)
     elif data.path is not None and data.staging_id is None:
@@ -328,6 +327,7 @@ async def describe_document(
     Args:
         session_id: The conversation's id; the change then shows in that session's history.
     """
+    checked_session(session_id)
     described = await documents.describe(document, data.description)
     await session.record(session_id, session.Action.DESCRIBE, document)
     return described

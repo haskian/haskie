@@ -1,4 +1,4 @@
-"""Collection routes: the listing, one collection, its settings, its members and its search.
+"""Collection routes: the listing, one collection, its settings and its members.
 
 A collection holds documents it does not own: attaching and detaching move a membership and the
 rows of this collection's index, never the document itself (see `collection/collection.py`).
@@ -10,7 +10,7 @@ import msgspec
 from litestar import delete, get, post, put
 
 from haskie import audit, logs
-from haskie.api.common import PAGED, BulkStarted, Describe
+from haskie.api.common import PAGED, BulkStarted, Describe, checked_session
 from haskie.catalogue import catalogue
 from haskie.collection.collection import (
     Collection,
@@ -163,11 +163,13 @@ async def add_document(
     """Attach an imported document to this collection and queue its index.
 
     Accepted, not done: the document is chunked and embedded once per distinct chunk settings and
-    reused from its cache, but the first collection to ask still pays for it. Poll the operation.
+    reused from its cache, but the first collection to ask still pays for it. Poll
+    `list_collection_documents` until the document reads `indexed`.
 
     Args:
         session_id: The conversation's id; the attach and its operation then show in that session.
     """
+    checked_session(session_id)
     audit.attach(document=data.document)
     logs.bind(document=data.document)
     operation_id = await workflows.attach(collection, data.document)
@@ -198,6 +200,7 @@ async def remove_document(collection: str, document: str, session_id: str | None
     Args:
         session_id: The conversation's id; the detach then shows in that session's history.
     """
+    checked_session(session_id)
     await workflows.detach(collection, document)
     await session.record(
         session_id,

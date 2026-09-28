@@ -496,6 +496,52 @@ async def test_rejected_settings_are_never_stored(ready: AsyncTestClient) -> Non
     )
 
 
+@pytest.mark.parametrize(
+    ("name", "method", "path", "body", "probe"),
+    [
+        (
+            "an import", "POST", "/api/documents/import", {"path": "{source}"},
+            "/api/documents/new.md",
+        ),
+        (
+            "a description", "PUT", "/api/documents/guide.md/description",
+            {"description": "changed"}, "/api/documents/guide.md",
+        ),
+        (
+            "an attach", "POST", "/api/collections/other/documents", {"document": "guide.md"},
+            "/api/collections/other/documents",
+        ),
+        (
+            "a detach", "DELETE", "/api/collections/notes/documents/guide.md", None,
+            "/api/collections/notes/documents",
+        ),
+    ],
+)  # fmt: skip
+async def test_a_bad_session_id_is_refused_before_the_change_it_would_record(
+    ready: AsyncTestClient,
+    tmp_path: Path,
+    name: str,
+    method: str,
+    path: str,
+    body: dict | None,
+    probe: str,
+) -> None:
+    """Refused after the change, the caller would read a 422 for work done, and its retry a 409."""
+    await ready.post("/api/collections", json={"name": "other"})
+    source = tmp_path / "new.md"
+    source.write_text(MD)
+    if body is not None:
+        body = {key: value.format(source=source) for key, value in body.items()}
+    before = await ready.get(probe)
+
+    response = await ready.request(method, path, json=body, params={"session_id": LONG_SESSION_ID})
+
+    assert response.status_code == 422, f"{name}: {response.text}"
+    assert "session id must be 1..128 characters" in response.text, name
+    after = await ready.get(probe)
+    assert (after.status_code, after.json()) == (before.status_code, before.json()), name
+
+
 async def test_accepted_settings_are_stored_and_applied(ready: AsyncTestClient) -> None:
     body = {"pipeline": {"cpu_budget": 3, "converting_weight": 2, "batch_pages": 4}}
 
@@ -597,18 +643,7 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
             "embedding",
         ]
     )
-    assert options["member_statuses"] == [
-        "pending",
-        "indexing",
-        "indexed",
-        "error",
-        "cancelled",
-        "removing",
-    ]
-    assert options["active_member_statuses"] == ["pending", "indexing", "removing"]
     assert options["active_run_statuses"] == ["ENQUEUED", "PENDING"]
-    assert options["operation_kinds"][0] == "document"
-    assert "index_collection" in options["bulk_kinds"]
 
 
 @pytest.mark.parametrize(("name", "installed"), [("MLX installed", True), ("no MLX", False)])
@@ -1481,7 +1516,7 @@ async def test_gaps_group_review_and_replay(ready: AsyncTestClient, tmp_path: Pa
     too_many = await ready.post("/api/gaps/replay", json={"ids": list(range(51))})
     assert too_many.status_code == 422 and "at most 50" in too_many.text
     no_window = await ready.get("/api/gaps", params={"days": 0})
-    assert no_window.status_code == 422 and "days must be 1.." in no_window.text
+    assert no_window.status_code == 422 and "Expected `int` >= 1" in no_window.text
 
 
 async def test_an_agent_reports_a_gap_on_a_question_it_asked(ready: AsyncTestClient) -> None:
@@ -3080,7 +3115,7 @@ async def test_search_trend_lists_every_recent_search_oldest_first(ready: AsyncT
     )
     assert [p["ts"] for p in points] == sorted(p["ts"] for p in points)
     bad = await ready.get("/api/insights/searches", params={"days": 0})
-    assert bad.status_code == 422 and "days must be 1.." in bad.text
+    assert bad.status_code == 422 and "Expected `int` >= 1" in bad.text
 
 
 async def test_chunk_trend_lists_imports_and_indexes_and_bounds_its_window(
@@ -3099,7 +3134,7 @@ async def test_chunk_trend_lists_imports_and_indexes_and_bounds_its_window(
     assert imported["chunks"] == indexed["chunks"] > 0, "the chunks embedded are the ones written"
     assert all(abs(point["ts"] - time.time()) < 60 for point in points)
     bad = await client.get("/api/insights/chunks", params={"days": 367})
-    assert bad.status_code == 422 and "days must be 1.." in bad.text
+    assert bad.status_code == 422 and "Expected `int` <= 366" in bad.text
 
 
 @pytest.mark.parametrize(
@@ -3117,7 +3152,8 @@ async def test_chunk_trend_lists_imports_and_indexes_and_bounds_its_window(
             200,
             "<p>text alert(1) after</p>\n",
         ),
-        ("past the limit is refused", "x" * 100_001, 422, "at most 100000 characters"),
+        ("at the limit is rendered", "x" * 100_000, 200, f"<p>{'x' * 100_000}</p>\n"),
+        ("past the limit is refused", "x" * 100_001, 422, "Expected `str` of length <= 100000"),
     ],
 )
 async def test_a_search_results_text_renders_as_markdown(

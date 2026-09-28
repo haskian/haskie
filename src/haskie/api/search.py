@@ -1,4 +1,4 @@
-"""Session selection and the searches that are not scoped to one collection."""
+"""Sessions, every search over the collections, the search log, and the Insights trends."""
 
 import asyncio
 from enum import StrEnum
@@ -9,7 +9,7 @@ from litestar import get, put
 from litestar.params import Parameter
 
 from haskie import audit
-from haskie.api.common import Limit, days_ago
+from haskie.api.common import Days, Limit, days_ago
 from haskie.collection.index import Hit
 from haskie.indexing import operations
 from haskie.paging import DEFAULT_PAGE_SIZE, Page
@@ -200,7 +200,7 @@ MAX_SEARCHES = 200  # a page of the log an agent reads through, not an export
 @get("/api/searches", mcp_tool="list_searches")
 async def list_searches(
     session_id: str | None = None,
-    days: int = 7,
+    days: Days = 7,
     limit: Annotated[int, Parameter(ge=1, le=MAX_SEARCHES)] = 50,
 ) -> list[log.LoggedSearch]:
     """What was searched, newest first: every search of the last `days` days, or one session's.
@@ -214,21 +214,21 @@ async def list_searches(
 
     Args:
         session_id: Only the searches of this conversation.
-        days: How far back, 1 to 366.
+        days: How far back, in days.
         limit: At most this many searches, the newest.
     """
     return await log.listed(days_ago(days), session_id, limit)
 
 
 @get("/api/insights/searches")
-async def search_trend(days: int = 7) -> list[log.SearchAt]:
+async def search_trend(days: Days = 7) -> list[log.SearchAt]:
     """Every search of the last `days` days, oldest first, for the Insights chart; `session_id`
     is null for a search made without one."""
     return await log.searches_since(days_ago(days))
 
 
 @get("/api/insights/chunks")
-async def chunk_trend(days: int = 7) -> list[operations.ChunksAt]:
+async def chunk_trend(days: Days = 7) -> list[operations.ChunksAt]:
     """Every finished index of the last `days` days, oldest first, for the Insights chart."""
     return await operations.chunks_since(days_ago(days))
 

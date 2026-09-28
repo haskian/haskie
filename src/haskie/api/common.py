@@ -7,8 +7,8 @@ import msgspec
 from litestar.di import Provide
 from litestar.params import Parameter
 
-from haskie.errors import InvalidInput
 from haskie.paging import page_request
+from haskie.search import session
 from haskie.settings import MAX_SCAN
 
 # The four paging query arguments, declared once. Litestar reads a provider's own parameters from
@@ -38,10 +38,16 @@ class Describe(msgspec.Struct):
 Limit = Annotated[int | None, Parameter(ge=1, le=MAX_SCAN)]
 
 MAX_DAYS = 366  # a window of history: Insights charts and Gaps read at most a year back
+Days = Annotated[int, Parameter(ge=1, le=MAX_DAYS)]
 
 
 def days_ago(days: int) -> float:
     """Unix seconds `days` days ago: where a window of history begins."""
-    if not 1 <= days <= MAX_DAYS:
-        raise InvalidInput(f"days must be 1..{MAX_DAYS}, got {days}")
     return time.time() - days * 86400
+
+
+def checked_session(session_id: str | None) -> None:
+    """Refuse a bad `session_id` before the change it would record: refused after, the change
+    stands while the caller reads a 422, and its retry meets a conflict."""
+    if session_id is not None:
+        session.checked(session_id)
