@@ -37,7 +37,9 @@ A home stamped with it has these tables and columns and is opened as it is. Any 
 shape this build cannot read, so the home is refused (see `migrate`). The commit that bumps it says
 what changed.
 
-A cache file or LanceDB table written the old way must never be read by this build.
+A cache file or LanceDB table written the old way must never be read by this build. The seed
+(`catalogue/seed.sql`) runs only on a fresh file, so an edit to it reaches an existing home only
+with a bump.
 
 Before 1.0.0 this is the only migration there is, and it covers the stores this version does not
 stamp as well. A change to what a chunk holds retires the embedding cache and every collection's
