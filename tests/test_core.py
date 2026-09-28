@@ -47,6 +47,7 @@ from haskie.collection import index as index_module
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection, DocumentCounts, Member, MemberStatus
 from haskie.collection.index import (
+    EMBEDDING_KEY,
     FTS_COLUMN,
     PLAIN_SCHEMA,
     CollectionIndex,
@@ -1356,6 +1357,8 @@ async def test_deleting_a_collection_drops_it_from_every_session() -> None:
 # --- index -------------------------------------------------------------------------
 
 COMPACT = EmbeddingModel("BAAI/bge-small-en-v1.5", 384)
+SAME_SIZE = EmbeddingModel("sentence-transformers/all-MiniLM-L6-v2", 384)
+VECTORS_384 = PLAIN_SCHEMA.append(pa.field("vector", pa.list_(pa.float32(), 384)))
 
 
 def _table_with(path: Path, schema: pa.Schema) -> None:
@@ -1384,10 +1387,22 @@ async def _aparts(parts: list[tuple[int, list[Row]]]) -> AsyncIterator[tuple[int
             False,
         ),
         (
-            "vector of the current dimensions",
-            PLAIN_SCHEMA.append(pa.field("vector", pa.list_(pa.float32(), 384))),
+            "vectors of the current embedding",
+            VECTORS_384.with_metadata({EMBEDDING_KEY: COMPACT.cache_name.encode()}),
             COMPACT,
             True,
+        ),
+        (
+            "vectors of another model of the same size -> outdated",
+            VECTORS_384.with_metadata({EMBEDDING_KEY: SAME_SIZE.cache_name.encode()}),
+            COMPACT,
+            False,
+        ),
+        (
+            "vectors of an unrecorded embedding, from an older build -> outdated",
+            VECTORS_384,
+            COMPACT,
+            False,
         ),
         (
             "vector of other dimensions -> outdated",

@@ -172,4 +172,8 @@ Before 1.0 there are no migrations. A storage change edits `tables.py` and bumps
 in `db.py`, which is stored in `PRAGMA user_version`. A home written with another version is refused at startup, with a message
 that says so. The fix is `haskie destroy` and a fresh import.
 
+A LanceDB table records the embedding its vectors were made by (the `cache_name`, in its schema
+metadata). A table of another embedding, or one from before the record, is outdated: the
+collection shows it, and *Index all* rebuilds it from the embedding cache. No re-import is needed.
+
 Code: `tables.py`, `db.py`, `catalogue/catalogue.py`, `catalogue/seed.sql`, `home.py`, `sysdb.py`.

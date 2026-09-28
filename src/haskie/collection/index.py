@@ -221,14 +221,17 @@ def location(
 
 # `schema_current` opens the table and reads its Arrow schema, and the read path asks for every
 # collection listing, search and delete. The index stage is the only writer of a table and it runs
-# in this process, so the answer is cached per (index directory, embedding dimensions) and
-# forgotten whenever a table is created, dropped, or its collection deleted.
+# in this process, so the answer is cached per (index directory, embedding) and forgotten whenever
+# a table is created, dropped, or its collection deleted.
 #
 # A `threading.Lock` rather than an async one: both event loops (Litestar's and DBOS's) read this
 # cache, and a lock made on one of them cannot be taken from the other. Nothing is awaited while
 # it is held, so it is never contended for longer than a dict lookup.
-_schema_current: dict[tuple[str, int | None], bool] = {}
+_schema_current: dict[tuple[str, str | None], bool] = {}
 _schema_lock = threading.Lock()
+# Schema metadata: the `cache_name` of the embedding a table's vectors were made by. LanceDB keeps
+# it through every write, delete, compaction and index build.
+EMBEDDING_KEY = b"haskie.embedding"
 
 
 def forget_schema(path: Path) -> None:
@@ -322,13 +325,15 @@ class CollectionIndex:
         return await self._for_write()
 
     async def schema_current(self, table: lancedb.AsyncTable | None = None) -> bool:
-        """False when the table cannot hold rows written by this build: a missing column, or a
-        vector of different dimensions than the current embedding model.
+        """False when the table cannot hold rows written by this build: a missing column, or
+        vectors made by another embedding than the current one. Another model of the same size
+        would fit the column, and its vectors would be compared with the query's all the same, so
+        the table records the embedding it was built for (`EMBEDDING_KEY`).
 
         A missing table is never cached (see `_schema_current`), so one created later is
         inspected.
         """
-        key = (str(self.path), self.embedding.dims if self.embedding else None)
+        key = (str(self.path), self.embedding.cache_name if self.embedding else None)
         with _schema_lock:
             cached = _schema_current.get(key)
         if cached is not None:
@@ -348,12 +353,15 @@ class CollectionIndex:
             return True
         if "vector" not in schema.names:
             return False
-        return schema.field("vector").type == pa.list_(pa.float32(), self.embedding.dims)
+        return (schema.metadata or {}).get(EMBEDDING_KEY) == self.embedding.cache_name.encode()
 
     def _schema(self) -> Any:
         if self.embedding is None:
             return PLAIN_SCHEMA
-        return PLAIN_SCHEMA.append(pa.field("vector", pa.list_(pa.float32(), self.embedding.dims)))
+        vector = pa.field("vector", pa.list_(pa.float32(), self.embedding.dims))
+        return PLAIN_SCHEMA.append(vector).with_metadata(
+            {EMBEDDING_KEY: self.embedding.cache_name.encode()}
+        )
 
     async def _deletable(self) -> lancedb.AsyncTable | None:
         """A delete on a missing or outdated table has nothing to remove; dropping it instead
