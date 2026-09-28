@@ -267,6 +267,9 @@ need at least 7 words, so two equal headings do not fold. Equivalent means the s
 other words: a nearly identical vector, or nearly the same words where words decide.
 
 A new result that repeats no kept result takes a new slot, while fewer than `limit` are taken.
+A passage too short to stand alone (see "Short passages") never leads a fold. Nothing folds under
+it, and it never takes a fuller passage's slot. Its section is dropped when no other passage
+stands in it, and a passage under it would be dropped too.
 
 The containment and alike tests run in up to two spaces, and the first space that finds a repeat
 decides. A `vector` search decides by the embedding space alone, as it ranks by vectors alone.
