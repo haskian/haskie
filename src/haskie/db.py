@@ -21,7 +21,7 @@ from typing import Any
 
 import anyio.to_thread
 import msgspec
-from sqlalchemy import Column, Row, Table, event
+from sqlalchemy import Column, Connection, Row, Table, event
 from sqlalchemy.dialects import sqlite
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -146,6 +146,23 @@ def _set_pragmas(dbapi_connection: Any, _record: Any) -> None:
     dbapi_connection.execute("pragma foreign_keys = on")  # per connection
 
 
+def _begin_immediate(conn: Connection) -> None:
+    """Every unit of work takes the write lock at its start, so what it read still holds when it
+    writes: a unit that checks, then writes, never acts on a check another commit made stale.
+
+    The driver's own transaction control is off (`isolation_level=None`): it would open none
+    before a SELECT, so a check ran outside the transaction its write joined later. A plain
+    (deferred) `begin` would make the check part of the transaction, but a commit landing
+    between the check and the write then fails the write at once ("database is locked"): the
+    busy timeout does not cover a stale snapshot, and DBOS commits to this file all the time.
+    `immediate` makes that commit wait instead. Measured on one WAL file with a writer
+    committing every millisecond: deferred failed every read-then-write unit, immediate none.
+    The price is that read-only units wait for each other and for DBOS's writers: 8 concurrent
+    readers ran 11 to 16 times slower. A read-only unit that would not take the lock needs its
+    own entry point, chosen by its caller."""
+    conn.exec_driver_sql("begin immediate")
+
+
 # One engine per database file, made by `_migrate_sync`: tests switch homes, and `haskie destroy`
 # deletes the file.
 _engines: dict[Path, AsyncEngine] = {}
@@ -156,8 +173,9 @@ async def _first_connected_engine() -> AsyncEngine:
 
     `NullPool` opens a connection per unit of work and closes it after, so no connection is ever
     shared between the two event loops (Litestar's and DBOS's), and one engine serves both.
-    `timeout` makes concurrent writers (DBOS, requests) wait instead of raising "database is
-    locked"; WAL (set when the schema is created) lets readers proceed.
+    `timeout` makes a unit wait for the write lock another unit or DBOS holds, instead of raising
+    "database is locked" (see `_begin_immediate`); WAL (set when the schema is created) lets
+    DBOS's readers proceed.
 
     SQLAlchemy guards an engine's first connection with an asyncio lock, which binds to the loop
     that waits on it. The two loops racing for that first connection fail with "bound to a
@@ -165,9 +183,10 @@ async def _first_connected_engine() -> AsyncEngine:
     made = create_async_engine(
         f"sqlite+aiosqlite:///{home.DB_FILE}",
         poolclass=NullPool,
-        connect_args={"timeout": BUSY_TIMEOUT_SECONDS},
+        connect_args={"timeout": BUSY_TIMEOUT_SECONDS, "isolation_level": None},
     )
     event.listen(made.sync_engine, "connect", _set_pragmas)
+    event.listen(made.sync_engine, "begin", _begin_immediate)
     async with made.connect():
         pass
     return made
@@ -180,8 +199,9 @@ def engine() -> AsyncEngine:
 
 @asynccontextmanager
 async def connect() -> AsyncIterator[AsyncConnection]:
-    """One connection and one transaction per unit of work; commits on success, rolls back on
-    error."""
+    """One connection and one transaction per unit of work, holding the write lock from its first
+    statement (see `_begin_immediate`); commits on success, rolls back on error. Never open one
+    while holding another: the inner unit would wait for the outer one's lock."""
     await migrate_once()
     async with engine().begin() as conn:
         yield conn

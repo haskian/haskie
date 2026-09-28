@@ -161,7 +161,7 @@ before `tables.py` keeps its older, unprefixed names.
 
 | store | how it is written | why |
 | --- | --- | --- |
-| SQLite | app code through SQLAlchemy Core on `aiosqlite`, one connection per unit of work (`NullPool`); DBOS through its own connections; WAL mode | a unit of work is one transaction. Writers that meet wait on the busy timeout |
+| SQLite | app code through SQLAlchemy Core on `aiosqlite`, one connection per unit of work (`NullPool`); DBOS through its own connections; WAL mode | a unit of work is one transaction, and it takes the write lock at its start (`begin immediate`), so a check it reads still holds when it writes. Units that meet, and DBOS's writers, wait on the busy timeout, then fail with "database is locked". The price: read-only units wait for each other too |
 | LanceDB | async API, one writer per collection (`task.indexing`) | one writer per table keeps commits simple |
 | small files | `home.atomic_write`: a temp file, then `os.replace` | a crash leaves the old file or the new one, never half |
 | imported originals | moved or copied into place | removed again if the import raises |
