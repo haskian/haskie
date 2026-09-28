@@ -59,7 +59,6 @@ class MemberStatus(StrEnum):
     REMOVING = "removing"  # a detach queued its removal; the membership goes once that ran
 
 
-MEMBER_STATUSES: tuple[MemberStatus, ...] = tuple(MemberStatus)
 # A document on its way out of a collection, by either road: its membership is being removed, or
 # the document is being deleted. Its rows stay in the table until the removal queued for them runs,
 # so a search reads around it. `for_search` leaves them out, and so does `holding`.

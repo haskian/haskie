@@ -53,5 +53,4 @@ async def get_operation_progress(operation_id: str) -> operations.OperationProgr
 @audit.audited("operation.cancel")
 async def cancel_operation(operation_id: str) -> None:
     """Cancels the operation, its jobs and their tasks."""
-    audit.attach(operation_id=operation_id)
     await workflows.cancel_operation(operation_id)

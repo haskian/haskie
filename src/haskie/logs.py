@@ -115,14 +115,6 @@ def configure() -> None:
     _configured = True
 
 
-def adopt_dbos_logger() -> None:
-    """DBOS attaches its own text handler in `dbos/_logger.py` when it launches; drop it so its
-    records reach our formatter instead of printing a second format alongside."""
-    dbos_logger = logging.getLogger("dbos")
-    dbos_logger.handlers.clear()
-    dbos_logger.propagate = True
-
-
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     return structlog.stdlib.get_logger(name)
 

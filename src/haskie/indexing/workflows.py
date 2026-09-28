@@ -369,7 +369,6 @@ async def start() -> None:
         "serializer": serializer.SERIALIZER,
     }
     DBOS(config=config)
-    logs.adopt_dbos_logger()  # DBOS installs its own text handler while it initializes
     # In a worker thread on purpose: `launch` is sync SQLAlchemy, and it adopts the loop of the
     # thread that calls it as the one queued async workflows run on. From a thread there is none,
     # so they run on DBOS's own background loop and never share Litestar's.
