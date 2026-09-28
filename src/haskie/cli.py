@@ -440,8 +440,9 @@ def destroy(
     """Delete the home directory and everything in it.
 
     Every document, collection, index, preview and operation record goes. There is no undo and
-    nothing is backed up first. Stop `haskie run` before this: removing the database under a running
-    server leaves it writing into deleted files.
+    nothing is backed up first. A home a haskie is serving is refused: removing the database under a
+    running server leaves it writing into deleted files, and takes the home lock with it. `haskie
+    stop` first.
     """
     import asyncio
 
@@ -461,6 +462,11 @@ def destroy(
             "no collections/)",
             err=True,
         )
+        raise typer.Exit(code=1)
+
+    held = home.home_holder()
+    if held is not None:
+        typer.echo(f"{held}; stop it first (haskie stop)", err=True)
         raise typer.Exit(code=1)
 
     typer.echo(f"about to delete {root}")

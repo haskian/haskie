@@ -136,7 +136,8 @@ it later means running *Index all* in each one.
   `haskie run --port <n>` and `haskie install claude --url http://127.0.0.1:<n>/mcp`, or set
   `HASKIE_PORT`, which moves the default of `run`, `ensure` and `install claude` at once.
 - **Other commands:** `haskie stop` stops the server. `haskie destroy` deletes `~/.haskie` after
-  showing what would be lost. `--home` or `HASKIE_HOME` keeps the data elsewhere.
+  showing what would be lost, and refuses while a server is running for it. `--home` or
+  `HASKIE_HOME` keeps the data elsewhere.
 
 ## From files to answers
 

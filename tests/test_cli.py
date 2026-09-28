@@ -282,6 +282,21 @@ def test_destroy_refuses_a_directory_that_is_not_a_home(tmp_path: Path) -> None:
     assert (documents / "keep" / "thesis.pdf").is_file(), "untouched"
 
 
+def test_destroy_refuses_a_home_a_server_holds(elsewhere: Path) -> None:
+    """The SessionStart hook usually keeps a server up. Deleting under it leaves it serving from
+    deleted files and takes the home lock with it, so `destroy` refuses before it asks."""
+    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+
+    with holding():
+        refused = runner.invoke(cli, ["destroy", "--home", str(elsewhere)], input="y\n")
+
+    assert refused.exit_code == 1, _text(refused)
+    assert "already running" in refused.stderr
+    assert "haskie stop" in refused.stderr, "says what to do"
+    assert "about to delete" not in refused.stdout, "refused before the prompt"
+    assert (elsewhere / "haskie.db").is_file(), "nothing deleted"
+
+
 def test_destroy_on_a_missing_home_says_so(tmp_path: Path) -> None:
     never = tmp_path / "never-created"
 
