@@ -55,6 +55,12 @@ _warm_lock = threading.Lock()
 _warm_tasks: set[asyncio.Task[None]] = set()
 
 
+class ModelLoading(NotReady):
+    """Not ready, but on its way: asked for, downloading or warming up. A caller that can wait
+    waits it out; a failed model raises the plain `NotReady` instead, which waiting would not
+    change."""
+
+
 class ModelKind(StrEnum):
     EMBEDDING = "embedding"
     RERANKER = "reranker"
@@ -309,12 +315,12 @@ async def require_ready(kind: ModelKind, name: str) -> None:
     if status.state == ModelState.ERROR:
         raise NotReady(f"{kind} model {name} failed to load: {status.error}")
     if status.state == ModelState.PENDING:
-        raise NotReady(f"{kind} model {name} is not loaded yet; check /api/status")
+        raise ModelLoading(f"{kind} model {name} is not loaded yet; check /api/status")
     if (
         found and found[0].status == RunStatus.SUCCESS
     ):  # downloaded, warming up (see `_model_status`)
-        raise NotReady(f"{kind} model {name} is loading in this process; retry in a moment")
-    raise NotReady(
+        raise ModelLoading(f"{kind} model {name} is loading in this process; retry in a moment")
+    raise ModelLoading(
         f"{kind} model {name} is downloading (operation {workflow_id}); "
         "check /api/operations?kind=download"
     )

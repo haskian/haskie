@@ -103,6 +103,10 @@ you need the machine back.
 - A **permanent** failure fails at once: a file the parser cannot read, or a PDF whose pages need
   OCR. With `skip_ocr_pages` on (the default), only a PDF where every page needs OCR fails.
   Unsupported file types are refused at import, before any operation starts.
+- An embedding model that is still downloading or warming up is not a failure. The embedding
+  run sleeps durably until the model is ready, before it cuts any slice. A batch that still finds
+  it warming, after a restart for example, sleeps the same way. Only a model that failed to load
+  ends the import in `error`.
 - A slice that runs past `task_timeout_seconds` per batch is cancelled, not retried.
 - A **model download** gets 5 attempts. Its durable id is `dl:{kind}:{model}`, so a restart
   reuses the files already on disk.

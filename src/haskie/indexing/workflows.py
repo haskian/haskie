@@ -246,14 +246,17 @@ class Context(msgspec.Struct):
 
 
 class BatchResult(msgspec.Struct):
-    """Outcome of one retried step: a value, or the message of a failure that must not be retried.
+    """Outcome of one retried step: a value, the message of a failure that must not be retried,
+    or word that the embedding model is still on its way.
 
     DBOS retries *every* exception raised inside a step with `retries_allowed`, so a deterministic
     failure (unsupported file, OCR policy, corrupt document) is reported as a value and raised by
-    the workflow body instead."""
+    the workflow body instead. A model still downloading or warming is reported the same way: three
+    quick retries cannot outlast it, so the workflow body waits for it (see `_awaiting_model`)."""
 
     value: int | None = None
     permanent_error: str | None = None
+    model_loading: bool = False
 
 
 class BulkProgress(msgspec.Struct):
@@ -567,6 +570,7 @@ async def apply_settings(settings: UserSettings) -> None:
 # Read once, here: DBOS copies a step's retry settings into the decorator, so this cannot change
 # after import.
 RETRY_INTERVAL_SECONDS = 1.0
+MODEL_WAIT_SECONDS = 2.0  # between two asks whether the embedding model is ready yet
 retried_step = DBOS.step(
     retries_allowed=True,
     max_attempts=3,
@@ -655,11 +659,24 @@ async def plan(stage: Stage, ctx: Context) -> list[Batch]:
 
 async def _guarded(call: Awaitable[int | None]) -> BatchResult:
     """Await one pipeline call inside a retried step: retry anything transient, report a
-    `PermanentError` as a value so DBOS does not retry a failure that cannot change."""
+    `PermanentError` as a value so DBOS does not retry a failure that cannot change, and a model
+    still on its way as a value so the workflow body can wait for it."""
     try:
         return BatchResult(value=await call)
     except PermanentError as exc:
         return BatchResult(permanent_error=f"{type(exc).__name__}: {exc}")
+    except models.ModelLoading:
+        return BatchResult(model_loading=True)
+
+
+async def _awaiting_model(step: Callable[[], Awaitable[BatchResult]]) -> BatchResult:
+    """Run one step until it stops reporting the embedding model on its way, with a durable sleep
+    between two runs. In the workflow body: the sleep holds no step, no CPU slot and no thread,
+    and a crash resumes it. A model that failed raises out of the step instead, and fails the
+    workflow."""
+    while (result := await step()).model_loading:
+        await DBOS.sleep_async(MODEL_WAIT_SECONDS)
+    return result
 
 
 def _value(result: BatchResult) -> int:
@@ -775,8 +792,16 @@ async def settle_maintenance(collection: str, claimed: int, report: maintenance.
     await Collection(collection).settle_maintenance(claimed, report.ann_trained, report.num_rows)
 
 
+@retried_step
+async def embedding_ready(embedding: EmbeddingModel) -> BatchResult:
+    """Whether this process can embed with the model yet (see `_awaiting_model`)."""
+    return await _guarded(models.require_ready(models.ModelKind.EMBEDDING, embedding.name))
+
+
 async def run_batch(stage: Stage, batch: Batch, ctx: Context) -> int:
-    return _value(await try_batch(stage, batch, ctx))
+    """One micro-batch. An embed batch can still find the model loading after its run waited for
+    it: a restart resumes the batch before the boot has warmed the model again."""
+    return _value(await _awaiting_model(partial(try_batch, stage, batch, ctx)))
 
 
 # --- workflows --------------------------------------------------------------------------
@@ -995,6 +1020,10 @@ async def ensure_embedding(doc: str, params: embed_cache.Params) -> str:
             chunking=ChunkSettings.of(params),
             cache_id=embed_cache.key(params),
         )
+        if ctx.embedding is not None:
+            # here rather than in the slices: a download takes minutes, and a slice waiting it out
+            # would hold a slot of `task.embedding` and run into its own timeout
+            _value(await _awaiting_model(partial(embedding_ready, ctx.embedding)))
         await _stage(Stage.EMBED, ctx)
         return await finalize_embed(params, ctx)
 
