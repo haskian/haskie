@@ -581,15 +581,9 @@ class CollectionIndex:
         table = await self._readable()
         if table is None:
             return []
-        lexical = await self.has_index(FTS_COLUMN)
         if vector is None or not await self.has_vector_column():
-            if not lexical:
-                return []
-            found = _excluding(await table.search(query, query_type="fts"), self.leaving)
-            if not vectors:
-                found = found.select([*PLAIN_SCHEMA.names, "_score"])
-            return _rows(await found.limit(limit).to_arrow())
-        if settings.mode == SearchMode.VECTOR or not lexical:
+            return await self._lexical(table, query, limit, vectors)
+        if settings.mode == SearchMode.VECTOR or not await self.has_index(FTS_COLUMN):
             found = _tuned(await table.search(vector, query_type="vector"), settings)
             found = _excluding(found, self.leaving)
             return _rows(await found.limit(limit).to_arrow())
@@ -613,9 +607,18 @@ class CollectionIndex:
         collection still building its index answers nothing here, as it does in `search_rows`.
         """
         table = await self._readable()
-        if table is None or not await self.has_index(FTS_COLUMN):
+        return [] if table is None else await self._lexical(table, query, limit)
+
+    async def _lexical(
+        self, table: lancedb.AsyncTable, query: str, limit: int, vectors: bool = True
+    ) -> list[dict]:
+        """At most `limit` BM25 rows of a readable table, none of a document `leaving`, and
+        without the vector column when `vectors` is False. `[]` without the full-text index."""
+        if not await self.has_index(FTS_COLUMN):
             return []
         found = _excluding(await table.search(query, query_type="fts"), self.leaving)
+        if not vectors:
+            found = found.select([*PLAIN_SCHEMA.names, "_score"])
         return _rows(await found.limit(limit).to_arrow())
 
     async def rows_at(self, keys: Iterable[RowKey], vectors: bool) -> list[dict]:
@@ -641,11 +644,11 @@ class CollectionIndex:
         """Where every chunk of these documents sits: its `document`, `seq`, heading path and char
         span, and nothing else, in no order. What a search reads to know how large each section
         around a match is. `[]` when there is nothing readable."""
-        names = sorted(set(documents))
+        names = set(documents)
         table = await self._readable()
         if table is None or not names:
             return []
-        wanted = f"document IN ({', '.join(_quoted(name) for name in names)})"
+        wanted = f"document IN {_listed(names)}"
         columns = ["document", "seq", "headings", "char_start", "char_end"]
         return await table.query().where(wanted).select(columns).to_list()
 
@@ -707,9 +710,9 @@ def _tuned(builder: Any, settings: SearchSettings) -> Any:
     return builder.nprobes(settings.nprobes).refine_factor(settings.refine_factor)
 
 
-async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
-    """Second stage for any mode: rescore candidate rows with a cross-encoder, in place, and
-    return them best first.
+async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -> None:
+    """Second stage for any mode: rescore candidate rows with a cross-encoder, in place. The
+    caller sorts, if it wants them ranked: each reads the scores back in its own order.
 
     The score is the sigmoid of the model's logit, in (0, 1). A raw logit is mostly negative for
     all but the few best candidates, and a passage's score (`passage.harmonic`) is 0 for any score
@@ -728,7 +731,6 @@ async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -
     scores = await cpu.on_cpu(rerank_scores, settings.reranker_model, accelerator, query, read)
     for row, logit in zip(rows, scores, strict=True):
         row["_relevance_score"] = _sigmoid(logit)
-    return sorted(rows, key=lambda r: r["_relevance_score"], reverse=True)
 
 
 def logit(score: float) -> float:
@@ -781,9 +783,13 @@ def _excluding(builder: Any, documents: frozenset[str]) -> Any:
     nothing is leaving, which is almost every search. Sync, like `_tuned`."""
     if not documents:
         return builder
-    return builder.where(
-        f"document NOT IN ({', '.join(_quoted(doc) for doc in sorted(documents))})"
-    )
+    return builder.where(f"document NOT IN {_listed(documents)}")
+
+
+def _listed(values: Iterable[str]) -> str:
+    """`values` as a parenthesized list of SQL string literals for a LanceDB `IN`, sorted so one
+    set always makes one filter."""
+    return f"({', '.join(_quoted(value) for value in sorted(values))})"
 
 
 def _quoted(value: str) -> str:

@@ -2276,19 +2276,19 @@ def test_logit_undoes_the_rerankers_sigmoid(name: str, score: float, expected: f
     [
         ("nothing retrieved, nothing to rescore", {}, []),
         (
-            "best first, whatever retrieval scored, as the sigmoid of the logit",
+            "each row, in the order given, the sigmoid of its logit, whatever retrieval scored",
             {"short": 5.0, "a longer chunk": 14.0},
-            [1 / (1 + math.exp(-14.0)), 1 / (1 + math.exp(-5.0))],
+            [1 / (1 + math.exp(-5.0)), 1 / (1 + math.exp(-14.0))],
         ),
         (
-            "a negative logit keeps its rank above 0, where a passage score can use it",
+            "a negative logit scores above 0, where a passage score can use it",
             {"off topic": -9.5, "near": -1.25, "on topic": 0.0},
-            [0.5, 1 / (1 + math.exp(1.25)), 1 / (1 + math.exp(9.5))],
+            [1 / (1 + math.exp(9.5)), 1 / (1 + math.exp(1.25)), 0.5],
         ),
         ("a logit past what exp can take is 0, not an error", {"noise": -800.0}, [0.0]),
     ],
 )
-async def test_cross_encode_rescores_candidates_best_first(
+async def test_cross_encode_rescores_candidates_in_place(
     monkeypatch: pytest.MonkeyPatch, name: str, logits: dict[str, float], expected: list[float]
 ) -> None:
     """The cross-encoder is CPU work, so it runs in a worker thread; the sigmoid of its logit
@@ -2313,10 +2313,10 @@ async def test_cross_encode_rescores_candidates_best_first(
     settings = SearchSettings(reranker=Reranker.CROSS_ENCODER)
     rows = [{"text": text, FTS_COLUMN: text, "frame": [], "_score": 9.0} for text in logits]
 
-    ranked = await cross_encode("q", rows, settings)
+    await cross_encode("q", rows, settings)
 
-    assert [row_score(row) for row in ranked] == pytest.approx(expected), name
-    assert all(0.0 <= row_score(row) < 1.0 for row in ranked), f"{name}: bounded"
+    assert [row_score(row) for row in rows] == pytest.approx(expected), name
+    assert all(0.0 <= row_score(row) < 1.0 for row in rows), f"{name}: bounded"
     assert checked == [("reranker", settings.reranker_model)], name
     assert hardware == [Accelerator.CPU], f"{name}: on the hardware the settings choose"
 
