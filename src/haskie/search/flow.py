@@ -47,9 +47,9 @@ from pydantic_graph.step import StepFunction
 
 from haskie.collection.index import Hit
 from haskie.paging import check_page_size
-from haskie.search import aspects, probe, retrieval, scoring, section
+from haskie.search import aspects, log, probe, retrieval, scoring, section
 from haskie.search.passage import Answer, Excerpt, HitRange, Passage, Sources
-from haskie.settings import Reranker
+from haskie.settings import Reranker, SearchMode
 
 # How deep any of these searches reads. A passage or a document row is folded from several chunks,
 # so the scan goes deeper than the answer; this is where that stops.
@@ -226,8 +226,12 @@ async def merge(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Poo
 
 
 async def rerank(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Pool:
-    """The merged candidates, rescored by a cross-encoder that reads query and chunk together."""
-    return await retrieval.rerank(ctx.inputs, ctx.state.rerank_query, ctx.state.plan)
+    """The merged candidates, rescored by a cross-encoder that reads query and chunk together.
+    The search log reads the ranking here, where every question's is whole (`log`)."""
+    state = ctx.state
+    pool = await retrieval.rerank(ctx.inputs, state.rerank_query, state.plan)
+    log.observe_ranking(state.query, state.plan, pool)
+    return pool
 
 
 async def hits(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Scanned:
@@ -492,6 +496,9 @@ async def _searches(
     # the collection's own limit when it is the only one searched, else the user's (`plan`), and
     # a slot for each question at least: a caller who set no limit cannot be refused for it
     limit = limit or max(plans[0].settings.limit, len(asked.questions))
+    # without a query vector every collection answers from its full-text index
+    mode = plans[0].settings.mode if plans[0].vector is not None else SearchMode.FTS
+    log.observe_scope(plans[0], plans[0].names, mode, limit)
     # a pipeline that folds scans deeper than it answers, and that is what `MAX_SCAN` bounds
     scan = max(limit, min(limit * deeper, MAX_SCAN))
     candidates = max(plans[0].settings.candidates, scan)

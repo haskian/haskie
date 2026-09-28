@@ -12,6 +12,7 @@ are the REST handlers marked `mcp_tool=`, so both surfaces share one contract. T
 | search | `search_excerpts`, `search_sources`, `set_session_collections` |
 | catalogue | `list_collections`, `get_collection`, `list_collection_documents`, `list_documents`, `get_document` |
 | write | `add_document`, `add_document_to_collection`, `remove_document_from_collection`, `describe_document` |
+| log and gaps | `list_searches`, `list_gaps`, `replay_gaps`, `review_gaps` ([Gaps](gaps.md)) |
 
 Everything else stays in the web UI and the REST API: managing collections, re-indexing,
 deleting or re-importing documents, operations and settings.
@@ -67,7 +68,8 @@ sequenceDiagram
 The hook's output is the only way the conversation's id reaches the tools, because no MCP call
 carries it. With the id, the Sessions view shows the conversation's last 100 events: searches,
 imports, attaches, detaches, descriptions and collection choices. Each operation it started
-names the conversation as its origin.
+names the conversation as its origin. Every search is also written to the search log, with or
+without an id, and the Gaps page reads it ([Gaps](gaps.md)).
 
 The hook does not wait for the server, and Claude Code connects to MCP while the hook still runs.
 So a session that starts while nothing is serving, such as the first one after a reboot, has no

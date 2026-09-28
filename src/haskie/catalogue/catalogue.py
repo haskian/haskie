@@ -83,6 +83,13 @@ class EmbeddingModel(msgspec.Struct):
     dims: int  # of the vectors stored and searched: the model's own, or its Matryoshka cut
     accelerator: Accelerator = Accelerator.AUTO
     duplicate: DuplicateCosine | None = None  # None: search results are compared by words alone
+    # The catalogue key it was chosen by: one model cut two ways is two profiles, and a query
+    # vector compares only with another of the same profile (`search.gaps`).
+    profile: str = ""
+    # The cosines the Gaps page judges by (`search.gaps`); None turns that judgement off. A best
+    # match under `weak_match` is no answer; two queries over `same_topic` ask about one thing.
+    weak_match: float | None = None
+    same_topic: float | None = None
     # What the model was trained to read ahead of a query and of a passage (e5's "query: ",
     # nomic's "search_query: "); empty for models that need none. They shape every vector, so
     # changing one is changing the model. The document prefix is part of `cache_name`, so the
@@ -120,6 +127,8 @@ _PROFILE = (
     embedding_profiles.c.matryoshka_layer_norm,
     embedding_profiles.c.duplicate_chunk,
     embedding_profiles.c.duplicate_passage,
+    embedding_profiles.c.weak_match,
+    embedding_profiles.c.same_topic,
 )
 
 
@@ -135,11 +144,25 @@ def _profiles(*columns: Any) -> Select[Any]:
 
 
 def _model(row: Row[Any]) -> tuple[str, EmbeddingModel]:
-    profile, name, dims, query_prefix, document_prefix, layer_norm, chunk, passage = row
+    (
+        profile,
+        name,
+        dims,
+        query_prefix,
+        document_prefix,
+        layer_norm,
+        chunk,
+        passage,
+        weak_match,
+        same_topic,
+    ) = row
     return profile, EmbeddingModel(
         name,
         dims,
         duplicate=None if chunk is None else DuplicateCosine(chunk, passage),
+        profile=profile,
+        weak_match=weak_match,
+        same_topic=same_topic,
         query_prefix=query_prefix,
         document_prefix=document_prefix,
         matryoshka=None if layer_norm is None else Matryoshka(layer_norm=bool(layer_norm)),

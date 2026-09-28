@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>haskie — gaps</title>
+  <link rel="stylesheet" href="design.css" />
+  <style>
+    /* page layout only; tokens live in design.css */
+    .gap-panel { display: grid; gap: var(--sp-3); align-content: start; }
+    .gap-query, .gap-near, .gap-now { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <div class="page">
+
+
+    <main class="body">
+      <aside class="side">
+        <a class="logo" href="index.html" aria-label="Haskie"></a>
+        <nav class="nav">
+          <a class="nav-item" href="explore.html"><i data-lucide="compass" class="icon"></i>Explore</a>
+          <a class="nav-item" href="documents.html"><i data-lucide="file-text" class="icon"></i>Documents<span class="count">30</span></a>
+          <a class="nav-item" href="collections.html"><i data-lucide="library" class="icon"></i>Collections<span class="count">5</span></a>
+          <a class="nav-item" href="operations.html"><i data-lucide="activity" class="icon"></i>Operations</a>
+          <a class="nav-item" href="sessions.html"><i data-lucide="bot" class="icon"></i>Sessions</a>
+          <a class="nav-item" href="#" aria-current="true"><i data-lucide="search-x" class="icon"></i>Gaps</a>
+          <a class="nav-item" href="insights.html"><i data-lucide="chart-column" class="icon"></i>Insights</a>
+          <a class="nav-item" href="settings.html"><i data-lucide="settings" class="icon"></i>Settings</a>
+        </nav>
+      </aside>
+      <div class="gallery-sections sections">
+        <div class="tabs" role="tablist">
+          <button class="tab" role="tab" aria-selected="true">Open</button>
+          <button class="tab" role="tab">Dismissed</button>
+          <button class="tab" role="tab">Resolved</button>
+        </div>
+        <section class="gallery-section section" id="g-again">
+          <span class="mono muted">Asked again · 2</span>
+          <div class="gallery gallery-lg">
+            <button class="tile" onclick="document.getElementById('modal').showModal()"><i data-lucide="search-x" class="icon"></i><span class="tile-text"><span class="name">How should a background job retry a failed Kafka message without duplicates?</span><span class="sub">4 times · 2 sessions · 2 h ago</span></span><span class="hint" role="tooltip"><strong>How should a background job retry a failed Kafka message without duplicates?</strong><span class="sub">4 times · 2 sessions · 2 h ago</span>weak match · distributed-systems · kafka</span></button>
+            <button class="tile"><i data-lucide="search-x" class="icon"></i><span class="tile-text"><span class="name">tone mapping operators</span><span class="sub">2 times · 1 session · 1 d ago</span></span><span class="hint" role="tooltip"><strong>tone mapping operators</strong><span class="sub">2 times · 1 session · 1 d ago</span>nothing came back · A–E</span></button>
+          </div>
+        </section>
+        <section class="gallery-section section" id="g-once">
+          <span class="mono muted">Asked once · 2</span>
+          <div class="gallery gallery-lg">
+            <button class="tile"><i data-lucide="search-x" class="icon"></i><span class="tile-text"><span class="name">What does the cleanup function of React useEffect do?</span><span class="sub">1 time · 1 session · 3 d ago</span></span><span class="hint" role="tooltip"><strong>What does the cleanup function of React useEffect do?</strong><span class="sub">1 time · 1 session · 3 d ago</span>weak match · A–E · K–O</span></button>
+            <button class="tile"><i data-lucide="search-x" class="icon"></i><span class="tile-text"><span class="name">refraction index of glass</span><span class="sub">1 time · no session · 5 d ago</span></span><span class="hint" role="tooltip"><strong>refraction index of glass</strong><span class="sub">1 time · no session · 5 d ago</span>nothing came back · every collection</span></button>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog class="modal" id="modal">
+    <div class="modal-body" tabindex="-1" autofocus>
+      <div class="modal-head">
+        <h2 class="title"><span>How should a background job retry a failed Kafka message without duplicates?</span><small class="muted">gap</small></h2>
+        <form method="dialog"><button class="btn btn-ghost" aria-label="Close"><i data-lucide="x" class="icon"></i></button></form>
+      </div>
+      <div class="row">
+        <button class="btn btn-mono"><i data-lucide="rotate-ccw" class="icon"></i>Replay</button>
+        <button class="btn btn-mono"><i data-lucide="check" class="icon"></i>Resolve</button>
+        <button class="btn btn-mono"><i data-lucide="x" class="icon"></i>Dismiss</button>
+      </div>
+      <div role="tabpanel" class="gap-panel">
+        <p class="muted">Replay asks each question again over every collection. Nothing is recorded.</p>
+        <ul class="list">
+          <li class="list-item"><i data-lucide="search-x" class="icon"></i><span class="list-text"><span class="gap-query">How should a background job retry a failed Kafka message without duplicates?</span><span class="sub">weak match: cosine 0.71 · via excerpts · claude-code a3f9 · 2 h ago</span><span class="sub gap-near">closest: ddia.pdf p.482 L10233-10240 · kafka-notes.md L12-30</span><span class="sub gap-now">now answered: kafka-the-definitive-guide.pdf p.211 L5120-5144 · 25 results</span></span></li>
+          <li class="list-item"><i data-lucide="search-x" class="icon"></i><span class="list-text"><span class="gap-query">retrying failed Kafka consumers idempotently</span><span class="sub">weak match: reranker -3.12 · via excerpts · claude-code a3f9 · 3 h ago</span><span class="sub gap-near">closest: ddia.pdf p.480 L10190-10201</span><span class="sub gap-now">now answered: kafka-the-definitive-guide.pdf p.212 L5150-5171 · 25 results</span></span></li>
+          <li class="list-item"><i data-lucide="search-x" class="icon"></i><span class="list-text"><span class="gap-query">kafka consumer retry duplicates</span><span class="sub">no excerpt answers it · via excerpts · cursor 7b21 · 1 d ago</span><span class="sub gap-now">now: still no excerpt answers it</span></span></li>
+        </ul>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="statusbar"></div>
+
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="design.js"></script>
+</body>
+</html>

@@ -34,6 +34,7 @@ from haskie.indexing import embed_cache, gguf_models, mlx_models
 from haskie.indexing.chunk import Chunk, Piece, split
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order
+from haskie.search import log
 from haskie.settings import (
     DEFAULT_RERANKER,
     Accelerator,
@@ -1159,6 +1160,138 @@ async def test_session_history_holds_every_action_newest_first(
     assert [row["origin"] for row in listed if "plain.md" in row["title"]] == [None], (
         "an import from the web UI came from nobody's session"
     )
+
+
+async def _converted(name: str, markdown: str) -> None:
+    """The markdown a conversion would have written: what an excerpt is widened against."""
+    (await document.get(name)).markdown.write_text(markdown)
+
+
+async def test_every_search_is_logged_with_what_it_returned(ready: AsyncTestClient) -> None:
+    """Every search endpoint writes one row to the search log: with or without a session, failed
+    or not, each question on its own. A later page of a full-text search is the same search, and
+    writes nothing."""
+    await _converted("guide.md", MD)
+    await ready.get("/api/search/excerpts", params={"q": "alpha", "session_id": "s3"})
+    await ready.get(
+        "/api/search/excerpts",
+        params={"q": ["alpha body", "zebra stripes"], "context": "notes", "session_id": "s3"},
+    )
+    await ready.get("/api/search/sources", params={"q": "alpha"})
+    first = (await ready.get("/api/search/text", params={"q": "alpha", "page_size": 1})).json()
+    assert first["next_cursor"] is not None, "one chunk, a page of one: the walk could go on"
+    await ready.get(
+        "/api/search/text", params={"q": "alpha", "page_size": 1, "cursor": first["next_cursor"]}
+    )
+    await ready.get("/api/search/explore", params={"q": "alpha"})
+    failed = await ready.get(
+        "/api/search/excerpts", params={"q": "alpha", "collections": "ghost", "session_id": "s3"}
+    )
+    assert failed.status_code == 404
+
+    logged = await log.load()
+
+    assert [(one.tool, one.session_id, one.result_count) for one in logged] == [
+        (log.Tool.EXCERPTS, "s3", 0),
+        (log.Tool.EXPLORE, None, 1),
+        (log.Tool.TEXT, None, 1),
+        (log.Tool.SOURCES, None, 1),
+        (log.Tool.EXCERPTS, "s3", 1),
+        (log.Tool.EXCERPTS, "s3", 1),
+    ], "newest first, the second page left out"
+    several = logged[-2]
+    assert [(one.question, one.uncovered) for one in several.questions] == [
+        ("alpha body", False),
+        ("zebra stripes", True),
+    ], "each question, and the one no excerpt answers"
+    assert several.context == "notes"
+    assert logged[0].error == "NotFound: collection not found: ghost"
+    assert all(one.error is None for one in logged[1:])
+    assert all(one.collections == ["notes"] and one.mode == "fts" for one in logged[1:])
+    assert {one.actor for one in logged} == {"web"}
+    assert logged[-1].result_limit == 25, "the user default, resolved"
+    (result,) = (await log.top_results([logged[-1].id], 5))[logged[-1].id]
+    assert (result.document, result.parent) == ("guide.md", None)
+    history = (await ready.get("/api/sessions/s3/history")).json()
+    assert [(row["subject"], row["detail"]) for row in history] == [
+        (
+            "alpha",
+            {
+                "scope": "excerpts",
+                "hits": 0,
+                "documents": [],
+                "error": "NotFound: collection not found: ghost",
+            },
+        ),
+        (
+            "alpha body | zebra stripes",
+            {
+                "scope": "excerpts",
+                "hits": 1,
+                "documents": ["guide.md"],
+                "questions": ["alpha body", "zebra stripes"],
+                "context": "notes",
+            },
+        ),
+        ("alpha", {"scope": "excerpts", "hits": 1, "documents": ["guide.md"]}),
+    ], "a session's searches are its history, failed ones too"
+
+
+async def test_gaps_group_review_and_replay(ready: AsyncTestClient, tmp_path: Path) -> None:
+    """Questions that found nothing come back as one topic per question, each on its own when a
+    search asked several; the curator dismisses one, and a replay shows the gap closing once a
+    document answers it."""
+    await _converted("guide.md", MD)
+    await ready.get("/api/search/excerpts", params={"q": "zebra stripes", "session_id": "g1"})
+    await ready.get(
+        "/api/search/excerpts", params={"q": ["alpha body", "Zebra stripes?"], "session_id": "g2"}
+    )
+    await ready.get("/api/search/excerpts", params={"q": "alpha", "session_id": "g1"})
+    await ready.get("/api/search/excerpts", params={"q": "zebra", "collections": "ghost"})
+
+    (topic,) = (await ready.get("/api/gaps")).json()
+
+    assert topic["question"] == "Zebra stripes?", "named by its newest question"
+    assert [(one["question"], one["signal"]) for one in topic["questions"]] == [
+        ("Zebra stripes?", "uncovered"),
+        ("zebra stripes", "empty"),
+    ], "one topic by their words; the answered questions and the failed search are no gaps"
+    assert (topic["sessions"], topic["collections"]) == (2, ["notes"])
+    newest, oldest = (one["id"] for one in topic["questions"])
+
+    reviewed = await ready.put("/api/gaps/review", json={"ids": [oldest], "review": "dismissed"})
+    assert reviewed.json() == 1
+    (still,) = (await ready.get("/api/gaps")).json()
+    assert [one["id"] for one in still["questions"]] == [newest]
+    (dismissed,) = (await ready.get("/api/gaps", params={"review": "dismissed"})).json()
+    assert [one["id"] for one in dismissed["questions"]] == [oldest]
+    assert (await ready.get("/api/gaps", params={"review": "resolved"})).json() == []
+
+    replayed = (await ready.post("/api/gaps/replay", json={"ids": [newest]})).json()
+    assert [(one["id"], one["signal"], one["result_count"]) for one in replayed] == [
+        (newest, "empty", 0)
+    ]
+    source = tmp_path / "zebra.md"
+    source.write_text("# Zebra\n\nzebra stripes run across the flank\n")
+    imported = await document.import_path(str(source))
+    await document.set_status(imported.name, DocumentStatus.IMPORTED)
+    await Collection("notes").add(imported.name)
+    await Collection("notes").set_member_status(imported.name, MemberStatus.INDEXED)
+    await seed_index("notes", imported.name, "zebra stripes run across the flank")
+    await _converted(imported.name, "zebra stripes run across the flank\n")
+    (closed,) = (await ready.post("/api/gaps/replay", json={"ids": [newest]})).json()
+    assert (closed["signal"], closed["results"][0]["document"]) == (None, "zebra.md")
+    assert len(await log.load()) == 4, "a replay is not a search anyone made"
+
+    await ready.put("/api/gaps/review", json={"ids": [newest], "review": "resolved"})
+    assert (await ready.get("/api/gaps")).json() == []
+    await ready.put("/api/gaps/review", json={"ids": [newest, oldest], "review": "open"})
+    assert len((await ready.get("/api/gaps")).json()[0]["questions"]) == 2, "reopened"
+
+    too_many = await ready.post("/api/gaps/replay", json={"ids": list(range(51))})
+    assert too_many.status_code == 422 and "at most 50" in too_many.text
+    no_window = await ready.get("/api/gaps", params={"days": 0})
+    assert no_window.status_code == 422 and "days must be 1.." in no_window.text
 
 
 async def test_session_search_survives_the_deletion_of_a_collection(
@@ -2608,7 +2741,7 @@ async def test_text_search_validates_page_size_and_cursor(
 
 async def test_search_trend_lists_every_recent_search_oldest_first(ready: AsyncTestClient) -> None:
     """The points the Insights chart buckets: one per search, with its session, and nothing else
-    a session did. A search without a session is nobody's and is left out."""
+    a session did. A search without a session is a point too, with no session."""
     for session_id, q in [("t1", "alpha"), ("t2", "alpha"), ("t1", "beta")]:
         await ready.get("/api/search/text", params={"q": q, "session_id": session_id})
     await ready.get("/api/search/text", params={"q": "alpha"})
@@ -2616,9 +2749,10 @@ async def test_search_trend_lists_every_recent_search_oldest_first(ready: AsyncT
 
     points = (await ready.get("/api/insights/searches", params={"days": 1})).json()
 
-    mine = [p for p in points if p["session_id"] in {"t1", "t2"}]
-    assert [p["session_id"] for p in mine] == ["t1", "t2", "t1"], "one point per search, in order"
-    assert [p["ts"] for p in mine] == sorted(p["ts"] for p in mine)
+    assert [p["session_id"] for p in points] == ["t1", "t2", "t1", None], (
+        "one point per search, in order, and no point for setting a selection"
+    )
+    assert [p["ts"] for p in points] == sorted(p["ts"] for p in points)
     bad = await ready.get("/api/insights/searches", params={"days": 0})
     assert bad.status_code == 422 and "days must be 1.." in bad.text
 

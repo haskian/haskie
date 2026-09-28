@@ -4,6 +4,7 @@ import { usePoll } from './hooks/usePoll'
 import { Collections } from './pages/Collections'
 import { Documents } from './pages/Documents'
 import { Explore } from './pages/Explore'
+import { Gaps } from './pages/Gaps'
 import { Init } from './pages/Init'
 import { Insights } from './pages/Insights'
 import { Operations } from './pages/Operations'
@@ -91,6 +92,8 @@ function Page({ route, counts, refreshStatus, dropped, onDropHandled }: PageProp
       return <Operations route={route} counts={counts} refreshStatus={refreshStatus} />
     case 'sessions':
       return <Sessions route={route} counts={counts} refreshStatus={refreshStatus} />
+    case 'gaps':
+      return <Gaps route={route} counts={counts} refreshStatus={refreshStatus} />
     case 'insights':
       return <Insights route={route} counts={counts} refreshStatus={refreshStatus} />
     case 'settings':

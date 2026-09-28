@@ -61,6 +61,15 @@ _log = get_logger(__name__)
 # --- what a search resolves before it reads anything ------------------------------
 
 
+def rerank_floor(min_rerank_score: float | None, calibrated: float | None) -> float:
+    """The reranker score a chunk must reach to stay: the settings' `min_rerank_score` when set,
+    else the reranker's calibrated floor, else 0, which keeps every chunk. One rule for the search
+    that drops chunks (`Plan.rerank_floor`) and the gaps that judge it later (`gaps`)."""
+    if min_rerank_score is not None:
+        return min_rerank_score
+    return calibrated if calibrated is not None else 0.0
+
+
 class Plan(msgspec.Struct):
     """Which collections a search covers and how, settled once for the whole fan-out.
 
@@ -80,9 +89,8 @@ class Plan(msgspec.Struct):
     def rerank_floor(self) -> float:
         """The reranker score a chunk must reach to stay: the settings' `min_rerank_score` when
         set, else the reranker's calibrated floor, else 0, which keeps every chunk."""
-        if self.settings.min_rerank_score is not None:
-            return self.settings.min_rerank_score
-        return self.calibration.floor if self.calibration is not None else 0.0
+        calibrated = self.calibration.floor if self.calibration is not None else None
+        return rerank_floor(self.settings.min_rerank_score, calibrated)
 
     @property
     def names(self) -> list[str]:
@@ -152,6 +160,9 @@ class Pool(msgspec.Struct):
     rows: dict[RowKey, tuple[CollectionIndex, dict]]
     rankings: dict[str, list[RowKey]]  # one per collection, in that collection's own order
     ranked: list[tuple[RowKey, float]] = []  # merged, best first
+    # the reranker's best score over the pool, kept when its floor drops every chunk: how close
+    # the search came is what the search log records (`log.observe_ranking`)
+    best_rerank: float | None = None
 
 
 async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True) -> Pool:
@@ -230,7 +241,8 @@ async def rerank(pool: Pool, query: str, where: Plan) -> Pool:
     # the reranker's score has a scale: under the floor it judged the chunk no answer, and a
     # search that keeps it would fill a slot, or tag a question, with it
     kept = [(key, score) for key, score in rescored if score >= where.rerank_floor]
-    return msgspec.structs.replace(pool, ranked=kept)
+    best = max((score for _, score in rescored), default=None)
+    return msgspec.structs.replace(pool, ranked=kept, best_rerank=best)
 
 
 class Scanned(msgspec.Struct):

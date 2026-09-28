@@ -149,8 +149,9 @@ it later means running *Index all* in each one.
    *Chunks* or *Passages* to see how haskie cut the documents and built each answer.
 
 **Operations** shows background jobs with their progress, and cancels running ones. **Sessions**
-replays each agent conversation. **Insights** charts searches and indexed chunks over time.
-**Settings** describes every default.
+replays each agent conversation. **Gaps** lists the questions your sources did not answer, grouped
+by topic, and replays them once you add a document. **Insights** charts searches and indexed
+chunks over time. **Settings** describes every default.
 
 ## How it works with Claude Code
 

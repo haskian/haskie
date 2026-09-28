@@ -655,6 +655,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/searches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** ListSearches */
+        get: operations["ApiSearchesListSearches"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/insights/searches": {
         parameters: {
             query?: never;
@@ -717,6 +734,57 @@ export interface paths {
         get: operations["ApiSearchTextSearchText"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/gaps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** ListGaps */
+        get: operations["ApiGapsListGaps"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/gaps/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** ReviewGaps */
+        put: operations["ApiGapsReviewReviewGaps"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/gaps/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** ReplayGaps */
+        post: operations["ApiGapsReplayReplayGaps"];
         delete?: never;
         options?: never;
         head?: never;
@@ -966,6 +1034,10 @@ export interface components {
             accelerator?: components["schemas"]["Accelerator"];
             duplicate?: components["schemas"]["DuplicateCosine"] | null;
             /** @default  */
+            profile: string;
+            weak_match?: number | null;
+            same_topic?: number | null;
+            /** @default  */
             query_prefix: string;
             /** @default  */
             document_prefix: string;
@@ -993,6 +1065,7 @@ export interface components {
             scope?: string | null;
             hits?: number | null;
             documents?: string[] | null;
+            error?: string | null;
             collection?: string | null;
             collections?: string[] | null;
             questions?: string[] | null;
@@ -1041,6 +1114,41 @@ export interface components {
          * @enum {string}
          */
         Fusion: "rrf" | "linear";
+        /** GapQuestion */
+        GapQuestion: {
+            id: number;
+            search_id: number;
+            ts: number;
+            session_id: string | null;
+            actor: string;
+            tool: components["schemas"]["Tool"];
+            question: string;
+            context: string | null;
+            collections: string[];
+            signal: components["schemas"]["Signal"];
+            result_count: number;
+            best_similarity: number | null;
+            best_rerank: number | null;
+            near_misses: components["schemas"]["LoggedResult"][];
+        };
+        /** GapReplay */
+        GapReplay: {
+            ids: number[];
+        };
+        /** GapReview */
+        GapReview: {
+            ids: number[];
+            review: components["schemas"]["Review"];
+        };
+        /** GapTopic */
+        GapTopic: {
+            question: string;
+            questions: components["schemas"]["GapQuestion"][];
+            sessions: number;
+            first_at: number;
+            last_at: number;
+            collections: string[];
+        };
         /**
          * Granularity
          * @default chunk
@@ -1169,6 +1277,51 @@ export interface components {
             md5: string;
             /** @default 0 */
             collections: number;
+        };
+        /** LoggedQuestion */
+        LoggedQuestion: {
+            question: string;
+            id?: number | null;
+            best_similarity?: number | null;
+            best_rerank?: number | null;
+            /** @default false */
+            uncovered: boolean;
+            review?: string | null;
+        };
+        /** LoggedResult */
+        LoggedResult: {
+            position: number;
+            parent: number | null;
+            relation: components["schemas"]["Relation"] | null;
+            collection: string;
+            document: string;
+            seq_start: number | null;
+            seq_end: number | null;
+            line_start: number;
+            line_end: number;
+            header: string;
+            location: string;
+            score: number;
+        };
+        /** LoggedSearch */
+        LoggedSearch: {
+            id: number;
+            ts: number;
+            session_id: string | null;
+            actor: string;
+            tool: components["schemas"]["Tool"];
+            context: string | null;
+            collections: string[];
+            mode: components["schemas"]["SearchMode"] | null;
+            embedding: string | null;
+            reranker: string | null;
+            min_rerank_score: number | null;
+            result_limit: number | null;
+            result_count: number;
+            duration_ms: number;
+            error: string | null;
+            questions?: components["schemas"]["LoggedQuestion"][];
+            results?: components["schemas"]["LoggedResult"][];
         };
         /** MaintenanceState */
         MaintenanceState: {
@@ -1506,6 +1659,16 @@ export interface components {
         Rendered: {
             html: string;
         };
+        /** ReplayedGap */
+        ReplayedGap: {
+            id: number;
+            question: string;
+            signal: components["schemas"]["Signal"] | null;
+            result_count: number;
+            best_similarity: number | null;
+            best_rerank: number | null;
+            results: components["schemas"]["LoggedResult"][];
+        };
         /**
          * Reranker
          * @description Second-stage scoring applied to the Candidates of any mode (vector, fts or hybrid). cross-encoder: a model reads query and chunk together and rescores each pair; slower but more precise than embeddings. none: keep the retrieval order.
@@ -1540,7 +1703,20 @@ export interface components {
              * @default 90
              */
             audit_days: number;
+            /**
+             * Search history (days)
+             * @description Days of searches kept: what each search asked and returned, which session histories, Insights and Gaps read. The daily maintenance run deletes older ones. 0 keeps everything.
+             * @default 90
+             */
+            search_days: number;
         };
+        /**
+         * Review
+         * @description What the curator decided about a gap. `open` is stored as no decision.
+         * @default open
+         * @enum {string}
+         */
+        Review: "open" | "dismissed" | "resolved";
         /**
          * RunStatus
          * @enum {string}
@@ -1561,7 +1737,7 @@ export interface components {
         /** SearchAt */
         SearchAt: {
             ts: number;
-            session_id: string;
+            session_id: string | null;
         };
         /**
          * SearchMode
@@ -1800,6 +1976,12 @@ export interface components {
             collections: string[];
             last_at: number | null;
         };
+        /**
+         * Signal
+         * @description Why a question counts as a gap.
+         * @enum {string}
+         */
+        Signal: "empty" | "uncovered" | "weak";
         /** Similar */
         Similar: {
             identical: string[];
@@ -1878,6 +2060,12 @@ export interface components {
             result: number | null;
             error: string | null;
         };
+        /**
+         * Tool
+         * @description Which endpoint ran a search.
+         * @enum {string}
+         */
+        Tool: "excerpts" | "sources" | "explore" | "text";
         /** UserSettings */
         UserSettings: {
             /**
@@ -3484,6 +3672,45 @@ export interface operations {
             };
         };
     };
+    ApiSearchesListSearches: {
+        parameters: {
+            query?: {
+                session_id?: string | null;
+                days?: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoggedSearch"][];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
     ApiInsightsSearchesSearchTrend: {
         parameters: {
             query?: {
@@ -3617,6 +3844,123 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Page_haskie.collection.index.Hit_"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiGapsListGaps: {
+        parameters: {
+            query?: {
+                /** @description What the curator decided about a gap. `open` is stored as no decision. */
+                review?: components["schemas"]["Review"];
+                days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GapTopic"][];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiGapsReviewReviewGaps: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GapReview"];
+            };
+        };
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": number;
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiGapsReplayReplayGaps: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GapReplay"];
+            };
+        };
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplayedGap"][];
                 };
             };
             /** @description Bad request syntax or unsupported method */

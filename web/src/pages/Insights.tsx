@@ -27,8 +27,9 @@ const bucketLabel = (unixSeconds: number, byHour: boolean): string =>
   new Date(unixSeconds * 1000).toLocaleString('en-GB', byHour ? { dateStyle: 'medium', timeStyle: 'short' } : { dateStyle: 'medium' })
 
 // Module-level, so a chart's effect sees one loader across renders.
+// a search made without a session is a series of its own
 const loadSearches = (days: number): Promise<Point[]> =>
-  api.searchTrend(days).then((points) => points.map((one) => ({ ts: one.ts, key: one.session_id, n: 1 })))
+  api.searchTrend(days).then((points) => points.map((one) => ({ ts: one.ts, key: one.session_id ?? 'no session', n: 1 })))
 const loadChunks = (days: number): Promise<Point[]> =>
   api
     .chunkTrend(days)

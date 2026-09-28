@@ -15,7 +15,7 @@ flowchart TB
         app --> api
         api --> document["<b>document/</b><br/>convert, store, render"]
         api --> collection["<b>collection/</b><br/>membership, LanceDB index"]
-        api --> search["<b>search/</b><br/>retrieval, passages,<br/>fold repeats, sessions"]
+        api --> search["<b>search/</b><br/>retrieval, passages,<br/>fold repeats, sessions,<br/>search log, gaps"]
         api --> indexing["<b>indexing/</b><br/>DBOS pipeline: chunk,<br/>embed, cache, write"]
         api --> catalogue["<b>catalogue/</b><br/>models, their metadata,<br/>embedding profiles"]
     end

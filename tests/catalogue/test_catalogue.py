@@ -232,6 +232,9 @@ async def test_the_schema_refuses_a_row_the_catalogue_cannot_mean(name: str, sql
                 384,
                 accelerator=Accelerator.CPU,
                 duplicate=DuplicateCosine(chunk=0.92, passage=0.95),
+                profile="compact",
+                weak_match=0.70,
+                same_topic=0.70,
             ),
         ),
         (
@@ -243,13 +246,18 @@ async def test_the_schema_refuses_a_row_the_catalogue_cannot_mean(name: str, sql
                 query_prefix="search_query: ",
                 document_prefix="search_document: ",
                 matryoshka=Matryoshka(layer_norm=True),
+                profile="nomic-v1.5-512",
             ),
         ),
         (
             "the same model whole: no cut, no thresholds",
             UserSettings(embedding="nomic-v1.5"),
             EmbeddingModel(
-                NOMIC, 768, query_prefix="search_query: ", document_prefix="search_document: "
+                NOMIC,
+                768,
+                query_prefix="search_query: ",
+                document_prefix="search_document: ",
+                profile="nomic-v1.5",
             ),
         ),
     ],

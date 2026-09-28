@@ -137,7 +137,7 @@ async def record(
     return entry
 
 
-def _context() -> tuple[Actor, str | None]:
+def request_context() -> tuple[Actor, str | None]:
     """Actor and request id bound by the request middleware; defaults outside a request."""
     context = structlog.contextvars.get_contextvars()
     actor = context.get("actor", DEFAULT_ACTOR)
@@ -163,7 +163,7 @@ def attach(**fields: str | int | bool) -> None:
 async def _finish(
     event: str, fields: dict[str, str], started: float, exc: BaseException | None
 ) -> None:
-    actor, request_id = _context()
+    actor, request_id = request_context()
     attached = _attached.get() or {}
     named = {k: v for k, v in attached.items() if k in RECORD_FIELDS}
     detail = {k: v for k, v in attached.items() if k not in RECORD_FIELDS}
