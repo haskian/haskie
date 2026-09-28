@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from evals import synth
+
 ROOT = Path(__file__).resolve().parent
 CORPUS_DIR = ROOT / "corpus"  # downloaded PDFs live here, never under the project's own library/
 DEFAULT_HOME = ROOT / ".haskie-eval"
@@ -130,12 +132,52 @@ def ensure_collection(collection: str, description: str, api: str) -> None:
         call("POST", "/api/collections", api, {"name": collection, "description": description})
 
 
+# Arm F's collections: the same documents as a synthetic corpus's own collection, chunked smaller.
+SMALL_CHUNKS = {"chunk_size": 300, "chunk_overlap": 40}
+
+
+def small_chunks(collection: str) -> str:
+    return f"{collection}-c{SMALL_CHUNKS['chunk_size']}"
+
+
+def ensure_chunking(collection: str, chunking: dict, api: str) -> None:
+    """Set the collection's chunking before any document is attached, so its first index already
+    uses it - changing it later would mean re-indexing everything attached."""
+    current = call("GET", f"/api/collections/{collection}", api)["settings"]
+    if any(current.get(key) != value for key, value in chunking.items()):
+        call("PUT", f"/api/collections/{collection}/settings", api, chunking)
+
+
+def ensure_profile(profile: str, api: str) -> None:
+    """Choose the embedding profile on a fresh instance, then wait for its model. An instance
+    already initialized with a different profile is an error, not something to change here:
+    switching profiles re-indexes every collection, which a setup script shouldn't do silently."""
+    status = call("GET", "/api/status", api)
+    if not status["initialized"]:
+        call("POST", "/api/init", api, {"profile": profile})
+    elif call("GET", "/api/settings", api)["embedding"] != profile:
+        raise RuntimeError(f"{api} is already initialized with a different embedding profile")
+    while True:
+        models = call("GET", "/api/status", api)["models"]
+        if any(m["state"] == "error" for m in models):
+            raise RuntimeError(f"model failed to load: {models}")
+        if models and all(m["state"] == "ready" for m in models):
+            return
+        time.sleep(POLL_SECONDS)
+
+
 def import_all(files: list[Path], api: str) -> list[str]:
-    """The name of each file once imported - already there, or freshly imported."""
+    """The name of each file once imported - already there, or freshly imported.
+
+    Documents are keyed by file name, so a name imported earlier with different content would
+    otherwise be silently reused - the case after `evals/synth.py`'s data changes under an
+    unchanged seed. A size mismatch catches that; bump the seed or reset the instance."""
     names = []
     for file in files:
         existing = get_or_none(f"/api/documents/{file.name}", api)
         if existing is not None:
+            if existing["size"] != file.stat().st_size:
+                raise RuntimeError(f"{file.name} was imported earlier with different content")
             names.append(existing["name"])
             continue
         row = call("POST", "/api/documents/import", api, {"path": str(file.resolve())})
@@ -177,15 +219,38 @@ def await_indexed(expected: int, collection: str, api: str, limit: float = 1800)
     return False
 
 
-def main(api: str = DEFAULT_API, collection: str = COLLECTION) -> int:
-    files = fetch()
-    ensure_collection(collection, DESCRIPTION, api)
+def load(
+    files: list[Path], collection: str, description: str, api: str, chunking: dict | None = None
+) -> bool:
+    ensure_collection(collection, description, api)
+    if chunking:
+        ensure_chunking(collection, chunking, api)
     names = import_all(files, api)
     ready = await_status(names, "imported", api)
     attach_all(ready, collection, api)
     ok = await_indexed(len(ready), collection, api)
-    print(f"{collection}: {len(ready)}/{len(files)} imported and indexed")
-    return 0 if ok and len(ready) == len(files) else 1
+    print(f"{collection}: {len(ready)}/{len(files)} imported and indexed", flush=True)
+    return ok and len(ready) == len(files)
+
+
+def main(api: str = DEFAULT_API, collection: str = COLLECTION, profile: str = "") -> int:
+    """`profile` picks an embedding profile for a fresh instance; empty leaves it full-text only."""
+    if profile:
+        ensure_profile(profile, api)
+    ok = load(fetch(), collection, DESCRIPTION, api)
+    for seed in synth.SEEDS:
+        synth.generate(seed)
+        for name, directory in synth.corpora(seed):
+            # Corpora nest and share documents by name, so each is imported once and attached to
+            # every collection that holds it.
+            files = sorted(directory.iterdir())
+            ok = load(files, name, f"Synthetic runbooks, {len(files)} documents.", api) and ok
+            # Arm F runs against the full-text instance only, and its question was answered on
+            # the default seed - other seeds don't need the extra index.
+            if not profile and seed == synth.DEFAULT_SEED:
+                description = f"Synthetic runbooks, {len(files)} documents, small chunks."
+                ok = load(files, small_chunks(name), description, api, SMALL_CHUNKS) and ok
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

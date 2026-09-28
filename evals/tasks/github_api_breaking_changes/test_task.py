@@ -32,6 +32,4 @@ def test_javascript_and_typescript_share_one_enum_value_now() -> None:
     """Before this version, the `languages` enum listed "javascript" and "typescript"
     separately. 2026-03-10 merges them into one value, reflecting that CodeQL always analyzed
     them together."""
-    assert (
-        github_api_breaking_changes.code_scanning_combined_language() == "javascript-typescript"
-    )
+    assert github_api_breaking_changes.code_scanning_combined_language() == "javascript-typescript"

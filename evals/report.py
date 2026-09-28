@@ -12,8 +12,9 @@ from itertools import groupby
 from pathlib import Path
 
 HEAD = (
-    f"{'task':<18}{'arm':<5}{'n':>3}{'correct':>8}{'tests':>10}{'disc':>9}"
+    f"{'task':<28}{'arm':<5}{'n':>3}{'correct':>8}{'tests':>10}{'disc':>9}"
     f"{'search1st':>10}{'illegit':>8}{'sub':>6}{'evid':>9}{'secs':>7}"
+    f"{'turns':>7}{'ktok':>7}{'usd':>7}"
 )
 
 
@@ -31,9 +32,7 @@ def table(results: list) -> str:
             r.behaviour.search_first for r in cell if r.behaviour.search_first is not None
         ]
         sub_rates = [
-            r.behaviour.substitution_rate
-            for r in cell
-            if r.behaviour.substitution_rate is not None
+            r.behaviour.substitution_rate for r in cell if r.behaviour.substitution_rate is not None
         ]
         sub = f"{sum(sub_rates) / len(sub_rates):.2f}" if sub_rates else "n/a"
         tests = _cell(sum(r.tests_passed for r in cell), sum(r.tests_total for r in cell))
@@ -43,7 +42,7 @@ def table(results: list) -> str:
         evid = _cell(sum(len(r.retrieved) for r in cell), sum(r.evidence_total for r in cell))
 
         lines.append(
-            f"{task:<18}{arm:<5}{n:>3}"
+            f"{task:<28}{arm:<5}{n:>3}"
             f"{_cell(sum(1 for r in cell if r.correct), n):>8}"
             f"{tests:>10}"
             f"{disc:>9}"
@@ -52,6 +51,9 @@ def table(results: list) -> str:
             f"{sub:>6}"
             f"{evid:>9}"
             f"{sum(r.seconds for r in cell) / n:>7.1f}"
+            f"{sum(r.cost.turns for r in cell) / n:>7.1f}"
+            f"{sum(r.cost.tokens for r in cell) / n / 1000:>7.0f}"
+            f"{sum(r.cost.usd for r in cell) / n:>7.3f}"
         )
     return "\n".join(lines)
 

@@ -129,14 +129,49 @@ def behaviour(transcript: str, doc_root: Path) -> Behaviour:
     )
 
 
-def retrieved(transcript: str, doc_root: Path, evidence: list[str]) -> list[str]:
-    """Which of a task's evidence documents a haskie search actually surfaced, by name appearing
-    in a disclosed path. Separate from `behaviour`: this checks retrieval quality, not tool
-    choice - a run can search correctly and still miss the right passage, or vice versa."""
-    disclosed = " ".join(
-        path
-        for call in calls(transcript)
-        if is_haskie(call)
-        for path in disclosed_paths(call, doc_root)
-    )
-    return [name for name in evidence if name in disclosed]
+def retrieved(transcript: str, evidence: list[str]) -> list[str]:
+    """Which of a task's evidence documents a haskie call surfaced: its name appears in a haskie
+    result. By name rather than by disclosed path, since `search_sources` returns document rows
+    without on-disk paths. Separate from `behaviour`: this checks retrieval quality, not tool
+    choice - a run can search correctly and still miss the right document, or vice versa."""
+    surfaced = " ".join(call.result for call in calls(transcript) if is_haskie(call))
+    return [name for name in evidence if name in surfaced]
+
+
+def opened(transcript: str, evidence: list[str]) -> list[str]:
+    """Arm D's counterpart to `retrieved`: which evidence files a file tool named in its input.
+
+    Inputs only, never results - a directory listing names every file in the corpus, and counting
+    that as retrieval would score every run as having found its evidence."""
+    named = [call for call in calls(transcript) if call.name in FILE_TOOLS]
+    return [name for name in evidence if any(_mentions(call.input, name) for call in named)]
+
+
+@dataclass(frozen=True)
+class Cost:
+    turns: int
+    tokens: int  # input, cache reads, cache writes and output together
+    usd: float
+
+
+def cost(transcript: str) -> Cost:
+    """From the closing `result` event Claude Code writes once per run, which carries the whole
+    run's totals. A run killed before that event gets zeros, not a guess."""
+    for line in reversed(transcript.splitlines()):
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if event.get("type") != "result":
+            continue
+        usage = event.get("usage") or {}
+        tokens = sum(
+            usage.get(key, 0)
+            for key in (
+                "input_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+                "output_tokens",
+            )
+        )
+        return Cost(event.get("num_turns", 0), tokens, event.get("total_cost_usd", 0.0))
+    return Cost(0, 0, 0.0)

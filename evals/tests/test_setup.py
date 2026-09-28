@@ -5,6 +5,8 @@ that records every call it receives so a test can assert on what was and was not
 
 from pathlib import Path
 
+import pytest
+
 from evals import setup
 
 
@@ -53,6 +55,11 @@ class FakeServer:
                 collection = path.removeprefix("/api/collections/").removesuffix("/documents")
                 self.documents[body["document"]]["in_collections"].append(collection)
                 return {}
+        if method == "PUT" and path.endswith("/settings"):
+            assert body is not None, f"PUT {path} with no body"
+            collection = path.removeprefix("/api/collections/").removesuffix("/settings")
+            self.collections[collection].setdefault("settings", {}).update(body)
+            return {}
         raise AssertionError(f"unhandled: {method} {path}")
 
 
@@ -97,7 +104,7 @@ def test_ensure_collection_skips_the_write_when_it_already_exists(monkeypatch) -
 def test_import_all_adopts_an_existing_document_without_reimporting(
     monkeypatch, tmp_path: Path
 ) -> None:
-    server = FakeServer(documents={"a.pdf": {"name": "a.pdf", "status": "imported"}})
+    server = FakeServer(documents={"a.pdf": {"name": "a.pdf", "status": "imported", "size": 1}})
     _install(monkeypatch, server)
     file = tmp_path / "a.pdf"
     file.write_text("x")
@@ -106,6 +113,32 @@ def test_import_all_adopts_an_existing_document_without_reimporting(
 
     assert names == ["a.pdf"]
     assert not _posts(server)
+
+
+def test_import_all_refuses_a_name_imported_earlier_with_different_content(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Documents are keyed by name, so without this a regenerated synthetic corpus would keep
+    being searched as the stale content imported under the same name."""
+    server = FakeServer(documents={"a.md": {"name": "a.md", "status": "imported", "size": 99}})
+    _install(monkeypatch, server)
+    file = tmp_path / "a.md"
+    file.write_text("x")
+
+    with pytest.raises(RuntimeError, match="different content"):
+        setup.import_all([file], "http://x")
+    assert not _posts(server)
+
+
+def test_ensure_chunking_writes_only_when_the_settings_differ(monkeypatch) -> None:
+    server = FakeServer(collections={"c": {"name": "c", "settings": {"chunk_size": None}}})
+    _install(monkeypatch, server)
+
+    setup.ensure_chunking("c", setup.SMALL_CHUNKS, "http://x")
+    setup.ensure_chunking("c", setup.SMALL_CHUNKS, "http://x")
+
+    puts = [call for call in server.calls if call[0] == "PUT"]
+    assert puts == [("PUT", "/api/collections/c/settings", setup.SMALL_CHUNKS)]
 
 
 def test_import_all_imports_a_file_not_seen_before(monkeypatch, tmp_path: Path) -> None:

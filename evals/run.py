@@ -7,6 +7,18 @@ tools as B plus one written instruction telling it to search before writing code
 CLAUDE.md instruction" step, now that A/B is trusted. It isolates one variable at a time: B vs A
 shows what the bare tool does on its own; C vs B shows what explicit coaching adds on top of that,
 each holding everything else about the task fixed.
+
+Arm D is the baseline haskie actually competes with: the same documents as plain files in the
+working directory, no haskie. A vs B only shows that a corpus is needed; D vs B shows whether
+haskie is the right way to reach one.
+
+Arm E is arm B against a second haskie instance that has an embedding profile, so its searches
+are hybrid (vectors + BM25) where B's are full-text only. B vs E isolates what semantic search
+adds - the variable the synthetic tasks' paraphrase level is built to exercise.
+
+Arm F is arm B searching sibling collections chunked at 300 characters instead of the default
+1200 (`setup.SMALL_CHUNKS`). An excerpt is a chunk widened to sentence boundaries, so chunk size
+sets how much every search result puts into the agent's context - B vs F isolates that.
 """
 
 from __future__ import annotations
@@ -23,26 +35,32 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from evals import metrics
+from evals import metrics, setup, synth
 from evals.report import write_report
+from evals.setup import CORPUS_DIR
 
 ROOT = Path(__file__).resolve().parent
 TASK_ROOT = ROOT / "tasks"
 RUNS = ROOT / "runs"
 
 CODING_TOOLS = ("Read", "Write", "Edit", "Grep", "Glob", "Bash", "TodoWrite")
+# Every read-only tool the server exposes (`grep -rn mcp_tool= src/haskie`); the write tools
+# (add/remove document) stay out so an arm can't change the corpus it's being measured against.
+# These must track the server: a tool missing here is silently unavailable to the agent.
 HASKIE_TOOLS = (
     "mcp__haskie__list_collections",
     "mcp__haskie__get_collection",
     "mcp__haskie__list_collection_documents",
+    "mcp__haskie__list_documents",
+    "mcp__haskie__describe_document",
+    "mcp__haskie__get_document",
     "mcp__haskie__set_session_collections",
-    "mcp__haskie__search",
-    "mcp__haskie__search_collection",
-    "mcp__haskie__search_text",
-    "mcp__haskie__document_passages",
+    "mcp__haskie__search_sources",
+    "mcp__haskie__search_excerpts",
 )
-ARMS = ("a", "b", "c")
-TASKS = (
+ARMS = ("a", "b", "c", "d", "e", "f")
+HASKIE_ARMS = ("b", "c", "e", "f")
+BOOK_TASKS = (
     "mlfq_priority",
     "reusable_barrier",
     "revision_ranges",
@@ -54,6 +72,9 @@ TASKS = (
     "raft_election",
     "collapsed_forwarding",
 )
+SYNTH_TASKS = tuple(task for seed in synth.SEEDS for task in synth.task_names(seed))
+TASKS = (*BOOK_TASKS, *SYNTH_TASKS)
+GROUPS = {"all": TASKS, "books": BOOK_TASKS, "synth": SYNTH_TASKS}
 
 # pytest's summary line lists whichever outcomes occurred, in its own fixed order - "failed"
 # before "passed" when both are present - not always "passed" first. Matching each `N <word>`
@@ -67,6 +88,8 @@ class Task:
     name: str
     module: str
     evidence: list[str]
+    corpus: Path  # what arm D gets as files
+    collection: str | None  # what the haskie arms search; None means the run's --collection
 
     @property
     def prompt(self) -> str:
@@ -79,7 +102,8 @@ class Task:
 
 def load_task(name: str) -> Task:
     meta = json.loads((TASK_ROOT / name / "meta.json").read_text())
-    return Task(name, meta["module"], meta["evidence"])
+    corpus = ROOT / meta["corpus"] if "corpus" in meta else CORPUS_DIR
+    return Task(name, meta["module"], meta["evidence"], corpus, meta.get("collection"))
 
 
 def claude_binary() -> str:
@@ -116,6 +140,12 @@ def prompt_for(task: Task, arm: str, collection: str) -> str:
     )
     if arm == "a":
         return f"{header}{task.prompt}"
+    if arm == "d":
+        files_note = (
+            "\n\nThe `corpus/` directory here holds a collection of documents. It may or may not "
+            "have material relevant to this task."
+        )
+        return f"{header}{task.prompt}{files_note}"
     if arm == "c":
         coaching = (
             f"\n\nYou have a Haskie MCP collection named {collection} available, containing the "
@@ -132,7 +162,7 @@ def prompt_for(task: Task, arm: str, collection: str) -> str:
 
 
 def allowed_tools(arm: str) -> list[str]:
-    return [*CODING_TOOLS, *(HASKIE_TOOLS if arm in ("b", "c") else ())]
+    return [*CODING_TOOLS, *(HASKIE_TOOLS if arm in HASKIE_ARMS else ())]
 
 
 # A parent Claude Code session and its spawned `claude -p` child share the same on-disk OAuth
@@ -148,7 +178,7 @@ def run_agent(task: Task, arm: str, directory: Path, model: str, api: str, colle
     work.mkdir(parents=True, exist_ok=True)
     mcp = directory / "mcp.json"
     servers = (
-        {"haskie": {"type": "http", "url": f"{api.rstrip('/')}/mcp"}} if arm in ("b", "c") else {}
+        {"haskie": {"type": "http", "url": f"{api.rstrip('/')}/mcp"}} if arm in HASKIE_ARMS else {}
     )
     mcp.write_text(json.dumps({"mcpServers": servers}, indent=2) + "\n")
 
@@ -252,6 +282,7 @@ class Result:
     evidence_total: int
     behaviour: metrics.Behaviour
     seconds: float
+    cost: metrics.Cost
 
     @property
     def correct(self) -> bool:
@@ -271,7 +302,12 @@ def grade(
     passed, total = run_pytest(task.tests, work)
     disc_passed, disc_total = run_pytest(task.tests, work, marker="discriminating")
     transcript = (directory / "transcript.jsonl").read_text(encoding="utf-8", errors="replace")
-    found = metrics.retrieved(transcript, doc_root, task.evidence) if arm in ("b", "c") else []
+    if arm in HASKIE_ARMS:
+        found = metrics.retrieved(transcript, task.evidence)
+    elif arm == "d":
+        found = metrics.opened(transcript, task.evidence)
+    else:
+        found = []
     behaviour = metrics.behaviour(transcript, doc_root)
     result = Result(
         task.name,
@@ -287,6 +323,7 @@ def grade(
         len(task.evidence),
         behaviour,
         seconds,
+        metrics.cost(transcript),
     )
     (directory / "result.json").write_text(
         json.dumps(asdict(result) | {"correct": result.correct}, indent=2, default=str) + "\n"
@@ -312,20 +349,30 @@ def warm_auth() -> None:
 def run_one(
     task: Task, arm: str, sample: int, model: str, api: str, home: Path, collection: str
 ) -> Result:
-    directory = RUNS / arm / task.name / str(sample)
+    directory = RUNS / model / arm / task.name / str(sample)
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir(parents=True)
+    # A copy, not a hardlink: an agent editing a corpus file in place would otherwise rewrite the
+    # shared original under every later run. Removed afterwards so 30 runs don't hold 30 copies.
+    corpus = directory / "work" / "corpus"
+    if arm == "d":
+        shutil.copytree(task.corpus, corpus)
     started = time.monotonic()
-    returncode = run_agent(task, arm, directory, model, api, collection)
+    name = task.collection or collection
+    if arm == "f":
+        name = setup.small_chunks(name)
+    returncode = run_agent(task, arm, directory, model, api, name)
     seconds = time.monotonic() - started
+    if arm == "d":
+        shutil.rmtree(corpus)
     doc_root = home / "documents"
     return grade(task, arm, directory, returncode, doc_root, seconds, model)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("task", nargs="?", choices=[*TASKS, "all"], default="all")
+    parser.add_argument("tasks", nargs="*", help=f"task names or groups: {', '.join(GROUPS)}")
     parser.add_argument("--arms", nargs="+", choices=list(ARMS), default=list(ARMS))
     parser.add_argument("--model", default=os.environ.get("EVAL_MODEL", "sonnet"))
     parser.add_argument("--api", default=os.environ.get("HASKIE_EVAL_URL", "http://127.0.0.1:8123"))
@@ -333,21 +380,39 @@ def main() -> int:
         "--home", type=Path, default=Path(os.environ.get("HASKIE_EVAL_HOME", ROOT / ".haskie-eval"))
     )
     parser.add_argument(
-        "--collection", default=os.environ.get("HASKIE_EVAL_COLLECTION", "eval-programming-books")
+        "--embed-api", default=os.environ.get("HASKIE_EVAL_EMBED_URL", "http://127.0.0.1:8124")
     )
     parser.add_argument(
-        "--samples", type=int, default=int(os.environ.get("EVAL_SAMPLES", "3"))
+        "--embed-home",
+        type=Path,
+        default=Path(os.environ.get("HASKIE_EVAL_EMBED_HOME", ROOT / ".haskie-eval-embed")),
+    )
+    parser.add_argument(
+        "--collection", default=os.environ.get("HASKIE_EVAL_COLLECTION", "eval-programming-books")
+    )
+    parser.add_argument("--samples", type=int, default=int(os.environ.get("EVAL_SAMPLES", "3")))
+    parser.add_argument(
+        "--first-sample",
+        type=int,
+        default=0,
+        help="index of the first sample to run: add samples to a cell without redoing earlier ones",
     )
     args = parser.parse_args()
 
-    tasks = [load_task(t) for t in (TASKS if args.task == "all" else [args.task])]
+    unknown = [name for name in args.tasks if name not in TASKS and name not in GROUPS]
+    if unknown:
+        parser.error(f"unknown task or group: {', '.join(unknown)}")
+    names = [t for name in args.tasks or ["all"] for t in GROUPS.get(name, (name,))]
+    tasks = [load_task(t) for t in dict.fromkeys(names)]
+    instance = {arm: (args.api, args.home) for arm in ARMS}
+    instance["e"] = (args.embed_api, args.embed_home)
     RUNS.mkdir(parents=True, exist_ok=True)
     warm_auth()
     results = [
-        run_one(task, arm, sample, args.model, args.api, args.home, args.collection)
+        run_one(task, arm, sample, args.model, *instance[arm], args.collection)
         for arm in args.arms
         for task in tasks
-        for sample in range(args.samples)
+        for sample in range(args.first_sample, args.first_sample + args.samples)
     ]
     write_report(results, RUNS)
     return 0 if all(r.correct for r in results) else 1

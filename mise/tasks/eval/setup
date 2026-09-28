@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-#MISE description="Start the isolated haskie eval instance, download the corpus, import and index it (idempotent)"
+#MISE description="Start both isolated haskie eval instances (full-text, and with embeddings), download the corpus, generate the synthetic corpus, import and index everything (idempotent)"
 set -euo pipefail
 home="${HASKIE_EVAL_HOME:-$PWD/evals/.haskie-eval}"
 api="${HASKIE_EVAL_URL:-http://127.0.0.1:8123}"
+embed_home="${HASKIE_EVAL_EMBED_HOME:-$PWD/evals/.haskie-eval-embed}"
+embed_api="${HASKIE_EVAL_EMBED_URL:-http://127.0.0.1:8124}"
+embed_profile="${HASKIE_EVAL_EMBED_PROFILE:-compact}"
 collection="${HASKIE_EVAL_COLLECTION:-eval-programming-books}"
 uv run haskie ensure --home "$home" --url "$api/mcp"
+uv run haskie ensure --home "$embed_home" --url "$embed_api/mcp"
 uv run python -m evals.setup "$api" "$collection"
+uv run python -m evals.setup "$embed_api" "$collection" "$embed_profile"

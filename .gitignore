@@ -12,8 +12,11 @@ dist/
 src/haskie/web/
 
 evals/corpus/
-evals/.haskie-eval/
+evals/.haskie-eval*/
 evals/runs/
+# regenerated from a seed by `evals/synth.py`
+evals/synth/
+evals/tasks/synth_*/
 evals/results.md
 
 library/
