@@ -431,15 +431,15 @@ def test_claim_home_claims_once_and_gives_the_home_back(elsewhere: Path) -> None
 
 
 @pytest.mark.parametrize(
-    ("name", "server_pid", "recorded"),
+    ("name", "server_pid"),
     [
-        ("a server that is its own process", None, os.getpid()),
+        pytest.param("a server that is its own process", None, id="own-process"),
         # under `--reload` the claim runs in a worker; `stop` must signal `run`, which outlives it
-        ("a worker under run --reload", 4242, 4242),
+        pytest.param("a worker under run --reload", 4242, id="reload-worker"),
     ],
 )
 def test_the_lock_names_the_process_stop_must_signal(
-    elsewhere: Path, monkeypatch: pytest.MonkeyPatch, name: str, server_pid, recorded: int
+    elsewhere: Path, monkeypatch: pytest.MonkeyPatch, name: str, server_pid: int | None
 ) -> None:
     home.use(elsewhere)
     if server_pid is not None:
@@ -450,7 +450,7 @@ def test_the_lock_names_the_process_stop_must_signal(
     with holding():
         line = home.LOCK_FILE.read_text()
 
-    assert line.startswith(f"pid {recorded},"), name
+    assert line.startswith(f"pid {server_pid or os.getpid()},"), name
 
 
 def test_run_exports_its_own_pid_for_the_lock(
