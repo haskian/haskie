@@ -2599,7 +2599,9 @@ FOREIGN = "https://evil.example"
         pytest.param(None, f" {FOREIGN}/ ,", LOOPBACK_URL, "POST", FOREIGN, 422, id="trusted"),
         pytest.param(None, "", "http://localhost:8451", "POST", None, 422, id="localhost-name"),
         pytest.param(None, "", "http://rebind.example", "GET", None, 403, id="rebinding-host"),
-        pytest.param("http://box.lan:8451", "", "http://box.lan:8451", "GET", None, 422, id="bound"),
+        pytest.param(
+            "http://box.lan:8451", "", "http://box.lan:8451", "GET", None, 422, id="bound"
+        ),
         pytest.param("http://0.0.0.0:8451", "", "http://box.lan", "GET", None, 422, id="wildcard"),
     ],
 )
