@@ -110,8 +110,7 @@ cited answers in Claude Code. Not there yet:
 haskie needs [uv](https://docs.astral.sh/uv/), which fetches Python 3.13 or newer if you have none.
 
 ```sh
-gh release download --repo haskian/haskie --pattern '*.whl'
-uv tool install ./haskie-*.whl
+uv tool install haskie
 haskie install claude       # MCP server, skill, rule and SessionStart hook for Claude Code
 haskie run                  # web UI, REST API and MCP on http://127.0.0.1:8451
 ```
@@ -121,16 +120,15 @@ The default model is bge-small (English, about 130 MB). Pick a multilingual one 
 languages, or none for keyword search only. The model applies to every collection, and changing
 it later means running *Index all* in each one.
 
-- **Extras:** install `"haskie[gpu] @ ./haskie-<version>-py3-none-any.whl"` to run embeddings and
+- **Extras:** install `"haskie[gpu]"` to run embeddings and
   rerankers on CUDA. On Apple Silicon, `haskie[mlx]` adds the MLX rerankers and embedding models, and
   `haskie[gguf]` the `-gguf` embedding profiles, which run on the GPU through llama.cpp (installing
   it compiles llama.cpp, which needs the Xcode command-line tools and cmake). Other ONNX embeddings
   run on the CPU there; the `coreml` hardware setting runs them through CoreML instead, which today
-  is slower. To install both Apple Silicon extras, run this in the folder that holds the wheel, and
-  drop the one you do not need:
+  is slower. To install both Apple Silicon extras, drop the one you do not need:
 
   ```sh
-  uv tool install "haskie[mlx,gguf] @ ./haskie-<version>-py3-none-any.whl"
+  uv tool install "haskie[mlx,gguf]"
   ```
 
 - **Port:** 8451 by default, clear of the usual 8000 and 8080. For another, run
