@@ -13,7 +13,7 @@ const STATUSBAR_HTML = `<div class="statusbar" role="status">
     </span>
   </div>`;
 document.getElementById('statusbar').outerHTML = STATUSBAR_HTML;
-const LOGO_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 6 8" fill="currentColor"><path d="M1 0h1v4h2v1a1 1 0 0 0 1 1h1v2H4V7a1 1 0 0 0-1-1H2v2H0V1a1 1 0 0 0 1-1ZM4 2h2v2H4Z"/></svg>';
+const LOGO_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 48" fill="currentColor"><path d="M7 0h5v48H0V7a7 7 0 0 0 7-7ZM24 12h12v12H24ZM12 24h12v12H12ZM24 36h12v12H24ZM30 36a6 6 0 0 0-6 6 6 6 0 0 0-6-6 6 6 0 0 0 6-6 6 6 0 0 0 6 6Z"/></svg>';
 for (const logo of document.querySelectorAll('.logo')) logo.innerHTML = LOGO_SVG + '<span>haskie</span>';
 lucide.createIcons();
 
