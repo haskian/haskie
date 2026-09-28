@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.13.1 - 2026-09-28
+#### Bug Fixes
+- (**release**) dispatch release.yml so PyPI accepts the upload (#23) - (15c3572) - Črtomir Majer
+
+- - -
+
 ## v0.13.0 - 2026-09-28
 #### Features
 - publish to PyPI and switch to the new k logo (#22) - (4992d4d) - Črtomir Majer
