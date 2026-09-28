@@ -176,7 +176,7 @@ def _model(row: Row[Any]) -> tuple[str, EmbeddingModel]:
 
 async def _records(statement: Select[Any]) -> list[dict[str, Any]]:
     """The rows of `statement` keyed by column name, so they convert to a struct by field name."""
-    async with db.connect() as conn:
+    async with db.read() as conn:
         return [db.record(row) for row in await conn.execute(statement)]
 
 
@@ -190,7 +190,7 @@ async def embedders() -> dict[str, EmbeddingModel]:
     only is the absence of a model."""
     cached = _embedders.get(home.DB_FILE)
     if cached is None:
-        async with db.connect() as conn:
+        async with db.read() as conn:
             rows = await conn.execute(_profiles(*_PROFILE))
             cached = _embedders[home.DB_FILE] = dict(map(_model, rows))
     return cached
@@ -280,7 +280,7 @@ async def check(settings: UserSettings | CollectionOverrides) -> None:
     user settings whose hardware setting leaves a model they use nowhere to run. Only here, where
     settings are written: a stored row that no longer runs still loads, and its model reports why.
     """
-    async with db.connect() as conn:
+    async with db.read() as conn:
         problem = await unknown(conn, settings)
     if not problem and isinstance(settings, UserSettings):
         problem = await _stranded(settings)

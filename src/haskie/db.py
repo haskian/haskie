@@ -146,9 +146,13 @@ def _set_pragmas(dbapi_connection: Any, _record: Any) -> None:
     dbapi_connection.execute("pragma foreign_keys = on")  # per connection
 
 
-def _begin_immediate(conn: Connection) -> None:
-    """Every unit of work takes the write lock at its start, so what it read still holds when it
-    writes: a unit that checks, then writes, never acts on a check another commit made stale.
+_READ_ONLY = "haskie_read_only"  # the execution option `read` sets, which `_begin` reads
+
+
+def _begin(conn: Connection) -> None:
+    """A unit of work that may write takes the write lock at its start, so what it read still
+    holds when it writes: a unit that checks, then writes, never acts on a check another commit
+    made stale.
 
     The driver's own transaction control is off (`isolation_level=None`): it would open none
     before a SELECT, so a check ran outside the transaction its write joined later. A plain
@@ -157,10 +161,17 @@ def _begin_immediate(conn: Connection) -> None:
     busy timeout does not cover a stale snapshot, and DBOS commits to this file all the time.
     `immediate` makes that commit wait instead. Measured on one WAL file with a writer
     committing every millisecond: deferred failed every read-then-write unit, immediate none.
-    The price is that read-only units wait for each other and for DBOS's writers: 8 concurrent
-    readers ran 11 to 16 times slower. A read-only unit that would not take the lock needs its
-    own entry point, chosen by its caller."""
-    conn.exec_driver_sql("begin immediate")
+
+    The price is that units wait for each other and for DBOS's writers, so a unit that only
+    reads (`read`) opens a deferred transaction instead: it never writes, so no stale snapshot
+    can fail it, and in WAL it waits for no one. `query_only` makes a write through it fail
+    loudly. The pragma outlives the transaction, which is harmless under `NullPool`: the
+    connection is closed when the unit ends."""
+    if conn.get_execution_options().get(_READ_ONLY):
+        conn.exec_driver_sql("pragma query_only = 1")
+        conn.exec_driver_sql("begin")
+    else:
+        conn.exec_driver_sql("begin immediate")
 
 
 # One engine per database file, made by `_migrate_sync`: tests switch homes, and `haskie destroy`
@@ -174,7 +185,7 @@ async def _first_connected_engine() -> AsyncEngine:
     `NullPool` opens a connection per unit of work and closes it after, so no connection is ever
     shared between the two event loops (Litestar's and DBOS's), and one engine serves both.
     `timeout` makes a unit wait for the write lock another unit or DBOS holds, instead of raising
-    "database is locked" (see `_begin_immediate`); WAL (set when the schema is created) lets
+    "database is locked" (see `_begin`); WAL (set when the schema is created) lets
     DBOS's readers proceed.
 
     SQLAlchemy guards an engine's first connection with an asyncio lock, which binds to the loop
@@ -186,7 +197,7 @@ async def _first_connected_engine() -> AsyncEngine:
         connect_args={"timeout": BUSY_TIMEOUT_SECONDS, "isolation_level": None},
     )
     event.listen(made.sync_engine, "connect", _set_pragmas)
-    event.listen(made.sync_engine, "begin", _begin_immediate)
+    event.listen(made.sync_engine, "begin", _begin)
     async with made.connect():
         pass
     return made
@@ -199,11 +210,26 @@ def engine() -> AsyncEngine:
 
 @asynccontextmanager
 async def connect() -> AsyncIterator[AsyncConnection]:
-    """One connection and one transaction per unit of work, holding the write lock from its first
-    statement (see `_begin_immediate`); commits on success, rolls back on error. Never open one
-    while holding another: the inner unit would wait for the outer one's lock."""
+    """One connection and one transaction per unit of work that writes, holding the write lock
+    from its first statement (see `_begin`); commits on success, rolls back on error. Never open
+    one while holding another: the inner unit would wait for the outer one's lock."""
     await migrate_once()
     async with engine().begin() as conn:
+        yield conn
+
+
+@asynccontextmanager
+async def read() -> AsyncIterator[AsyncConnection]:
+    """One connection and one deferred transaction per unit of work that only reads (see
+    `_begin`). It takes no lock, so it waits neither for other units nor for DBOS's writers.
+
+    Every statement of the unit still reads one snapshot: in WAL, a transaction's first read fixes
+    the commit it sees, and a commit landing after it stays invisible until the unit ends. A write
+    through it raises ("attempt to write a readonly database"). Nothing is committed: the unit
+    rolls back when it ends."""
+    await migrate_once()
+    async with engine().connect() as conn:
+        await conn.execution_options(**{_READ_ONLY: True})
         yield conn
 
 

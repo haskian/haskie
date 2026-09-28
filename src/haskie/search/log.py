@@ -397,7 +397,7 @@ async def load(
         .order_by(chosen.c.ts.desc(), chosen.c.id.desc(), search_questions.c.position)
     )
     found: dict[int, Logged] = {}
-    async with db.connect() as conn:
+    async with db.read() as conn:
         for row in await conn.execute(joined):
             logged = found.get(row.id)
             if logged is None:
@@ -418,7 +418,7 @@ async def load(
 
 async def vectors(question_ids: Sequence[int]) -> dict[int, np.ndarray]:
     """The query vector of each of these questions that has one, read straight from its bytes."""
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = await conn.execute(
             select(search_questions.c.id, search_questions.c.query_vector).where(
                 search_questions.c.id.in_(question_ids),
@@ -446,7 +446,7 @@ async def top_results(
     statement = select(kept.c.search_id, *(kept.c[name] for name in LoggedResult.__struct_fields__))
     if per_search is not None:
         statement = statement.where(kept.c.rank <= per_search)
-    async with db.connect() as conn:
+    async with db.read() as conn:
         for row in await conn.execute(statement.order_by(kept.c.search_id, kept.c.position)):
             found[row.search_id].append(db.row_to(LoggedResult, row))
     return found
@@ -492,7 +492,7 @@ async def history(session_id: str, limit: int) -> list[session.SessionEvent]:
 
 async def last_searched() -> dict[str, float]:
     """When each session last searched, in unix seconds; a session that never did is absent."""
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = await conn.execute(
             select(searches.c.session_id, func.max(searches.c.ts))
             .where(searches.c.session_id.is_not(None))
@@ -505,7 +505,7 @@ async def recent_questions(limit: int) -> list[str]:
     """The `limit` distinct questions this home asked most recently, newest first: each question
     of a search of several counts as one."""
     asked_at = func.max(searches.c.ts)
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = await conn.scalars(
             select(search_questions.c.question)
             .join(searches, searches.c.id == search_questions.c.search_id)
@@ -527,7 +527,7 @@ class SearchAt(msgspec.Struct):
 async def searches_since(cutoff: float) -> list[SearchAt]:
     """Every search on or after `cutoff`, oldest first. Raw points, not buckets: the reader
     buckets them by its own day boundaries, which the server does not know."""
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = await conn.execute(
             select(searches.c.ts, searches.c.session_id)
             .where(searches.c.ts >= cutoff)

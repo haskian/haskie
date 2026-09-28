@@ -8,9 +8,9 @@ write into this collection's table), so a membership carries its own status — 
 `indexed` in one collection and `error` in another at the same time. Deleting a collection drops
 its rows and its folder and touches no document.
 
-Every row read, row write and file touch is awaited: the database goes through `db.connect()`
-(aiosqlite), the files through `anyio.Path` and `home`, the table through `CollectionIndex`. The
-pure parts (paths, row decoding) stay sync.
+Every row read, row write and file touch is awaited: the database goes through `db.read()` or
+`db.connect()` (aiosqlite), the files through `anyio.Path` and `home`, the table through
+`CollectionIndex`. The pure parts (paths, row decoding) stay sync.
 """
 
 import time
@@ -252,7 +252,7 @@ class Collection:
     async def names() -> list[str]:
         """Every name, for callers inside the process (sessions, workflows). The API pages
         instead, through `page` below."""
-        async with db.connect() as conn:
+        async with db.read() as conn:
             return list(await conn.scalars(select(collections.c.name).order_by(collections.c.name)))
 
     @staticmethod
@@ -262,7 +262,7 @@ class Collection:
         sort, column = resolve_sort(request.sort, COLLECTION_SORTS, "name")
         walk = keyset(sort, column, request, collections.c.name)
         listed = select(collections.c.name, collections.c.created_at, collections.c.description)
-        async with db.connect() as conn:
+        async with db.read() as conn:
             rows = (await conn.execute(walk.apply(listed))).all()
             total = await conn.scalar(count_of(listed))
             counts = await _counts_by_collection(
@@ -296,7 +296,7 @@ class Collection:
 
     @classmethod
     async def get(cls, name: str) -> "Collection":
-        async with db.connect() as conn:
+        async with db.read() as conn:
             found = await conn.scalar(select(collections.c.name).where(collections.c.name == name))
         if found is None:
             raise NotFound(f"collection not found: {name}")
@@ -397,7 +397,7 @@ class Collection:
     async def load_overrides(names: list[str]) -> dict[str, CollectionOverrides]:
         """The overrides of several collections in one query, keyed by name. A name with no row
         is absent from the result, which is how a caller learns the collection is gone."""
-        async with db.connect() as conn:
+        async with db.read() as conn:
             return await _overrides_of(conn, names)
 
     @staticmethod
@@ -409,7 +409,7 @@ class Collection:
         collection (`LEAVING`). A name with no row is absent, as in `load_overrides`.
 
         One unit of work, so the overrides and the documents leaving are read at one moment."""
-        async with db.connect() as conn:
+        async with db.read() as conn:
             found = await _overrides_of(conn, names)
             leaving = await _leaving(conn, list(found))
         return {
@@ -427,7 +427,7 @@ class Collection:
 
         One query over the `overrides` column: the model downloads have to cover the overrides too,
         and a search of that collection loads whichever model it names."""
-        async with db.connect() as conn:
+        async with db.read() as conn:
             rows = await conn.execute(
                 select(collections.c.name, collections.c.overrides).order_by(collections.c.name)
             )
@@ -447,7 +447,7 @@ class Collection:
         and the member counts. Reading them apart would let a concurrent write show up in one
         half of the answer and not the other."""
         user = await load_user_settings()
-        async with db.connect() as conn:
+        async with db.read() as conn:
             row = (
                 await conn.execute(
                     select(
@@ -490,7 +490,7 @@ class Collection:
     async def pending_names() -> list[str]:
         """Collections with documents indexed since their last finished run: what a boot
         reschedules."""
-        async with db.connect() as conn:
+        async with db.read() as conn:
             names = await conn.scalars(
                 select(collections.c.name)
                 .where(collections.c.pending_documents > 0)
@@ -501,7 +501,7 @@ class Collection:
     async def maintenance_state(self) -> MaintenanceState | None:
         """None when the collection has no row: it was never created, or it was deleted while a
         run waited. A run treats that as a skip, so the absence has to stay visible."""
-        async with db.connect() as conn:
+        async with db.read() as conn:
             row = (
                 await conn.execute(
                     select(*MAINTENANCE_COLUMNS).where(collections.c.name == self.name)
@@ -598,7 +598,7 @@ class Collection:
         self._refuse_removing(doc, membership)
 
     async def member(self, doc: str) -> Member:
-        async with db.connect() as conn:
+        async with db.read() as conn:
             row = (await conn.execute(_MEMBERS.where(self._membership(doc)))).first()
         if row is None:
             raise NotFound(f"document not in collection {self.name}: {doc}")
@@ -656,7 +656,7 @@ class Collection:
         if not docs or not names:
             return {}
         member = collection_documents.c
-        async with db.connect() as conn:
+        async with db.read() as conn:
             rows = await conn.execute(
                 _MEMBERS.with_only_columns(member.document, member.collection)
                 .where(member.document.in_(list(docs)), member.collection.in_(list(set(names))))
@@ -677,11 +677,11 @@ class Collection:
         names = select(member.document).where(member.collection == self.name)
         if after is not None:
             names = names.where(member.document > after)
-        async with db.connect() as conn:
+        async with db.read() as conn:
             return list(await conn.scalars(names.order_by(member.document).limit(limit)))
 
     async def counts(self) -> DocumentCounts:
-        async with db.connect() as conn:
+        async with db.read() as conn:
             return (await _counts_by_collection(conn, [self.name]))[self.name]
 
     async def members_page(
@@ -694,7 +694,7 @@ class Collection:
         filters = [collection_documents.c.collection == self.name]
         if status is not None:
             filters.append(collection_documents.c.status == status)
-        async with db.connect() as conn:
+        async with db.read() as conn:
             members = _MEMBERS.where(*filters)
             rows = (await conn.execute(walk.apply(members))).all()
             total = await conn.scalar(count_of(members))

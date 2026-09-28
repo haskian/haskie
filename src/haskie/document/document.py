@@ -16,10 +16,10 @@ once, at import, so `parser` and `skip_ocr_pages` are chosen then and stored on 
 collection. Lifecycle: queued -> converting -> embedding -> imported, ending in error or cancelled
 instead; `deleting` while a delete runs, so nothing attaches the document meanwhile.
 
-Every row read, row write and file touch is awaited: the database goes through `db.connect()`
-(aiosqlite), the files through `anyio.Path` and `home`, and the one piece of CPU work here — the
-preview build — through `cpu.off_interpreter` for a PDF and `cpu.on_cpu` otherwise. The pure
-parts (paths, name cleaning, row decoding) stay sync.
+Every row read, row write and file touch is awaited: the database goes through `db.read()` or
+`db.connect()` (aiosqlite), the files through `anyio.Path` and `home`, and the one piece of CPU
+work here — the preview build — through `cpu.off_interpreter` for a PDF and `cpu.on_cpu`
+otherwise. The pure parts (paths, name cleaning, row decoding) stay sync.
 """
 
 import hashlib
@@ -156,7 +156,7 @@ async def listed(docs: list[Document]) -> list[Listed]:
     names_ = [doc.name for doc in docs]
     counts: dict[str, int] = {}
     if names_:
-        async with db.connect() as conn:
+        async with db.read() as conn:
             rows = await conn.execute(
                 select(collection_documents.c.document, func.count())
                 .where(collection_documents.c.document.in_(names_))
@@ -193,7 +193,7 @@ async def identical(md5: str, but: str | None = None) -> list[str]:
     )
     if but is not None:
         same = same.where(documents.c.name != but)
-    async with db.connect() as conn:
+    async with db.read() as conn:
         return list(await conn.scalars(same.order_by(documents.c.name)))
 
 
@@ -292,7 +292,7 @@ async def sweep_staging(max_age_seconds: float) -> int:
     `staging_path` now refuses (`notes.md~`) is cleared like any other.
     """
     cutoff = time.time() - max_age_seconds
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = (await conn.execute(select(staging.c.staging_id, staging.c.created_at))).all()
     live = {staging_id for staging_id, created_at in rows if created_at >= cutoff}
     expired = {staging_id for staging_id, created_at in rows if created_at < cutoff}
@@ -394,7 +394,7 @@ async def import_staged(staging_id: str, options: ImportOptions | None = None) -
     """
     options = options or ImportOptions()
     source = staging_path(staging_id)  # a trust boundary: the id is validated into a path here
-    async with db.connect() as conn:
+    async with db.read() as conn:
         row = (
             await conn.execute(
                 select(staging.c.filename, staging.c.md5).where(staging.c.staging_id == staging_id)
@@ -461,14 +461,14 @@ async def page(request: PageRequest, status: DocumentStatus | None = None) -> Pa
     walk = keyset(sort, column, request, documents.c.name)
     filters = [documents.c.status == status] if status is not None else []
     listing = select(*DOCUMENT_COLUMNS).where(*filters)
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = (await conn.execute(walk.apply(listing))).all()
         total = await conn.scalar(count_of(listing))
     return walk.page(rows, build=from_row, total=total)
 
 
 async def get(name: str) -> Document:
-    async with db.connect() as conn:
+    async with db.read() as conn:
         row = (
             await conn.execute(select(*DOCUMENT_COLUMNS).where(documents.c.name == name))
         ).first()
@@ -514,7 +514,7 @@ async def descriptions_of(docs: set[str]) -> dict[str, str]:
     if not docs:
         return {}
     wanted = sorted(docs)
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = await conn.execute(
             select(documents.c.name, documents.c.description).where(
                 documents.c.name.in_(wanted), documents.c.description != ""
@@ -540,7 +540,7 @@ def fill_descriptions(rows: Iterable[Described], described: dict[str, str]) -> N
 
 async def collections_of(name: str) -> list[str]:
     """Every collection holding the document, in name order."""
-    async with db.connect() as conn:
+    async with db.read() as conn:
         held = await conn.scalars(
             select(collection_documents.c.collection)
             .where(collection_documents.c.document == name)

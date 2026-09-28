@@ -1,4 +1,5 @@
-"""The unit of work `db.connect` opens: one transaction from its first statement to its commit.
+"""The two units of work `db` opens: `connect` for a unit that may write, `read` for one that only
+reads.
 
 A unit that reads, decides, then writes must not act on a read another unit's commit has made
 stale in between. The race is played on real connections through the real entry points: a
@@ -6,20 +7,26 @@ collection rename checks that no member is being deleted, and a document delete 
 document `deleting` and snapshots its memberships while the rename sits between its check and its
 first write. An attach checks that its document is imported, and the same delete runs while the
 attach sits after its check.
+
+A unit that only reads takes no lock, still reads one snapshot, and refuses a write.
 """
 
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 import anyio
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, insert, select
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.util import await_only
 
 from haskie import db
 from haskie.collection.collection import Collection
 from haskie.document import document
 from haskie.document.document import DocumentStatus
+from haskie.tables import collections
 
 from conftest import import_row  # isort: skip
 
@@ -153,3 +160,94 @@ async def test_an_attach_checks_and_inserts_in_one_unit() -> None:
     assert race.deleted_during_pause is True, "the delete ran while the attach paused"
     assert race.snapshot == ["health"], "the delete's snapshot holds the membership"
     assert await document.collections_of(doc) == ["health"]
+
+
+class Meanwhile(StrEnum):
+    """What another unit does while the unit under test runs."""
+
+    NOTHING = "nothing"
+    COMMITS = "commits"  # between the unit's two reads
+    HOLDS_THE_LOCK = "holds the lock"  # from before the unit starts until after it ends
+
+
+@dataclass(frozen=True)
+class EntryCase:
+    name: str
+    entry: str  # the `db` function that opens the unit
+    meanwhile: Meanwhile
+    writes: bool  # the unit inserts the collection "mine" after its two reads
+    error: str | None  # what the unit raises
+    after: list[str]  # the collections committed once every unit ended
+
+
+async def _add(conn: AsyncConnection, name: str) -> None:
+    await conn.execute(insert(collections).values(name=name, created_at=1.0))
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        EntryCase(
+            "a read unit reads one snapshot while another unit commits",
+            "read",
+            Meanwhile.COMMITS,
+            writes=False,
+            error=None,
+            after=["other"],
+        ),
+        EntryCase(
+            "a read unit waits for no unit holding the write lock",
+            "read",
+            Meanwhile.HOLDS_THE_LOCK,
+            writes=False,
+            error=None,
+            after=["other"],
+        ),
+        EntryCase(
+            "a write through a read unit raises and writes nothing",
+            "read",
+            Meanwhile.NOTHING,
+            writes=True,
+            error="attempt to write a readonly database",
+            after=[],
+        ),
+        EntryCase(
+            "a write unit commits what it writes",
+            "connect",
+            Meanwhile.NOTHING,
+            writes=True,
+            error=None,
+            after=["mine"],
+        ),
+    ],
+    ids=lambda case: case.name,
+)
+@pytest.mark.anyio
+async def test_each_entry_point_opens_its_own_kind_of_unit(
+    case: EntryCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read unit's two reads agree whatever commits between them, and neither waits for a
+    writer: the busy timeout is cut short, so a read that waited for the lock would fail."""
+    monkeypatch.setattr(db, "BUSY_TIMEOUT_SECONDS", 0.1)
+    names = select(collections.c.name).order_by(collections.c.name)
+    reads: list[list[str]] = []
+    error: str | None = None
+    async with AsyncExitStack() as held:
+        if case.meanwhile is Meanwhile.HOLDS_THE_LOCK:
+            await _add(await held.enter_async_context(db.connect()), "other")
+        try:
+            async with getattr(db, case.entry)() as conn:
+                reads.append(list(await conn.scalars(names)))
+                if case.meanwhile is Meanwhile.COMMITS:
+                    async with db.connect() as other:
+                        await _add(other, "other")
+                reads.append(list(await conn.scalars(names)))
+                if case.writes:
+                    await _add(conn, "mine")
+        except OperationalError as exc:
+            error = str(exc.orig)
+
+    assert reads == [[], []], f"{case.name}: both reads see the state the unit started from"
+    assert error == case.error, case.name
+    async with db.read() as conn:
+        assert list(await conn.scalars(names)) == case.after, case.name
