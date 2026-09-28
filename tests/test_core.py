@@ -971,13 +971,61 @@ async def test_ensure_preview_bounds_concurrent_builds(
                     readers.start_soon(document.ensure_preview, doc)
                 for _ in range(workers):  # every slot of the pool is now inside a build
                     await anyio.to_thread.run_sync(entered.acquire)
-                assert document._preview_slots.current.value == 0, f"{name}: no slot left"
+                assert document._preview_slots.available_tokens == 0, f"{name}: no slot left"
                 release.set()
     finally:
         document.configure_preview_slots(PipelineSettings().preview_workers)
 
     assert len(builds) == 4, f"{name}: every document was built, once"
     assert peak == workers, f"{name}: never more parses at once than the pool admits"
+
+
+@pytest.mark.anyio
+async def test_resizing_the_preview_pool_counts_the_builds_already_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two builds run and two wait; raising the pool from 2 to 3 admits one more, not three."""
+    from haskie import cpu
+
+    monkeypatch.setattr(cpu, "_cpu_slots", cpu.SlotBudget(4))  # not the ceiling under test
+    names = [(await import_row(f"doc-{i}.md")).name for i in range(4)]
+    entered, release, counted = threading.Semaphore(0), threading.Event(), threading.Lock()
+    live, peak = 0, 0
+    real = convert.build_preview
+
+    def gated(*args, **kwargs):
+        nonlocal live, peak
+        with counted:
+            live += 1
+            peak = max(peak, live)
+        entered.release()
+        assert release.wait(timeout=30)
+        try:
+            return real(*args, **kwargs)
+        finally:
+            with counted:
+                live -= 1
+
+    document.configure_preview_slots(2)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(convert, "build_preview", gated)
+            async with anyio.create_task_group() as readers:
+                for doc in names:
+                    readers.start_soon(document.ensure_preview, doc)
+                for _ in range(2):
+                    await anyio.to_thread.run_sync(entered.acquire)
+
+                document.configure_preview_slots(3)
+
+                await anyio.to_thread.run_sync(entered.acquire)  # the one it admits
+                await anyio.sleep(0.1)  # time enough for any it wrongly admits to enter too
+                assert live == 3, "one more build, beside the two already running"
+                release.set()
+    finally:
+        document.configure_preview_slots(PipelineSettings().preview_workers)
+
+    assert peak == 3, "never more builds at once than the resized pool admits"
 
 
 @pytest.mark.anyio
@@ -988,16 +1036,15 @@ async def test_ensure_preview_returns_not_ready_when_the_queue_is_full(
     its request open until the burst clears."""
     doc = await import_row("g.md")
     monkeypatch.setattr(document, "PREVIEW_WAIT_SECONDS", 0.05)
-    from haskie import cpu
-
-    slots = cpu.ResizableSemaphore(anyio.Semaphore, 1)
+    slots = anyio.CapacityLimiter(1)
     monkeypatch.setattr(document, "_preview_slots", slots)
-    await slots.current.acquire()  # the test holds the only slot, so every reader waits it out
+    holder = object()  # another build: a limiter tells its borrowers apart
+    await slots.acquire_on_behalf_of(holder)  # it holds the only slot, so every reader waits
     try:
         with pytest.raises(NotReady, match="preview queue is full"):
             await document.ensure_preview(doc.name)
     finally:
-        slots.current.release()
+        slots.release_on_behalf_of(holder)
 
     assert (await document.get(doc.name)).preview is None, "nothing built, nothing stored"
 
@@ -1221,21 +1268,81 @@ async def test_member_names_walk_one_page_at_a_time() -> None:
 @pytest.mark.anyio
 async def test_member_counts_group_by_status() -> None:
     collection = await Collection.create("counts")
-    for name in ("a.md", "b.md", "c.md", "d.md"):
+    for name in ("a.md", "b.md", "c.md", "d.md", "e.md"):
         await collection.add((await attachable(name)).name)
     await collection.set_member_status("a.md", MemberStatus.INDEXED)
     await collection.set_member_status("b.md", MemberStatus.INDEXING)
     await collection.set_member_status("c.md", MemberStatus.ERROR, "boom")
+    await collection.start_removal("e.md")
 
     counts = await collection.counts()
 
-    assert counts.total == 4
+    assert counts.total == 5
     assert counts.indexed == 1
-    assert counts.active == 2, "pending and indexing are both in flight"
+    assert counts.active == 3, "pending, indexing and removing are all in flight"
     assert counts.error == 1
-    assert counts.by_status == {"indexed": 1, "indexing": 1, "error": 1, "pending": 1}
+    assert counts.by_status == {
+        "indexed": 1,
+        "indexing": 1,
+        "error": 1,
+        "pending": 1,
+        "removing": 1,
+    }
     empty = await Collection.create("empty")
     assert await empty.counts() == DocumentCounts(), "a collection without members"
+
+
+@pytest.mark.parametrize(
+    ("change", "detached", "status", "error"),
+    [
+        # a cancelled index still finishing, and the cancel itself, write the status too late
+        ("index", True, "removing", None),
+        ("cancel", True, "removing", None),
+        # a failed removal is the one write that ends `removing`, short of the row going
+        ("fail the removal", True, "error", "removal failed: boom"),
+        # a delete's removal never marked the member: its failure leaves the status alone
+        ("fail the removal", False, "indexed", None),
+        # attaching again is refused and leaves the membership as it was
+        ("attach", True, "removing", None),
+        ("attach", False, "indexed", None),
+        # detaching again marks it again; a stranger is not found and marks nothing
+        ("detach", True, "removing", None),
+        ("detach a stranger", True, "removing", None),
+    ],
+)
+@pytest.mark.anyio
+async def test_a_removing_membership_keeps_its_status_until_its_removal_ends(
+    change: str, detached: bool, status: str, error: str | None
+) -> None:
+    """A detach answers once its removal is queued, and the listing shows `removing` until it ran:
+    no index status may overwrite that, or a poll would stop following a member still going."""
+    collection = await Collection.create("going")
+    doc = await attachable("going.md")
+    await collection.add(doc.name)
+    await collection.set_member_status(doc.name, MemberStatus.INDEXED)
+    if detached:
+        await collection.start_removal(doc.name)
+
+    if change == "index":
+        await collection.set_member_status(doc.name, MemberStatus.INDEXED)
+    elif change == "cancel":
+        await collection.set_member_status(doc.name, MemberStatus.CANCELLED)
+    elif change == "fail the removal":
+        await collection.fail_removal(doc.name, "removal failed: boom")
+    elif change == "attach" and detached:
+        with pytest.raises(Conflict, match="being removed from collection going"):
+            await collection.add(doc.name)
+    elif change == "attach":
+        await collection.add(doc.name)  # attaching a member again is a no-op
+    elif change == "detach":
+        await collection.start_removal(doc.name)
+    else:
+        with pytest.raises(NotFound, match="document not in collection going: ghost.md"):
+            await collection.start_removal("ghost.md")
+
+    member = await collection.member(doc.name)
+    assert (member.status, member.error) == (status, error)
+    assert (await collection.counts()).active == (status == "removing")
 
 
 @pytest.mark.parametrize(

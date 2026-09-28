@@ -579,17 +579,18 @@ _preview_locks: dict[str, anyio.Lock] = {}
 
 
 # A preview build parses a whole document, so a burst of opens would otherwise start one parse per
-# request. The semaphore admits `pipeline.preview_workers` of them; the rest wait, and a reader
+# request. The limiter admits `pipeline.preview_workers` of them; the rest wait, and a reader
 # that waited this long is told to retry instead of holding its request open forever.
 PREVIEW_WAIT_SECONDS = 60
-# 2 is the default of `PipelineSettings.preview_workers`. An anyio semaphore, unlike the CPU
-# budget's: every preview waits on Litestar's event loop, as `_preview_locks` describes.
-_preview_slots = cpu.ResizableSemaphore(anyio.Semaphore, 2)
+# 2 is the default of `PipelineSettings.preview_workers`. An anyio limiter, unlike the CPU budget:
+# every preview waits on Litestar's event loop, as `_preview_locks` describes. Its size may change
+# under running builds, and it counts them: from 2 to 3 under load admits one more build, not three.
+_preview_slots = anyio.CapacityLimiter(2)
 
 
 def configure_preview_slots(workers: int) -> None:
     """Resize the pool of preview builders (from `workflows.apply_settings`)."""
-    _preview_slots.resize(workers)
+    _preview_slots.total_tokens = workers
 
 
 async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
@@ -613,10 +614,9 @@ async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
             info = await get(name)  # another reader may have built it while we waited
             if info.preview is not None:
                 return info, info.preview
-            slots = _preview_slots.current  # the object to release, even if the pool is resized
             try:
                 with anyio.fail_after(PREVIEW_WAIT_SECONDS):
-                    await slots.acquire()
+                    await _preview_slots.acquire()
             except TimeoutError:
                 raise NotReady("preview queue is full; retry") from None
             # PDF extraction holds the GIL (see `cpu`), so on a thread it would stall this loop,
@@ -638,7 +638,7 @@ async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
                         .values(preview=db.dumps(preview))
                     )
             finally:
-                slots.release()
+                _preview_slots.release()
             return await get(name), preview
         finally:
             # Still holding the lock, so a queued reader keeps it: dropping it here would send

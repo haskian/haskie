@@ -26,24 +26,6 @@ from haskie import shutdown
 from haskie.settings import PipelineSettings
 
 
-class ResizableSemaphore[S]:
-    """A semaphore the settings may resize while work is in flight, for work on one event loop.
-
-    A caller acquires `current` and releases that same object, so a resize under it never raises.
-    A resize does over-admit: the fresh semaphore starts with every slot free while the old
-    holders still run. The CPU budget, which must not, is a `SlotBudget` instead.
-    """
-
-    def __init__(self, make: Callable[[int], S], size: int) -> None:
-        self._make = make
-        self.size = size
-        self.current: S = make(size)
-
-    def resize(self, size: int) -> None:
-        if size != self.size:
-            self.size, self.current = size, self._make(size)
-
-
 class SlotBudget:
     """A thread-safe count of slots, which the settings may resize while work holds slots.
 
