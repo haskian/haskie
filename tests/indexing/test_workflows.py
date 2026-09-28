@@ -1439,7 +1439,7 @@ async def test_adopt_orphans_resumes_only_stale_in_flight_workflows(
         s.workflow_id for s in await DBOS.list_workflows_async(status=["PENDING", "ENQUEUED"])
     }
     assert set(resumed) == in_flight and running in in_flight and finished not in in_flight
-    assert await dbos.adopt_orphans() == len(in_flight), "idempotent while they remain stale"
+    assert await dbos.adopt_orphans() == 0, "moved onto this build, so adopted once"
 
     gate.release.set()
     await wait_for(running)  # drain before teardown

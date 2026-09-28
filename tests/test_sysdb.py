@@ -16,7 +16,7 @@ from haskie.collection.collection import Collection
 from haskie.indexing import dbos_names, operations, workflows
 from haskie.settings import PipelineSettings, UserSettings, save_user_settings
 
-from conftest import attach_document, import_document, text_pdf  # isort: skip
+from conftest import attach_document, import_document, text_pdf, wait_for  # isort: skip
 
 pytestmark = pytest.mark.anyio
 
@@ -130,38 +130,37 @@ async def test_operation_activity_counts_the_operation_queues_by_status(dbos, tm
     )
 
 
-async def test_stale_active_ids_pages_over_another_versions_workflows(
-    dbos, monkeypatch, tmp_path
-) -> None:
-    """`adopt_orphans` reads ids of in-flight workflows of an older build, oldest first."""
+async def test_adopted_workflows_of_an_older_build_run_to_the_end(dbos, tmp_path) -> None:
+    """`adopt_orphans` reads in-flight workflows of an older build a page at a time, oldest first,
+    moves them onto this build and resumes each on its own queue. The real resume runs here: DBOS
+    dequeues only its own application version, so a resume alone left them enqueued forever."""
     from haskie import db
 
     await _imported(dbos, tmp_path, pages=1)
     import_id = await _run_id("import")
-    async with db.connect() as conn:  # pretend the work is still running under an older build
+    async with db.connect() as conn:  # pretend the work is still waiting under an older build
         await conn.exec_driver_sql(
             "update workflow_status set status = 'ENQUEUED', application_version = 'old-build'"
         )
 
-    active = await sysdb.stale_active_ids(workflows.APP_VERSION, limit=10)
+    stale = await sysdb.stale_active(workflows.APP_VERSION, limit=10)
 
-    assert import_id in active and len(active) == 4, (
+    assert import_id in dict(stale) and len(stale) == 4, (
         "the import and its one convert slice, the embedding it warmed and that one's embed slice"
     )
-    assert await sysdb.stale_active_ids(workflows.APP_VERSION, limit=2) == active[:2], "limit"
-    assert await sysdb.stale_active_ids(workflows.APP_VERSION, limit=10, offset=2) == active[2:], (
-        "offset"
-    )
-    assert await sysdb.stale_active_ids("old-build", limit=10) == [], "this build's own workflows"
+    assert await sysdb.stale_active(workflows.APP_VERSION, limit=2) == stale[:2], "limit"
+    assert await sysdb.stale_active("old-build", limit=10) == [], "this build's own workflows"
+    assert all(queue is not None for _, queue in stale), "each waits on a queue of its own"
 
-    resumed: list[str] = []
-
-    async def resume(ids: list[str], **kwargs) -> None:  # the bulk call `adopt_orphans` makes
-        resumed.extend(ids)
-
-    monkeypatch.setattr(DBOS, "resume_workflows_async", resume)
     assert await workflows.adopt_orphans(batch=3) == 4, "one page, then the remainder"
-    assert sorted(resumed) == sorted(active), "every page adopted, none twice"
+
+    assert await sysdb.stale_active(workflows.APP_VERSION, limit=10) == [], "all moved over"
+    assert await wait_for(import_id) == "imported", "the adopted import runs to the end"
+    for workflow_id, queue in stale:
+        status = await DBOS.get_workflow_status_async(workflow_id)
+        assert status is not None and status.status == "SUCCESS", workflow_id
+        assert status.queue_name == queue, "resumed on its own queue, under its limits"
+    assert await workflows.adopt_orphans() == 0, "adopted once"
 
 
 def test_the_sysdb_page_stays_under_sqlites_parameter_limit() -> None:

@@ -479,16 +479,24 @@ async def adopt_orphans(batch: int = ADOPT_PAGE) -> int:
     """Re-enqueue non-terminal workflows recorded under a different application version.
     Recovery skips them; resuming replays them from their step logs under this version.
 
-    Read and resume one page of ids at a time: after a long outage the backlog can be large, and
-    neither the whole list of statuses nor a resume call per workflow belongs on the boot path. A
-    row that leaves the page while we walk it was already adopted and dequeued; anything the
-    shifted window skips is adopted at the next boot."""
+    Each page moves onto this build first (`sysdb.move_to_version`): DBOS dequeues only its own
+    version, and a resume keeps the old one. Each workflow resumes on the queue it was on, so its
+    queue's limits still hold; one this build no longer registers goes to DBOS's internal queue.
+
+    One page at a time: after a long outage the backlog can be large, and neither the whole list
+    of statuses nor a resume call per workflow belongs on the boot path."""
+    registered = {queue.name for queue in _QUEUES}
     adopted = 0
     while True:
-        stale = await sysdb.stale_active_ids(APP_VERSION, batch, adopted)
+        stale = await sysdb.stale_active(APP_VERSION, batch)
         if not stale:
             return adopted
-        await DBOS.resume_workflows_async(stale)
+        await sysdb.move_to_version([workflow_id for workflow_id, _ in stale], APP_VERSION)
+        by_queue: dict[str | None, list[str]] = {}
+        for workflow_id, queue in stale:
+            by_queue.setdefault(queue if queue in registered else None, []).append(workflow_id)
+        for queue, ids in by_queue.items():
+            await DBOS.resume_workflows_async(ids, queue_name=queue)
         adopted += len(stale)
 
 

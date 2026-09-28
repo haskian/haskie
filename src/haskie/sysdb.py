@@ -5,16 +5,16 @@ whole page of operations needs aggregates: how many steps each stage slice recor
 workflows of each name or queue are active. One grouped query answers that for every row on the
 page, where the API would need a call per workflow.
 
-Nothing here writes: DBOS owns every row in these tables, and their schema too, so they are
-declared here as lightweight `table()` clauses with the columns read, outside `tables.metadata`,
-which creates only haskie's own. `db.connect()` opens the same file DBOS was configured with, so the
-reads see its committed state through WAL.
+DBOS owns every row in these tables, and their schema too, so they are declared here as lightweight
+`table()` clauses with the columns read, outside `tables.metadata`, which creates only haskie's own.
+`db.connect()` opens the same file DBOS was configured with, so the reads see its committed state
+through WAL. One function writes, `move_to_version`, because DBOS offers no call that does it.
 """
 
 from collections.abc import Sequence
 from itertools import batched
 
-from sqlalchemy import column, func, select, table
+from sqlalchemy import column, func, select, table, update
 
 from haskie import db
 from haskie.indexing.dbos_names import ACTIVE_STATUS
@@ -94,16 +94,30 @@ async def operation_activity(skip: Sequence[str] = ()) -> dict[str, int]:
         return dict(rows.tuples().all())
 
 
-async def stale_active_ids(app_version: str, limit: int, offset: int = 0) -> list[str]:
-    """One page of ids of workflows that are still enqueued or running under another application
-    version, oldest first. Ids only: a boot after a long outage must not load the whole backlog."""
+async def stale_active(app_version: str, limit: int) -> list[tuple[str, str | None]]:
+    """One page of workflows still enqueued or running under another application version, oldest
+    first, as (id, queue name). Ids only: a boot after a long outage must not load the whole
+    backlog. No offset: `move_to_version` takes each page out of the result."""
     async with db.connect() as conn:
         workflow = workflow_status.c
-        ids = await conn.scalars(
-            select(workflow.workflow_uuid)
+        rows = await conn.execute(
+            select(workflow.workflow_uuid, workflow.queue_name)
             .where(workflow.status.in_(ACTIVE_STATUS), workflow.application_version != app_version)
             .order_by(workflow.created_at)
             .limit(limit)
-            .offset(offset)
         )
-        return list(ids)
+        return [(workflow_id, queue) for workflow_id, queue in rows.tuples()]
+
+
+async def move_to_version(workflow_ids: list[str], app_version: str) -> None:
+    """Hand workflows of an older build to this one. DBOS dequeues only rows of its own
+    application version, and a resume keeps the old one, so without this an adopted workflow
+    waits in its queue forever."""
+    async with db.connect() as conn:
+        workflow = workflow_status.c
+        for chunk in batched(workflow_ids, SYSDB_PAGE, strict=False):
+            await conn.execute(
+                update(workflow_status)
+                .where(workflow.workflow_uuid.in_(chunk))
+                .values(application_version=app_version)
+            )

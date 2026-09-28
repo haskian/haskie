@@ -109,7 +109,9 @@ you need the machine back.
 - On **restart**, DBOS resumes each workflow at its first unfinished step. It reads the
   recorded inputs back through `indexing/serializer.py`, which keeps each `msgspec.Struct` by
   field name. So a field added or removed since does not garble an old record. The DBOS application
-  version is the package version, so work recorded under another version is enqueued again.
+  version is the package version, and DBOS runs only its own version's work. So at boot,
+  `adopt_orphans` moves work recorded under another version onto this one and enqueues it again,
+  each workflow on its own queue.
 - **Deduplication:** one active import per document, one active index per membership, one
   embedding run per cache id.
 - **Cancellation** works on running operations, from the Operations view or
