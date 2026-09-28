@@ -29,6 +29,7 @@ from haskie import app as app_module
 from haskie import audit, db, errors, home, logs
 from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection, MemberStatus
+from haskie.collection.index import CollectionIndex
 from haskie.document import document
 from haskie.document.document import DocumentStatus
 from haskie.indexing import embed_cache, gguf_models, mlx_models
@@ -62,6 +63,8 @@ from conftest import (  # isort: skip
     seed_index,
     stage_and_import,
     text_pdf,
+    until,
+    wait_event,
     wait_for,
     wait_import,
     walk_pages,
@@ -593,14 +596,15 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
             "embedding",
         ]
     )
-    assert (
-        options["member_statuses"][:2]
-        == options["active_member_statuses"]
-        == [
-            "pending",
-            "indexing",
-        ]
-    )
+    assert options["member_statuses"] == [
+        "pending",
+        "indexing",
+        "indexed",
+        "error",
+        "cancelled",
+        "removing",
+    ]
+    assert options["active_member_statuses"] == ["pending", "indexing", "removing"]
     assert options["active_run_statuses"] == ["ENQUEUED", "PENDING"]
     assert options["operation_kinds"][0] == "document"
     assert "index_collection" in options["bulk_kinds"]
@@ -858,7 +862,11 @@ async def test_an_upload_names_the_documents_it_repeats(
     assert (await client.get("/api/documents/ghost.md/similar")).status_code == 404
 
 
-async def test_attach_list_and_detach_a_member(client: AsyncTestClient) -> None:
+async def test_attach_list_and_detach_a_member(
+    client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The detach answers once its removal is queued: the removal waits its turn on the
+    collection's single writer, and the member reads `removing` until it ran."""
     await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "guide.md", MD.encode())
@@ -878,10 +886,32 @@ async def test_attach_list_and_detach_a_member(client: AsyncTestClient) -> None:
     (hit,) = (await client.get("/api/search/explore", params=in_notes)).json()
     assert (hit["collection"], hit["document"]) == ("notes", "guide.md")
 
+    entered, release = threading.Event(), threading.Event()
+    delete_rows = CollectionIndex.delete_document
+
+    async def held(self: CollectionIndex, doc: str) -> None:
+        entered.set()
+        assert await wait_event(release), "the test never released the removal"
+        await delete_rows(self, doc)
+
+    monkeypatch.setattr(CollectionIndex, "delete_document", held)
+
     detached = await client.delete("/api/collections/notes/documents/guide.md")
 
     assert detached.status_code == 204, detached.text
-    assert (await client.get("/api/collections/notes/documents")).json()["items"] == []
+    assert await wait_event(entered), "the removal never ran"
+    removing = (
+        await client.get("/api/collections/notes/documents", params={"status": "removing"})
+    ).json()["items"]
+    assert [(m["document"]["name"], m["status"]) for m in removing] == [("guide.md", "removing")]
+    assert (await client.get("/api/collections/notes")).json()["counts"]["active"] == 1
+    release.set()
+
+    async def gone() -> bool:
+        return (await client.get("/api/collections/notes/documents")).json()["items"] == []
+
+    await until(gone, "the removal never took the membership")
+    assert (await client.get("/api/collections/notes")).json()["counts"]["active"] == 0
     assert (await client.get("/api/documents/guide.md/collections")).json() == []
     assert (await client.get("/api/search/explore", params=in_notes)).json() == []
     assert (await client.get("/api/documents/guide.md")).json()["status"] == "imported", (

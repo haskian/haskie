@@ -65,6 +65,7 @@ from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection
+from haskie.collection.index import CollectionIndex
 from haskie.document import convert, document
 from haskie.document.document import Document, DocumentStatus
 from haskie.errors import (
@@ -1781,7 +1782,7 @@ async def test_detach_leaves_the_document_and_the_other_collection(dbos, tmp_pat
         await attach_document(dbos, name, doc.name)
     (entry,) = await embed_cache.entries(doc.name)
 
-    await dbos.detach("drop", doc.name)
+    await wait_for(await dbos.detach("drop", doc.name))
 
     assert await Collection("drop").member_names() == []
     assert await collection_hits("drop", "lancedb") == []
@@ -1794,7 +1795,7 @@ async def test_detach_leaves_the_document_and_the_other_collection(dbos, tmp_pat
     assert doc.markdown.exists() and doc.parts_dir.exists()
 
 
-async def test_detach_waits_for_the_index_write_in_flight(
+async def test_the_removal_waits_for_the_index_write_in_flight(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:
     """F3: the detach cancels the member's index workflow, and that cancel rewrites the status row
@@ -1810,19 +1811,16 @@ async def test_detach_waits_for_the_index_write_in_flight(
     monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
     in_flight = await dbos.attach("part", slow.name)
     assert await wait_event(gate.entered)
-    order: list[str] = []
 
-    async def release_once_cancelled() -> None:
-        await until(_all_cancelled([in_flight]), "the detach never cancelled the index in flight")
-        order.append("released")
-        gate.release.set()
+    removal = await dbos.detach("part", slow.name)
+    await until(_all_cancelled([in_flight]), "the detach never cancelled the index in flight")
+    assert (await collection.member(slow.name)).status == "removing"
+    assert await _statuses([removal]) in (["ENQUEUED"], ["PENDING"]), (
+        "the removal waits for the write holding the lock"
+    )
+    gate.release.set()
 
-    async with anyio.create_task_group() as releasing:
-        releasing.start_soon(release_once_cancelled)
-        await dbos.detach("part", slow.name)
-        order.append("detached")
-
-    assert order == ["released", "detached"], "the detach waited for the write holding the lock"
+    await wait_for(removal)
     await await_terminal([in_flight])
     assert gate.calls == [0], "one batch wrote past the cancel; the next stopped at its step"
     assert await collection.member_names() == [done.name]
@@ -1835,6 +1833,114 @@ async def test_detach_waits_for_the_index_write_in_flight(
     with pytest.raises(NotFound, match="document not in collection part: slow.pdf"):
         await dbos.detach("part", slow.name)
     await _drain()
+
+
+DETACH_ANSWERS_WITHIN = 5.0  # the partition stays held until the test lets go: waiting on it hangs
+
+
+@pytest.mark.parametrize(
+    ("meanwhile", "members", "documents"),
+    [
+        # the removal waits for the partition, then takes the rows and the membership
+        ("nothing", ["slow.pdf"], ["done.md", "slow.pdf"]),
+        # a second detach queues a second removal, which finds nothing left to remove
+        ("detach again", ["slow.pdf"], ["done.md", "slow.pdf"]),
+        # an attach or a re-index would write rows the removal queued ahead then deletes
+        ("attach again", ["slow.pdf"], ["done.md", "slow.pdf"]),
+        ("re-index", ["slow.pdf"], ["done.md", "slow.pdf"]),
+        # the delete snapshots the removing membership and queues its own removal behind this one
+        ("delete the document", ["slow.pdf"], ["slow.pdf"]),
+        # the membership cascades with the collection row; the removal then finds nothing
+        ("delete the collection", [], ["done.md", "slow.pdf"]),
+    ],
+)
+async def test_detach_answers_while_the_partition_is_held(
+    dbos,
+    tmp_path: Path,
+    monkeypatch,
+    meanwhile: str,
+    members: list[str],
+    documents: list[str],
+) -> None:
+    """The removal runs on the collection's partition, one writer at a time, so waiting for it
+    would hold the request for as long as the write ahead of it. The detach answers once the
+    removal is queued, and the membership reads `removing` - an active state, which a poll keeps
+    following - until the removal ran."""
+    await _use(dbos, workers=4, batch_pages=1, index_group_parts=1)
+    collection = await Collection.create("busy")
+    done = await import_document(dbos, "done.md", MD, tmp_path)
+    await attach_document(dbos, "busy", done.name)
+    slow = await import_document(dbos, "slow.pdf", text_pdf(["alpha", "beta"]), tmp_path)
+    gate = Gate()
+    monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
+    writing = await dbos.attach("busy", slow.name)
+    assert await wait_event(gate.entered), "the other member never took the partition"
+    indexes = await _member_workflows("busy")
+
+    try:
+        with anyio.fail_after(DETACH_ANSWERS_WITHIN):
+            removals = [await dbos.detach("busy", done.name)]
+        member = await collection.member(done.name)
+        assert (member.status, member.error) == ("removing", None)
+        counts = await collection.counts()
+        assert (counts.active, counts.indexed) == (2, 0), "the removal and the write in flight"
+        assert await _rows_of(collection, done.name) > 0, "the rows wait for the partition"
+        jobs: list[str] = []
+        if meanwhile == "detach again":
+            removals.append(await dbos.detach("busy", done.name))
+        elif meanwhile == "attach again":
+            with pytest.raises(Conflict, match="being removed from collection busy"):
+                await dbos.attach("busy", done.name)
+        elif meanwhile == "re-index":
+            with pytest.raises(Conflict, match="being removed from collection busy: done.md"):
+                await dbos.start_index_collection_document("busy", done.name)
+        elif meanwhile == "delete the document":
+            jobs.append(await dbos.start_delete_document(done.name))
+        elif meanwhile == "delete the collection":
+            jobs.append(await dbos.start_delete_collection("busy"))
+        assert (await collection.member(done.name)).status == "removing", "still queued"
+    finally:
+        gate.release.set()
+
+    for job in [*removals, *jobs]:
+        await wait_for(job)
+    await await_terminal([writing])
+    await _drain()
+    assert await collection.member_names() == members
+    assert sorted(await document_names()) == documents
+    assert await _rows_of(collection, done.name) == 0, "the rows went with the membership"
+    assert await _member_workflows("busy") == indexes, "nothing indexed the removing member"
+    assert collection.root.exists() == (meanwhile != "delete the collection"), (
+        "a removal that ran after the delete put no folder back"
+    )
+
+
+async def test_a_failed_removal_leaves_the_member_in_error(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """The detach answered before its removal ran, so a removal that fails has only the member
+    listing to say so: the membership moves from `removing` to `error`, not stays active for ever,
+    and detaching again retries it."""
+    collection = await Collection.create("flaky")
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await attach_document(dbos, "flaky", doc.name)
+
+    async def disk_gone(self, name: str) -> None:
+        raise OSError("disk gone")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(CollectionIndex, "delete_document", disk_gone)
+        with pytest.raises(workflows.PipelineError, match="OSError: disk gone"):
+            await wait_for(await dbos.detach("flaky", doc.name))
+
+    member = await collection.member(doc.name)
+    assert (member.status, member.error) == ("error", "removal failed: OSError: disk gone")
+    assert (await collection.counts()).active == 0, "a poll stops"
+    assert await _rows_of(collection, doc.name) > 0, "nothing was removed"
+
+    await wait_for(await dbos.detach("flaky", doc.name))
+    assert await collection.member_names() == []
+    assert await _rows_of(collection, doc.name) == 0
 
 
 async def test_detach_rejects_an_unknown_membership(dbos, tmp_path: Path) -> None:

@@ -61,6 +61,7 @@ Workflow ids, every one starting with a prefix that names its kind and the names
 convert or embed child and `{parent}:index` for the index child, `bulk-index:{collection}:{uuid}`
 and `bulk-delete:{collection}:{uuid}` for the two bulk operations, `del-doc:{doc}:{uuid}` for a
 document delete (and `{parent}:rm:{collection}` for each collection it leaves),
+`rm:{collection}:{doc}:{uuid}` for the removal a detach queues,
 `maint:{collection}:{parent}` for a maintenance run, and `dl:{kind}:{model}` for a model download
 (see `models`). `document.safe_name` keeps `:` out of every name, so a prefix is unambiguous: one
 query finds a whole operation. Child ids are deterministic, so a replay after a crash re-attaches
@@ -165,6 +166,7 @@ COLLECTION_DOCUMENT_PREFIX = "idx-col"
 BULK_INDEX_PREFIX = "bulk-index"
 BULK_DELETE_PREFIX = "bulk-delete"
 DELETE_DOCUMENT_PREFIX = "del-doc"
+REMOVE_PREFIX = "rm"  # `rm:{collection}:{doc}:{uuid}`: the removal a detach queues
 MAINTAIN_PREFIX = "maint"  # `maint:{collection}:{parent}`: one collection's runs, one id prefix
 PROGRESS_EVENT = "progress"  # the DBOS event a bulk index publishes after every page
 
@@ -622,16 +624,17 @@ async def set_member_status(
 
 async def _member_present(collection: str, doc: str) -> bool:
     try:
-        await Collection(collection).member(doc)
+        found = await Collection(collection).member(doc)
     except NotFound:
         return False
-    return True
+    return found.status != MemberStatus.REMOVING
 
 
 @retried_step
 async def member_present(collection: str, doc: str) -> bool:
-    """Whether the membership still exists: a detach that landed between the enqueue and the run
-    must not leave rows in the table with no membership to remove them by."""
+    """Whether the membership still exists and no detach is taking it away: a detach that landed
+    between the enqueue and the run must not leave rows in the table with no membership to remove
+    them by, nor spend a write on rows its removal will delete."""
     return await _member_present(collection, doc)
 
 
@@ -643,7 +646,8 @@ async def index_write(collection: str, doc: str) -> AsyncIterator[bool]:
     The lock alone only orders this write against a removal (see `collection_lock`); the re-check
     inside it is what the loser of that race acts on. A removal that went first took the
     membership with it - the whole collection row for a delete (memberships cascade), this one
-    row for a detach - so a write that finds none has nothing left to write into."""
+    row for a detach - so a write that finds none has nothing left to write into. A membership a
+    detach marked `removing` counts as gone too: its removal is queued behind this write."""
     async with collection_lock(collection):
         yield await _member_present(collection, doc)
 
@@ -1137,6 +1141,11 @@ async def remove_member_row(collection: str, doc: str) -> None:
     await Collection(collection).remove_member(doc)
 
 
+@retried_step
+async def fail_removal(collection: str, doc: str, error: str) -> None:
+    await Collection(collection).fail_removal(doc, error)
+
+
 @DBOS.workflow(name=REMOVE_FROM_INDEX_WORKFLOW)
 async def remove_from_collection_index(collection: str, doc: str) -> None:
     """Take one document out of one collection: its rows in the table, then its membership. The
@@ -1144,11 +1153,19 @@ async def remove_from_collection_index(collection: str, doc: str) -> None:
 
     Both steps under the collection's write lock, not only the first: an index step still in
     flight (its workflow was cancelled, which stops nothing already running) would otherwise take
-    the lock between them, still find the membership, and write the rows back."""
+    the lock between them, still find the membership, and write the rows back.
+
+    A removal that fails moves a `removing` membership to `error`: the detach answered long ago,
+    and the member listing is the only place its caller looks."""
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, document=doc):
-        async with collection_lock(collection):
-            await remove_index_rows(collection, doc)
-            await remove_member_row(collection, doc)
+        try:
+            async with collection_lock(collection):
+                await remove_index_rows(collection, doc)
+                await remove_member_row(collection, doc)
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, PermanentError) else root_cause(exc)
+            await fail_removal(collection, doc, f"removal failed: {message}")
+            raise PipelineError(message) from exc
 
 
 @retried_step
@@ -1442,8 +1459,11 @@ async def _enqueue_index(collection: str, doc: str, workflow_id: str | None = No
 
 async def start_index_collection_document(collection: str, doc: str) -> str:
     """Queue the index of one member into its collection; a second call while it runs returns the
-    same operation. Both names are checked before anything is queued."""
-    await (await Collection.get(collection)).member(doc)  # NotFound before anything is queued
+    same operation. Both names are checked before anything is queued, and a member being removed
+    is refused: its removal, queued ahead, would take the rows this index writes."""
+    member = await (await Collection.get(collection)).member(doc)  # NotFound before the enqueue
+    if member.status == MemberStatus.REMOVING:
+        raise Conflict(f"document is being removed from collection {collection}: {doc}")
     return await _enqueue_index(collection, doc)
 
 
@@ -1458,19 +1478,29 @@ async def attach(collection: str, doc: str) -> str:
     return await _enqueue_index(collection, doc)
 
 
-async def detach(collection: str, doc: str) -> None:
-    """Take a document out of one collection and wait for it: cancel its index workflow there,
-    then delete its rows and membership from the collection's own partition. The document stays,
-    in its folder and in every other collection."""
-    await (await Collection.get(collection)).member(doc)  # NotFound before anything is cancelled
+async def detach(collection: str, doc: str) -> str:
+    """Take a document out of one collection: mark the membership `removing`, cancel its index
+    workflow there, and queue the removal of its rows and membership on the collection's own
+    partition. Returns the removal's id once it is queued, not done: the partition runs one
+    writer at a time, and a compaction, an index build or another member's write ahead of it can
+    take minutes. The document stays, in its folder and in every other collection.
+
+    `removing` first, so the member listing shows the detach from the moment it answers, and so
+    the cancelled index can no longer move the status (see `Collection.set_member_status`). A
+    second detach queues a second removal, which finds nothing left to remove: that is also how a
+    removal that failed, or one lost between the mark and the enqueue, is retried."""
+    await (await Collection.get(collection)).start_removal(doc)  # NotFound before any cancel
     await DBOS.cancel_workflows_async(
         await _active_collection_workflows(collection, doc), cancel_children=True
     )
-    with SetEnqueueOptions(queue_partition_key=index_partition(collection)):
+    with (
+        SetWorkflowID(f"{REMOVE_PREFIX}:{collection}:{doc}:{uuid4().hex}"),
+        SetEnqueueOptions(queue_partition_key=index_partition(collection)),
+    ):
         handle = await DBOS.enqueue_workflow_async(
             INDEX_QUEUE, remove_from_collection_index, collection, doc
         )
-    await handle.get_result(polling_interval_sec=TASK_POLL)
+    return handle.workflow_id
 
 
 async def _active_ids(
@@ -1563,7 +1593,8 @@ async def start_delete_collection(collection: str) -> str:
 async def rename_collection(collection: str, name: str) -> Collection:
     """Rename one collection; the same name is a no-op, and any other is refused while work of
     the collection runs. Each such run holds the old name: an index write or a maintenance run
-    would put the old folder back, and a bulk index or delete would go on queueing under it. A
+    would put the old folder back, a bulk index or delete would go on queueing under it, and a
+    detach's removal would find no membership under it and leave the moved one `removing`. A
     run queued after this check is the window left open; the rename itself is one transaction
     and a folder move."""
     found = await Collection.get(collection)  # NotFound before anything else
@@ -1575,6 +1606,7 @@ async def rename_collection(collection: str, name: str) -> Collection:
             DELETE_COLLECTION_WORKFLOW,
             COLLECTION_DOCUMENT_WORKFLOW,
             MAINTAIN_PARTITION_WORKFLOW,
+            REMOVE_FROM_INDEX_WORKFLOW,
         ],
         [
             f"{prefix}:{collection}:"
@@ -1583,6 +1615,7 @@ async def rename_collection(collection: str, name: str) -> Collection:
                 BULK_DELETE_PREFIX,
                 COLLECTION_DOCUMENT_PREFIX,
                 MAINTAIN_PREFIX,
+                REMOVE_PREFIX,
             )
         ],
         limit=1,

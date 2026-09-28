@@ -142,8 +142,9 @@ async def list_collection_documents(
     """List the documents of one collection, one page at a time.
 
     Sort by name, size, status or updated_at; `status` keeps one membership state only (pending,
-    indexing, indexed, error, cancelled) — how far this collection got writing the document into
-    its index, which is not the document's own import status. Pass the `next_cursor` of a
+    indexing, indexed, error, cancelled, removing) — how far this collection got writing the
+    document into its index, or taking it out again, which is not the document's own import
+    status. Pass the `next_cursor` of a
     response back as `cursor` to continue; it is null on the last page.
     """
     found = await Collection.get(collection)
@@ -189,8 +190,10 @@ async def add_document(
 async def remove_document(collection: str, document: str, session_id: str | None = None) -> None:
     """Take one document out of this collection: its rows here go, the document stays.
 
-    Waited out rather than queued: a detach cancels one index and deletes that collection's rows,
-    which is short enough to answer with the outcome instead of an operation to poll.
+    Queued, not waited out: the removal runs on the collection's single writer, behind any index
+    write, compaction or index build already there. The membership reads `removing` from now on
+    and is gone once its rows are; poll `list_collection_documents`. A removal that fails leaves
+    it in `error`; detaching again retries it.
 
     Args:
         session_id: The conversation's id; the detach then shows in that session's history.

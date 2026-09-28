@@ -58,7 +58,8 @@ spreads over the free slots. The index stage is one child and is never sliced.
 
 **One writer per table.** Every index child runs on `task.indexing`, partitioned by collection
 with one slot per partition, and under a per-collection lock. So LanceDB sees one writer per
-table.
+table. A detach's removal waits its turn there too. The request only queues it, and the membership
+reads `removing` until it ran (see [a membership's life](documents-and-collections.md#a-memberships-life)).
 
 ## Queues
 
