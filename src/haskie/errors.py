@@ -18,6 +18,12 @@ class HaskieError(Exception):
     headers: ClassVar[dict[str, str]] = {}
 
 
+class Forbidden(HaskieError):
+    """A caller haskie does not serve: a browser page from another origin, or an unknown host."""
+
+    status_code = 403
+
+
 class NotFound(HaskieError):
     status_code = 404
 

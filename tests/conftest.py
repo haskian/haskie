@@ -620,6 +620,11 @@ IMPORT_POLL_SECONDS = 0.02
 MAX_WALK_PAGES = 100  # a cursor that never ends is the bug to catch, not a walk to hang on
 
 
+# Where a client reaches haskie: a loopback host, the only one the app serves by default (see
+# `app.served_hosts`), unlike the test client's own `testserver.local`.
+LOOPBACK_URL = "http://127.0.0.1:8451"
+
+
 def api_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The app with `WEB_DIST` pointed at a directory that does not exist, so its routing table is
     the API alone whether or not `web/dist` has been built."""
@@ -635,7 +640,7 @@ def api_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     needs it takes the `dbos` fixture too (see `test_api`)."""
     from litestar.testing import AsyncTestClient
 
-    return AsyncTestClient(api_app(tmp_path, monkeypatch))
+    return AsyncTestClient(api_app(tmp_path, monkeypatch), base_url=LOOPBACK_URL)
 
 
 async def _release_default_executor() -> None:

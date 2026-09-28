@@ -50,6 +50,7 @@ from haskie.settings import (
 from haskie.tables import searches
 
 from conftest import (  # isort: skip
+    LOOPBACK_URL,
     NO_MODELS,
     api_app,
     attach_via_api,
@@ -2584,13 +2585,60 @@ async def test_bind_request_context_scopes_the_names(
 # --- body size, static files and lifespan ---------------------------------------------
 
 
+FOREIGN = "https://evil.example"
+
+
+@pytest.mark.parametrize(
+    ("bound", "trusted", "base_url", "method", "origin", "status"),
+    [
+        pytest.param(None, "", LOOPBACK_URL, "POST", None, 422, id="agent-without-origin-passes"),
+        pytest.param(None, "", LOOPBACK_URL, "POST", LOOPBACK_URL, 422, id="own-ui-passes"),
+        pytest.param(None, "", LOOPBACK_URL, "POST", FOREIGN, 403, id="foreign-page-post-refused"),
+        pytest.param(None, "", LOOPBACK_URL, "POST", "null", 403, id="opaque-origin-refused"),
+        pytest.param(None, "", LOOPBACK_URL, "GET", FOREIGN, 422, id="foreign-read-passes"),
+        pytest.param(None, f" {FOREIGN}/ ,", LOOPBACK_URL, "POST", FOREIGN, 422, id="trusted"),
+        pytest.param(None, "", "http://localhost:8451", "POST", None, 422, id="localhost-name"),
+        pytest.param(None, "", "http://rebind.example", "GET", None, 403, id="rebinding-host"),
+        pytest.param("http://box.lan:8451", "", "http://box.lan:8451", "GET", None, 422, id="bound"),
+        pytest.param("http://0.0.0.0:8451", "", "http://box.lan", "GET", None, 422, id="wildcard"),
+    ],
+)
+async def test_only_served_hosts_and_trusted_browser_origins_reach_a_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bound: str | None,
+    trusted: str,
+    base_url: str,
+    method: str,
+    origin: str | None,
+    status: int,
+) -> None:
+    """A browser ignores the loopback bind, so a page the user opens could post to the API, and a
+    DNS-rebinding page could read it. Agents send no `Origin` and pass. A request that passes is
+    answered by the route itself: a 422 for its invalid input, which the guard never looks at."""
+    if bound is not None:
+        monkeypatch.setenv("HASKIE_ADDRESS", bound)
+    monkeypatch.setenv(app_module.ALLOWED_ORIGINS_ENV, trusted)
+    client = AsyncTestClient(api_app(tmp_path, monkeypatch), base_url=base_url)
+    headers = {} if origin is None else {"Origin": origin}
+
+    if method == "GET":
+        response = await client.get("/api/search/excerpts?q=x&limit=0", headers=headers)
+    else:
+        response = await client.post("/api/documents/render", json={"x": 1}, headers=headers)
+
+    assert response.status_code == status, response.text
+    if status == 403:
+        assert app_module.ALLOWED_ORIGINS_ENV in response.text or "not one haskie" in response.text
+
+
 async def test_a_body_over_the_upload_cap_is_rejected_before_the_handler(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dbos
 ) -> None:
     """Litestar enforces `request_max_body_size`, so a 512 MiB upload never has to be sent here:
     the cap is lowered and the same code path answers 413."""
     monkeypatch.setattr(app_module, "UPLOAD_MAX_BYTES", 64)  # read by `create_app`, so first
-    client = AsyncTestClient(api_app(tmp_path, monkeypatch))
+    client = AsyncTestClient(api_app(tmp_path, monkeypatch), base_url=LOOPBACK_URL)
 
     response = await client.post(
         "/api/documents/staging", files={"data": ("big.md", b"x" * 500, "text/markdown")}
@@ -2609,7 +2657,7 @@ async def test_static_files_are_served_when_the_web_build_exists(
     dist.mkdir()
     (dist / "index.html").write_text("<!doctype html><title>haskie</title>")
     monkeypatch.setattr(app_module, "WEB_DIST", dist)
-    client = AsyncTestClient(app_module.create_app())
+    client = AsyncTestClient(app_module.create_app(), base_url=LOOPBACK_URL)
 
     assert "haskie" in (await client.get("/index.html")).text
     assert (await client.get("/api/status")).status_code == 200, (
@@ -2627,7 +2675,7 @@ async def test_lifespan_starts_and_destroys_dbos_on_every_run(
     before = set(threading.enumerate())
 
     for _ in range(2):
-        async with AsyncTestClient(api_app(tmp_path, monkeypatch)) as client:
+        async with AsyncTestClient(api_app(tmp_path, monkeypatch), base_url=LOOPBACK_URL) as client:
             assert (await client.get("/api/status")).status_code == 200
             assert dbos_module._dbos_global_instance is not None
         assert dbos_module._dbos_global_instance is None, "destroyed by the shutdown hook"

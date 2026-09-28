@@ -50,7 +50,8 @@ Environment variables. Each has a working default:
 | `HASKIE_PORT` | `8451` | the default port of `run`, `ensure` and `install claude`. `mise.toml` sets `8452`, so development serves beside the installed haskie |
 | `HASKIE_LOG_LEVEL` | `INFO` | level for every logger, DBOS included |
 | `HASKIE_LOG_FORMAT` | `json` | `console` for readable logs |
-| `HASKIE_ADDRESS` | unset | set by `run` itself, so a second start can name the server that holds the home |
+| `HASKIE_ADDRESS` | unset | set by `run` itself, so a second start can name the server that holds the home, and the app can serve the host it was bound to |
+| `HASKIE_ALLOWED_ORIGINS` | unset | comma-separated browser origins trusted beside haskie's own UI, for an agent UI that runs in a browser. Clients that are not browsers send no `Origin` and need nothing here |
 
 Timing knobs are module constants, not variables (`workflows.OPERATION_POLL`,
 `workflows.TASK_POLL`, `workflows.RETRY_INTERVAL_SECONDS`). `tests/conftest.py` shortens the polls.
@@ -75,6 +76,7 @@ Timing knobs are module constants, not variables (`workflows.OPERATION_POLL`,
 | Exclusive lock on the home | One home is one SQLite file and one set of queues. Two servers would take each other's work | [Architecture](docs/architecture.md) |
 | No migrations before 1.0 | A storage change bumps `SCHEMA_VERSION`. An older home is refused, then destroyed and imported again | [Storage](docs/storage.md) |
 | Loopback by default, no auth | A home is one user's documents | `claude.py` (`DEFAULT_HOST`) |
+| Host and Origin checked on every request | A browser ignores the loopback bind: any page could post to the API, and a DNS-rebinding page could read it. Agents send no `Origin`, so they pass | `app.py` (`guard_callers`) |
 
 ## Pull requests
 

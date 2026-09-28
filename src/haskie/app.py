@@ -4,25 +4,34 @@ The routes live in `haskie.api`, one module per feature. What stays here is what
 every request: the request context, the error mapping, and how the application is assembled.
 """
 
+import os
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 import msgspec
 from litestar import Litestar, Request, Response
-from litestar.datastructures import MutableScopeHeaders
+from litestar.datastructures import Headers, MutableScopeHeaders
 from litestar.exceptions import HTTPException, ValidationException
 from litestar.exceptions.responses import create_exception_response
 from litestar.openapi import OpenAPIConfig
 from litestar.static_files import create_static_files_router
-from litestar.types import ControllerRouterHandler, ExceptionHandlersMap, Message, Scope
-from litestar_mcp import LitestarMCP
+from litestar.types import (
+    ASGIApp,
+    ControllerRouterHandler,
+    ExceptionHandlersMap,
+    Message,
+    Receive,
+    Scope,
+    Send,
+)
+from litestar_mcp import LitestarMCP, MCPConfig
 
 from haskie import APP_VERSION, home, logs, shutdown
 from haskie.api import ROUTE_HANDLERS
 from haskie.audit import Actor
 from haskie.document.document import UPLOAD_MAX_BYTES
-from haskie.errors import HaskieError
+from haskie.errors import Forbidden, HaskieError
 from haskie.indexing import workflows
 from haskie.search import flow
 
@@ -85,6 +94,62 @@ async def add_request_id(message: Message, scope: Scope) -> None:
             # JSON, percent-encoded: a header is Latin-1, and the formulas are not
             lineage = msgspec.json.encode(trace.scoring).decode()
             MutableScopeHeaders(message)[SCORING_HEADER] = quote(lineage)
+
+
+# --- who may call -----------------------------------------------------------
+
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+WILDCARD_HOSTS = frozenset({"0.0.0.0", "::"})  # a bind to every interface: exposed on purpose
+READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+ALLOWED_ORIGINS_ENV = "HASKIE_ALLOWED_ORIGINS"
+
+
+def allowed_origins() -> frozenset[str]:
+    """Browser origins trusted beside haskie's own, for an agent UI that runs in a browser:
+    `HASKIE_ALLOWED_ORIGINS`, comma-separated, e.g. `https://agent.example`."""
+    listed = os.environ.get(ALLOWED_ORIGINS_ENV, "").split(",")
+    return frozenset(origin.strip().rstrip("/").lower() for origin in listed if origin.strip())
+
+
+def served_hosts() -> frozenset[str] | None:
+    """The host names a request may address: loopback and the address `run` bound, or None for a
+    wildcard bind, where any name can reach the server and none can be told apart."""
+    bound = urlsplit(os.environ.get("HASKIE_ADDRESS", "")).hostname
+    if bound in WILDCARD_HOSTS:
+        return None
+    return LOOPBACK_HOSTS | ({bound} if bound else set())
+
+
+def _refusal(scope: Scope, hosts: frozenset[str] | None, origins: frozenset[str]) -> str | None:
+    """Why a request is refused, or None. Agents, MCP clients and scripts send no `Origin`, so
+    they pass. A browser does, and a browser ignores the loopback bind: without these checks any
+    page the user opens could post to the API, and a DNS-rebinding page could read it too."""
+    headers = Headers.from_scope(scope)
+    host = headers.get("host", "")
+    try:
+        hostname = urlsplit(f"//{host}").hostname
+    except ValueError:
+        hostname = None
+    if hosts is not None and hostname not in hosts:
+        return f"host {host!r} is not one haskie serves"
+    origin = headers.get("origin")
+    if origin is None or scope["method"] in READ_METHODS:
+        return None
+    if origin.lower() in origins | {f"{scope['scheme']}://{host}".lower()}:
+        return None
+    return f"requests from {origin} are not accepted; list it in {ALLOWED_ORIGINS_ENV} to trust it"
+
+
+def guard_callers(app: ASGIApp) -> ASGIApp:
+    """Middleware refusing a request from a host or browser origin haskie does not serve."""
+    hosts, origins = served_hosts(), allowed_origins()
+
+    async def guarded(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and (reason := _refusal(scope, hosts, origins)):
+            raise Forbidden(reason)
+        await app(scope, receive, send)
+
+    return guarded
 
 
 # --- errors -----------------------------------------------------------------
@@ -163,7 +228,8 @@ def create_app() -> Litestar:
         _log.warning("web_ui_missing", expected=str(WEB_DIST), serving="api and mcp only")
     return Litestar(
         route_handlers=route_handlers,
-        plugins=[LitestarMCP()],
+        plugins=[LitestarMCP(MCPConfig(allowed_origins=sorted(allowed_origins())))],
+        middleware=[guard_callers],
         openapi_config=OpenAPIConfig(title="haskie", version=APP_VERSION),
         logging_config=None,  # `logs.configure` above owns it (see logs.py)
         exception_handlers=EXCEPTION_HANDLERS,
