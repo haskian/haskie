@@ -131,9 +131,9 @@ document is deleted.
 Renaming a collection moves its row, its memberships, every session that chose it and its folder
 in one transaction. The index table holds no collection name, so it moves as it is. A rename is
 refused while any work of the collection runs: an index write or a maintenance run still holds
-the old name, and would put the old folder back. A delete removes the row before the folder, so
-a create or a rename onto the name of a collection still being deleted is refused too. The
-delete's last step would remove the new folder.
+the old name, and would put the old folder back. A delete moves the folder aside before it
+frees the name, so a create or a rename may take the name at once: the delete removes only the
+folder it moved.
 
 ## The embedding cache
 

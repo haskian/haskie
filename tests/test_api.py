@@ -1087,7 +1087,7 @@ async def test_a_rename_refused_changes_nothing(
         ("rename", "PUT", "/api/collections/other/name", {"name": "gone"}, ["gone"]),
     ],
 )
-async def test_a_name_whose_delete_still_runs_is_refused(
+async def test_a_name_whose_delete_still_runs_can_be_taken(
     client: AsyncTestClient,
     monkeypatch,
     claim: str,
@@ -1096,33 +1096,28 @@ async def test_a_name_whose_delete_still_runs_is_refused(
     body: dict,
     left: list[str],
 ) -> None:
-    """The delete removes the row before the folder, so the name is free while its folder stands.
-    A create or a rename onto it would put its folder there, and the delete's last step would then
-    remove it: refused until the delete finished, and taken after."""
+    """The delete moves the folder aside before it frees the name, so a create or a rename onto
+    the name while the delete still runs lands in a folder of its own, which the delete's last
+    step leaves alone."""
     await client.post("/api/init", json=NO_MODELS)
     for existing in ("gone", "other"):
         await client.post("/api/collections", json={"name": existing})
     gate = Gate()
-    monkeypatch.setattr(Collection, "remove_tree", gate.wrap(Collection.remove_tree))
+    monkeypatch.setattr(Collection, "remove_aside", gate.wrap(Collection.remove_aside))
     deleting = (await client.delete("/api/collections/gone")).json()["operation_id"]
     assert await wait_event(gate.entered), "the delete reached its last step"
 
-    refused = await client.request(method, path, json=body)
-
-    assert refused.status_code == 409, f"{claim}: {refused.text}"
-    assert f"collection gone is still being deleted by {deleting}" in refused.json()["detail"]
-    listed = (await client.get("/api/collections")).json()["items"]
-    assert [one["name"] for one in listed] == ["other"], f"{claim}: a refused claim changes nothing"
-    assert Collection("other").root.is_dir()
-
-    gate.release.set()
-    await wait_for(deleting)
     taken = await client.request(method, path, json=body)
 
     assert taken.status_code in (200, 201), f"{claim}: {taken.text}"
+    gate.release.set()
+    await wait_for(deleting)
     listed = (await client.get("/api/collections")).json()["items"]
     assert [one["name"] for one in listed] == left, claim
     assert Collection("gone").root.is_dir(), f"{claim}: the folder the claim made stays"
+    assert [
+        p.name for p in Collection("gone").root.parent.iterdir() if p.name.startswith(".")
+    ] == [], f"{claim}: the folder the delete moved aside is gone"
 
 
 async def test_deleting_a_document_removes_it_from_every_collection(

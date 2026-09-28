@@ -71,6 +71,7 @@ under an explicit name (see `dbos_names`).
 
 import asyncio
 import contextlib
+import hashlib
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -1311,15 +1312,22 @@ async def remove_rows(collection: str) -> None:
 
 
 @retried_step
-async def remove_tree(collection: str) -> None:
-    """Last: while the folder is there the table can still be deleted again."""
-    await Collection(collection).remove_tree()
+async def move_aside(collection: str, key: str) -> None:
+    """First: the folder leaves the name before the row frees it (see `Collection.move_aside`)."""
+    await Collection(collection).move_aside(key)
+
+
+@retried_step
+async def remove_aside(collection: str, key: str) -> None:
+    """Last: the folder moved aside goes, whatever took the name meanwhile."""
+    await Collection(collection).remove_aside(key)
 
 
 @DBOS.workflow(name=DELETE_COLLECTION_WORKFLOW)
 async def delete_collection_workflow(collection: str) -> None:
     """Cancel every index workflow of the collection, then drop the rows and the folder. No
-    document is touched.
+    document is touched. The folder moves aside before the row goes, so the name is free with no
+    folder under it: a create or rename may take it at once.
 
     The sweep repeats until it finds nothing: a bulk index still queueing documents can add more
     while the first sweep runs. Each sweep's cancel is final for the status row and for nothing
@@ -1333,9 +1341,12 @@ async def delete_collection_workflow(collection: str) -> None:
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection):
         while await cancel_active_batch(collection) > 0:
             pass
+        # one per delete, from its durable id, so a replay moves and removes the same folder
+        key = hashlib.sha1((DBOS.workflow_id or collection).encode()).hexdigest()[:12]
         async with collection_lock(collection):
+            await move_aside(collection, key)
             await remove_rows(collection)
-            await remove_tree(collection)
+            await remove_aside(collection, key)
         _collection_locks.pop(collection, None)  # nothing may write to it again
 
 
@@ -1599,33 +1610,13 @@ async def start_delete_collection(collection: str) -> str:
     )
 
 
-async def _refuse_while_deleted(name: str) -> None:
-    """Refuse a name whose delete still runs. The delete removes the row before the folder, so
-    the name is free while the folder still stands; a create or a rename onto it would put its
-    folder there, and the delete's last step would then remove it."""
-    deleting = await _active_ids(
-        DELETE_COLLECTION_WORKFLOW, f"{BULK_DELETE_PREFIX}:{name}:", limit=1
-    )
-    if deleting:
-        raise Conflict(
-            f"collection {name} is still being deleted by {deleting[0]}; "
-            "use the name once that finishes"
-        )
-
-
-async def create_collection(name: str, description: str = "") -> Collection:
-    """Create one collection, refused while a delete of the same name still runs."""
-    await _refuse_while_deleted(document.safe_name(name))
-    return await Collection.create(name, description)
-
-
 async def rename_collection(collection: str, name: str) -> Collection:
     """Rename one collection; the same name is a no-op, and any other is refused while work of
     the collection runs. Each such run holds the old name: an index write or a maintenance run
     would put the old folder back, a bulk index or delete would go on queueing under it, and a
     detach's removal would find no membership under it and leave the moved one `removing`. A
     run queued after this check is the window left open; the rename itself is one transaction
-    and a folder move. A name whose delete still runs is refused too (`_refuse_while_deleted`)."""
+    and a folder move."""
     found = await Collection.get(collection)  # NotFound before anything else
     if document.safe_name(name) == found.name:
         return found
@@ -1651,7 +1642,6 @@ async def rename_collection(collection: str, name: str) -> Collection:
     )
     if busy:
         raise Conflict(f"collection is busy with {busy[0]}; rename it once that finishes")
-    await _refuse_while_deleted(document.safe_name(name))
     renamed = await found.rename(name)
     # a run debounced under the old name finds no row and skips, so the pending documents it was
     # for are asked for again under the new one

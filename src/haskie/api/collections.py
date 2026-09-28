@@ -56,7 +56,7 @@ async def list_collections(page: PageRequest) -> Page[CollectionSummary]:
 @post("/api/collections")
 @audit.audited("collection.create")
 async def create_collection(data: CreateCollection) -> CollectionInfo:
-    found = await workflows.create_collection(data.name, data.description)
+    found = await Collection.create(data.name, data.description)
     audit.attach(collection=found.name)
     logs.bind(collection=found.name)
     return await found.info()
