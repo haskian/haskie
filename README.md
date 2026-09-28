@@ -115,9 +115,10 @@ haskie install claude       # MCP server, skill, rule and SessionStart hook for 
 haskie run                  # web UI, REST API and MCP on http://127.0.0.1:8451
 ```
 
-Open http://127.0.0.1:8451. The first screen asks for an embedding model and the search defaults.
-The default model is bge-small (English, about 130 MB). Pick a multilingual one for other
-languages, or none for keyword search only. The model applies to every collection, and changing
+Open http://127.0.0.1:8451, or run `haskie init`, which starts the server and opens it for you.
+The first screen asks for an embedding model and the search defaults: by default the
+cross-encoder reranker is on. The default model is bge-small (English, about 130 MB). Pick a
+multilingual one for other languages, or none for keyword search only. The model applies to every collection, and changing
 it later means running *Index all* in each one.
 
 - **Extras:** install `"haskie[gpu]"` to run embeddings and

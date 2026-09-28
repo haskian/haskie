@@ -67,14 +67,92 @@ def _pre_collection_home(root: Path) -> None:
 
 def test_init_creates_the_home_and_repeats_safely(elsewhere: Path) -> None:
     """Idempotent: `init` is also how an existing home is migrated after an upgrade."""
-    first = runner.invoke(cli, ["init", "--home", str(elsewhere)])
+    first = runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
     assert first.exit_code == 0, _text(first)
     assert (elsewhere / "haskie.db").is_file()
     for directory in ("documents", "collections", "staging", "audit"):
         assert (elsewhere / directory).is_dir(), directory
 
-    again = runner.invoke(cli, ["init", "--home", str(elsewhere)])
+    again = runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
     assert again.exit_code == 0, _text(again)
+
+
+UI = f"http://{claude.DEFAULT_HOST}:{claude.DEFAULT_PORT}/"
+THIS_HOME = None  # the server reached serves the home `init` made
+
+
+@pytest.mark.parametrize(
+    ("name", "picked", "flags", "serving", "exit_code", "served", "opened", "says"),
+    [
+        (
+            "a first run not done: a server, and the UI opened on it",
+            False,
+            [],
+            THIS_HOME,
+            0,
+            True,
+            [UI],
+            "pick the embedding model and the search at",
+        ),
+        (
+            "another home serves the port: refused, nothing opened",
+            False,
+            [],
+            "/elsewhere",
+            1,
+            True,
+            [],
+            "serves another home (/elsewhere)",
+        ),
+        (
+            "no browser: nothing started, only where to go",
+            False,
+            ["--no-browser"],
+            THIS_HOME,
+            0,
+            False,
+            [],
+            "(haskie run serves it)",
+        ),
+        ("a first run done: the home as it is", True, [], THIS_HOME, 0, False, [], "ready in"),
+    ],
+)
+def test_init_finishes_the_first_run_in_the_browser_once(
+    elsewhere: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    picked: bool,
+    flags: list[str],
+    serving: str | None,
+    exit_code: int,
+    served: bool,
+    opened: list[str],
+    says: str,
+) -> None:
+    """The settings the first run needs are picked in the web UI, so `init` opens it on a server
+    it starts, unless they are picked already, the caller has no browser, or the port is taken
+    by another home, whose UI would pick that home's settings."""
+    import webbrowser
+
+    from haskie import settings
+
+    if picked:
+        runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+        assert asyncio.run(settings.init_user_settings(settings.UserSettings()))
+    serves: list[str] = []
+    browsed: list[str] = []
+    answers = {"home": serving or str(elsewhere.resolve())}
+    monkeypatch.setattr(cli_module, "_serve", lambda url, wait: serves.append(url))
+    monkeypatch.setattr(cli_module, "_status", lambda _url: answers)
+    monkeypatch.setattr(webbrowser, "open", lambda url: browsed.append(url) or True)
+
+    result = runner.invoke(cli, ["init", "--home", str(elsewhere), *flags])
+
+    assert result.exit_code == exit_code, f"{name}: {_text(result)}"
+    assert (elsewhere / "haskie.db").is_file(), name
+    assert serves == ([claude.MCP_URL] if served else []), name
+    assert browsed == opened, name
+    assert says in _text(result), name
 
 
 def test_init_refuses_a_home_from_before_collections(elsewhere: Path) -> None:
@@ -82,7 +160,7 @@ def test_init_refuses_a_home_from_before_collections(elsewhere: Path) -> None:
     rather than losing rows to a silent drop."""
     _pre_collection_home(elsewhere)
 
-    refused = runner.invoke(cli, ["init", "--home", str(elsewhere)])
+    refused = runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
 
     assert refused.exit_code == 1
     assert db.INCOMPATIBLE_HOME_MESSAGE in _text(refused)
@@ -97,14 +175,14 @@ def test_destroy_after_a_refused_init_lets_it_start_over(elsewhere: Path) -> Non
     _pre_collection_home(elsewhere)
 
     assert runner.invoke(cli, ["destroy", "--home", str(elsewhere), "--yes"]).exit_code == 0
-    again = runner.invoke(cli, ["init", "--home", str(elsewhere)])
+    again = runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
 
     assert again.exit_code == 0, _text(again)
     assert (elsewhere / "collections").is_dir()
 
 
 def test_destroy_asks_first_and_leaves_everything_when_refused(elsewhere: Path) -> None:
-    runner.invoke(cli, ["init", "--home", str(elsewhere)])
+    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
     _shelve(home.COLLECTION_ROOT, "notes")
     _shelve(home.DOCUMENT_ROOT, "guide.md")
 
@@ -118,7 +196,7 @@ def test_destroy_asks_first_and_leaves_everything_when_refused(elsewhere: Path) 
 
 
 def test_destroy_deletes_the_home_when_confirmed(elsewhere: Path) -> None:
-    runner.invoke(cli, ["init", "--home", str(elsewhere)])
+    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
 
     done = runner.invoke(cli, ["destroy", "--home", str(elsewhere)], input="y\n")
 
@@ -127,7 +205,7 @@ def test_destroy_deletes_the_home_when_confirmed(elsewhere: Path) -> None:
 
 
 def test_destroy_yes_skips_the_prompt(elsewhere: Path) -> None:
-    runner.invoke(cli, ["init", "--home", str(elsewhere)])
+    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
 
     done = runner.invoke(cli, ["destroy", "--home", str(elsewhere), "--yes"])
 
@@ -178,10 +256,10 @@ def test_destroy_on_a_missing_home_says_so(tmp_path: Path) -> None:
 def test_init_after_destroy_migrates_again(elsewhere: Path) -> None:
     """`destroy` clears the per-process "already migrated" set, or the new home would have no
     schema."""
-    runner.invoke(cli, ["init", "--home", str(elsewhere)])
+    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
     runner.invoke(cli, ["destroy", "--home", str(elsewhere), "--yes"])
 
-    again = runner.invoke(cli, ["init", "--home", str(elsewhere)])
+    again = runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
 
     assert again.exit_code == 0, _text(again)
     assert (elsewhere / "haskie.db").is_file(), "the schema was applied to the new file"
@@ -636,7 +714,9 @@ def test_install_claude(
     claude_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runner.invoke(cli, ["init", "--home", str(elsewhere)])  # `init` points the process at it
+    runner.invoke(
+        cli, ["init", "--home", str(elsewhere), "--no-browser"]
+    )  # `init` points the process at it
     for name, description in case.collections:
         asyncio.run(Collection.create(name, description))
     if case.claude_on_path:
@@ -672,7 +752,7 @@ def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
     elsewhere: Path, claude_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Re-running is how the trigger is refreshed after a collection is added."""
-    runner.invoke(cli, ["init", "--home", str(elsewhere)])
+    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
     asyncio.run(Collection.create("roasting", "Coffee."))
     monkeypatch.setattr(cli_module, "_serving", lambda _url: True)
     arguments = ["install", "claude", "--home", str(elsewhere), "--scope", "project"]

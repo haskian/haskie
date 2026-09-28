@@ -5,6 +5,7 @@ creates the schema, `run` is uvicorn over `app:create_app` — so it adds a way 
 way of doing the work.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -76,27 +77,54 @@ def _use_home(path: Path | None) -> None:
     home.use(Path(resolved))
 
 
-@cli.command()
-def init(home_dir: HomeOption = None) -> None:
-    """Create the home directory and its database.
+async def _first_run_done() -> bool:
+    """Make the home (see `db.migrate_once`), and say whether its first run picked the settings."""
+    from haskie import db, settings
 
-    Safe to repeat: every step is idempotent, and a home already at this version is left as it is.
-    `run` does the same thing at startup; this is for doing it first.
+    await db.migrate_once()
+    return await settings.load_user_settings_or_none() is not None
+
+
+@cli.command()
+def init(
+    home_dir: HomeOption = None,
+    browser: Annotated[
+        bool, typer.Option(help="Open the web UI to pick the settings the first run needs.")
+    ] = True,
+) -> None:
+    """Create the home directory and its database, then finish the first run in the browser.
+
+    The embedding model and the search are picked in the web UI, which shows what each model
+    costs, so a home without them starts a server (as `ensure` does) and opens the UI there.
+    A home that has them is left as it is: safe to repeat.
 
     There is no upgrade path. A home written at another schema version is refused, and the message
     says what to do instead (see `db.INCOMPATIBLE_HOME_MESSAGE`).
     """
     import asyncio
-
-    from haskie import db
+    import webbrowser
 
     _use_home(home_dir)
     try:
-        asyncio.run(db.migrate_once())  # makes the home first (see `db.migrate_once`)
+        done = asyncio.run(_first_run_done())
     except HaskieError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(f"haskie {APP_VERSION} ready in {home.HOME}")
+    if done:
+        return
+    ui = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/"
+    if not browser:
+        typer.echo(f"pick the embedding model and the search at {ui} (haskie run serves it)")
+        return
+    _serve(MCP_URL, wait=True)
+    # a haskie of another home may hold the port, and its UI would pick that home's settings
+    served = (_status(MCP_URL) or {}).get("home")
+    if served != str(home.HOME):
+        typer.echo(f"{ui} serves another home ({served}); stop it, or set HASKIE_PORT", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"pick the embedding model and the search at {ui}")
+    webbrowser.open(ui)  # False without a browser to open; the line above says where to go
 
 
 SHUTDOWN_DRAIN = 10.0  # what `run` gives uvicorn to finish the requests in flight when it is told
@@ -160,7 +188,12 @@ def _poll_until(ready: Callable[[], bool], seconds: float) -> bool:
 
 
 def _serving(url: str) -> bool:
-    """`/api/status` of the app serving `url`: the cheapest proof that a haskie is up.
+    """Whether a haskie answers at `url`."""
+    return _status(url) is not None
+
+
+def _status(url: str) -> dict[str, Any] | None:
+    """`/api/status` of the app serving `url`, or None: the cheapest proof that a haskie is up.
 
     `http.client` rather than `urllib.request`, and imported here rather than at module scope:
     `urlopen` builds a global opener whose `ProxyHandler` reads the system proxy configuration,
@@ -172,9 +205,10 @@ def _serving(url: str) -> bool:
     connection = HTTPConnection(parts.hostname or "", parts.port or 80, timeout=PROBE_TIMEOUT)
     try:
         connection.request("GET", "/api/status")
-        return connection.getresponse().status == 200
-    except OSError:  # a refused connection and a timeout are both OSError
-        return False
+        response = connection.getresponse()
+        return json.loads(response.read()) if response.status == 200 else None
+    except (OSError, ValueError):  # refused, timed out, or not haskie's JSON
+        return None
     finally:
         connection.close()
 
@@ -295,6 +329,11 @@ def ensure(
         # place the conversation's own id can reach the tools: nothing in an MCP call carries it,
         # so without this line every search is recorded against no session at all.
         typer.echo(claude.session_announcement(session_id))
+    _serve(url, wait)
+
+
+def _serve(url: str, wait: bool) -> None:
+    """Start haskie detached if nothing is serving `url`, and wait for it unless told not to."""
     if _serving(url):
         typer.echo(f"haskie is already serving {url}")
         return
