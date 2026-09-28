@@ -12,27 +12,35 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import signal
 import sqlite3
 import stat
 import subprocess
-import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from conftest import fresh_attribute, holding
 from typer.testing import CliRunner
 
 from haskie import APP_VERSION, claude, db, home
 from haskie import cli as cli_module
 from haskie.claude import Scope
 from haskie.cli import cli
-from haskie.collection.collection import Collection
+from haskie.collection.collection import Collection, CollectionSummary, DocumentCounts
 from haskie.errors import Conflict, InvalidInput
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def no_home_in_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every command exports the home it uses (see `cli._use_home`), and `--home` reads it back
+    from there: without this a mise shell's `HASKIE_HOME` would reach a test, and a test's own
+    home would reach the next one. `setenv` first, so the undo restores even an unset variable."""
+    monkeypatch.setenv("HASKIE_HOME", "")
+    monkeypatch.delenv("HASKIE_HOME")
 
 
 @pytest.fixture
@@ -155,6 +163,35 @@ def test_init_finishes_the_first_run_in_the_browser_once(
     assert says in _text(result), name
 
 
+@pytest.mark.parametrize(
+    "given", [True, False], ids=["--home through a link", "the default home through a link"]
+)
+def test_init_knows_its_own_server_through_a_linked_home(
+    given: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`~/.haskie` may be a link into a synced folder. The server `init` starts is given the
+    resolved root and reports that back, so `init` must resolve the home it compares, whether it
+    came from `--home` or from the default, or it calls its own server another home's."""
+    import webbrowser
+
+    real = tmp_path / "synced" / "haskie"
+    real.mkdir(parents=True)
+    link = tmp_path / ".haskie"
+    link.symlink_to(real)
+    home.use(link)  # the default, as `~/.haskie` would be
+    monkeypatch.setattr(cli_module, "_serve", lambda _url, wait: None)
+    monkeypatch.setattr(cli_module, "_status", lambda _url: {"home": str(real.resolve())})
+    monkeypatch.setattr(webbrowser, "open", lambda _url: True)
+
+    result = runner.invoke(cli, ["init", *(["--home", str(link)] if given else [])])
+
+    assert result.exit_code == 0, _text(result)
+    assert "serves another home" not in _text(result)
+    assert home.HOME == real.resolve()
+    assert os.environ["HASKIE_HOME"] == str(real.resolve()), "a --reload child reads the same root"
+    assert (real / "haskie.db").is_file()
+
+
 def test_init_refuses_a_home_from_before_collections(elsewhere: Path) -> None:
     """No migration path exists for the old storage shape, so the user is told to destroy it
     rather than losing rows to a silent drop."""
@@ -244,6 +281,67 @@ def test_destroy_refuses_a_directory_that_is_not_a_home(tmp_path: Path) -> None:
     assert (documents / "keep" / "thesis.pdf").is_file(), "untouched"
 
 
+def test_destroy_refuses_a_home_a_server_holds(elsewhere: Path) -> None:
+    """The SessionStart hook usually keeps a server up. Deleting under it leaves it serving from
+    deleted files and takes the home lock with it, so `destroy` refuses before it asks."""
+    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+
+    with holding():
+        refused = runner.invoke(cli, ["destroy", "--home", str(elsewhere)], input="y\n")
+
+    assert refused.exit_code == 1, _text(refused)
+    assert "already running" in refused.stderr
+    assert "haskie stop" in refused.stderr, "says what to do"
+    assert "about to delete" not in refused.stdout, "refused before the prompt"
+    assert (elsewhere / "haskie.db").is_file(), "nothing deleted"
+
+
+@dataclass
+class LeftOverCase:
+    files: list[str]  # what sits in a directory destroy may not write into
+    directories: list[str]  # empty directories beside them
+    expect_left: str
+
+
+LEFT_OVER_CASES = {
+    "a file it cannot delete is named": LeftOverCase(
+        files=["guide.md"], directories=[], expect_left="still there: documents/pinned/guide.md"
+    ),
+    "past the first few, a count": LeftOverCase(
+        files=[f"part-{n}.md" for n in range(cli_module.LEFT_SHOWN + 2)],
+        directories=[],
+        expect_left="documents/pinned/part-4.md and 2 more",
+    ),
+    "only directories left": LeftOverCase(
+        files=[], directories=["empty"], expect_left="still there: empty directories"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", LEFT_OVER_CASES.values(), ids=list(LEFT_OVER_CASES))
+def test_destroy_fails_when_something_is_left(case: LeftOverCase, elsewhere: Path) -> None:
+    """`remove_tree` logs what it cannot delete and carries on, so `destroy` looks afterwards: a
+    home still on disk is a failure, and the message says what is left."""
+    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    pinned = elsewhere / "documents" / "pinned"
+    pinned.mkdir()
+    for name in case.files:
+        (pinned / name).write_text("# kept\n")
+    for name in case.directories:
+        (pinned / name).mkdir()
+    pinned.chmod(0o500)  # nothing inside can be unlinked
+    try:
+        result = runner.invoke(cli, ["destroy", "--home", str(elsewhere), "--yes"])
+    finally:
+        pinned.chmod(0o700)
+
+    assert result.exit_code == 1, _text(result)
+    assert f"deleted {elsewhere.resolve()}" not in result.stdout, "never claims it is gone"
+    assert f"could not delete all of {elsewhere.resolve()}" in result.stderr
+    assert case.expect_left in result.stderr
+    assert elsewhere.is_dir()
+
+
 def test_destroy_on_a_missing_home_says_so(tmp_path: Path) -> None:
     never = tmp_path / "never-created"
 
@@ -284,19 +382,6 @@ def test_version_flag_answers_without_a_subcommand() -> None:
 # --- one haskie per home ----------------------------------------------------
 
 
-@contextmanager
-def holding(address: str = "http://127.0.0.1:8451") -> Iterator[None]:
-    """Claim the home for the body, and give it back afterwards. `claim_home` takes the address
-    from the environment, the way `run` leaves it there."""
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv("HASKIE_ADDRESS", address)
-        home.claim_home()
-    try:
-        yield
-    finally:
-        home.release_home()
-
-
 def test_claim_home_refuses_a_second_holder_and_says_who_has_it(
     elsewhere: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -328,6 +413,25 @@ def test_claim_home_claims_once_and_gives_the_home_back(elsewhere: Path) -> None
 
     with holding():
         assert home.LOCK_FILE.read_text().startswith("pid "), "the next one gets in"
+
+
+def test_run_exports_its_own_pid_for_the_lock(
+    elsewhere: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run` puts its pid in the environment before uvicorn starts, so a `--reload` worker that
+    claims the home records the reloader, not itself."""
+    seen: dict[str, str | None] = {}
+
+    def serve(*_args, **_kwargs) -> None:
+        seen["pid"] = os.environ.get(home.SERVER_PID_ENV)
+
+    monkeypatch.setattr("uvicorn.run", serve)
+    monkeypatch.delenv(home.SERVER_PID_ENV, raising=False)
+
+    result = runner.invoke(cli, ["run", "--home", str(elsewhere), "--reload"])
+
+    assert result.exit_code == 0, result.output
+    assert seen["pid"] == str(os.getpid())
 
 
 def test_run_refuses_in_one_line_when_the_home_is_taken(elsewhere: Path) -> None:
@@ -696,6 +800,13 @@ INSTALL_CASES = {
         expect_in_skill=["adr: Architecture decisions"],
         expect_in_output="registered the haskie MCP server",
     ),
+    "trailing punctuation gives way to the separator": InstallCase(
+        scope=Scope.PROJECT,
+        claude_on_path=True,
+        collections=[("Software-Architecture", "DDD, event-driven,")],
+        expect_in_skill=["Software-Architecture: DDD, event-driven."],
+        expect_in_output="registered the haskie MCP server",
+    ),
     "an empty home still installs": InstallCase(
         scope=Scope.PROJECT,
         claude_on_path=True,
@@ -770,6 +881,123 @@ def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
     assert "adr: Architecture decisions" in rule, "the new collection reached the rule"
 
 
+def test_install_claude_leaves_stdin_to_the_script_that_runs_it(
+    elsewhere: Path, claude_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a SessionStart hook's `ensure` reads a payload from stdin. `install claude` inside a
+    piped script must not read the script's next lines as one, nor wait on a pipe held open."""
+    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    served: list[tuple[str, bool]] = []
+    monkeypatch.setattr(cli_module, "_serve", lambda url, wait: served.append((url, wait)))
+    payload = json.dumps({"session_id": "abc-123", "source": "startup"})
+
+    result = runner.invoke(
+        cli,
+        ["install", "claude", "--home", str(elsewhere), "--scope", "project"],
+        input=payload,
+    )
+
+    assert result.exit_code == 0, _text(result)
+    assert "session id is" not in _text(result), "stdin was not read as a hook payload"
+    assert served == [(claude.MCP_URL, True)], "brings the server up and waits for it"
+
+
+SKILL_DESCRIPTION_CAP = 1536  # where Claude Code cuts a skill description in its listing
+
+
+def test_a_long_trigger_line_keeps_the_fixed_triggers() -> None:
+    """Claude Code cuts the description at its cap, so the collections go last: a home with many
+    described collections loses its last topics, never "my documents"."""
+    essay = "Every book and paper on roasting, brewing and tasting coffee, " * 4
+    collections = [
+        CollectionSummary(
+            name=f"shelf-{n}", counts=DocumentCounts(), created_at=0.0, description=essay
+        )
+        for n in range(20)
+    ]
+
+    skill = claude.render_skill(collections)
+
+    description = skill.split("description: >-\n", 1)[1].split("\n---\n", 1)[0]
+    assert len(description) > SKILL_DESCRIPTION_CAP, "long enough to be cut"
+    assert '"my documents"' in description[:SKILL_DESCRIPTION_CAP]
+    assert "cited to something they own" in description[:SKILL_DESCRIPTION_CAP]
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://127.0.0.1:8451/mcp", "http://127.0.0.1:8451/mcp?a=1&b=2", "http://host/my mcp"],
+    ids=["a plain url", "a url with a shell operator", "a url with a space"],
+)
+def test_a_url_stays_one_argument(url: str, claude_workspace: Path, tmp_path: Path) -> None:
+    """The hook and the by-hand line are both run by a shell, so a URL that holds `&` or a space
+    must reach haskie and `claude` as one argument, not split into a second command."""
+    home_dir = tmp_path / "my home"
+
+    hooked = shlex.split(claude.hook_command(home_dir, url))
+    manual = claude.register_mcp(url, Scope.PROJECT)  # no `claude` on the workspace's PATH
+
+    assert hooked[-6:] == ["ensure", "--home", str(home_dir), "--url", url, "--no-wait"]
+    assert manual is not None
+    assert shlex.split(manual)[-2:] == ["haskie", url]
+
+
+@dataclass
+class RefusedInstallCase:
+    old_home: bool  # a home from before collections, which `read_collections` cannot open
+    claude_fails: bool  # a `claude` CLI whose `mcp add` exits non-zero
+    settings: str | None  # what `.claude/settings.json` holds before the install
+    expect_error: str
+
+
+REFUSED_INSTALL_CASES = {
+    "a home from another schema": RefusedInstallCase(
+        old_home=True, claude_fails=False, settings=None, expect_error=db.INCOMPATIBLE_HOME_MESSAGE
+    ),
+    "claude mcp add fails": RefusedInstallCase(
+        old_home=False, claude_fails=True, settings=None, expect_error="no such scope"
+    ),
+    "a settings file that is not JSON": RefusedInstallCase(
+        old_home=False, claude_fails=False, settings="{not json", expect_error="is not valid JSON"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", REFUSED_INSTALL_CASES.values(), ids=list(REFUSED_INSTALL_CASES))
+def test_install_claude_refuses_in_one_line(
+    case: RefusedInstallCase,
+    elsewhere: Path,
+    claude_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every failure `install claude` can meet is a `HaskieError`, and each one ends as a line on
+    stderr and exit 1, never a traceback, wherever in the install it happens."""
+    if case.old_home:
+        _pre_collection_home(elsewhere)
+    else:
+        runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    if case.claude_fails:
+        stub = claude_workspace / "claude"
+        stub.write_text("#!/bin/sh\necho 'error: no such scope' >&2\nexit 1\n")
+        stub.chmod(0o755)
+    if case.settings is not None:
+        settings_file = claude.settings_path(Scope.PROJECT)
+        settings_file.parent.mkdir(parents=True)
+        settings_file.write_text(case.settings)
+    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)
+
+    result = runner.invoke(
+        cli, ["install", "claude", "--home", str(elsewhere), "--scope", "project"]
+    )
+
+    assert result.exit_code == 1, _text(result)
+    assert isinstance(result.exception, SystemExit), "a refusal, not a traceback"
+    assert case.expect_error in result.stderr
+    assert len(result.stderr.strip().splitlines()) == 1, "one line"
+    if case.settings is not None:
+        assert claude.settings_path(Scope.PROJECT).read_text() == case.settings, "left as it was"
+
+
 # `install_hook` merges into a file the user owns, so its branches are worth reaching directly
 # rather than through four more end-to-end installs.
 
@@ -825,18 +1053,87 @@ def test_install_hook(case: HookCase, claude_workspace: Path, tmp_path: Path) ->
         assert settings[case.keeps] == "opus", "an unrelated setting survives"
 
 
-def test_install_hook_refuses_a_settings_file_it_cannot_parse(
-    claude_workspace: Path, tmp_path: Path
+UNREADABLE_SETTINGS = {
+    "not JSON": ("{not json", "is not valid JSON"),
+    "not UTF-8": ('{"model": "\xff"}', "is not valid JSON"),
+    "not an object": ("[]", "hooks.SessionStart"),
+    "hooks is null": ('{"hooks": null}', "hooks.SessionStart"),
+    "SessionStart is an object": ('{"hooks": {"SessionStart": {}}}', "hooks.SessionStart"),
+    "a matcher is not an object": ('{"hooks": {"SessionStart": ["mine"]}}', "hooks.SessionStart"),
+    "a matcher's hooks is not a list": (
+        '{"hooks": {"SessionStart": [{"hooks": "mine"}]}}',
+        "hooks.SessionStart",
+    ),
+    "a hook is not an object": (
+        '{"hooks": {"SessionStart": [{"hooks": ["mine"]}]}}',
+        "hooks.SessionStart",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("before", "expect_error"), UNREADABLE_SETTINGS.values(), ids=list(UNREADABLE_SETTINGS)
+)
+def test_install_hook_refuses_a_settings_file_it_cannot_follow(
+    before: str, expect_error: str, claude_workspace: Path, tmp_path: Path
 ) -> None:
-    """Rewriting a file we could not read would throw the user's settings away."""
+    """Rewriting a file we could not read would throw the user's settings away, and every failure
+    here must be a `HaskieError`, never a bare `AttributeError`."""
     settings_file = claude.settings_path(Scope.PROJECT)
     settings_file.parent.mkdir(parents=True)
-    settings_file.write_text("{not json")
+    settings_file.write_bytes(before.encode("latin-1"))
 
-    with pytest.raises(InvalidInput, match="not valid JSON"):
+    with pytest.raises(InvalidInput, match=expect_error):
         claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8451/mcp")
 
-    assert settings_file.read_text() == "{not json", "left exactly as it was"
+    assert settings_file.read_bytes() == before.encode("latin-1"), "left exactly as it was"
+
+
+@dataclass
+class KeptFileCase:
+    mode: int | None  # the existing file's mode; None when there is no file yet
+    linked: bool  # whether settings.json is a link into a dotfiles directory
+    expect_mode: int | None  # None: what a new file gets under the process umask
+
+
+KEPT_FILE_CASES = {
+    "no file yet gets the default mode": KeptFileCase(mode=None, linked=False, expect_mode=None),
+    "a private file stays private": KeptFileCase(mode=0o600, linked=False, expect_mode=0o600),
+    "a read-only file is still rewritten": KeptFileCase(
+        mode=0o400, linked=False, expect_mode=0o400
+    ),
+    "a linked file stays linked": KeptFileCase(mode=0o600, linked=True, expect_mode=0o600),
+}
+
+
+@pytest.mark.parametrize("case", KEPT_FILE_CASES.values(), ids=list(KEPT_FILE_CASES))
+def test_install_hook_keeps_the_settings_file_what_it_was(
+    case: KeptFileCase, claude_workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rewrite is a rename, which replaces whatever sits at the path. A settings file that is a
+    link into a dotfiles repository must stay one, and one kept private (it can hold API keys) must
+    not come back world-readable."""
+    settings_file = claude.settings_path(Scope.PROJECT)
+    settings_file.parent.mkdir(parents=True)
+    real = tmp_path / "dotfiles" / "settings.json" if case.linked else settings_file
+    if case.mode is not None:
+        real.parent.mkdir(parents=True, exist_ok=True)
+        real.write_text('{"env": {"API_KEY": "sk-test"}}')
+        real.chmod(case.mode)
+    if case.linked:
+        settings_file.symlink_to(real)
+
+    claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8451/mcp")
+
+    assert settings_file.is_symlink() is case.linked
+    umask = os.umask(0)
+    os.umask(umask)
+    expect_mode = 0o666 & ~umask if case.expect_mode is None else case.expect_mode
+    assert stat.S_IMODE(real.stat().st_mode) == expect_mode
+    written = json.loads(real.read_text())
+    assert claude.HOOK_MARKER in written["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    if case.mode is not None:
+        assert written["env"] == {"API_KEY": "sk-test"}, "the rest of the file survives"
 
 
 def _served_tools() -> set[str]:
@@ -889,14 +1186,19 @@ def test_the_default_url_matches_where_mcp_is_mounted() -> None:
 )
 def test_haskie_port_moves_the_default_url(port: str | None, expected: str) -> None:
     """Read once at import, so only a fresh interpreter shows it."""
-    env = {key: value for key, value in os.environ.items() if key != "HASKIE_PORT"}
-    if port is not None:
-        env["HASKIE_PORT"] = port
-    printed = subprocess.run(
-        [sys.executable, "-c", "from haskie import claude; print(claude.MCP_URL)"],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
+    printed = fresh_attribute("haskie.claude", "MCP_URL", {"HASKIE_PORT": port})
     assert printed == expected
+
+
+@pytest.mark.parametrize(
+    ("config_dir", "expected"),
+    [(None, "home/.claude"), ("", "home/.claude"), ("~/work-claude", "home/work-claude")],
+    ids=["unset: ~/.claude", "empty: ~/.claude", "CLAUDE_CONFIG_DIR: where Claude Code moved it"],
+)
+def test_claude_config_dir_moves_the_user_scope(
+    config_dir: str | None, expected: str, tmp_path: Path
+) -> None:
+    """Read once at import, so only a fresh interpreter shows it."""
+    env = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": config_dir}
+    printed = fresh_attribute("haskie.claude", "USER_CLAUDE", env)
+    assert printed == str(tmp_path / expected)

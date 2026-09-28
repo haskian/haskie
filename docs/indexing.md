@@ -58,7 +58,8 @@ spreads over the free slots. The index stage is one child and is never sliced.
 
 **One writer per table.** Every index child runs on `task.indexing`, partitioned by collection
 with one slot per partition, and under a per-collection lock. So LanceDB sees one writer per
-table.
+table. A detach's removal waits its turn there too. The request only queues it, and the membership
+reads `removing` until it ran (see [a membership's life](documents-and-collections.md#a-memberships-life)).
 
 ## Queues
 
@@ -103,15 +104,23 @@ you need the machine back.
 - A **permanent** failure fails at once: a file the parser cannot read, or a PDF whose pages need
   OCR. With `skip_ocr_pages` on (the default), only a PDF where every page needs OCR fails.
   Unsupported file types are refused at import, before any operation starts.
+- An embedding model that is still downloading or warming up is not a failure. The embedding
+  run sleeps durably until the model is ready, before it cuts any slice. A batch that still finds
+  it warming, after a restart for example, sleeps the same way. Only a model that failed to load
+  ends the import in `error`.
 - A slice that runs past `task_timeout_seconds` per batch is cancelled, not retried.
 - A **model download** gets 5 attempts. Its durable id is `dl:{kind}:{model}`, so a restart
   reuses the files already on disk.
 - On **restart**, DBOS resumes each workflow at its first unfinished step. It reads the
   recorded inputs back through `indexing/serializer.py`, which keeps each `msgspec.Struct` by
   field name. So a field added or removed since does not garble an old record. The DBOS application
-  version is the package version, so work recorded under another version is enqueued again.
+  version is the package version, and DBOS runs only its own version's work. So at boot,
+  `adopt_orphans` moves work recorded under another version onto this one and enqueues it again,
+  each workflow on its own queue.
 - **Deduplication:** one active import per document, one active index per membership, one
-  embedding run per cache id.
+  embedding run per cache id. Two collections with the same chunk settings share one run. The
+  run belongs to the operation that asked first. When a cancel of that operation also cancels
+  the run, the other collection starts a run of its own.
 - **Cancellation** works on running operations, from the Operations view or
   `DELETE /api/operations/{id}`. A cancelled import or index is marked `cancelled`.
 

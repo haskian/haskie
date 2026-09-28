@@ -2,11 +2,16 @@
 
 import asyncio
 import hashlib
+import io
+import json
+import logging
+import logging.config
 import os
 import sqlite3
 import stat
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -15,9 +20,11 @@ from typing import Any
 import anyio
 import msgspec
 import pytest
+import uvicorn.config
+from dbos import _logger as dbos_logger
 from sqlalchemy import func, insert, select, text, update
 
-from haskie import audit, cpu, db, errors, home, settings, tables
+from haskie import audit, cpu, db, errors, home, logs, settings, tables
 from haskie.audit import Actor, Outcome
 from haskie.collection.collection import Collection
 from haskie.document import document
@@ -26,6 +33,7 @@ from haskie.indexing import embed_cache
 from haskie.indexing.chunk import Chunk, Piece
 from haskie.indexing.segment import CutReason, PieceType
 from haskie.settings import (
+    MAX_SCAN,
     Chunker,
     ChunkSettings,
     CollectionOverrides,
@@ -43,7 +51,7 @@ from haskie.settings import (
     without_none,
 )
 
-from conftest import audit_lines, events, forget_settings  # isort: skip
+from conftest import audit_lines, events, forget_settings, fresh_attribute, holding  # isort: skip
 
 # --- errors -----------------------------------------------------------------------
 
@@ -67,7 +75,7 @@ def test_scrub_replaces_absolute_paths(name: str, template: str, expected: str) 
 
 
 def test_invalid_input_is_also_a_value_error() -> None:
-    """Callers written before `errors` (and msgspec's decode-time wrapping) catch ValueError."""
+    """msgspec wraps only a ValueError raised in `__post_init__` as a decode-time error."""
     assert issubclass(errors.InvalidInput, ValueError)
 
 
@@ -213,6 +221,35 @@ async def test_atomic_write_leaves_no_temp_file_on_failure(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("writer", WRITERS)
+async def test_atomic_write_puts_the_bytes_on_disk_before_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    """A rename can reach the disk before the bytes it names, and a power cut then leaves an empty
+    file where the old one was. So the whole payload is flushed first."""
+    target = tmp_path / "preview.md"
+    target.write_text("# Old\n")
+    steps: list[tuple[str, int]] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(descriptor: int) -> None:
+        steps.append(("fsync", os.fstat(descriptor).st_size))
+        real_fsync(descriptor)
+
+    def replace(source: Path, destination: Path) -> None:
+        steps.append(("replace", Path(source).stat().st_size))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    await _write(writer, target, "# A longer title\n")
+
+    size = len("# A longer title\n")
+    assert steps == [("fsync", size), ("replace", size)], f"{writer}: every byte, then the rename"
+    assert target.read_text() == "# A longer title\n", writer
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("name", "already_there"),
     [
@@ -234,6 +271,90 @@ async def test_ensure_home_creates_private_directories(name: str, already_there:
         assert directory.is_dir(), name
         assert directory.parent == home.HOME, name
         assert stat.S_IMODE(directory.stat().st_mode) == home.DIR_MODE, name
+
+
+@pytest.mark.parametrize(
+    ("name", "configured", "expected"),
+    [
+        ("a relative home is anchored where the process starts", "data", "{cwd}/data"),
+        ("a home under ~ is expanded", "~/haskie-home", "{user}/haskie-home"),
+    ],
+)
+def test_the_home_from_the_environment_is_absolute(
+    tmp_path: Path, name: str, configured: str, expected: str
+) -> None:
+    """`litestar run` hands `HASKIE_HOME` over as written, without the CLI's resolving. A relative
+    home would follow every later change of directory, and `scrub` would rewrite the bare word
+    `data` in every log line. The module reads it once, at import, so a fresh interpreter does."""
+    shown = fresh_attribute("haskie.home", "HOME", {"HASKIE_HOME": configured}, cwd=tmp_path)
+
+    wanted = expected.format(cwd=tmp_path.resolve(), user=Path.home())
+    assert shown == str(Path(wanted).resolve()), name
+
+
+# --- the holder line in the home lock ---------------------------------------------
+
+HOLDER_ADDRESS = "http://127.0.0.1:8452"
+
+
+# Ids of their own: a case that expects this process's pid would otherwise carry it in its id,
+# and every xdist worker would collect a different test.
+@pytest.mark.parametrize(
+    ("name", "left_behind", "server_pid", "written_while_held", "expected_pid"),
+    [
+        pytest.param(
+            "a longer line an earlier holder left is cut to ours",
+            "pid 4194304, http://127.0.0.1:65535 (an older build said more)",
+            None,
+            None,
+            os.getpid(),
+            id="stale-tail",
+        ),
+        # under `--reload` the claim runs in a worker; `stop` must signal `run`, which outlives it
+        pytest.param("a worker under run --reload names run", None, 4242, None, 4242, id="reload"),
+        pytest.param(
+            "a line that is not ours reads as no pid",
+            None,
+            None,
+            "held, but not by haskie",
+            None,
+            id="foreign-line",
+        ),
+        pytest.param(
+            "a pid that is not at the start reads as no pid",
+            None,
+            None,
+            "holder pid 4194304",
+            None,
+            id="pid-not-first",
+        ),
+    ],
+)
+def test_the_holder_line(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    left_behind: str | None,
+    server_pid: int | None,
+    written_while_held: str | None,
+    expected_pid: int | None,
+) -> None:
+    """`stop` signals the pid it reads off the lock, so the line must be exactly the one
+    `claim_home` wrote: a stale tail or a foreign line must never pass for a pid to signal."""
+    if left_behind is not None:
+        home.LOCK_FILE.write_text(left_behind)
+    if server_pid is None:
+        monkeypatch.delenv(home.SERVER_PID_ENV, raising=False)
+    else:
+        monkeypatch.setenv(home.SERVER_PID_ENV, str(server_pid))
+
+    with holding(HOLDER_ADDRESS):
+        if written_while_held is None:
+            assert home.LOCK_FILE.read_text() == f"pid {expected_pid}, {HOLDER_ADDRESS}", name
+        else:
+            home.LOCK_FILE.write_text(written_while_held)  # the lock is advisory: this is allowed
+        pid = home.running_pid()
+
+    assert pid == expected_pid, name
 
 
 # --- home.remove_tree -------------------------------------------------------------
@@ -280,6 +401,81 @@ async def test_remove_tree_reports_a_file_it_cannot_delete(
         assert events(caplog) == ["remove_failed", "remove_failed"], "file, then directory"
     finally:
         protected.chmod(0o700)
+
+
+# --- log lines --------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LogLineCase:
+    name: str
+    emit: Callable[[Path], None]  # logs one line about a file under the home it is given
+    field: str  # the field of the rendered line that holds the path
+
+
+def _bound_field(path: Path) -> None:
+    logs.get_logger("haskie.probe").warning("probe_failed", path=str(path))
+
+
+def _exception(path: Path) -> None:
+    try:
+        raise FileNotFoundError(f"no such file: {path}")
+    except FileNotFoundError:
+        logs.get_logger("haskie.probe").exception("probe_failed")
+
+
+def _foreign_record(path: Path) -> None:
+    # the way uvicorn logs its startup line: `%` arguments, and a copy for the terminal in `extra`
+    logging.getLogger("uvicorn.error").warning(
+        "Serving %s", path, extra={"color_message": f"Serving \x1b[1m{path}\x1b[0m"}
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        LogLineCase("a field our code binds", _bound_field, "path"),
+        LogLineCase("an exception our code logs", _exception, "exception"),
+        LogLineCase("a record from a library", _foreign_record, "event"),
+    ],
+    ids=lambda case: case.name,
+)
+def test_a_rendered_log_line_names_no_home_path(case: LogLineCase) -> None:
+    """The scrub runs after the traceback is formatted and the extras are copied, so it reaches
+    every field of the line as it is printed; the terminal copy of a message is not printed."""
+    target = home.DOCUMENT_ROOT / "ab" / "notes.md"
+    printed = io.StringIO()
+    capture = logging.StreamHandler(printed)
+    capture.setFormatter(logs.formatter("json"))  # the one the root handler renders with
+    logging.getLogger().addHandler(capture)
+    try:
+        case.emit(target)
+    finally:
+        logging.getLogger().removeHandler(capture)
+
+    (line,) = [json.loads(text) for text in printed.getvalue().splitlines()]
+    assert "$HASKIE_HOME/documents/ab/notes.md" in line[case.field], case.name
+    assert str(home.HOME) not in printed.getvalue(), f"{case.name}: no absolute path anywhere"
+    assert "color_message" not in line, case.name
+
+
+def test_configure_takes_over_the_library_loggers_with_handlers_of_their_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """uvicorn's CLI sets its text handlers up before it imports the app, and DBOS adds its own to
+    a logger that has none. Either would print plain text beside the JSON."""
+    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+    monkeypatch.setattr(logs, "_configured", False)
+
+    logs.configure()
+    dbos_logger.init_logger()
+
+    for name in ("uvicorn", "uvicorn.access"):
+        library = logging.getLogger(name)
+        assert (library.handlers, library.propagate) == ([], True), name
+    library = logging.getLogger("dbos")
+    assert [type(handler) for handler in library.handlers] == [logging.NullHandler], "dbos"
+    assert library.propagate, "dbos"
 
 
 # --- settings validation ----------------------------------------------------------
@@ -340,6 +536,11 @@ async def test_remove_tree_reports_a_file_it_cannot_delete(
             "task_timeout_seconds must be >= 1",
         ),
         ("limit below 1", lambda: SearchSettings(limit=0), "limit must be >= 1"),
+        (
+            "limit over the scan depth",
+            lambda: SearchOverrides(limit=MAX_SCAN + 1).resolve(SearchSettings()),
+            f"limit must be at most {MAX_SCAN}",
+        ),
         ("candidates below 1", lambda: SearchSettings(candidates=0), "candidates must be >= 1"),
         ("rrf_k below 1", lambda: SearchSettings(rrf_k=0), "rrf_k must be >= 1"),
         (
@@ -435,12 +636,29 @@ def test_document_parallelism_default_and_docs() -> None:
     assert doc.title == "Parallel tasks per document" and doc.description
 
 
+@pytest.mark.parametrize(
+    ("name", "usable_cores", "expected"),
+    [
+        ("a process pinned to 2 of the machine's 16 cores", 2, 1),
+        ("a process that may use all 16", 16, 8),
+        ("one core still gets a slot", 1, 1),
+        ("a platform that cannot tell", None, 1),
+    ],
+)
+def test_cpu_budget_defaults_to_half_the_cores_the_process_may_use(
+    monkeypatch: pytest.MonkeyPatch, name: str, usable_cores: int | None, expected: int
+) -> None:
+    """The default is stored at first run, so a count of cores the process cannot use would stay."""
+    monkeypatch.setattr(os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(os, "process_cpu_count", lambda: usable_cores)
+
+    assert PipelineSettings().cpu_budget == expected, name
+
+
 def test_cpu_budget_defaults_and_docs() -> None:
-    """Half the machine by default, so other work keeps the rest; the weights only say how that
+    """Half the cores by default, so other work keeps the rest; the weights only say how that
     budget is shared out when every stage has work."""
-    cores = os.cpu_count() or 2
     indexing = PipelineSettings()
-    assert indexing.cpu_budget == max(1, cores // 2)
     weights = (indexing.converting_weight, indexing.embedding_weight, indexing.indexing_weight)
     assert weights == (2, 2, 1), "converting and embedding cost more than the LanceDB write"
     docs = settings.docs()
@@ -658,7 +876,7 @@ async def test_connect_skips_ensure_home_after_the_first_success(
         return await real()
 
     monkeypatch.setattr(home, "ensure_home", counted)
-    db._migrated.clear()
+    db.invalidate_migrations()
 
     async with db.connect():
         pass
@@ -743,9 +961,9 @@ async def test_migrate_once_creates_the_schema_exactly_once(
     applied: list[int] = []  # the thread each run of the schema script happened on
     real = db.migrate
 
-    def counted(conn: sqlite3.Connection) -> int:
+    def counted(conn: sqlite3.Connection) -> None:
         applied.append(threading.get_ident())
-        return real(conn)
+        real(conn)
 
     monkeypatch.setattr(db, "migrate", counted)
 
@@ -909,6 +1127,56 @@ async def test_record_writes_one_private_json_line_with_every_field() -> None:
     assert stat.S_IMODE(os.stat(audit.path()).st_mode) == audit.FILE_MODE
 
 
+def _missing_part_error(root: Path) -> str:
+    """The text a pipeline failure carries when a part file is gone: `root_cause` of the real
+    `FileNotFoundError`, which names the absolute path."""
+    missing = root / "documents" / "ab" / "report.pdf" / "parts" / f"{home.part_name(0)}.md"
+    try:
+        missing.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    raise AssertionError(f"{missing} exists")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "error", "expected"),
+    [
+        ("no error", None, None),
+        (
+            "a path under the haskie home",
+            lambda: _missing_part_error(home.HOME),
+            "FileNotFoundError: [Errno 2] No such file or directory: "
+            "'$HASKIE_HOME/documents/ab/report.pdf/parts/000000.md'",
+        ),
+        (
+            "a path under the user's home",
+            lambda: _missing_part_error(Path.home() / "private"),
+            "FileNotFoundError: [Errno 2] No such file or directory: "
+            "'~/private/documents/ab/report.pdf/parts/000000.md'",
+        ),
+    ],
+)
+async def test_record_scrubs_the_error_it_is_given(
+    name: str, error: Callable[[], str] | None, expected: str | None, caplog
+) -> None:
+    """A pipeline failure reaches `record` as raw exception text, so the scrub happens there."""
+    with caplog.at_level("AUDIT", logger="haskie.audit"):
+        entry = await audit.record(
+            "import.failed",
+            actor=Actor.OPERATION,
+            outcome=Outcome.ERROR,
+            duration_ms=3,
+            document="report.pdf",
+            error=None if error is None else error(),
+        )
+
+    (line,) = audit_lines()
+    assert (entry.error, line.get("error")) == (expected, expected), name
+    (logged,) = [r for r in caplog.records if r.name == "haskie.audit"]
+    assert getattr(logged, "error", None) == expected, name
+
+
 @pytest.mark.anyio
 async def test_record_appends_rather_than_replacing() -> None:
     await audit.record("a", actor=Actor.WEB, outcome=Outcome.OK, duration_ms=0)
@@ -994,6 +1262,20 @@ async def test_audited_skips_unset_optional_parameters() -> None:
     (line,) = audit_lines()
     assert line["session_id"] == "s-1"
     assert "collection" not in line
+
+
+@pytest.mark.anyio
+async def test_audited_copies_every_record_field_a_handler_takes() -> None:
+    """`operation_id` too: a handler that takes one needs no `attach` for it."""
+
+    @audit.audited("operation.cancel")
+    async def handler(operation_id: str) -> None: ...
+
+    await handler("op-1")
+
+    (line,) = audit_lines()
+    assert line["operation_id"] == "op-1"
+    assert "detail" not in line
 
 
 # --- audit retention --------------------------------------------------------------

@@ -6,12 +6,13 @@ import statistics
 from pathlib import Path
 
 import pytest
+import typer
 from conftest import attach_document, import_document
 
 from haskie.catalogue import calibrate, catalogue
 from haskie.catalogue.calibrate import Borderline, Candidates, fit_beta, floor
 from haskie.collection.collection import Collection
-from haskie.indexing import embed, models
+from haskie.indexing import embed
 from haskie.search import log
 from haskie.settings import (
     Accelerator,
@@ -81,11 +82,9 @@ async def test_measuring_stores_the_floor_and_curve_a_search_reads(
     def rerank_scores(model: str, accelerator: Accelerator, q: str, ts: list[str]) -> list[float]:
         return [logits[text] for text in ts]
 
-    async def ready(kind: str, model: str) -> None:
-        return None
-
+    loaded: list[str] = []
     monkeypatch.setattr(embed, "rerank_scores", rerank_scores)
-    monkeypatch.setattr(models, "require_ready", ready)
+    monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: loaded.append(name))
     pairs = [("why", "borderline one"), ("how", "borderline two")]
     spread = [("why", "far"), ("why", "near"), ("how", "far")]
 
@@ -95,6 +94,29 @@ async def test_measuring_stores_the_floor_and_curve_a_search_reads(
     assert (name, measured.floor) == (MODEL, pytest.approx(expected))
     assert measured.source.endswith("on 2 borderline pairs")
     assert await catalogue.calibration(MODEL) == measured, "what a search reads next"
+    assert loaded == [MODEL, MODEL], (
+        "the model is loaded here, where no server does it, and the search's own check passes"
+    )
+
+
+async def test_measuring_no_borderline_pairs_is_refused_before_any_scoring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty borderline file gives no floor, so no candidate is reranked for nothing."""
+    scored: list[str] = []
+
+    def rerank_scores(model: str, accelerator: Accelerator, q: str, ts: list[str]) -> list[float]:
+        scored.extend(ts)
+        return [0.0 for _ in ts]
+
+    monkeypatch.setattr(embed, "rerank_scores", rerank_scores)
+    monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: None)
+
+    with pytest.raises(typer.BadParameter, match="no borderline pairs"):
+        await calibrate._measure([MODEL], [], [("why", "far")], write=True)
+
+    assert scored == [], "refused before the candidates were scored"
+    assert await catalogue.calibration(MODEL) == catalogue.UNCALIBRATED, "nothing written"
 
 
 def test_the_judged_files_read_one_record_a_line(tmp_path: Path) -> None:
@@ -117,13 +139,11 @@ async def test_sampling_reads_every_candidate_as_the_reranker_does_under_no_floo
     still writes the chunks ranked 10 to 30, since a floor measured on chunks over the old one
     could only rise. Each is written as the reranker reads it, its heading path first."""
 
-    async def ready(kind: str, model: str) -> None:
-        return None
-
     def rerank_scores(model: str, accelerator: Accelerator, q: str, ts: list[str]) -> list[float]:
         return [-3.0 - n / 100 for n, _ in enumerate(ts)]  # every sigmoid under 0.05
 
-    monkeypatch.setattr(models, "require_ready", ready)
+    loaded: list[str] = []
+    monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: loaded.append(name))
     monkeypatch.setattr(embed, "rerank_scores", rerank_scores)
     search = SearchSettings(reranker=Reranker.CROSS_ENCODER, min_rerank_score=0.9)
     await save_user_settings(UserSettings(search=search))
@@ -142,3 +162,4 @@ async def test_sampling_reads_every_candidate_as_the_reranker_does_under_no_floo
     assert written == 1 and sampled.query == "retry"
     assert len(sampled.texts) == len(calibrate.CANDIDATES), "ranks 10 to 30, none dropped"
     assert all(text.startswith("Part ") and "\n\nretry note" in text for text in sampled.texts)
+    assert search.reranker_model in loaded, "loaded here: no server runs to load it"

@@ -32,7 +32,8 @@ flowchart LR
 ```
 
 The files go under `~/.claude` with `--scope user` (the default), or `./.claude` of the current
-directory with `--scope project`. `--url` points them at another endpoint. The hook's full command
+directory with `--scope project`. With `CLAUDE_CONFIG_DIR` set, the user scope follows it, as
+Claude Code does. `--url` points them at another endpoint. The hook's full command
 is the absolute path of `haskie` with `ensure --home <home> --url <url> --no-wait`. The skill's
 trigger and the rule both name the home's collections, so they fire on the topics you collected.
 Run `haskie install claude` again after adding a collection to refresh them.

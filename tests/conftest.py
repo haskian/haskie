@@ -1,12 +1,16 @@
 """Fixtures shared by every test module: the temp home, and the DBOS runtime on top of it."""
 
 import functools
+import os
 import shutil
 import signal
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,6 +26,7 @@ if TYPE_CHECKING:  # every helper below imports haskie when it runs, not when py
     from haskie.catalogue.catalogue import EmbeddingModel
     from haskie.collection.index import CollectionIndex, Hit
     from haskie.indexing.chunk import Chunk
+    from haskie.indexing.pipeline import Batch
     from haskie.search.collapse import Scan
     from haskie.settings import SearchOverrides, SearchSettings
 
@@ -115,7 +120,7 @@ def _drop_caches(patch: pytest.MonkeyPatch) -> None:
     from haskie.catalogue import catalogue
     from haskie.indexing import models
 
-    patch.setattr(db, "_migrated", set())
+    patch.setattr(db, "_engines", {})
     patch.setattr(catalogue, "_embedders", {})
     patch.setattr(settings, "_state", None)
     # a loaded model is process state, and the process outlives the test that loaded it
@@ -272,6 +277,57 @@ async def wait_for(workflow_id: str):
     return await handle.get_result(polling_interval_sec=workflows.TASK_POLL)
 
 
+@contextmanager
+def extraction_pool(monkeypatch: pytest.MonkeyPatch, workers: int) -> Iterator[None]:
+    """The extraction pool the suite otherwise turns off (`CONVERT_WORKERS = 0`), fresh, open and
+    of `workers`, shut down after. The CPU budget is set to match: a pool call holds a slot of it,
+    and an earlier test on the same worker may have left it smaller than the pool."""
+    from haskie import cpu
+
+    budget = cpu._cpu_slots.size
+    cpu.configure_cpu_budget(workers)
+    monkeypatch.setattr(cpu, "CONVERT_WORKERS", workers)
+    monkeypatch.setattr(cpu, "_pool", None)
+    monkeypatch.setattr(cpu, "_pool_closed", False)
+    try:
+        yield
+    finally:
+        cpu.shutdown_pool()
+        cpu.configure_cpu_budget(budget)
+
+
+@contextmanager
+def holding(address: str = "http://127.0.0.1:8451") -> Iterator[None]:
+    """Claim the home for the body, and give it back afterwards. `claim_home` takes the address
+    from the environment, the way `run` leaves it there."""
+    from haskie import home
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(home.ADDRESS_ENV, address)
+        home.claim_home()
+    try:
+        yield
+    finally:
+        home.release_home()
+
+
+def fresh_attribute(
+    module: str, attribute: str, env: dict[str, str | None], cwd: Path | None = None
+) -> str:
+    """`module.attribute` as a fresh interpreter prints it: what a module reads once, at import.
+    `env` is laid over this process's environment, and a None in it unsets that variable."""
+    environment = {key: value for key, value in {**os.environ, **env}.items() if value is not None}
+    code = f"import importlib; print(importlib.import_module({module!r}).{attribute})"
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        env=environment,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
 WAIT = 30.0  # generous: every wait in the suite is released by another thread, never by a timer
 
 
@@ -279,6 +335,73 @@ async def wait_event(event: threading.Event, timeout: float = WAIT) -> bool:
     """Wait for a `threading.Event` without blocking the caller's loop. Two loops are involved -
     the test's and DBOS's background one - so the blocking wait goes to a worker thread."""
     return await anyio.to_thread.run_sync(functools.partial(event.wait, timeout))
+
+
+def batch_of(args: tuple) -> "Batch | None":
+    """The micro-batch one pipeline call was given. The three stage steps take it in three
+    different positions (`convert_batch`, `embed_batch`, `index_batch`), so it is found by type
+    rather than by index: one wrapper then fits all three."""
+    from haskie.indexing.pipeline import Batch
+
+    for value in args:
+        if isinstance(value, Batch):
+            return value
+    return None
+
+
+def doc_of(args: tuple) -> str:
+    """The document one pipeline call was given, by the same reasoning as `batch_of`."""
+    from haskie.document.document import Document
+
+    for value in args:
+        if isinstance(value, Document):
+            return value.name
+    return ""
+
+
+class Gate:
+    """A step the test can hold open: `entered` fires on the first blocked call, and that call
+    returns only once `release` is set. It wraps any async function, a method included."""
+
+    def __init__(
+        self, seq: int | None = None, doc: str | None = None, *, holds_cpu: bool = False
+    ) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls: list[int] = []
+        self.seq = seq  # block only this batch; None = every batch
+        self.doc = doc  # block only this document; None = every document
+        self.holds_cpu = holds_cpu  # hold one slot of the CPU budget while blocked (see `wrap`)
+
+    def _blocks(self, doc: str, batch: "Batch | None") -> bool:
+        by_seq = self.seq is None or (batch is not None and batch.seq == self.seq)
+        return by_seq and (self.doc is None or doc == self.doc)
+
+    def wrap(self, real):
+        from haskie import cpu
+
+        async def blocking(*args):
+            batch = batch_of(args)
+            self.calls.append(-1 if batch is None else batch.seq)
+            if self._blocks(doc_of(args), batch):
+                if self.holds_cpu:
+                    await cpu.on_cpu(self._hold)
+                else:
+                    self.entered.set()
+                    assert await wait_event(self.release), "the test never released the step"
+            return await real(*args)
+
+        return blocking
+
+    def _hold(self) -> None:
+        """The same wait, taken inside `cpu.on_cpu`, so it occupies one slot of the CPU budget for
+        as long as it lasts.
+
+        A step takes its slot inside `cpu.on_cpu`, around its CPU work alone, so a gate at the
+        step's entry holds no slot at all. A test about the budget rather than about a queue asks
+        for one. Sync, and run in the worker thread `cpu.on_cpu` gave it."""
+        self.entered.set()
+        assert self.release.wait(timeout=WAIT), "the test never released the step"
 
 
 async def await_terminal(workflow_ids: list[str]) -> None:
@@ -613,11 +736,28 @@ async def delete_collection(dbos, collection: str) -> None:
     await wait_for(await dbos.start_delete_collection(collection))
 
 
+async def remove_collection(collection: str) -> None:
+    """The steps `delete_collection_workflow` runs, in its order, for a test with no DBOS: the
+    folder moves aside, the row goes, then the folder moved aside."""
+    from haskie.collection.collection import Collection
+
+    removed = Collection(collection)
+    key = "test"  # the workflow keys it by its own id; one delete per name here
+    await removed.move_aside(key)
+    await removed.remove_rows()
+    await removed.remove_aside(key)
+
+
 # --- the same intake over HTTP, for the API tests ----------------------------
 
 IMPORT_TIMEOUT_SECONDS = 60
 IMPORT_POLL_SECONDS = 0.02
 MAX_WALK_PAGES = 100  # a cursor that never ends is the bug to catch, not a walk to hang on
+
+
+# Where a client reaches haskie: a loopback host, the only one the app serves by default (see
+# `app.served_hosts`), unlike the test client's own `testserver.local`.
+LOOPBACK_URL = "http://127.0.0.1:8451"
 
 
 def api_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -635,7 +775,7 @@ def api_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     needs it takes the `dbos` fixture too (see `test_api`)."""
     from litestar.testing import AsyncTestClient
 
-    return AsyncTestClient(api_app(tmp_path, monkeypatch))
+    return AsyncTestClient(api_app(tmp_path, monkeypatch), base_url=LOOPBACK_URL)
 
 
 async def _release_default_executor() -> None:

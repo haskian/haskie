@@ -5,16 +5,17 @@ whole page of operations needs aggregates: how many steps each stage slice recor
 workflows of each name or queue are active. One grouped query answers that for every row on the
 page, where the API would need a call per workflow.
 
-Nothing here writes: DBOS owns every row in these tables, and their schema too, so they are
-declared here as lightweight `table()` clauses with the columns read, outside `tables.metadata`,
-which creates only haskie's own. `db.connect()` opens the same file DBOS was configured with, so the
-reads see its committed state through WAL.
+DBOS owns every row in these tables, and their schema too, so they are declared here as lightweight
+`table()` clauses with the columns read, outside `tables.metadata`, which creates only haskie's own.
+`db.read()` opens the same file DBOS was configured with, so the reads see its committed state
+through WAL, and wait for none of its writers. One function writes, `move_to_version`, because
+DBOS offers no call that does it.
 """
 
 from collections.abc import Sequence
 from itertools import batched
 
-from sqlalchemy import column, func, select, table
+from sqlalchemy import column, func, select, table, update
 
 from haskie import db
 from haskie.indexing.dbos_names import ACTIVE_STATUS
@@ -30,7 +31,8 @@ workflow_status = table(
 )
 operation_outputs = table("operation_outputs", column("workflow_uuid"), column("function_name"))
 
-# SQLite allows 999 bound parameters by default; one query per page keeps every list under it.
+# SQLite builds before 3.32 allow only 999 bound parameters, and a custom build may set the limit
+# as low; one query per page keeps every list under that floor on any build.
 SYSDB_PAGE = 500
 
 
@@ -42,7 +44,7 @@ async def step_counts(workflow_ids: list[str], function_name: str) -> dict[str, 
     if not workflow_ids:
         return {}
     counts: dict[str, int] = {}
-    async with db.connect() as conn:
+    async with db.read() as conn:
         step = operation_outputs.c
         for chunk in batched(workflow_ids, SYSDB_PAGE, strict=False):
             rows = await conn.execute(
@@ -59,7 +61,7 @@ async def active_counts_by_name() -> dict[str, int]:
 
     One query for the whole app: the Operations view shows an active count per kind, and a kind is
     a set of workflow names, so counting through the API would cost a listing per name."""
-    async with db.connect() as conn:
+    async with db.read() as conn:
         workflow = workflow_status.c
         rows = await conn.execute(
             select(workflow.name, func.count())
@@ -80,7 +82,7 @@ async def operation_activity(skip: Sequence[str] = ()) -> dict[str, int]:
     waiting for a slot. Counting it made the indicator read "1 queued" for a whole
     `maintenance_idle_seconds` after the last document, with nothing queued and the Operations
     view - which counts the same `ACTIVE_STATUS` - showing nothing."""
-    async with db.connect() as conn:
+    async with db.read() as conn:
         workflow = workflow_status.c
         rows = await conn.execute(
             select(workflow.status, func.count())
@@ -94,16 +96,30 @@ async def operation_activity(skip: Sequence[str] = ()) -> dict[str, int]:
         return dict(rows.tuples().all())
 
 
-async def stale_active_ids(app_version: str, limit: int, offset: int = 0) -> list[str]:
-    """One page of ids of workflows that are still enqueued or running under another application
-    version, oldest first. Ids only: a boot after a long outage must not load the whole backlog."""
-    async with db.connect() as conn:
+async def stale_active(app_version: str, limit: int) -> list[tuple[str, str | None]]:
+    """One page of workflows still enqueued or running under another application version, oldest
+    first, as (id, queue name). A page, never the whole backlog: a boot after a long outage must
+    not load it. No offset: `move_to_version` takes each page out of the result."""
+    async with db.read() as conn:
         workflow = workflow_status.c
-        ids = await conn.scalars(
-            select(workflow.workflow_uuid)
+        rows = await conn.execute(
+            select(workflow.workflow_uuid, workflow.queue_name)
             .where(workflow.status.in_(ACTIVE_STATUS), workflow.application_version != app_version)
             .order_by(workflow.created_at)
             .limit(limit)
-            .offset(offset)
         )
-        return list(ids)
+        return list(rows.tuples())
+
+
+async def move_to_version(workflow_ids: list[str], app_version: str) -> None:
+    """Hand workflows of an older build to this one. DBOS dequeues only rows of its own
+    application version, and a resume keeps the old one, so without this an adopted workflow
+    waits in its queue forever."""
+    async with db.connect() as conn:
+        workflow = workflow_status.c
+        for chunk in batched(workflow_ids, SYSDB_PAGE, strict=False):
+            await conn.execute(
+                update(workflow_status)
+                .where(workflow.workflow_uuid.in_(chunk))
+                .values(application_version=app_version)
+            )

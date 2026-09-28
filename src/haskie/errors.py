@@ -18,6 +18,12 @@ class HaskieError(Exception):
     headers: ClassVar[dict[str, str]] = {}
 
 
+class Forbidden(HaskieError):
+    """A caller haskie does not serve: a browser page from another origin, or an unknown host."""
+
+    status_code = 403
+
+
 class NotFound(HaskieError):
     status_code = 404
 
@@ -28,7 +34,7 @@ class Conflict(HaskieError):
 
 class InvalidInput(HaskieError, ValueError):
     """Also a ValueError: msgspec only turns a ValueError raised in `__post_init__` into a
-    decode-time `ValidationError`, and callers that predate this module catch ValueError."""
+    decode-time `ValidationError`."""
 
     status_code = 422
 
@@ -38,6 +44,13 @@ class NotReady(HaskieError):
 
     status_code = 503
     headers = {"Retry-After": "2"}
+
+
+class Unavailable(HaskieError):
+    """Cannot serve this until something changes, such as a model that failed to load: it stays
+    failed until a restart or a settings save, so no `Retry-After` invites a retry loop."""
+
+    status_code = 503
 
 
 class PermanentError(HaskieError):

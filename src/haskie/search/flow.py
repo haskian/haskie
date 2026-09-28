@@ -14,7 +14,7 @@ Four pipelines over one set of steps:
 and the excerpts an agent reads, which run the shared ranking once per question asked:
 
     answers    (retrieve -> merge -> rerank -> hits -> judge_thin) per question -> fold -> group
-               -> budget -> probe_gaps -> fill -> quote
+               -> budget -> probe_gaps -> fill -> quote -> rerank_excerpts
 
 The first four steps are the search every answer shares; what follows is the fold that answer is
 made of, and it is a step rather than something every search pays for. `chunks` folds each
@@ -49,11 +49,8 @@ from haskie.collection.index import Hit
 from haskie.paging import check_page_size
 from haskie.search import aspects, log, probe, retrieval, scoring, section
 from haskie.search.passage import Answer, Excerpt, HitRange, Passage, Sources
-from haskie.settings import Reranker, SearchMode
+from haskie.settings import MAX_SCAN, SearchMode
 
-# How deep any of these searches reads. A passage or a document row is folded from several chunks,
-# so the scan goes deeper than the answer; this is where that stops.
-MAX_SCAN = 200
 CHUNK_SCAN = 2  # chunks scanned per chunk asked for: a folded near-duplicate frees its slot
 PASSAGE_SCAN = 4  # chunks scanned per passage asked for: consecutive ones merge into one passage
 DEFAULT_SECTIONS = 3  # hot sections per document: where in it the answer is, not an outline
@@ -241,10 +238,7 @@ async def hits(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Scan
 
 async def collapse_hits(ctx: StepContext[Search, None, retrieval.Scanned]) -> list[Hit]:
     """The best hits, each near-duplicate folded into the hit it repeats."""
-    plan = ctx.state.plan
-    return await retrieval.collapse_hits(
-        ctx.inputs, plan.embedding, plan.settings.mode, ctx.state.limit
-    )
+    return await retrieval.collapse_hits(ctx.inputs, ctx.state.plan, ctx.state.limit)
 
 
 async def fill_thin(ctx: StepContext[Search, None, retrieval.Scanned]) -> retrieval.Ranged:
@@ -266,9 +260,8 @@ async def judge_thin(ctx: StepContext[Search, None, retrieval.Scanned]) -> retri
 async def collapse_ranges(ctx: StepContext[Search, None, retrieval.Ranged]) -> list[HitRange]:
     """The `limit` best ranges, each near-duplicate folded into the range it repeats. A range too
     short to stand alone (`thin`) is no passage, so it takes no slot."""
-    plan = ctx.state.plan
     return await retrieval.collapse_ranges(
-        retrieval.standing(ctx.inputs), plan.embedding, plan.settings.mode, ctx.state.limit
+        retrieval.standing(ctx.inputs), ctx.state.plan, ctx.state.limit
     )
 
 
@@ -277,18 +270,12 @@ async def fold(ctx: StepContext[Search, None, list[retrieval.Ranged]]) -> list[H
     sections are what `limit` counts (`group`). One question's are its own, each near-duplicate
     folded into the range it repeats; several take turns (`retrieval.cover`). A range too short
     to stand alone is kept too, since the section it sits in may hold another."""
-    state = ctx.state
-    plan, ranged = state.plan, ctx.inputs
+    state, ranged = ctx.state, ctx.inputs
     if len(ranged) == 1:
-        return await retrieval.collapse_ranges(ranged[0], plan.embedding, plan.settings.mode, None)
+        return await retrieval.collapse_ranges(ranged[0], state.plan, None)
     labels = [one.asked for one in state.questions]
     depth = aspects.depth(len(labels), state.limit)
-    settings = plan.settings
-    by_score = settings.reranker != Reranker.NONE
-    how = settings.score_fold
-    return await retrieval.cover(
-        ranged, labels, plan.embedding, settings.mode, depth, state.scan, by_score, how
-    )
+    return await retrieval.cover(ranged, labels, state.plan, depth, state.scan)
 
 
 async def read(ctx: StepContext[Search, None, list[HitRange]]) -> list[Passage]:
@@ -333,9 +320,7 @@ async def shortlist(ctx: StepContext[Search, None, retrieval.Scanned]) -> Source
     them from."""
     state = ctx.state
     how = state.plan.settings.score_fold
-    return await retrieval.shortlist(
-        ctx.inputs.hits, state.plan.names, state.limit, state.sections, how
-    )
+    return await retrieval.shortlist(ctx.inputs.hits, state.plan, state.limit, state.sections, how)
 
 
 async def rerank_excerpts(ctx: StepContext[Search, None, list[Excerpt]]) -> list[Excerpt]:
@@ -437,6 +422,7 @@ async def answers(names: list[str], asked: aspects.Questions, limit: int | None 
     found = await ANSWERED.run(
         state=msgspec.structs.replace(states[0], branch=None), inputs=list(ranged)
     )
+    # inline: the kept sections' words were stemmed by `probe_gaps` already (`probe.stem`)
     return probe.report(found, states[0].questions)
 
 

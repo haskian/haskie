@@ -45,6 +45,63 @@ def test_a_text_holds_a_word_or_a_form_of_it(
 
 
 @pytest.mark.parametrize(
+    ("name", "texts", "stemmed", "expected"),
+    [
+        ("no text, nothing stemmed", [], set(), set()),
+        (
+            "a word repeated in one text is stemmed once",
+            ["Orders ship. Orders keep. Orders wait."],
+            {"orders", "ship", "keep", "wait"},
+            {"order", "ship", "keep", "wait"},
+        ),
+        (
+            "one word in several texts and cases is stemmed once",
+            ["Inventory", "the inventory keeps", "INVENTORY"],
+            {"inventory", "the", "keeps"},
+            {"inventori", "the", "keep"},
+        ),
+    ],
+)
+def test_the_vocabulary_stems_each_distinct_word_once(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    texts: list[str],
+    stemmed: set[str],
+    expected: set[str],
+) -> None:
+    """The stemmer is pure Python and an answer runs to about 36,000 characters, most of its
+    words many times over."""
+    calls: list[str] = []
+    real = probe.stem
+
+    def counted(word: str) -> str:
+        calls.append(word)
+        return real(word)
+
+    monkeypatch.setattr(probe, "stem", counted)
+
+    assert probe.vocabulary(texts) == expected, name
+    assert sorted(calls) == sorted(stemmed), f"{name}: each distinct word once"
+
+
+def test_a_word_is_stemmed_once_across_reads() -> None:
+    """Each search reads its words twice (`retrieval.probe_gaps`, then `probe.report`), so `stem`
+    remembers what it stemmed, in a bounded cache: the second read stems nothing again."""
+    probe.stem.cache_clear()
+    texts = ["Orders keep inventory consistent.", "orders KEEP inventory"]
+
+    first = probe.vocabulary(texts)
+    cold = probe.stem.cache_info()
+    second = probe.vocabulary(texts)
+    warm = probe.stem.cache_info()
+
+    assert first == second == {"order", "keep", "inventori", "consist"}
+    assert (cold.misses, cold.hits) == (4, 0), "each distinct word stemmed once"
+    assert (warm.misses, warm.hits) == (4, 4), "the second read stems none of them again"
+    assert warm.maxsize == probe.STEM_CACHE, "bounded"
+
+
+@pytest.mark.parametrize(
     ("name", "questions", "covered", "expected"),
     [
         (

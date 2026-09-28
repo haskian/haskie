@@ -100,14 +100,11 @@ def params(
 
 
 def urn(p: Params) -> str:
-    """Canonical form: fixed field order, so equal params always give equal text. `document` is safe
-    inside it because `document.safe_name` allows no `;` or `:`."""
-    return (
-        f"document:{p.document};model:{p.model};chunk_size:{p.chunk_size};"
-        f"chunk_merge_below:{p.chunk_merge_below};"
-        f"chunk_frame:{'true' if p.chunk_frame else 'false'};chunker:{p.chunker};"
-        f"chunk_version:{p.chunk_version};parser:{p.parser};"
-        f"skip_ocr_pages:{'true' if p.skip_ocr_pages else 'false'}"
+    """Canonical form: `name:value` per field in declaration order, so equal params always give
+    equal text. `document` is safe inside it because `document.safe_name` allows no `;` or `:`."""
+    return ";".join(
+        f"{name}:{str(value).lower() if isinstance(value, bool) else value}"
+        for name, value in msgspec.structs.asdict(p).items()
     )
 
 
@@ -222,7 +219,7 @@ def _document_vector(summed: np.ndarray | None) -> bytes | None:
 async def lookup(p: Params) -> str | None:
     """The cache id of a hit, else None: a row or a file on its own is an interrupted write."""
     id = key(p)
-    async with db.connect() as conn:
+    async with db.read() as conn:
         found = await conn.scalar(select(embeddings.c.id).where(embeddings.c.id == id))
     if found is None or not await anyio.Path(file_path(p.document, id)).is_file():
         return None
@@ -296,7 +293,7 @@ async def forget(doc: str) -> None:
 
 async def entries(doc: str) -> list[Entry]:
     """Every cache row of one document, newest first."""
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = await conn.execute(
             select(*ENTRY_COLUMNS)
             .where(embeddings.c.document == doc)
@@ -321,7 +318,7 @@ async def nearest(doc: str, model: str, limit: int, but: Collection[str] = ()) -
     Each document is compared by its newest cache entry under the model: the entries of one
     document differ only in how it was chunked, which barely moves the mean. Every vector is read
     and compared in memory; a library of thousands of books is a few megabytes of them."""
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = await conn.execute(
             select(embeddings.c.document, embeddings.c.vector)
             .join_from(embeddings, documents, embeddings.c.document == documents.c.name)

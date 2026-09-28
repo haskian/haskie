@@ -19,7 +19,7 @@ from litestar.params import Body
 from litestar.response import File, Stream
 
 from haskie import audit, cpu, logs
-from haskie.api.common import PAGED, BulkStarted, Describe
+from haskie.api.common import PAGED, BulkStarted, Describe, SessionId
 from haskie.catalogue import catalogue
 from haskie.document import convert, render
 from haskie.document import document as documents
@@ -64,7 +64,7 @@ MAX_RENDERED = 100_000  # characters: an excerpt is at most a few sections (`max
 class Markdown(msgspec.Struct):
     """Markdown to render, as a search result quotes it."""
 
-    markdown: str
+    markdown: Annotated[str, msgspec.Meta(max_length=MAX_RENDERED)]
 
 
 class Rendered(msgspec.Struct):
@@ -75,8 +75,6 @@ class Rendered(msgspec.Struct):
 async def render_markdown(data: Markdown) -> Rendered:
     """A search result's text as HTML, rendered as the document viewer renders a page: raw HTML is
     stripped first, so the text a document holds cannot inject markup."""
-    if len(data.markdown) > MAX_RENDERED:
-        raise InvalidInput(f"markdown must be at most {MAX_RENDERED} characters")
     return Rendered(html=await cpu.on_cpu(render.fragment_html, data.markdown))
 
 
@@ -98,7 +96,7 @@ async def stage_document(
 
 @post("/api/documents/import", mcp_tool="add_document")
 @audit.audited("document.import")
-async def import_document(data: ImportRequest, session_id: str | None = None) -> Document:
+async def import_document(data: ImportRequest, session_id: SessionId = None) -> Document:
     """Import a staged upload (`staging_id`) or a local file by absolute path (`path`).
 
     The name is fixed here and never changes: `name` renames the document, but the original
@@ -209,12 +207,28 @@ async def similar_documents(document: str) -> Similar:
     return Similar(identical=identical, nearest=nearest)
 
 
+# A document's own bytes are served on haskie's origin, where an HTML or SVG file would run its
+# script against an API that authenticates no one. `sandbox` gives the response an opaque origin
+# and no script, however it is opened: in the pane, in a new tab, or from a link. PDF is left out:
+# the sandbox blocks the browser's PDF viewer, which runs a PDF's script in its own sandbox anyway.
+UNTRUSTED_HEADERS = {"Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"}
+
+
+def _untrusted_headers(is_pdf: bool) -> dict[str, str]:
+    return {} if is_pdf else UNTRUSTED_HEADERS
+
+
 @get("/api/documents/{document:str}/source")
 async def get_source(document: str) -> File:
     row = await documents.get(document)
     # named after the document, not the stored `original.*`: the name is what the media type is
     # guessed from, and what a browser that saves it calls the file
-    return File(path=row.source_path(), filename=row.name, content_disposition_type="inline")
+    return File(
+        path=row.source_path(),
+        filename=row.name,
+        content_disposition_type="inline",
+        headers=_untrusted_headers(row.suffix == ".pdf"),
+    )
 
 
 PREVIEW_MEDIA = {
@@ -234,6 +248,7 @@ async def get_preview(document: str) -> File:
         filename=document if media is None else None,
         media_type=media,
         content_disposition_type="inline",
+        headers=_untrusted_headers(preview.kind == convert.PreviewKind.PDF),
     )
 
 
@@ -301,7 +316,7 @@ async def get_lines(document: str, line_start: int, line_end: int) -> Lines:
 @put("/api/documents/{document:str}/description", mcp_tool="describe_document")
 @audit.audited("document.describe")
 async def describe_document(
-    document: str, data: Describe, session_id: str | None = None
+    document: str, data: Describe, session_id: SessionId = None
 ) -> Document:
     """Replace what the document is said to be. Empty clears it.
 

@@ -68,11 +68,13 @@ HomeOption = Annotated[
 
 
 def _use_home(path: Path | None) -> None:
-    """Point the process at `path` before anything reads the home layout. The environment carries
-    it too, so a `--reload` child re-reads the same root (see `home.HOME`)."""
-    if path is None:
-        return
-    resolved = str(Path(path).expanduser().resolve())
+    """Point the process at `path`, or at the default home, before anything reads the home layout.
+    The environment carries it too, so a `--reload` child re-reads the same root (see `home.HOME`).
+
+    Resolved either way: a server started from here reports the resolved root, so a default reached
+    through a link (`~/.haskie` into a synced folder) must compare as the same home.
+    """
+    resolved = str(Path(home.HOME if path is None else path).expanduser().resolve())
     os.environ["HASKIE_HOME"] = resolved
     home.use(Path(resolved))
 
@@ -153,7 +155,8 @@ def run(
         raise typer.Exit(code=1)
     # The address the startup hook records, for the next process's message. The environment is the
     # one carrier, so a `--reload` child that re-imports `home` records the same thing.
-    os.environ["HASKIE_ADDRESS"] = f"http://{host}:{port}"
+    os.environ[home.ADDRESS_ENV] = f"http://{host}:{port}"
+    os.environ[home.SERVER_PID_ENV] = str(os.getpid())
     typer.echo(f"haskie {APP_VERSION} on http://{host}:{port}  (home: {home.HOME})")
     uvicorn.run(
         "haskie.app:create_app",
@@ -392,18 +395,23 @@ def install_claude(
     every session saying when to - before answering from memory, planning, or the web. Re-run
     after adding a collection to refresh both.
     """
+    _use_home(home_dir)
+    try:
+        _install_claude(url, scope)
+    except HaskieError as exc:  # a home too old to read, a settings file that is not JSON, ...
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _install_claude(url: str, scope: Scope) -> None:
+    """The steps of `install claude`, each reporting as it goes; failures are `HaskieError`."""
     import asyncio
 
-    _use_home(home_dir)
     # `read_collections` reaches the database through `db.connect`, which migrates the home and
     # makes it first - so there is no prelude to repeat here.
     found = asyncio.run(claude.read_collections())
 
-    try:
-        manual = claude.register_mcp(url, scope)
-    except HaskieError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from None
+    manual = claude.register_mcp(url, scope)
     if manual is None:
         typer.echo(f"registered the haskie MCP server at {url} ({scope} scope)")
     else:
@@ -419,7 +427,9 @@ def install_claude(
     added = claude.install_hook(scope, home.HOME, url)
     settings_file = claude.settings_path(scope)
     typer.echo(f"{'added' if added else 'updated'} the SessionStart hook in {settings_file}")
-    ensure(home_dir=home.HOME, url=url)  # already-serving is its fast path, not ours
+    # `_serve`, not the `ensure` command: that one reads a hook payload from stdin, which here is
+    # the rest of a piped script. Already-serving is its fast path, not ours.
+    _serve(url, wait=True)
     typer.echo("re-run `haskie install claude` after adding a collection, to refresh the trigger")
 
 
@@ -431,8 +441,9 @@ def destroy(
     """Delete the home directory and everything in it.
 
     Every document, collection, index, preview and operation record goes. There is no undo and
-    nothing is backed up first. Stop `haskie run` before this: removing the database under a running
-    server leaves it writing into deleted files.
+    nothing is backed up first. A home a haskie is serving is refused: removing the database under a
+    running server leaves it writing into deleted files, and takes the home lock with it. `haskie
+    stop` first.
     """
     import asyncio
 
@@ -454,6 +465,11 @@ def destroy(
         )
         raise typer.Exit(code=1)
 
+    held = home.home_holder()
+    if held is not None:
+        typer.echo(f"{held}; stop it first (haskie stop)", err=True)
+        raise typer.Exit(code=1)
+
     typer.echo(f"about to delete {root}")
     typer.echo(f"  {_describe(root)}")
     if not yes:
@@ -461,7 +477,23 @@ def destroy(
 
     asyncio.run(home.remove_tree(root))
     db.invalidate_migrations()  # the file this process migrated is gone; a new one starts over
+    # `remove_tree` logs what it cannot delete and carries on, so only a look afterwards knows.
+    if os.path.lexists(root):
+        typer.echo(f"could not delete all of {root}; still there: {_left_over(root)}", err=True)
+        raise typer.Exit(code=1)
     typer.echo(f"deleted {root}")
+
+
+LEFT_SHOWN = 5  # enough to see where the failure is, few enough to stay one line
+
+
+def _left_over(root: Path) -> str:
+    """The files a failed delete left under `root`, the first few by name."""
+    left = sorted(str(path.relative_to(root)) for path in root.rglob("*") if not path.is_dir())
+    if not left:
+        return "empty directories"
+    more = f" and {len(left) - LEFT_SHOWN} more" if len(left) > LEFT_SHOWN else ""
+    return ", ".join(left[:LEFT_SHOWN]) + more
 
 
 def _entries(root: Path) -> list[str]:

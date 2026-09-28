@@ -61,6 +61,7 @@ Workflow ids, every one starting with a prefix that names its kind and the names
 convert or embed child and `{parent}:index` for the index child, `bulk-index:{collection}:{uuid}`
 and `bulk-delete:{collection}:{uuid}` for the two bulk operations, `del-doc:{doc}:{uuid}` for a
 document delete (and `{parent}:rm:{collection}` for each collection it leaves),
+`rm:{collection}:{doc}:{uuid}` for the removal a detach queues,
 `maint:{collection}:{parent}` for a maintenance run, and `dl:{kind}:{model}` for a model download
 (see `models`). `document.safe_name` keeps `:` out of every name, so a prefix is unambiguous: one
 query finds a whole operation. Child ids are deterministic, so a replay after a crash re-attaches
@@ -93,8 +94,10 @@ from dbos import (
     WorkflowHandleAsync,
 )
 
-# Retention has no public entry point in DBOS 3.0: the collector takes the instance itself.
+# DBOS 3.0 exports neither the error of awaiting a cancelled workflow nor a retention entry point
+# (the collector takes the instance itself).
 from dbos._dbos import _get_dbos_instance
+from dbos._error import DBOSAwaitedWorkflowCancelledError
 from dbos._workflow_commands import garbage_collect
 
 from haskie import APP_VERSION, audit, db, home, logs, shutdown, sysdb
@@ -106,7 +109,7 @@ from haskie.collection.collection import Collection, MemberStatus
 from haskie.cpu import configure_cpu_budget, open_pool, shutdown_pool
 from haskie.document import document
 from haskie.document.document import Document, DocumentStatus, configure_preview_slots
-from haskie.errors import Conflict, InvalidInput, NotFound, PermanentError
+from haskie.errors import Conflict, InvalidInput, NotFound, PermanentError, Unavailable
 from haskie.indexing import embed_cache, models, pipeline, serializer
 from haskie.indexing.dbos_names import (
     ACTIVE_STATUS,
@@ -163,6 +166,7 @@ COLLECTION_DOCUMENT_PREFIX = "idx-col"
 BULK_INDEX_PREFIX = "bulk-index"
 BULK_DELETE_PREFIX = "bulk-delete"
 DELETE_DOCUMENT_PREFIX = "del-doc"
+REMOVE_PREFIX = "rm"  # `rm:{collection}:{doc}:{uuid}`: the removal a detach queues
 MAINTAIN_PREFIX = "maint"  # `maint:{collection}:{parent}`: one collection's runs, one id prefix
 PROGRESS_EVENT = "progress"  # the DBOS event a bulk index publishes after every page
 
@@ -244,14 +248,17 @@ class Context(msgspec.Struct):
 
 
 class BatchResult(msgspec.Struct):
-    """Outcome of one retried step: a value, or the message of a failure that must not be retried.
+    """Outcome of one retried step: a value, the message of a failure that must not be retried,
+    or word that the embedding model is still on its way.
 
     DBOS retries *every* exception raised inside a step with `retries_allowed`, so a deterministic
     failure (unsupported file, OCR policy, corrupt document) is reported as a value and raised by
-    the workflow body instead."""
+    the workflow body instead. A model still downloading or warming is reported the same way: three
+    quick retries cannot outlast it, so the workflow body waits for it (see `_awaiting_model`)."""
 
     value: int | None = None
     permanent_error: str | None = None
+    model_loading: bool = False
 
 
 class BulkProgress(msgspec.Struct):
@@ -362,7 +369,6 @@ async def start() -> None:
         "serializer": serializer.SERIALIZER,
     }
     DBOS(config=config)
-    logs.adopt_dbos_logger()  # DBOS installs its own text handler while it initializes
     # In a worker thread on purpose: `launch` is sync SQLAlchemy, and it adopts the loop of the
     # thread that calls it as the one queued async workflows run on. From a thread there is none,
     # so they run on DBOS's own background loop and never share Litestar's.
@@ -479,16 +485,24 @@ async def adopt_orphans(batch: int = ADOPT_PAGE) -> int:
     """Re-enqueue non-terminal workflows recorded under a different application version.
     Recovery skips them; resuming replays them from their step logs under this version.
 
-    Read and resume one page of ids at a time: after a long outage the backlog can be large, and
-    neither the whole list of statuses nor a resume call per workflow belongs on the boot path. A
-    row that leaves the page while we walk it was already adopted and dequeued; anything the
-    shifted window skips is adopted at the next boot."""
+    Each page moves onto this build first (`sysdb.move_to_version`): DBOS dequeues only its own
+    version, and a resume keeps the old one. Each workflow resumes on the queue it was on, so its
+    queue's limits still hold; one this build no longer registers goes to DBOS's internal queue.
+
+    One page at a time: after a long outage the backlog can be large, and neither the whole list
+    of statuses nor a resume call per workflow belongs on the boot path."""
+    registered = {queue.name for queue in _QUEUES}
     adopted = 0
     while True:
-        stale = await sysdb.stale_active_ids(APP_VERSION, batch, adopted)
+        stale = await sysdb.stale_active(APP_VERSION, batch)
         if not stale:
             return adopted
-        await DBOS.resume_workflows_async(stale)
+        await sysdb.move_to_version([workflow_id for workflow_id, _ in stale], APP_VERSION)
+        by_queue: dict[str | None, list[str]] = {}
+        for workflow_id, queue in stale:
+            by_queue.setdefault(queue if queue in registered else None, []).append(workflow_id)
+        for queue, ids in by_queue.items():
+            await DBOS.resume_workflows_async(ids, queue_name=queue)
         adopted += len(stale)
 
 
@@ -557,6 +571,7 @@ async def apply_settings(settings: UserSettings) -> None:
 # Read once, here: DBOS copies a step's retry settings into the decorator, so this cannot change
 # after import.
 RETRY_INTERVAL_SECONDS = 1.0
+MODEL_WAIT_SECONDS = 2.0  # between two asks whether the embedding model is ready yet
 retried_step = DBOS.step(
     retries_allowed=True,
     max_attempts=3,
@@ -608,16 +623,17 @@ async def set_member_status(
 
 async def _member_present(collection: str, doc: str) -> bool:
     try:
-        await Collection(collection).member(doc)
+        found = await Collection(collection).member(doc)
     except NotFound:
         return False
-    return True
+    return found.status != MemberStatus.REMOVING
 
 
 @retried_step
 async def member_present(collection: str, doc: str) -> bool:
-    """Whether the membership still exists: a detach that landed between the enqueue and the run
-    must not leave rows in the table with no membership to remove them by."""
+    """Whether the membership still exists and no detach is taking it away: a detach that landed
+    between the enqueue and the run must not leave rows in the table with no membership to remove
+    them by, nor spend a write on rows its removal will delete."""
     return await _member_present(collection, doc)
 
 
@@ -629,7 +645,8 @@ async def index_write(collection: str, doc: str) -> AsyncIterator[bool]:
     The lock alone only orders this write against a removal (see `collection_lock`); the re-check
     inside it is what the loser of that race acts on. A removal that went first took the
     membership with it - the whole collection row for a delete (memberships cascade), this one
-    row for a detach - so a write that finds none has nothing left to write into."""
+    row for a detach - so a write that finds none has nothing left to write into. A membership a
+    detach marked `removing` counts as gone too: its removal is queued behind this write."""
     async with collection_lock(collection):
         yield await _member_present(collection, doc)
 
@@ -645,11 +662,25 @@ async def plan(stage: Stage, ctx: Context) -> list[Batch]:
 
 async def _guarded(call: Awaitable[int | None]) -> BatchResult:
     """Await one pipeline call inside a retried step: retry anything transient, report a
-    `PermanentError` as a value so DBOS does not retry a failure that cannot change."""
+    `PermanentError` as a value so DBOS does not retry a failure that cannot change, and a model
+    still on its way as a value so the workflow body can wait for it. A model that failed to
+    load (`Unavailable`) is permanent too: it stays failed until a restart or a settings save."""
     try:
         return BatchResult(value=await call)
-    except PermanentError as exc:
+    except (PermanentError, Unavailable) as exc:
         return BatchResult(permanent_error=f"{type(exc).__name__}: {exc}")
+    except models.ModelLoading:
+        return BatchResult(model_loading=True)
+
+
+async def _awaiting_model(step: Callable[[], Awaitable[BatchResult]]) -> BatchResult:
+    """Run one step until it stops reporting the embedding model on its way, with a durable sleep
+    between two runs. In the workflow body: the sleep holds no step, no CPU slot and no thread,
+    and a crash resumes it. A model that failed comes back as a permanent error instead, which
+    `_value` fails the workflow with."""
+    while (result := await step()).model_loading:
+        await DBOS.sleep_async(MODEL_WAIT_SECONDS)
+    return result
 
 
 def _value(result: BatchResult) -> int:
@@ -765,8 +796,16 @@ async def settle_maintenance(collection: str, claimed: int, report: maintenance.
     await Collection(collection).settle_maintenance(claimed, report.ann_trained, report.num_rows)
 
 
+@retried_step
+async def embedding_ready(embedding: EmbeddingModel) -> BatchResult:
+    """Whether this process can embed with the model yet (see `_awaiting_model`)."""
+    return await _guarded(models.require_ready(models.ModelKind.EMBEDDING, embedding.name))
+
+
 async def run_batch(stage: Stage, batch: Batch, ctx: Context) -> int:
-    return _value(await try_batch(stage, batch, ctx))
+    """One micro-batch. An embed batch can still find the model loading after its run waited for
+    it: a restart resumes the batch before the boot has warmed the model again."""
+    return _value(await _awaiting_model(partial(try_batch, stage, batch, ctx)))
 
 
 # --- workflows --------------------------------------------------------------------------
@@ -830,6 +869,12 @@ def run_id(workflow_id: str) -> str:
     return workflow_id.rsplit(":", 1)[-1]
 
 
+def embed_id(parent_id: str, doc: str) -> str:
+    """The id of the `ensure_embedding` run one import or index workflow asks for as its own (see
+    `_ensure_embedding`); `operations` folds that run into its parent by it."""
+    return f"{EMBED_PREFIX}:{doc}:{run_id(parent_id)}"
+
+
 def _slice_count(stage: Stage, ctx: Context) -> int:
     """Slices this stage may be cut into. The index stage is never sliced (see `INDEX_QUEUE`)."""
     return 1 if stage == Stage.INDEX else resolve_parallelism(ctx.pipeline, stage)
@@ -890,18 +935,38 @@ async def _ensure_embedding(ctx: Context) -> str:
     """The cache id of the embedding `ctx` calls for, computing it through `ensure_embedding`
     when it is missing. Deduplicated by the cache id: two callers wanting the same embedding at
     once share one run instead of computing it twice (and racing on the write). The child id is
-    derived from this workflow's, so a replay re-attaches to the run it already started."""
+    derived from this workflow's, so a replay re-attaches to the run it already started.
+
+    A shared run is the child of whoever asked first, so cancelling that caller cascades into it,
+    and every other caller would fail with it. A caller waiting on someone else's run therefore
+    asks again when it is cancelled: its own id was never used, and the cancel freed the
+    deduplication id, so the next ask starts a run of its own (or joins a newer shared one). A
+    caller that was cancelled itself stops at that ask, which DBOS refuses from a cancelled
+    workflow. A cancel of its own run is final."""
     params = embed_cache.params(ctx.document, ctx.chunking, ctx.embedding)
-    with (
-        SetWorkflowID(f"{EMBED_PREFIX}:{ctx.document.name}:{run_id(DBOS.workflow_id or '')}"),
-        SetEnqueueOptions(
-            deduplication_id=embed_cache.key(params), duplication_policy="return-existing"
-        ),
-    ):
-        handle = await DBOS.enqueue_workflow_async(
-            EMBEDDING_QUEUE, ensure_embedding, ctx.document.name, params
-        )
-    return await handle.get_result(polling_interval_sec=TASK_POLL)
+    own = embed_id(DBOS.workflow_id or "", ctx.document.name)
+    while True:
+        with (
+            SetWorkflowID(own),
+            SetEnqueueOptions(
+                deduplication_id=embed_cache.key(params), duplication_policy="return-existing"
+            ),
+        ):
+            handle = await DBOS.enqueue_workflow_async(
+                EMBEDDING_QUEUE, ensure_embedding, ctx.document.name, params
+            )
+        try:
+            return await handle.get_result(polling_interval_sec=TASK_POLL)
+        except DBOSAwaitedWorkflowCancelledError:
+            if handle.workflow_id == own:
+                raise
+            _log.info("shared_embedding_cancelled", embedding=handle.workflow_id)
+
+
+def _failure(exc: Exception) -> str:
+    """How a workflow reports a failure: a `PermanentError` carries its own message, anything
+    else is unwrapped to its root cause."""
+    return str(exc) if isinstance(exc, PermanentError) else root_cause(exc)
 
 
 @contextlib.asynccontextmanager
@@ -915,14 +980,13 @@ async def _outcome(
 ) -> AsyncIterator[None]:
     """Move the status to its end state and write one audit line, whichever way the body ended.
 
-    Both document workflows report a failure the same way: a `PermanentError` carries its own
-    message, anything else is unwrapped to its root cause, and what leaves the workflow is a flat
-    `PipelineError` DBOS can store and rebuild."""
+    Both document workflows report a failure the same way (`_failure`), and what leaves the
+    workflow is a flat `PipelineError` DBOS can store and rebuild."""
     started = time.perf_counter()
     try:
         yield
     except Exception as exc:
-        message = str(exc) if isinstance(exc, PermanentError) else root_cause(exc)
+        message = _failure(exc)
         await set_state(failed, message)
         await _record(collection, doc, f"{event}.failed", started, message)
         raise PipelineError(message) from exc
@@ -956,8 +1020,8 @@ async def ensure_embedding(doc: str, params: embed_cache.Params) -> str:
 
     The chunk settings come from `params`, not from any collection: the collection's settings may
     change between the enqueue and the run, and what was asked for is what the id names. The
-    embedding model is the global one, so a model changed meanwhile fails the run: the parent
-    asks again under the new model."""
+    embedding model is the global one, so a model changed meanwhile fails the run, and the parent
+    with it: a reindex asks again under the new model."""
     with logs.bound(workflow_id=DBOS.workflow_id, document=doc):
         found = await cache_lookup(params)
         if found is not None:
@@ -971,6 +1035,10 @@ async def ensure_embedding(doc: str, params: embed_cache.Params) -> str:
             chunking=ChunkSettings.of(params),
             cache_id=embed_cache.key(params),
         )
+        if ctx.embedding is not None:
+            # here rather than in the slices: a download takes minutes, and a slice waiting it out
+            # would hold a slot of `task.embedding` and run into its own timeout
+            _value(await _awaiting_model(partial(embedding_ready, ctx.embedding)))
         await _stage(Stage.EMBED, ctx)
         return await finalize_embed(params, ctx)
 
@@ -1084,6 +1152,11 @@ async def remove_member_row(collection: str, doc: str) -> None:
     await Collection(collection).remove_member(doc)
 
 
+@retried_step
+async def fail_removal(collection: str, doc: str, error: str) -> None:
+    await Collection(collection).fail_removal(doc, error)
+
+
 @DBOS.workflow(name=REMOVE_FROM_INDEX_WORKFLOW)
 async def remove_from_collection_index(collection: str, doc: str) -> None:
     """Take one document out of one collection: its rows in the table, then its membership. The
@@ -1091,11 +1164,19 @@ async def remove_from_collection_index(collection: str, doc: str) -> None:
 
     Both steps under the collection's write lock, not only the first: an index step still in
     flight (its workflow was cancelled, which stops nothing already running) would otherwise take
-    the lock between them, still find the membership, and write the rows back."""
+    the lock between them, still find the membership, and write the rows back.
+
+    A removal that fails moves a `removing` membership to `error`: the detach answered long ago,
+    and the member listing is the only place its caller looks."""
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, document=doc):
-        async with collection_lock(collection):
-            await remove_index_rows(collection, doc)
-            await remove_member_row(collection, doc)
+        try:
+            async with collection_lock(collection):
+                await remove_index_rows(collection, doc)
+                await remove_member_row(collection, doc)
+        except Exception as exc:
+            message = _failure(exc)
+            await fail_removal(collection, doc, f"removal failed: {message}")
+            raise PipelineError(message) from exc
 
 
 @retried_step
@@ -1231,15 +1312,22 @@ async def remove_rows(collection: str) -> None:
 
 
 @retried_step
-async def remove_tree(collection: str) -> None:
-    """Last: while the folder is there the table can still be deleted again."""
-    await Collection(collection).remove_tree()
+async def move_aside(collection: str, key: str) -> None:
+    """First: the folder leaves the name before the row frees it (see `Collection.move_aside`)."""
+    await Collection(collection).move_aside(key)
+
+
+@retried_step
+async def remove_aside(collection: str, key: str) -> None:
+    """Last: the folder moved aside goes, whatever took the name meanwhile."""
+    await Collection(collection).remove_aside(key)
 
 
 @DBOS.workflow(name=DELETE_COLLECTION_WORKFLOW)
 async def delete_collection_workflow(collection: str) -> None:
     """Cancel every index workflow of the collection, then drop the rows and the folder. No
-    document is touched.
+    document is touched. The folder moves aside before the row goes, so the name is free with no
+    folder under it: a create or rename may take it at once.
 
     The sweep repeats until it finds nothing: a bulk index still queueing documents can add more
     while the first sweep runs. Each sweep's cancel is final for the status row and for nothing
@@ -1253,9 +1341,12 @@ async def delete_collection_workflow(collection: str) -> None:
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection):
         while await cancel_active_batch(collection) > 0:
             pass
+        # one per delete, from its durable id, so a replay moves and removes the same folder
+        key = run_id(DBOS.workflow_id or "")
         async with collection_lock(collection):
+            await move_aside(collection, key)
             await remove_rows(collection)
-            await remove_tree(collection)
+            await remove_aside(collection, key)
         _collection_locks.pop(collection, None)  # nothing may write to it again
 
 
@@ -1389,8 +1480,10 @@ async def _enqueue_index(collection: str, doc: str, workflow_id: str | None = No
 
 async def start_index_collection_document(collection: str, doc: str) -> str:
     """Queue the index of one member into its collection; a second call while it runs returns the
-    same operation. Both names are checked before anything is queued."""
-    await (await Collection.get(collection)).member(doc)  # NotFound before anything is queued
+    same operation. Both names are checked before anything is queued, and a member being removed
+    is refused (`Collection.member_to_index`)."""
+    # NotFound or Conflict before the enqueue
+    await (await Collection.get(collection)).member_to_index(doc)
     return await _enqueue_index(collection, doc)
 
 
@@ -1405,19 +1498,29 @@ async def attach(collection: str, doc: str) -> str:
     return await _enqueue_index(collection, doc)
 
 
-async def detach(collection: str, doc: str) -> None:
-    """Take a document out of one collection and wait for it: cancel its index workflow there,
-    then delete its rows and membership from the collection's own partition. The document stays,
-    in its folder and in every other collection."""
-    await (await Collection.get(collection)).member(doc)  # NotFound before anything is cancelled
+async def detach(collection: str, doc: str) -> str:
+    """Take a document out of one collection: mark the membership `removing`, cancel its index
+    workflow there, and queue the removal of its rows and membership on the collection's own
+    partition. Returns the removal's id once it is queued, not done: the partition runs one
+    writer at a time, and a compaction, an index build or another member's write ahead of it can
+    take minutes. The document stays, in its folder and in every other collection.
+
+    `removing` first, so the member listing shows the detach from the moment it answers, and so
+    the cancelled index can no longer move the status (see `Collection.set_member_status`). A
+    second detach queues a second removal, which finds nothing left to remove: that is also how a
+    removal that failed, or one lost between the mark and the enqueue, is retried."""
+    await (await Collection.get(collection)).start_removal(doc)  # NotFound before any cancel
     await DBOS.cancel_workflows_async(
         await _active_collection_workflows(collection, doc), cancel_children=True
     )
-    with SetEnqueueOptions(queue_partition_key=index_partition(collection)):
+    with (
+        SetWorkflowID(f"{REMOVE_PREFIX}:{collection}:{doc}:{uuid4().hex}"),
+        SetEnqueueOptions(queue_partition_key=index_partition(collection)),
+    ):
         handle = await DBOS.enqueue_workflow_async(
             INDEX_QUEUE, remove_from_collection_index, collection, doc
         )
-    await handle.get_result(polling_interval_sec=TASK_POLL)
+    return handle.workflow_id
 
 
 async def _active_ids(
@@ -1510,7 +1613,8 @@ async def start_delete_collection(collection: str) -> str:
 async def rename_collection(collection: str, name: str) -> Collection:
     """Rename one collection; the same name is a no-op, and any other is refused while work of
     the collection runs. Each such run holds the old name: an index write or a maintenance run
-    would put the old folder back, and a bulk index or delete would go on queueing under it. A
+    would put the old folder back, a bulk index or delete would go on queueing under it, and a
+    detach's removal would find no membership under it and leave the moved one `removing`. A
     run queued after this check is the window left open; the rename itself is one transaction
     and a folder move."""
     found = await Collection.get(collection)  # NotFound before anything else
@@ -1522,6 +1626,7 @@ async def rename_collection(collection: str, name: str) -> Collection:
             DELETE_COLLECTION_WORKFLOW,
             COLLECTION_DOCUMENT_WORKFLOW,
             MAINTAIN_PARTITION_WORKFLOW,
+            REMOVE_FROM_INDEX_WORKFLOW,
         ],
         [
             f"{prefix}:{collection}:"
@@ -1530,6 +1635,7 @@ async def rename_collection(collection: str, name: str) -> Collection:
                 BULK_DELETE_PREFIX,
                 COLLECTION_DOCUMENT_PREFIX,
                 MAINTAIN_PREFIX,
+                REMOVE_PREFIX,
             )
         ],
         limit=1,
@@ -1554,7 +1660,9 @@ async def cancel_operation(operation_id: str) -> None:
     Here rather than in `operations`, which is a read model: this writes, and it reads the names it
     writes by out of the id grammar this module owns (see `pipeline_names`).
 
-    No-op on an operation that already finished: its document status is final."""
+    No-op on an operation that already finished: its document status is final. One that finishes
+    between this read and the cancel keeps its end state too (`document.cancel_import`,
+    `Collection.cancel_index`)."""
     found = await DBOS.get_workflow_status_async(operation_id)
     if found is None:
         raise NotFound(f"operation not found: {operation_id}")
@@ -1566,6 +1674,6 @@ async def cancel_operation(operation_id: str) -> None:
         return
     action, collection, doc = names
     if action == PipelineAction.IMPORT:
-        await document.set_status(doc, DocumentStatus.CANCELLED)
+        await document.cancel_import(doc)
     elif collection is not None:
-        await Collection(collection).set_member_status(doc, MemberStatus.CANCELLED)
+        await Collection(collection).cancel_index(doc)

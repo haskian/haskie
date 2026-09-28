@@ -41,7 +41,7 @@ async def load() -> dict[str, list[str]]:
     """Every session with its collections, in the order the session chose them. Two queries rather
     than a join: a session that selected nothing still has to be listed."""
     chosen = session_collections.c
-    async with db.connect() as conn:
+    async with db.read() as conn:
         ids = await conn.scalars(select(sessions.c.id).order_by(sessions.c.id))
         loaded: dict[str, list[str]] = {session_id: [] for session_id in ids}
         rows = await conn.execute(
@@ -87,7 +87,7 @@ async def set_collections(session: str, collections: list[str]) -> list[str]:
 
 
 async def collections_for(session: str) -> list[str]:
-    async with db.connect() as conn:
+    async with db.read() as conn:
         chosen = await conn.scalars(
             select(session_collections.c.collection)
             .where(session_collections.c.session_id == session)
@@ -109,7 +109,7 @@ async def summaries(last_searched: dict[str, float]) -> list[SessionSummary]:
     """Every session with its collections and its latest event or search, in id order; the page
     sorts. `last_searched` is when each session last searched (`log.last_searched`)."""
     loaded = await load()
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = await conn.execute(
             select(session_events.c.session_id, func.max(session_events.c.ts)).group_by(
                 session_events.c.session_id
@@ -197,7 +197,7 @@ async def history(session: str, limit: int = MAX_HISTORY) -> list[SessionEvent]:
     """What the session did besides searching, newest first; its searches are in the search log
     (`log.history`)."""
     event = session_events.c
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = await conn.execute(
             select(
                 event.ts,
@@ -219,7 +219,7 @@ async def origins(operation_ids: list[str]) -> dict[str, str]:
     One query for a whole page of operations."""
     if not operation_ids:
         return {}
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = await conn.execute(
             select(session_events.c.operation_id, session_events.c.session_id).where(
                 session_events.c.operation_id.in_(operation_ids)

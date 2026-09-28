@@ -16,7 +16,7 @@ from conftest import compact_model, hit, words_scan
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.index import Hit, Overlap, Relation, location
 from haskie.indexing import chunk
-from haskie.search import collapse
+from haskie.search import collapse, section
 from haskie.search.passage import HitRange, ranges
 from haskie.settings import Chunker, ChunkSettings, ScoreFold, SearchMode
 
@@ -606,6 +606,78 @@ async def test_a_folded_range_points_at_its_own_lines(bge_small: EmbeddingModel)
     )
     assert reference.to_parent.embedding.contains == pytest.approx(1 / 3), "one of three chunks"
     assert len(kept.also_in) == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "found", "expected", "excerpts"),
+    [
+        (
+            "a passage never folds under a range too short to stand alone",
+            [(RETRY, "a.md", 0.9, True), (RETRY, "copy.md", 0.8, False)],
+            [("a.md", True, []), ("copy.md", False, [])],
+            ["copy.md"],
+        ),
+        (
+            "a range too short to stand alone folds under a passage it repeats",
+            [(RETRY, "a.md", 0.9, False), (RETRY, "copy.md", 0.8, True)],
+            [("a.md", False, ["copy.md"])],
+            ["a.md"],
+        ),
+        (
+            "a range too short to stand alone never takes the slot of a passage it holds",
+            [(RETRY, "a.md", 0.9, False), (FULLER, "book.md", 0.8, True)],
+            [("a.md", False, []), ("book.md", True, [])],
+            ["a.md"],
+        ),
+        (
+            "a passage takes the slot of a range too short to stand alone it holds",
+            [(RETRY, "a.md", 0.9, True), (FULLER, "book.md", 0.8, False)],
+            [("book.md", False, ["a.md"])],
+            ["book.md"],
+        ),
+        (
+            "nothing folds under a range too short to stand alone, not even another",
+            [(RETRY, "a.md", 0.9, True), (RETRY, "copy.md", 0.8, True)],
+            [("a.md", True, []), ("copy.md", True, [])],
+            [],
+        ),
+    ],
+)
+def test_a_range_too_short_to_stand_alone_leads_no_fold(
+    name: str,
+    found: list[tuple[str, str, float, bool]],
+    expected: list[tuple[str, bool, list[str]]],
+    excerpts: list[str],
+) -> None:
+    """A section whose ranges are all too short to stand alone is dropped (`section.group`), with
+    every place folded under them. So a passage must never sit under such a range: it would be
+    lost with it, though it stands on its own."""
+    scanned = [hit(text, score, document=document) for text, document, score, _ in found]
+    marked = [
+        msgspec.structs.replace(one, alone=alone)
+        for one, (*_, alone) in zip(ranges(scanned, how=HARMONIC), found, strict=True)
+    ]
+
+    kept = collapse.ranges(marked, scanned, words_scan(scanned), None)
+
+    shape = [(r.hits[0].document, r.alone, [ref.document for ref in r.also_in]) for r in kept]
+    assert shape == expected, name
+    # each document one section of one chunk, as `CollectionIndex.outline_rows` reads it
+    rows = [
+        {
+            "document": one.document,
+            "seq": one.seq,
+            "headings": one.headings,
+            "char_start": one.char_start,
+            "char_end": one.char_end,
+        }
+        for one in scanned
+    ]
+    outlines = section.outlines(
+        [(one.collection, row) for one, row in zip(scanned, rows, strict=True)]
+    )
+    grouped = section.group(kept, outlines, max_chars=10_000, limit=len(kept) + 1)
+    assert [one.document for one in grouped] == excerpts, f"{name}: the excerpts answered with"
 
 
 # --- the space ------------------------------------------------------------------------

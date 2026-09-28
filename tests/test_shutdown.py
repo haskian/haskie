@@ -115,27 +115,34 @@ def test_signals_are_left_alone_where_they_cannot_be_wrapped(server_handler: lis
 
 
 # A server process in miniature: the app bounds its exit, then the main thread finishes, the way
-# `uvicorn.run` returns after a shutdown. `sys.argv[1]` says whether work is still in a thread.
+# `uvicorn.run` returns after a shutdown. `sys.argv[1]` says where work is still running. The
+# thread pool is imported only after the bound, as a lazy import in the app would.
 EXIT_SCRIPT = """
 import sys, threading, time
 from haskie import shutdown
 shutdown.EXIT_GRACE = 0.5
 shutdown.bound_exit()
 shutdown.bound_exit()  # a second app in the same process adds no second bound
-if sys.argv[1] == "busy":
+if sys.argv[1] == "thread":
     threading.Thread(target=time.sleep, args=(120,), name="busy-worker").start()
+if sys.argv[1] == "thread pool":
+    from concurrent.futures import ThreadPoolExecutor
+    ThreadPoolExecutor(thread_name_prefix="busy-worker").submit(time.sleep, 120)
 """
 
+EXIT_CASES = {
+    "a thread still running is left behind after the grace": "thread",
+    "a thread-pool worker still running is left behind after the grace": "thread pool",
+    "a clean exit is not held": "idle",
+}
 
-@pytest.mark.parametrize(
-    "work",
-    ["busy", "idle"],
-    ids=["work still running is left behind after the grace", "a clean exit is not held"],
-)
+
+@pytest.mark.parametrize("work", EXIT_CASES.values(), ids=list(EXIT_CASES))
 def test_the_process_exits_within_its_grace(work: str, tmp_path: Path) -> None:
     """Python joins every non-daemon thread before it exits and ignores Ctrl-C while it does, so
-    CPU work a shutdown abandoned would hold the process for as long as it runs."""
-    forced = work == "busy"
+    CPU work a shutdown abandoned would hold the process for as long as it runs. A thread-pool
+    worker is joined earlier than a plain thread, in the thread-pool module's own exit hook."""
+    forced = work != "idle"
     done = subprocess.run(
         [sys.executable, "-c", EXIT_SCRIPT, work],
         capture_output=True,

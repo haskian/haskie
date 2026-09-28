@@ -39,13 +39,17 @@ from haskie.indexing.chunk import record as chunk_record
 from haskie.logs import get_logger
 from haskie.settings import Fusion, SearchMode, SearchSettings, load_user_settings
 
-# What identifies one chunk, wherever it is stored. The collection is deliberately not part of it:
-# the same chunk of the same document is the same answer, whichever collection's table it came out
-# of, so `search.retrieval.fan_out` and `search.text.merge` both count it once.
-RowKey = tuple[str, int]
+# Where a row sits in one collection's table: what `rows_at` reads it back by.
+RowKey = tuple[str, int]  # (document, seq)
 # One chunk as a search result: the collection too, since two collections may chunk one document
 # with different settings and each numbers its own `seq` (`search.passage.ranges`).
 ChunkKey = tuple[str, str, int]  # (collection, document, seq)
+# What identifies one chunk's text, wherever it is stored. The collection is deliberately not part
+# of it: the same span of the same document is the same answer, whichever collection's table it
+# came out of, so `search.retrieval.fan_out` and `search.text.merge` both count it once. The `seq`
+# is not part of it either: two chunk settings number one span differently, and give one `seq`
+# other text.
+SpanKey = tuple[str, int, int]  # (document, char_start, char_end)
 
 
 class Row(msgspec.Struct):
@@ -221,20 +225,29 @@ def location(
 
 # `schema_current` opens the table and reads its Arrow schema, and the read path asks for every
 # collection listing, search and delete. The index stage is the only writer of a table and it runs
-# in this process, so the answer is cached per (index directory, embedding dimensions) and
-# forgotten whenever a table is created, dropped, or its collection deleted.
+# in this process, so the answer is cached per (index directory, embedding) and forgotten whenever
+# a table is created, dropped, or its collection deleted.
+#
+# Forgetting also bumps the directory's generation. A read that started before a drop would
+# otherwise cache its answer about the dropped table as the answer for the new one, and the next
+# document's `reset_for_write` would drop the new table with every row in it.
 #
 # A `threading.Lock` rather than an async one: both event loops (Litestar's and DBOS's) read this
 # cache, and a lock made on one of them cannot be taken from the other. Nothing is awaited while
 # it is held, so it is never contended for longer than a dict lookup.
-_schema_current: dict[tuple[str, int | None], bool] = {}
+_schema_current: dict[tuple[str, str | None], bool] = {}
+_schema_generation: dict[str, int] = {}  # index directory -> times its answers were forgotten
 _schema_lock = threading.Lock()
+# Schema metadata: the `cache_name` of the embedding a table's vectors were made by. LanceDB keeps
+# it through every write, delete, compaction and index build.
+EMBEDDING_KEY = b"haskie.embedding"
 
 
 def forget_schema(path: Path) -> None:
     """Drop the cached `schema_current` answers for one index directory."""
     directory = str(path)
     with _schema_lock:
+        _schema_generation[directory] = _schema_generation.get(directory, 0) + 1
         for key in [k for k in _schema_current if k[0] == directory]:
             del _schema_current[key]
 
@@ -252,13 +265,21 @@ def _fusion(settings: SearchSettings):
 
 class CollectionIndex:
     def __init__(
-        self, path: Path, collection: str, home: Path, embedding: EmbeddingModel | None
+        self,
+        path: Path,
+        collection: str,
+        home: Path,
+        embedding: EmbeddingModel | None,
+        leaving: frozenset[str] = frozenset(),
     ) -> None:
         """Sync and IO-free: opening the table is what `_existing` / `_for_write` do, awaited."""
         self.path = path
         self.collection = collection
         self.home = home  # stored paths are relative to it (see Document.relative)
         self.embedding = embedding
+        # the documents on their way out of the collection when a search opened this index
+        # (`collection.LEAVING`): no search read answers with their rows (see `_excluding`)
+        self.leaving = leaving
         self._conn: lancedb.AsyncConnection | None = None  # one connection per index instance
         self._cached: lancedb.AsyncTable | None = None  # one handle per index instance
 
@@ -309,7 +330,7 @@ class CollectionIndex:
         it is the only copy of anything: every document of the collection is rewritten from its
         embedding cache by "Index all"."""
         table = await self._existing()
-        if table is not None and not await self.schema_current(table):
+        if table is not None and not await self.schema_current():
             _log.warning("index_table_outdated", collection=self.collection, path=str(self.path))
             await (await self._connection()).drop_table(TABLE)
             # the connection too, not only the table handle: an AsyncConnection that dropped a
@@ -321,24 +342,29 @@ class CollectionIndex:
             forget_schema(self.path)  # the answer just cached is about a table that is gone
         return await self._for_write()
 
-    async def schema_current(self, table: lancedb.AsyncTable | None = None) -> bool:
-        """False when the table cannot hold rows written by this build: a missing column, or a
-        vector of different dimensions than the current embedding model.
+    async def schema_current(self) -> bool:
+        """False when the table cannot hold rows written by this build: a missing column, or
+        vectors made by another embedding than the current one. Another model of the same size
+        would fit the column, and its vectors would be compared with the query's all the same, so
+        the table records the embedding it was built for (`EMBEDDING_KEY`).
 
         A missing table is never cached (see `_schema_current`), so one created later is
         inspected.
         """
-        key = (str(self.path), self.embedding.dims if self.embedding else None)
+        directory = str(self.path)
+        key = (directory, self.embedding.cache_name if self.embedding else None)
         with _schema_lock:
             cached = _schema_current.get(key)
+            generation = _schema_generation.get(directory, 0)
         if cached is not None:
             return cached
-        table = table or await self._existing()
+        table = await self._existing()
         if table is None:
             return True
         current = self._fits(await table.schema())
         with _schema_lock:
-            _schema_current[key] = current
+            if _schema_generation.get(directory, 0) == generation:  # no drop or create meanwhile
+                _schema_current[key] = current
         return current
 
     def _fits(self, schema: pa.Schema) -> bool:
@@ -348,18 +374,21 @@ class CollectionIndex:
             return True
         if "vector" not in schema.names:
             return False
-        return schema.field("vector").type == pa.list_(pa.float32(), self.embedding.dims)
+        return (schema.metadata or {}).get(EMBEDDING_KEY) == self.embedding.cache_name.encode()
 
     def _schema(self) -> Any:
         if self.embedding is None:
             return PLAIN_SCHEMA
-        return PLAIN_SCHEMA.append(pa.field("vector", pa.list_(pa.float32(), self.embedding.dims)))
+        vector = pa.field("vector", pa.list_(pa.float32(), self.embedding.dims))
+        return PLAIN_SCHEMA.append(vector).with_metadata(
+            {EMBEDDING_KEY: self.embedding.cache_name.encode()}
+        )
 
     async def _deletable(self) -> lancedb.AsyncTable | None:
         """A delete on a missing or outdated table has nothing to remove; dropping it instead
         would wipe every document of the collection."""
         table = await self._existing()
-        return table if table is not None and await self.schema_current(table) else None
+        return table if table is not None and await self.schema_current() else None
 
     async def delete_document(self, doc: str) -> None:
         table = await self._deletable()
@@ -497,7 +526,8 @@ class CollectionIndex:
         a collection to an approximate index does not change what `row_score` means.
 
         The training itself is CPU work inside LanceDB's runtime, so it cannot be put under the
-        CPU budget (`cpu.on_cpu`); maintenance runs one collection at a time instead."""
+        CPU budget (`cpu.on_cpu`); the index queue bounds it instead, one run per collection
+        partition (see `maintenance.run`)."""
         table = await self._existing()
         if table is None or self.embedding is None:
             return
@@ -509,7 +539,7 @@ class CollectionIndex:
                 # one 8-bit code per 16 dimensions: the usual PQ ratio, and it divides every
                 # embedding profile's dimension count
                 num_sub_vectors=max(1, self.embedding.dims // 16),
-                num_bits=8,
+                num_bits=PQ_BITS,
             ),
             replace=True,
         )
@@ -530,7 +560,7 @@ class CollectionIndex:
         table = await self._existing()
         if table is None or await table.count_rows() == 0:
             return None
-        if not await self.schema_current(table):
+        if not await self.schema_current():
             _log.warning("index_table_outdated", collection=self.collection, path=str(self.path))
             return None
         return table
@@ -553,20 +583,23 @@ class CollectionIndex:
 
         `vectors` False leaves the vector column out of a lexical read, for a caller that only
         wants the chunks: the probe for missing words (`search.retrieval.probe_gaps`).
+
+        A table with rows and no full-text index yet, a collection in the middle of its first
+        index, answers what it can: LanceDB refuses any full-text query without the index, so a
+        lexical query finds nothing and a hybrid one falls back to its vector half.
         """
         table = await self._readable()
         if table is None:
             return []
         if vector is None or not await self.has_vector_column():
-            found = await table.search(query, query_type="fts")
-            if not vectors:
-                found = found.select([*PLAIN_SCHEMA.names, "_score"])
-            return _rows(await found.limit(limit).to_arrow())
-        if settings.mode == SearchMode.VECTOR:
+            return await self._lexical(table, query, limit, vectors)
+        if settings.mode == SearchMode.VECTOR or not await self.has_index(FTS_COLUMN):
             found = _tuned(await table.search(vector, query_type="vector"), settings)
+            found = _excluding(found, self.leaving)
             return _rows(await found.limit(limit).to_arrow())
         # the async API builds a hybrid query out of its two halves instead of `query_type=hybrid`
         hybrid = table.query().nearest_to(vector).nearest_to_text(query)
+        hybrid = _excluding(hybrid, self.leaving)
         return _rows(
             await _tuned(hybrid, settings)
             .limit(max(settings.candidates, limit))
@@ -576,17 +609,27 @@ class CollectionIndex:
 
     async def fts_rows(self, query: str, limit: int) -> list[dict]:
         """Lexical retrieval alone: at most `limit` BM25 rows, whatever this index could answer
-        with. `[]` when it cannot answer one at all — no table, no rows, or no full-text index
-        yet, which is what a collection in the middle of its first index looks like.
+        with, none of them of a document `leaving` (see `_excluding`). `[]` when it cannot
+        answer one at all — no table, no rows, or no full-text index yet, which is what a
+        collection in the middle of its first index looks like.
 
-        A missing full-text index is a real answer here, not a scan: a cross-collection search
-        asks every collection at once (see search/text.py), and one still building its index would
-        make the whole query wait for it. `search_rows` is the opposite trade for one collection.
+        LanceDB refuses a full-text query without the index rather than scanning, so a
+        collection still building its index answers nothing here, as it does in `search_rows`.
         """
         table = await self._readable()
-        if table is None or not await self.has_index(FTS_COLUMN):
+        return [] if table is None else await self._lexical(table, query, limit)
+
+    async def _lexical(
+        self, table: lancedb.AsyncTable, query: str, limit: int, vectors: bool = True
+    ) -> list[dict]:
+        """At most `limit` BM25 rows of a readable table, none of a document `leaving`, and
+        without the vector column when `vectors` is False. `[]` without the full-text index."""
+        if not await self.has_index(FTS_COLUMN):
             return []
-        return _rows(await (await table.search(query, query_type="fts")).limit(limit).to_arrow())
+        found = _excluding(await table.search(query, query_type="fts"), self.leaving)
+        if not vectors:
+            found = found.select([*PLAIN_SCHEMA.names, "_score"])
+        return _rows(await found.limit(limit).to_arrow())
 
     async def rows_at(self, keys: Iterable[RowKey], vectors: bool) -> list[dict]:
         """The stored rows of these chunks, in no order: what a search reads to look at the
@@ -611,11 +654,11 @@ class CollectionIndex:
         """Where every chunk of these documents sits: its `document`, `seq`, heading path and char
         span, and nothing else, in no order. What a search reads to know how large each section
         around a match is. `[]` when there is nothing readable."""
-        names = sorted(set(documents))
+        names = set(documents)
         table = await self._readable()
         if table is None or not names:
             return []
-        wanted = f"document IN ({', '.join(_quoted(name) for name in names)})"
+        wanted = f"document IN {_listed(names)}"
         columns = ["document", "seq", "headings", "char_start", "char_end"]
         return await table.query().where(wanted).select(columns).to_list()
 
@@ -658,6 +701,9 @@ class CollectionIndex:
 SEARCH_CONCURRENCY = 8  # LanceDB reads are IO bound; more in flight than this only queues up
 MIN_PARTITIONS = 16  # below this an IVF index buys nothing over a scan
 MAX_PARTITIONS = 4096  # above this training costs more than the queries save
+PQ_BITS = 8  # one byte per PQ sub-vector code
+# LanceDB trains each PQ codebook's 2^bits centroids on at least that many rows, and refuses fewer
+PQ_MIN_ROWS = 2**PQ_BITS
 
 
 def _partitions(num_rows: int) -> int:
@@ -677,9 +723,9 @@ def _tuned(builder: Any, settings: SearchSettings) -> Any:
     return builder.nprobes(settings.nprobes).refine_factor(settings.refine_factor)
 
 
-async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
-    """Second stage for any mode: rescore candidate rows with a cross-encoder, in place, and
-    return them best first.
+async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -> None:
+    """Second stage for any mode: rescore candidate rows with a cross-encoder, in place. The
+    caller sorts, if it wants them ranked: each reads the scores back in its own order.
 
     The score is the sigmoid of the model's logit, in (0, 1). A raw logit is mostly negative for
     all but the few best candidates, and a passage's score (`passage.harmonic`) is 0 for any score
@@ -698,7 +744,6 @@ async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -
     scores = await cpu.on_cpu(rerank_scores, settings.reranker_model, accelerator, query, read)
     for row, logit in zip(rows, scores, strict=True):
         row["_relevance_score"] = _sigmoid(logit)
-    return sorted(rows, key=lambda r: r["_relevance_score"], reverse=True)
 
 
 def logit(score: float) -> float:
@@ -742,6 +787,24 @@ def _rows(found: pa.Table) -> list[dict]:
     return rows
 
 
+def _excluding(builder: Any, documents: frozenset[str]) -> Any:
+    """A query that leaves the rows of `documents` out: those of a document on its way out of the
+    collection (`CollectionIndex.leaving`), whose rows stay until the removal queued for them runs.
+
+    A filter on the query rather than on its answer: LanceDB applies it before the limit, so a
+    document that leaves does not take the slots of the ones that stay. No filter at all when
+    nothing is leaving, which is almost every search. Sync, like `_tuned`."""
+    if not documents:
+        return builder
+    return builder.where(f"document NOT IN {_listed(documents)}")
+
+
+def _listed(values: Iterable[str]) -> str:
+    """`values` as a parenthesized list of SQL string literals for a LanceDB `IN`, sorted so one
+    set always makes one filter."""
+    return f"({', '.join(_quoted(value) for value in sorted(values))})"
+
+
 def _quoted(value: str) -> str:
     """`value` as a SQL string literal for a LanceDB filter. A document name is the user's file
     name, so a quote in it is doubled rather than allowed to end the literal."""
@@ -776,9 +839,9 @@ def row_score(r: dict) -> float:
     return 0.0
 
 
-def row_key(row: dict) -> RowKey:
-    """(document, seq) of one result row."""
-    return (row["document"], row["seq"])
+def span_key(row: dict) -> SpanKey:
+    """(document, char_start, char_end) of one result row."""
+    return (row["document"], row["char_start"], row["char_end"])
 
 
 async def gather_rows(
@@ -802,16 +865,16 @@ async def gather_rows(
     return list(await asyncio.gather(*(read(index) for index in indexes)))
 
 
-def first_per_key(
+def first_per_span(
     pairs: Iterable[tuple[CollectionIndex, dict]],
 ) -> list[tuple[CollectionIndex, dict]]:
-    """One pair per `row_key`, keeping the first offered and the caller's order.
+    """One pair per `span_key`, keeping the first offered and the caller's order.
 
     The same document may be a member of several collections, whose tables then hold the same
     chunk. A search is about chunks, not memberships, so the copies are dropped. The caller's
     ranking decides which copy is "first" (see search.retrieval.fan_out and search.text.merge).
     """
-    unique: dict[RowKey, tuple[CollectionIndex, dict]] = {}
+    unique: dict[SpanKey, tuple[CollectionIndex, dict]] = {}
     for index, row in pairs:
-        unique.setdefault(row_key(row), (index, row))
+        unique.setdefault(span_key(row), (index, row))
     return list(unique.values())

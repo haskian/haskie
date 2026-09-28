@@ -1385,7 +1385,7 @@ export interface components {
          * MemberStatus
          * @enum {string}
          */
-        MemberStatus: "pending" | "indexing" | "indexed" | "error" | "cancelled";
+        MemberStatus: "pending" | "indexing" | "indexed" | "error" | "cancelled" | "removing";
         /**
          * ModelKind
          * @enum {string}
@@ -1469,16 +1469,10 @@ export interface components {
             };
             document_statuses: components["schemas"]["DocumentStatus"][];
             active_document_statuses: components["schemas"]["DocumentStatus"][];
-            member_statuses: components["schemas"]["MemberStatus"][];
-            active_member_statuses: components["schemas"]["MemberStatus"][];
             active_run_statuses: components["schemas"]["RunStatus"][];
-            operation_kinds: components["schemas"]["OperationKind"][];
-            bulk_kinds: components["schemas"]["BulkWorkflow"][];
         };
         /**
          * Order
-         * @description One of: asc, desc.
-         * @default asc
          * @enum {string}
          */
         Order: "asc" | "desc";
@@ -1582,7 +1576,7 @@ export interface components {
         PipelineSettings: {
             /**
              * CPU budget
-             * @description Maximum number of tasks haskie runs at the same time across every queue: converting, embedding, indexing and maintenance. Defaults to half the machine's cores so other work keeps the rest. Never exceeded, whatever the weights below say.
+             * @description Maximum number of tasks haskie runs at the same time across every queue: converting, embedding and indexing. Defaults to half the cores haskie may run on, so other work keeps the rest. Never exceeded, whatever the weights below say.
              */
             cpu_budget?: number;
             /**
@@ -1647,7 +1641,7 @@ export interface components {
             ann_min_rows: number;
             /**
              * Preview builds
-             * @description Maximum number of document previews built at the same time when they are first opened; further requests wait, so a burst of opens does not start dozens of PDF parses. Outside the CPU budget: a preview is built for a reader who is waiting for it.
+             * @description Maximum number of document previews built at the same time when they are first opened; further requests wait, so a burst of opens does not start dozens of PDF parses. Each build still takes a slot of the CPU budget, so a preview can wait behind indexing.
              * @default 2
              */
             preview_workers: number;
@@ -1750,7 +1744,7 @@ export interface components {
         };
         /**
          * Review
-         * @description What the curator decided about a gap. `open` is stored as no decision.
+         * @description One of: open, dismissed, resolved.
          * @default open
          * @enum {string}
          */
@@ -1788,12 +1782,12 @@ export interface components {
         SearchOverrides: {
             /**
              * Results
-             * @description Number of results a search returns.
+             * @description Number of results a search returns, at most 200.
              */
             limit?: number | null;
             /**
              * Candidates
-             * @description Results fetched before fusion and reranking: per retriever in hybrid mode, in total otherwise. Then cut down to Results. Higher = better recall, slower. Ignored when neither fusion nor a reranker applies.
+             * @description The fewest rows each collection reads, in every search mode. A search that scans deeper, for more Results, reads that many instead. The rows are merged, reranked when a reranker is on, and cut down to Results. Higher = better recall, slower.
              */
             candidates?: number | null;
             /**
@@ -1838,7 +1832,7 @@ export interface components {
             reranker?: components["schemas"]["Reranker"] | null;
             /**
              * Reranker model
-             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded on first use.
+             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded as soon as it is chosen; a search that needs it is refused until the download finishes.
              */
             reranker_model?: string | null;
             /**
@@ -1896,13 +1890,13 @@ export interface components {
         SearchSettings: {
             /**
              * Results
-             * @description Number of results a search returns.
+             * @description Number of results a search returns, at most 200.
              * @default 25
              */
             limit: number;
             /**
              * Candidates
-             * @description Results fetched before fusion and reranking: per retriever in hybrid mode, in total otherwise. Then cut down to Results. Higher = better recall, slower. Ignored when neither fusion nor a reranker applies.
+             * @description The fewest rows each collection reads, in every search mode. A search that scans deeper, for more Results, reads that many instead. The rows are merged, reranked when a reranker is on, and cut down to Results. Higher = better recall, slower.
              * @default 50
              */
             candidates: number;
@@ -1941,7 +1935,7 @@ export interface components {
             reranker?: components["schemas"]["Reranker"];
             /**
              * Reranker model
-             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded on first use.
+             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded as soon as it is chosen; a search that needs it is refused until the download finishes.
              * @default Xenova/ms-marco-MiniLM-L-6-v2
              */
             reranker_model: string;
@@ -2174,18 +2168,14 @@ export interface operations {
                     "application/json": components["schemas"]["UserSettings"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2233,18 +2223,14 @@ export interface operations {
                     "application/json": components["schemas"]["UserSettings"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2292,18 +2278,14 @@ export interface operations {
                     "application/json": components["schemas"]["Rendered"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2334,18 +2316,14 @@ export interface operations {
                     "application/json": components["schemas"]["Staged"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2375,18 +2353,14 @@ export interface operations {
                     "application/json": components["schemas"]["Document"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2399,7 +2373,7 @@ export interface operations {
                 page_size?: number;
                 sort?: string | null;
                 /** @description One of: asc, desc. */
-                order?: components["schemas"]["Order"];
+                order?: components["schemas"]["Order"] | null;
                 /** @description One of: queued, converting, embedding, imported, error, cancelled, deleting. */
                 status?: components["schemas"]["DocumentStatus"] | null;
             };
@@ -2418,18 +2392,14 @@ export interface operations {
                     "application/json": components["schemas"]["Page_haskie.document.document.Listed_"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2455,18 +2425,14 @@ export interface operations {
                     "application/json": components["schemas"]["Listed"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2492,18 +2458,14 @@ export interface operations {
                     "application/json": components["schemas"]["BulkStarted"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2529,18 +2491,14 @@ export interface operations {
                     "application/json": components["schemas"]["BulkStarted"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2566,18 +2524,14 @@ export interface operations {
                     "application/json": string[];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2603,18 +2557,14 @@ export interface operations {
                     "application/json": components["schemas"]["Entry"][];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2640,18 +2590,14 @@ export interface operations {
                     "application/json": components["schemas"]["Similar"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2683,18 +2629,14 @@ export interface operations {
                     "": string;
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2726,18 +2668,14 @@ export interface operations {
                     "": string;
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2765,18 +2703,14 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2805,18 +2739,14 @@ export interface operations {
                     "application/json": components["schemas"]["Lines"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2848,18 +2778,14 @@ export interface operations {
                     "application/json": components["schemas"]["Document"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2872,7 +2798,7 @@ export interface operations {
                 page_size?: number;
                 sort?: string | null;
                 /** @description One of: asc, desc. */
-                order?: components["schemas"]["Order"];
+                order?: components["schemas"]["Order"] | null;
             };
             header?: never;
             path?: never;
@@ -2889,18 +2815,14 @@ export interface operations {
                     "application/json": components["schemas"]["Page_haskie.collection.collection.CollectionSummary_"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2928,18 +2850,14 @@ export interface operations {
                     "application/json": components["schemas"]["CollectionInfo"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -2965,18 +2883,14 @@ export interface operations {
                     "application/json": components["schemas"]["CollectionInfo"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3002,18 +2916,14 @@ export interface operations {
                     "application/json": components["schemas"]["BulkStarted"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3043,18 +2953,14 @@ export interface operations {
                     "application/json": components["schemas"]["CollectionInfo"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3084,18 +2990,14 @@ export interface operations {
                     "application/json": components["schemas"]["CollectionInfo"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3125,18 +3027,14 @@ export interface operations {
                     "application/json": components["schemas"]["CollectionInfo"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3162,18 +3060,14 @@ export interface operations {
                     "application/json": components["schemas"]["BulkStarted"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3186,8 +3080,8 @@ export interface operations {
                 page_size?: number;
                 sort?: string | null;
                 /** @description One of: asc, desc. */
-                order?: components["schemas"]["Order"];
-                /** @description One of: pending, indexing, indexed, error, cancelled. */
+                order?: components["schemas"]["Order"] | null;
+                /** @description One of: pending, indexing, indexed, error, cancelled, removing. */
                 status?: components["schemas"]["MemberStatus"] | null;
             };
             header?: never;
@@ -3207,18 +3101,14 @@ export interface operations {
                     "application/json": components["schemas"]["Page_haskie.collection.collection.Member_"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3250,18 +3140,14 @@ export interface operations {
                     "application/json": components["schemas"]["BulkStarted"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3288,18 +3174,14 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3326,18 +3208,14 @@ export interface operations {
                     "application/json": components["schemas"]["BulkStarted"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3366,18 +3244,14 @@ export interface operations {
                     "application/json": components["schemas"]["Page_haskie.indexing.operations.Operation_"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3443,18 +3317,14 @@ export interface operations {
                     "application/json": components["schemas"]["Task"][];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3480,18 +3350,14 @@ export interface operations {
                     "application/json": components["schemas"]["OperationProgress"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3515,18 +3381,14 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3576,18 +3438,14 @@ export interface operations {
                     "application/json": string[];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3617,18 +3475,14 @@ export interface operations {
                     "application/json": components["schemas"]["Hit"][] | components["schemas"]["Passage"][];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3658,18 +3512,14 @@ export interface operations {
                     "application/json": components["schemas"]["Answer"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3699,18 +3549,14 @@ export interface operations {
                     "application/json": components["schemas"]["Sources"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3738,18 +3584,14 @@ export interface operations {
                     "application/json": components["schemas"]["LoggedSearch"][];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3775,18 +3617,14 @@ export interface operations {
                     "application/json": components["schemas"]["SearchAt"][];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3812,18 +3650,14 @@ export interface operations {
                     "application/json": components["schemas"]["ChunksAt"][];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3849,18 +3683,14 @@ export interface operations {
                     "application/json": components["schemas"]["SessionEvent"][];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3890,18 +3720,14 @@ export interface operations {
                     "application/json": components["schemas"]["Page_haskie.collection.index.Hit_"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3910,9 +3736,10 @@ export interface operations {
     ApiGapsListGaps: {
         parameters: {
             query?: {
-                /** @description What the curator decided about a gap. `open` is stored as no decision. */
+                /** @description One of: open, dismissed, resolved. */
                 review?: components["schemas"]["Review"];
                 days?: number;
+                /** @description One of: reported, empty, uncovered, weak, borderline. */
                 signals?: components["schemas"]["Signal"][] | null;
             };
             header?: never;
@@ -3930,18 +3757,14 @@ export interface operations {
                     "application/json": components["schemas"]["GapTopic"][];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -3969,18 +3792,14 @@ export interface operations {
                     "application/json": number;
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -4008,18 +3827,14 @@ export interface operations {
                     "application/json": components["schemas"]["ReplayedGap"][];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };
@@ -4049,18 +3864,14 @@ export interface operations {
                     "application/json": components["schemas"]["Reported"];
                 };
             };
-            /** @description Bad request syntax or unsupported method */
-            400: {
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": {
-                        status_code: number;
                         detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
                     };
                 };
             };

@@ -4,25 +4,41 @@ The routes live in `haskie.api`, one module per feature. What stays here is what
 every request: the request context, the error mapping, and how the application is assembled.
 """
 
+import os
+from collections.abc import Mapping
+from copy import copy
+from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote
+from typing import Any, cast
+from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 import msgspec
-from litestar import Litestar, Request, Response
-from litestar.datastructures import MutableScopeHeaders
+from litestar import Litestar, MediaType, Request, Response
+from litestar.datastructures import Headers, MutableScopeHeaders
 from litestar.exceptions import HTTPException, ValidationException
 from litestar.exceptions.responses import create_exception_response
+from litestar.handlers import HTTPRouteHandler
 from litestar.openapi import OpenAPIConfig
+from litestar.openapi.spec import OpenAPIMediaType, OpenAPIResponse, OpenAPIType, Operation, Schema
 from litestar.static_files import create_static_files_router
-from litestar.types import ControllerRouterHandler, ExceptionHandlersMap, Message, Scope
-from litestar_mcp import LitestarMCP
+from litestar.types import (
+    ASGIApp,
+    ControllerRouterHandler,
+    ExceptionHandlersMap,
+    HTTPScope,
+    Message,
+    Receive,
+    Scope,
+    Send,
+)
+from litestar_mcp import LitestarMCP, MCPConfig
 
 from haskie import APP_VERSION, home, logs, shutdown
 from haskie.api import ROUTE_HANDLERS
 from haskie.audit import Actor
 from haskie.document.document import UPLOAD_MAX_BYTES
-from haskie.errors import HaskieError
+from haskie.errors import Forbidden, HaskieError
 from haskie.indexing import workflows
 from haskie.search import flow
 
@@ -55,20 +71,33 @@ async def bind_request_context(request: Request) -> None:
     request.scope["state"][TRACE_KEY] = flow.start_trace()
     logs.clear()
     path = request.scope["path"]
-    # `collection` and `document` are what every collection and document route is keyed by, so the
-    # request context carries them for free instead of each handler binding them again. A document
-    # route has no collection at all: the document belongs to none.
-    routed = request.path_params
-    scoped: dict[str, str] = {
-        key: routed[key] for key in ("collection", "document") if routed.get(key)
-    }
     logs.bind(
         request_id=request_id,
         actor=Actor.MCP if path.startswith(MCP_PATH) else Actor.WEB,
         method=request.method,
         path=path,
-        **scoped,
+        **_scope_names(request.path_params),
     )
+
+
+async def bind_tool_context(_tool: str, arguments: dict[str, Any], _request: Request) -> None:
+    """The names an MCP tool call is keyed by. litestar-mcp does not run the app's
+    `before_request` again for the tool, and the outer `/mcp` request it did run for has no path
+    parameters. Nor does the request it builds for the tool: it finds a route's parameters by the
+    handler's identity, which Litestar's copy on registering breaks. The tool's arguments carry
+    them either way."""
+    logs.bind(**_scope_names(arguments))
+
+
+def _scope_names(values: Mapping[str, Any]) -> dict[str, str]:
+    """`collection` and `document` are what every collection and document route is keyed by, so
+    the request context carries them instead of each handler binding them again. A document route
+    has no collection at all: the document belongs to none."""
+    return {
+        key: value
+        for key in ("collection", "document")
+        if isinstance(value := values.get(key), str) and value
+    }
 
 
 async def add_request_id(message: Message, scope: Scope) -> None:
@@ -85,6 +114,64 @@ async def add_request_id(message: Message, scope: Scope) -> None:
             # JSON, percent-encoded: a header is Latin-1, and the formulas are not
             lineage = msgspec.json.encode(trace.scoring).decode()
             MutableScopeHeaders(message)[SCORING_HEADER] = quote(lineage)
+
+
+# --- who may call -----------------------------------------------------------
+
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+WILDCARD_HOSTS = frozenset({"0.0.0.0", "::"})  # a bind to every interface: exposed on purpose
+READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+ALLOWED_ORIGINS_ENV = "HASKIE_ALLOWED_ORIGINS"
+
+
+def allowed_origins() -> frozenset[str]:
+    """Browser origins trusted beside haskie's own, for an agent UI that runs in a browser:
+    `HASKIE_ALLOWED_ORIGINS`, comma-separated, e.g. `https://agent.example`."""
+    listed = os.environ.get(ALLOWED_ORIGINS_ENV, "").split(",")
+    return frozenset(origin.strip().rstrip("/").lower() for origin in listed if origin.strip())
+
+
+def served_hosts() -> frozenset[str] | None:
+    """The host names a request may address: loopback and the address `run` bound, or None for a
+    wildcard bind, where any name can reach the server and none can be told apart."""
+    bound = urlsplit(os.environ.get(home.ADDRESS_ENV, "")).hostname
+    if bound in WILDCARD_HOSTS:
+        return None
+    return LOOPBACK_HOSTS | ({bound} if bound else set())
+
+
+def _refusal(scope: HTTPScope, hosts: frozenset[str] | None, origins: frozenset[str]) -> str | None:
+    """Why a request is refused, or None. Agents, MCP clients and scripts send no `Origin`, so
+    they pass. A browser does, and a browser ignores the loopback bind: without these checks any
+    page the user opens could post to the API, and a DNS-rebinding page could read it too."""
+    headers = Headers.from_scope(scope)
+    host = headers.get("host", "")
+    try:
+        hostname = urlsplit(f"//{host}").hostname
+    except ValueError:
+        hostname = None
+    if hosts is not None and hostname not in hosts:
+        return f"host {host!r} is not one haskie serves"
+    origin = headers.get("origin")
+    if origin is None or scope["method"] in READ_METHODS:
+        return None
+    if origin.lower() in origins | {f"{scope['scheme']}://{host}".lower()}:
+        return None
+    return f"requests from {origin} are not accepted; list it in {ALLOWED_ORIGINS_ENV} to trust it"
+
+
+def guard_callers(app: ASGIApp) -> ASGIApp:
+    """Middleware refusing a request from a host or browser origin haskie does not serve."""
+    hosts, origins = served_hosts(), allowed_origins()
+
+    async def guarded(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and (
+            reason := _refusal(cast("HTTPScope", scope), hosts, origins)
+        ):
+            raise Forbidden(reason)
+        await app(scope, receive, send)
+
+    return guarded
 
 
 # --- errors -----------------------------------------------------------------
@@ -113,9 +200,7 @@ def validation_error(_: Request, exc: ValidationException) -> Response:
     own 400; a rejected body is invalid input, so it keeps our 422. `extra` carries the message
     of the field that failed, which the bare exception text drops."""
     reasons = [str(item.get("message", item)) for item in exc.extra or [] if isinstance(item, dict)]
-    return _client_error(
-        exc, 422, message=": ".join([exc.detail, *reasons]) if reasons else exc.detail
-    )
+    return _client_error(exc, 422, message=": ".join([exc.detail, *reasons]))
 
 
 def internal_error(request: Request, exc: Exception) -> Response:
@@ -134,6 +219,42 @@ EXCEPTION_HANDLERS: ExceptionHandlersMap = {
     Exception: internal_error,
 }
 
+# What `validation_error` and an `InvalidInput` answer, for the OpenAPI document. Inline rather than
+# a component: Litestar replaces the configured component schemas with the ones it generates.
+REJECTED = OpenAPIResponse(
+    description="The request is invalid: a parameter or body that does not decode, or a value "
+    "the handler refuses.",
+    content={
+        MediaType.JSON: OpenAPIMediaType(
+            schema=Schema(
+                type=OpenAPIType.OBJECT,
+                required=["detail"],
+                properties={"detail": Schema(type=OpenAPIType.STRING)},
+            )
+        )
+    },
+)
+
+
+@dataclass
+class RejectingOperation(Operation):
+    """An operation as haskie answers it. Litestar documents every route that validates its input
+    with its own 400 `{status_code, detail, extra}` body, and offers no app-wide way to change
+    that; `validation_error` answers 422 `{detail}`, so that is what the document says instead."""
+
+    def __post_init__(self) -> None:
+        # the handlers declare no `raises`, so a 400 here is only ever Litestar's validation one
+        if self.responses is not None and self.responses.pop("400", None) is not None:
+            self.responses["422"] = REJECTED
+
+
+def documented(handler: HTTPRouteHandler) -> HTTPRouteHandler:
+    """`handler` with the operation class that documents its rejections truthfully. A copy,
+    because the handler objects are module globals and Litestar copies what it registers anyway."""
+    rejecting = copy(handler)
+    rejecting.operation_class = RejectingOperation
+    return rejecting
+
 
 # --- app --------------------------------------------------------------------
 
@@ -151,7 +272,9 @@ def create_app() -> Litestar:
     """Factory so logging is configured before Litestar builds anything; `app` below keeps
     `litestar --app haskie.app:app` working."""
     logs.configure()
-    route_handlers: list[ControllerRouterHandler] = list(ROUTE_HANDLERS)
+    route_handlers: list[ControllerRouterHandler] = [
+        documented(handler) for handler in ROUTE_HANDLERS
+    ]
     if WEB_DIST.is_dir():
         route_handlers.append(
             create_static_files_router("/", directories=[WEB_DIST], html_mode=True)
@@ -163,7 +286,15 @@ def create_app() -> Litestar:
         _log.warning("web_ui_missing", expected=str(WEB_DIST), serving="api and mcp only")
     return Litestar(
         route_handlers=route_handlers,
-        plugins=[LitestarMCP()],
+        plugins=[
+            LitestarMCP(
+                MCPConfig(
+                    allowed_origins=sorted(allowed_origins()),
+                    before_tool_call=bind_tool_context,
+                )
+            )
+        ],
+        middleware=[guard_callers],
         openapi_config=OpenAPIConfig(title="haskie", version=APP_VERSION),
         logging_config=None,  # `logs.configure` above owns it (see logs.py)
         exception_handlers=EXCEPTION_HANDLERS,
@@ -176,7 +307,6 @@ def create_app() -> Litestar:
             home.claim_home,
             shutdown.bound_exit,
             shutdown.debounce_signals,
-            home.ensure_home,
             workflows.start,
         ],
         on_shutdown=[stop_runtime],

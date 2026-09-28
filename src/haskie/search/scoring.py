@@ -8,15 +8,16 @@ the same numbers. So each step that sets or changes a score says how, in words, 
 (`flow`), and the answer carries that lineage beside its step timings. No IO here.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from haskie.collection.index import chunk_key, row_mode
+from haskie.collection.index import ChunkKey, Hit, chunk_key, row_mode
+from haskie.search.passage import HitRange
 from haskie.settings import Fusion, Reranker, ScoreFold, SearchMode, SearchSettings
 
 if TYPE_CHECKING:
     from haskie.search.flow import Search
-    from haskie.search.retrieval import Pool
+    from haskie.search.retrieval import Pool, Ranged, Scanned
     from haskie.search.section import Group
 
 # how each `score_fold` folds chunk scores into one (`passage.fold`), in the lineage's words
@@ -137,10 +138,36 @@ def _judge_thin(state: "Search", *_: Any) -> str | None:
     return _passage(state)
 
 
-def _fold(state: "Search", ranged: list, __: Any) -> str | None:
-    """Only several questions change what a score is compared with."""
-    if len(ranged) == 1:
+def _key(result: Hit | HitRange) -> ChunkKey:
+    """What identifies a result through the fold: a hit's chunk, or a range's first chunk."""
+    return chunk_key(result.hits[0] if isinstance(result, HitRange) else result)
+
+
+def _swapped(read: Sequence[Hit | HitRange], kept: Sequence[Hit | HitRange]) -> str | None:
+    """The superset swap (`collapse`), when it happened: a kept result scoring other than it did
+    before the fold took its score from the slot it took."""
+    own = {_key(one): one.score for one in read}
+    if all(own.get(_key(one), one.score) == one.score for one in kept):
         return None
+    return (
+        "A fuller result that takes the slot of one it contains takes that one's score too, and "
+        "lists it under it (also_in)."
+    )
+
+
+def _collapse_hits(_: "Search", scanned: "Scanned", kept: list[Hit]) -> str | None:
+    return _swapped(scanned.hits, kept)
+
+
+def _collapse_ranges(_: "Search", ranged: "Ranged", kept: list[HitRange]) -> str | None:
+    return _swapped(ranged.ranges, kept)
+
+
+def _fold(state: "Search", ranged: list["Ranged"], kept: list[HitRange]) -> str | None:
+    """One question's ranges fold as `collapse_ranges` does; only several change what a score is
+    compared with."""
+    if len(ranged) == 1:
+        return _collapse_ranges(state, ranged[0], kept)
     if state.plan.settings.reranker != Reranker.NONE:
         return (
             "Each chunk of a passage scores its best question, the reranker's score for it in "
@@ -178,10 +205,27 @@ def _probe_gaps(state: "Search", before: list["Group"], after: list["Group"]) ->
     )
 
 
-def _fill(_: "Search", before: list["Group"], after: list["Group"]) -> str | None:
+def _joined(before: list["Group"], after: list["Group"]) -> bool:
+    """Whether the fill bridged a gap: one passage after it holds the first chunk of several."""
+    starts = {chunk_key(one.hits[0]) for group in before for one in group.ranges}
+    return any(
+        sum(chunk_key(hit) in starts for hit in one.hits) > 1
+        for group in after
+        for one in group.ranges
+    )
+
+
+def _fill(state: "Search", before: list["Group"], after: list["Group"]) -> str | None:
     if not _new_hits(before, after):
         return None
-    return "Text filled in around and between passages scores 0; each passage keeps its score."
+    rule = (
+        "Text filled in around and between passages scores 0, so a passage it grows keeps its "
+        "score."
+    )
+    if not _joined(before, after):
+        return rule
+    fold = _FOLDS[state.plan.settings.score_fold]
+    return f"{rule} Two passages it joins make one, and that one scores {fold}."
 
 
 def _shortlist(state: "Search", *_: Any) -> str | None:
@@ -208,8 +252,10 @@ RULES: dict[str, Rule] = {
     "retrieve": _retrieve,
     "merge": _merge,
     "rerank": _rerank,
+    "collapse_hits": _collapse_hits,
     "fill_thin": _fill_thin,
     "judge_thin": _judge_thin,
+    "collapse_ranges": _collapse_ranges,
     "fold": _fold,
     "group": _group,
     "probe_gaps": _probe_gaps,

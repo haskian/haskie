@@ -21,6 +21,12 @@ pytestmark = pytest.mark.anyio
         ("inline html", "# T\n\ntext <b onclick=evil()>bold</b> more\n", "onclick"),
         ("iframe", "# T\n\n<iframe src=//evil></iframe>\n", "iframe"),
         ("svg with script", "# T\n\n<svg><script>alert(1)</script></svg>\n", "svg"),
+        (
+            "after non-ascii text",
+            "# T\n\n" + "é" * 40 + " <img src=x onerror=alert(1)>\n",
+            "onerror",
+        ),
+        ("block after non-ascii heading", "# Čšž ☃\n\n<script>alert(1)</script>\n", "alert"),
     ],
 )
 def test_raw_html_never_reaches_the_page(name: str, markdown: str, gone: str) -> None:
@@ -116,6 +122,8 @@ def test_inline_raw_html_loses_its_tags_but_keeps_its_text() -> None:
         ("event handler", "<img src=x onerror=alert(1)>"),
         ("inline handler", "text <b onclick=evil()>b</b>"),
         ("iframe", "<iframe src=//evil></iframe>"),
+        ("handler after multi-byte text", "日本語 " * 20 + "<img src=x onerror=alert(1)>"),
+        ("script after emoji", "🙂🙂 para <script>alert(1)</script> end"),
     ],
 )
 def test_nothing_executable_survives(name: str, markdown: str) -> None:

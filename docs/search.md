@@ -15,7 +15,7 @@ flowchart LR
     rerank --> hits["<b>hits</b><br/>cut to scan depth"]
     hits --> fchunks["collapse hits"] --> chunks(["chunks"])
     hits --> franges["merge neighbours,<br/>grow or drop short ones,<br/>collapse ranges"] --> read["read the spans"] --> passages(["passages"])
-    franges --> group["group by section"] --> budget["cut to<br/>the budget"] --> probe["search again for<br/>missing words"] --> fill["fill around<br/>and between"] --> excerpts(["excerpts"])
+    franges --> group["group by section"] --> budget["cut to<br/>the budget"] --> probe["search again for<br/>missing words"] --> fill["fill around<br/>and between"] --> rerankx["rerank whole excerpts<br/>(experiment)"] --> excerpts(["excerpts"])
     hits --> shortlist["group by document"] --> sources(["sources"])
 ```
 
@@ -24,9 +24,14 @@ flowchart LR
 1. **Scope.** The `collections` argument, else the session's collections, else all of them.
 2. **Retrieve.** Each collection runs `hybrid` (vector and BM25, fused), `vector` or `fts`.
    Fusion is `rrf` (reciprocal rank fusion) or `linear`. Without an embedding model everything is
-   `fts`. The query is embedded once, and up to 8 collections are read in parallel.
+   `fts`. The query is embedded once, and up to 8 collections are read in parallel. A collection
+   still building its first full-text index has no BM25 half yet: `hybrid` answers with the
+   vector half alone, and `fts` finds nothing there. A document on its way out of a collection
+   answers from none of its rows there: a membership `removing`, or a document `deleting`. One
+   query per search reads those names, and each read filters them out before its limit.
 3. **Merge** across collections by rank, because scores from two indexes are not comparable. A
-   chunk that two collections share counts once. A search over one collection keeps that
+   chunk that two collections share counts once: the same span of one document, whatever `seq`
+   each collection's chunk settings give it. A search over one collection keeps that
    collection's own scores.
 4. **Rerank** (optional). A cross-encoder rescores the merged `candidates`.
 
@@ -127,7 +132,8 @@ takes its best question's value. Without a reranker that question tags it; with 
 reranker's judgement tags (`aspects.tagged`), so a filled chunk brings no tag.
 
 - A gap between two passages is filled when its values sum above 0, and the two become one. So a
-  gap of up to twice `max_passage_grow` chunks can be filled.
+  gap of up to twice `max_passage_grow` chunks can be filled. The joined passage scores by
+  `score_fold` over the chunks of both.
 - Every passage grows outward by the run of chunks next to it whose values sum highest, when that
   is above 0: into a gap as far as its half, so the passages on either side never reach for one
   chunk.
@@ -264,6 +270,9 @@ need at least 7 words, so two equal headings do not fold. Equivalent means the s
 other words: a nearly identical vector, or nearly the same words where words decide.
 
 A new result that repeats no kept result takes a new slot, while fewer than `limit` are taken.
+A passage too short to stand alone (see "Short passages") never leads a fold. Nothing folds under
+it, and it never takes a fuller passage's slot. Its section is dropped when no other passage
+stands in it, and a passage under it would be dropped too.
 
 The containment and alike tests run in up to two spaces, and the first space that finds a repeat
 decides. A `vector` search decides by the embedding space alone, as it ranks by vectors alone.
@@ -284,8 +293,9 @@ code says so.
 
 A folded result becomes an `also_in` entry under the result it repeats, and `also_in` is a tree.
 When a fuller result takes a slot (the superset swap), the old one moves under it with everything
-folded into it. Each place stays under the place it was measured against. Each entry carries its
-`relation` to its parent. It also carries `to_parent` and `to_root`, measured by words and by
+folded into it. The fuller one takes the old one's score too, and the score lineage says so. Each
+place stays under the place it was measured against. Each entry carries its `relation` to its
+parent. It also carries `to_parent` and `to_root`, measured by words and by
 embedding: `contained`, `contains`, `alike`, and `score`, the harmonic mean of the two directions.
 That score is the Dice coefficient for words and the F1 of the best chunk matches for embeddings.
 
@@ -310,7 +320,7 @@ flowchart LR
     ranges --> turns["<b>take turns</b><br/>round-robin<br/>over the parts"]
     turns --> fold["collapse ranges<br/>across all parts"]
     fold --> tag["tag each passage<br/>with its parts"]
-    tag --> group["group by section"] --> budget["budget"] --> probe["probe"] --> fill["fill"] --> excerpts(["excerpts"])
+    tag --> group["group by section"] --> budget["budget"] --> probe["probe"] --> fill["fill"] --> rerankx["rerank whole<br/>excerpts"] --> excerpts(["excerpts"])
 ```
 
 Each part runs the shared ranking on its own, as deep as one search of that `limit` would go.
@@ -353,7 +363,7 @@ refused (422).
 `collections`, with no model and nothing to set up. It ignores the session's selection. Scores
 are raw BM25, because one scorer with one tokenizer puts every collection on one scale. It is
 paged with an offset cursor bound to the query (at most 1,000 results deep). A collection still
-building its first full-text index contributes nothing instead of making the query wait.
+building its first full-text index contributes nothing: LanceDB refuses a BM25 query without it.
 
 ## Settings
 

@@ -213,6 +213,8 @@ class _Item(msgspec.Struct):
     char_end: int
     rows: list[int]  # its chunks, as rows of the spaces
     text: str | None  # what a duplicate is matched by (`_exact`)
+    # too short to stand alone (`HitRange.alone`): no passage, so nothing may sit under it
+    alone: bool = False
 
 
 class _Fold(msgspec.Struct):
@@ -302,11 +304,18 @@ def _groups(items: list[_Item], scores: list[float], scan: Scan, limit: int | No
 
     Past `limit` kept items the walk goes on, folding only: a repeat found further down still
     counts as corroboration, and it costs no slot. No `limit` keeps every item that repeats none.
+
+    Of the two items of a fold, the one that would lead must be a passage. An item too short to
+    stand alone (`_Item.alone`) is dropped with its section (`section.group`), and would take
+    whatever sat under it along. So nothing folds under one, and one never swaps in.
     """
     groups: list[_Group] = []
     for index, item in enumerate(items):
         matches = [
-            (g, fold) for g in groups if (fold := _compare(item, items[g.leader], scan.deciding))
+            (g, fold)
+            for g in groups
+            if (fold := _compare(item, items[g.leader], scan.deciding))
+            and not (item.alone if fold.swap else items[g.leader].alone)
         ]
         if not matches:
             if limit is None or len(groups) < limit:
@@ -453,6 +462,7 @@ def ranges(
             char_end=hit_range.char_end,
             rows=[row_of[(hit.collection, hit.document, hit.seq)] for hit in hit_range.hits],
             text=_exact([hit.text for hit in hit_range.hits]),
+            alone=hit_range.alone,
         )
         for hit_range in hit_ranges
     ]

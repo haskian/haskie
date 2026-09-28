@@ -29,6 +29,7 @@ from haskie import app as app_module
 from haskie import audit, db, errors, home, logs
 from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection, MemberStatus
+from haskie.collection.index import CollectionIndex
 from haskie.document import document
 from haskie.document.document import DocumentStatus
 from haskie.indexing import embed_cache, gguf_models, mlx_models
@@ -50,6 +51,8 @@ from haskie.settings import (
 from haskie.tables import searches
 
 from conftest import (  # isort: skip
+    LOOPBACK_URL,
+    Gate,
     NO_MODELS,
     api_app,
     attach_via_api,
@@ -61,6 +64,8 @@ from conftest import (  # isort: skip
     seed_index,
     stage_and_import,
     text_pdf,
+    until,
+    wait_event,
     wait_for,
     wait_import,
     walk_pages,
@@ -224,6 +229,16 @@ def _requested(lines: list[dict]) -> list[str]:
             422, "Expected `int` >= 1",
         ),
         (
+            "explore limit past the scan depth -> unprocessable",
+            "GET", "/api/search/explore?session_id=s1&q=alpha&limit=201", None, None,
+            422, "Expected `int` <= 200",
+        ),
+        (
+            "excerpts limit past the scan depth -> unprocessable",
+            "GET", "/api/search/excerpts?session_id=s1&q=alpha&limit=100000", None, None,
+            422, "Expected `int` <= 200",
+        ),
+        (
             "tasks of an unknown job -> not found",
             "GET", "/api/jobs/ghost/tasks", None, None,
             404, "job not found: ghost",
@@ -272,12 +287,12 @@ def _requested(lines: list[dict]) -> list[str]:
         (
             "import a relative path -> unprocessable",
             "POST", "/api/documents/import", {"path": "notes/a.md"}, None,
-            422, "path must be absolute: notes/a.md",
+            422, "path must be absolute: a.md",
         ),
         (
             "import a path that is not there -> unprocessable",
             "POST", "/api/documents/import", {"path": "/nowhere/a.md"}, None,
-            422, "file not found: /nowhere/a.md",
+            422, "file not found: a.md",
         ),
         (
             "re-import an unknown document -> not found",
@@ -353,7 +368,18 @@ def _requested(lines: list[dict]) -> list[str]:
         (
             "session id longer than the cap -> unprocessable",
             "PUT", f"/api/sessions/{LONG_SESSION_ID}", {"collections": []}, None,
-            422, "session id must be 1..128 characters",
+            422, "Expected `str` of length <= 128",
+        ),
+        (
+            "empty session id on a search -> unprocessable",
+            "GET", "/api/search/excerpts?q=alpha&session_id=", None, None,
+            422, "session_id=: Expected `str` of length >= 1",
+        ),
+        (
+            "session id longer than the cap on a gap report -> unprocessable",
+            "POST", f"/api/gaps/report?session_id={LONG_SESSION_ID}",
+            {"question": "alpha", "verdict": "partial"}, None,
+            422, "Expected `str` of length <= 128",
         ),
         (
             "more collections than a session may hold -> unprocessable",
@@ -391,6 +417,47 @@ async def test_route_errors(
 
 
 @pytest.mark.parametrize(
+    ("name", "method", "path", "rejected_by", "documented"),
+    [
+        (
+            "a query that does not decode answers the 422 the document declares",
+            "get", "/api/search/explore", "?q=alpha&limit=0", {"200", "422"},
+        ),
+        (
+            "a body that does not decode answers the 422 the document declares",
+            "put", "/api/settings", {"search": "not an object"}, {"200", "422"},
+        ),
+        (
+            "a route with nothing to validate declares no rejection",
+            "get", "/api/status", None, {"200"},
+        ),
+    ],
+)  # fmt: skip
+async def test_the_openapi_document_declares_the_rejections_answered(
+    ready: AsyncTestClient,
+    name: str,
+    method: str,
+    path: str,
+    rejected_by: str | dict | None,
+    documented: set[str],
+) -> None:
+    """Litestar documents its own 400 `{status_code, detail, extra}`; a client built from the
+    document must read the 422 `{detail}` that `validation_error` actually answers."""
+    responses = (await ready.get("/schema/openapi.json")).json()["paths"][path][method]["responses"]
+
+    assert set(responses) == documented, name
+    if rejected_by is None:
+        return
+    declared = responses["422"]["content"]["application/json"]["schema"]
+    if isinstance(rejected_by, str):
+        rejected = await ready.request(method, path + rejected_by)
+    else:
+        rejected = await ready.request(method, path, json=rejected_by)
+    assert rejected.status_code == 422, f"{name}: {rejected.text}"
+    assert set(rejected.json()) == set(declared["properties"]) == set(declared["required"]), name
+
+
+@pytest.mark.parametrize(
     ("name", "path", "expected"),
     [
         ("a matched route carries the id it logged under", "/api/status", True),
@@ -418,6 +485,17 @@ async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClie
     assert response.headers["Retry-After"] == errors.NotReady.headers["Retry-After"]
 
 
+async def test_a_limit_at_the_scan_depth_is_searched(ready: AsyncTestClient) -> None:
+    """The top of the shared `limit` bound (`settings.MAX_SCAN`) is a search, not a rejection; one
+    past it is in the error table."""
+    response = await ready.get(
+        "/api/search/explore", params={"q": "alpha", "session_id": "s1", "limit": 200}
+    )
+
+    assert response.status_code == 200, response.text
+    assert [hit["text"] for hit in response.json()] == ["alpha body about lancedb"]
+
+
 async def test_rejected_settings_are_never_stored(ready: AsyncTestClient) -> None:
     before = (await ready.get("/api/settings")).json()
 
@@ -427,6 +505,59 @@ async def test_rejected_settings_are_never_stored(ready: AsyncTestClient) -> Non
     assert (await ready.get("/api/settings")).json() == before, (
         "the body was rejected while decoding"
     )
+
+
+@pytest.mark.parametrize(
+    ("session_id", "refusal"),
+    [(LONG_SESSION_ID, "Expected `str` of length <= 128"), ("", "Expected `str` of length >= 1")],
+    ids=["too long", "empty"],
+)
+@pytest.mark.parametrize(
+    ("name", "method", "path", "body", "probe"),
+    [
+        (
+            "an import", "POST", "/api/documents/import", {"path": "{source}"},
+            "/api/documents/new.md",
+        ),
+        (
+            "a description", "PUT", "/api/documents/guide.md/description",
+            {"description": "changed"}, "/api/documents/guide.md",
+        ),
+        (
+            "an attach", "POST", "/api/collections/other/documents", {"document": "guide.md"},
+            "/api/collections/other/documents",
+        ),
+        (
+            "a detach", "DELETE", "/api/collections/notes/documents/guide.md", None,
+            "/api/collections/notes/documents",
+        ),
+    ],
+)  # fmt: skip
+async def test_a_bad_session_id_is_refused_before_the_change_it_would_record(
+    ready: AsyncTestClient,
+    tmp_path: Path,
+    name: str,
+    method: str,
+    path: str,
+    body: dict | None,
+    probe: str,
+    session_id: str,
+    refusal: str,
+) -> None:
+    """Refused after the change, the caller would read a 422 for work done, and its retry a 409."""
+    await ready.post("/api/collections", json={"name": "other"})
+    source = tmp_path / "new.md"
+    source.write_text(MD)
+    if body is not None:
+        body = {key: value.format(source=source) for key, value in body.items()}
+    before = await ready.get(probe)
+
+    response = await ready.request(method, path, json=body, params={"session_id": session_id})
+
+    assert response.status_code == 422, f"{name}: {response.text}"
+    assert f"session_id={session_id}: {refusal}" in response.text, name
+    after = await ready.get(probe)
+    assert (after.status_code, after.json()) == (before.status_code, before.json()), name
 
 
 async def test_accepted_settings_are_stored_and_applied(ready: AsyncTestClient) -> None:
@@ -530,17 +661,7 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
             "embedding",
         ]
     )
-    assert (
-        options["member_statuses"][:2]
-        == options["active_member_statuses"]
-        == [
-            "pending",
-            "indexing",
-        ]
-    )
     assert options["active_run_statuses"] == ["ENQUEUED", "PENDING"]
-    assert options["operation_kinds"][0] == "document"
-    assert "index_collection" in options["bulk_kinds"]
 
 
 @pytest.mark.parametrize(("name", "installed"), [("MLX installed", True), ("no MLX", False)])
@@ -795,7 +916,11 @@ async def test_an_upload_names_the_documents_it_repeats(
     assert (await client.get("/api/documents/ghost.md/similar")).status_code == 404
 
 
-async def test_attach_list_and_detach_a_member(client: AsyncTestClient) -> None:
+async def test_attach_list_and_detach_a_member(
+    client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The detach answers once its removal is queued: the removal waits its turn on the
+    collection's single writer, and the member reads `removing` until it ran."""
     await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "guide.md", MD.encode())
@@ -815,10 +940,27 @@ async def test_attach_list_and_detach_a_member(client: AsyncTestClient) -> None:
     (hit,) = (await client.get("/api/search/explore", params=in_notes)).json()
     assert (hit["collection"], hit["document"]) == ("notes", "guide.md")
 
+    removal = Gate()
+    monkeypatch.setattr(
+        CollectionIndex, "delete_document", removal.wrap(CollectionIndex.delete_document)
+    )
+
     detached = await client.delete("/api/collections/notes/documents/guide.md")
 
     assert detached.status_code == 204, detached.text
-    assert (await client.get("/api/collections/notes/documents")).json()["items"] == []
+    assert await wait_event(removal.entered), "the removal never ran"
+    removing = (
+        await client.get("/api/collections/notes/documents", params={"status": "removing"})
+    ).json()["items"]
+    assert [(m["document"]["name"], m["status"]) for m in removing] == [("guide.md", "removing")]
+    assert (await client.get("/api/collections/notes")).json()["counts"]["active"] == 1
+    removal.release.set()
+
+    async def gone() -> bool:
+        return (await client.get("/api/collections/notes/documents")).json()["items"] == []
+
+    await until(gone, "the removal never took the membership")
+    assert (await client.get("/api/collections/notes")).json()["counts"]["active"] == 0
     assert (await client.get("/api/documents/guide.md/collections")).json() == []
     assert (await client.get("/api/search/explore", params=in_notes)).json() == []
     assert (await client.get("/api/documents/guide.md")).json()["status"] == "imported", (
@@ -956,6 +1098,46 @@ async def test_a_rename_refused_changes_nothing(
     assert [one["name"] for one in listed] == ["notes", "other"], name
 
 
+@pytest.mark.parametrize(
+    ("claim", "method", "path", "body", "left"),
+    [
+        ("create", "POST", "/api/collections", {"name": "gone"}, ["gone", "other"]),
+        ("rename", "PUT", "/api/collections/other/name", {"name": "gone"}, ["gone"]),
+    ],
+)
+async def test_a_name_whose_delete_still_runs_can_be_taken(
+    client: AsyncTestClient,
+    monkeypatch,
+    claim: str,
+    method: str,
+    path: str,
+    body: dict,
+    left: list[str],
+) -> None:
+    """The delete moves the folder aside before it frees the name, so a create or a rename onto
+    the name while the delete still runs lands in a folder of its own, which the delete's last
+    step leaves alone."""
+    await client.post("/api/init", json=NO_MODELS)
+    for existing in ("gone", "other"):
+        await client.post("/api/collections", json={"name": existing})
+    gate = Gate()
+    monkeypatch.setattr(Collection, "remove_aside", gate.wrap(Collection.remove_aside))
+    deleting = (await client.delete("/api/collections/gone")).json()["operation_id"]
+    assert await wait_event(gate.entered), "the delete reached its last step"
+
+    taken = await client.request(method, path, json=body)
+
+    assert taken.status_code in (200, 201), f"{claim}: {taken.text}"
+    gate.release.set()
+    await wait_for(deleting)
+    listed = (await client.get("/api/collections")).json()["items"]
+    assert [one["name"] for one in listed] == left, claim
+    assert Collection("gone").root.is_dir(), f"{claim}: the folder the claim made stays"
+    assert [
+        p.name for p in Collection("gone").root.parent.iterdir() if p.name.startswith(".")
+    ] == [], f"{claim}: the folder the delete moved aside is gone"
+
+
 async def test_deleting_a_document_removes_it_from_every_collection(
     client: AsyncTestClient,
 ) -> None:
@@ -1006,6 +1188,37 @@ async def test_reading_one_document(client: AsyncTestClient) -> None:
         "/api/documents/guide.md/description", json={"description": "the guide"}
     )
     assert described.json()["description"] == "the guide"
+
+
+ATTACK_HTML = b"<html><body><script>fetch('/api/documents')</script>page</body></html>"
+ATTACK_SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+
+
+@pytest.mark.parametrize(
+    ("name", "body", "sandboxed"),
+    [
+        pytest.param("page.html", ATTACK_HTML, True, id="html-runs-no-script"),
+        pytest.param("logo.svg", ATTACK_SVG, True, id="svg-runs-no-script"),
+        pytest.param("guide.md", MD.encode(), True, id="text-is-sandboxed-too"),
+        pytest.param("paper.pdf", text_pdf(["one"]), False, id="pdf-keeps-its-viewer"),
+    ],
+)
+async def test_a_documents_own_bytes_are_served_sandboxed(
+    client: AsyncTestClient, name: str, body: bytes, sandboxed: bool
+) -> None:
+    """The source and the preview carry the file's own bytes on haskie's origin, where a script
+    in them would reach an API that authenticates no one: `sandbox` takes the origin away."""
+    await client.post("/api/init", json=NO_MODELS)
+    await stage_and_import(client, name, body)
+
+    for route in ("source", "preview"):
+        response = await client.get(f"/api/documents/{name}/{route}")
+
+        assert response.status_code == 200, (route, response.text)
+        csp = response.headers.get("content-security-policy")
+        assert csp == ("sandbox" if sandboxed else None), route
+        nosniff = response.headers.get("x-content-type-options")
+        assert nosniff == ("nosniff" if sandboxed else None), route
 
 
 @pytest.mark.parametrize(
@@ -1081,6 +1294,74 @@ async def test_session_search_returns_each_passage_once(client: AsyncTestClient)
     assert {h["document"] for h in hits} == {"shared.md", "only-beta.md"}
     shared = next(h for h in hits if h["document"] == "shared.md")
     assert shared["collection"] == "alpha", "the first collection of the session is credited"
+
+
+SEARCH_PATHS: dict[str, tuple[str, dict, str]] = {
+    # name -> (route, extra arguments, key of the list of results in the answer; "" for the root)
+    "explore chunks": ("/api/search/explore", {"granularity": "chunk"}, ""),
+    "explore passages": ("/api/search/explore", {"granularity": "passage"}, ""),
+    "excerpts": ("/api/search/excerpts", {}, "excerpts"),
+    "sources": ("/api/search/sources", {}, "documents"),
+    "text": ("/api/search/text", {}, "items"),
+}
+
+
+@pytest.mark.parametrize("path", list(SEARCH_PATHS))
+@pytest.mark.parametrize(
+    ("leaving", "found", "sources"),
+    [
+        (
+            "nothing",
+            {("notes", "guide.md"), ("notes", "keep.md")},
+            {("notes", "guide.md"), ("other", "guide.md"), ("notes", "keep.md")},
+        ),
+        (
+            "guide.md removing from notes",
+            {("other", "guide.md"), ("notes", "keep.md")},
+            {("other", "guide.md"), ("notes", "keep.md")},
+        ),
+        ("guide.md deleting", {("notes", "keep.md")}, {("notes", "keep.md")}),
+    ],
+)
+async def test_a_document_on_its_way_out_answers_no_search(
+    client: AsyncTestClient,
+    tmp_path: Path,
+    path: str,
+    leaving: str,
+    found: set[tuple[str, str]],
+    sources: set[tuple[str, str]],
+) -> None:
+    """A detach or a document delete answers once its removal is queued, and the rows stay in the
+    table until it ran: a membership `removing` does not answer from that collection, and a
+    document `deleting` from none. `guide.md` sits in both collections, so it still answers from
+    the one it is not leaving; `sources` lists every collection holding a document, and a
+    collection it is leaving does not hold it any more."""
+    await client.post("/api/init", json=NO_MODELS)
+    for name in ("notes", "other"):
+        await client.post("/api/collections", json={"name": name})
+    await stage_and_import(client, "guide.md", b"# Guide\n\nA guide to lancedb tables.\n")
+    await stage_and_import(client, "keep.md", b"# Keep\n\nWhy lancedb keeps its old versions.\n")
+    for collection, name in (("notes", "guide.md"), ("other", "guide.md"), ("notes", "keep.md")):
+        await attach_via_api(client, collection, name)
+    if leaving == "guide.md removing from notes":
+        await Collection("notes").start_removal("guide.md")
+    elif leaving == "guide.md deleting":
+        await document.set_status("guide.md", DocumentStatus.DELETING)
+
+    route, extra, key = SEARCH_PATHS[path]
+    response = await client.get(
+        route, params={"q": "lancedb", "collections": "notes,other", **extra}
+    )
+    assert response.status_code == 200, response.text
+    results = response.json()[key] if key else response.json()
+
+    if path == "sources":
+        held = {(one, row["document"]) for row in results for one in row["collections"]}
+        assert held == sources, f"{path}, {leaving}"
+    else:
+        assert {(row["collection"], row["document"]) for row in results} == found, (
+            f"{path}, {leaving}"
+        )
 
 
 async def test_documents_are_listed_with_their_collection_counts(ready: AsyncTestClient) -> None:
@@ -1293,7 +1574,7 @@ async def test_gaps_group_review_and_replay(ready: AsyncTestClient, tmp_path: Pa
     too_many = await ready.post("/api/gaps/replay", json={"ids": list(range(51))})
     assert too_many.status_code == 422 and "at most 50" in too_many.text
     no_window = await ready.get("/api/gaps", params={"days": 0})
-    assert no_window.status_code == 422 and "days must be 1.." in no_window.text
+    assert no_window.status_code == 422 and "Expected `int` >= 1" in no_window.text
 
 
 async def test_an_agent_reports_a_gap_on_a_question_it_asked(ready: AsyncTestClient) -> None:
@@ -2457,11 +2738,20 @@ async def test_the_audit_trail_is_written_even_when_logging_is_silenced(
     client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`HASKIE_LOG_LEVEL=CRITICAL` lands on the root logger, so this sets the same thing the
-    env var configures. The file append is the durable sink: no level may drop it."""
-    monkeypatch.setattr(logging.getLogger(), "level", logging.CRITICAL)
-    assert not logging.getLogger("haskie.audit").isEnabledFor(logs.AUDIT)
+    env var configures. The file append is the durable sink: no level may drop it.
 
-    assert (await client.post("/api/collections", json={"name": "notes"})).status_code == 201
+    Through `setLevel`, both ways: it clears every logger's cached level check, which assigning
+    `level` does not, so a later test would find its loggers still silenced."""
+    root = logging.getLogger()
+    before = root.level
+    root.setLevel(logging.CRITICAL)
+    try:
+        assert not logging.getLogger("haskie.audit").isEnabledFor(logs.AUDIT)
+        created = await client.post("/api/collections", json={"name": "notes"})
+    finally:
+        root.setLevel(before)
+
+    assert created.status_code == 201
 
     (record,) = audit_lines()
     assert (record["event"], record["outcome"], record["collection"]) == (
@@ -2584,13 +2874,62 @@ async def test_bind_request_context_scopes_the_names(
 # --- body size, static files and lifespan ---------------------------------------------
 
 
+FOREIGN = "https://evil.example"
+
+
+@pytest.mark.parametrize(
+    ("bound", "trusted", "base_url", "method", "origin", "status"),
+    [
+        pytest.param(None, "", LOOPBACK_URL, "POST", None, 422, id="agent-without-origin-passes"),
+        pytest.param(None, "", LOOPBACK_URL, "POST", LOOPBACK_URL, 422, id="own-ui-passes"),
+        pytest.param(None, "", LOOPBACK_URL, "POST", FOREIGN, 403, id="foreign-page-post-refused"),
+        pytest.param(None, "", LOOPBACK_URL, "POST", "null", 403, id="opaque-origin-refused"),
+        pytest.param(None, "", LOOPBACK_URL, "GET", FOREIGN, 422, id="foreign-read-passes"),
+        pytest.param(None, f" {FOREIGN}/ ,", LOOPBACK_URL, "POST", FOREIGN, 422, id="trusted"),
+        pytest.param(None, "", "http://localhost:8451", "POST", None, 422, id="localhost-name"),
+        pytest.param(None, "", "http://rebind.example", "GET", None, 403, id="rebinding-host"),
+        pytest.param(
+            "http://box.lan:8451", "", "http://box.lan:8451", "GET", None, 422, id="bound"
+        ),
+        pytest.param("http://0.0.0.0:8451", "", "http://box.lan", "GET", None, 422, id="wildcard"),
+    ],
+)
+async def test_only_served_hosts_and_trusted_browser_origins_reach_a_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bound: str | None,
+    trusted: str,
+    base_url: str,
+    method: str,
+    origin: str | None,
+    status: int,
+) -> None:
+    """A browser ignores the loopback bind, so a page the user opens could post to the API, and a
+    DNS-rebinding page could read it. Agents send no `Origin` and pass. A request that passes is
+    answered by the route itself: a 422 for its invalid input, which the guard never looks at."""
+    if bound is not None:
+        monkeypatch.setenv(home.ADDRESS_ENV, bound)
+    monkeypatch.setenv(app_module.ALLOWED_ORIGINS_ENV, trusted)
+    client = AsyncTestClient(api_app(tmp_path, monkeypatch), base_url=base_url)
+    headers = {} if origin is None else {"Origin": origin}
+
+    if method == "GET":
+        response = await client.get("/api/search/excerpts?q=x&limit=0", headers=headers)
+    else:
+        response = await client.post("/api/documents/render", json={"x": 1}, headers=headers)
+
+    assert response.status_code == status, response.text
+    if status == 403:
+        assert app_module.ALLOWED_ORIGINS_ENV in response.text or "not one haskie" in response.text
+
+
 async def test_a_body_over_the_upload_cap_is_rejected_before_the_handler(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dbos
 ) -> None:
     """Litestar enforces `request_max_body_size`, so a 512 MiB upload never has to be sent here:
     the cap is lowered and the same code path answers 413."""
     monkeypatch.setattr(app_module, "UPLOAD_MAX_BYTES", 64)  # read by `create_app`, so first
-    client = AsyncTestClient(api_app(tmp_path, monkeypatch))
+    client = AsyncTestClient(api_app(tmp_path, monkeypatch), base_url=LOOPBACK_URL)
 
     response = await client.post(
         "/api/documents/staging", files={"data": ("big.md", b"x" * 500, "text/markdown")}
@@ -2609,7 +2948,7 @@ async def test_static_files_are_served_when_the_web_build_exists(
     dist.mkdir()
     (dist / "index.html").write_text("<!doctype html><title>haskie</title>")
     monkeypatch.setattr(app_module, "WEB_DIST", dist)
-    client = AsyncTestClient(app_module.create_app())
+    client = AsyncTestClient(app_module.create_app(), base_url=LOOPBACK_URL)
 
     assert "haskie" in (await client.get("/index.html")).text
     assert (await client.get("/api/status")).status_code == 200, (
@@ -2627,7 +2966,7 @@ async def test_lifespan_starts_and_destroys_dbos_on_every_run(
     before = set(threading.enumerate())
 
     for _ in range(2):
-        async with AsyncTestClient(api_app(tmp_path, monkeypatch)) as client:
+        async with AsyncTestClient(api_app(tmp_path, monkeypatch), base_url=LOOPBACK_URL) as client:
             assert (await client.get("/api/status")).status_code == 200
             assert dbos_module._dbos_global_instance is not None
         assert dbos_module._dbos_global_instance is None, "destroyed by the shutdown hook"
@@ -2843,7 +3182,7 @@ async def test_search_trend_lists_every_recent_search_oldest_first(ready: AsyncT
     )
     assert [p["ts"] for p in points] == sorted(p["ts"] for p in points)
     bad = await ready.get("/api/insights/searches", params={"days": 0})
-    assert bad.status_code == 422 and "days must be 1.." in bad.text
+    assert bad.status_code == 422 and "Expected `int` >= 1" in bad.text
 
 
 async def test_chunk_trend_lists_imports_and_indexes_and_bounds_its_window(
@@ -2862,7 +3201,7 @@ async def test_chunk_trend_lists_imports_and_indexes_and_bounds_its_window(
     assert imported["chunks"] == indexed["chunks"] > 0, "the chunks embedded are the ones written"
     assert all(abs(point["ts"] - time.time()) < 60 for point in points)
     bad = await client.get("/api/insights/chunks", params={"days": 367})
-    assert bad.status_code == 422 and "days must be 1.." in bad.text
+    assert bad.status_code == 422 and "Expected `int` <= 366" in bad.text
 
 
 @pytest.mark.parametrize(
@@ -2880,7 +3219,8 @@ async def test_chunk_trend_lists_imports_and_indexes_and_bounds_its_window(
             200,
             "<p>text alert(1) after</p>\n",
         ),
-        ("past the limit is refused", "x" * 100_001, 422, "at most 100000 characters"),
+        ("at the limit is rendered", "x" * 100_000, 200, f"<p>{'x' * 100_000}</p>\n"),
+        ("past the limit is refused", "x" * 100_001, 422, "Expected `str` of length <= 100000"),
     ],
 )
 async def test_a_search_results_text_renders_as_markdown(

@@ -107,7 +107,7 @@ async def test_home_is_portable(dbos, tmp_path: Path, monkeypatch: pytest.Monkey
     moved = tmp_path / "elsewhere"
     shutil.copytree(home.HOME, moved)
     monkeypatch.setattr(home, "HOME", moved)  # every other path is derived from it
-    monkeypatch.setattr(db, "_migrated", set())
+    monkeypatch.setattr(db, "_engines", {})
 
     again = await Collection.get("port")
     (hit,) = await collection_hits(again.name, "portable")
@@ -368,6 +368,41 @@ async def test_with_a_reranker_a_question_tags_only_what_it_judged_an_answer(
         "Refunds": ([asked[1]], {asked[1]: pytest.approx(top)}, pytest.approx(top)),
     }, "no weather: every question judged it no answer"
     assert answer.uncovered == [asked[2]], "nothing about a tax, so it is not answered"
+
+
+async def test_an_excerpts_search_stems_its_answer_once_on_the_event_loop(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """An excerpts search reads the kept sections' words for the probe, then the answer's for its
+    report. `probe.stem` remembers each word, so the second read stems nothing again and both run
+    on the event loop, with no wait for a slot of the CPU budget that indexing may hold."""
+    import threading
+
+    from haskie.search import probe
+
+    await Collection.create("pay")
+    body = "# Retries\n\nRetry a failed payment with backoff.\n\n# Refunds\n\nRefund a payment.\n"
+    doc = await import_document(dbos, "pay.md", body, tmp_path)
+    await attach_document(dbos, "pay", doc.name)
+    probe.stem.cache_clear()
+    loop_thread = threading.get_ident()
+    reads: list[tuple[int, int]] = []  # (thread, words stemmed afresh)
+    real = probe.vocabulary
+
+    def recorded(texts):
+        before = probe.stem.cache_info().misses
+        found = real(texts)
+        reads.append((threading.get_ident(), probe.stem.cache_info().misses - before))
+        return found
+
+    monkeypatch.setattr(probe, "vocabulary", recorded)
+
+    answer = await flow.answers(["pay"], aspects.questions(["Why retry a payment?"], None))
+
+    assert answer.excerpts, "the search found the section it stems"
+    (probe_on, probed), (report_on, reported) = reads  # once for the probe, once for the report
+    assert probed > 0 and reported == 0, "the report's words were stemmed for the probe"
+    assert probe_on == report_on == loop_thread, "both on the event loop"
 
 
 async def test_session_search_propagates_a_broken_collection(

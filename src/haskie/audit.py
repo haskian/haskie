@@ -42,7 +42,8 @@ LEVEL_NAME = "AUDIT"
 FILE_MODE = 0o600
 # The daily files `path` writes, and the only ones `prune` may delete.
 FILE_NAME = re.compile(r"^audit-(\d{4}-\d{2}-\d{2})\.jsonl\Z")
-# Names `attach` fills on the record itself; anything else it receives goes into `detail`.
+# Names `attach` fills on the record itself, and that `audited` copies from a handler's parameters;
+# anything else `attach` receives goes into `detail`.
 # `collection` is the one a request or an operation acted on; a document has no collection of its
 # own, so a document-scoped action carries `document` alone.
 RECORD_FIELDS = frozenset({"collection", "document", "session_id", "operation_id"})
@@ -72,9 +73,9 @@ class AuditRecord(msgspec.Struct, omit_defaults=True):
     detail: dict[str, str | int | bool] | None = None
 
 
-def path(when: datetime | None = None) -> Path:
-    """One file per UTC day."""
-    return home.AUDIT_DIR / f"audit-{(when or datetime.now(UTC)):%Y-%m-%d}.jsonl"
+def path() -> Path:
+    """Today's file: one per UTC day."""
+    return home.AUDIT_DIR / f"audit-{datetime.now(UTC):%Y-%m-%d}.jsonl"
 
 
 async def prune(retention_days: int, now: datetime | None = None) -> int:
@@ -113,9 +114,18 @@ async def _append(entry: AuditRecord) -> None:
 
 
 async def record(
-    event: str, *, actor: Actor, outcome: Outcome, duration_ms: int, **fields: Any
+    event: str,
+    *,
+    actor: Actor,
+    outcome: Outcome,
+    duration_ms: int,
+    error: str | None = None,
+    **fields: Any,
 ) -> AuditRecord:
-    """Append one record and mirror it to the `haskie.audit` logger at level AUDIT."""
+    """Append one record and mirror it to the `haskie.audit` logger at level AUDIT.
+
+    `error` is scrubbed here rather than by each caller: a pipeline failure arrives as raw
+    exception text, and a missing file names its absolute path."""
     entry = AuditRecord(
         ts=datetime.now(UTC).isoformat(),
         level=LEVEL_NAME,
@@ -124,6 +134,7 @@ async def record(
         outcome=outcome,
         duration_ms=duration_ms,
         app_version=APP_VERSION,
+        error=None if error is None else home.scrub(error),
         **fields,
     )
     await _append(entry)
@@ -173,7 +184,7 @@ async def _finish(
         outcome=Outcome.OK if exc is None else Outcome.ERROR,
         duration_ms=int((time.perf_counter() - started) * 1000),
         request_id=request_id,
-        error=None if exc is None else home.scrub(f"{type(exc).__name__}: {exc}"),
+        error=None if exc is None else f"{type(exc).__name__}: {exc}",
         detail=detail or None,
         **{**fields, **named},
     )
@@ -182,19 +193,15 @@ async def _finish(
 def audited(event: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorate an async handler so every call appends one audit record, then re-raise on failure.
 
-    A parameter named `collection`, `document` or `session_id` is copied into the record field of
-    the same name; `attach` adds what the handler only knows once it runs. The wrapper keeps the
+    A parameter named after one of `RECORD_FIELDS` is copied into the record field of the same
+    name; `attach` adds what the handler only knows once it runs. The wrapper keeps the
     wrapped signature because Litestar builds its dependency injection from `inspect.signature`,
     so it must take no parameter of its own.
     """
 
     def decorate(func: Callable[..., Any]) -> Callable[..., Any]:
         signature = inspect.signature(func)
-        fields_from = [
-            field
-            for field in ("collection", "document", "session_id")
-            if field in signature.parameters
-        ]
+        fields_from = [field for field in RECORD_FIELDS if field in signature.parameters]
 
         def fields(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, str]:
             bound = signature.bind(*args, **kwargs)

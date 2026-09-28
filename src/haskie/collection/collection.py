@@ -8,18 +8,30 @@ write into this collection's table), so a membership carries its own status — 
 `indexed` in one collection and `error` in another at the same time. Deleting a collection drops
 its rows and its folder and touches no document.
 
-Every row read, row write and file touch is awaited: the database goes through `db.connect()`
-(aiosqlite), the files through `anyio.Path` and `home`, the table through `CollectionIndex`. The
-pure parts (paths, row decoding) stay sync.
+Every row read, row write and file touch is awaited: the database goes through `db.read()` or
+`db.connect()` (aiosqlite), the files through `anyio.Path` and `home`, the table through
+`CollectionIndex`. The pure parts (paths, row decoding) stay sync.
 """
 
 import time
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 import anyio
 import msgspec
-from sqlalchemy import Row, delete, func, select, update
+from sqlalchemy import (
+    ColumnElement,
+    CompoundSelect,
+    Row,
+    and_,
+    delete,
+    func,
+    not_,
+    select,
+    union,
+    update,
+)
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -45,11 +57,20 @@ class MemberStatus(StrEnum):
     INDEXED = "indexed"
     ERROR = "error"
     CANCELLED = "cancelled"
+    REMOVING = "removing"  # a detach queued its removal; the membership goes once that ran
 
 
-MEMBER_STATUSES: tuple[MemberStatus, ...] = tuple(MemberStatus)
-# being written into the collection right now: the states a poll waits on
-ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = (MemberStatus.PENDING, MemberStatus.INDEXING)
+# A document on its way out of a collection, by either road: its membership is being removed, or
+# the document is being deleted. Its rows stay in the table until the removal queued for them runs,
+# so a search reads around it. `for_search` leaves them out, and so does `holding`.
+_REMOVING = collection_documents.c.status == MemberStatus.REMOVING
+LEAVING = (_REMOVING, documents.c.status == document.DocumentStatus.DELETING)
+# being written into or taken out of the collection right now: the states a poll waits on
+ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = (
+    MemberStatus.PENDING,
+    MemberStatus.INDEXING,
+    MemberStatus.REMOVING,
+)
 
 # The member listing selects a document row and its membership, which share `status`, `error`
 # and `updated_at`: the membership's are labelled, so a row maps each name to one column.
@@ -172,10 +193,48 @@ async def _counts_by_collection(
     return {name: _counts(by_status) for name, by_status in by_collection.items()}
 
 
+def _leaving_query(names: list[str]) -> CompoundSelect:
+    """The (collection, document) pairs of these collections that are on their way out
+    (`LEAVING`): one select per road, joined by UNION rather than one OR across the two tables.
+    An OR over the join reads every membership of the collections to find a set that is almost
+    always empty; each select alone is bound by an index, the membership's by
+    `idx_collection_documents_status` and the document's by `idx_documents_status`."""
+    member = collection_documents.c
+    wanted = list(set(names))
+    return union(
+        *(
+            _MEMBERS.with_only_columns(member.collection, member.document).where(
+                member.collection.in_(wanted), road
+            )
+            for road in LEAVING
+        )
+    )
+
+
+async def _leaving(conn: AsyncConnection, names: list[str]) -> dict[str, frozenset[str]]:
+    """The documents on their way out of each of these collections, on the caller's connection;
+    a collection nothing is leaving is absent."""
+    found: dict[str, set[str]] = {}
+    for collection, doc in await conn.execute(_leaving_query(names)):
+        found.setdefault(collection, set()).add(doc)
+    return {collection: frozenset(docs) for collection, docs in found.items()}
+
+
+async def _overrides_of(conn: AsyncConnection, names: list[str]) -> dict[str, CollectionOverrides]:
+    """The overrides of these collections in one query, on the caller's connection; a name with
+    no row is absent."""
+    wanted = list(dict.fromkeys(names))
+    if not wanted:
+        return {}
+    rows = await conn.execute(
+        select(collections.c.name, collections.c.overrides).where(collections.c.name.in_(wanted))
+    )
+    return {name: _overrides(raw) for name, raw in rows}
+
+
 def _overrides(raw: str) -> CollectionOverrides:
-    """One `overrides` column as the struct every caller reads. Unreadable JSON falls back to the
-    defaults, which is what a collection that never set any has."""
-    return db.loads(raw, CollectionOverrides) or CollectionOverrides()
+    """One `overrides` column as the struct every caller reads."""
+    return msgspec.json.decode(raw, type=CollectionOverrides)
 
 
 class Collection:
@@ -192,7 +251,7 @@ class Collection:
     async def names() -> list[str]:
         """Every name, for callers inside the process (sessions, workflows). The API pages
         instead, through `page` below."""
-        async with db.connect() as conn:
+        async with db.read() as conn:
             return list(await conn.scalars(select(collections.c.name).order_by(collections.c.name)))
 
     @staticmethod
@@ -202,7 +261,7 @@ class Collection:
         sort, column = resolve_sort(request.sort, COLLECTION_SORTS, "name")
         walk = keyset(sort, column, request, collections.c.name)
         listed = select(collections.c.name, collections.c.created_at, collections.c.description)
-        async with db.connect() as conn:
+        async with db.read() as conn:
             rows = (await conn.execute(walk.apply(listed))).all()
             total = await conn.scalar(count_of(listed))
             counts = await _counts_by_collection(
@@ -236,21 +295,11 @@ class Collection:
 
     @classmethod
     async def get(cls, name: str) -> "Collection":
-        async with db.connect() as conn:
+        async with db.read() as conn:
             found = await conn.scalar(select(collections.c.name).where(collections.c.name == name))
         if found is None:
             raise NotFound(f"collection not found: {name}")
         return cls(name)
-
-    async def delete(self) -> None:
-        """Delete the collection. `delete_*` is the whole operation, `remove_*` is one step of it.
-
-        Rows first, then the folder: while the row exists the collection is still listed, so a
-        crash in between leaves a collection that can be deleted again rather than a phantom.
-        No document is touched: the documents stay, in their folders and in every other
-        collection that holds them."""
-        await self.remove_rows()
-        await self.remove_tree()
 
     async def rename(self, name: str) -> "Collection":
         """The collection under `name`: its row, its memberships, every session that chose it,
@@ -317,6 +366,24 @@ class Collection:
         forget_schema(self.index_dir)
         await home.remove_tree(self.root)
 
+    def _aside(self, key: str) -> Path:
+        """Where a delete moves the folder before it frees the name: beside it, under a name no
+        collection can take (`safe_name` strips a leading dot), one per delete (`key`)."""
+        return self.root.with_name(f".{self.root.name}.deleted-{key}")
+
+    async def move_aside(self, key: str) -> None:
+        """Move the folder to `_aside(key)`, so the name is free with no folder under it: a create
+        or a rename onto it, once the row goes, cannot land in a folder the delete then removes.
+        Idempotent: a replay finds the folder moved already."""
+        aside = anyio.Path(self._aside(key))
+        forget_schema(self.index_dir)
+        if await anyio.Path(self.root).exists() and not await aside.exists():
+            await anyio.Path(self.root).rename(aside)
+
+    async def remove_aside(self, key: str) -> None:
+        """Delete the folder a delete moved aside, index table and all."""
+        await home.remove_tree(self._aside(key))
+
     # --- overrides -------------------------------------------------------
 
     async def overrides(self) -> CollectionOverrides:
@@ -337,16 +404,29 @@ class Collection:
     async def load_overrides(names: list[str]) -> dict[str, CollectionOverrides]:
         """The overrides of several collections in one query, keyed by name. A name with no row
         is absent from the result, which is how a caller learns the collection is gone."""
-        wanted = list(dict.fromkeys(names))
-        if not wanted:
-            return {}
-        async with db.connect() as conn:
-            rows = await conn.execute(
-                select(collections.c.name, collections.c.overrides).where(
-                    collections.c.name.in_(wanted)
-                )
+        async with db.read() as conn:
+            return await _overrides_of(conn, names)
+
+    @staticmethod
+    async def for_search(
+        names: list[str], embedding: EmbeddingModel | None
+    ) -> dict[str, tuple[CollectionIndex, CollectionOverrides]]:
+        """The index of each of these collections, with its overrides, once each and in the order
+        given: what a search reads. Each index leaves out the documents on their way out of its
+        collection (`LEAVING`). A name with no row is absent, as in `load_overrides`.
+
+        One unit of work, so the overrides and the documents leaving are read at one moment."""
+        async with db.read() as conn:
+            found = await _overrides_of(conn, names)
+            leaving = await _leaving(conn, list(found))
+        return {
+            name: (
+                Collection(name).index_with(embedding, leaving.get(name, frozenset())),
+                found[name],
             )
-            return {name: _overrides(raw) for name, raw in rows}
+            for name in dict.fromkeys(names)
+            if name in found
+        }
 
     @staticmethod
     async def reranker_overrides() -> list[str]:
@@ -354,27 +434,21 @@ class Collection:
 
         One query over the `overrides` column: the model downloads have to cover the overrides too,
         and a search of that collection loads whichever model it names."""
-        async with db.connect() as conn:
-            rows = await conn.execute(
-                select(collections.c.name, collections.c.overrides).order_by(collections.c.name)
-            )
-        found = {name: _overrides(raw) for name, raw in rows}
-        chosen = [v.search.reranker_model for v in found.values() if v.search.reranker_model]
-        return list(dict.fromkeys(chosen))
+        async with db.read() as conn:
+            rows = await conn.scalars(select(collections.c.overrides).order_by(collections.c.name))
+        chosen = [_overrides(raw).search.reranker_model for raw in rows]
+        return list(dict.fromkeys(model for model in chosen if model))
 
     async def chunk_settings(self) -> ChunkSettings:
         """How this collection splits a document: what the embedding cache is keyed by."""
         return (await self.overrides()).resolve(await load_user_settings())
-
-    async def search_settings(self) -> SearchSettings:
-        return (await self.overrides()).resolve_search(await load_user_settings())
 
     async def info(self) -> CollectionInfo:
         """Everything the collection panel shows, off one connection: the whole `collections` row
         and the member counts. Reading them apart would let a concurrent write show up in one
         half of the answer and not the other."""
         user = await load_user_settings()
-        async with db.connect() as conn:
+        async with db.read() as conn:
             row = (
                 await conn.execute(
                     select(
@@ -417,7 +491,7 @@ class Collection:
     async def pending_names() -> list[str]:
         """Collections with documents indexed since their last finished run: what a boot
         reschedules."""
-        async with db.connect() as conn:
+        async with db.read() as conn:
             names = await conn.scalars(
                 select(collections.c.name)
                 .where(collections.c.pending_documents > 0)
@@ -428,7 +502,7 @@ class Collection:
     async def maintenance_state(self) -> MaintenanceState | None:
         """None when the collection has no row: it was never created, or it was deleted while a
         run waited. A run treats that as a skip, so the absence has to stay visible."""
-        async with db.connect() as conn:
+        async with db.read() as conn:
             row = (
                 await conn.execute(
                     select(*MAINTENANCE_COLUMNS).where(collections.c.name == self.name)
@@ -469,12 +543,29 @@ class Collection:
     async def index(self) -> CollectionIndex:
         return self.index_with(await catalogue.embedding_model(await load_user_settings()))
 
-    def index_with(self, embedding: EmbeddingModel | None) -> CollectionIndex:
+    def index_with(
+        self, embedding: EmbeddingModel | None, leaving: frozenset[str] = frozenset()
+    ) -> CollectionIndex:
         """Variant without the settings read, for steps that already hold the embedding model.
+        A search passes the documents `leaving` the collection, which its reads then leave out.
         Sync, like the `CollectionIndex` constructor it calls: opening the table is what awaits."""
-        return CollectionIndex(self.index_dir, self.name, home.HOME, embedding)
+        return CollectionIndex(self.index_dir, self.name, home.HOME, embedding, leaving)
 
     # --- members ---------------------------------------------------------
+
+    def _membership(self, doc: str) -> ColumnElement[bool]:
+        """The filter that picks this collection's membership of `doc`."""
+        member = collection_documents.c
+        return and_(member.collection == self.name, member.document == doc)
+
+    def _refuse_removing(self, doc: str, status: str | None) -> None:
+        """A membership being removed takes no new index work: the removal queued ahead of it
+        would take the rows that work writes."""
+        if status == MemberStatus.REMOVING:
+            raise Conflict(
+                f"document is being removed from collection {self.name}; "
+                f"attach or index it again once it is gone: {doc}"
+            )
 
     async def add(self, doc: str) -> None:
         """Attach a document: a `pending` membership, which indexing then moves along. Attaching
@@ -482,56 +573,112 @@ class Collection:
 
         Only an imported document may join a collection, and the check lives here rather than in
         the caller: one still importing has no markdown to chunk yet, and one being deleted must
-        not gain a membership the delete's snapshot missed.
+        not gain a membership the delete's snapshot missed. A membership being removed refuses
+        the attach too (`_refuse_removing`).
+
+        The check and the insert are one unit of work: a delete that marks the document between
+        them would snapshot its memberships without this one, and never remove it.
         """
-        row = await document.get(doc)  # NotFound before anything is written
-        if row.status != document.DocumentStatus.IMPORTED:
-            raise Conflict(
-                f"document is {row.status}; only an imported document joins a collection: {doc}"
-            )
         now = time.time()
         async with db.connect() as conn:
+            status = await conn.scalar(select(documents.c.status).where(documents.c.name == doc))
+            if status is None:
+                raise NotFound(f"document not found: {doc}")
+            if status != document.DocumentStatus.IMPORTED:
+                raise Conflict(
+                    f"document is {status}; only an imported document joins a collection: {doc}"
+                )
             await conn.execute(
                 insert(collection_documents)
                 .values(collection=self.name, document=doc, added_at=now, updated_at=now)
                 .on_conflict_do_nothing()
             )
+            membership = await conn.scalar(
+                select(collection_documents.c.status).where(self._membership(doc))
+            )
+        self._refuse_removing(doc, membership)
 
     async def member(self, doc: str) -> Member:
-        async with db.connect() as conn:
-            row = (
-                await conn.execute(
-                    _MEMBERS.where(
-                        collection_documents.c.collection == self.name, documents.c.name == doc
-                    )
-                )
-            ).first()
+        async with db.read() as conn:
+            row = (await conn.execute(_MEMBERS.where(self._membership(doc)))).first()
         if row is None:
             raise NotFound(f"document not in collection {self.name}: {doc}")
         return _member(row)
 
+    async def member_to_index(self, doc: str) -> Member:
+        """The membership of `doc`, refused while it is being removed (`_refuse_removing`)."""
+        found = await self.member(doc)
+        self._refuse_removing(doc, found.status)
+        return found
+
+    async def _move_member(
+        self, doc: str, status: MemberStatus, error: str | None, *guard: ColumnElement[bool]
+    ) -> bool:
+        """Set the membership's status and error where every `guard` holds; whether it did."""
+        async with db.connect() as conn:
+            moved = await conn.scalar(
+                update(collection_documents)
+                .where(self._membership(doc), *guard)
+                .values(status=status, error=error, updated_at=time.time())
+                .returning(collection_documents.c.document)
+            )
+        return moved is not None
+
     async def set_member_status(
         self, doc: str, status: MemberStatus, error: str | None = None
     ) -> None:
-        async with db.connect() as conn:
-            await conn.execute(
-                update(collection_documents)
-                .where(
-                    collection_documents.c.collection == self.name,
-                    collection_documents.c.document == doc,
-                )
-                .values(status=status, error=error, updated_at=time.time())
-            )
+        """Move the membership along its index. A membership being removed stays so: a cancelled
+        index still finishing its write, or a cancel of it, must not show it as indexed or
+        cancelled again. Only its removal ends that status (see `fail_removal`)."""
+        await self._move_member(doc, status, error, not_(_REMOVING))
+
+    async def cancel_index(self, doc: str) -> None:
+        """Record a cancelled index as `cancelled`, but only while the membership is still being
+        indexed. An index that ended between the cancel's read and this write keeps the status it
+        ended on (DBOS keeps its SUCCESS or ERROR too), and a removal keeps `removing`."""
+        await self._move_member(
+            doc,
+            MemberStatus.CANCELLED,
+            None,
+            collection_documents.c.status.in_((MemberStatus.PENDING, MemberStatus.INDEXING)),
+        )
+
+    async def start_removal(self, doc: str) -> None:
+        """Mark the membership `removing`, whatever it was: a detach answers once its removal is
+        queued, and this is what the member listing shows until that removal ran."""
+        if not await self._move_member(doc, MemberStatus.REMOVING, None):
+            raise NotFound(f"document not in collection {self.name}: {doc}")
+
+    async def fail_removal(self, doc: str, error: str) -> None:
+        """A removal that failed leaves the membership in `error`, with the reason, so it does not
+        read `removing` for ever; detaching again retries it."""
+        await self._move_member(doc, MemberStatus.ERROR, error, _REMOVING)
 
     async def remove_member(self, doc: str) -> None:
         """Detach only: the document, its files and its embedding cache stay."""
         async with db.connect() as conn:
-            await conn.execute(
-                delete(collection_documents).where(
-                    collection_documents.c.collection == self.name,
-                    collection_documents.c.document == doc,
-                )
+            await conn.execute(delete(collection_documents).where(self._membership(doc)))
+
+    @staticmethod
+    async def holding(docs: set[str], names: list[str]) -> dict[str, list[str]]:
+        """Which of the collections `names` hold each of `docs`, in name order, but for one it is
+        on its way out of (`LEAVING`), where a search no longer finds it. A document none of them
+        hold is absent. One query for a whole search result: a search that folds hits to
+        documents needs every membership at once."""
+        if not docs or not names:
+            return {}
+        member = collection_documents.c
+        async with db.read() as conn:
+            rows = await conn.execute(
+                _MEMBERS.with_only_columns(member.document, member.collection)
+                .where(member.document.in_(list(docs)), member.collection.in_(list(set(names))))
+                .where(*(not_(one) for one in LEAVING))
+                .order_by(member.document, member.collection)
             )
+        held: dict[str, list[str]] = {}
+        for doc, collection in rows:
+            held.setdefault(doc, []).append(collection)
+        return held
 
     async def member_names(self, after: str | None = None, limit: int | None = None) -> list[str]:
         """Names alone, ordered by name: what a caller that only iterates members needs.
@@ -542,11 +689,11 @@ class Collection:
         names = select(member.document).where(member.collection == self.name)
         if after is not None:
             names = names.where(member.document > after)
-        async with db.connect() as conn:
+        async with db.read() as conn:
             return list(await conn.scalars(names.order_by(member.document).limit(limit)))
 
     async def counts(self) -> DocumentCounts:
-        async with db.connect() as conn:
+        async with db.read() as conn:
             return (await _counts_by_collection(conn, [self.name]))[self.name]
 
     async def members_page(
@@ -559,7 +706,7 @@ class Collection:
         filters = [collection_documents.c.collection == self.name]
         if status is not None:
             filters.append(collection_documents.c.status == status)
-        async with db.connect() as conn:
+        async with db.read() as conn:
             members = _MEMBERS.where(*filters)
             rows = (await conn.execute(walk.apply(members))).all()
             total = await conn.scalar(count_of(members))

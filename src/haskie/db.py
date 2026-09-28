@@ -21,7 +21,7 @@ from typing import Any
 
 import anyio.to_thread
 import msgspec
-from sqlalchemy import Column, Row, Table, event
+from sqlalchemy import Column, Connection, Row, Table, event
 from sqlalchemy.dialects import sqlite
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -34,18 +34,12 @@ SCHEMA_VERSION = 24
 """`pragma user_version` of the schema in `tables.py`.
 
 A home stamped with it has these tables and columns and is opened as it is. Any other stamp is a
-shape this build cannot read, so the home is refused (see `migrate`). Against the last release (23),
-searches move out of `session_events` into the search log (`searches`, `search_questions`,
-`search_results`), and the embedding profiles gain the cosines the Gaps page judges by
-(`weak_match`, `answered_match`, `same_topic`). Against 22, a document and a staged upload keep the
-MD5 of their bytes (`md5`), and an embedding cache row keeps the document's mean vector
-(`embeddings.vector`). Against 21, where two parts of a document meet is cut `part` or `heading`,
-not `edge` (`CutReason.PART`). Against 20, the catalogue holds each reranker's calibration
-(`reranker_calibration`). Against 19, a piece without a word (`---`, a stray symbol, a page marker
-alone) makes no chunk (`chunk.pack`): every document chunks differently, and a search no longer
-checks for such chunks, so an index written the old way would return them.
+shape this build cannot read, so the home is refused (see `migrate`). The commit that bumps it says
+what changed.
 
-A cache file or LanceDB table written the old way must never be read by this build.
+A cache file or LanceDB table written the old way must never be read by this build. The seed
+(`catalogue/seed.sql`) runs only on a fresh file, so an edit to it reaches an existing home only
+with a bump.
 
 Before 1.0.0 this is the only migration there is, and it covers the stores this version does not
 stamp as well. A change to what a chunk holds retires the embedding cache and every collection's
@@ -79,19 +73,18 @@ INCOMPATIBLE_HOME_MESSAGE = (
 
 BUSY_TIMEOUT_SECONDS = 30.0  # how long a writer waits for another writer before it gives up
 
-_migrated: set[Path] = set()
 _migrate_lock = threading.Lock()  # both event loops get here through worker threads of their own
 
 
-def migrate(conn: sqlite3.Connection) -> int:
-    """Create the schema on a fresh file; returns the version the file is at.
+def migrate(conn: sqlite3.Connection) -> None:
+    """Create the schema on a fresh file, and leave a file at `SCHEMA_VERSION` as it is.
 
     A home stamped with anything else was written by a build whose storage shape this one cannot
     read, and there is no path from it. It is refused with `user_version` untouched and the user is
     told to destroy it, rather than losing its rows to a silent drop."""
     (version,) = conn.execute("pragma user_version").fetchone()
     if version == SCHEMA_VERSION:
-        return SCHEMA_VERSION
+        return
     if version != 0:
         raise HaskieError(INCOMPATIBLE_HOME_MESSAGE)
     conn.execute("pragma journal_mode = wal")  # persistent; needs an exclusive lock, so once
@@ -99,7 +92,6 @@ def migrate(conn: sqlite3.Connection) -> int:
     conn.executescript(SEED.read_text(encoding="utf-8"))
     conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
     conn.commit()
-    return SCHEMA_VERSION
 
 
 def _migrate_sync() -> None:
@@ -107,25 +99,25 @@ def _migrate_sync() -> None:
     switch are one blocking burst, and the lock is a threading one because the callers are the two
     event loops of this process (Litestar's and DBOS's), not one."""
     with _migrate_lock:
-        if home.DB_FILE in _migrated:
+        if home.DB_FILE in _engines:
             return
         conn = sqlite3.connect(str(home.DB_FILE), timeout=BUSY_TIMEOUT_SECONDS)
         try:
             migrate(conn)
         finally:
             conn.close()
+        # its engine is also the mark that this process migrated the file
         _engines[home.DB_FILE] = asyncio.run(_first_connected_engine())
-        _migrated.add(home.DB_FILE)
 
 
 def invalidate_migrations() -> None:
     """Forget which database files this process has opened.
 
-    The set is a per-process cache of "already at `SCHEMA_VERSION`". Deleting the file behind it
-    (`haskie destroy`) leaves that claim false, so the next `migrate_once` has to run again.
+    The engines are a per-process cache of "already at `SCHEMA_VERSION`". Deleting the file
+    behind one (`haskie destroy`) leaves that claim false, so the next `migrate_once` has to run
+    again.
     """
     with _migrate_lock:
-        _migrated.clear()
         _engines.clear()
 
 
@@ -134,7 +126,7 @@ async def migrate_once() -> None:
 
     The one-time WAL switch needs an exclusive lock, so this runs before anything else (DBOS, or
     the first `connect()`) holds the file open."""
-    if home.DB_FILE in _migrated:
+    if home.DB_FILE in _engines:
         return
     await home.ensure_home()
     await anyio.to_thread.run_sync(_migrate_sync)
@@ -142,8 +134,37 @@ async def migrate_once() -> None:
 
 def _set_pragmas(dbapi_connection: Any, _record: Any) -> None:
     # the adapter's own `execute`: one round trip to the driver thread, where a cursor takes three
-    dbapi_connection.execute("pragma synchronous = normal")  # durable across crashes in WAL mode
+    # consistent across crashes in WAL mode; a power cut may roll back the last commits
+    dbapi_connection.execute("pragma synchronous = normal")
     dbapi_connection.execute("pragma foreign_keys = on")  # per connection
+
+
+_READ_ONLY = "haskie_read_only"  # the execution option `read` sets, which `_begin` reads
+
+
+def _begin(conn: Connection) -> None:
+    """A unit of work that may write takes the write lock at its start, so what it read still
+    holds when it writes: a unit that checks, then writes, never acts on a check another commit
+    made stale.
+
+    The driver's own transaction control is off (`isolation_level=None`): it would open none
+    before a SELECT, so a check ran outside the transaction its write joined later. A plain
+    (deferred) `begin` would make the check part of the transaction, but a commit landing
+    between the check and the write then fails the write at once ("database is locked"): the
+    busy timeout does not cover a stale snapshot, and DBOS commits to this file all the time.
+    `immediate` makes that commit wait instead. Measured on one WAL file with a writer
+    committing every millisecond: deferred failed every read-then-write unit, immediate none.
+
+    The price is that units wait for each other and for DBOS's writers, so a unit that only
+    reads (`read`) opens a deferred transaction instead: it never writes, so no stale snapshot
+    can fail it, and in WAL it waits for no one. `query_only` makes a write through it fail
+    loudly. The pragma outlives the transaction, which is harmless under `NullPool`: the
+    connection is closed when the unit ends."""
+    if conn.get_execution_options().get(_READ_ONLY):
+        conn.exec_driver_sql("pragma query_only = 1")
+        conn.exec_driver_sql("begin")
+    else:
+        conn.exec_driver_sql("begin immediate")
 
 
 # One engine per database file, made by `_migrate_sync`: tests switch homes, and `haskie destroy`
@@ -156,8 +177,9 @@ async def _first_connected_engine() -> AsyncEngine:
 
     `NullPool` opens a connection per unit of work and closes it after, so no connection is ever
     shared between the two event loops (Litestar's and DBOS's), and one engine serves both.
-    `timeout` makes concurrent writers (DBOS, requests) wait instead of raising "database is
-    locked"; WAL (set when the schema is created) lets readers proceed.
+    `timeout` makes a unit wait for the write lock another unit or DBOS holds, instead of raising
+    "database is locked" (see `_begin`); WAL (set when the schema is created) lets
+    DBOS's readers proceed.
 
     SQLAlchemy guards an engine's first connection with an asyncio lock, which binds to the loop
     that waits on it. The two loops racing for that first connection fail with "bound to a
@@ -165,9 +187,10 @@ async def _first_connected_engine() -> AsyncEngine:
     made = create_async_engine(
         f"sqlite+aiosqlite:///{home.DB_FILE}",
         poolclass=NullPool,
-        connect_args={"timeout": BUSY_TIMEOUT_SECONDS},
+        connect_args={"timeout": BUSY_TIMEOUT_SECONDS, "isolation_level": None},
     )
     event.listen(made.sync_engine, "connect", _set_pragmas)
+    event.listen(made.sync_engine, "begin", _begin)
     async with made.connect():
         pass
     return made
@@ -180,10 +203,26 @@ def engine() -> AsyncEngine:
 
 @asynccontextmanager
 async def connect() -> AsyncIterator[AsyncConnection]:
-    """One connection and one transaction per unit of work; commits on success, rolls back on
-    error."""
+    """One connection and one transaction per unit of work that writes, holding the write lock
+    from its first statement (see `_begin`); commits on success, rolls back on error. Never open
+    one while holding another: the inner unit would wait for the outer one's lock."""
     await migrate_once()
     async with engine().begin() as conn:
+        yield conn
+
+
+@asynccontextmanager
+async def read() -> AsyncIterator[AsyncConnection]:
+    """One connection and one deferred transaction per unit of work that only reads (see
+    `_begin`). It takes no lock, so it waits neither for other units nor for DBOS's writers.
+
+    Every statement of the unit still reads one snapshot: in WAL, a transaction's first read fixes
+    the commit it sees, and a commit landing after it stays invisible until the unit ends. A write
+    through it raises ("attempt to write a readonly database"). Nothing is committed: the unit
+    rolls back when it ends."""
+    await migrate_once()
+    async with engine().connect() as conn:
+        await conn.execution_options(**{_READ_ONLY: True})
         yield conn
 
 

@@ -161,9 +161,9 @@ before `tables.py` keeps its older, unprefixed names.
 
 | store | how it is written | why |
 | --- | --- | --- |
-| SQLite | app code through SQLAlchemy Core on `aiosqlite`, one connection per unit of work (`NullPool`); DBOS through its own connections; WAL mode | a unit of work is one transaction. Writers that meet wait on the busy timeout |
+| SQLite | app code through SQLAlchemy Core on `aiosqlite`, one connection per unit of work (`NullPool`); DBOS through its own connections; WAL mode | a unit of work is one transaction. A unit that writes (`db.connect`) takes the write lock at its start (`begin immediate`), so a check it reads still holds when it writes. Writers that meet, and DBOS's writers, wait on the busy timeout, then fail with "database is locked". A unit that only reads (`db.read`) takes no lock: a deferred transaction reads one snapshot, waits for no writer, and refuses any write (`query_only`) |
 | LanceDB | async API, one writer per collection (`task.indexing`) | one writer per table keeps commits simple |
-| small files | `home.atomic_write`: a temp file, then `os.replace` | a crash leaves the old file or the new one, never half |
+| small files | `home.atomic_write`: a temp file, flushed to disk, then `os.replace` | a crash or a power cut leaves the old file or the new one, never half |
 | imported originals | moved or copied into place | removed again if the import raises |
 
 ## Schema changes
@@ -171,5 +171,9 @@ before `tables.py` keeps its older, unprefixed names.
 Before 1.0 there are no migrations. A storage change edits `tables.py` and bumps `SCHEMA_VERSION`
 in `db.py`, which is stored in `PRAGMA user_version`. A home written with another version is refused at startup, with a message
 that says so. The fix is `haskie destroy` and a fresh import.
+
+A LanceDB table records the embedding its vectors were made by (the `cache_name`, in its schema
+metadata). A table of another embedding, or one from before the record, is outdated: the
+collection shows it, and *Index all* rebuilds it from the embedding cache. No re-import is needed.
 
 Code: `tables.py`, `db.py`, `catalogue/catalogue.py`, `catalogue/seed.sql`, `home.py`, `sysdb.py`.

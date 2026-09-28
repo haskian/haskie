@@ -6,10 +6,9 @@ from litestar import get, post, put
 from haskie import audit, home
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbedderMetadata, EmbeddingModel, RerankerMetadata
-from haskie.collection.collection import ACTIVE_MEMBER_STATUSES, MEMBER_STATUSES, MemberStatus
 from haskie.document.document import ACTIVE_DOCUMENT_STATUSES, DOCUMENT_STATUSES, DocumentStatus
 from haskie.errors import Conflict
-from haskie.indexing import hardware, models, operations, workflows
+from haskie.indexing import hardware, models, workflows
 from haskie.indexing.dbos_names import ACTIVE_STATUS, RunStatus
 from haskie.settings import (
     NO_EMBEDDING,
@@ -71,11 +70,7 @@ class Options(msgspec.Struct):
     document_statuses: tuple[DocumentStatus, ...]
     # in the import pipeline: a poll waits on them
     active_document_statuses: tuple[DocumentStatus, ...]
-    member_statuses: tuple[MemberStatus, ...]
-    active_member_statuses: tuple[MemberStatus, ...]
     active_run_statuses: tuple[RunStatus, ...]  # run statuses that are still on their way
-    operation_kinds: tuple[operations.OperationKind, ...]  # the order the Operations view shows
-    bulk_kinds: tuple[operations.BulkKind, ...]  # the operations a 202 points at
 
 
 def _changed_fields(before: msgspec.Struct, after: msgspec.Struct, prefix: str = "") -> list[str]:
@@ -96,11 +91,10 @@ def _changed_fields(before: msgspec.Struct, after: msgspec.Struct, prefix: str =
 @get("/api/status")
 async def get_status() -> Status:
     saved = await load_user_settings_or_none()
-    current = saved or UserSettings()
     return Status(
         initialized=saved is not None,
         home=str(home.HOME),
-        embedding=(await catalogue.embedding_model(current)) if saved else None,
+        embedding=(await catalogue.embedding_model(saved)) if saved else None,
         models=(await models.model_statuses()) if saved else [],
         settings_error=settings_problem(),
     )
@@ -173,9 +167,5 @@ async def get_options() -> Options:
         embedding_metadata=await catalogue.embedding_metadata(),
         document_statuses=DOCUMENT_STATUSES,
         active_document_statuses=ACTIVE_DOCUMENT_STATUSES,
-        member_statuses=MEMBER_STATUSES,
-        active_member_statuses=ACTIVE_MEMBER_STATUSES,
         active_run_statuses=tuple(RunStatus(status) for status in ACTIVE_STATUS),
-        operation_kinds=operations.KIND_ORDER,
-        bulk_kinds=operations.BULK_KINDS,
     )

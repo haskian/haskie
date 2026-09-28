@@ -27,10 +27,10 @@ from haskie.collection.collection import Collection
 from haskie.collection.index import (
     CollectionIndex,
     Hit,
-    first_per_key,
+    first_per_span,
     gather_rows,
-    row_key,
     row_score,
+    span_key,
 )
 from haskie.errors import InvalidInput, NotFound
 from haskie.paging import DEFAULT_PAGE_SIZE, OffsetCursor, Order, Page, check_page_size
@@ -105,12 +105,11 @@ def split_collections(raw: str | None) -> list[str] | None:
     return [name for name in names if name] or None
 
 
-def _rank_key(pair: tuple[CollectionIndex, dict]) -> tuple[float, str, int, str]:
-    """Best score first, then the identity of the chunk — (document, seq) — and the
-    collection last, so two collections holding the same chunk sort next to each other and the
-    ranking is the same every time it is recomputed."""
+def _rank_key(pair: tuple[CollectionIndex, dict]) -> tuple[float, str, int, int, str]:
+    """Best score first, then the identity of the chunk — (document, char_start, char_end) — and
+    the collection last, so the ranking is the same every time it is recomputed."""
     index, row = pair
-    return (-row_score(row), *row_key(row), index.collection)
+    return (-row_score(row), *span_key(row), index.collection)
 
 
 def merge(
@@ -122,12 +121,12 @@ def merge(
     in the same order every time the ranking is recomputed, or a page boundary would swap them and
     the walk would show one twice and the other never.
 
-    A document in two collections puts the same (document, seq) in both their rankings. The
-    sort puts those copies next to each other, best score first, so keeping the first of each
-    identity (`first_per_key`) keeps the best-scoring copy and drops the rest deterministically.
+    A document in two collections puts the same span of it in both their rankings. The sort
+    puts the copies best score first, so keeping the first of each span (`first_per_span`) keeps
+    the best-scoring copy and drops the rest deterministically.
     """
     pairs = ((index, row) for index, rows in retrieved for row in rows)
-    return first_per_key(sorted(pairs, key=_rank_key))
+    return first_per_span(sorted(pairs, key=_rank_key))
 
 
 async def search(
@@ -139,24 +138,24 @@ async def search(
     """One page of the merged full-text ranking over `collections`, or over every collection.
 
     `total` is None: counting the whole ranking costs the same as producing it, for a number no
-    caller pages to. Searches are not audited, like every other search.
+    caller pages to. Searches are not audited, like every other search. A document on its way out
+    of a collection does not answer from it (`Collection.for_search`), as in every search.
     """
     check_page_size(page_size, MAX_TEXT_PAGE_SIZE)
     names = await checked_names(collections)
-    chosen = [Collection(name) for name in names]
     offset = parse_cursor(cursor, q, names, page_size)
     log.observe_scope(None, names, SearchMode.FTS, page_size)
     depth = offset + page_size
     if depth > MAX_DEPTH:
         raise InvalidInput(f"cannot read past {MAX_DEPTH} results; narrow the query instead")
-    if not chosen:
+    if not names:
         return Page(items=[], next_cursor=None, total=None)
 
     # read once, not once per collection
     embedding = await catalogue.embedding_model(await load_user_settings())
+    found = await Collection.for_search(names, embedding)
     retrieved = await gather_rows(
-        [collection.index_with(embedding) for collection in chosen],
-        lambda index: index.fts_rows(q, depth),
+        [index for index, _ in found.values()], lambda index: index.fts_rows(q, depth)
     )
 
     merged = merge(retrieved)

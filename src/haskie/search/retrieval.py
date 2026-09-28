@@ -32,10 +32,9 @@ from haskie.collection.index import (
     RowKey,
     chunk_key,
     cross_encode,
-    first_per_key,
+    first_per_span,
     gather_rows,
     logit,
-    row_key,
     row_score,
 )
 from haskie.document import document
@@ -107,20 +106,18 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
     every search.
     """
     user = await load_user_settings()
-    found = await Collection.load_overrides(names)
+    embedding = await catalogue.embedding_model(user)
+    found = await Collection.for_search(names, embedding)
     for name in names:
         if name not in found:
             _log.warning("session_collection_missing", collection=name)
-    plans = [
-        (Collection(name), found[name].resolve_search(user)) for name in names if name in found
-    ]
-    if not plans:
+    indexes = [(index, overrides.resolve_search(user)) for index, overrides in found.values()]
+    if not indexes:
         return None
-    settings = plans[0][1] if len(plans) == 1 else user.search
+    settings = indexes[0][1] if len(indexes) == 1 else user.search
 
-    embedding = await catalogue.embedding_model(user)
     vectors: list[list[float] | None] = [None] * len(queries)
-    if embedding is not None and any(one.mode != SearchMode.FTS for _, one in plans):
+    if embedding is not None and any(one.mode != SearchMode.FTS for _, one in indexes):
         await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
         vectors = await cpu.on_cpu(_embed_all, embedding, queries)
     calibrated = None
@@ -128,7 +125,6 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
         # before the fan-out
         await models.require_ready(models.ModelKind.RERANKER, settings.reranker_model)
         calibrated = await catalogue.calibration(settings.reranker_model)
-    indexes = [(one.index_with(embedding), where) for one, where in plans]
     await asyncio.gather(*(index.open() for index, _ in indexes))
     return [
         Plan(
@@ -157,9 +153,9 @@ class Pool(msgspec.Struct):
     row answers with is decided by the steps after it.
     """
 
-    rows: dict[RowKey, tuple[CollectionIndex, dict]]
-    rankings: dict[str, list[RowKey]]  # one per collection, in that collection's own order
-    ranked: list[tuple[RowKey, float]] = []  # merged, best first
+    rows: dict[ChunkKey, tuple[CollectionIndex, dict]]
+    rankings: dict[str, list[ChunkKey]]  # one per collection, in that collection's own order
+    ranked: list[tuple[ChunkKey, float]] = []  # merged, best first
     # the reranker's scores over the pool, best first, kept before its floor drops any: how close
     # the search came is what the search log records (`log.observe_ranking`)
     rerank_scores: list[float] = []
@@ -173,10 +169,14 @@ async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True
     chunk, not one per collection that holds it. So the first collection in the caller's order
     that returned a chunk gets the credit, and the later copies are dropped before the ranks are
     counted. Otherwise a document in two collections would be fused with itself and outrank an
-    equally good one that sits in a single collection.
+    equally good one that sits in a single collection. A chunk is its span of the document, not its
+    `seq`: two collections that chunk one document two ways give one `seq` other text.
 
     A collection that fails to answer fails the search: a silent hole in a merged ranking reads as
     "no match".
+
+    A document on its way out of a collection does not answer from it (`CollectionIndex.leaving`):
+    its rows stay in the table until the removal queued for them runs.
     """
     chosen = {index.collection: settings for index, settings in where.indexes}
 
@@ -191,8 +191,8 @@ async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True
 
     retrieved = await gather_rows([index for index, _ in where.indexes], read)
     pool = Pool(rows={}, rankings={index.collection: [] for index, _ in retrieved})
-    for index, row in first_per_key((i, r) for i, rows in retrieved for r in rows):
-        key = row_key(row)
+    for index, row in first_per_span((i, r) for i, rows in retrieved for r in rows):
+        key = (index.collection, row["document"], row["seq"])
         pool.rows[key] = (index, row)
         pool.rankings[index.collection].append(key)
     return pool
@@ -236,8 +236,11 @@ async def rerank(pool: Pool, query: str, where: Plan) -> Pool:
     settings = where.settings
     if settings.reranker == Reranker.NONE:
         return pool
-    rows = [pool.rows[key][1] for key, _ in pool.ranked]
-    rescored = [(row_key(row), row_score(row)) for row in await cross_encode(query, rows, settings)]
+    keys = [key for key, _ in pool.ranked]
+    rows = [pool.rows[key][1] for key in keys]
+    await cross_encode(query, rows, settings)  # scores the rows in place
+    scored = [(key, row_score(row)) for key, row in zip(keys, rows, strict=True)]
+    rescored = sorted(scored, key=lambda pair: pair[1], reverse=True)
     # the reranker's score has a scale: under the floor it judged the chunk no answer, and a
     # search that keeps it would fill a slot, or tag a question, with it
     kept = [(key, score) for key, score in rescored if score >= where.rerank_floor]
@@ -425,38 +428,33 @@ def _values(
 # --- what the hits are folded into ------------------------------------------------
 
 
-def _spaces(scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode) -> collapse.Scan:
-    return collapse.spaces([hit.text for hit in scanned.hits], scanned.vectors, model, mode)
+def _spaces(scanned: Scanned, where: Plan) -> collapse.Scan:
+    texts = [hit.text for hit in scanned.hits]
+    return collapse.spaces(texts, scanned.vectors, where.embedding, where.settings.mode)
 
 
-def _fold_hits(
-    scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode, limit: int
-) -> list[Hit]:
-    scan = _spaces(scanned, model, mode)
+def _fold_hits(scanned: Scanned, where: Plan, limit: int) -> list[Hit]:
+    scan = _spaces(scanned, where)
     kept = collapse.hits(scanned.hits, scan, limit)
     _log_collapse(scan.deciding[0].kind, len(scanned.hits), kept, limit)
     return kept
 
 
-def _fold_ranges(
-    ranged: Ranged, model: EmbeddingModel | None, mode: SearchMode, limit: int | None
-) -> list[passage.HitRange]:
-    scan = _spaces(ranged.scanned, model, mode)
+def _fold_ranges(ranged: Ranged, where: Plan, limit: int | None) -> list[passage.HitRange]:
+    scan = _spaces(ranged.scanned, where)
     kept = collapse.ranges(ranged.ranges, ranged.scanned.hits, scan, limit)
     _log_collapse(scan.deciding[0].kind, len(ranged.ranges), kept, limit)
     return kept
 
 
-async def collapse_hits(
-    scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode, limit: int
-) -> list[Hit]:
+async def collapse_hits(scanned: Scanned, where: Plan, limit: int) -> list[Hit]:
     """The `limit` best hits, each with the near-duplicates it stands for (see `collapse`).
 
     CPU work that grows with the square of the scan - tens of milliseconds at the default depth -
     so it runs in a worker thread rather than on the event loop the search came in on, the
     comparison spaces included.
     """
-    return await cpu.on_cpu(_fold_hits, scanned, model, mode, limit)
+    return await cpu.on_cpu(_fold_hits, scanned, where, limit)
 
 
 def standing(ranged: Ranged) -> Ranged:
@@ -464,9 +462,7 @@ def standing(ranged: Ranged) -> Ranged:
     return msgspec.structs.replace(ranged, ranges=[one for one in ranged.ranges if not one.alone])
 
 
-async def collapse_ranges(
-    ranged: Ranged, model: EmbeddingModel | None, mode: SearchMode, limit: int | None
-) -> list[passage.HitRange]:
+async def collapse_ranges(ranged: Ranged, where: Plan, limit: int | None) -> list[passage.HitRange]:
     """The `limit` best hit ranges, each with the near-duplicates it stands for; every range that
     repeats none without a `limit`.
 
@@ -474,7 +470,7 @@ async def collapse_ranges(
     sit next to each other and read alike, and folding them would split the passage they make up.
     A worker thread runs the fold, as `collapse_hits` says.
     """
-    return await cpu.on_cpu(_fold_ranges, ranged, model, mode, limit)
+    return await cpu.on_cpu(_fold_ranges, ranged, where, limit)
 
 
 def _picked(picks: list[aspects.Pick], scanned: list[Scanned]) -> Scanned:
@@ -490,21 +486,16 @@ def _picked(picks: list[aspects.Pick], scanned: list[Scanned]) -> Scanned:
 
 
 def _cover(
-    ranged: list[Ranged],
-    labels: list[str],
-    model: EmbeddingModel | None,
-    mode: SearchMode,
-    depth: int,
-    cap: int,
-    by_score: bool,
-    how: ScoreFold,
+    ranged: list[Ranged], labels: list[str], where: Plan, depth: int, cap: int
 ) -> list[passage.HitRange]:
+    how = where.settings.score_fold
     picks = aspects.interleave([one.ranges for one in ranged], depth, cap, how)
     joined = _picked(picks, [one.scanned for one in ranged])
-    scan = _spaces(joined, model, mode)
+    scan = _spaces(joined, where)
     # none cut: the sections they fall in are what the answer counts (`sections`)
     kept = collapse.ranges([pick.span for pick in picks], joined.hits, scan, None)
     scans = [{chunk_key(hit): hit.score for hit in one.scanned.hits} for one in ranged]
+    by_score = where.settings.reranker != Reranker.NONE
     found = aspects.tagged(kept, picks, labels, scans, by_score, how)
     _log_collapse(scan.deciding[0].kind, len(picks), kept, None)
     _log.info(
@@ -519,21 +510,14 @@ def _cover(
 
 
 async def cover(
-    ranged: list[Ranged],
-    labels: list[str],
-    model: EmbeddingModel | None,
-    mode: SearchMode,
-    depth: int,
-    cap: int,
-    by_score: bool,
-    how: ScoreFold,
+    ranged: list[Ranged], labels: list[str], where: Plan, depth: int, cap: int
 ) -> list[passage.HitRange]:
     """The ranges across the parts of one question, in the order the parts took them, each with
     its near-duplicates folded in and tagged with the parts it answers (see `aspects`). None is
     cut: `sections` counts the answer. `ranged` holds one set of ranges and `labels` one question
-    per part; `by_score` tags by the reranker's scores (`aspects.tagged`). A worker thread runs
-    it, as `collapse_hits` says."""
-    return await cpu.on_cpu(_cover, ranged, labels, model, mode, depth, cap, by_score, how)
+    per part; with a reranker on, the tags read its scores (`aspects.tagged`). A worker thread
+    runs it, as `collapse_hits` says."""
+    return await cpu.on_cpu(_cover, ranged, labels, where, depth, cap)
 
 
 def _log_collapse(
@@ -749,6 +733,7 @@ async def probe_gaps(
     scored against each question whose words are missing, dropped under the floor, tagged with
     the questions it clears it for. Without one, its BM25 score is on another scale than the
     ranked passages', so it scores 0 and is tagged by the words it holds (`probe.tags`)."""
+    # inline, not in a worker thread: stems are cached (`probe.stem`), see `probe.vocabulary`
     wanted = probe.missing(questions, probe.covered(groups))
     if not wanted:
         return groups
@@ -794,7 +779,7 @@ async def _judged(
     best: dict[ChunkKey, float] = {}
     scores: dict[str, dict[ChunkKey, float]] = {}
     for question in asked:
-        rows = [dict(pool.rows[(hit.document, hit.seq)][1]) for hit in hits]
+        rows = [dict(pool.rows[chunk_key(hit)][1]) for hit in hits]
         await cross_encode(question.asked, rows, where.settings)  # scores the copies in place
         for hit, row in zip(hits, rows, strict=True):
             score, key = row_score(row), chunk_key(hit)
@@ -913,24 +898,25 @@ def _read_texts(hit_ranges: list[passage.HitRange]) -> list[str]:
 
 
 async def shortlist(
-    hits: list[Hit], names: list[str], limit: int, sections: int, how: ScoreFold
+    hits: list[Hit], where: Plan, limit: int, sections: int, how: ScoreFold
 ) -> Sources:
     """Which documents these hits came from, one row per document, and the collections to select
     to read them.
 
     Its score folds every chunk it matched by `how` (`passage.fold`), `sections` says where in it
     the answer sits, and `collections` names
-    which of the searched collections hold it. `Sources.collections` is the cover: the fewest
-    collections a follow-up search has to select to reach every row.
+    which of the searched collections hold it, but for one it is on its way out of
+    (`Collection.holding`), where a follow-up search would not find it. `Sources.collections` is the
+    cover: the fewest collections a follow-up search has to select to reach every row.
     """
     # the shortlist is cut first: only a document that made it is worth a membership and a
     # description, and both are one query for the whole of it
     kept = passage.top_documents(hits, limit, how)
     docs = {group[0].document for group in kept}
-    memberships, described = await asyncio.gather(
-        document.memberships(docs, names), document.descriptions_of(docs)
+    held, described = await asyncio.gather(
+        Collection.holding(docs, where.names), document.descriptions_of(docs)
     )
-    found = passage.fold_sources(kept, memberships, sections, how)
+    found = passage.fold_sources(kept, held, sections, how)
     document.fill_descriptions(found.documents, described)
     return found
 

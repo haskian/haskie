@@ -1,10 +1,13 @@
 """Gaps: the questions the collections do not answer, for the curator and for an agent."""
 
+from typing import Annotated
+
 import msgspec
 from litestar import get, post, put
 
 from haskie import audit
-from haskie.api.common import days_ago
+from haskie.api.common import Days, RequiredSessionId, days_ago
+from haskie.paging import one_of
 from haskie.search import gaps
 
 
@@ -29,9 +32,9 @@ class GapReport(msgspec.Struct):
 
 @get("/api/gaps", mcp_tool="list_gaps")
 async def list_gaps(
-    review: gaps.Review = gaps.Review.OPEN,
-    days: int = 30,
-    signals: list[gaps.Signal] | None = None,
+    review: Annotated[gaps.Review, one_of(gaps.Review)] = gaps.Review.OPEN,
+    days: Days = 30,
+    signals: Annotated[list[gaps.Signal] | None, one_of(gaps.Signal)] = None,
 ) -> list[gaps.GapTopic]:
     """The questions the collections could not answer, grouped by topic, the most asked first:
     what to add to the collections next.
@@ -46,7 +49,7 @@ async def list_gaps(
 
     Args:
         review: open (the default), or the ones already dismissed or resolved.
-        days: How far back, 1 to 366.
+        days: How far back, in days.
         signals: Which reasons to list; every one but `borderline` by default.
     """
     wanted = frozenset(signals) if signals else gaps.CONFIRMED
@@ -74,7 +77,7 @@ async def replay_gaps(data: GapReplay) -> list[gaps.ReplayedGap]:
 
 @post("/api/gaps/report", status_code=200, mcp_tool="report_gap")
 @audit.audited("gaps.report")
-async def report_gap(session_id: str, data: GapReport) -> gaps.Reported:
+async def report_gap(session_id: RequiredSessionId, data: GapReport) -> gaps.Reported:
     """Say that a search you just ran did not answer your question: the gap then shows to the
     user as one the collections should close.
 

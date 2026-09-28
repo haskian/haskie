@@ -28,9 +28,9 @@ from conftest import (
 from dbos import DBOS
 
 from haskie.collection.collection import Collection
-from haskie.errors import HaskieError, NotReady
+from haskie.errors import HaskieError, NotReady, Unavailable
 from haskie.indexing import dbos_names, embed, models, operations, workflows
-from haskie.indexing.models import ModelKind
+from haskie.indexing.models import ModelKind, ModelLoading
 from haskie.settings import (
     CollectionOverrides,
     Fusion,
@@ -51,17 +51,42 @@ async def test_no_model_is_required_for_full_text_only(dbos) -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "outcome", "state", "match"),
+    ("name", "outcome", "state", "match", "raised"),
     [
-        ("loaded in this process", "ready", "ready", None),
-        ("download failed", "error", "error", "failed to load: RuntimeError: no such model"),
-        ("never required before", "missing", "pending", "is not loaded yet"),
-        ("still downloading", "blocked", "loading", "is downloading .operation dl:embedding:"),
-        ("downloaded, caches cold", "cold", "loading", "is loading in this process"),
+        ("loaded in this process", "ready", "ready", None, None),
+        # a failed model stays failed until a restart or a settings save: no retry hint
+        (
+            "download failed",
+            "error",
+            "error",
+            "failed to load: RuntimeError: no such model",
+            Unavailable,
+        ),
+        ("never required before", "missing", "pending", "is not loaded yet", ModelLoading),
+        (
+            "still downloading",
+            "blocked",
+            "loading",
+            "is downloading .operation dl:embedding:",
+            ModelLoading,
+        ),
+        (
+            "downloaded, caches cold",
+            "cold",
+            "loading",
+            "is loading in this process",
+            ModelLoading,
+        ),
     ],
 )
 async def test_model_state_decides_whether_search_may_run(
-    dbos, monkeypatch, name: str, outcome: str, state: str, match: str | None
+    dbos,
+    monkeypatch,
+    name: str,
+    outcome: str,
+    state: str,
+    match: str | None,
+    raised: type[Exception] | None,
 ) -> None:
     """A download record that says SUCCESS is not enough: the model lives in the caches of the
     process that loaded it, so a boot that inherits the record still reports "loading" until it
@@ -91,11 +116,12 @@ async def test_model_state_decides_whether_search_may_run(
     try:
         (status,) = await models.model_statuses()
         assert (status.kind, status.name, status.state) == ("embedding", model_name, state), name
-        if match is None:
+        if raised is None:
             await models.require_ready(ModelKind.EMBEDDING, model_name)  # no raise
         else:
-            with pytest.raises(NotReady, match=match):
+            with pytest.raises(raised, match=match) as caught:
                 await models.require_ready(ModelKind.EMBEDDING, model_name)
+            assert type(caught.value) is raised, name
     finally:
         blocked.set()
         await await_terminal([models._model_id(ModelKind.EMBEDDING, model_name)])
@@ -144,7 +170,7 @@ async def test_require_ready_answers_from_the_process_that_loaded_the_model(
     model_name = (await compact_model()).name
     await models.ensure_models(user)
     await await_terminal([models._model_id(ModelKind.EMBEDDING, model_name)])
-    with pytest.raises(NotReady, match="failed to load"):
+    with pytest.raises(Unavailable, match="failed to load"):
         await models.require_ready(ModelKind.EMBEDDING, model_name)  # a failure is never cached
 
     await models.ensure_models(user)  # deletes the failed record and enqueues the same id again
@@ -173,7 +199,7 @@ async def test_embed_stage_precomputes_vectors_and_hybrid_search_uses_them(
         )
     )
     await models.ensure_models(user)
-    for kind, name in await models._required(user):
+    for kind, name in await models.required(user):
         await wait_for(models._model_id(kind, name))
     assert {(m.kind, m.state) for m in await models.model_statuses()} == {
         ("embedding", "ready"),
@@ -249,7 +275,7 @@ async def test_models_are_idempotent_and_fail_fast_when_missing(dbos, monkeypatc
         await wait_for(models._model_id(ModelKind.RERANKER, "nope/x"))
     (status,) = await models.model_statuses()
     assert (status.kind, status.state) == ("reranker", "error") and status.error
-    with pytest.raises(NotReady, match="failed to load"):
+    with pytest.raises(Unavailable, match="failed to load"):
         await models.require_ready(ModelKind.RERANKER, "nope/x")
 
 
@@ -328,7 +354,7 @@ async def test_required_models_follow_the_settings(
 
     monkeypatch.setattr(models, "_collection_rerankers", overrides)
 
-    assert await models._required(user) == expected, name
+    assert await models.required(user) == expected, name
 
 
 async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> None:
@@ -376,7 +402,7 @@ async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> N
 
     await models.ensure_models(user)
     await await_terminal(
-        [models._model_id(kind, name) for kind, name in await models._required(user)]
+        [models._model_id(kind, name) for kind, name in await models.required(user)]
     )
 
     downloads = (await operations.list_operations("download")).items

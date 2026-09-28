@@ -136,7 +136,8 @@ it later means running *Index all* in each one.
   `haskie run --port <n>` and `haskie install claude --url http://127.0.0.1:<n>/mcp`, or set
   `HASKIE_PORT`, which moves the default of `run`, `ensure` and `install claude` at once.
 - **Other commands:** `haskie stop` stops the server. `haskie destroy` deletes `~/.haskie` after
-  showing what would be lost. `--home` or `HASKIE_HOME` keeps the data elsewhere.
+  showing what would be lost, and refuses while a server is running for it. `--home` or
+  `HASKIE_HOME` keeps the data elsewhere.
 
 ## From files to answers
 
@@ -165,7 +166,8 @@ chunks over time. **Settings** describes every default.
 | SessionStart hook | `~/.claude/settings.json` | runs `haskie ensure`: starts the server if it is down, and passes the session id so Sessions can record it |
 
 Run it again after adding a collection, to refresh the names. `--scope project` installs into
-`./.claude` of the directory you run it from. The hook does not wait for the server, so a session
+`./.claude` of the directory you run it from. With `CLAUDE_CONFIG_DIR` set, the user scope
+installs there instead of `~/.claude`, as Claude Code reads it. The hook does not wait for the server, so a session
 that starts while nothing is serving, such as the first after a reboot, has no haskie tools. Keep
 `haskie run` open if that session matters.
 

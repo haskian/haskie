@@ -34,13 +34,17 @@ from conftest import (
     MD,
     WAIT,
     WAITING_STATUS,
+    Gate,
     attach_document,
     audit_lines,
     await_terminal,
+    batch_of,
     collection_hits,
+    compact_model,
     counted_list_workflows,
     delete_collection,
     delete_document,
+    doc_of,
     document_names,
     events,
     forget_settings,
@@ -59,20 +63,30 @@ from dbos._error import DBOSAwaitedWorkflowCancelledError
 from dbos._registrations import get_dbos_func_name
 from sqlalchemy import func, insert, select, update
 
-from haskie import audit, cpu, db, home, paging, settings, shutdown
+from haskie import audit, db, home, paging, settings, shutdown
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection
+from haskie.collection.index import CollectionIndex
 from haskie.document import convert, document
-from haskie.document.document import Document, DocumentStatus
+from haskie.document.document import DocumentStatus
 from haskie.errors import (
     Conflict,
     InvalidInput,
     NotFound,
     PermanentError,
 )
-from haskie.indexing import chunk, dbos_names, embed_cache, models, operations, pipeline, workflows
+from haskie.indexing import (
+    chunk,
+    dbos_names,
+    embed,
+    embed_cache,
+    models,
+    operations,
+    pipeline,
+    workflows,
+)
 from haskie.indexing.pipeline import Batch
 from haskie.indexing.workflows import Stage
 from haskie.paging import Order
@@ -105,11 +119,6 @@ async def _add_member(collection: Collection, doc: str) -> None:
                 collection=collection.name, document=doc, added_at=now, updated_at=now
             )
         )
-
-
-def _embed_id(workflow_id: str, doc: str) -> str:
-    """The `emb:` child one `imp:` or `idx-col:` workflow asks for (see `_ensure_embedding`)."""
-    return f"{workflows.EMBED_PREFIX}:{doc}:{workflows.run_id(workflow_id)}"
 
 
 async def _steps(workflow_id: str) -> list[str]:
@@ -238,67 +247,6 @@ async def _rows_of(collection: Collection, doc: str) -> int:
     return 0 if table is None else await table.count_rows(f"document = '{doc}'")
 
 
-def _batch_of(args: tuple) -> Batch | None:
-    """The micro-batch one pipeline call was given. The three stage steps take it in three
-    different positions (`convert_batch`, `embed_batch`, `index_batch`), so it is found by type
-    rather than by index: one wrapper then fits all three."""
-    for value in args:
-        if isinstance(value, Batch):
-            return value
-    return None
-
-
-def _doc_of(args: tuple) -> str:
-    """The document one pipeline call was given, by the same reasoning as `_batch_of`."""
-    for value in args:
-        if isinstance(value, Document):
-            return value.name
-    return ""
-
-
-class Gate:
-    """A pipeline step the test can hold open: `entered` fires on the first blocked call, and that
-    call returns only once `release` is set."""
-
-    def __init__(
-        self, seq: int | None = None, doc: str | None = None, *, holds_cpu: bool = False
-    ) -> None:
-        self.entered = threading.Event()
-        self.release = threading.Event()
-        self.calls: list[int] = []
-        self.seq = seq  # block only this batch; None = every batch
-        self.doc = doc  # block only this document; None = every document
-        self.holds_cpu = holds_cpu  # hold one slot of the CPU budget while blocked (see `wrap`)
-
-    def _blocks(self, doc: str, batch: Batch | None) -> bool:
-        by_seq = self.seq is None or (batch is not None and batch.seq == self.seq)
-        return by_seq and (self.doc is None or doc == self.doc)
-
-    def wrap(self, real):
-        async def blocking(*args):
-            batch = _batch_of(args)
-            self.calls.append(-1 if batch is None else batch.seq)
-            if self._blocks(_doc_of(args), batch):
-                if self.holds_cpu:
-                    await cpu.on_cpu(self._hold)
-                else:
-                    self.entered.set()
-                    assert await wait_event(self.release), "the test never released the step"
-            return await real(*args)
-
-        return blocking
-
-    def _hold(self) -> None:
-        """The same wait, taken inside `cpu.on_cpu`, so it occupies one slot of the CPU budget for
-        as long as it lasts.
-
-        A step takes its slot inside `cpu.on_cpu`, around its CPU work alone, so a gate at the
-        step's entry holds no slot at all. A test about the budget rather than about a queue asks
-        for one. Sync, and run in the worker thread `cpu.on_cpu` gave it."""
-        self.entered.set()
-        assert self.release.wait(timeout=WAIT), "the test never released the step"
-
-
 class EmbedSpy:
     """Counts the embed work per cache id: one entry per micro-batch really chunked and embedded.
 
@@ -408,7 +356,7 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
         ("convert", 0, 0, 10, "SUCCESS"), ("convert", 1, 10, 20, "SUCCESS"),
         ("convert", 2, 20, 25, "SUCCESS"),
     ]  # fmt: skip
-    embedding = _embed_id(first, pdf.name)
+    embedding = workflows.embed_id(first, pdf.name)
     assert [(t.stage, t.seq, t.status) for t in await operations.list_tasks(embedding)] == [
         ("embed", 0, "SUCCESS"), ("embed", 1, "SUCCESS"), ("embed", 2, "SUCCESS"),
     ]  # fmt: skip
@@ -479,7 +427,7 @@ async def test_workflow_ids_name_their_kind_and_their_names(dbos, tmp_path: Path
     assert await wait_for(index_id) == "indexed"
 
     assert sorted(await _workflow_ids(dbos_names.EMBED_WORKFLOW)) == sorted(
-        {_embed_id(import_id, doc.name), _embed_id(index_id, doc.name)}
+        {workflows.embed_id(import_id, doc.name), workflows.embed_id(index_id, doc.name)}
     ), "each parent derives its embedding child's id from its own run"
     delete_id = await dbos.start_delete_document(doc.name)
     assert delete_id.startswith(f"{workflows.DELETE_DOCUMENT_PREFIX}:a.md:"), delete_id
@@ -616,7 +564,7 @@ class Overlap:
         return await self._count(self.real, *args)
 
     async def _count(self, real, *args):
-        batch = _batch_of(args)
+        batch = batch_of(args)
         with self.lock:
             self.active += 1
             self.peak = max(self.peak, self.active)
@@ -879,7 +827,7 @@ async def test_one_document_creates_a_bounded_number_of_workflows(dbos, tmp_path
         return Counter(s.name for s in listed)
 
     assert await named(import_id) == {dbos_names.IMPORT_WORKFLOW: 1, dbos_names.STAGE_WORKFLOW: 3}
-    embedding = _embed_id(import_id, doc.name)
+    embedding = workflows.embed_id(import_id, doc.name)
     assert await named(embedding) == {dbos_names.EMBED_WORKFLOW: 1, dbos_names.STAGE_WORKFLOW: 3}
     assert await named(index_id) == {
         dbos_names.COLLECTION_DOCUMENT_WORKFLOW: 1,
@@ -1011,7 +959,7 @@ async def test_reindexing_with_unchanged_settings_hits_the_cache(
     assert await wait_for(job_id) == "indexed"
 
     assert sum(spy.calls.values()) == computed == 1, "the embed work did not run again"
-    embedding = _embed_id(job_id, doc.name)
+    embedding = workflows.embed_id(job_id, doc.name)
     steps = await _steps(embedding)
     assert "cache_lookup" in steps, f"the run never looked the cache up: {steps}"
     assert "plan" not in steps and "finalize_embed" not in steps, "it returned on the hit"
@@ -1046,18 +994,78 @@ async def test_concurrent_attaches_converge_on_one_embedding_run(
     gate.release.set()
 
     assert [await wait_for(first), await wait_for(second)] == ["indexed", "indexed"]
-    shared = _embed_id(first, doc.name)
+    shared = workflows.embed_id(first, doc.name)
     ids = sorted(await _workflow_ids(dbos_names.EMBED_WORKFLOW))
-    assert ids == sorted({_embed_id(await _import_id(doc.name), doc.name), shared}), (
+    assert ids == sorted({workflows.embed_id(await _import_id(doc.name), doc.name), shared}), (
         "the import's pre-warm and one shared run, not one run per collection"
     )
-    assert _embed_id(second, doc.name) not in ids, "the second enqueue returned the first run"
+    assert workflows.embed_id(second, doc.name) not in ids, (
+        "the second enqueue returned the first run"
+    )
     assert gate.calls == [0], "and the embed step ran exactly once"
     assert {e.chunk_size for e in await embed_cache.entries(doc.name)} == {
         (await load_user_settings()).conversion.chunk_size,
         60,
     }
     await _drain()
+
+
+@pytest.mark.parametrize(
+    ("cancel", "owner_error", "owner_member"),
+    [
+        # the owner's cancel cascades into the run it started: the waiter did not ask for it
+        ("detach the owner", DBOSAwaitedWorkflowCancelledError, None),
+        # someone cancelled the run itself: the owner's own run is gone, and it fails
+        ("cancel the run", workflows.PipelineError, "error"),
+    ],
+)
+async def test_a_waiter_outlives_the_cancel_of_the_embedding_run_it_shares(
+    dbos,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel: str,
+    owner_error: type[Exception],
+    owner_member: str | None,
+) -> None:
+    """The second collection waits on the first one's `emb:` run (deduplicated by the cache id),
+    but the run is the first one's child. When that run is cancelled, the waiter asks again under
+    its own id instead of failing an index nobody cancelled."""
+    await _use(dbos, workers=4, batch_pages=1)
+    for name in ("one", "two"):
+        await (await Collection.create(name)).set_overrides(CollectionOverrides(chunk_size=60))
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    gate = Gate()
+    monkeypatch.setattr(pipeline, "embed_batch", gate.wrap(pipeline.embed_batch))
+    first = await dbos.attach("one", doc.name)
+    assert await wait_event(gate.entered), "the first attach never reached the embed step"
+    second = await dbos.attach("two", doc.name)
+
+    async def asked() -> bool:
+        return dbos_names.EMBED_WORKFLOW in await _steps(second)
+
+    await until(asked, "the second attach never asked for the embedding")
+    shared = workflows.embed_id(first, doc.name)
+    if cancel == "detach the owner":
+        await dbos.detach("one", doc.name)
+    else:
+        await workflows.cancel_operation(shared)
+    gate.release.set()
+
+    assert await wait_for(second) == "indexed", "the waiter indexed with a run of its own"
+    with pytest.raises(owner_error):
+        await wait_for(first)
+    await _drain()
+    assert await _statuses([shared, workflows.embed_id(second, doc.name)]) == [
+        "CANCELLED",
+        "SUCCESS",
+    ]
+    assert gate.calls == [0, 0], "the cancelled run's one batch, then the waiter's own"
+    assert (await Collection("two").member(doc.name)).status == "indexed"
+    assert (await collection_hits("two", "lancedb"))[0].document == doc.name
+    if owner_member is None:
+        assert await Collection("one").member_names() == [], "the detach took the membership"
+    else:
+        assert (await Collection("one").member(doc.name)).status == owner_member
 
 
 async def _import_id(doc: str) -> str:
@@ -1101,7 +1109,7 @@ async def test_reimport_reconverts_and_drops_the_stale_cache(dbos, tmp_path: Pat
 async def test_ensure_embedding_fails_permanently_under_another_model(dbos, tmp_path: Path) -> None:
     """The cache id names the model the rows were computed with, so a run whose params no longer
     match the installed profile cannot produce them: it fails at once instead of writing rows
-    under the wrong id, and the parent asks again under the new model."""
+    under the wrong id. The parent fails with it, and a reindex asks again under the new model."""
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     row = await document.get(doc.name)
     wanted = embed_cache.params(
@@ -1121,6 +1129,127 @@ async def test_ensure_embedding_fails_permanently_under_another_model(dbos, tmp_
         await handle.get_result(polling_interval_sec=workflows.TASK_POLL)
     assert await embed_cache.lookup(wanted) is None, "nothing was written under the wrong model"
     assert "plan" not in await _steps(handle.workflow_id), "it never reached the embed stage"
+
+
+async def _fake_compact_model(monkeypatch: pytest.MonkeyPatch, load_model) -> str:
+    """Fake the compact model's download (`load_model`) and its vectors, so the test fetches
+    nothing, and let a run wait 20 ms between two asks. Returns the download's workflow id."""
+    monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(models, "load_model", load_model)
+    monkeypatch.setattr(embed, "embed_texts", lambda m, texts: [[0.5] * m.dims for _ in texts])
+    return models._model_id(models.ModelKind.EMBEDDING, (await compact_model()).name)
+
+
+def _record_embeds(monkeypatch: pytest.MonkeyPatch, before=lambda calls: None) -> list[str]:
+    """The documents the embed step ran for, one entry per call. `before(calls)` runs ahead of
+    each call, with the number of calls so far, this one included."""
+    embedded: list[str] = []
+    real = pipeline.embed_batch
+
+    async def recorded(*args) -> int:
+        embedded.append(doc_of(args))
+        before(len(embedded))
+        return await real(*args)
+
+    monkeypatch.setattr(pipeline, "embed_batch", recorded)
+    return embedded
+
+
+async def test_an_import_waits_for_the_embedding_model_to_download(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first install or a model switch: a model still downloading is a normal state, not a
+    failure, so the embedding run sleeps durably before it cuts any slice."""
+    release = threading.Event()
+
+    async def load_model(kind: str, name: str) -> None:
+        assert await wait_event(release), "the test never finished the download"
+
+    await _fake_compact_model(monkeypatch, load_model)
+    embedded = _record_embeds(monkeypatch)
+    await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
+    doc = await import_row("a.md", MD, tmp_path)
+    job_id = await dbos.start_import(doc.name)
+    run = workflows.embed_id(job_id, doc.name)
+
+    async def waiting() -> bool:
+        return "DBOS.sleep" in await _steps(run)
+
+    await until(waiting, "the embedding run never waited for the download")
+    assert "plan" not in await _steps(run), "no slice was cut while the model downloads"
+    assert (await document.get(doc.name)).status == "embedding"
+    release.set()
+
+    assert await wait_for(job_id) == "imported"
+    steps = await _steps(run)
+    assert steps.index("plan") > steps.index("DBOS.sleep") > steps.index("embedding_ready")
+    assert embedded == [doc.name], "one batch, run once the model was there"
+    assert await embed_cache.entries(doc.name), "the embedding is cached"
+
+
+async def test_a_batch_waits_for_the_embedding_model_to_warm(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart resumes the batch before the boot warmed the model again: the batch sleeps
+    durably and runs again once the model is warm, rather than failing."""
+
+    async def load_model(kind: str, name: str) -> None:
+        pass
+
+    download = await _fake_compact_model(monkeypatch, load_model)
+
+    def restart_then_warm(calls: int) -> None:
+        if calls == 1:
+            models._ready.discard(download)  # what a restart does to the caches
+        elif calls == 2:
+            models._mark_ready(download)  # the boot's warm-up is done
+
+    embedded = _record_embeds(monkeypatch, restart_then_warm)
+    await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
+    await await_terminal([download])
+    doc = await import_row("a.md", MD, tmp_path)
+    job_id = await dbos.start_import(doc.name)
+    run = workflows.embed_id(job_id, doc.name)
+
+    assert await wait_for(job_id) == "imported"
+    assert "DBOS.sleep" not in await _steps(run), "the model was ready when the run asked"
+    assert await _steps(f"{run}:{Stage.EMBED}:0") == ["try_batch", "DBOS.sleep", "try_batch"]
+    assert embedded == [doc.name, doc.name], "the batch waited, then ran again"
+    assert await embed_cache.entries(doc.name), "the embedding is cached"
+
+
+async def test_an_import_whose_embedding_model_failed_ends_in_error(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a model still downloading or warming is waited for: a failed download ends the
+    import in `error`, as before, and at once: waiting or retrying would not change it."""
+
+    async def load_model(kind: str, name: str) -> None:
+        raise RuntimeError("no such model")
+
+    download = await _fake_compact_model(monkeypatch, load_model)
+    embedded = _record_embeds(monkeypatch)
+    await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
+    await await_terminal([download])
+    asked: list[str] = []
+    require_ready = models.require_ready
+
+    async def counted(kind: models.ModelKind, name: str) -> None:
+        asked.append(name)
+        await require_ready(kind, name)
+
+    monkeypatch.setattr(models, "require_ready", counted)
+    doc = await import_row("a.md", MD, tmp_path)
+    job_id = await dbos.start_import(doc.name)
+
+    with pytest.raises(workflows.PipelineError, match="failed to load: .*no such model"):
+        await wait_for(job_id)
+    assert (await document.get(doc.name)).status == "error"
+    assert len(asked) == 1, "a failed model is permanent: the step is not retried"
+    assert "plan" not in await _steps(workflows.embed_id(job_id, doc.name)), (
+        "it never reached embedding"
+    )
+    assert embedded == []
 
 
 # --- collection index maintenance --------------------------------------------------
@@ -1237,10 +1366,10 @@ async def test_maintenance_skips_a_collection_deleted_while_it_waited(dbos, tmp_
     """A run may sit in the queue while the collection is deleted, so it never asks for the
     collection before it has checked that there still is one."""
     await _use(dbos, workers=2, batch_pages=10, maintenance_idle_seconds=NEVER)
-    collection = await Collection.create("vanish")
+    await Collection.create("vanish")
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     await attach_document(dbos, "vanish", doc.name)
-    await collection.delete()
+    await delete_collection(dbos, "vanish")
 
     report = await wait_for(
         (await workflows.MAINTAIN.debounce_async("vanish", 0.0, "vanish")).workflow_id
@@ -1439,7 +1568,7 @@ async def test_adopt_orphans_resumes_only_stale_in_flight_workflows(
         s.workflow_id for s in await DBOS.list_workflows_async(status=["PENDING", "ENQUEUED"])
     }
     assert set(resumed) == in_flight and running in in_flight and finished not in in_flight
-    assert await dbos.adopt_orphans() == len(in_flight), "idempotent while they remain stale"
+    assert await dbos.adopt_orphans() == 0, "moved onto this build, so adopted once"
 
     gate.release.set()
     await wait_for(running)  # drain before teardown
@@ -1532,6 +1661,40 @@ async def test_cancel_operation_rejects_unknown_ids_and_leaves_finished_ones_alo
 
     assert (await Collection("done").member(doc.name)).status == "indexed"
     assert (await operations._pipeline_page("done")).items[0].status == "SUCCESS"
+
+
+@pytest.mark.parametrize("action", ["import", "index"])
+async def test_cancel_operation_after_the_run_finished_keeps_its_end_state(
+    dbos, tmp_path: Path, monkeypatch, action: str
+) -> None:
+    """The race: the cancel reads the operation while it still runs, the run then finishes, and
+    only then does the cancel write. DBOS keeps its SUCCESS, so the document (for an import) or
+    the membership (for an index) must keep the status the run ended on too."""
+    await Collection.create("race")
+    doc = await import_row("r.md", MD, tmp_path)
+    job_id = await dbos.start_import(doc.name)
+    assert await wait_for(job_id) == "imported"
+    if action == "index":
+        job_id = await dbos.attach("race", doc.name)
+        assert await wait_for(job_id) == "indexed"
+    read = workflows.DBOS.get_workflow_status_async
+
+    async def read_while_it_ran(workflow_id: str):
+        found = await read(workflow_id)
+        assert found is not None
+        found.status = "PENDING"  # what the cancel saw before the run finished
+        return found
+
+    monkeypatch.setattr(workflows.DBOS, "get_workflow_status_async", read_while_it_ran)
+
+    await workflows.cancel_operation(job_id)
+
+    assert (await document.get(doc.name)).status == "imported"
+    if action == "index":
+        assert (await Collection("race").member(doc.name)).status == "indexed"
+    monkeypatch.undo()
+    finished = await DBOS.get_workflow_status_async(job_id)
+    assert finished is not None and finished.status == "SUCCESS"
 
 
 async def test_delete_document_while_it_indexes_leaves_nothing_behind(
@@ -1629,6 +1792,34 @@ async def test_attaching_while_a_delete_runs_is_refused(dbos, tmp_path: Path, mo
     assert await document_names() == []
 
 
+async def test_rename_is_refused_while_a_document_delete_removes_a_member(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """A document delete queues its removal from each collection under that collection's name
+    (`del-doc:…:rm:{collection}`), which the rename's busy check does not match. The document reads
+    `deleting` until every removal ran, and its membership stays until its own removal ran, so
+    the rename refuses on that member instead; once the delete is done the name moves."""
+    await Collection.create("old")
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await attach_document(dbos, "old", doc.name)
+    gate = Gate()
+    monkeypatch.setattr(
+        CollectionIndex, "delete_document", gate.wrap(CollectionIndex.delete_document)
+    )
+    job_id = await dbos.start_delete_document(doc.name)
+    assert await wait_event(gate.entered), "the delete's removal from `old` never started"
+
+    with pytest.raises(Conflict, match="document a.md is being deleted"):
+        await dbos.rename_collection("old", "new")
+    assert await Collection.names() == ["old"], "a refused rename changes nothing"
+
+    gate.release.set()
+    await wait_for(job_id)
+    assert await document_names() == [], "the removal found the membership under the old name"
+    assert (await dbos.rename_collection("old", "new")).name == "new"
+    assert await Collection("new").member_names() == []
+
+
 async def test_detach_leaves_the_document_and_the_other_collection(dbos, tmp_path: Path) -> None:
     """A detach is one collection's business: its rows and its membership go, and the document,
     its cache and every other collection holding it are untouched."""
@@ -1639,7 +1830,7 @@ async def test_detach_leaves_the_document_and_the_other_collection(dbos, tmp_pat
         await attach_document(dbos, name, doc.name)
     (entry,) = await embed_cache.entries(doc.name)
 
-    await dbos.detach("drop", doc.name)
+    await wait_for(await dbos.detach("drop", doc.name))
 
     assert await Collection("drop").member_names() == []
     assert await collection_hits("drop", "lancedb") == []
@@ -1652,7 +1843,7 @@ async def test_detach_leaves_the_document_and_the_other_collection(dbos, tmp_pat
     assert doc.markdown.exists() and doc.parts_dir.exists()
 
 
-async def test_detach_waits_for_the_index_write_in_flight(
+async def test_the_removal_waits_for_the_index_write_in_flight(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:
     """F3: the detach cancels the member's index workflow, and that cancel rewrites the status row
@@ -1668,19 +1859,16 @@ async def test_detach_waits_for_the_index_write_in_flight(
     monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
     in_flight = await dbos.attach("part", slow.name)
     assert await wait_event(gate.entered)
-    order: list[str] = []
 
-    async def release_once_cancelled() -> None:
-        await until(_all_cancelled([in_flight]), "the detach never cancelled the index in flight")
-        order.append("released")
-        gate.release.set()
+    removal = await dbos.detach("part", slow.name)
+    await until(_all_cancelled([in_flight]), "the detach never cancelled the index in flight")
+    assert (await collection.member(slow.name)).status == "removing"
+    assert await _statuses([removal]) in (["ENQUEUED"], ["PENDING"]), (
+        "the removal waits for the write holding the lock"
+    )
+    gate.release.set()
 
-    async with anyio.create_task_group() as releasing:
-        releasing.start_soon(release_once_cancelled)
-        await dbos.detach("part", slow.name)
-        order.append("detached")
-
-    assert order == ["released", "detached"], "the detach waited for the write holding the lock"
+    await wait_for(removal)
     await await_terminal([in_flight])
     assert gate.calls == [0], "one batch wrote past the cancel; the next stopped at its step"
     assert await collection.member_names() == [done.name]
@@ -1693,6 +1881,119 @@ async def test_detach_waits_for_the_index_write_in_flight(
     with pytest.raises(NotFound, match="document not in collection part: slow.pdf"):
         await dbos.detach("part", slow.name)
     await _drain()
+
+
+DETACH_ANSWERS_WITHIN = 5.0  # the partition stays held until the test lets go: waiting on it hangs
+# one guard answers an attach and a re-index of a member being removed, with one message
+REMOVING_REFUSED = (
+    "document is being removed from collection busy; attach or index it again once it is gone: "
+    "done.md"
+)
+
+
+@pytest.mark.parametrize(
+    ("meanwhile", "members", "documents"),
+    [
+        # the removal waits for the partition, then takes the rows and the membership
+        ("nothing", ["slow.pdf"], ["done.md", "slow.pdf"]),
+        # a second detach queues a second removal, which finds nothing left to remove
+        ("detach again", ["slow.pdf"], ["done.md", "slow.pdf"]),
+        # an attach or a re-index would write rows the removal queued ahead then deletes
+        ("attach again", ["slow.pdf"], ["done.md", "slow.pdf"]),
+        ("re-index", ["slow.pdf"], ["done.md", "slow.pdf"]),
+        # the delete snapshots the removing membership and queues its own removal behind this one
+        ("delete the document", ["slow.pdf"], ["slow.pdf"]),
+        # the membership cascades with the collection row; the removal then finds nothing
+        ("delete the collection", [], ["done.md", "slow.pdf"]),
+    ],
+)
+async def test_detach_answers_while_the_partition_is_held(
+    dbos,
+    tmp_path: Path,
+    monkeypatch,
+    meanwhile: str,
+    members: list[str],
+    documents: list[str],
+) -> None:
+    """The removal runs on the collection's partition, one writer at a time, so waiting for it
+    would hold the request for as long as the write ahead of it. The detach answers once the
+    removal is queued, and the membership reads `removing` - an active state, which a poll keeps
+    following - until the removal ran."""
+    await _use(dbos, workers=4, batch_pages=1, index_group_parts=1)
+    collection = await Collection.create("busy")
+    done = await import_document(dbos, "done.md", MD, tmp_path)
+    await attach_document(dbos, "busy", done.name)
+    slow = await import_document(dbos, "slow.pdf", text_pdf(["alpha", "beta"]), tmp_path)
+    gate = Gate()
+    monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
+    writing = await dbos.attach("busy", slow.name)
+    assert await wait_event(gate.entered), "the other member never took the partition"
+    indexes = await _member_workflows("busy")
+
+    try:
+        with anyio.fail_after(DETACH_ANSWERS_WITHIN):
+            removals = [await dbos.detach("busy", done.name)]
+        member = await collection.member(done.name)
+        assert (member.status, member.error) == ("removing", None)
+        counts = await collection.counts()
+        assert (counts.active, counts.indexed) == (2, 0), "the removal and the write in flight"
+        assert await _rows_of(collection, done.name) > 0, "the rows wait for the partition"
+        jobs: list[str] = []
+        if meanwhile == "detach again":
+            removals.append(await dbos.detach("busy", done.name))
+        elif meanwhile == "attach again":
+            with pytest.raises(Conflict, match=REMOVING_REFUSED):
+                await dbos.attach("busy", done.name)
+        elif meanwhile == "re-index":
+            with pytest.raises(Conflict, match=REMOVING_REFUSED):
+                await dbos.start_index_collection_document("busy", done.name)
+        elif meanwhile == "delete the document":
+            jobs.append(await dbos.start_delete_document(done.name))
+        elif meanwhile == "delete the collection":
+            jobs.append(await dbos.start_delete_collection("busy"))
+        assert (await collection.member(done.name)).status == "removing", "still queued"
+    finally:
+        gate.release.set()
+
+    for job in [*removals, *jobs]:
+        await wait_for(job)
+    await await_terminal([writing])
+    await _drain()
+    assert await collection.member_names() == members
+    assert sorted(await document_names()) == documents
+    assert await _rows_of(collection, done.name) == 0, "the rows went with the membership"
+    assert await _member_workflows("busy") == indexes, "nothing indexed the removing member"
+    assert collection.root.exists() == (meanwhile != "delete the collection"), (
+        "a removal that ran after the delete put no folder back"
+    )
+
+
+async def test_a_failed_removal_leaves_the_member_in_error(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """The detach answered before its removal ran, so a removal that fails has only the member
+    listing to say so: the membership moves from `removing` to `error`, not stays active for ever,
+    and detaching again retries it."""
+    collection = await Collection.create("flaky")
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await attach_document(dbos, "flaky", doc.name)
+
+    async def disk_gone(self, name: str) -> None:
+        raise OSError("disk gone")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(CollectionIndex, "delete_document", disk_gone)
+        with pytest.raises(workflows.PipelineError, match="OSError: disk gone"):
+            await wait_for(await dbos.detach("flaky", doc.name))
+
+    member = await collection.member(doc.name)
+    assert (member.status, member.error) == ("error", "removal failed: OSError: disk gone")
+    assert (await collection.counts()).active == 0, "a poll stops"
+    assert await _rows_of(collection, doc.name) > 0, "nothing was removed"
+
+    await wait_for(await dbos.detach("flaky", doc.name))
+    assert await collection.member_names() == []
+    assert await _rows_of(collection, doc.name) == 0
 
 
 async def test_detach_rejects_an_unknown_membership(dbos, tmp_path: Path) -> None:
@@ -2170,7 +2471,9 @@ async def test_list_tasks_reports_stage_slices_still_waiting(
     gate.release.set()
     assert await wait_for(job_id) == "imported"
     assert {t.status for t in await operations.list_tasks(job_id)} == {"SUCCESS"}
-    assert len(await operations.list_tasks(_embed_id(job_id, doc.name))) == 3, "the embed job's own"
+    assert len(await operations.list_tasks(workflows.embed_id(job_id, doc.name))) == 3, (
+        "the embed job's own"
+    )
 
 
 async def test_list_tasks_merges_the_slices_of_a_stage(dbos, tmp_path: Path, monkeypatch) -> None:
@@ -2266,6 +2569,46 @@ async def test_a_document_delete_is_listed_as_a_collection_operation_with_no_col
     assert filtered.items == [], (
         "a collection filter keeps one collection's operations, and this one has none"
     )
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        ("index all", {"bulk": "index_collection", "done": 1, "total": 1}),
+        # no page queued yet, so no progress event to read
+        ("index all, before its first page", {"bulk": "index_collection"}),
+        ("delete collection", {"bulk": "delete_collection"}),
+        ("delete document", {"bulk": "delete_document"}),
+    ],
+)
+async def test_a_collection_operation_names_which_of_the_three_it_is(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, expected: dict
+) -> None:
+    """The three whole-thing workflows share the `collection` kind, so `detail.bulk` is what the
+    Operations view tells an index from a delete by: its tag and its bar follow it."""
+    await Collection.create("shelf")
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await attach_document(dbos, "shelf", doc.name)
+    counting = Gate()
+    monkeypatch.setattr(workflows, "count_members", counting.wrap(workflows.count_members))
+    if operation.startswith("index all"):
+        operation_id = await dbos.start_index_collection("shelf")
+    elif operation == "delete collection":
+        operation_id = await dbos.start_delete_collection("shelf")
+    else:
+        operation_id = await dbos.start_delete_document(doc.name)
+    if operation == "index all, before its first page":
+        assert await wait_event(counting.entered), "the bulk index never started"
+    else:
+        counting.release.set()
+        await wait_for(operation_id)
+
+    (row,) = (await operations.list_operations("collection", page_size=10)).items
+
+    assert (row.id, row.detail) == (operation_id, expected)
+    counting.release.set()
+    await await_terminal([operation_id])
+    await _drain()
 
 
 def test_the_names_the_operations_view_spells_out_are_the_ones_dbos_records() -> None:

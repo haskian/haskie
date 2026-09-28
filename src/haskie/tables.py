@@ -1,7 +1,8 @@
-"""Every table of ~/.haskie/haskie.db as SQLAlchemy Core: the one source of the schema.
+"""Every table haskie owns in ~/.haskie/haskie.db as SQLAlchemy Core: the one source of the schema.
 
 `db.migrate` generates the DDL from `metadata`, and every query is a Core statement over these
-tables, so a column is named once. Changing a table means bumping `db.SCHEMA_VERSION`.
+tables, so a column is named once. Changing a table means bumping `db.SCHEMA_VERSION`. DBOS keeps
+its workflow tables in the same file and owns their schema; `sysdb.py` declares the ones it reads.
 
 SQLite has no date type: a `Float` timestamp holds the unix seconds `time.time()` returns. Flags
 stay `Integer` (0 or 1), the way sqlite stores them anyway.
@@ -187,7 +188,8 @@ search_questions = Table(
     # reranker's best scores before its floor, each float32 and best first (`log.PROFILE`)
     Column("similarities", LargeBinary),
     Column("rerank_scores", LargeBinary),
-    Column("uncovered", Integer, nullable=False, server_default=ZERO),  # no excerpt answers it
+    # several were asked, and no excerpt answers this one
+    Column("uncovered", Integer, nullable=False, server_default=ZERO),
     Column("review", Text, CheckConstraint("review in ('dismissed', 'resolved')")),
     # the agent's own verdict on what the search gave it (`gaps.report`), and what it lacked
     Column("agent_verdict", Text, CheckConstraint("agent_verdict in ('insufficient', 'partial')")),

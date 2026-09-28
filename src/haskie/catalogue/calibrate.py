@@ -34,9 +34,10 @@ from haskie import db
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import RerankerCalibration
 from haskie.collection.index import FTS_COLUMN, cross_encode, row_score
+from haskie.indexing import models
 from haskie.indexing.chunk import framed
 from haskie.search import flow, log, retrieval
-from haskie.settings import Reranker, SearchSettings
+from haskie.settings import Reranker, SearchSettings, load_user_settings
 from haskie.tables import reranker_calibration
 
 QUESTIONS = 40  # Cohere asks for 30 to 50 representative queries
@@ -92,6 +93,8 @@ def write_jsonl(path: Path, items: Sequence[msgspec.Struct], *, replace: bool = 
 
 
 async def _sample(out: Path) -> int:
+    # a search checks its models are loaded in this process, and no server runs here to load them
+    await models.load_here(await models.required(await load_user_settings()))
     names = await retrieval.scope(None, None)
     lines = []
     for query in await log.recent_questions(QUESTIONS):
@@ -108,6 +111,7 @@ async def _scores(model: str, pairs: list[tuple[str, str]]) -> list[float]:
     """Each pair's reranker score, as a search scores it (`cross_encode`): one pass a question,
     over its texts."""
     settings = SearchSettings(reranker=Reranker.CROSS_ENCODER, reranker_model=model)
+    await models.load_here([(models.ModelKind.RERANKER, model)])  # as `_sample` does
     by_query: dict[str, list[int]] = {}
     for at, (query, _) in enumerate(pairs):
         by_query.setdefault(query, []).append(at)
@@ -124,6 +128,8 @@ async def _measure(
     models: list[str], pairs: list[tuple[str, str]], spread: list[tuple[str, str]], write: bool
 ) -> list[tuple[str, RerankerCalibration, float]]:
     """Each model's calibration, and the seconds it took; stored in this home when `write`."""
+    if not pairs:  # checked first: the candidates take far longer to score than this to read
+        raise typer.BadParameter("no borderline pairs to set a floor from")
     known = await catalogue.rerankers()
     source = f"calibrated {date.today().isoformat()} on {len(pairs)} borderline pairs"
     found = []

@@ -31,7 +31,7 @@ from dbos import WorkflowStatus as DbosWorkflowStatus
 
 from haskie import cpu
 from haskie.catalogue import catalogue
-from haskie.errors import HaskieError, NotReady
+from haskie.errors import HaskieError, NotReady, Unavailable
 from haskie.indexing import embed, hardware
 from haskie.indexing.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, RunStatus, root_cause
 from haskie.indexing.hardware import Device
@@ -53,6 +53,11 @@ _warm_lock = threading.Lock()
 # Strong references to the warm tasks in flight: an event loop keeps only a weak one, so a task
 # nobody holds may be collected mid-load. Each discards itself when it finishes.
 _warm_tasks: set[asyncio.Task[None]] = set()
+
+
+class ModelLoading(NotReady):
+    """Not ready, but on its way: asked for, downloading or warming up. A caller that can wait
+    waits it out; a failed model raises `Unavailable` instead, which waiting would not change."""
 
 
 class ModelKind(StrEnum):
@@ -92,6 +97,15 @@ async def warm_model(kind: ModelKind, name: str) -> None:
     await cpu.on_cpu(warm, name, accelerator)
 
 
+async def load_here(models: list[tuple[ModelKind, str]]) -> None:
+    """Load models in this process and mark them ready, with no DBOS: for a command-line tool that
+    searches or scores with the app's own code but runs no server (`catalogue.calibrate`), where
+    no download workflow will ever mark them. A cold disk cache downloads here."""
+    for kind, name in models:
+        await warm_model(kind, name)
+        _mark_ready(_model_id(kind, name))
+
+
 @DBOS.step(
     retries_allowed=True,
     max_attempts=5,
@@ -114,7 +128,7 @@ async def ensure_model(kind: ModelKind, name: str) -> ModelState:
     return ModelState.READY
 
 
-async def _required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
+async def required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
     """Every model this installation needs, in a stable order and without duplicates.
 
     A collection may override the reranker model, and a search of that collection then loads it,
@@ -172,7 +186,7 @@ async def ensure_models(settings: UserSettings) -> list[ModelStatus]:
 
     One query for every record, not one per model: the same read decides what to enqueue and
     answers the statuses this returns."""
-    wanted = await _required(settings)
+    wanted = await required(settings)
     records = await _download_records(wanted)
     for kind, name in wanted:
         workflow_id = _model_id(kind, name)
@@ -268,7 +282,7 @@ async def model_statuses() -> list[ModelStatus]:
     """One status per required model. `ensure_models` builds the same list off the records it
     just read, rather than reading them again."""
     settings = await load_user_settings()
-    wanted = await _required(settings)
+    wanted = await required(settings)
     return _statuses(wanted, await _download_records(wanted), settings)
 
 
@@ -298,14 +312,14 @@ async def require_ready(kind: ModelKind, name: str) -> None:
     found = await DBOS.list_workflows_async(workflow_ids=[workflow_id])
     status = _model_status(kind, name, found[0] if found else None)
     if status.state == ModelState.ERROR:
-        raise NotReady(f"{kind} model {name} failed to load: {status.error}")
+        raise Unavailable(f"{kind} model {name} failed to load: {status.error}")
     if status.state == ModelState.PENDING:
-        raise NotReady(f"{kind} model {name} is not loaded yet; check /api/status")
+        raise ModelLoading(f"{kind} model {name} is not loaded yet; check /api/status")
     if (
         found and found[0].status == RunStatus.SUCCESS
     ):  # downloaded, warming up (see `_model_status`)
-        raise NotReady(f"{kind} model {name} is loading in this process; retry in a moment")
-    raise NotReady(
+        raise ModelLoading(f"{kind} model {name} is loading in this process; retry in a moment")
+    raise ModelLoading(
         f"{kind} model {name} is downloading (operation {workflow_id}); "
         "check /api/operations?kind=download"
     )

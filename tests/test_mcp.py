@@ -8,14 +8,18 @@ them.
 """
 
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 from conftest import NO_MODELS, attach_via_api, stage_and_import, wait_for, wait_import
 from litestar.testing import AsyncTestClient
 
 from haskie.app import MCP_PATH
+from haskie.collection.collection import Collection
+from haskie.document import document
 
 pytestmark = pytest.mark.anyio
 
@@ -107,6 +111,10 @@ async def test_the_tools_an_agent_is_offered(client: AsyncTestClient) -> None:
     for name, one in tools.items():
         assert len(one["description"]) > 40, f"{name}: an agent chooses a tool by its description"
         assert one["inputSchema"]["type"] == "object", name
+        for argument, schema in one["inputSchema"]["properties"].items():
+            # litestar-mcp types an enum as a bare object, so its values ride in the description
+            if "<enum" in json.dumps(schema):
+                assert schema.get("description", "").startswith("One of: "), (name, argument)
     search = tools["search_excerpts"]["inputSchema"]
     assert search["properties"]["q"] == {"type": "array", "items": {"type": "string"}}
     assert search["required"] == ["q"]
@@ -265,8 +273,25 @@ async def test_every_read_tool_answers(
             "document not found",
         ),
         ("a file that does not exist", "add_document", {"path": "/nowhere/at/all.md"}, "all.md"),
-        ("a log reaching back past a year", "list_searches", {"days": 367}, "days must be 1..366"),
+        (
+            "a log reaching back past a year",
+            "list_searches",
+            {"days": 367},
+            "days=367: Expected `int` <= 366",
+        ),
         ("more searches than a page holds", "list_searches", {"limit": 201}, "limit"),
+        (
+            "an empty session id",
+            "search_excerpts",
+            {"q": [BY_RETRY], "session_id": ""},
+            "session_id=: Expected `str` of length >= 1",
+        ),
+        (
+            "a session id past the cap, before the change it would record",
+            "describe_document",
+            {"document": "retries.md", "description": "changed", "session_id": "s" * 129},
+            "Expected `str` of length <= 128",
+        ),
         ("a review nobody can decide", "review_gaps", {"ids": [1], "review": "maybe"}, "review"),
         ("too many gaps to replay at once", "replay_gaps", {"ids": list(range(51))}, "at most 50"),
     ],
@@ -383,3 +408,54 @@ async def test_a_web_only_route_is_not_a_tool(library: AsyncTestClient) -> None:
             library, "tools/call", {"name": name, "arguments": {"q": "x"}}, status=400
         )
         assert reply["error"]["message"] == f"Tool not found: {name}", reply
+
+
+@pytest.mark.parametrize(
+    ("name", "tool", "arguments", "expected"),
+    [
+        (
+            "a collection tool binds the collection",
+            "get_collection",
+            {"collection": "notes"},
+            {"collection": "notes"},
+        ),
+        (
+            "a document tool binds the document alone",
+            "get_document",
+            {"document": "retries.md"},
+            {"document": "retries.md"},
+        ),
+        ("a tool with neither binds neither", "list_collections", {}, {}),
+    ],
+)
+async def test_a_tool_call_logs_the_names_it_is_routed_by(
+    library: AsyncTestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    tool: str,
+    arguments: dict,
+    expected: dict,
+) -> None:
+    """The app's request hook ran for the outer `/mcp` request only, which has no path
+    parameters; the log lines a tool writes still carry the names its route is keyed by."""
+    seen: list[dict[str, Any]] = []
+
+    def seeing[**P, R](real: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+        """`real`, noting the log context of the handler that called it."""
+
+        async def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+            seen.append(dict(structlog.contextvars.get_contextvars()))
+            return await real(*args, **kwargs)
+
+        return wrapped
+
+    # what each of the three handlers reads first
+    monkeypatch.setattr(Collection, "get", staticmethod(seeing(Collection.get)))
+    monkeypatch.setattr(Collection, "page", staticmethod(seeing(Collection.page)))
+    monkeypatch.setattr(document, "get", seeing(document.get))
+
+    error, found = await _call(library, tool, arguments)
+
+    assert not error, found
+    (context,) = seen
+    assert {k: context[k] for k in ("collection", "document") if k in context} == expected, name

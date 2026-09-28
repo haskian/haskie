@@ -35,9 +35,12 @@ computes the cache id from its own chunk settings and reads that entry.
 ## A document's life
 
 An upload from the UI lands in `staging/` first, as a file and a `staging` row, with no document
-yet. The import then fixes the name, creates the document and moves the file into its folder. An
-agent's `add_document` imports a local path directly and copies the file. The nightly run (at
-03:17, if haskie is running then) sweeps uploads older than a day.
+yet. The import then fixes the name, creates the document and moves the file into its folder. A
+name is taken ignoring case: the folder is named after it, and on a case-insensitive disk
+`Notes.md` and `notes.md` would be one folder. An agent's `add_document` imports a local path directly and copies the file. When it refuses the
+path, the error names the file alone. The audit trail copies that error, and it never records the
+folder an import came from. The nightly run (at 03:17, if haskie is running then) sweeps uploads
+older than a day.
 
 ```mermaid
 stateDiagram-v2
@@ -63,8 +66,9 @@ stateDiagram-v2
 ```
 
 Any failure lands in `error`: a parser error, an OCR policy failure, or retries run out. A
-re-import runs from `queued`, `error` or `cancelled`. A delete is accepted in any state. The
-original suffix is kept in the name, because it decides the route:
+re-import runs from `queued`, `error` or `cancelled`, with the `parser` and `skip_ocr_pages` the
+document was imported with: to change either, delete it and import it again. A delete is accepted
+in any state. The original suffix is kept in the name, because it decides the route:
 
 - PDFs convert page by page with pdf-inspector.
 - Text and HTML files are read as they are.
@@ -103,13 +107,23 @@ stateDiagram-v2
     indexed --> indexing: re-index or Index all
     error --> indexing: re-index or Index all
     cancelled --> indexing: re-index or Index all
-    pending --> [*]: detach
-    indexed --> [*]: detach
-    error --> [*]: detach
-    cancelled --> [*]: detach
+    pending --> removing: detach
+    indexing --> removing: detach
+    indexed --> removing: detach
+    error --> removing: detach
+    cancelled --> removing: detach
+    removing --> [*]: rows and membership removed
+    removing --> error: the removal failed
 ```
 
-Detaching deletes the document's rows from that collection's table. Deleting a collection deletes
+Detaching deletes the document's rows from that collection's table. The request marks the
+membership `removing`, cancels its index and queues the removal on the collection's single writer.
+It answers at once: a compaction or another document's write may hold that writer for minutes.
+`removing` counts as active, so the UI keeps polling until the membership is gone. Until then, the
+old rows stay in the table, but a search leaves them out. The same holds for a document being
+deleted, in every collection. An attach or a re-index of that document is refused
+meanwhile, and its index can no longer change the status. A removal that fails leaves the
+membership in `error` with the reason, and detaching again retries it. Deleting a collection deletes
 its table and memberships, and keeps every document. Deleting a document detaches it from every
 collection first, then drops its folder and row. Memberships also go when their collection or
 document is deleted.
@@ -117,7 +131,9 @@ document is deleted.
 Renaming a collection moves its row, its memberships, every session that chose it and its folder
 in one transaction. The index table holds no collection name, so it moves as it is. A rename is
 refused while any work of the collection runs: an index write or a maintenance run still holds
-the old name, and would put the old folder back.
+the old name, and would put the old folder back. A delete moves the folder aside before it
+frees the name, so a create or a rename may take the name at once: the delete removes only the
+folder it moved.
 
 ## The embedding cache
 

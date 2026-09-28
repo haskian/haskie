@@ -16,6 +16,7 @@ answer (`Answer.missing_terms`): the agent learns what its sources did not say. 
 """
 
 from collections.abc import Iterable
+from functools import lru_cache
 
 import msgspec
 import snowballstemmer
@@ -37,8 +38,12 @@ class Question(msgspec.Struct, frozen=True):
 
 
 _ENGLISH = snowballstemmer.stemmer("english")
+# Distinct words kept stemmed: more than the whole vocabulary of a large English corpus, so the
+# words of every search stay in it, and a bound on the memory a stream of odd tokens can take.
+STEM_CACHE = 2**15
 
 
+@lru_cache(maxsize=STEM_CACHE)
 def stem(word: str) -> str:
     """A word's stem, by the Snowball English stemmer, the one LanceDB's full-text index uses:
     "deployment" and "deploy" are "deploy", "keeps" and "keeping" are "keep", while "category" is
@@ -47,8 +52,16 @@ def stem(word: str) -> str:
 
 
 def vocabulary(texts: Iterable[str]) -> set[str]:
-    """The stems of every word of `texts`: a text holds a word when it holds its stem."""
-    return {stem(word) for text in texts for word in WORD.findall(text.lower())}
+    """The stems of every word of `texts`: a text holds a word when it holds its stem.
+
+    Each distinct word is stemmed once, and `stem` remembers it: the stemmer is pure Python, and
+    an answer of 36,000 characters repeats most of its words. Measured on one such answer (1,112
+    distinct words): 11 ms with every word new, 0.65 ms once they are known, as they are for the
+    second read of every search (`probe.report` over what `retrieval.probe_gaps` read) and for
+    the vocabulary a running server has seen. So a search reads it on its own event loop rather
+    than waiting for a slot of the CPU budget (`cpu.on_cpu`), which indexing may hold."""
+    words = {word for text in texts for word in WORD.findall(text.lower())}
+    return {stem(word) for word in words}
 
 
 def missing(questions: list[Question], covered: Iterable[str]) -> dict[str, list[Question]]:

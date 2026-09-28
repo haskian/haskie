@@ -16,17 +16,18 @@ once, at import, so `parser` and `skip_ocr_pages` are chosen then and stored on 
 collection. Lifecycle: queued -> converting -> embedding -> imported, ending in error or cancelled
 instead; `deleting` while a delete runs, so nothing attaches the document meanwhile.
 
-Every row read, row write and file touch is awaited: the database goes through `db.connect()`
-(aiosqlite), the files through `anyio.Path` and `home`, and the one piece of CPU work here — the
-preview build — through `cpu.on_cpu`. The pure parts (paths, name cleaning, row decoding) stay
-sync.
+Every row read, row write and file touch is awaited: the database goes through `db.read()` or
+`db.connect()` (aiosqlite), the files through `anyio.Path` and `home`, and the one piece of CPU
+work here — the preview build — through `cpu.off_interpreter` for a PDF and `cpu.on_cpu`
+otherwise. The pure parts (paths, name cleaning, row decoding) stay sync.
 """
 
 import hashlib
 import re
 import shutil
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
@@ -35,14 +36,14 @@ from uuid import uuid4
 import anyio
 import anyio.to_thread
 import msgspec
-from sqlalchemy import Row, delete, func, select, update
+from sqlalchemy import ColumnElement, Row, delete, func, literal, select, update
 from sqlalchemy.dialects.sqlite import insert
 
 from haskie import cpu, db, home
 from haskie.document import convert
 from haskie.errors import Conflict, InvalidInput, NotFound, NotReady, PermanentError
 from haskie.paging import Page, PageRequest, count_of, keyset, resolve_sort
-from haskie.settings import Parser, load_user_settings
+from haskie.settings import Parser, PipelineSettings, load_user_settings
 from haskie.tables import collection_documents, documents, staging
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
@@ -155,7 +156,7 @@ async def listed(docs: list[Document]) -> list[Listed]:
     names_ = [doc.name for doc in docs]
     counts: dict[str, int] = {}
     if names_:
-        async with db.connect() as conn:
+        async with db.read() as conn:
             rows = await conn.execute(
                 select(collection_documents.c.document, func.count())
                 .where(collection_documents.c.document.in_(names_))
@@ -192,7 +193,7 @@ async def identical(md5: str, but: str | None = None) -> list[str]:
     )
     if but is not None:
         same = same.where(documents.c.name != but)
-    async with db.connect() as conn:
+    async with db.read() as conn:
         return list(await conn.scalars(same.order_by(documents.c.name)))
 
 
@@ -253,10 +254,13 @@ async def stage(filename: str, content: bytes) -> Staged:
     Bytes first, row second: a crash in between leaves a file the sweep removes as an orphan,
     where a row without bytes would be an upload the import cannot read.
     """
-    stored_name(filename)  # refuse what could never be imported, before writing anything
+    # refuse what could never be imported, before writing anything
+    importable = stored_name(filename)
     if len(content) > UPLOAD_MAX_BYTES:
         raise InvalidInput(f"file larger than {UPLOAD_MAX_BYTES} bytes: {len(content)}")
-    staging_id = f"{uuid4().hex}{Path(filename).suffix.lower()}"
+    # The cleaned name's suffix, not the raw one: `report.md.` or `notes.md~` would give an id
+    # `STAGING_ID` refuses, which neither the import nor the sweep could turn back into a path.
+    staging_id = f"{uuid4().hex}{Path(importable).suffix.lower()}"
     name = Path(filename).name
     await anyio.Path(home.STAGING_ROOT).mkdir(parents=True, exist_ok=True, mode=home.DIR_MODE)
     await home.atomic_write(home.STAGING_ROOT / staging_id, content)
@@ -282,14 +286,16 @@ async def sweep_staging(max_age_seconds: float) -> int:
     A file with no row goes too, once it is that old: it is an interrupted `stage`, and nobody can
     import it because the import reads the row. An upload that was never imported is not a
     document, so nothing but its bytes is lost.
+
+    The bytes go by the files in `staging/`, never by turning a row's id into a path: every file
+    there is ours, and one a live row names is kept. So a row an older build staged under an id
+    `staging_path` now refuses (`notes.md~`) is cleared like any other.
     """
     cutoff = time.time() - max_age_seconds
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = (await conn.execute(select(staging.c.staging_id, staging.c.created_at))).all()
-    staged = {staging_id for staging_id, _ in rows}
-    expired = [staging_id for staging_id, created_at in rows if created_at < cutoff]
-    for staging_id in expired:
-        await anyio.Path(staging_path(staging_id)).unlink(missing_ok=True)
+    live = {staging_id for staging_id, created_at in rows if created_at >= cutoff}
+    expired = {staging_id for staging_id, created_at in rows if created_at < cutoff}
     if expired:
         async with db.connect() as conn:
             await conn.execute(delete(staging).where(staging.c.staging_id.in_(expired)))
@@ -298,8 +304,11 @@ async def sweep_staging(max_age_seconds: float) -> int:
     if not await directory.is_dir():
         return deleted
     async for file in directory.iterdir():
-        orphan = STAGING_ID.match(file.name) and file.name not in staged
-        if orphan and (await file.stat()).st_mtime < cutoff:
+        if file.name in live:
+            continue
+        if file.name in expired:
+            await file.unlink(missing_ok=True)
+        elif (await file.stat()).st_mtime < cutoff:  # an orphan, once it is that old
             await file.unlink(missing_ok=True)
             deleted += 1
     return deleted
@@ -319,45 +328,56 @@ class ImportOptions(msgspec.Struct):
 
 async def _create(name: str, size: int, md5: str, options: ImportOptions) -> Document:
     """The row, before the file: a name already taken is refused with nothing on disk to undo.
-    `parser` / `skip_ocr_pages` default to the user settings at the moment of import."""
+    `parser` / `skip_ocr_pages` default to the user settings at the moment of import.
+
+    Taken ignoring case: a document's folder is named after it, and on a case-insensitive disk
+    (macOS by default) `Notes.md` and `notes.md` are one folder, so the second import would
+    overwrite the first's files. Names are ASCII (`SAFE_NAME`), which `NOCASE` compares exactly,
+    and the check is in the insert itself, so two imports at once cannot both pass it."""
     user = await load_user_settings()
-    parser = options.parser or user.conversion.parser
-    skip = (
-        user.conversion.skip_ocr_pages if options.skip_ocr_pages is None else options.skip_ocr_pages
-    )
     now = time.time()
+    row = {
+        "name": name,
+        "suffix": Path(name).suffix.lower(),
+        "size": size,
+        "status": DocumentStatus.QUEUED,
+        "parser": options.parser or user.conversion.parser,
+        "skip_ocr_pages": (
+            user.conversion.skip_ocr_pages
+            if options.skip_ocr_pages is None
+            else options.skip_ocr_pages
+        ),
+        "created_at": now,
+        "updated_at": now,
+        "description": options.description,
+        "md5": md5,
+    }
+    taken = select(documents.c.name).where(documents.c.name.collate("NOCASE") == name)
     async with db.connect() as conn:
         result = await conn.execute(
-            insert(documents)
-            .values(
-                name=name,
-                suffix=Path(name).suffix.lower(),
-                size=size,
-                status=DocumentStatus.QUEUED,
-                parser=parser,
-                skip_ocr_pages=skip,
-                created_at=now,
-                updated_at=now,
-                description=options.description,
-                md5=md5,
+            insert(documents).from_select(
+                list(row),
+                select(
+                    *(literal(value, documents.c[key].type) for key, value in row.items())
+                ).where(~taken.exists()),
             )
-            .on_conflict_do_nothing()
         )
         created = result.rowcount == 1  # read on the open connection, before it is closed
+        existing = None if created else await conn.scalar(taken)
     if not created:
-        raise Conflict(f"document already exists: {name}")
+        raise Conflict(f"document already exists: {existing or name}")
     return await get(name)
 
 
-async def _place(document: Document, move: bool, source: Path) -> Document:
-    """Put the file where the row says it is; the row goes if that fails, so a failed import
-    leaves neither a phantom row nor a name that cannot be used again."""
+async def _place(
+    document: Document, source: Path, transfer: Callable[[Path, Path], object]
+) -> Document:
+    """Put the file where the row says it is, by `transfer` (`shutil.move` or `shutil.copyfile`);
+    the row goes if that fails, so a failed import leaves neither a phantom row nor a name that
+    cannot be used again."""
     try:
         await anyio.Path(document.root).mkdir(parents=True, exist_ok=True)
-        if move:
-            await anyio.to_thread.run_sync(shutil.move, source, document.original)
-        else:
-            await anyio.to_thread.run_sync(shutil.copyfile, source, document.original)
+        await anyio.to_thread.run_sync(transfer, source, document.original)
     except BaseException:
         await remove_files(document.name)
         await remove_row(document.name)
@@ -374,7 +394,7 @@ async def import_staged(staging_id: str, options: ImportOptions | None = None) -
     """
     options = options or ImportOptions()
     source = staging_path(staging_id)  # a trust boundary: the id is validated into a path here
-    async with db.connect() as conn:
+    async with db.read() as conn:
         row = (
             await conn.execute(
                 select(staging.c.filename, staging.c.md5).where(staging.c.staging_id == staging_id)
@@ -385,7 +405,7 @@ async def import_staged(staging_id: str, options: ImportOptions | None = None) -
     final = stored_name(row.filename, options.name)
     size = (await anyio.Path(source).stat()).st_size
     document = await _create(final, size, row.md5, options)
-    placed = await _place(document, True, source)
+    placed = await _place(document, source, shutil.move)
     async with db.connect() as conn:
         await conn.execute(delete(staging).where(staging.c.staging_id == staging_id))
     return placed
@@ -399,17 +419,36 @@ async def import_path(path: str, options: ImportOptions | None = None) -> Docume
     """
     options = options or ImportOptions()
     source = Path(path).expanduser()
+    # Every refusal names the file alone: the audit trail copies the error, and it never holds
+    # the folder an import came from (see `api.documents.import_document`).
     if not source.is_absolute():
-        raise InvalidInput(f"path must be absolute: {home.scrub(str(source))}")
+        raise InvalidInput(f"path must be absolute: {source.name}")
     if not await anyio.Path(source).is_file():
-        raise InvalidInput(f"file not found: {home.scrub(str(source))}")
+        raise InvalidInput(f"file not found: {source.name}")
     final = stored_name(source.name, options.name)
-    size = (await anyio.Path(source).stat()).st_size
-    if size > UPLOAD_MAX_BYTES:
-        raise InvalidInput(f"file larger than {UPLOAD_MAX_BYTES} bytes: {size}")
-    md5 = await anyio.to_thread.run_sync(_md5_of_file, source)
+    with _reading(source):
+        size = (await anyio.Path(source).stat()).st_size
+        if size > UPLOAD_MAX_BYTES:
+            raise InvalidInput(f"file larger than {UPLOAD_MAX_BYTES} bytes: {size}")
+        md5 = await anyio.to_thread.run_sync(_md5_of_file, source)
     document = await _create(final, size, md5, options)
-    return await _place(document, False, source)
+    with _reading(source):
+        return await _place(document, source, shutil.copyfile)
+
+
+@contextmanager
+def _reading(source: Path) -> Iterator[None]:
+    """Refuse a source the process cannot read, naming the file but not its folder.
+
+    A file can pass `is_file` and still fail to open: its mode, or macOS privacy protection on
+    a folder like Documents. The `OSError` then carries the full path. A failure about any
+    other file, such as the document's own folder filling the disk, passes through unchanged."""
+    try:
+        yield
+    except OSError as exc:
+        if exc.filename is None or Path(exc.filename) != source:
+            raise
+        raise InvalidInput(f"cannot read file: {source.name}: {exc.strerror}") from None
 
 
 # --- rows ---------------------------------------------------------------------
@@ -422,14 +461,14 @@ async def page(request: PageRequest, status: DocumentStatus | None = None) -> Pa
     walk = keyset(sort, column, request, documents.c.name)
     filters = [documents.c.status == status] if status is not None else []
     listing = select(*DOCUMENT_COLUMNS).where(*filters)
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = (await conn.execute(walk.apply(listing))).all()
         total = await conn.scalar(count_of(listing))
     return walk.page(rows, build=from_row, total=total)
 
 
 async def get(name: str) -> Document:
-    async with db.connect() as conn:
+    async with db.read() as conn:
         row = (
             await conn.execute(select(*DOCUMENT_COLUMNS).where(documents.c.name == name))
         ).first()
@@ -438,16 +477,31 @@ async def get(name: str) -> Document:
     return from_row(row)
 
 
-async def set_status(name: str, status: DocumentStatus, error: str | None = None) -> None:
-    """A lifecycle step is a change to the document, so it stamps `updated_at`: that is the
+async def set_status(
+    name: str, status: DocumentStatus, error: str | None = None, *guard: ColumnElement[bool]
+) -> bool:
+    """Set the document's status and error where every `guard` holds; whether it did.
+
+    A lifecycle step is a change to the document, so it stamps `updated_at`: that is the
     column the "recently touched" listing sorts on. Building the preview is not (see
     `ensure_preview`), it only fills in what the row always described."""
     async with db.connect() as conn:
-        await conn.execute(
+        moved = await conn.scalar(
             update(documents)
-            .where(documents.c.name == name)
+            .where(documents.c.name == name, *guard)
             .values(status=status, error=error, updated_at=time.time())
+            .returning(documents.c.name)
         )
+    return moved is not None
+
+
+async def cancel_import(name: str) -> None:
+    """Record a cancelled import as `cancelled`, but only while the document is still in the
+    import pipeline. An import that ended between the cancel's read and this write keeps the status
+    it ended on (DBOS keeps its SUCCESS or ERROR too), and a delete keeps `deleting`."""
+    await set_status(
+        name, DocumentStatus.CANCELLED, None, documents.c.status.in_(ACTIVE_DOCUMENT_STATUSES)
+    )
 
 
 async def describe(name: str, description: str) -> Document:
@@ -475,7 +529,7 @@ async def descriptions_of(docs: set[str]) -> dict[str, str]:
     if not docs:
         return {}
     wanted = sorted(docs)
-    async with db.connect() as conn:
+    async with db.read() as conn:
         rows = await conn.execute(
             select(documents.c.name, documents.c.description).where(
                 documents.c.name.in_(wanted), documents.c.description != ""
@@ -501,34 +555,13 @@ def fill_descriptions(rows: Iterable[Described], described: dict[str, str]) -> N
 
 async def collections_of(name: str) -> list[str]:
     """Every collection holding the document, in name order."""
-    async with db.connect() as conn:
+    async with db.read() as conn:
         held = await conn.scalars(
             select(collection_documents.c.collection)
             .where(collection_documents.c.document == name)
             .order_by(collection_documents.c.collection)
         )
         return list(held)
-
-
-async def memberships(docs: set[str], collections: list[str]) -> dict[str, list[str]]:
-    """Which of `collections` hold each of `docs`, in name order; a document none of them hold is
-    absent. One query for a whole search result, the way `descriptions_of` is one for its
-    descriptions: a search that folds hits to documents needs every membership at once."""
-    if not docs or not collections:
-        return {}
-    wanted = list(docs)
-    names = list(set(collections))
-    async with db.connect() as conn:
-        member = collection_documents.c
-        rows = await conn.execute(
-            select(member.document, member.collection)
-            .where(member.document.in_(wanted), member.collection.in_(names))
-            .order_by(member.document, member.collection)
-        )
-    held: dict[str, list[str]] = {}
-    for name, collection in rows:
-        held.setdefault(name, []).append(collection)
-    return held
 
 
 # --- preview ------------------------------------------------------------------
@@ -542,17 +575,18 @@ _preview_locks: dict[str, anyio.Lock] = {}
 
 
 # A preview build parses a whole document, so a burst of opens would otherwise start one parse per
-# request. The semaphore admits `pipeline.preview_workers` of them; the rest wait, and a reader
+# request. The limiter admits `pipeline.preview_workers` of them; the rest wait, and a reader
 # that waited this long is told to retry instead of holding its request open forever.
 PREVIEW_WAIT_SECONDS = 60
-# 2 is the default of `PipelineSettings.preview_workers`. An anyio semaphore, unlike the CPU
-# budget's: every preview waits on Litestar's event loop, as `_preview_locks` describes.
-_preview_slots = cpu.ResizableSemaphore(anyio.Semaphore, 2)
+# An anyio limiter, unlike the CPU budget: every preview waits on Litestar's event loop, as
+# `_preview_locks` describes. Its size may change under running builds, and it counts them: from 2
+# to 3 under load admits one more build, not three.
+_preview_slots = anyio.CapacityLimiter(PipelineSettings().preview_workers)
 
 
 def configure_preview_slots(workers: int) -> None:
     """Resize the pool of preview builders (from `workflows.apply_settings`)."""
-    _preview_slots.resize(workers)
+    _preview_slots.total_tokens = workers
 
 
 async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
@@ -563,7 +597,8 @@ async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
 
     Two locks, always in this order: the document's own (build this document once), then a
     slot in the process-wide pool (build at most `preview_workers` documents at a time).
-    The parse itself is CPU work, so it runs in a worker thread under the CPU budget.
+    The parse itself is CPU work, so it runs under the CPU budget: a PDF in the extraction pool,
+    anything else in a worker thread.
     """
     info = await get(name)
     if info.preview is not None:
@@ -575,14 +610,17 @@ async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
             info = await get(name)  # another reader may have built it while we waited
             if info.preview is not None:
                 return info, info.preview
-            slots = _preview_slots.current  # the object to release, even if the pool is resized
             try:
                 with anyio.fail_after(PREVIEW_WAIT_SECONDS):
-                    await slots.acquire()
+                    await _preview_slots.acquire()
             except TimeoutError:
                 raise NotReady("preview queue is full; retry") from None
+            # PDF extraction holds the GIL (see `cpu`), so on a thread it would stall this loop,
+            # and every request on it, for the whole parse. It leaves the interpreter, as the
+            # import's does; every other kind releases the GIL and stays on a thread.
+            run = cpu.off_interpreter if info.suffix == ".pdf" else cpu.on_cpu
             try:
-                preview = await cpu.on_cpu(
+                preview = await run(
                     convert.build_preview,
                     info.source_path(),
                     info.preview_dir,
@@ -596,7 +634,7 @@ async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
                         .values(preview=db.dumps(preview))
                     )
             finally:
-                slots.release()
+                _preview_slots.release()
             return await get(name), preview
         finally:
             # Still holding the lock, so a queued reader keeps it: dropping it here would send

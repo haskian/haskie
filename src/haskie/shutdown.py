@@ -4,6 +4,7 @@ The server owns SIGINT and SIGTERM. The first one starts a graceful shutdown, an
 the user asking to hurry. Both rules here keep that true under the tools haskie runs behind.
 """
 
+import concurrent.futures.thread  # noqa: F401 - registers its exit hook first; see `bound_exit`
 import contextlib
 import math
 import os
@@ -100,7 +101,10 @@ def listening(callback: Callable[[], object]) -> Iterator[None]:
             _listeners = tuple(listener for listener in _listeners if listener is not callback)
 
 
-WORKFLOW_GRACE = 10  # seconds running workflows get to finish before DBOS cancels them
+# Seconds DBOS waits for running workflows to finish. Past it DBOS stops waiting, not the work:
+# it stops its event loop, which cancels a workflow at its next await, but a step in a worker
+# thread runs on until it returns.
+WORKFLOW_GRACE = 10
 
 # How long the interpreter may take to exit once the main thread is done. Before it exits, Python
 # joins every non-daemon thread, and it ignores Ctrl-C while it waits. Work a shutdown abandons -
@@ -111,8 +115,11 @@ WORKFLOW_GRACE = 10  # seconds running workflows get to finish before DBOS cance
 EXIT_GRACE = 5.0
 
 
+_exit_started = threading.Event()
+
+
 def _exit_when_held() -> None:
-    threading.main_thread().join()  # returns once the main thread starts the interpreter's exit
+    _exit_started.wait()
     time.sleep(EXIT_GRACE)
     held_by = [t.name for t in threading.enumerate() if not t.daemon and t.is_alive()]
     _log.warning("exit_forced", grace_seconds=EXIT_GRACE, held_by=held_by)
@@ -126,9 +133,17 @@ _bounded_lock = threading.Lock()
 def bound_exit() -> None:
     """Make sure the process exits within `EXIT_GRACE` of its main thread finishing. Once per
     process, however many times an app starts in it. A daemon thread, so a clean exit ends it
-    without waiting and never reaches `os._exit`."""
+    without waiting and never reaches `os._exit`.
+
+    The clock starts in a threading exit hook, not when the main thread counts as done. Python
+    runs those hooks, newest first, before it marks the main thread done, and the thread-pool
+    module's hook joins every thread-pool worker: a DBOS step or an MLX batch would hold the exit
+    before the clock even started. So this hook is registered after that module's, which the
+    import above makes sure of, and runs before it.
+    """
     global _bounded
     with _bounded_lock:  # `functools.cache` would not do: two first calls may both run
         if not _bounded:
             _bounded = True
+            threading._register_atexit(_exit_started.set)  # ty: ignore[unresolved-attribute]
             threading.Thread(target=_exit_when_held, name="haskie-exit-bound", daemon=True).start()

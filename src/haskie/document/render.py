@@ -58,18 +58,20 @@ def _without_raw_html(markdown: str) -> str:
     """The markdown with every raw HTML span cut out.
 
     The spans come from `events_with_range`, so "raw HTML" means whatever the CommonMark parser
-    calls raw HTML, not whatever a regular expression of ours would match. Cut back to front so
-    each removal leaves the earlier offsets alone.
+    calls raw HTML, not whatever a regular expression of ours would match. They are UTF-8 byte
+    offsets, so the cut is made on the bytes: on the `str`, every non-ASCII character before a
+    span would shift it, and the tag would survive. Cut back to front so each removal leaves the
+    earlier offsets alone.
     """
     spans = [
         (span["start"], span["end"])
         for event, span in pyromark.events_with_range(markdown)
         if isinstance(event, dict) and ("Html" in event or "InlineHtml" in event)
     ]
-    out = markdown
+    out = markdown.encode()
     for start, end in sorted(set(spans), reverse=True):
         out = out[:start] + out[end:]
-    return out
+    return out.decode()
 
 
 def fragment_html(markdown: str) -> str:

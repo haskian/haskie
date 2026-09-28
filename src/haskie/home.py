@@ -11,8 +11,9 @@ ones (`atomic_replace`, `atomic_write_sync`) are for code that already runs in o
 `document/convert.py` and `indexing/embed_cache.py` are sync by nature (pyarrow, the parsers) and
 would otherwise hop threads twice for one write.
 
-The home lock (`claim_home` and friends) is sync for a different reason: it runs before there
-is an event loop at all, as the app's first startup hook.
+The home lock (`claim_home` and friends) is sync for a different reason: it is the app's first
+startup hook, so it blocks the event loop once, before the server serves anything, and a worker
+thread would buy nothing.
 """
 
 import fcntl
@@ -33,7 +34,14 @@ import anyio.to_thread
 from haskie import logs
 from haskie.errors import Conflict
 
-HOME = Path(os.environ.get("HASKIE_HOME", Path.home() / ".haskie"))
+# Absolute, whoever starts the app: `litestar run` passes a relative `HASKIE_HOME` through as it
+# is, and `scrub` would then rewrite every bare mention of that name in a log line.
+HOME = Path(os.environ.get("HASKIE_HOME", Path.home() / ".haskie")).expanduser().resolve()
+# Where `run` serves, which it puts in the environment for the holder line and the app's host check
+ADDRESS_ENV = "HASKIE_ADDRESS"
+# The pid `run` itself runs as. Under `--reload` the app lives in a worker the reloader restarts, so
+# the holder line names `run`'s pid, the one `haskie stop` has to signal to end the server.
+SERVER_PID_ENV = "HASKIE_SERVER_PID"
 
 # The layout, relative to `HOME`. Every name here is readable as a module attribute
 # (`home.DB_FILE`) and derived on access, so `use()` has one global to rebind.
@@ -122,8 +130,9 @@ def claim_home() -> None:
     os.ftruncate(handle, 0)
     # `run` puts the address in the environment for this; an app started another way has none to
     # give, so the holder line says so rather than inventing one.
-    address = os.environ.get("HASKIE_ADDRESS", "address unknown")
-    os.write(handle, f"pid {os.getpid()}, {address}".encode())
+    address = os.environ.get(ADDRESS_ENV, "address unknown")
+    pid = os.environ.get(SERVER_PID_ENV, str(os.getpid()))
+    os.write(handle, f"pid {pid}, {address}".encode())
     _holding = handle
 
 
@@ -187,8 +196,8 @@ def release_home() -> None:
 
 
 def ensure_home_sync() -> Path:
-    """The home tree, made. Sync because the callers that need it have no event loop: the startup
-    hook that claims the lock, the CLI, and the test fixtures.
+    """The home tree, made. Sync because its callers either have no event loop (the CLI, the test
+    fixtures) or block theirs once, before serving (the startup hook that claims the lock).
 
     `HOME` is made first and by name, because `parents=True` does not apply `mode` to the parents
     it creates - so a home made only as a parent of its subdirectories would be world-readable.
@@ -209,29 +218,33 @@ def atomic_replace(path: Path) -> Iterator[Path]:
     previous file or the complete new one, never a partial write.
 
     The temporary file shares the directory so `os.replace` stays on one filesystem, and it is
-    removed when the body raises, so a failure leaves nothing to mistake for a finished file.
+    removed when the body raises, so a failure leaves nothing to mistake for a finished file. Its
+    bytes reach the disk before the rename: otherwise a power cut can keep the rename and lose the
+    bytes, leaving an empty file where the old one was.
     """
     tmp = path.with_name(path.name + ".tmp")
     try:
         yield tmp
+        with open(tmp, "rb") as written:
+            os.fsync(written.fileno())
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
 
 
-def atomic_write_sync(path: Path, data: bytes | str, encoding: str = "utf-8") -> None:
+def atomic_write_sync(path: Path, data: bytes | str) -> None:
     """One whole payload through `atomic_replace`, for code that already runs in a worker thread
     (see `document/convert.py`). Calling it from a coroutine blocks that event loop; await
     `atomic_write` there instead."""
-    payload = data.encode(encoding) if isinstance(data, str) else data
+    payload = data.encode() if isinstance(data, str) else data
     with atomic_replace(path) as tmp:
         tmp.write_bytes(payload)
 
 
-async def atomic_write(path: Path, data: bytes | str, encoding: str = "utf-8") -> None:
+async def atomic_write(path: Path, data: bytes | str) -> None:
     """`atomic_write_sync` off the event loop."""
-    await anyio.to_thread.run_sync(atomic_write_sync, path, data, encoding)
+    await anyio.to_thread.run_sync(atomic_write_sync, path, data)
 
 
 async def remove_tree(path: Path) -> None:

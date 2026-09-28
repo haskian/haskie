@@ -176,12 +176,12 @@ def _model(row: Row[Any]) -> tuple[str, EmbeddingModel]:
 
 async def _records(statement: Select[Any]) -> list[dict[str, Any]]:
     """The rows of `statement` keyed by column name, so they convert to a struct by field name."""
-    async with db.connect() as conn:
+    async with db.read() as conn:
         return [db.record(row) for row in await conn.execute(statement)]
 
 
-# nothing writes the catalogue after the seed, so each database file's profiles are read once:
-# every search and indexing step resolves its model here
+# each database file's profiles are read once, since every search and indexing step resolves its
+# model here: a process sees gap bars `calibrate_gaps --write` stores only after a restart
 _embedders: dict[Path, dict[str, EmbeddingModel]] = {}
 
 
@@ -190,7 +190,7 @@ async def embedders() -> dict[str, EmbeddingModel]:
     only is the absence of a model."""
     cached = _embedders.get(home.DB_FILE)
     if cached is None:
-        async with db.connect() as conn:
+        async with db.read() as conn:
             rows = await conn.execute(_profiles(*_PROFILE))
             cached = _embedders[home.DB_FILE] = dict(map(_model, rows))
     return cached
@@ -234,12 +234,9 @@ async def calibration(model: str) -> RerankerCalibration:
     """How `model`'s scores read; the uncalibrated defaults for a model the catalogue has no row
     for, as a reranker added after the seed has."""
     records = await _records(
-        select(
-            reranker_calibration.c.floor,
-            reranker_calibration.c.beta_a,
-            reranker_calibration.c.beta_b,
-            reranker_calibration.c.source,
-        ).where(reranker_calibration.c.model == model)
+        select(*db.columns_of(reranker_calibration, RerankerCalibration)).where(
+            reranker_calibration.c.model == model
+        )
     )
     return msgspec.convert(records[0], RerankerCalibration) if records else UNCALIBRATED
 
@@ -280,7 +277,7 @@ async def check(settings: UserSettings | CollectionOverrides) -> None:
     user settings whose hardware setting leaves a model they use nowhere to run. Only here, where
     settings are written: a stored row that no longer runs still loads, and its model reports why.
     """
-    async with db.connect() as conn:
+    async with db.read() as conn:
         problem = await unknown(conn, settings)
     if not problem and isinstance(settings, UserSettings):
         problem = await _stranded(settings)
