@@ -537,6 +537,28 @@ async def test_import_staged_defaults_conversion_to_the_user_settings() -> None:
     assert (doc.parser, doc.skip_ocr_pages) == ("plain", False)
 
 
+@pytest.mark.parametrize(
+    ("second", "reason"),
+    [
+        pytest.param("Notes.md", "the same name", id="exact"),
+        pytest.param("NOTES.md", "one folder on a case-insensitive disk", id="case-only"),
+    ],
+)
+@pytest.mark.anyio
+async def test_a_name_taken_ignoring_case_is_refused(second: str, reason: str) -> None:
+    """A document's folder is named after it, so a name that differs only in case would share the
+    first one's folder on macOS, and its import would overwrite the first one's files."""
+    first = await document.stage("Notes.md", b"# first\n")
+    doc = await document.import_staged(first.staging_id)
+    clash = await document.stage(second, b"# second\n")
+
+    with pytest.raises(Conflict, match="document already exists: Notes.md"):
+        await document.import_staged(clash.staging_id)
+
+    assert await document_names() == ["Notes.md"], reason
+    assert doc.original.read_bytes() == b"# first\n", "the first document's file is untouched"
+
+
 @pytest.mark.anyio
 async def test_import_staged_renames_and_refuses_a_name_already_taken() -> None:
     first = await document.stage("book.pdf", text_pdf(["one"]))

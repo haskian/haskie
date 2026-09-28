@@ -35,8 +35,9 @@ computes the cache id from its own chunk settings and reads that entry.
 ## A document's life
 
 An upload from the UI lands in `staging/` first, as a file and a `staging` row, with no document
-yet. The import then fixes the name, creates the document and moves the file into its folder. An
-agent's `add_document` imports a local path directly and copies the file. The nightly run (at
+yet. The import then fixes the name, creates the document and moves the file into its folder. A
+name is taken ignoring case: the folder is named after it, and on a case-insensitive disk
+`Notes.md` and `notes.md` would be one folder. An agent's `add_document` imports a local path directly and copies the file. The nightly run (at
 03:17, if haskie is running then) sweeps uploads older than a day.
 
 ```mermaid

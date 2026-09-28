@@ -35,7 +35,7 @@ from uuid import uuid4
 import anyio
 import anyio.to_thread
 import msgspec
-from sqlalchemy import Row, delete, func, select, update
+from sqlalchemy import Row, delete, func, literal, select, update
 from sqlalchemy.dialects.sqlite import insert
 
 from haskie import cpu, db, home
@@ -319,33 +319,44 @@ class ImportOptions(msgspec.Struct):
 
 async def _create(name: str, size: int, md5: str, options: ImportOptions) -> Document:
     """The row, before the file: a name already taken is refused with nothing on disk to undo.
-    `parser` / `skip_ocr_pages` default to the user settings at the moment of import."""
+    `parser` / `skip_ocr_pages` default to the user settings at the moment of import.
+
+    Taken ignoring case: a document's folder is named after it, and on a case-insensitive disk
+    (macOS by default) `Notes.md` and `notes.md` are one folder, so the second import would
+    overwrite the first's files. Names are ASCII (`SAFE_NAME`), which `NOCASE` compares exactly,
+    and the check is in the insert itself, so two imports at once cannot both pass it."""
     user = await load_user_settings()
-    parser = options.parser or user.conversion.parser
-    skip = (
-        user.conversion.skip_ocr_pages if options.skip_ocr_pages is None else options.skip_ocr_pages
-    )
     now = time.time()
+    row = {
+        "name": name,
+        "suffix": Path(name).suffix.lower(),
+        "size": size,
+        "status": DocumentStatus.QUEUED,
+        "parser": options.parser or user.conversion.parser,
+        "skip_ocr_pages": (
+            user.conversion.skip_ocr_pages
+            if options.skip_ocr_pages is None
+            else options.skip_ocr_pages
+        ),
+        "created_at": now,
+        "updated_at": now,
+        "description": options.description,
+        "md5": md5,
+    }
+    taken = select(documents.c.name).where(documents.c.name.collate("NOCASE") == name)
     async with db.connect() as conn:
         result = await conn.execute(
-            insert(documents)
-            .values(
-                name=name,
-                suffix=Path(name).suffix.lower(),
-                size=size,
-                status=DocumentStatus.QUEUED,
-                parser=parser,
-                skip_ocr_pages=skip,
-                created_at=now,
-                updated_at=now,
-                description=options.description,
-                md5=md5,
+            insert(documents).from_select(
+                list(row),
+                select(
+                    *(literal(value, documents.c[key].type) for key, value in row.items())
+                ).where(~taken.exists()),
             )
-            .on_conflict_do_nothing()
         )
         created = result.rowcount == 1  # read on the open connection, before it is closed
+        existing = None if created else await conn.scalar(taken)
     if not created:
-        raise Conflict(f"document already exists: {name}")
+        raise Conflict(f"document already exists: {existing or name}")
     return await get(name)
 
 
