@@ -124,6 +124,7 @@ from haskie.indexing.dbos_names import (
     root_cause,
 )
 from haskie.indexing.pipeline import Batch
+from haskie.search import log
 from haskie.settings import ChunkSettings, PipelineSettings, UserSettings, load_user_settings
 
 _log = logs.get_logger(__name__)
@@ -379,6 +380,9 @@ async def start() -> None:
     # happened on the schedule would never happen at all
     await _housekeeping(
         prune_audit(), "audit_prune_failed", partial(_log.info, "audit_files_pruned")
+    )
+    await _housekeeping(
+        prune_searches(), "search_prune_failed", partial(_log.info, "searches_pruned")
     )
 
 
@@ -1291,6 +1295,14 @@ async def prune_audit() -> int:
 
 
 @retried_step
+async def prune_searches() -> int:
+    """Delete the searches the retention setting no longer covers, with what they returned.
+    Retried: one delete that can lose the file to another writer for a moment, and a second
+    round over the same cutoff deletes nothing."""
+    return await log.prune((await load_user_settings()).retention.search_days)
+
+
+@retried_step
 async def sweep_staging() -> int:
     """Delete staged uploads nobody imported within `STAGING_TTL_SECONDS`."""
     return await document.sweep_staging(STAGING_TTL_SECONDS)
@@ -1298,15 +1310,17 @@ async def sweep_staging() -> int:
 
 @DBOS.workflow(name=DAILY_MAINTENANCE_WORKFLOW)
 async def daily_maintenance(scheduled_time: datetime, context: Any) -> None:
-    """Nightly housekeeping: the operation history, the audit trail and the staging folder.
-    Takes the two arguments every DBOS schedule passes."""
+    """Nightly housekeeping: the operation history, the audit trail, the search log and the
+    staging folder. Takes the two arguments every DBOS schedule passes."""
     purged_before_ms = await purge_operation_history()
     deleted = await prune_audit()
+    searches = await prune_searches()
     swept = await sweep_staging()
     _log.info(
         "home_housekept",
         jobs_purged_before_ms=purged_before_ms,
         audit_files_pruned=deleted,
+        searches_pruned=searches,
         staged_uploads_swept=swept,
     )
 

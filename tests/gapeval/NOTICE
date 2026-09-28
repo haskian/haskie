@@ -1,0 +1,6 @@
+The question lists in this directory are haskie's own (MIT, see ../../LICENSE).
+
+The evaluation reads "The Rust Programming Language" by Steve Klabnik, Carol Nichols and the Rust
+community (https://github.com/rust-lang/book), fetched at the commit named in rust_book.json. It is
+licensed under the Apache License, Version 2.0 or the MIT license, at your option, and is not
+redistributed here.

@@ -34,7 +34,8 @@ from haskie.collection.index import (
 )
 from haskie.errors import InvalidInput, NotFound
 from haskie.paging import DEFAULT_PAGE_SIZE, OffsetCursor, Order, Page, check_page_size
-from haskie.settings import load_user_settings
+from haskie.search import log
+from haskie.settings import SearchMode, load_user_settings
 
 MAX_TEXT_PAGE_SIZE = 200  # a page of chunks is a page of text; 200 is already a lot for an agent
 MAX_DEPTH = 1000  # every page re-runs the whole ranking, so how deep a walk may go is capped
@@ -144,6 +145,7 @@ async def search(
     names = await checked_names(collections)
     chosen = [Collection(name) for name in names]
     offset = parse_cursor(cursor, q, names, page_size)
+    log.observe_scope(None, names, SearchMode.FTS, page_size)
     depth = offset + page_size
     if depth > MAX_DEPTH:
         raise InvalidInput(f"cannot read past {MAX_DEPTH} results; narrow the query instead")

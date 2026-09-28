@@ -420,6 +420,14 @@ AUDIT_RETENTION = Meta(
         "daily maintenance run. 0 keeps everything."
     ),
 )
+SEARCH_RETENTION = Meta(
+    title="Search history (days)",
+    description=(
+        "Days of searches kept: what each search asked and returned, which session histories, "
+        "Insights and Gaps read. The daily maintenance run deletes older ones. 0 keeps "
+        "everything."
+    ),
+)
 RETENTION_DAYS = Meta(
     title="Operation history (days)",
     description=(
@@ -635,16 +643,18 @@ class PipelineSettings(msgspec.Struct):
 
 
 class RetentionSettings(msgspec.Struct):
-    """How long history is kept: the operation history in DBOS's own tables, and the audit trail
-    on disk. Both are swept by the nightly maintenance run (see `workflows.daily_maintenance`), so
-    they are answered in the same place."""
+    """How long history is kept: the operation history in DBOS's own tables, the audit trail on
+    disk, and the search log. All are swept by the nightly maintenance run (see
+    `workflows.daily_maintenance`), so they are answered in the same place."""
 
     operation_days: Annotated[int, RETENTION_DAYS] = 28
     audit_days: Annotated[int, AUDIT_RETENTION] = 90
+    search_days: Annotated[int, SEARCH_RETENTION] = 90
 
     def __post_init__(self) -> None:
         _at_least(1, operation_days=self.operation_days)
-        _at_least(0, audit_days=self.audit_days)  # 0 = keep everything
+        # 0 = keep everything
+        _at_least(0, audit_days=self.audit_days, search_days=self.search_days)
 
 
 class UserSettings(msgspec.Struct):

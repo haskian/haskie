@@ -1,0 +1,15 @@
+/* Gaps page layout only. Tokens and component styles live in design/design.css. */
+
+/* The modal panel: the searches of one topic, one stack. */
+.gap-panel {
+  display: grid;
+  gap: var(--sp-3);
+  align-content: start;
+}
+
+/* A query and a citation are whatever the agent sent and the document holds: they wrap, never widen. */
+.gap-query,
+.gap-near,
+.gap-now {
+  overflow-wrap: anywhere;
+}

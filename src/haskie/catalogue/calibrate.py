@@ -20,26 +20,24 @@ The pure parts (`floor`, `fit_beta`) are separate from the IO so they can be tes
 """
 
 import asyncio
-import json
 import statistics
 import time
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 from typing import Annotated
 
 import msgspec
 import typer
-from sqlalchemy import select
 
 from haskie import db
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import RerankerCalibration
 from haskie.collection.index import FTS_COLUMN, cross_encode, row_score
 from haskie.indexing.chunk import framed
-from haskie.search import flow, retrieval
-from haskie.search.session import Action
+from haskie.search import flow, log, retrieval
 from haskie.settings import Reranker, SearchSettings
-from haskie.tables import reranker_calibration, session_events
+from haskie.tables import reranker_calibration
 
 QUESTIONS = 40  # Cohere asks for 30 to 50 representative queries
 CANDIDATES = range(10, 30)  # past the top, where the borderline chunks sit
@@ -81,37 +79,28 @@ def fit_beta(scores: list[float]) -> tuple[float, float]:
     return (mean * common, (1 - mean) * common)
 
 
-def _read[T](path: Path, kind: type[T]) -> list[T]:
+def read_jsonl[T](path: Path, kind: type[T]) -> list[T]:
     return [msgspec.json.decode(line, type=kind) for line in path.read_text().splitlines() if line]
 
 
-async def _asked(limit: int) -> list[str]:
-    """The distinct questions this home searched for, newest first: each part of a search of
-    several counts as one."""
-    async with db.connect() as conn:
-        rows = await conn.execute(
-            select(session_events.c.subject, session_events.c.detail)
-            .where(session_events.c.action == Action.SEARCH)
-            .order_by(session_events.c.ts.desc())
-        )
-        found: dict[str, None] = {}
-        for subject, detail in rows:
-            parts = json.loads(detail or "{}").get("questions") or [subject]
-            found.update(dict.fromkeys(part for part in parts if part.strip()))
-    return list(found)[:limit]
+def write_jsonl(path: Path, items: Sequence[msgspec.Struct], *, replace: bool = True) -> None:
+    """One JSON line per item. `replace=False` raises `FileExistsError` rather than replace a file
+    that exists, and checks and creates it in one step."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w" if replace else "x") as out:
+        out.writelines(msgspec.json.encode(one).decode() + "\n" for one in items)
 
 
 async def _sample(out: Path) -> int:
     names = await retrieval.scope(None, None)
     lines = []
-    for query in await _asked(QUESTIONS):
+    for query in await log.recent_questions(QUESTIONS):
         hits = await flow.chunks(names, query, limit=CANDIDATES.stop, rerank_floor=0.0)
         found = hits[CANDIDATES.start : CANDIDATES.stop]
         texts = [framed(hit.frame, hit.text) for hit in found]
         if texts:
-            lines.append(msgspec.json.encode(Candidates(query, texts)).decode())
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(lines) + "\n")
+            lines.append(Candidates(query, texts))
+    write_jsonl(out, lines)
     return len(lines)
 
 
@@ -179,8 +168,8 @@ def measure(
     write: bool = False,
 ) -> None:
     """Each reranker's floor over the borderline pairs and its curve over the candidates."""
-    pairs = [(one.query, one.text) for one in _read(borderline, Borderline)]
-    spread = [(one.query, text) for one in _read(candidates, Candidates) for text in one.texts]
+    pairs = [(one.query, one.text) for one in read_jsonl(borderline, Borderline)]
+    spread = [(one.query, text) for one in read_jsonl(candidates, Candidates) for text in one.texts]
     for name, measured, seconds in asyncio.run(_measure(model, pairs, spread, write)):
         typer.echo(
             f"('{name}', {measured.floor:.4f}, {measured.beta_a:.3f}, {measured.beta_b:.3f}, "

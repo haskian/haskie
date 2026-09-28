@@ -1,4 +1,4 @@
-import { Activity, Bot, ChartColumn, Compass, FileText, Library, Settings } from 'lucide-react'
+import { Activity, Bot, ChartColumn, Compass, FileText, Library, SearchX, Settings } from 'lucide-react'
 import type { ComponentType, ReactNode } from 'react'
 import logoSvg from '../../../design/haskie-logo.svg?raw'
 import { href, type RouteName } from '../router'
@@ -42,6 +42,7 @@ export function Shell({
     { name: 'collections', label: 'Collections', icon: Library, href: href({ name: 'collections' }), count: counts.collections },
     { name: 'operations', label: 'Operations', icon: Activity, href: href({ name: 'operations' }) },
     { name: 'sessions', label: 'Sessions', icon: Bot, href: href({ name: 'sessions' }) },
+    { name: 'gaps', label: 'Gaps', icon: SearchX, href: href({ name: 'gaps' }) },
     { name: 'insights', label: 'Insights', icon: ChartColumn, href: href({ name: 'insights' }) },
     { name: 'settings', label: 'Settings', icon: Settings, href: href({ name: 'settings' }) },
   ]

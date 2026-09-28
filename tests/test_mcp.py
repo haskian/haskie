@@ -34,6 +34,11 @@ TOOLS = {
     "add_document_to_collection",
     "remove_document_from_collection",
     "describe_document",
+    "list_searches",
+    "list_gaps",
+    "replay_gaps",
+    "review_gaps",
+    "report_gap",
 }
 # Two notes on retries and one on ordering, with no word in common between the two topics, so a
 # full-text search finds each question in its own note.
@@ -260,6 +265,10 @@ async def test_every_read_tool_answers(
             "document not found",
         ),
         ("a file that does not exist", "add_document", {"path": "/nowhere/at/all.md"}, "all.md"),
+        ("a log reaching back past a year", "list_searches", {"days": 367}, "days must be 1..366"),
+        ("more searches than a page holds", "list_searches", {"limit": 201}, "limit"),
+        ("a review nobody can decide", "review_gaps", {"ids": [1], "review": "maybe"}, "review"),
+        ("too many gaps to replay at once", "replay_gaps", {"ids": list(range(51))}, "at most 50"),
     ],
 )
 async def test_every_mistake_an_agent_makes_is_a_tool_error(
@@ -312,6 +321,58 @@ async def test_an_agent_imports_attaches_finds_and_detaches_a_document(
 
     history = (await library.get(f"/api/sessions/{SESSION}/history")).json()
     assert [event["action"] for event in history] == ["detach", "attach", "import"]
+
+
+async def test_an_agent_finds_a_gap_closes_it_and_resolves_it(
+    library: AsyncTestClient, tmp_path: Path
+) -> None:
+    """The log and the gaps as an agent reads them: a question the notes cannot answer shows in
+    the log and as a gap; once a note answers it, a replay says so, and the agent resolves it."""
+    unanswered = "How long should sourdough starter ferment?"
+    await _call(library, "search_excerpts", {"q": [BY_RETRY, unanswered], "session_id": SESSION})
+
+    error, logged = await _call(library, "list_searches", {"session_id": SESSION})
+    assert not error, logged
+    (search,) = logged
+    assert [(one["question"], one["uncovered"]) for one in search["questions"]] == [
+        (BY_RETRY, False),
+        (unanswered, True),
+    ]
+    assert [one["document"] for one in search["results"]] == ["retries.md"]
+    assert "vector" not in search["questions"][0], "a query vector never reaches a caller"
+
+    error, topics = await _call(library, "list_gaps", {})
+    assert not error, topics
+    (topic,) = topics
+    (gap,) = topic["questions"]
+    assert (gap["question"], gap["signal"], gap["session_id"]) == (unanswered, "uncovered", SESSION)
+
+    note = tmp_path / "bread.md"
+    note.write_text("# Bread\n\nLet a sourdough starter ferment for twelve hours before baking.\n")
+    await stage_and_import(library, "bread.md", note.read_bytes())
+    await attach_via_api(library, "notes", "bread.md")
+    error, replayed = await _call(library, "replay_gaps", {"ids": [gap["id"]]})
+    assert not error, replayed
+    assert [(one["signal"], one["results"][0]["document"]) for one in replayed] == [
+        (None, "bread.md")
+    ]
+
+    error, reported = await _call(
+        library,
+        "report_gap",
+        {"session_id": SESSION, "question": BY_RETRY, "verdict": "partial", "missing": "backoff"},
+    )
+    assert not error and reported["verdict"] == "partial", reported
+    error, both = await _call(library, "list_gaps", {})
+    assert {one["questions"][0]["signal"] for one in both} == {"reported", "uncovered"}
+
+    error, reviewed = await _call(
+        library, "review_gaps", {"ids": [gap["id"], reported["id"]], "review": "resolved"}
+    )
+    assert (error, reviewed) == (False, 2)
+    assert (await _call(library, "list_gaps", {}))[1] == []
+    error, resolved = await _call(library, "list_gaps", {"review": "resolved"})
+    assert sorted(one["question"] for one in resolved) == sorted([unanswered, BY_RETRY])
 
 
 async def test_a_web_only_route_is_not_a_tool(library: AsyncTestClient) -> None:

@@ -382,6 +382,11 @@ async def test_remove_tree_reports_a_file_it_cannot_delete(
             lambda: RetentionSettings(audit_days=-1),
             "audit_days must be >= 0",
         ),
+        (
+            "negative search retention",
+            lambda: RetentionSettings(search_days=-1),
+            "search_days must be >= 0",
+        ),
     ],
 )
 def test_settings_reject_out_of_bounds(name: str, build, match: str) -> None:
@@ -404,6 +409,7 @@ def test_settings_reject_out_of_bounds(name: str, build, match: str) -> None:
         ("merging every paragraph that fits", lambda: ChunkSettings(chunk_merge_below=100)),
         ("the shortest operation history", lambda: RetentionSettings(operation_days=1)),
         ("audit retention of zero keeps everything", lambda: RetentionSettings(audit_days=0)),
+        ("search retention of zero keeps every search", lambda: RetentionSettings(search_days=0)),
         ("one preview builder", lambda: PipelineSettings(preview_workers=1)),
         ("one slice per document", lambda: PipelineSettings(document_parallelism=1)),
         (

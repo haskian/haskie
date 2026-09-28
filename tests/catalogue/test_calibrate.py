@@ -12,6 +12,7 @@ from haskie.catalogue import calibrate, catalogue
 from haskie.catalogue.calibrate import Borderline, Candidates, fit_beta, floor
 from haskie.collection.collection import Collection
 from haskie.indexing import embed, models
+from haskie.search import log
 from haskie.settings import (
     Accelerator,
     Reranker,
@@ -102,8 +103,11 @@ def test_the_judged_files_read_one_record_a_line(tmp_path: Path) -> None:
     sampled = tmp_path / "candidates.jsonl"
     sampled.write_text('{"query": "why", "texts": ["a", "b"]}\n')
 
-    assert calibrate._read(judged, Borderline) == [Borderline("why", "a"), Borderline("how", "b")]
-    assert calibrate._read(sampled, Candidates) == [Candidates("why", ["a", "b"])]
+    assert calibrate.read_jsonl(judged, Borderline) == [
+        Borderline("why", "a"),
+        Borderline("how", "b"),
+    ]
+    assert calibrate.read_jsonl(sampled, Candidates) == [Candidates("why", ["a", "b"])]
 
 
 async def test_sampling_reads_every_candidate_as_the_reranker_does_under_no_floor(
@@ -119,12 +123,8 @@ async def test_sampling_reads_every_candidate_as_the_reranker_does_under_no_floo
     def rerank_scores(model: str, accelerator: Accelerator, q: str, ts: list[str]) -> list[float]:
         return [-3.0 - n / 100 for n, _ in enumerate(ts)]  # every sigmoid under 0.05
 
-    async def asked(limit: int) -> list[str]:
-        return ["retry"]
-
     monkeypatch.setattr(models, "require_ready", ready)
     monkeypatch.setattr(embed, "rerank_scores", rerank_scores)
-    monkeypatch.setattr(calibrate, "_asked", asked)
     search = SearchSettings(reranker=Reranker.CROSS_ENCODER, min_rerank_score=0.9)
     await save_user_settings(UserSettings(search=search))
     await Collection.create("notes")
@@ -132,10 +132,13 @@ async def test_sampling_reads_every_candidate_as_the_reranker_does_under_no_floo
     doc = await import_document(dbos, "guide.md", body, tmp_path)
     await attach_document(dbos, "notes", doc.name)
     out = tmp_path / "candidates.jsonl"
+    # the question the home asked: the sample draws it from the search log
+    async with log.capturing(log.Tool.EXCERPTS, ["retry"], None):
+        pass
 
     written = await calibrate._sample(out)
 
-    (sampled,) = calibrate._read(out, Candidates)
+    (sampled,) = calibrate.read_jsonl(out, Candidates)
     assert written == 1 and sampled.query == "retry"
     assert len(sampled.texts) == len(calibrate.CANDIDATES), "ranks 10 to 30, none dropped"
     assert all(text.startswith("Part ") and "\n\nretry note" in text for text in sampled.texts)

@@ -6,19 +6,21 @@ the search counts its chunks once whichever collections hold them (`retrieval.fa
 """
 
 import time
-from collections.abc import Sequence
 from enum import StrEnum
-from typing import Protocol
 
 import msgspec
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, literal, select
 from sqlalchemy.dialects.sqlite import Insert, insert
 from sqlalchemy.exc import IntegrityError
 
 from haskie import db
 from haskie.collection.collection import Collection
 from haskie.errors import InvalidInput, NotFound
-from haskie.tables import session_collections, session_events, sessions
+from haskie.tables import (
+    session_collections,
+    session_events,
+    sessions,
+)
 
 MAX_SESSION_ID = 128
 MAX_COLLECTIONS = 100  # a session selects collections by hand; a longer list is a client mistake
@@ -55,7 +57,7 @@ async def load() -> dict[str, list[str]]:
 async def set_collections(session: str, collections: list[str]) -> list[str]:
     """Replace the selection of one session, in one transaction: the session row, then its
     collection rows with the caller's order as `position`."""
-    _checked(session)
+    checked(session)
     chosen = list(dict.fromkeys(collections))  # deduplicate, keep the caller's order
     if len(chosen) > MAX_COLLECTIONS:
         raise InvalidInput(f"at most {MAX_COLLECTIONS} collections per session, got {len(chosen)}")
@@ -65,7 +67,7 @@ async def set_collections(session: str, collections: list[str]) -> list[str]:
     if missing:
         raise NotFound(f"collection not found: {missing[0]}")
     async with db.connect() as conn:
-        await conn.execute(_create_session(session))
+        await conn.execute(create_session(session))
         await conn.execute(
             delete(session_collections).where(session_collections.c.session_id == session)
         )
@@ -103,8 +105,9 @@ class SessionSummary(msgspec.Struct):
     last_at: float | None  # unix seconds of its newest event
 
 
-async def summaries() -> list[SessionSummary]:
-    """Every session with its collections and its latest event, in id order; the page sorts."""
+async def summaries(last_searched: dict[str, float]) -> list[SessionSummary]:
+    """Every session with its collections and its latest event or search, in id order; the page
+    sorts. `last_searched` is when each session last searched (`log.last_searched`)."""
     loaded = await load()
     async with db.connect() as conn:
         rows = await conn.execute(
@@ -112,7 +115,9 @@ async def summaries() -> list[SessionSummary]:
                 session_events.c.session_id
             )
         )
-        last = dict(rows.tuples().all())
+        last = dict(last_searched)
+        for session_id, ts in rows:
+            last[session_id] = max(ts, last.get(session_id, ts))
     return [SessionSummary(id, collections, last.get(id)) for id, collections in loaded.items()]
 
 
@@ -121,10 +126,11 @@ class EventDetail(msgspec.Struct, omit_defaults=True):
     the generated client knows the fields: every one is optional, and an action fills the few that
     apply to it."""
 
-    # search: "explore", "excerpts", "sources", "text", or a collection name
+    # search: the tool that ran it, "explore", "excerpts", "sources" or "text"
     scope: str | None = None
     hits: int | None = None  # search: how many results came back
     documents: list[str] | None = None  # search: the distinct documents among the hits, best first
+    error: str | None = None  # search: why it failed
     collection: str | None = None  # attach, detach
     collections: list[str] | None = None  # collections: the selection that was set
     questions: list[str] | None = None  # search: the parts, when several were asked at once
@@ -134,8 +140,10 @@ class EventDetail(msgspec.Struct, omit_defaults=True):
 class SessionEvent(msgspec.Struct):
     """One thing a session did: what, to what, and what came of it in one line.
 
-    `detail` is whatever that action has to say: `hits`, `documents` and `scope` for a search,
-    `collections` for a selection. `operation_id` names the operation the action started, if any."""
+    `detail` is whatever that action has to say: `hits`, `documents`, `scope` and `error` for a
+    search, `collections` for a selection. `operation_id` names the operation the action started,
+    if any. A search is read from the search log (`searches`), everything else from
+    `session_events`."""
 
     ts: float  # unix seconds
     action: Action
@@ -145,11 +153,11 @@ class SessionEvent(msgspec.Struct):
     duration_ms: int
 
 
-def _create_session(session: str) -> Insert:
+def create_session(session: str) -> Insert:
     return insert(sessions).values(id=session).on_conflict_do_nothing()
 
 
-def _checked(session: str) -> str:
+def checked(session: str) -> str:
     if not session or len(session) > MAX_SESSION_ID:
         raise InvalidInput(f"session id must be 1..{MAX_SESSION_ID} characters")
     return session
@@ -162,17 +170,17 @@ async def record(
     *,
     detail: EventDetail | None = None,
     operation_id: str | None = None,
-    duration_ms: int = 0,
 ) -> None:
-    """Append one event to the session's history; a no-op without a session.
+    """Append one event to the session's history; a no-op without a session. A search is not an
+    event: the search log records it (`log.capturing`).
 
     The first action under an id is what creates the session: an agent names its conversation
     and imports before it selects anything, and that import belongs to the conversation too."""
     if session is None:
         return
-    _checked(session)
+    checked(session)
     async with db.connect() as conn:
-        await conn.execute(_create_session(session))
+        await conn.execute(create_session(session))
         await conn.execute(
             insert(session_events).values(
                 session_id=session,
@@ -181,71 +189,24 @@ async def record(
                 subject=subject,
                 detail=db.dumps(detail or EventDetail()),
                 operation_id=operation_id,
-                duration_ms=duration_ms,
             )
         )
 
 
-class Found(Protocol):
-    """What every search result has in common, as far as its history event is concerned."""
-
-    document: str
-
-
-async def record_search(
-    session: str | None,
-    scope: str,
-    query: str,
-    found: Sequence[Found],
-    started: float,
-    questions: list[str] | None = None,
-    context: str | None = None,
-) -> None:
-    """A search as one event: the query, how many hits, which documents, and where it looked
-    (the scopes `EventDetail` lists, or a collection's name). `started` is a `perf_counter`.
-    `questions` are the parts of a search of several questions, kept whole; `context` is the
-    context an excerpts search sent, with one question or several."""
-    documents = list(dict.fromkeys(hit.document for hit in found))
-    await record(
-        session,
-        Action.SEARCH,
-        query,
-        detail=EventDetail(
-            scope=scope,
-            hits=len(found),
-            documents=documents,
-            questions=questions,
-            context=context,
-        ),
-        duration_ms=int((time.perf_counter() - started) * 1000),
-    )
-
-
-class SearchAt(msgspec.Struct):
-    """One search, as a point on a trend: when, and which session ran it."""
-
-    ts: float
-    session_id: str
-
-
-async def searches_since(cutoff: float) -> list[SearchAt]:
-    """Every search on or after `cutoff`, oldest first. Raw points, not buckets: the reader
-    buckets them by its own day boundaries, which the server does not know."""
-    async with db.connect() as conn:
-        rows = await conn.execute(
-            select(session_events.c.ts, session_events.c.session_id)
-            .where(session_events.c.action == Action.SEARCH, session_events.c.ts >= cutoff)
-            .order_by(session_events.c.ts)
-        )
-        return [SearchAt(ts, session_id) for ts, session_id in rows]
-
-
 async def history(session: str, limit: int = MAX_HISTORY) -> list[SessionEvent]:
-    """What the session did, newest first."""
+    """What the session did besides searching, newest first; its searches are in the search log
+    (`log.history`)."""
     event = session_events.c
     async with db.connect() as conn:
         rows = await conn.execute(
-            select(*db.columns_of(session_events, SessionEvent))
+            select(
+                event.ts,
+                event.action,
+                event.subject,
+                event.detail,
+                event.operation_id,
+                literal(0).label("duration_ms"),  # only a search takes time worth showing
+            )
             .where(event.session_id == session)
             .order_by(event.ts.desc(), event.id.desc())
             .limit(limit)

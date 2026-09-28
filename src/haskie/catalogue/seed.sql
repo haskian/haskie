@@ -75,28 +75,28 @@ values
 --
 -- `matryoshka_layer_norm` set means the vectors are cut to `dims` (Matryoshka Representation
 -- Learning); 1 is nomic's recipe, a layer norm over the whole vector before the cut.
-insert or ignore into embedding_profiles (profile, model, dims, description, query_prefix, document_prefix, matryoshka_layer_norm, duplicate_chunk, duplicate_passage)
+insert or ignore into embedding_profiles (profile, model, dims, description, query_prefix, document_prefix, matryoshka_layer_norm, duplicate_chunk, duplicate_passage, weak_match, answered_match, same_topic)
 values
-    ('compact', 'BAAI/bge-small-en-v1.5', 384, null, '', '', null, 0.92, 0.95),
-    ('balanced', 'BAAI/bge-base-en-v1.5', 768, null, '', '', null, 0.92, 0.95),
-    ('gte-base', 'thenlper/gte-base', 768, null, '', '', null, null, null),
-    ('arctic-m', 'snowflake/snowflake-arctic-embed-m', 768, null, 'Represent this sentence for searching relevant passages: ', '', null, null, null),
-    ('nomic-v1.5', 'nomic-ai/nomic-embed-text-v1.5', 768, null, 'search_query: ', 'search_document: ', null, null, null),
-    ('jina-v2-small', 'jinaai/jina-embeddings-v2-small-en', 512, null, '', '', null, null, null),
+    ('compact', 'BAAI/bge-small-en-v1.5', 384, null, '', '', null, 0.92, 0.95, 0.67, 0.775, 0.70),
+    ('balanced', 'BAAI/bge-base-en-v1.5', 768, null, '', '', null, 0.92, 0.95, null, null, null),
+    ('gte-base', 'thenlper/gte-base', 768, null, '', '', null, null, null, null, null, null),
+    ('arctic-m', 'snowflake/snowflake-arctic-embed-m', 768, null, 'Represent this sentence for searching relevant passages: ', '', null, null, null, 0.27, null, 0.54),
+    ('nomic-v1.5', 'nomic-ai/nomic-embed-text-v1.5', 768, null, 'search_query: ', 'search_document: ', null, null, null, null, null, null),
+    ('jina-v2-small', 'jinaai/jina-embeddings-v2-small-en', 512, null, '', '', null, null, null, null, null, null),
     -- nomic v1.5 cut to 512 of its 768: 61.96 on MTEB against 62.28 whole, by its card
-    ('nomic-v1.5-512','nomic-ai/nomic-embed-text-v1.5', 512, 'nomic v1.5 with its vectors cut to 512 (Matryoshka): a third less index for a small loss (~520 MB).', 'search_query: ', 'search_document: ', 1, null, null),
-    ('jina-v2-base', 'jinaai/jina-embeddings-v2-base-en', 768, null, '', '', null, null, null),
-    ('modernbert-mlx', 'mlx-community/nomicai-modernbert-embed-base-bf16', 768, null, 'search_query: ', 'search_document: ', null, null, null),
-    ('jina-v5-nano-mlx', 'jinaai/jina-embeddings-v5-text-nano-retrieval-mlx', 768, null, '', '', null, null, null),
-    ('quality', 'BAAI/bge-large-en-v1.5', 1024, null, '', '', null, 0.92, 0.95),
-    ('multilingual', 'intfloat/multilingual-e5-large', 1024, null, 'query: ', 'passage: ', null, 0.97, 0.98),
-    ('bge-m3', 'BAAI/bge-m3', 1024, null, '', '', null, null, null),
+    ('nomic-v1.5-512','nomic-ai/nomic-embed-text-v1.5', 512, 'nomic v1.5 with its vectors cut to 512 (Matryoshka): a third less index for a small loss (~520 MB).', 'search_query: ', 'search_document: ', 1, null, null, null, null, null),
+    ('jina-v2-base', 'jinaai/jina-embeddings-v2-base-en', 768, null, '', '', null, null, null, null, null, null),
+    ('modernbert-mlx', 'mlx-community/nomicai-modernbert-embed-base-bf16', 768, null, 'search_query: ', 'search_document: ', null, null, null, null, null, null),
+    ('jina-v5-nano-mlx', 'jinaai/jina-embeddings-v5-text-nano-retrieval-mlx', 768, null, '', '', null, null, null, null, null, null),
+    ('quality', 'BAAI/bge-large-en-v1.5', 1024, null, '', '', null, 0.92, 0.95, null, null, null),
+    ('multilingual', 'intfloat/multilingual-e5-large', 1024, null, 'query: ', 'passage: ', null, 0.97, 0.98, null, null, null),
+    ('bge-m3', 'BAAI/bge-m3', 1024, null, '', '', null, null, null, null, null, null),
     -- each GGUF profile as its ONNX twin: the same sizes, prefixes and duplicate cosines
-    ('bge-small-gguf', 'ggml-org/bge-small-en-v1.5-Q8_0-GGUF', 384, null, '', '', null, 0.92, 0.95),
-    ('jina-v2-base-gguf', 'ggml-org/jina-embeddings-v2-base-en-Q8_0-GGUF', 768, null, '', '', null, null, null),
-    ('nomic-v1.5-gguf', 'nomic-ai/nomic-embed-text-v1.5-GGUF', 768, null, 'search_query: ', 'search_document: ', null, null, null),
-    ('bge-m3-gguf', 'ggml-org/bge-m3-Q8_0-GGUF', 1024, null, '', '', null, null, null),
-    ('jina-v3', 'jinaai/jina-embeddings-v3', 1024, null, '', '', null, null, null);
+    ('bge-small-gguf', 'ggml-org/bge-small-en-v1.5-Q8_0-GGUF', 384, null, '', '', null, 0.92, 0.95, 0.67, 0.775, 0.70),
+    ('jina-v2-base-gguf', 'ggml-org/jina-embeddings-v2-base-en-Q8_0-GGUF', 768, null, '', '', null, null, null, null, null, null),
+    ('nomic-v1.5-gguf', 'nomic-ai/nomic-embed-text-v1.5-GGUF', 768, null, 'search_query: ', 'search_document: ', null, null, null, null, null, null),
+    ('bge-m3-gguf', 'ggml-org/bge-m3-Q8_0-GGUF', 1024, null, '', '', null, null, null, null, null, null),
+    ('jina-v3', 'jinaai/jina-embeddings-v3', 1024, null, '', '', null, null, null, null, null, null);
 
 -- Each reranker's floor and score curve (`reranker_calibration`). Uncalibrated until measured:
 -- a floor of 0.05 (logit about -3), judged on one book with MiniLM-L-6, and the identity curve
@@ -116,3 +116,32 @@ values
     ('soichisumi/bge-reranker-v2-m3-mlx-affine8', 0.05, 1.0, 1.0, 'uncalibrated'),
     ('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1', 0.05, 1.0, 1.0, 'uncalibrated'),
     ('afanjul/gte-reranker-modernbert-base-mlx', 0.05, 1.0, 1.0, 'uncalibrated');
+
+-- `weak_match`, `answered_match` and `same_topic` in the profiles above are the cosines the Gaps
+-- page judges searches by (`search.gaps`), measured with `mise run evaluate-gaps`, not guessed. A
+-- best cosine under `weak_match` is a gap; from it to `answered_match`, borderline (maybe
+-- answered); over it, an answer. A reranked search is judged by the reranker's floor instead,
+-- since the reranker reads query and passage together. A profile without `weak_match` gives no
+-- cosine verdict; without `answered_match`, no borderline band; without `same_topic`, gaps are
+-- grouped by their words. Each bar is set so that no answered question is flagged: a false gap
+-- costs the curator's trust, a missed one only waits for the next search.
+--
+-- Two shelves (tests/gapeval), each pinned to a commit: the Rust book (1,418 chunks at the default
+-- chunk settings; 45 answered questions, 40 unanswered: 30 near its topics, 10 far) and four of
+-- haskie's docs (80 chunks; 12 answered, 5 unanswered). `answered_match` must hold every unanswered question the
+-- low bar misses while flagging at most 15% of the answered ones; else a profile has no band.
+-- `same_topic` sits over the highest cosine between two queries of different topics (12 topics,
+-- 3 phrasings each), so two topics never merge.
+--
+-- - compact: the lowest answered best cosine is 0.673 (haskie docs; the Rust book's is 0.751),
+--   so 0.67; it catches 30 of 45 unanswered. The highest unanswered is 0.763, so the band ends at
+--   0.775: it holds the other 15, with 5 of 57 answered (9%). Topics: other pairs <= 0.692, so
+--   0.70, joining 89% of same-topic pairs. An edit to the docs alone moved their lowest answered
+--   cosine from 0.698 to 0.673: a bar holds for the text it was measured on.
+-- - arctic-m: answered down to 0.278 (haskie docs; 0.386 on the Rust book), unanswered up to
+--   0.464: they overlap, so 0.27 catches 13 of 45, and no band passes (holding all 32 others
+--   would flag 40% of answered). Topics: other pairs <= 0.525, so 0.54.
+-- - bge-small-gguf borrows compact's values, as it borrows its duplicate cosines.
+-- - Measured against the rerankers' floors above: MiniLM-L-6 at 0.05 flags no answered question
+--   and catches 36 of 45 (compact pools); mxbai-rerank-xsmall at 0.05 flags none and catches 24
+--   of 45 (arctic-m pools).

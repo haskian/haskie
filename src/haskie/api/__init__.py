@@ -8,14 +8,15 @@ what two of them share lives in `common.py`.
 from litestar.handlers import HTTPRouteHandler
 from litestar.types import ControllerRouterHandler
 
-from haskie.api import collections, documents, operations, search, settings
+from haskie.api import collections, documents, gaps, operations, search, settings
 
 # The module order is the order the routes appear in the OpenAPI document, so it follows the UI:
-# set up, then documents, then the collections holding them, then the work, then searching.
+# set up, then documents, then the collections holding them, then the work, then searching, then
+# what searching found missing.
 # Inside a module it is definition order, which is what `vars()` yields.
 ROUTE_HANDLERS: list[ControllerRouterHandler] = [
     handler
-    for module in (settings, documents, collections, operations, search)
+    for module in (settings, documents, collections, operations, search, gaps)
     for handler in vars(module).values()
     if isinstance(handler, HTTPRouteHandler)
 ]

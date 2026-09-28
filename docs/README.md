@@ -10,6 +10,7 @@ Start with the architecture, then follow a document from import to a cited answe
 | [Indexing](indexing.md) | the durable DBOS pipeline, queues, the CPU budget, recovery |
 | [Chunking](chunking.md) | Structure-Aware Chunking: settings, steps, and every cut rule |
 | [Search](search.md) | from query to excerpts: ranking, the four answers, folding repeats |
+| [Gaps](gaps.md) | the search log, which searches found no answer, and how the bars were measured |
 | [Storage](storage.md) | the home directory, the metadata database, schema changes |
 | [REST API](rest-api.md) | routes, intake, errors, paging |
 | [MCP and Claude Code](mcp.md) | the tools, what the installer adds, a session end to end |

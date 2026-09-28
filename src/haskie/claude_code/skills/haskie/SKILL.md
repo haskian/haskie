@@ -150,6 +150,32 @@ Every write takes `session_id`, so the change shows in the conversation's histor
 - Not over MCP: creating, describing, tuning, re-indexing or deleting a collection; deleting or
   re-importing a document; operations and settings. Point the user to the web UI.
 
+## Log and gap tools
+
+haskie keeps every search, so the collections can grow where they fall short.
+
+- **`list_searches(session_id?, days?, limit?)`** → the searches of the last `days` days (7 by
+  default), newest first, at most `limit` (50, at most 200). Each has its `questions`, each with
+  `best_similarity`, `best_rerank` and `uncovered`, and its `results` cited by `header` and
+  `location`. A failed search has an `error`. Use it to recall what this conversation already
+  searched.
+- **`list_gaps(review?, days?, signals?)`** → the questions no collection answers, grouped by
+  topic, the most asked first. Each question has a `signal` (`reported`, `empty`, `uncovered` or
+  `weak`), its `id`, and `near_misses`: what came closest. `borderline` (maybe answered: the best
+  match sits between the bars) is left out unless `signals` names it. Tell the user which topics
+  keep coming back; they are what to add next.
+- **`replay_gaps(ids)`** → each gap question asked again over every collection, at most 50:
+  `signal` null means it is answered now, and `results` cites where. Nothing is logged.
+- **`report_gap(session_id, question, verdict, missing?)`** → the question's `id` and `verdict`.
+  Call it when the excerpts of a search you just ran do not let a careful reader answer the
+  question from them alone (`insufficient`), or answer only part (`partial`). `question` is the
+  question as you passed it, in this session, in the last hour. `missing` is what they lacked, at
+  most 300 characters. The question's signal is then `reported`, whatever its scores say. Not for a
+  question answered in other words.
+- **`review_gaps(ids, review)`** → how many questions it reached. `resolved` after a document now
+  answers them, `dismissed` when the collections are not meant to, `open` to take it back. Resolve
+  a gap only after `replay_gaps` shows it answered.
+
 ## Errors
 
 A failed call is a tool error with a status code and a message that names the problem.

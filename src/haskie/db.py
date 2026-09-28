@@ -30,18 +30,20 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from haskie import home, tables
 from haskie.errors import HaskieError
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 """`pragma user_version` of the schema in `tables.py`.
 
 A home stamped with it has these tables and columns and is opened as it is. Any other stamp is a
-shape this build cannot read, so the home is refused (see `migrate`). Against 22, a document
-and a staged upload keep the MD5 of their bytes (`md5`), and an embedding cache row keeps the
-document's mean vector (`embeddings.vector`). Against 21, where two parts of a document meet
-is cut `part` or `heading`, not `edge` (`CutReason.PART`). Against 20, the
-catalogue holds each reranker's calibration (`reranker_calibration`). Against the last release
-(19), a piece without a word (`---`, a stray symbol, a page marker alone) makes no chunk
-(`chunk.pack`): every document chunks differently, and a search no longer checks for such
-chunks, so an index written the old way would return them.
+shape this build cannot read, so the home is refused (see `migrate`). Against the last release (23),
+searches move out of `session_events` into the search log (`searches`, `search_questions`,
+`search_results`), and the embedding profiles gain the cosines the Gaps page judges by
+(`weak_match`, `answered_match`, `same_topic`). Against 22, a document and a staged upload keep the
+MD5 of their bytes (`md5`), and an embedding cache row keeps the document's mean vector
+(`embeddings.vector`). Against 21, where two parts of a document meet is cut `part` or `heading`,
+not `edge` (`CutReason.PART`). Against 20, the catalogue holds each reranker's calibration
+(`reranker_calibration`). Against 19, a piece without a word (`---`, a stray symbol, a page marker
+alone) makes no chunk (`chunk.pack`): every document chunks differently, and a search no longer
+checks for such chunks, so an index written the old way would return them.
 
 A cache file or LanceDB table written the old way must never be read by this build.
 

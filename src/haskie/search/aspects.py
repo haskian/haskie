@@ -68,6 +68,15 @@ class Questions(msgspec.Struct, frozen=True):
         ]
 
 
+def question(asked: str) -> str:
+    """The one question of a single-question search, stripped, or `InvalidInput` when blank: a
+    blank search finds nothing, and would be logged as an unnamed gap."""
+    stripped = asked.strip()
+    if not stripped:
+        raise InvalidInput("q is empty")
+    return stripped
+
+
 def questions(asked: list[str], context: str | None = None) -> Questions:
     """The questions a caller sent, stripped and deduplicated in order, or `InvalidInput`.
 

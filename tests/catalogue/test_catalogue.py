@@ -210,6 +210,11 @@ async def test_the_schema_takes_a_valid_model() -> None:
         ("a release date not in ISO form", _MODEL.format_map(_VALID | {"released": "15.3.2024"})),
         ("a release date that is no day", _MODEL.format_map(_VALID | {"released": "2024-02-30"})),
         ("a card off the Hub", _MODEL.format_map(_VALID | {"url": "https://example.com/x/y"})),
+        (
+            "a borderline band that ends under its start",
+            "update embedding_profiles set weak_match = 0.7, answered_match = 0.6 "
+            "where profile = 'compact'",
+        ),
     ],
 )
 async def test_the_schema_refuses_a_row_the_catalogue_cannot_mean(name: str, sql: str) -> None:
@@ -232,6 +237,10 @@ async def test_the_schema_refuses_a_row_the_catalogue_cannot_mean(name: str, sql
                 384,
                 accelerator=Accelerator.CPU,
                 duplicate=DuplicateCosine(chunk=0.92, passage=0.95),
+                profile="compact",
+                weak_match=0.67,
+                answered_match=0.775,
+                same_topic=0.70,
             ),
         ),
         (
@@ -243,13 +252,18 @@ async def test_the_schema_refuses_a_row_the_catalogue_cannot_mean(name: str, sql
                 query_prefix="search_query: ",
                 document_prefix="search_document: ",
                 matryoshka=Matryoshka(layer_norm=True),
+                profile="nomic-v1.5-512",
             ),
         ),
         (
             "the same model whole: no cut, no thresholds",
             UserSettings(embedding="nomic-v1.5"),
             EmbeddingModel(
-                NOMIC, 768, query_prefix="search_query: ", document_prefix="search_document: "
+                NOMIC,
+                768,
+                query_prefix="search_query: ",
+                document_prefix="search_document: ",
+                profile="nomic-v1.5",
             ),
         ),
     ],

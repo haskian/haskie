@@ -1,0 +1,55 @@
+{
+  "commit": "b6bdd14f662940b05a5ee741ad332a2dd6a2a28a",
+  "files": [
+    "README.md",
+    "docs/search.md",
+    "docs/indexing.md",
+    "docs/storage.md"
+  ],
+  "answered": [
+    "How does haskie chunk a markdown document?",
+    "What happens when the schema version changes?",
+    "How are searches across several collections merged?",
+    "Which search modes are there and how does hybrid fusion work?",
+    "How does the CPU budget limit indexing work?",
+    "Where does haskie store its documents and database?",
+    "How does a reranker rescore the candidates?",
+    "What is an excerpt and how is a passage widened?",
+    "How does DBOS resume indexing after a crash?",
+    "How does search_sources pick the collections to select?",
+    "What is the embedding cache keyed by?",
+    "How does maintenance compact a collection's table?"
+  ],
+  "unanswered_near": [
+    "How should a background job retry a failed Kafka message without duplicates?",
+    "retrying failed Kafka consumers idempotently",
+    "How do I center a div with CSS grid?",
+    "How does the Rust borrow checker reason about lifetimes?"
+  ],
+  "unanswered_far": [
+    "What grape varieties are used in Rioja wine?"
+  ],
+  "reworded": [
+    "How does haskie slice markdown files into fragments?",
+    "What happens when the database layout version is bumped?",
+    "How are results from several shelves combined into one list?",
+    "How does the cross-encoder reshuffle the hit list?",
+    "How does the processor quota throttle ingestion?",
+    "Where does haskie persist its files and metadata store?",
+    "How does the durable workflow engine pick up again after the process dies?",
+    "What identifies an entry in the vector cache?",
+    "How does housekeeping defragment a collection's storage?",
+    "How are repeated passages merged so each point appears once?",
+    "How is a quotation stretched to whole sentences?",
+    "How does the lexical index rank matches?",
+    "What does the curation interface show about agent conversations?",
+    "How are uploaded files transformed into plain text?",
+    "How do I purge old job history?",
+    "How are several sub-questions answered in a single call?",
+    "How does the tool choose which shelves to narrow the conversation to?",
+    "How is the approximate nearest-neighbour index trained for big collections?",
+    "How is a page reference given when quoting a PDF?",
+    "How are models fetched before first use?"
+  ],
+  "_reworded": "questions the docs answer, asked in words they do not use: what a vocabulary gap looks like"
+}

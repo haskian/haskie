@@ -1,11 +1,13 @@
 """Request and response shapes shared by more than one feature module."""
 
+import time
 from typing import Annotated
 
 import msgspec
 from litestar.di import Provide
 from litestar.params import Parameter
 
+from haskie.errors import InvalidInput
 from haskie.paging import page_request
 
 # The four paging query arguments, declared once. Litestar reads a provider's own parameters from
@@ -31,3 +33,12 @@ class Describe(msgspec.Struct):
 
 # A search returns at least one result or none at all; the bound rides along into the schema.
 Limit = Annotated[int | None, Parameter(ge=1)]
+
+MAX_DAYS = 366  # a window of history: Insights charts and Gaps read at most a year back
+
+
+def days_ago(days: int) -> float:
+    """Unix seconds `days` days ago: where a window of history begins."""
+    if not 1 <= days <= MAX_DAYS:
+        raise InvalidInput(f"days must be 1..{MAX_DAYS}, got {days}")
+    return time.time() - days * 86400

@@ -12,7 +12,7 @@ src/haskie/
   document/     convert files to markdown, store them, render previews
   collection/   named sets of documents, one LanceDB index each
   indexing/     DBOS pipeline: chunk, embed, cache, index; model lifecycle
-  search/       retrieval, passages, near-duplicate folding, sessions
+  search/       retrieval, passages, near-duplicate folding, sessions, the search log, gaps
   catalogue/    models and embedding profiles, seeded into SQLite; loaders stay in indexing/
   claude_code/  skill and rule files installed into Claude Code
   app.py        Litestar app; cli.py the CLI; claude.py the Claude Code install

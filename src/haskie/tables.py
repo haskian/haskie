@@ -143,9 +143,79 @@ session_events = Table(
     Column("subject", Text, nullable=False),
     Column("detail", Text, nullable=False, server_default="{}"),
     Column("operation_id", Text),
-    Column("duration_ms", Integer, nullable=False, server_default=ZERO),
     Index("idx_session_events_session", "session_id", "ts"),
     Index("idx_session_events_operation", "operation_id"),
+)
+
+# every search as it ran (see search/log.py), with or without a session: the session history and
+# the Insights trend read the searches here, and the Gaps page judges their questions. Retention
+# prunes them by age (`retention.search_days`)
+searches = Table(
+    "searches",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("ts", Float, nullable=False),
+    Column("session_id", Text),
+    Column("actor", Text, nullable=False),
+    Column("tool", Text, nullable=False),
+    Column("context", Text),  # the background an excerpts search's questions shared
+    Column("collections", Text, nullable=False, server_default="[]"),
+    Column("mode", Text),
+    Column("embedding", Text),  # the profile key: query vectors compare within one profile only
+    Column("reranker", Text),  # the cross-encoder model, None when the search did not rerank
+    Column("min_rerank_score", Float),  # the settings' floor in place of the reranker's own
+    Column("result_limit", Integer),
+    Column("result_count", Integer, nullable=False, server_default=ZERO),
+    Column("duration_ms", Integer, nullable=False, server_default=ZERO),
+    Column("error", Text),
+    # the words of its questions no excerpt held (`Answer.missing_terms`), JSON; excerpts only
+    Column("missing_terms", Text, nullable=False, server_default="[]"),
+    Index("idx_searches_ts", "ts"),
+    Index("idx_searches_session", "session_id", "ts"),
+)
+
+# each question one search asked, in the order asked, and what its own ranking measured: an
+# excerpts search runs one ranking per question, and the Gaps page judges and reviews each alone
+search_questions = Table(
+    "search_questions",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("search_id", Integer, ForeignKey("searches.id", ondelete="CASCADE"), nullable=False),
+    Column("position", Integer, nullable=False),
+    Column("question", Text, nullable=False),
+    # the score profile of its ranking: the best cosines of the query to the rows read and the
+    # reranker's best scores before its floor, each float32 and best first (`log.PROFILE`)
+    Column("similarities", LargeBinary),
+    Column("rerank_scores", LargeBinary),
+    Column("uncovered", Integer, nullable=False, server_default=ZERO),  # no excerpt answers it
+    Column("review", Text, CheckConstraint("review in ('dismissed', 'resolved')")),
+    # the agent's own verdict on what the search gave it (`gaps.report`), and what it lacked
+    Column("agent_verdict", Text, CheckConstraint("agent_verdict in ('insufficient', 'partial')")),
+    Column("agent_note", Text),
+    # float32, the search's `embedding` dimensions; last, since a row's columns past a blob this
+    # big are read from overflow pages, and most reads skip it
+    Column("query_vector", LargeBinary),
+    Index("idx_search_questions_search", "search_id", "position", unique=True),
+)
+
+# what one search returned: every result and every place folded into one (`also_in`), in
+# preorder, each under its parent's position
+search_results = Table(
+    "search_results",
+    metadata,
+    Column("search_id", Integer, ForeignKey("searches.id", ondelete="CASCADE"), primary_key=True),
+    Column("position", Integer, primary_key=True),
+    Column("parent", Integer),
+    Column("relation", Text),
+    Column("collection", Text, nullable=False),
+    Column("document", Text, nullable=False),
+    Column("seq_start", Integer),
+    Column("seq_end", Integer),
+    Column("line_start", Integer, nullable=False),
+    Column("line_end", Integer, nullable=False),
+    Column("header", Text, nullable=False),
+    Column("location", Text, nullable=False),
+    Column("score", Float, nullable=False),
 )
 
 # the model catalogue (see catalogue/catalogue.py): every model the runtimes can load, with its
@@ -186,6 +256,12 @@ embedding_profiles = Table(
     Column("duplicate_chunk", Float),
     Column("duplicate_passage", Float),
     CheckConstraint("(duplicate_chunk is null) = (duplicate_passage is null)"),
+    # the cosines search/gaps.py judges by: a best match under `weak_match` is no answer, and two
+    # queries over `same_topic` ask about one thing
+    Column("weak_match", Float),
+    Column("answered_match", Float),  # at and over it an answer; between the two, borderline
+    Column("same_topic", Float),
+    CheckConstraint("answered_match is null or answered_match >= weak_match"),
 )
 
 # how one reranker's scores read (`catalogue.calibration`): its floor, under which it judged a

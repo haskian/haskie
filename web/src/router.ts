@@ -8,6 +8,7 @@ export type Route =
   | { name: 'collections'; collection?: string }
   | { name: 'operations' }
   | { name: 'sessions'; session?: string }
+  | { name: 'gaps'; topic?: string }
   | { name: 'insights' }
   | { name: 'settings' }
 
@@ -29,6 +30,8 @@ export function parseRoute(hash: string): Route {
       return { name: 'operations' }
     case 'sessions':
       return { name: 'sessions', session: name }
+    case 'gaps':
+      return { name: 'gaps', topic: name }
     case 'insights':
       return { name: 'insights' }
     case 'settings':
@@ -46,6 +49,8 @@ export function formatRoute(route: Route): string {
       return route.collection === undefined ? '#/collections' : `#/collections/${encodeURIComponent(route.collection)}`
     case 'sessions':
       return route.session === undefined ? '#/sessions' : `#/sessions/${encodeURIComponent(route.session)}`
+    case 'gaps':
+      return route.topic === undefined ? '#/gaps' : `#/gaps/${encodeURIComponent(route.topic)}`
     default:
       return `#/${route.name}`
   }

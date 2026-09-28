@@ -24,3 +24,6 @@ topics no collection covers.
 5. Report the gaps. A part in `uncovered` or a word in `missing_terms` is something the sources do
    not say. No excerpts at all means the collections do not cover the topic. Say so, then fall back
    to the web. Never pass a web result off as one of their sources.
+6. When the excerpts came back but do not let a careful reader answer from them alone, call
+   `report_gap` with the question as you asked it, `insufficient` or `partial`, and in `missing` what
+   they lacked. The user sees it as a gap to close.

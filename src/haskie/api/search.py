@@ -1,18 +1,19 @@
 """Session selection and the searches that are not scoped to one collection."""
 
-import time
+import asyncio
 from enum import StrEnum
+from typing import Annotated
 
 import msgspec
 from litestar import get, put
+from litestar.params import Parameter
 
 from haskie import audit
-from haskie.api.common import Limit
+from haskie.api.common import Limit, days_ago
 from haskie.collection.index import Hit
-from haskie.errors import InvalidInput
 from haskie.indexing import operations
 from haskie.paging import DEFAULT_PAGE_SIZE, Page
-from haskie.search import aspects, flow, retrieval, session, text
+from haskie.search import aspects, flow, log, retrieval, session, text
 from haskie.search.passage import Answer, Passage, Sources
 
 
@@ -31,7 +32,7 @@ class SessionCollections(msgspec.Struct):
 @get("/api/sessions")
 async def list_sessions() -> list[session.SessionSummary]:
     """Every session: its collections and when it last did anything."""
-    return await session.summaries()
+    return await session.summaries(await log.last_searched())
 
 
 @put("/api/sessions/{session_id:str}", mcp_tool="set_session_collections")
@@ -70,13 +71,14 @@ async def explore(
     result it repeats: it is listed in that result's `also_in` rather than on its own, and its
     slot goes to the next result down.
     """
-    started = time.perf_counter()
-    names = await retrieval.scope(session_id, collections)
-    if granularity == Granularity.PASSAGE:
-        found: list[Hit] | list[Passage] = await flow.passages(names, q, limit)
-    else:
-        found = await flow.chunks(names, q, limit)
-    await session.record_search(session_id, "explore", q, found, started)
+    q = aspects.question(q)  # stripped as `report_gap` matches it
+    async with log.capturing(log.Tool.EXPLORE, [q], session_id) as capture:
+        names = await retrieval.scope(session_id, collections)
+        if granularity == Granularity.PASSAGE:
+            found: list[Hit] | list[Passage] = await flow.passages(names, q, limit)
+        else:
+            found = await flow.chunks(names, q, limit)
+        capture.answer(found)
     return found
 
 
@@ -150,19 +152,13 @@ async def search_excerpts(
             `rerank_with_context` setting is on).
         session_id: The conversation's id; the search then shows in that session's history.
     """
-    started = time.perf_counter()
+    # a malformed question is a refused request, not a search: it is checked before the capture
     asked = aspects.questions(q, context)
-    found = await flow.answers(await retrieval.scope(session_id, collections), asked, limit)
-    several = asked.questions if len(asked.questions) > 1 else None
-    await session.record_search(
-        session_id,
-        "excerpts",
-        " | ".join(asked.questions),
-        found.excerpts,
-        started,
-        questions=several,
-        context=asked.context,
-    )
+    async with log.capturing(
+        log.Tool.EXCERPTS, asked.questions, session_id, context=asked.context
+    ) as capture:
+        found = await flow.answers(await retrieval.scope(session_id, collections), asked, limit)
+        capture.answer(found.excerpts, found.uncovered, found.missing_terms)
     return found
 
 
@@ -190,39 +186,62 @@ async def search_sources(
     Args:
         session_id: The conversation's id; the search then shows in that session's history.
     """
-    started = time.perf_counter()
-    names = await retrieval.scope(session_id, collections)
-    found = await flow.sources(names, q, limit, sections)
-    await session.record_search(session_id, "sources", q, found.documents, started)
+    q = aspects.question(q)  # stripped as `report_gap` matches it
+    async with log.capturing(log.Tool.SOURCES, [q], session_id) as capture:
+        names = await retrieval.scope(session_id, collections)
+        found = await flow.sources(names, q, limit, sections)
+        capture.answer(found.documents)
     return found
 
 
-MAX_TREND_DAYS = 366
+MAX_SEARCHES = 200  # a page of the log an agent reads through, not an export
 
 
-def _trend_cutoff(days: int) -> float:
-    """Unix seconds `days` days ago: where an Insights chart begins."""
-    if not 1 <= days <= MAX_TREND_DAYS:
-        raise InvalidInput(f"days must be 1..{MAX_TREND_DAYS}, got {days}")
-    return time.time() - days * 86400
+@get("/api/searches", mcp_tool="list_searches")
+async def list_searches(
+    session_id: str | None = None,
+    days: int = 7,
+    limit: Annotated[int, Parameter(ge=1, le=MAX_SEARCHES)] = 50,
+) -> list[log.LoggedSearch]:
+    """What was searched, newest first: every search of the last `days` days, or one session's.
+
+    Each search lists its `questions`, each with how close its best match came
+    (`best_similarity`, the cosine of the query to the nearest chunk; `best_rerank`, the
+    reranker's score of the best chunk, 0 to 1) and whether no excerpt answered it (`uncovered`,
+    when several were asked at once). `results` are what it returned, cited by `header` and
+    `location`. A search that failed has an `error` and no results. `list_gaps` groups the
+    questions that found no answer.
+
+    Args:
+        session_id: Only the searches of this conversation.
+        days: How far back, 1 to 366.
+        limit: At most this many searches, the newest.
+    """
+    return await log.listed(days_ago(days), session_id, limit)
 
 
 @get("/api/insights/searches")
-async def search_trend(days: int = 7) -> list[session.SearchAt]:
-    """Every search of the last `days` days, oldest first, for the Insights chart."""
-    return await session.searches_since(_trend_cutoff(days))
+async def search_trend(days: int = 7) -> list[log.SearchAt]:
+    """Every search of the last `days` days, oldest first, for the Insights chart; `session_id`
+    is null for a search made without one."""
+    return await log.searches_since(days_ago(days))
 
 
 @get("/api/insights/chunks")
 async def chunk_trend(days: int = 7) -> list[operations.ChunksAt]:
     """Every finished index of the last `days` days, oldest first, for the Insights chart."""
-    return await operations.chunks_since(_trend_cutoff(days))
+    return await operations.chunks_since(days_ago(days))
 
 
 @get("/api/sessions/{session_id:str}/history")
 async def session_history(session_id: str) -> list[session.SessionEvent]:
-    """What a session did, newest first; the last 100 events at most."""
-    return await session.history(session_id)
+    """What a session did, newest first: its searches and its other actions, the last 100 at
+    most."""
+    actions, searched = await asyncio.gather(
+        session.history(session_id), log.history(session_id, session.MAX_HISTORY)
+    )
+    events = actions + searched
+    return sorted(events, key=lambda one: one.ts, reverse=True)[: session.MAX_HISTORY]
 
 
 @get("/api/search/text")
@@ -243,8 +262,9 @@ async def search_text(
     Args:
         session_id: The conversation's id; the search then shows in that session's history.
     """
-    started = time.perf_counter()
-    page = await text.search(q, text.split_collections(collections), page_size, cursor)
-    if cursor is None:  # one event per search, not one per page of it
-        await session.record_search(session_id, "text", q, page.items, started)
+    # one search per query, not one per page of it
+    q = aspects.question(q)  # stripped as `report_gap` matches it
+    async with log.capturing(log.Tool.TEXT, [q], session_id, record=cursor is None) as capture:
+        page = await text.search(q, text.split_collections(collections), page_size, cursor)
+        capture.answer(page.items)
     return page

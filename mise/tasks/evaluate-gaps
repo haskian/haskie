@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="Measure how well each gap signal tells answered from unanswered questions, on the Rust book and haskie's docs (see tests/gapeval/evaluate.py); downloads the book and runs real models"
+set -euo pipefail
+uv run python tests/gapeval/evaluate.py "$@"

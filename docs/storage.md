@@ -7,7 +7,7 @@ they sit in the fastembed and Hugging Face caches, outside the home.
 ```
 ~/.haskie/
   haskie.db               SQLite (WAL): settings, documents, collections, memberships,
-                          embedding metadata, sessions, and the DBOS tables
+                          embedding metadata, sessions, the search log, and the DBOS tables
   haskie.lock             the home lock, naming the process that holds it
   server.log              output of a server that `haskie ensure` started
   staging/                uploads not yet imported; the nightly run sweeps those over a day old
@@ -37,6 +37,9 @@ erDiagram
     sessions ||--o{ session_collections : ""
     collections ||--o{ session_collections : ""
     sessions ||--o{ session_events : ""
+    sessions |o--o{ searches : ""
+    searches ||--o{ search_questions : ""
+    searches ||--o{ search_results : ""
     models ||--o{ embedding_profiles : ""
     models ||--o| reranker_calibration : ""
     documents {
@@ -78,6 +81,32 @@ erDiagram
         text action
         text operation_id
     }
+    searches {
+        int id PK
+        text session_id
+        text tool
+        text context
+        text collections
+    }
+    search_questions {
+        int id PK
+        int search_id
+        text question
+        blob similarities
+        blob rerank_scores
+        int uncovered
+        text review
+        text agent_verdict
+        text agent_note
+        blob query_vector
+    }
+    search_results {
+        int search_id PK
+        int position PK
+        int parent
+        text document
+        text location
+    }
     models {
         text name PK
         text kind
@@ -111,6 +140,13 @@ by. The seed gives every reranker an uncalibrated floor of 0.05 and the identity
 `documents.md5` is the MD5 of the original file, so a second upload of the same bytes is spotted.
 `embeddings.vector` is the document as one vector: the mean of its unit chunk vectors,
 normalized. It is what the nearest documents are found by.
+
+`searches` is the search log (`search/log.py`): one row per search, with or without a session,
+failed or not. `search_questions` holds each question it asked and what that question's ranking
+measured, and `search_results` every place it returned, folded places included. A session's
+history reads its searches from here and its other actions from `session_events`. The Gaps page
+judges the questions on read ([Gaps](gaps.md)). The nightly run deletes searches older than
+`retention.search_days`.
 
 Two more tables stand alone: `settings` (one row of JSON) and `staging` (uploads waiting for a
 name, with the MD5 of their bytes). DBOS keeps its own workflow and queue tables in the same file. `sysdb.py` reads them for

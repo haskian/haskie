@@ -58,6 +58,13 @@ export type SessionSummary = Wire<'SessionSummary'>
 export type EventDetail = components['schemas']['EventDetail']
 export type SessionEvent = Omit<Wire<'SessionEvent'>, 'detail'> & { detail: EventDetail }
 export type SearchAt = Wire<'SearchAt'>
+// Gaps: questions that found no answer, grouped by what they asked (`search.gaps`).
+export type GapTopic = Wire<'GapTopic'>
+export type GapQuestion = Wire<'GapQuestion'>
+export type LoggedResult = Wire<'LoggedResult'>
+export type ReplayedGap = Wire<'ReplayedGap'>
+export type GapSignal = Wire<'Signal'>
+export type GapReview = Wire<'Review'>
 export type ChunksAt = Wire<'ChunksAt'>
 export type OperationKindSummary = Wire<'OperationKindSummary'>
 // Work the backend only accepts (202) and runs in the background. `operation_id` is what a poll of
@@ -336,6 +343,14 @@ export const api = {
   chunkTrend: (days: number) => request<ChunksAt[]>(`/api/insights/chunks${pageQuery({}, { days: String(days) })}`),
   saveSession: (id: string, collections: string[]) =>
     request<string[]>(`/api/sessions/${encodeURIComponent(id)}`, json('PUT', { collections })),
+
+  // `signals` defaults to the confirmed gaps; the page asks for the borderline ones too
+  gaps: (review: GapReview, days: number, signals?: GapSignal[]) =>
+    request<GapTopic[]>(`/api/gaps${pageQuery({}, { review, days: String(days), signals })}`),
+  // `open` takes a decision back. Answers how many questions it reached.
+  reviewGaps: (ids: number[], review: GapReview) => request<number>('/api/gaps/review', json('PUT', { ids, review })),
+  // Asks the questions again over every collection now; nothing is recorded.
+  replayGaps: (ids: number[]) => request<ReplayedGap[]>('/api/gaps/replay', json('POST', { ids })),
 
   // The three searches Explore runs, over one scope: `collections` when given, else the session's
   // selection, else every collection (the backend applies that order). Each answers with the
