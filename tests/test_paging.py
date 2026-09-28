@@ -65,6 +65,7 @@ def _b64(raw: bytes) -> str:
         ("integer key and tie-breaker", [42, "doc-01"]),
         ("float key and tie-breaker", [1.5, "doc-01"]),
         ("negative and zero values", [0, -7, "doc-01"]),
+        ("sqlite's integer bounds", [-(2**63), 2**63 - 1]),
     ],
 )
 def test_cursor_round_trip(name: str, key: list[Any]) -> None:
@@ -118,6 +119,30 @@ def test_cursor_round_trip(name: str, key: list[Any]) -> None:
             "desc",
             1,
             "does not match sort/order",
+        ),
+        (
+            "key value below sqlite's integer",
+            encode_cursor([-(2**63) - 1], "size", Order.ASC),
+            "size",
+            "asc",
+            1,
+            "invalid cursor",
+        ),
+        (
+            "key value a JSON boolean",
+            encode_cursor([True], "size", Order.ASC),
+            "size",
+            "asc",
+            1,
+            "invalid cursor",
+        ),
+        (
+            "key value a JSON null",
+            encode_cursor([None, "doc-01"], "size", Order.ASC),
+            "size",
+            "asc",
+            2,
+            "invalid cursor",
         ),
     ],
 )

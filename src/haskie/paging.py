@@ -1,10 +1,14 @@
-"""Keyset pagination shared by every listing endpoint: page request, opaque cursor, sort whitelist.
+"""Pagination shared by every listing endpoint: page request, opaque cursor, sort whitelist.
 
-Keyset (not offset): the cursor carries the sort key of the last row of the previous page, so a
-page boundary stays exact while rows are inserted or deleted, and sqlite never counts rows it
-skips. The cursor is not signed: this is a single-user local app, the cursor never leaves the
-machine, and nothing inside it reaches SQL — columns come from the caller's whitelist only, the
-cursor contributes bound parameters.
+Two cursor kinds. A keyset cursor (`Keyset`) carries the sort key of the last row of the previous
+page, so a page boundary stays exact while rows are inserted or deleted, and sqlite never counts
+rows it skips; the document, collection and member listings use it. An offset cursor
+(`OffsetCursor`) is for a listing that cannot be resumed by key: full-text search and the
+operation history.
+
+The cursor is not signed: this is a single-user local app, the cursor never leaves the machine,
+and nothing inside it reaches SQL — columns come from the caller's whitelist only, the cursor
+contributes bound parameters, each checked to be one sqlite can bind.
 """
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
@@ -27,6 +31,7 @@ class Order(StrEnum):
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 1000
 CURSOR_VERSION = 1
+SQLITE_INTEGERS = range(-(2**63), 2**63)  # what sqlite's INTEGER holds
 
 
 def check_page_size(size: int, cap: int = MAX_PAGE_SIZE, field: str = "page_size") -> int:
@@ -109,6 +114,15 @@ def _read_cursor(cursor: str) -> _Cursor:
         raise InvalidInput("invalid cursor") from exc
 
 
+def _bindable(value: Any) -> bool:
+    """A key value sqlite can bind: a string, a float, or an integer in its 64-bit range. Any
+    other JSON value, forged into a cursor, would fail in the driver as a 500."""
+    # `type(...) is` rather than isinstance: JSON true/false decode as int subclasses
+    if type(value) is int:
+        return value in SQLITE_INTEGERS
+    return type(value) is str or type(value) is float
+
+
 def decode_cursor(cursor: str, sort: str, order: Order, width: int) -> list[Any]:
     """The sort key inside `cursor`, rejected unless it was built for this sort, order, version
     and keyset width: a cursor from another listing would compare the wrong columns."""
@@ -120,6 +134,8 @@ def decode_cursor(cursor: str, sort: str, order: Order, width: int) -> list[Any]
         or len(decoded.k) != width
     ):
         raise InvalidInput("cursor does not match sort/order")
+    if not all(_bindable(value) for value in decoded.k):
+        raise InvalidInput("invalid cursor")
     return decoded.k
 
 
@@ -143,8 +159,7 @@ class OffsetCursor:
         """The (identity, offset) inside `cursor`. Callers check the identity: only they know
         which result set they are paging."""
         identity, offset = decode_cursor(cursor, self.sort, self.order, width=2)
-        # `type(...) is` rather than isinstance: JSON true/false decode as int subclasses
-        if not isinstance(identity, str) or type(offset) is not int or offset < 0:
+        if not isinstance(identity, str) or not isinstance(offset, int) or offset < 0:
             raise InvalidInput("invalid cursor")
         return identity, offset
 
