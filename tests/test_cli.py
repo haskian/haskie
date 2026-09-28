@@ -808,6 +808,62 @@ def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
     assert "adr: Architecture decisions" in rule, "the new collection reached the rule"
 
 
+@dataclass
+class RefusedInstallCase:
+    old_home: bool  # a home from before collections, which `read_collections` cannot open
+    claude_fails: bool  # a `claude` CLI whose `mcp add` exits non-zero
+    settings: str | None  # what `.claude/settings.json` holds before the install
+    expect_error: str
+
+
+REFUSED_INSTALL_CASES = {
+    "a home from another schema": RefusedInstallCase(
+        old_home=True, claude_fails=False, settings=None, expect_error=db.INCOMPATIBLE_HOME_MESSAGE
+    ),
+    "claude mcp add fails": RefusedInstallCase(
+        old_home=False, claude_fails=True, settings=None, expect_error="no such scope"
+    ),
+    "a settings file that is not JSON": RefusedInstallCase(
+        old_home=False, claude_fails=False, settings="{not json", expect_error="is not valid JSON"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", REFUSED_INSTALL_CASES.values(), ids=list(REFUSED_INSTALL_CASES))
+def test_install_claude_refuses_in_one_line(
+    case: RefusedInstallCase,
+    elsewhere: Path,
+    claude_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every failure `install claude` can meet is a `HaskieError`, and each one ends as a line on
+    stderr and exit 1, never a traceback, wherever in the install it happens."""
+    if case.old_home:
+        _pre_collection_home(elsewhere)
+    else:
+        runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    if case.claude_fails:
+        stub = claude_workspace / "claude"
+        stub.write_text("#!/bin/sh\necho 'error: no such scope' >&2\nexit 1\n")
+        stub.chmod(0o755)
+    if case.settings is not None:
+        settings_file = claude.settings_path(Scope.PROJECT)
+        settings_file.parent.mkdir(parents=True)
+        settings_file.write_text(case.settings)
+    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)
+
+    result = runner.invoke(
+        cli, ["install", "claude", "--home", str(elsewhere), "--scope", "project"]
+    )
+
+    assert result.exit_code == 1, _text(result)
+    assert isinstance(result.exception, SystemExit), "a refusal, not a traceback"
+    assert case.expect_error in result.stderr
+    assert len(result.stderr.strip().splitlines()) == 1, "one line"
+    if case.settings is not None:
+        assert claude.settings_path(Scope.PROJECT).read_text() == case.settings, "left as it was"
+
+
 # `install_hook` merges into a file the user owns, so its branches are worth reaching directly
 # rather than through four more end-to-end installs.
 

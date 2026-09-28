@@ -394,18 +394,23 @@ def install_claude(
     every session saying when to - before answering from memory, planning, or the web. Re-run
     after adding a collection to refresh both.
     """
+    _use_home(home_dir)
+    try:
+        _install_claude(url, scope)
+    except HaskieError as exc:  # a home too old to read, a settings file that is not JSON, ...
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _install_claude(url: str, scope: Scope) -> None:
+    """The steps of `install claude`, each reporting as it goes; failures are `HaskieError`."""
     import asyncio
 
-    _use_home(home_dir)
     # `read_collections` reaches the database through `db.connect`, which migrates the home and
     # makes it first - so there is no prelude to repeat here.
     found = asyncio.run(claude.read_collections())
 
-    try:
-        manual = claude.register_mcp(url, scope)
-    except HaskieError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from None
+    manual = claude.register_mcp(url, scope)
     if manual is None:
         typer.echo(f"registered the haskie MCP server at {url} ({scope} scope)")
     else:
