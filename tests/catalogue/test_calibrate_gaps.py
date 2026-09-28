@@ -172,7 +172,8 @@ def test_sample_replaces_labels_only_when_forced(seeded_home, tmp_path: Path) ->
     labels = out.read_text()
     forced = runner.invoke(calibrate_gaps.app, ["sample", "--out", str(out), "--force"])
 
-    assert kept.exit_code != 0 and "--force" in kept.output
-    assert labels == '{"answered": true}\n'
+    # a usage error; its text is wrapped and coloured to the terminal's width, so not matched
+    assert kept.exit_code == 2, kept.output
+    assert labels == '{"answered": true}\n', "the labels are kept"
     assert forced.exit_code == 0, forced.output
     assert "0 questions" in forced.output and out.read_text() == "", "the empty log's sample"
