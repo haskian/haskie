@@ -8,7 +8,7 @@ first write. An attach checks that its document is imported, and the same delete
 attach sits after its check.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import anyio
 import pytest
@@ -35,11 +35,33 @@ class RaceCase:
 
 @dataclass
 class Race:
-    checked: anyio.Event
-    deleted: anyio.Event
+    """A unit paused between its read and its write, and a document delete run meanwhile."""
+
+    doc: str
+    checked: anyio.Event = field(default_factory=anyio.Event)
+    deleted: anyio.Event = field(default_factory=anyio.Event)
     deleted_during_pause: bool | None = None
     snapshot: list[str] | None = None
     delete_error: str | None = None
+
+    async def pause(self) -> None:
+        """Where the paused unit waits: until the delete has run, or `PAUSE_SECONDS`."""
+        self.checked.set()
+        with anyio.move_on_after(PAUSE_SECONDS):
+            await self.deleted.wait()
+        self.deleted_during_pause = self.deleted.is_set()
+
+    async def delete(self) -> None:
+        """The first two steps of `delete_document_workflow`, once the unit paused: mark, then
+        snapshot. A busy error ends it with nothing written."""
+        await self.checked.wait()
+        try:
+            await document.set_status(self.doc, DocumentStatus.DELETING)
+        except OperationalError as error:
+            self.delete_error = str(error.orig)
+            return
+        self.snapshot = await document.collections_of(self.doc)
+        self.deleted.set()
 
 
 @pytest.mark.parametrize(
@@ -63,35 +85,18 @@ async def test_a_write_waits_for_a_unit_between_its_read_and_its_write(
     doc = (await import_row("a.md")).name
     await document.set_status(doc, DocumentStatus.IMPORTED)
     await collection.add(doc)
-    race = Race(checked=anyio.Event(), deleted=anyio.Event())
-
-    async def pause() -> None:
-        race.checked.set()
-        with anyio.move_on_after(PAUSE_SECONDS):
-            await race.deleted.wait()
-        race.deleted_during_pause = race.deleted.is_set()
+    race = Race(doc)
 
     def pause_after_member_check(_conn, _cursor, statement: str, parameters, *_args) -> None:
         # the rename's check is the one SELECT that asks for a `deleting` member
         is_check = statement.lstrip().upper().startswith("SELECT") and "deleting" in parameters
         if is_check and not race.checked.is_set():
-            await_only(pause())  # the listener runs in SQLAlchemy's greenlet, on the loop
-
-    async def delete_start() -> None:
-        """The first two steps of `delete_document_workflow`: mark, then snapshot."""
-        await race.checked.wait()
-        try:
-            await document.set_status(doc, DocumentStatus.DELETING)
-        except OperationalError as error:
-            race.delete_error = str(error.orig)
-            return
-        race.deleted.set()
-        race.snapshot = await document.collections_of(doc)
+            await_only(race.pause())  # the listener runs in SQLAlchemy's greenlet, on the loop
 
     event.listen(db.engine().sync_engine, "after_cursor_execute", pause_after_member_check)
     try:
         async with anyio.create_task_group() as tasks:
-            tasks.start_soon(delete_start)
+            tasks.start_soon(race.delete)
             tasks.start_soon(collection.rename, "new")
     finally:
         event.remove(db.engine().sync_engine, "after_cursor_execute", pause_after_member_check)
@@ -121,14 +126,8 @@ async def test_an_attach_checks_and_inserts_in_one_unit() -> None:
     collection = await Collection.create("health")
     doc = (await import_row("a.md")).name
     await document.set_status(doc, DocumentStatus.IMPORTED)
-    race = Race(checked=anyio.Event(), deleted=anyio.Event())
+    race = Race(doc)
     reader: list[object] = []  # the DBAPI connection that read the status
-
-    async def pause() -> None:
-        race.checked.set()
-        with anyio.move_on_after(PAUSE_SECONDS):
-            await race.deleted.wait()
-        race.deleted_during_pause = race.deleted.is_set()
 
     def note_status_read(conn, _cursor, statement: str, parameters, *_args) -> None:
         # the attach's check is the first SELECT of the document's row
@@ -138,21 +137,14 @@ async def test_an_attach_checks_and_inserts_in_one_unit() -> None:
 
     def pause_on_checkin(dbapi_connection, _record) -> None:
         if reader and dbapi_connection is reader[0] and not race.checked.is_set():
-            await_only(pause())  # the pool returns the connection in SQLAlchemy's greenlet
-
-    async def delete_start() -> None:
-        """The first two steps of `delete_document_workflow`: mark, then snapshot."""
-        await race.checked.wait()
-        await document.set_status(doc, DocumentStatus.DELETING)
-        race.snapshot = await document.collections_of(doc)
-        race.deleted.set()
+            await_only(race.pause())  # the pool returns the connection in SQLAlchemy's greenlet
 
     sync_engine = db.engine().sync_engine
     event.listen(sync_engine, "after_cursor_execute", note_status_read)
     event.listen(sync_engine.pool, "checkin", pause_on_checkin)
     try:
         async with anyio.create_task_group() as tasks:
-            tasks.start_soon(delete_start)
+            tasks.start_soon(race.delete)
             tasks.start_soon(collection.add, doc)
     finally:
         event.remove(sync_engine, "after_cursor_execute", note_status_read)
