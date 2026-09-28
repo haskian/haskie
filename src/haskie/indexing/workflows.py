@@ -957,6 +957,12 @@ async def _ensure_embedding(ctx: Context) -> str:
             _log.info("shared_embedding_cancelled", embedding=handle.workflow_id)
 
 
+def _failure(exc: Exception) -> str:
+    """How a workflow reports a failure: a `PermanentError` carries its own message, anything
+    else is unwrapped to its root cause."""
+    return str(exc) if isinstance(exc, PermanentError) else root_cause(exc)
+
+
 @contextlib.asynccontextmanager
 async def _outcome(
     set_state: Callable[..., Awaitable[None]],
@@ -968,14 +974,13 @@ async def _outcome(
 ) -> AsyncIterator[None]:
     """Move the status to its end state and write one audit line, whichever way the body ended.
 
-    Both document workflows report a failure the same way: a `PermanentError` carries its own
-    message, anything else is unwrapped to its root cause, and what leaves the workflow is a flat
-    `PipelineError` DBOS can store and rebuild."""
+    Both document workflows report a failure the same way (`_failure`), and what leaves the
+    workflow is a flat `PipelineError` DBOS can store and rebuild."""
     started = time.perf_counter()
     try:
         yield
     except Exception as exc:
-        message = str(exc) if isinstance(exc, PermanentError) else root_cause(exc)
+        message = _failure(exc)
         await set_state(failed, message)
         await _record(collection, doc, f"{event}.failed", started, message)
         raise PipelineError(message) from exc
@@ -1163,7 +1168,7 @@ async def remove_from_collection_index(collection: str, doc: str) -> None:
                 await remove_index_rows(collection, doc)
                 await remove_member_row(collection, doc)
         except Exception as exc:
-            message = str(exc) if isinstance(exc, PermanentError) else root_cause(exc)
+            message = _failure(exc)
             await fail_removal(collection, doc, f"removal failed: {message}")
             raise PipelineError(message) from exc
 
