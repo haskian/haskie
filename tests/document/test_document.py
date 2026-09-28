@@ -13,7 +13,14 @@ from sqlalchemy import func, select, update
 from haskie import cpu, db, errors, home, tables
 from haskie.document import document
 
-from conftest import MD, NO_MODELS, audit_lines, document_names, text_pdf  # isort: skip
+from conftest import (  # isort: skip
+    MD,
+    NO_MODELS,
+    audit_lines,
+    document_names,
+    extraction_pool,
+    text_pdf,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -187,23 +194,11 @@ async def test_the_sweep_clears_a_row_an_older_build_staged_under_a_refused_id()
 
 # --- preview ----------------------------------------------------------------------
 
-POOL_WORKERS = 1
-
 
 @pytest.fixture
 def pooled(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """The extraction pool the suite otherwise turns off, fresh and open, and shut down after.
-
-    The CPU budget is set too: a pool call holds a slot of it, and an earlier test on the same
-    worker may have left it smaller than the pool."""
-    budget = cpu._cpu_slots.size
-    cpu.configure_cpu_budget(POOL_WORKERS)
-    monkeypatch.setattr(cpu, "CONVERT_WORKERS", POOL_WORKERS)
-    monkeypatch.setattr(cpu, "_pool", None)
-    monkeypatch.setattr(cpu, "_pool_closed", False)
-    yield
-    cpu.shutdown_pool()
-    cpu.configure_cpu_budget(budget)
+    with extraction_pool(monkeypatch, 1):
+        yield
 
 
 @pytest.mark.usefixtures("pooled")

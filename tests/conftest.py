@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -270,6 +271,25 @@ async def wait_for(workflow_id: str):
 
     handle = await DBOS.retrieve_workflow_async(workflow_id)
     return await handle.get_result(polling_interval_sec=workflows.TASK_POLL)
+
+
+@contextmanager
+def extraction_pool(monkeypatch: pytest.MonkeyPatch, workers: int) -> Iterator[None]:
+    """The extraction pool the suite otherwise turns off (`CONVERT_WORKERS = 0`), fresh, open and
+    of `workers`, shut down after. The CPU budget is set to match: a pool call holds a slot of it,
+    and an earlier test on the same worker may have left it smaller than the pool."""
+    from haskie import cpu
+
+    budget = cpu._cpu_slots.size
+    cpu.configure_cpu_budget(workers)
+    monkeypatch.setattr(cpu, "CONVERT_WORKERS", workers)
+    monkeypatch.setattr(cpu, "_pool", None)
+    monkeypatch.setattr(cpu, "_pool_closed", False)
+    try:
+        yield
+    finally:
+        cpu.shutdown_pool()
+        cpu.configure_cpu_budget(budget)
 
 
 WAIT = 30.0  # generous: every wait in the suite is released by another thread, never by a timer

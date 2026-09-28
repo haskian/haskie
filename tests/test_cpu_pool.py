@@ -22,7 +22,7 @@ from pebble import ProcessExpired, ProcessPool
 from haskie import cpu, shutdown
 from haskie.document import convert
 
-from conftest import WAIT, text_pdf, until  # isort: skip
+from conftest import WAIT, extraction_pool, text_pdf, until  # isort: skip
 
 pytestmark = [pytest.mark.anyio, pytest.mark.usefixtures("pooled")]
 
@@ -44,19 +44,9 @@ NATIVE_ROUNDS = 800_000_000
 
 @pytest.fixture
 def pooled(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """A fresh pool of `WORKERS`, open, and shut down after the test.
-
-    The CPU budget is set here too. Every pool call holds a slot of it, and the budget is
-    process-wide: an earlier test on the same worker may have left it at one, and then no two
-    calls could ever run at once."""
-    budget = cpu._cpu_slots.size
-    cpu.configure_cpu_budget(WORKERS)
-    monkeypatch.setattr(cpu, "CONVERT_WORKERS", WORKERS)
-    monkeypatch.setattr(cpu, "_pool", None)
-    monkeypatch.setattr(cpu, "_pool_closed", False)
-    yield
-    cpu.shutdown_pool()
-    cpu.configure_cpu_budget(budget)
+    """A fresh pool of `WORKERS`: two, so calls can run side by side."""
+    with extraction_pool(monkeypatch, WORKERS):
+        yield
 
 
 def _native_call() -> asyncio.Task[bytes]:
