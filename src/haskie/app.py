@@ -307,7 +307,6 @@ def create_app() -> Litestar:
             home.claim_home,
             shutdown.bound_exit,
             shutdown.debounce_signals,
-            home.ensure_home,
             workflows.start,
         ],
         on_shutdown=[stop_runtime],

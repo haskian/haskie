@@ -71,7 +71,6 @@ INCOMPATIBLE_HOME_MESSAGE = (
 
 BUSY_TIMEOUT_SECONDS = 30.0  # how long a writer waits for another writer before it gives up
 
-_migrated: set[Path] = set()
 _migrate_lock = threading.Lock()  # both event loops get here through worker threads of their own
 
 
@@ -98,25 +97,25 @@ def _migrate_sync() -> None:
     switch are one blocking burst, and the lock is a threading one because the callers are the two
     event loops of this process (Litestar's and DBOS's), not one."""
     with _migrate_lock:
-        if home.DB_FILE in _migrated:
+        if home.DB_FILE in _engines:
             return
         conn = sqlite3.connect(str(home.DB_FILE), timeout=BUSY_TIMEOUT_SECONDS)
         try:
             migrate(conn)
         finally:
             conn.close()
+        # its engine is also the mark that this process migrated the file
         _engines[home.DB_FILE] = asyncio.run(_first_connected_engine())
-        _migrated.add(home.DB_FILE)
 
 
 def invalidate_migrations() -> None:
     """Forget which database files this process has opened.
 
-    The set is a per-process cache of "already at `SCHEMA_VERSION`". Deleting the file behind it
-    (`haskie destroy`) leaves that claim false, so the next `migrate_once` has to run again.
+    The engines are a per-process cache of "already at `SCHEMA_VERSION`". Deleting the file
+    behind one (`haskie destroy`) leaves that claim false, so the next `migrate_once` has to run
+    again.
     """
     with _migrate_lock:
-        _migrated.clear()
         _engines.clear()
 
 
@@ -125,7 +124,7 @@ async def migrate_once() -> None:
 
     The one-time WAL switch needs an exclusive lock, so this runs before anything else (DBOS, or
     the first `connect()`) holds the file open."""
-    if home.DB_FILE in _migrated:
+    if home.DB_FILE in _engines:
         return
     await home.ensure_home()
     await anyio.to_thread.run_sync(_migrate_sync)

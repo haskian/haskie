@@ -56,7 +56,6 @@ sequenceDiagram
     CLI->>App: start on 127.0.0.1:8451 (default)
     App->>Home: claim_home (create folders, exclusive lock)
     Note over App,Home: any other ASGI server, or a race, stops here
-    App->>Home: ensure_home
     App->>DBOS: workflows.start
     DBOS->>Home: migrate (check schema version, WAL on a new file)
     Note over DBOS,Home: a home at another schema version is refused here

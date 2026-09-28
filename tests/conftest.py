@@ -117,7 +117,7 @@ def _drop_caches(patch: pytest.MonkeyPatch) -> None:
     from haskie.catalogue import catalogue
     from haskie.indexing import models
 
-    patch.setattr(db, "_migrated", set())
+    patch.setattr(db, "_engines", {})
     patch.setattr(catalogue, "_embedders", {})
     patch.setattr(settings, "_state", None)
     # a loaded model is process state, and the process outlives the test that loaded it

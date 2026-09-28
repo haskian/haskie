@@ -871,7 +871,7 @@ async def test_connect_skips_ensure_home_after_the_first_success(
         return await real()
 
     monkeypatch.setattr(home, "ensure_home", counted)
-    db._migrated.clear()
+    db.invalidate_migrations()
 
     async with db.connect():
         pass

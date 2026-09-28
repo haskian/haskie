@@ -107,7 +107,7 @@ async def test_home_is_portable(dbos, tmp_path: Path, monkeypatch: pytest.Monkey
     moved = tmp_path / "elsewhere"
     shutil.copytree(home.HOME, moved)
     monkeypatch.setattr(home, "HOME", moved)  # every other path is derived from it
-    monkeypatch.setattr(db, "_migrated", set())
+    monkeypatch.setattr(db, "_engines", {})
 
     again = await Collection.get("port")
     (hit,) = await collection_hits(again.name, "portable")
