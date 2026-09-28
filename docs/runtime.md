@@ -21,7 +21,7 @@ flowchart TB
     wf -- "cpu.on_cpu" --> sem
     sem --> pool
     pool --> cpu["chunk, embed, rerank,<br/>previews, load a model"]
-    pool -- "off_interpreter" --> procs["process pool:<br/>PDF page conversion"]
+    pool -- "off_interpreter" --> procs["process pool:<br/>PDF page conversion, PDF previews"]
 ```
 
 - **IO is async.** Every handler is `async def`. SQLite goes through SQLAlchemy Core's async engine
@@ -29,8 +29,8 @@ flowchart TB
   through `anyio`, with `os.replace` and `shutil.rmtree` in a worker thread because they have no
   async form.
 - **CPU work is sync, in a thread.** `cpu.on_cpu` runs it in a worker thread and holds one slot of
-  the `pipeline.cpu_budget` semaphore for as long as it runs. PDF page conversion goes one step
-  further, to a process pool (`cpu.off_interpreter`), while the thread holds the slot. A pipeline
+  the `pipeline.cpu_budget` semaphore for as long as it runs. PDF page conversion and a PDF's
+  preview go one step further, to a process pool (`cpu.off_interpreter`), while the thread holds the slot. A pipeline
   step holds a slot for its CPU part only, never for the IO around it. The pool is pebble's: a
   parser that crashes its worker fails only its own call, and a new worker takes its place.
 - **A budget change applies to running work.** A resize counts the slots already held, so a

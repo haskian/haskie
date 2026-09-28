@@ -283,12 +283,12 @@ def _requested(lines: list[dict]) -> list[str]:
         (
             "import a relative path -> unprocessable",
             "POST", "/api/documents/import", {"path": "notes/a.md"}, None,
-            422, "path must be absolute: notes/a.md",
+            422, "path must be absolute: a.md",
         ),
         (
             "import a path that is not there -> unprocessable",
             "POST", "/api/documents/import", {"path": "/nowhere/a.md"}, None,
-            422, "file not found: /nowhere/a.md",
+            422, "file not found: a.md",
         ),
         (
             "re-import an unknown document -> not found",

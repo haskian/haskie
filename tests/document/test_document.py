@@ -165,6 +165,26 @@ async def test_the_sweep_removes_every_expired_upload_whatever_its_raw_name() ->
     assert [s.filename for s in staged] == [filename for _, filename, _, _ in STAGED_NAMES]
 
 
+async def test_the_sweep_clears_a_row_an_older_build_staged_under_a_refused_id() -> None:
+    """Before the id took the stored name's suffix, `notes.md~` was staged as `<hex>.md~`, which
+    `staging_path` refuses. Such a row, and its bytes, must still go once expired."""
+    legacy = f"{'0' * 32}.md~"
+    home.STAGING_ROOT.mkdir(parents=True, exist_ok=True)
+    (home.STAGING_ROOT / legacy).write_bytes(MD.encode())
+    async with db.connect() as conn:
+        await conn.execute(
+            tables.staging.insert().values(
+                staging_id=legacy, filename="notes.md~", size=len(MD), md5="", created_at=0
+            )
+        )
+
+    assert await document.sweep_staging(max_age_seconds=3600) == 1
+
+    assert list(home.STAGING_ROOT.iterdir()) == [], "its bytes go too"
+    async with db.connect() as conn:
+        assert (await conn.scalar(select(func.count()).select_from(tables.staging))) == 0
+
+
 # --- preview ----------------------------------------------------------------------
 
 POOL_WORKERS = 1

@@ -293,7 +293,10 @@ async def sweep_staging(max_age_seconds: float) -> int:
     staged = {staging_id for staging_id, _ in rows}
     expired = [staging_id for staging_id, created_at in rows if created_at < cutoff]
     for staging_id in expired:
-        await anyio.Path(staging_path(staging_id)).unlink(missing_ok=True)
+        # By its own name, not through `staging_path`: a row an older build staged may carry an
+        # id that the check refuses (`notes.md~`), and the sweep must still clear it. `.name`
+        # keeps it inside `staging/`, and the id is ours, from a row, not from a caller.
+        await anyio.Path(home.STAGING_ROOT / Path(staging_id).name).unlink(missing_ok=True)
     if expired:
         async with db.connect() as conn:
             await conn.execute(delete(staging).where(staging.c.staging_id.in_(expired)))
