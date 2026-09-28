@@ -283,9 +283,9 @@ GROW_BIAS = Meta(
 CANDIDATES = Meta(
     title="Candidates",
     description=(
-        "Results fetched before fusion and reranking: per retriever in hybrid mode, in total "
-        "otherwise. Then cut down to Results. Higher = better recall, slower. Ignored when "
-        "neither fusion nor a reranker applies."
+        "The fewest rows each collection reads, in every search mode. A search that scans "
+        "deeper, for more Results, reads that many instead. The rows are merged, reranked when a "
+        "reranker is on, and cut down to Results. Higher = better recall, slower."
     ),
 )
 MODE = Meta(
