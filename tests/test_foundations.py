@@ -6,7 +6,7 @@ import os
 import sqlite3
 import stat
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -907,6 +907,56 @@ async def test_record_writes_one_private_json_line_with_every_field() -> None:
         "detail": {"size": 12, "suffix": ".md", "cached": False},
     }
     assert stat.S_IMODE(os.stat(audit.path()).st_mode) == audit.FILE_MODE
+
+
+def _missing_part_error(root: Path) -> str:
+    """The text a pipeline failure carries when a part file is gone: `root_cause` of the real
+    `FileNotFoundError`, which names the absolute path."""
+    missing = root / "documents" / "ab" / "report.pdf" / "parts" / f"{home.part_name(0)}.md"
+    try:
+        missing.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    raise AssertionError(f"{missing} exists")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "error", "expected"),
+    [
+        ("no error", None, None),
+        (
+            "a path under the haskie home",
+            lambda: _missing_part_error(home.HOME),
+            "FileNotFoundError: [Errno 2] No such file or directory: "
+            "'$HASKIE_HOME/documents/ab/report.pdf/parts/000000.md'",
+        ),
+        (
+            "a path under the user's home",
+            lambda: _missing_part_error(Path.home() / "private"),
+            "FileNotFoundError: [Errno 2] No such file or directory: "
+            "'~/private/documents/ab/report.pdf/parts/000000.md'",
+        ),
+    ],
+)
+async def test_record_scrubs_the_error_it_is_given(
+    name: str, error: Callable[[], str] | None, expected: str | None, caplog
+) -> None:
+    """A pipeline failure reaches `record` as raw exception text, so the scrub happens there."""
+    with caplog.at_level("AUDIT", logger="haskie.audit"):
+        entry = await audit.record(
+            "import.failed",
+            actor=Actor.OPERATION,
+            outcome=Outcome.ERROR,
+            duration_ms=3,
+            document="report.pdf",
+            error=None if error is None else error(),
+        )
+
+    (line,) = audit_lines()
+    assert (entry.error, line.get("error")) == (expected, expected), name
+    (logged,) = [r for r in caplog.records if r.name == "haskie.audit"]
+    assert getattr(logged, "error", None) == expected, name
 
 
 @pytest.mark.anyio

@@ -113,9 +113,18 @@ async def _append(entry: AuditRecord) -> None:
 
 
 async def record(
-    event: str, *, actor: Actor, outcome: Outcome, duration_ms: int, **fields: Any
+    event: str,
+    *,
+    actor: Actor,
+    outcome: Outcome,
+    duration_ms: int,
+    error: str | None = None,
+    **fields: Any,
 ) -> AuditRecord:
-    """Append one record and mirror it to the `haskie.audit` logger at level AUDIT."""
+    """Append one record and mirror it to the `haskie.audit` logger at level AUDIT.
+
+    `error` is scrubbed here rather than by each caller: a pipeline failure arrives as raw
+    exception text, and a missing file names its absolute path."""
     entry = AuditRecord(
         ts=datetime.now(UTC).isoformat(),
         level=LEVEL_NAME,
@@ -124,6 +133,7 @@ async def record(
         outcome=outcome,
         duration_ms=duration_ms,
         app_version=APP_VERSION,
+        error=None if error is None else home.scrub(error),
         **fields,
     )
     await _append(entry)
@@ -173,7 +183,7 @@ async def _finish(
         outcome=Outcome.OK if exc is None else Outcome.ERROR,
         duration_ms=int((time.perf_counter() - started) * 1000),
         request_id=request_id,
-        error=None if exc is None else home.scrub(f"{type(exc).__name__}: {exc}"),
+        error=None if exc is None else f"{type(exc).__name__}: {exc}",
         detail=detail or None,
         **{**fields, **named},
     )
