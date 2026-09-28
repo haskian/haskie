@@ -4,16 +4,16 @@ import errno
 import json
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select, update
 
-from haskie import db, errors, home, tables
+from haskie import cpu, db, errors, home, tables
 from haskie.document import document
 
-from conftest import MD, NO_MODELS, audit_lines, document_names  # isort: skip
+from conftest import MD, NO_MODELS, audit_lines, document_names, text_pdf  # isort: skip
 
 pytestmark = pytest.mark.anyio
 
@@ -163,3 +163,68 @@ async def test_the_sweep_removes_every_expired_upload_whatever_its_raw_name() ->
     async with db.connect() as conn:
         assert (await conn.scalar(select(func.count()).select_from(tables.staging))) == 0
     assert [s.filename for s in staged] == [filename for _, filename, _, _ in STAGED_NAMES]
+
+
+# --- preview ----------------------------------------------------------------------
+
+POOL_WORKERS = 1
+
+
+@pytest.fixture
+def pooled(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The extraction pool the suite otherwise turns off, fresh and open, and shut down after.
+
+    The CPU budget is set too: a pool call holds a slot of it, and an earlier test on the same
+    worker may have left it smaller than the pool."""
+    budget = cpu._cpu_slots.size
+    cpu.configure_cpu_budget(POOL_WORKERS)
+    monkeypatch.setattr(cpu, "CONVERT_WORKERS", POOL_WORKERS)
+    monkeypatch.setattr(cpu, "_pool", None)
+    monkeypatch.setattr(cpu, "_pool_closed", False)
+    yield
+    cpu.shutdown_pool()
+    cpu.configure_cpu_budget(budget)
+
+
+@pytest.mark.usefixtures("pooled")
+@pytest.mark.parametrize(
+    ("name", "filename", "content", "status", "media", "in_pool"),
+    [
+        ("a pdf", "paper.pdf", text_pdf(["page one", "page two"]), 200, "application/pdf", True),
+        ("a pdf its parser refuses", "broken.pdf", b"%PDF-1.4 not a pdf", 422, None, True),
+        ("markdown", "guide.md", MD.encode(), 200, "text/plain", False),
+    ],
+)
+async def test_a_pdf_preview_is_built_outside_the_interpreter(
+    client,
+    tmp_path: Path,
+    name: str,
+    filename: str,
+    content: bytes,
+    status: int,
+    media: str | None,
+    in_pool: bool,
+) -> None:
+    """PDF extraction holds the GIL, so a PDF preview runs in the extraction pool, where it
+    cannot stall the requests beside it; its result and its failure both come back across the
+    process boundary. Every other kind stays on a thread and never starts the pool."""
+    source = tmp_path / "incoming" / filename
+    source.parent.mkdir()
+    source.write_bytes(content)
+    await document.import_path(str(source))
+
+    response = await client.get(f"/api/documents/{filename}/preview")
+
+    assert response.status_code == status, f"{name}: {response.text}"
+    assert (cpu._pool is not None) == in_pool, name
+    built = await document.get(filename)
+    if media is None:
+        assert response.json()["detail"].startswith("could not convert original.pdf: "), name
+        assert built.preview is None, name
+        return
+    assert response.headers["content-type"].startswith(media), name
+    assert built.preview is not None, name
+    assert built.preview.kind == ("pdf" if filename.endswith(".pdf") else "text"), name
+    if filename.endswith(".pdf"):
+        assert (built.preview.pages, built.preview.truncated) == (2, False), name
+        assert "page two" in (built.preview_dir / "preview.md").read_text(), name

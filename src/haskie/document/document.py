@@ -18,8 +18,8 @@ instead; `deleting` while a delete runs, so nothing attaches the document meanwh
 
 Every row read, row write and file touch is awaited: the database goes through `db.connect()`
 (aiosqlite), the files through `anyio.Path` and `home`, and the one piece of CPU work here — the
-preview build — through `cpu.on_cpu`. The pure parts (paths, name cleaning, row decoding) stay
-sync.
+preview build — through `cpu.off_interpreter` for a PDF and `cpu.on_cpu` otherwise. The pure
+parts (paths, name cleaning, row decoding) stay sync.
 """
 
 import hashlib
@@ -597,7 +597,8 @@ async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
 
     Two locks, always in this order: the document's own (build this document once), then a
     slot in the process-wide pool (build at most `preview_workers` documents at a time).
-    The parse itself is CPU work, so it runs in a worker thread under the CPU budget.
+    The parse itself is CPU work, so it runs under the CPU budget: a PDF in the extraction pool,
+    anything else in a worker thread.
     """
     info = await get(name)
     if info.preview is not None:
@@ -615,8 +616,12 @@ async def ensure_preview(name: str) -> tuple[Document, convert.Preview]:
                     await slots.acquire()
             except TimeoutError:
                 raise NotReady("preview queue is full; retry") from None
+            # PDF extraction holds the GIL (see `cpu`), so on a thread it would stall this loop,
+            # and every request on it, for the whole parse. It leaves the interpreter, as the
+            # import's does; every other kind releases the GIL and stays on a thread.
+            run = cpu.off_interpreter if info.suffix == ".pdf" else cpu.on_cpu
             try:
-                preview = await cpu.on_cpu(
+                preview = await run(
                     convert.build_preview,
                     info.source_path(),
                     info.preview_dir,
