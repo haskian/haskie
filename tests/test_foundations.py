@@ -630,12 +630,30 @@ def test_document_parallelism_default_and_docs() -> None:
     assert doc.title == "Parallel tasks per document" and doc.description
 
 
+@pytest.mark.parametrize(
+    ("name", "usable_cores", "expected"),
+    [
+        ("a process pinned to 2 of the machine's 16 cores", 2, 1),
+        ("a process that may use all 16", 16, 8),
+        ("one core still gets a slot", 1, 1),
+        ("a platform that cannot tell", None, 1),
+    ],
+)
+def test_cpu_budget_defaults_to_half_the_cores_the_process_may_use(
+    monkeypatch: pytest.MonkeyPatch, name: str, usable_cores: int | None, expected: int
+) -> None:
+    """The default is stored at first run, so a count of cores the process cannot use would stay."""
+    monkeypatch.setattr(os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(os, "process_cpu_count", lambda: usable_cores)
+
+    assert PipelineSettings().cpu_budget == expected, name
+
+
 def test_cpu_budget_defaults_and_docs() -> None:
-    """Half the machine by default, so other work keeps the rest; the weights only say how that
+    """Half the cores by default, so other work keeps the rest; the weights only say how that
     budget is shared out when every stage has work."""
-    cores = os.cpu_count() or 2
     indexing = PipelineSettings()
-    assert indexing.cpu_budget == max(1, cores // 2)
+    assert indexing.cpu_budget == max(1, (os.process_cpu_count() or 2) // 2)
     weights = (indexing.converting_weight, indexing.embedding_weight, indexing.indexing_weight)
     assert weights == (2, 2, 1), "converting and embedding cost more than the LanceDB write"
     docs = settings.docs()

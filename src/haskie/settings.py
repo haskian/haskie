@@ -155,7 +155,7 @@ CPU_BUDGET = Meta(
     title="CPU budget",
     description=(
         "Maximum number of tasks haskie runs at the same time across every queue: converting, "
-        "embedding, indexing and maintenance. Defaults to half the machine's cores so other work "
+        "embedding and indexing. Defaults to half the cores haskie may run on, so other work "
         "keeps the rest. Never exceeded, whatever the weights below say."
     ),
 )
@@ -408,7 +408,8 @@ RERANKER_MODEL = Meta(
     title="Reranker model",
     description=(
         "The model the cross-encoder reranker scores with; what each one is, its size, languages, "
-        "license and hardware are listed with it. Downloaded on first use."
+        "license and hardware are listed with it. Downloaded as soon as it is chosen; a search "
+        "that needs it is refused until the download finishes."
     ),
 )
 PREVIEW_WORKERS = Meta(
@@ -603,15 +604,16 @@ class SearchOverrides(msgspec.Struct):
 
 
 def _half_the_cores() -> int:
-    """Default CPU budget: haskie takes half the machine, the rest stays for everything else."""
-    return max(1, (os.cpu_count() or 2) // 2)
+    """Default CPU budget: haskie takes half the cores it may run on, the rest stays for everything
+    else. A process pinned to some cores counts only those."""
+    return max(1, (os.process_cpu_count() or 2) // 2)
 
 
 class PipelineSettings(msgspec.Struct):
     """One CPU budget for the whole app, shared out over the stages by weight.
 
     `cpu_budget` is how many tasks run at the same time, everywhere: it is the number of slots
-    converting, embedding, indexing and maintenance draw from, and it is never exceeded. The
+    converting, embedding and indexing draw from, and it is never exceeded. The
     weights only decide who gets which share of it when every stage has work, because the stages
     cost different things: converting is CPU and IO per page, every embedding task loads the
     model, and indexing writes to LanceDB, which takes one writer per collection. Every stage keeps
