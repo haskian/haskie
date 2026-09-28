@@ -1,7 +1,7 @@
 name: Version
 
 # On push to main: a SemVer bump (cog) writes CHANGELOG.md and cuts the tag, then release.yml
-# builds the wheel from that tag and attaches it to a GitHub Release.
+# builds the wheel from that tag and publishes it.
 #
 # Every push to main gets a version, so no version is skipped: the commit subjects decide the
 # increment, and a push whose subjects imply none takes a patch. Only a `majorfeat!` subject takes
@@ -37,15 +37,16 @@ jobs:
       - id: bump
         run: mise run bump
 
-  # Same jobs a hand-pushed `v*` tag runs. Called, not triggered: GitHub does not start a workflow
-  # from a tag pushed with GITHUB_TOKEN.
+  # Dispatched, not triggered by the tag: GitHub starts no workflow from a tag pushed with
+  # GITHUB_TOKEN, except through a dispatch. Its own run, so PyPI sees release.yml as the workflow.
   release:
     needs: bump
     if: needs.bump.outputs.released == 'true'
-    # A called workflow gets no more than its caller grants; `id-token` is for PyPI's OIDC.
+    runs-on: ubuntu-latest
     permissions:
-      contents: write
-      id-token: write
-    uses: ./.github/workflows/release.yml
-    with:
-      ref: ${{ needs.bump.outputs.version }}
+      actions: write # dispatch release.yml
+    steps:
+      - run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.bump.outputs.version }}
