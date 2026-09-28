@@ -2,6 +2,10 @@
 
 import asyncio
 import hashlib
+import io
+import json
+import logging
+import logging.config
 import os
 import sqlite3
 import stat
@@ -9,6 +13,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -17,9 +22,12 @@ from typing import Any
 import anyio
 import msgspec
 import pytest
+import structlog
+import uvicorn.config
+from dbos import _logger as dbos_logger
 from sqlalchemy import func, insert, select, text, update
 
-from haskie import audit, cpu, db, errors, home, settings, tables
+from haskie import audit, cpu, db, errors, home, logs, settings, tables
 from haskie.audit import Actor, Outcome
 from haskie.collection.collection import Collection
 from haskie.document import document
@@ -382,6 +390,86 @@ async def test_remove_tree_reports_a_file_it_cannot_delete(
         assert events(caplog) == ["remove_failed", "remove_failed"], "file, then directory"
     finally:
         protected.chmod(0o700)
+
+
+# --- log lines --------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LogLineCase:
+    name: str
+    emit: Callable[[Path], None]  # logs one line about a file under the home it is given
+    field: str  # the field of the rendered line that holds the path
+
+
+def _bound_field(path: Path) -> None:
+    logs.get_logger("haskie.probe").warning("probe_failed", path=str(path))
+
+
+def _exception(path: Path) -> None:
+    try:
+        raise FileNotFoundError(f"no such file: {path}")
+    except FileNotFoundError:
+        logs.get_logger("haskie.probe").exception("probe_failed")
+
+
+def _foreign_record(path: Path) -> None:
+    # the way uvicorn logs its startup line: `%` arguments, and a copy for the terminal in `extra`
+    logging.getLogger("uvicorn.error").warning(
+        "Serving %s", path, extra={"color_message": f"Serving \x1b[1m{path}\x1b[0m"}
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        LogLineCase("a field our code binds", _bound_field, "path"),
+        LogLineCase("an exception our code logs", _exception, "exception"),
+        LogLineCase("a record from a library", _foreign_record, "event"),
+    ],
+    ids=lambda case: case.name,
+)
+def test_a_rendered_log_line_names_no_home_path(case: LogLineCase) -> None:
+    """The scrub runs after the traceback is formatted and the extras are copied, so it reaches
+    every field of the line as it is printed; the terminal copy of a message is not printed."""
+    target = home.DOCUMENT_ROOT / "ab" / "notes.md"
+    (formatter,) = [
+        handler.formatter
+        for handler in logging.getLogger().handlers
+        if isinstance(handler.formatter, structlog.stdlib.ProcessorFormatter)
+    ]
+    printed = io.StringIO()
+    capture = logging.StreamHandler(printed)
+    capture.setFormatter(formatter)
+    logging.getLogger().addHandler(capture)
+    try:
+        case.emit(target)
+    finally:
+        logging.getLogger().removeHandler(capture)
+
+    (line,) = [json.loads(text) for text in printed.getvalue().splitlines()]
+    assert "$HASKIE_HOME/documents/ab/notes.md" in line[case.field], case.name
+    assert str(home.HOME) not in printed.getvalue(), f"{case.name}: no absolute path anywhere"
+    assert "color_message" not in line, case.name
+
+
+def test_configure_takes_over_the_library_loggers_with_handlers_of_their_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """uvicorn's CLI sets its text handlers up before it imports the app, and DBOS adds its own to
+    a logger that has none. Either would print plain text beside the JSON."""
+    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+    monkeypatch.setattr(logs, "_configured", False)
+
+    logs.configure()
+    dbos_logger.init_logger()
+
+    for name in ("uvicorn", "uvicorn.access"):
+        library = logging.getLogger(name)
+        assert (library.handlers, library.propagate) == ([], True), name
+    library = logging.getLogger("dbos")
+    assert [type(handler) for handler in library.handlers] == [logging.NullHandler], "dbos"
+    assert library.propagate, "dbos"
 
 
 # --- settings validation ----------------------------------------------------------
@@ -850,9 +938,9 @@ async def test_migrate_once_creates_the_schema_exactly_once(
     applied: list[int] = []  # the thread each run of the schema script happened on
     real = db.migrate
 
-    def counted(conn: sqlite3.Connection) -> int:
+    def counted(conn: sqlite3.Connection) -> None:
         applied.append(threading.get_ident())
-        return real(conn)
+        real(conn)
 
     monkeypatch.setattr(db, "migrate", counted)
 
