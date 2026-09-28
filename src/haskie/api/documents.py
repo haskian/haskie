@@ -20,6 +20,7 @@ from litestar.response import File, Stream
 
 from haskie import audit, cpu, logs
 from haskie.api.common import PAGED, BulkStarted, Describe
+from haskie.catalogue import catalogue
 from haskie.document import convert, render
 from haskie.document import document as documents
 from haskie.document.document import Document, DocumentStatus, ImportOptions, Staged
@@ -27,6 +28,7 @@ from haskie.errors import InvalidInput, NotFound
 from haskie.indexing import embed_cache, workflows
 from haskie.paging import Page, PageRequest, one_of
 from haskie.search import session
+from haskie.settings import load_user_settings
 
 
 class ImportRequest(ImportOptions):
@@ -34,6 +36,17 @@ class ImportRequest(ImportOptions):
 
     staging_id: str | None = None
     path: str | None = None
+
+
+class Similar(msgspec.Struct):
+    """What a document may repeat: the same file imported under other names, and the documents
+    whose content lies closest to it."""
+
+    identical: list[str]  # the same bytes (`md5`), in name order
+    nearest: list[embed_cache.Neighbour]  # empty until it is imported, or with no embedding model
+
+
+NEAREST = 3  # enough to spot a second edition, few enough to read at a glance
 
 
 class Head(msgspec.Struct):
@@ -73,7 +86,10 @@ async def stage_document(
     data: Annotated[UploadFile, Body(media_type=RequestEncodingType.MULTI_PART)],
 ) -> Staged:
     """Upload a file and keep it until it is imported. Nothing is committed here: no name, no
-    document row. Call `import_document` with the returned `staging_id` to commit it."""
+    document row. Call `import_document` with the returned `staging_id` to commit it.
+
+    `duplicates` names the documents that already hold these exact bytes: importing the file
+    again only adds a copy."""
     content = await data.read()
     upload = Path(data.filename)
     audit.attach(name=upload.name, size=len(content), suffix=upload.suffix.lower())
@@ -176,6 +192,21 @@ async def list_document_embeddings(document: str) -> list[embed_cache.Entry]:
     and embedding model, shared by every collection that indexes it with them."""
     await documents.get(document)
     return await embed_cache.entries(document)
+
+
+@get("/api/documents/{document:str}/similar")
+async def similar_documents(document: str) -> Similar:
+    """The documents this one may repeat: identical files, and the three others nearest by the
+    mean vector of their chunks under the current embedding model."""
+    row = await documents.get(document)
+    identical = await documents.identical(row.md5, but=row.name)
+    model = await catalogue.embedding_model(await load_user_settings())
+    nearest = (
+        []
+        if model is None
+        else await embed_cache.nearest(row.name, model.cache_name, NEAREST, but=identical)
+    )
+    return Similar(identical=identical, nearest=nearest)
 
 
 @get("/api/documents/{document:str}/source")

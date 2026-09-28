@@ -45,6 +45,7 @@ erDiagram
         text status
         text parser
         text description
+        text md5
     }
     collections {
         text name PK
@@ -61,6 +62,7 @@ erDiagram
         text document
         text urn
         text model
+        blob vector
     }
     sessions {
         text id PK
@@ -106,8 +108,12 @@ when `min_rerank_score` is empty, and the beta curve `fill_values = absolute` sp
 by. The seed gives every reranker an uncalibrated floor of 0.05 and the identity curve, until
 `catalogue/calibrate.py` measures both on borderline pairs of your own collections.
 
+`documents.md5` is the MD5 of the original file, so a second upload of the same bytes is spotted.
+`embeddings.vector` is the document as one vector: the mean of its unit chunk vectors,
+normalized. It is what the nearest documents are found by.
+
 Two more tables stand alone: `settings` (one row of JSON) and `staging` (uploads waiting for a
-name). DBOS keeps its own workflow and queue tables in the same file. `sysdb.py` reads them for
+name, with the MD5 of their bytes). DBOS keeps its own workflow and queue tables in the same file. `sysdb.py` reads them for
 the Operations view, through `table()` declarations of its own: DBOS owns their schema.
 
 Every table and index is a SQLAlchemy Core `Table` in `tables.py`, the one source of the schema.

@@ -32,12 +32,13 @@ pyarrow is sync.
 
 import hashlib
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from pathlib import Path
 
 import anyio
 import anyio.to_thread
 import msgspec
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from sqlalchemy import delete, select
@@ -50,7 +51,7 @@ from haskie.document import document
 from haskie.indexing import chunk
 from haskie.indexing.chunk import CHUNK_VERSION, Chunk
 from haskie.settings import Chunker, ChunkSettings, Parser
-from haskie.tables import embeddings
+from haskie.tables import documents, embeddings
 
 NO_MODEL = "none"  # the `model` of a profile without an embedding model: chunks only, no vectors
 
@@ -173,17 +174,28 @@ def _rows(batch: pa.RecordBatch) -> list[Row]:
     ]
 
 
-def _merge(parts: list[Path], target: Path, dims: int | None) -> tuple[int, int]:
+def _unit_sum(rows: list[Row], dims: int) -> np.ndarray:
+    """The sum of the rows' vectors, each scaled to length one first, so a long chunk weighs no
+    more than a short one. An empty part sums to zero."""
+    vectors = [row.vector for row in rows if row.vector is not None]
+    matrix = np.asarray(vectors, dtype=np.float32).reshape(-1, dims)
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    return (matrix / np.where(norms > 0, norms, 1)).sum(axis=0)
+
+
+def _merge(parts: list[Path], target: Path, dims: int | None) -> tuple[int, int, bytes | None]:
     """Stream every `rows.json` into `target` as one row group each, through a `.tmp` and one
-    replace, so a reader never sees a partial file. Returns (rows, bytes). An empty part still
-    gets a row group, so group `n` is always part `n` (an empty group is skipped on read).
+    replace, so a reader never sees a partial file. Returns (rows, bytes, document vector). An
+    empty part still gets a row group, so group `n` is always part `n` (an empty group is
+    skipped on read).
 
     This is also where `Row.seq` is filled in: the parts are chunked in parallel and each one
     numbers its chunks from zero, so the merge is the first place that sees the whole document
-    in order.
+    in order. And where the document vector is summed, since every row passes through here once.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     total = 0
+    summed = None if dims is None else np.zeros(dims, dtype=np.float32)
     with home.atomic_replace(target) as tmp, pq.ParquetWriter(tmp, _schema(dims)) as writer:
         for part, path in enumerate(parts):
             rows = msgspec.json.decode(path.read_bytes(), type=list[Row])
@@ -191,7 +203,17 @@ def _merge(parts: list[Path], target: Path, dims: int | None) -> tuple[int, int]
                 row.seq = seq
             total += len(rows)
             writer.write_batch(_batch(part, rows, dims))
-    return total, target.stat().st_size
+            if summed is not None:
+                summed += _unit_sum(rows, len(summed))
+    return total, target.stat().st_size, _document_vector(summed)
+
+
+def _document_vector(summed: np.ndarray | None) -> bytes | None:
+    """The mean direction of a document's chunks, normalized, as the float32 bytes stored."""
+    if summed is None:
+        return None
+    norm = float(np.linalg.norm(summed))
+    return (summed / norm).astype(np.float32).tobytes() if norm > 0 else None
 
 
 # --- the cache -----------------------------------------------------------------
@@ -212,7 +234,7 @@ async def write(p: Params, parts: list[Path], dims: int | None) -> str:
     scratch directory - last, so a retry before the row was written still finds its input."""
     id = key(p)
     target = file_path(p.document, id)
-    rows, size = await anyio.to_thread.run_sync(_merge, parts, target, dims)
+    rows, size, vector = await anyio.to_thread.run_sync(_merge, parts, target, dims)
     entry = Entry(
         **msgspec.structs.asdict(p),
         id=id,
@@ -223,7 +245,9 @@ async def write(p: Params, parts: list[Path], dims: int | None) -> str:
     )
     async with db.connect() as conn:
         await conn.execute(
-            insert(embeddings).values(msgspec.to_builtins(entry)).on_conflict_do_nothing()
+            insert(embeddings)
+            .values({**msgspec.to_builtins(entry), "vector": vector})
+            .on_conflict_do_nothing()
         )
     await home.remove_tree(scratch_dir(p.document, id))
     return id
@@ -279,3 +303,52 @@ async def entries(doc: str) -> list[Entry]:
             .order_by(embeddings.c.created_at.desc())
         )
         return [db.row_to(Entry, row) for row in rows]
+
+
+class Neighbour(msgspec.Struct):
+    """A document close to another one, by the cosine of their document vectors (1 is the same
+    direction)."""
+
+    document: str
+    similarity: float
+
+
+async def nearest(doc: str, model: str, limit: int, but: Collection[str] = ()) -> list[Neighbour]:
+    """The `limit` imported documents whose vector under `model` lies closest to `doc`'s, closest
+    first, `but` left out: the copies of the same file, which would only fill the slots at 1.0.
+    Empty while `doc` has no vector under it: still importing, or no embedding model.
+
+    Each document is compared by its newest cache entry under the model: the entries of one
+    document differ only in how it was chunked, which barely moves the mean. Every vector is read
+    and compared in memory; a library of thousands of books is a few megabytes of them."""
+    async with db.connect() as conn:
+        rows = await conn.execute(
+            select(embeddings.c.document, embeddings.c.vector)
+            .join_from(embeddings, documents, embeddings.c.document == documents.c.name)
+            .where(
+                embeddings.c.model == model,
+                embeddings.c.vector.is_not(None),
+                documents.c.status == document.DocumentStatus.IMPORTED,
+            )
+            .order_by(embeddings.c.created_at.desc())
+        )
+        vectors: dict[str, bytes] = {}
+        for name, vector in rows:
+            vectors.setdefault(name, vector)  # newest first, so the first one is kept
+    target = vectors.pop(doc, None)
+    for name in but:
+        vectors.pop(name, None)
+    if target is None or not vectors:
+        return []
+    # in a worker thread, like every other numpy and pyarrow call here: the matrix grows with
+    # the library
+    return await anyio.to_thread.run_sync(_closest, vectors, target, limit)
+
+
+def _closest(vectors: dict[str, bytes], target: bytes, limit: int) -> list[Neighbour]:
+    """The `limit` of `vectors` with the highest cosine to `target`; all are unit length."""
+    names = list(vectors)
+    matrix = np.frombuffer(b"".join(vectors.values()), dtype=np.float32).reshape(len(names), -1)
+    scores = matrix @ np.frombuffer(target, dtype=np.float32)
+    closest = np.argsort(-scores, kind="stable")[:limit]
+    return [Neighbour(document=names[at], similarity=round(float(scores[at]), 4)) for at in closest]

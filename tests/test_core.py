@@ -7,6 +7,7 @@ the HTTP contract lives in `tests/test_api.py`.
 """
 
 import base64
+import hashlib
 import io
 import math
 import random
@@ -485,6 +486,31 @@ async def test_import_staged_moves_the_file_and_creates_the_row() -> None:
     assert not document.staging_path(staged.staging_id).exists(), "moved, not copied"
     assert await _staging_rows() == [], "the staging row goes with the bytes"
     assert await document_names() == ["My-Guide.md"]
+
+
+@pytest.mark.anyio
+async def test_the_same_bytes_are_spotted_at_staging_whichever_way_they_came_in(
+    tmp_path: Path,
+) -> None:
+    """The MD5 is taken at staging and at a path import alike, so an upload that repeats either
+    names every document that already holds those bytes; other bytes name none."""
+    md5 = hashlib.md5(MD.encode()).hexdigest()
+    first = await document.stage("guide.md", MD.encode())
+    assert first.duplicates == [], "nothing imported yet"
+    staged = await document.import_staged(first.staging_id)
+    copy = tmp_path / "copy.md"
+    copy.write_text(MD)
+    by_path = await document.import_path(str(copy), document.ImportOptions(name="b-copy.md"))
+
+    again = await document.stage("renamed.md", MD.encode())
+    other = await document.stage("other.md", b"# Other\n\nnot the guide\n")
+
+    assert (staged.md5, by_path.md5) == (md5, md5), "one hash, staged or read from a path"
+    assert again.duplicates == ["b-copy.md", "guide.md"], "every holder, in name order"
+    assert other.duplicates == [], "other bytes are another file"
+    assert await document.identical(md5, but="guide.md") == ["b-copy.md"], "itself left out"
+    await document.set_status("b-copy.md", DocumentStatus.DELETING)
+    assert await document.identical(md5) == ["guide.md"], "one being deleted is no longer a copy"
 
 
 @pytest.mark.anyio

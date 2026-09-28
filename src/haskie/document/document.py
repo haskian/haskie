@@ -22,6 +22,7 @@ preview build — through `cpu.on_cpu`. The pure parts (paths, name cleaning, ro
 sync.
 """
 
+import hashlib
 import re
 import shutil
 import time
@@ -95,6 +96,7 @@ class Document(msgspec.Struct):
     created_at: float = 0.0  # unix seconds
     updated_at: float = 0.0
     description: str = ""  # what the document is, in the importer's words
+    md5: str = ""  # of the original file's bytes: the same hash is the same file imported again
 
     @property
     def root(self) -> Path:
@@ -171,6 +173,27 @@ class Staged(msgspec.Struct):
     staging_id: str
     filename: str
     size: int
+    # documents already holding these exact bytes: importing it again only adds a copy
+    duplicates: list[str]
+
+
+def _md5_of_file(path: Path) -> str:
+    """What `md5` holds: a fingerprint for spotting the same file twice, not a security check.
+    Streamed, since an import may be as large as the upload cap."""
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, lambda: hashlib.md5(usedforsecurity=False)).hexdigest()
+
+
+async def identical(md5: str, but: str | None = None) -> list[str]:
+    """The documents whose original has these bytes, in name order, `but` left out, and one being
+    deleted too: it is on its way out, so the file is no repeat of it."""
+    same = select(documents.c.name).where(
+        documents.c.md5 == md5, documents.c.status != DocumentStatus.DELETING
+    )
+    if but is not None:
+        same = same.where(documents.c.name != but)
+    async with db.connect() as conn:
+        return list(await conn.scalars(same.order_by(documents.c.name)))
 
 
 def root(name: str) -> Path:
@@ -237,13 +260,20 @@ async def stage(filename: str, content: bytes) -> Staged:
     name = Path(filename).name
     await anyio.Path(home.STAGING_ROOT).mkdir(parents=True, exist_ok=True, mode=home.DIR_MODE)
     await home.atomic_write(home.STAGING_ROOT / staging_id, content)
+    # hashed once, here, and carried to the import in the row
+    md5 = await anyio.to_thread.run_sync(_md5_of_file, home.STAGING_ROOT / staging_id)
     async with db.connect() as conn:
         await conn.execute(
             insert(staging).values(
-                staging_id=staging_id, filename=name, size=len(content), created_at=time.time()
+                staging_id=staging_id,
+                filename=name,
+                size=len(content),
+                md5=md5,
+                created_at=time.time(),
             )
         )
-    return Staged(staging_id=staging_id, filename=name, size=len(content))
+    duplicates = await identical(md5)
+    return Staged(staging_id=staging_id, filename=name, size=len(content), duplicates=duplicates)
 
 
 async def sweep_staging(max_age_seconds: float) -> int:
@@ -287,7 +317,7 @@ class ImportOptions(msgspec.Struct):
     skip_ocr_pages: bool | None = None
 
 
-async def _create(name: str, size: int, options: ImportOptions) -> Document:
+async def _create(name: str, size: int, md5: str, options: ImportOptions) -> Document:
     """The row, before the file: a name already taken is refused with nothing on disk to undo.
     `parser` / `skip_ocr_pages` default to the user settings at the moment of import."""
     user = await load_user_settings()
@@ -309,6 +339,7 @@ async def _create(name: str, size: int, options: ImportOptions) -> Document:
                 created_at=now,
                 updated_at=now,
                 description=options.description,
+                md5=md5,
             )
             .on_conflict_do_nothing()
         )
@@ -344,14 +375,16 @@ async def import_staged(staging_id: str, options: ImportOptions | None = None) -
     options = options or ImportOptions()
     source = staging_path(staging_id)  # a trust boundary: the id is validated into a path here
     async with db.connect() as conn:
-        filename = await conn.scalar(
-            select(staging.c.filename).where(staging.c.staging_id == staging_id)
-        )
-    if filename is None or not await anyio.Path(source).is_file():
+        row = (
+            await conn.execute(
+                select(staging.c.filename, staging.c.md5).where(staging.c.staging_id == staging_id)
+            )
+        ).first()
+    if row is None or not await anyio.Path(source).is_file():
         raise NotFound(f"staged upload not found: {staging_id}")
-    final = stored_name(filename, options.name)
+    final = stored_name(row.filename, options.name)
     size = (await anyio.Path(source).stat()).st_size
-    document = await _create(final, size, options)
+    document = await _create(final, size, row.md5, options)
     placed = await _place(document, True, source)
     async with db.connect() as conn:
         await conn.execute(delete(staging).where(staging.c.staging_id == staging_id))
@@ -374,7 +407,8 @@ async def import_path(path: str, options: ImportOptions | None = None) -> Docume
     size = (await anyio.Path(source).stat()).st_size
     if size > UPLOAD_MAX_BYTES:
         raise InvalidInput(f"file larger than {UPLOAD_MAX_BYTES} bytes: {size}")
-    document = await _create(final, size, options)
+    md5 = await anyio.to_thread.run_sync(_md5_of_file, source)
+    document = await _create(final, size, md5, options)
     return await _place(document, False, source)
 
 

@@ -30,7 +30,7 @@ from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection, MemberStatus
 from haskie.document import document
 from haskie.document.document import DocumentStatus
-from haskie.indexing import gguf_models, mlx_models
+from haskie.indexing import embed_cache, gguf_models, mlx_models
 from haskie.indexing.chunk import Chunk, Piece, split
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order
@@ -727,6 +727,52 @@ async def test_a_failed_import_can_be_re_run(client: AsyncTestClient, tmp_path: 
 
 
 # --- membership -----------------------------------------------------------------------
+
+
+async def test_an_upload_names_the_documents_it_repeats(
+    client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging names every document that already holds the same bytes, before anything is
+    imported. Once imported, `similar` names them again, and the nearest by document vector
+    under the embedding model; full-text only has no vectors to compare."""
+    await client.post("/api/init", json={"profile": "none"})
+    await stage_and_import(client, "guide.md", MD.encode())
+    await stage_and_import(client, "other.md", b"# Other\n\nsomething else entirely\n")
+
+    staged = await client.post(
+        "/api/documents/staging", files={"data": ("copy.md", MD.encode(), "text/markdown")}
+    )
+    assert staged.status_code == 201, staged.text
+    assert staged.json()["duplicates"] == ["guide.md"], "the same bytes, under another name"
+    await stage_and_import(client, "copy.md", MD.encode())
+
+    similar = await client.get("/api/documents/copy.md/similar")
+
+    assert similar.status_code == 200, similar.text
+    assert similar.json() == {"identical": ["guide.md"], "nearest": []}, "no model, no vectors"
+
+    asked: list[tuple[str, str, int, list[str]]] = []
+
+    async def nearest(
+        doc: str, model: str, limit: int, but: list[str]
+    ) -> list[embed_cache.Neighbour]:
+        asked.append((doc, model, limit, but))
+        return [embed_cache.Neighbour(document="other.md", similarity=0.42)]
+
+    async def tiny(_settings: object) -> catalogue.EmbeddingModel:
+        return catalogue.EmbeddingModel("test/tiny", 4)
+
+    monkeypatch.setattr(catalogue, "embedding_model", tiny)
+    monkeypatch.setattr(embed_cache, "nearest", nearest)
+    under_model = await client.get("/api/documents/copy.md/similar")
+
+    assert under_model.json() == {
+        "identical": ["guide.md"],
+        "nearest": [{"document": "other.md", "similarity": 0.42}],
+    }
+    tiny_model = catalogue.EmbeddingModel("test/tiny", 4).cache_name
+    assert asked == [("copy.md", tiny_model, 3, ["guide.md"])], "the copies left out of the three"
+    assert (await client.get("/api/documents/ghost.md/similar")).status_code == 404
 
 
 async def test_attach_list_and_detach_a_member(client: AsyncTestClient) -> None:

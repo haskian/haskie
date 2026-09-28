@@ -139,8 +139,9 @@ it later means running *Index all* in each one.
 
 ## From files to answers
 
-1. **Documents.** Drop files onto the page. haskie converts them to markdown (text formats are
-   read as they are) and embeds them in the background, with a side-by-side preview.
+1. **Documents.** Drop a file onto the page, one at a time. haskie converts it to markdown (text
+   formats are read as they are) and embeds it in the background, with a side-by-side preview.
+   It warns when the same file is already imported, and shows the nearest documents once done.
 2. **Collections.** Create one per topic and add its documents. Give it a one-line description.
    The agent reads it to choose where to look.
 3. **Explore.** Search and see exactly what your agent gets: *Excerpts* and *Sources*. Switch to

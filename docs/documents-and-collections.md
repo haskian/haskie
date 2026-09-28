@@ -75,6 +75,19 @@ original suffix is kept in the name, because it decides the route:
 The import also warms the embedding cache for the default chunk settings. A re-import clears the
 document's cached embeddings first.
 
+## Repeats
+
+The web UI adds one document at a time, so each new book gets checked for repeats:
+
+- **The same file.** Staging and a path import both take the MD5 of the bytes. Staging answers
+  with `duplicates`, the documents that already hold those bytes. The UI then suggests discarding
+  the upload, and the import button turns into "Import anyway".
+- **The nearest documents.** Writing a cache entry also stores the document as one vector: the
+  mean of its unit chunk vectors, normalized. `GET /api/documents/{name}/similar` names the
+  identical documents and the three nearest by cosine, under the current embedding model. The
+  vector exists only once the import has embedded the document, so the UI follows the new book
+  until then. Full-text only has no vectors, so it finds no nearest documents.
+
 ## A membership's life
 
 Attaching a document to a collection is an index operation with its own status, per collection.

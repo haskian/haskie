@@ -10,9 +10,10 @@ import itertools
 from pathlib import Path
 
 import msgspec
+import numpy as np
 import pytest
 from conftest import import_row
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from haskie import db
 from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
@@ -305,6 +306,89 @@ async def test_a_second_write_of_the_same_params_is_a_no_op_row(tmp_path: Path) 
     entries = await embed_cache.entries(doc.name)
     assert len(entries) == 1, "insert or ignore: one row, not two and not an IntegrityError"
     assert entries[0].created_at == before.created_at, "the first row stands"
+
+
+async def _vector_of(doc: str) -> list[float] | None:
+    """The document vector the one cache row of `doc` stores, decoded."""
+    async with db.connect() as conn:
+        stored = await conn.scalar(select(embeddings.c.vector).where(embeddings.c.document == doc))
+    return None if stored is None else np.frombuffer(stored, dtype=np.float32).tolist()
+
+
+@pytest.mark.parametrize(
+    ("name", "dims", "groups", "expected"),
+    [
+        (
+            "each chunk counts once, however long its vector; parts add up, an empty one adds 0",
+            4,
+            [[_row("alpha", [3.0, 0.0, 0.0, 0.0])], [], [_row("beta", [0.0, 4.0, 0.0, 0.0])]],
+            [2**-0.5, 2**-0.5, 0.0, 0.0],
+        ),
+        ("no embedding model: no vector", None, [[_row("alpha")]], None),
+        (
+            "vectors that cancel out have no direction",
+            4,
+            [[_row("alpha", [1.0, 0.0, 0.0, 0.0]), _row("beta", [-1.0, 0.0, 0.0, 0.0])]],
+            None,
+        ),
+    ],
+)
+async def test_write_stores_the_document_vector(
+    tmp_path: Path,
+    name: str,
+    dims: int | None,
+    groups: list[list[Row]],
+    expected: list[float] | None,
+) -> None:
+    """The mean of the unit chunk vectors, normalized: the document as one direction."""
+    doc = await import_row(DOC, BODY)
+    params = msgspec.structs.replace(BASE, document=doc.name)
+
+    await embed_cache.write(params, _parts(tmp_path / "scratch", groups), dims)
+
+    stored = await _vector_of(doc.name)
+    if expected is None:
+        assert stored is None, name
+    else:
+        assert stored == pytest.approx(expected), name
+
+
+async def _embedded(
+    tmp_path: Path, name: str, vector: list[float], model: str = TINY.cache_name, size: int = 1200
+) -> None:
+    """One cache entry of `name` whose document vector is `vector`, normalized."""
+    params = msgspec.structs.replace(BASE, document=name, model=model, chunk_size=size)
+    parts = _parts(tmp_path / f"{name}-{model}-{size}", [[_row(name, vector)]])
+    await embed_cache.write(params, parts, len(vector))
+
+
+async def test_nearest_ranks_imported_documents_by_their_newest_vector(tmp_path: Path) -> None:
+    """Closest first; the document itself, one under another model and one not imported are
+    left out; a document with two entries is compared by its newest."""
+    for name in ("a.md", "close.md", "far.md", "other-model.md", "importing.md"):
+        await import_row(name, f"# {name}\n\nbody\n")
+        if name != "importing.md":
+            await document.set_status(name, DocumentStatus.IMPORTED)
+    await _embedded(tmp_path, "a.md", [1.0, 0.0, 0.0, 0.0])
+    await _embedded(tmp_path, "far.md", [1.0, 1.0, 0.0, 0.0], size=900)  # older: not read
+    await _embedded(tmp_path, "far.md", [0.0, 1.0, 0.0, 0.0])
+    await _embedded(tmp_path, "close.md", [3.0, 1.0, 0.0, 0.0])
+    await _embedded(tmp_path, "other-model.md", [1.0, 0.0, 0.0, 0.0], model="other/model")
+    await _embedded(tmp_path, "importing.md", [1.0, 0.0, 0.0, 0.0])
+
+    found = await embed_cache.nearest("a.md", TINY.cache_name, 3)
+
+    assert [(one.document, one.similarity) for one in found] == [
+        ("close.md", pytest.approx(0.9487, abs=1e-4)),
+        ("far.md", pytest.approx(0.0, abs=1e-4)),
+    ]
+    assert [one.document for one in await embed_cache.nearest("a.md", TINY.cache_name, 1)] == [
+        "close.md"
+    ], "cut to the limit"
+    but_close = await embed_cache.nearest("a.md", TINY.cache_name, 3, but=["close.md"])
+    assert [one.document for one in but_close] == ["far.md"], "a copy left out takes no slot"
+    assert await embed_cache.nearest("importing.md", TINY.cache_name, 3) == [], "no vector yet"
+    assert await embed_cache.nearest("a.md", "other/model", 3) == [], "none under that model"
 
 
 async def test_entries_lists_every_cache_of_one_document_newest_first(
