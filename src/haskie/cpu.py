@@ -7,9 +7,11 @@ or event loop they came from.
 
 The per-queue caps in `workflows.stage_caps` shape the *mix* of work; this budget is the ceiling,
 which no queue can enforce, because no queue sees the others.
+
+One piece of CPU work runs outside it: LanceDB trains a vector index on its own runtime, where no
+thread of ours can hold a slot (see `maintenance.run`).
 """
 
-import functools
 import multiprocessing
 import threading
 from collections.abc import Callable, Iterator
@@ -95,22 +97,18 @@ def cpu_slot() -> Iterator[None]:
         _cpu_slots.release()
 
 
-async def _in_thread[T](call: Callable[[], T]) -> T:
-    """Run `call` in a worker thread of the running loop, holding one slot of the budget."""
+async def on_cpu[T](fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """Run one piece of CPU work in a worker thread of the running loop, under one slot of the
+    budget."""
     limiter = anyio.to_thread.current_default_thread_limiter()
     if limiter.total_tokens < THREAD_LIMIT:
         limiter.total_tokens = THREAD_LIMIT
 
     def run() -> T:
         with cpu_slot():
-            return call()
+            return fn(*args, **kwargs)
 
     return await anyio.to_thread.run_sync(run)
-
-
-async def on_cpu[T](fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
-    """Run one piece of CPU work in a worker thread, under one slot of the budget."""
-    return await _in_thread(functools.partial(fn, *args, **kwargs))
 
 
 # --- work that has to leave this interpreter ---------------------------------------
@@ -286,4 +284,4 @@ async def off_interpreter[T](fn: Callable[..., T], /, *args: Any) -> T:
     """
     if not _pool_size():
         return await on_cpu(fn, *args)
-    return await _in_thread(functools.partial(_run_in_pool, fn, args))
+    return await on_cpu(_run_in_pool, fn, args)

@@ -35,7 +35,9 @@ flowchart TB
   parser that crashes its worker fails only its own call, and a new worker takes its place.
   One exception runs on the event loop: stemming a search's answer (`probe.vocabulary`). It
   remembers every word it stemmed, so it costs well under a millisecond once a server has seen
-  the words, and waiting for a slot that indexing holds would cost more.
+  the words, and waiting for a slot that indexing holds would cost more. Another runs outside our
+  threads: maintenance has LanceDB train a vector index on its own runtime, where no slot can be
+  held (`maintenance.run`).
 - **A budget change applies to running work.** A resize counts the slots already held, so a
   raise from 2 to 3 admits one more job, not three. The process pool has one worker per slot. A
   pool of the old size takes no new work, finishes what it took, and exits. The next extraction
