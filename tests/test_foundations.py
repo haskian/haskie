@@ -20,7 +20,6 @@ from typing import Any
 import anyio
 import msgspec
 import pytest
-import structlog
 import uvicorn.config
 from dbos import _logger as dbos_logger
 from sqlalchemy import func, insert, select, text, update
@@ -445,14 +444,9 @@ def test_a_rendered_log_line_names_no_home_path(case: LogLineCase) -> None:
     """The scrub runs after the traceback is formatted and the extras are copied, so it reaches
     every field of the line as it is printed; the terminal copy of a message is not printed."""
     target = home.DOCUMENT_ROOT / "ab" / "notes.md"
-    (formatter,) = [
-        handler.formatter
-        for handler in logging.getLogger().handlers
-        if isinstance(handler.formatter, structlog.stdlib.ProcessorFormatter)
-    ]
     printed = io.StringIO()
     capture = logging.StreamHandler(printed)
-    capture.setFormatter(formatter)
+    capture.setFormatter(logs.formatter("json"))  # the one the root handler renders with
     logging.getLogger().addHandler(capture)
     try:
         case.emit(target)

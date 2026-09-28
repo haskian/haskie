@@ -64,6 +64,17 @@ def _renderer(log_format: str) -> Processor:
     return structlog.processors.JSONRenderer()
 
 
+def formatter(log_format: str) -> structlog.stdlib.ProcessorFormatter:
+    """What renders every line, ours and the libraries': the shared chain, then JSON or console."""
+    return structlog.stdlib.ProcessorFormatter(
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            _renderer(log_format),
+        ],
+        foreign_pre_chain=SHARED_PROCESSORS,
+    )
+
+
 _configured = False
 
 
@@ -77,16 +88,7 @@ def configure() -> None:
         {
             "version": 1,
             "disable_existing_loggers": False,
-            "formatters": {
-                "standard": {
-                    "()": structlog.stdlib.ProcessorFormatter,
-                    "processors": [
-                        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-                        _renderer(log_format),
-                    ],
-                    "foreign_pre_chain": SHARED_PROCESSORS,
-                }
-            },
+            "formatters": {"standard": {"()": formatter, "log_format": log_format}},
             "handlers": {
                 "console": {
                     "class": "logging.StreamHandler",
