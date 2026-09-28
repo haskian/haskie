@@ -36,7 +36,7 @@ from uuid import uuid4
 import anyio
 import anyio.to_thread
 import msgspec
-from sqlalchemy import Row, delete, func, literal, select, update
+from sqlalchemy import ColumnElement, Row, delete, func, literal, select, update
 from sqlalchemy.dialects.sqlite import insert
 
 from haskie import cpu, db, home
@@ -477,28 +477,31 @@ async def get(name: str) -> Document:
     return from_row(row)
 
 
-async def set_status(name: str, status: DocumentStatus, error: str | None = None) -> None:
-    """A lifecycle step is a change to the document, so it stamps `updated_at`: that is the
+async def set_status(
+    name: str, status: DocumentStatus, error: str | None = None, *guard: ColumnElement[bool]
+) -> bool:
+    """Set the document's status and error where every `guard` holds; whether it did.
+
+    A lifecycle step is a change to the document, so it stamps `updated_at`: that is the
     column the "recently touched" listing sorts on. Building the preview is not (see
     `ensure_preview`), it only fills in what the row always described."""
     async with db.connect() as conn:
-        await conn.execute(
+        moved = await conn.scalar(
             update(documents)
-            .where(documents.c.name == name)
+            .where(documents.c.name == name, *guard)
             .values(status=status, error=error, updated_at=time.time())
+            .returning(documents.c.name)
         )
+    return moved is not None
 
 
 async def cancel_import(name: str) -> None:
     """Record a cancelled import as `cancelled`, but only while the document is still in the
     import pipeline. An import that ended between the cancel's read and this write keeps the status
     it ended on (DBOS keeps its SUCCESS or ERROR too), and a delete keeps `deleting`."""
-    async with db.connect() as conn:
-        await conn.execute(
-            update(documents)
-            .where(documents.c.name == name, documents.c.status.in_(ACTIVE_DOCUMENT_STATUSES))
-            .values(status=DocumentStatus.CANCELLED, error=None, updated_at=time.time())
-        )
+    await set_status(
+        name, DocumentStatus.CANCELLED, None, documents.c.status.in_(ACTIVE_DOCUMENT_STATUSES)
+    )
 
 
 async def describe(name: str, description: str) -> Document:

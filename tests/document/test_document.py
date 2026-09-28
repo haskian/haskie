@@ -243,3 +243,49 @@ async def test_a_pdf_preview_is_built_outside_the_interpreter(
     if filename.endswith(".pdf"):
         assert (built.preview.pages, built.preview.truncated) == (2, False), name
         assert "page two" in (built.preview_dir / "preview.md").read_text(), name
+
+
+# --- status -----------------------------------------------------------------------
+
+IN_THE_PIPELINE = tables.documents.c.status.in_(document.ACTIVE_DOCUMENT_STATUSES)
+
+
+@pytest.mark.parametrize(
+    ("name", "start", "guard", "target", "moved"),
+    [
+        ("no guard moves any status", document.DocumentStatus.IMPORTED, (), "salary.md", True),
+        (
+            "a guard that holds moves it",
+            document.DocumentStatus.CONVERTING,
+            (IN_THE_PIPELINE,),
+            "salary.md",
+            True,
+        ),
+        (
+            "a guard that fails leaves it",
+            document.DocumentStatus.DELETING,
+            (IN_THE_PIPELINE,),
+            "salary.md",
+            False,
+        ),
+        ("an unknown document moves nothing", document.DocumentStatus.ERROR, (), "ghost.md", False),
+    ],
+)
+async def test_set_status_moves_the_row_only_where_every_guard_holds(
+    tmp_path: Path,
+    name: str,
+    start: document.DocumentStatus,
+    guard: tuple,
+    target: str,
+    moved: bool,
+) -> None:
+    """It answers whether it moved the row, so a caller can tell a guarded write that lost."""
+    doc = await document.import_path(str(_source(tmp_path / "private")))
+    await document.set_status(doc.name, start, "an earlier failure")
+
+    answered = await document.set_status(target, document.DocumentStatus.CANCELLED, None, *guard)
+
+    row = await document.get(doc.name)
+    assert answered is moved, name
+    expected = ("cancelled", None) if moved else (start, "an earlier failure")
+    assert (row.status, row.error) == expected, name
