@@ -344,7 +344,9 @@ export const api = {
   saveSession: (id: string, collections: string[]) =>
     request<string[]>(`/api/sessions/${encodeURIComponent(id)}`, json('PUT', { collections })),
 
-  gaps: (review: GapReview, days: number) => request<GapTopic[]>(`/api/gaps${pageQuery({}, { review, days: String(days) })}`),
+  // `signals` defaults to the confirmed gaps; the page asks for the borderline ones too
+  gaps: (review: GapReview, days: number, signals?: GapSignal[]) =>
+    request<GapTopic[]>(`/api/gaps${pageQuery({}, { review, days: String(days), signals })}`),
   // `open` takes a decision back. Answers how many questions it reached.
   reviewGaps: (ids: number[], review: GapReview) => request<number>('/api/gaps/review', json('PUT', { ids, review })),
   // Asks the questions again over every collection now; nothing is recorded.

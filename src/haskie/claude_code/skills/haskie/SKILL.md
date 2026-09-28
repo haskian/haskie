@@ -159,10 +159,11 @@ haskie keeps every search, so the collections can grow where they fall short.
   `best_similarity`, `best_rerank` and `uncovered`, and its `results` cited by `header` and
   `location`. A failed search has an `error`. Use it to recall what this conversation already
   searched.
-- **`list_gaps(review?, days?)`** → the questions no collection answers, grouped by topic, the
-  most asked first. Each question has a `signal` (`empty`, `uncovered` or `weak`), its `id`, and
-  `near_misses`: what came closest. Tell the user which topics keep coming back; they are what to
-  add next.
+- **`list_gaps(review?, days?, signals?)`** → the questions no collection answers, grouped by
+  topic, the most asked first. Each question has a `signal` (`reported`, `empty`, `uncovered` or
+  `weak`), its `id`, and `near_misses`: what came closest. `borderline` (maybe answered: the best
+  match sits between the bars) is left out unless `signals` names it. Tell the user which topics
+  keep coming back; they are what to add next.
 - **`replay_gaps(ids)`** → each gap question asked again over every collection, at most 50:
   `signal` null means it is answered now, and `results` cites where. Nothing is logged.
 - **`report_gap(session_id, question, verdict, missing?)`** → the question's `id` and `verdict`.

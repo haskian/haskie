@@ -1,6 +1,6 @@
 import { Check, RotateCcw, SearchX, Undo2, X } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
-import { api, type GapReview, type GapTopic, type ReplayedGap } from '../api'
+import { api, type GapReview, type GapSignal, type GapTopic, type ReplayedGap } from '../api'
 import type { PageProps } from '../App'
 import { errorText } from '../format'
 import { useRun } from '../hooks/useRun'
@@ -16,6 +16,8 @@ const TABS: TabDef[] = [
   { id: 'resolved', label: 'Resolved' },
 ]
 const DAYS = 30
+// every reason, the borderline one included: the page folds those away rather than hiding them
+const SIGNALS: GapSignal[] = ['reported', 'empty', 'uncovered', 'weak', 'borderline']
 const EMPTY: Record<GapReview, string> = {
   open: `No gaps. Every question of the last ${DAYS} days found an answer.`,
   dismissed: 'Nothing dismissed.',
@@ -31,7 +33,7 @@ export function Gaps({ route, counts }: PageProps<Extract<Route, { name: 'gaps' 
   const [error, setError] = useState<string | null>(null)
 
   // "2 h ago" is measured from the moment the list was read
-  const refresh = useCallback(() => api.gaps(review, DAYS).then((topics) => setLoaded({ topics, now: Date.now() / 1000 })), [review])
+  const refresh = useCallback(() => api.gaps(review, DAYS, SIGNALS).then((topics) => setLoaded({ topics, now: Date.now() / 1000 })), [review])
   useEffect(() => {
     refresh().catch((cause: unknown) => setError(errorText(cause)))
   }, [refresh])
@@ -51,7 +53,7 @@ export function Gaps({ route, counts }: PageProps<Extract<Route, { name: 'gaps' 
         {loaded !== null && loaded.topics.length === 0 && <p className="muted">{EMPTY[review]}</p>}
         {loaded !== null &&
           bands(loaded.topics).map((group) => (
-            <GallerySection key={group.label} label={`${group.label} · ${group.items.length}`} large>
+            <GallerySection key={group.label} label={`${group.label} · ${group.items.length}`} large collapsed={group.collapsed}>
               {group.items.map((topic) => (
                 <Tile
                   key={topicId(topic)}

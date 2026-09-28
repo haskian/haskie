@@ -20,6 +20,7 @@ The topic pairs of `topics.json` give the `same_topic` bar the same way.
 
 import argparse
 import asyncio
+import hashlib
 import io
 import json
 import math
@@ -85,18 +86,26 @@ def _sigmoid(logit: float) -> float:
     return 1.0 / (1.0 + math.exp(-logit)) if logit >= 0 else math.exp(logit) / (1 + math.exp(logit))
 
 
-async def _measure(shelf: str, profile: str, reranker: str | None) -> dict[str, Any]:
-    from haskie.catalogue import catalogue
+class Asked:
+    """One question put to one shelf: its logged score profile, its three nearest chunks (what the
+    Gaps page cites as near misses) and the words of it the five nearest chunks do not hold."""
+
+    def __init__(self, logged: Any, nearest: list[int], missing: list[str]) -> None:
+        self.logged, self.nearest, self.missing = logged, nearest, missing
+
+
+async def _index(shelf: str, model: Any) -> tuple[list[str], np.ndarray, dict[str, Any]]:
+    """The shelf's chunks as the models read them, their vectors (cached), and its labels."""
     from haskie.indexing import chunk, embed
-    from haskie.search import gaps, log
-    from haskie.settings import Accelerator, ChunkSettings, UserSettings
+    from haskie.settings import ChunkSettings
 
     text, labels = _shelf(shelf)
-    model = await catalogue.embedding_model(UserSettings(embedding=profile))
-    assert model is not None, "a profile with a model"
-    chunks = chunk.split(text, ChunkSettings())
-    texts = [chunk.framed(one.frame, one.text) for one in chunks]
-    print(f"{shelf}: {len(texts)} chunks, embedding with {profile}", file=sys.stderr)
+    texts = [chunk.framed(one.frame, one.text) for one in chunk.split(text, ChunkSettings())]
+    key = hashlib.sha256("\x00".join([model.cache_name, *texts]).encode()).hexdigest()[:16]
+    cached = CACHE / f"{shelf}-{key}.npy"
+    if cached.exists():
+        return texts, np.load(cached), labels
+    print(f"{shelf}: {len(texts)} chunks, embedding with {model.name}", file=sys.stderr)
     vectors = np.asarray(
         [
             v
@@ -104,162 +113,246 @@ async def _measure(shelf: str, profile: str, reranker: str | None) -> dict[str, 
             for v in embed.embed_texts(model, texts[at : at + BATCH])
         ]
     )
-    units = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
-
-    groups = {
-        "answered": labels["answered"],
-        "unanswered": labels["unanswered_near"] + labels["unanswered_far"],
-    }
-    measured: dict[str, list[log.LoggedQuestion]] = {}
-    for group, questions in groups.items():
-        measured[group] = []
-        for question in questions:
-            query = np.asarray(embed.embed_query(model, question))
-            pool = np.argsort(-(units @ (query / np.linalg.norm(query))))[:CANDIDATES]
-            found = log.profile(query.tolist(), vectors[pool].tolist())
-            scores: list[float] = []
-            if reranker is not None:
-                logits = embed.rerank_scores(
-                    reranker, Accelerator.CPU, question, [texts[i] for i in pool]
-                )
-                scores = sorted((_sigmoid(one) for one in logits), reverse=True)[: log.PROFILE]
-            measured[group].append(
-                log.LoggedQuestion(
-                    question,
-                    similarities=found.similarities,
-                    rerank_scores=scores,
-                    coherence=found.coherence,
-                )
-            )
-
-    features: dict[str, Any] = {}
-    for name, feature in gaps.FEATURES.items():
-        a = [v for q in measured["answered"] if (v := feature(q)) is not None]
-        u = [v for q in measured["unanswered"] if (v := feature(q)) is not None]
-        if not a or not u:
-            continue
-        features[name] = {
-            "auroc": auroc(a, u),
-            "answered_min": min(a),
-            "unanswered_max": max(u),
-        }
-    bar = model.weak_match
-    floor = (await catalogue.calibration(reranker)).floor if reranker else None
-
-    def under(group: str, head: str, line: float | None) -> int | None:
-        """How many questions of `group` a bar on the head of `head` flags as gaps."""
-        if line is None:
-            return None
-        return sum(getattr(q, head)[0] < line for q in measured[group] if getattr(q, head))
-
-    flagged = {
-        "cosine_bar": bar,
-        "answered_under_bar": under("answered", "similarities", bar),
-        "unanswered_under_bar": under("unanswered", "similarities", bar),
-        "rerank_floor": floor,
-        "answered_under_floor": under("answered", "rerank_scores", floor),
-        "unanswered_under_floor": under("unanswered", "rerank_scores", floor),
-    }
-    return {
-        "shelf": shelf,
-        "profile": profile,
-        "reranker": reranker,
-        "chunks": len(texts),
-        "answered": len(measured["answered"]),
-        "unanswered": len(measured["unanswered"]),
-        "features": features,
-        "bars": flagged,
-        "questions": {
-            group: [
-                {
-                    "question": q.question,
-                    "similarities": q.similarities[:5],
-                    "rerank_scores": q.rerank_scores[:5],
-                    "coherence": q.coherence,
-                }
-                for q in found
-            ]
-            for group, found in measured.items()
-        },
-    }
+    CACHE.mkdir(parents=True, exist_ok=True)
+    np.save(cached, vectors)
+    return texts, vectors, labels
 
 
-async def _topics(profile: str) -> dict[str, Any]:
-    from haskie.catalogue import catalogue
+def _ask(
+    question: str, model: Any, texts: list[str], vectors: np.ndarray, reranker: str | None
+) -> Asked:
     from haskie.indexing import embed
+    from haskie.search import log, probe
+    from haskie.settings import Accelerator
+
+    query = np.asarray(embed.embed_query(model, question))
+    units = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
+    pool = np.argsort(-(units @ (query / np.linalg.norm(query))))[:CANDIDATES]
+    found = log.profile(query.tolist(), vectors[pool].tolist())
+    scores: list[float] = []
+    if reranker is not None:
+        logits = embed.rerank_scores(reranker, Accelerator.CPU, question, [texts[i] for i in pool])
+        scores = sorted((_sigmoid(one) for one in logits), reverse=True)[: log.PROFILE]
+    asked = probe.Question(vector=None, asked=question)
+    missing = list(probe.missing([asked], [texts[i] for i in pool[:5]]))
+    logged = log.LoggedQuestion(
+        question, similarities=found.similarities, rerank_scores=scores, coherence=found.coherence
+    )
+    return Asked(logged, [int(i) for i in pool[:3]], missing)
+
+
+async def _measure(
+    shelves: list[str], profile: str, reranker: str | None
+) -> tuple[dict[str, dict[str, list[Asked]]], Any]:
+    """Every labelled question of every shelf, and the topic questions against each shelf."""
+    from haskie.catalogue import catalogue
     from haskie.settings import UserSettings
 
     model = await catalogue.embedding_model(UserSettings(embedding=profile))
-    assert model is not None
+    assert model is not None, "a profile with a model"
     triples = json.loads((HERE / "topics.json").read_text())
-    flat = [(topic, q) for topic, triple in enumerate(triples) for q in triple]
-    vectors = np.asarray([embed.embed_query(model, q) for _, q in flat])
-    units = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
-    pairs = units @ units.T
-    within, across = [], []
-    for i in range(len(flat)):
-        for j in range(i + 1, len(flat)):
-            (within if flat[i][0] == flat[j][0] else across).append(float(pairs[i, j]))
-    bar = model.same_topic
-    return {
-        "same_topic_bar": bar,
-        "within_min": min(within),
-        "across_max": max(across),
-        "within_joined": (sum(w > bar for w in within) / len(within)) if bar else None,
-        "across_joined": sum(a > bar for a in across) if bar else None,
-    }
+    measured: dict[str, dict[str, list[Asked]]] = {}
+    for shelf in shelves:
+        texts, vectors, labels = await _index(shelf, model)
+        groups = {
+            "answered": labels["answered"],
+            "unanswered": labels["unanswered_near"] + labels["unanswered_far"],
+            "reworded": labels.get("reworded", []),
+            "topics": [q for triple in triples for q in triple],
+        }
+        measured[shelf] = {
+            group: [_ask(q, model, texts, vectors, reranker) for q in questions]
+            for group, questions in groups.items()
+        }
+    return measured, model
 
 
-def _report(results: list[dict[str, Any]], topics: dict[str, Any]) -> str:
-    lines = []
-    for one in results:
-        lines.append(
-            f"\n## {one['shelf']}: {one['chunks']} chunks, {one['answered']} answered, "
-            f"{one['unanswered']} unanswered ({one['profile']}, {one['reranker'] or 'no reranker'})"
+def _features(measured: dict[str, dict[str, list[Asked]]]) -> list[str]:
+    """AUROC of every feature per shelf, and the step-1 gate: a bar under every answered question
+    of every shelf, and how many gaps it catches on each."""
+    from haskie.search import gaps
+
+    lines = [
+        f"{'feature':<14} "
+        + " ".join(f"{s[:11]:>11}" for s in measured)
+        + "   bar under all answered: caught"
+    ]
+    for name, feature in gaps.FEATURES.items():
+        values = {
+            shelf: {
+                group: [v for one in found[group] if (v := feature(one.logged)) is not None]
+                for group in ("answered", "unanswered")
+            }
+            for shelf, found in measured.items()
+        }
+        if any(not v["answered"] or not v["unanswered"] for v in values.values()):
+            continue
+        aurocs = [auroc(v["answered"], v["unanswered"]) for v in values.values()]
+        bar = min(min(v["answered"]) for v in values.values())
+        caught = ", ".join(
+            f"{sum(u < bar for u in v['unanswered'])}/{len(v['unanswered'])}"
+            for v in values.values()
         )
-        lines.append(f"{'feature':<14} {'AUROC':>6} {'answered min':>13} {'unanswered max':>15}")
-        for name, f in sorted(one["features"].items(), key=lambda kv: -abs(kv[1]["auroc"] - 0.5)):
-            low, high = f["answered_min"], f["unanswered_max"]
-            lines.append(f"{name:<14} {f['auroc']:>6.3f} {low:>13.3f} {high:>15.3f}")
-        b = one["bars"]
-        if b["cosine_bar"] is not None:
-            lines.append(
-                f"cosine bar {b['cosine_bar']}: flags {b['answered_under_bar']} answered, "
-                f"{b['unanswered_under_bar']} of {one['unanswered']} unanswered"
+        lines.append(
+            f"{name:<14} " + " ".join(f"{a:>11.3f}" for a in aurocs) + f"   {bar:.3f}: {caught}"
+        )
+    return lines
+
+
+def _verdict(one: Any, low: float | None, high: float | None) -> str:
+    best = one.logged.best_similarity
+    if low is None or best is None:
+        return "none"
+    if best < low:
+        return "weak"
+    return "borderline" if high is not None and best < high else "answered"
+
+
+def _bars(
+    measured: dict[str, dict[str, list[Asked]]], model: Any, floor: float | None
+) -> list[str]:
+    """How the catalogue's bars sort each group: weak, borderline or answered; and the reranker's
+    floor. The vocabulary rule (step 3) on top: borderline and with words no near miss holds."""
+    lines = []
+    low, high = model.weak_match, model.answered_match
+    lines.append(f"cosine bars: weak under {low}, borderline under {high}")
+    for shelf, found in measured.items():
+        for group in ("answered", "unanswered", "reworded"):
+            asked = found[group]
+            if not asked:
+                continue
+            verdicts = [_verdict(one, low, high) for one in asked]
+            vocabulary = sum(
+                v in {"weak", "borderline"} and bool(one.missing)
+                for v, one in zip(verdicts, asked, strict=True)
             )
-        if b["rerank_floor"] is not None:
-            lines.append(
-                f"rerank floor {b['rerank_floor']}: flags {b['answered_under_floor']} answered, "
-                f"{b['unanswered_under_floor']} of {one['unanswered']} unanswered"
+            counts = {v: verdicts.count(v) for v in ("weak", "borderline", "answered")}
+            floored = (
+                sum(
+                    one.logged.rerank_scores[0] < floor for one in asked if one.logged.rerank_scores
+                )
+                if floor is not None
+                else None
             )
-    lines.append(
-        f"\n## topics: same-topic pairs >= {topics['within_min']:.3f}, other pairs <= "
-        f"{topics['across_max']:.3f}; bar {topics['same_topic_bar']} joins "
-        f"{topics['within_joined']:.0%} of same-topic pairs, {topics['across_joined']} others"
+            lines.append(
+                f"  {shelf:<11} {group:<10} {len(asked):>3}: weak {counts['weak']:>2}, borderline "
+                f"{counts['borderline']:>2}, answered {counts['answered']:>2}; words missing "
+                f"(of weak or borderline) {vocabulary:>2}; under rerank floor {floored}"
+            )
+    return lines
+
+
+def _joined(
+    pairs: list[tuple[int, int]],
+    cosines: np.ndarray,
+    nearest: list[set[int]],
+    bar: float | None,
+    low: float,
+    share: float,
+) -> int:
+    """How many pairs a topic rule joins: query cosine over `bar`, or over `low` with at least
+    `share` of their near misses in common (Jaccard of their three nearest chunks)."""
+
+    def join(i: int, j: int) -> bool:
+        if bar is not None and cosines[i, j] > bar:
+            return True
+        union = nearest[i] | nearest[j]
+        overlap = len(nearest[i] & nearest[j]) / len(union) if union else 0.0
+        return cosines[i, j] > low and overlap >= share
+
+    return sum(join(i, j) for i, j in pairs)
+
+
+def _topics(measured: dict[str, dict[str, list[Asked]]], model: Any) -> list[str]:
+    """The step-4 gate: same-topic pairs joined and other pairs merged, by query cosine alone
+    (`same_topic`), and by a lower cosine plus shared near misses."""
+    from haskie.indexing import embed
+    from haskie.search import collapse
+
+    triples = json.loads((HERE / "topics.json").read_text())
+    topic = [n for n, triple in enumerate(triples) for _ in triple]
+    asked = [q for triple in triples for q in triple]
+    cosines = collapse.unit_rows([embed.embed_query(model, q) for q in asked])
+    cosines = cosines @ cosines.T
+    pairs = [(i, j) for i in range(len(topic)) for j in range(i + 1, len(topic))]
+    same = [(i, j) for i, j in pairs if topic[i] == topic[j]]
+    other = [(i, j) for i, j in pairs if topic[i] != topic[j]]
+    bar = model.same_topic
+    lines = []
+    for shelf, found in measured.items():
+        nearest = [set(one.nearest) for one in found["topics"]]
+        ok = _joined(same, cosines, nearest, bar, 2.0, 2.0) / len(same)
+        bad = _joined(other, cosines, nearest, bar, 2.0, 2.0)
+        lines.append(f"  {shelf}: cosine > {bar} alone: {ok:.0%} joined, {bad} merged")
+        for low in (0.5, 0.55, 0.6, 0.65):
+            for share in (0.5, 1.0):
+                ok = _joined(same, cosines, nearest, bar, low, share) / len(same)
+                bad = _joined(other, cosines, nearest, bar, low, share)
+                lines.append(
+                    f"    + cosine > {low}, near misses shared >= {share}: "
+                    f"{ok:.0%} joined, {bad} merged"
+                )
+    return lines
+
+
+def _report(measured: dict[str, dict[str, list[Asked]]], model: Any, floor: float | None) -> str:
+    sizes = ", ".join(
+        f"{shelf} {len(f['answered'])} answered / {len(f['unanswered'])} unanswered"
+        for shelf, f in measured.items()
     )
-    return "\n".join(lines)
+    return "\n".join(
+        [
+            f"# {model.profile}: {sizes}",
+            "\n## features: AUROC per shelf (answered over unanswered)",
+            *_features(measured),
+            "\n## bars",
+            *_bars(measured, model, floor),
+            "\n## topics",
+            *_topics(measured, model),
+        ]
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     parser.add_argument("--shelf", choices=["rust-book", "haskie-docs", "all"], default="all")
     parser.add_argument("--profile", default="compact", help="an embedding profile key")
     parser.add_argument("--reranker", default="Xenova/ms-marco-MiniLM-L-6-v2", help="or 'none'")
-    parser.add_argument("--out", type=Path, help="write the full measurements as JSON here")
+    parser.add_argument("--out", type=Path, help="write each question's measurements as JSON here")
     args = parser.parse_args()
     reranker = None if args.reranker == "none" else args.reranker
     shelves = ["rust-book", "haskie-docs"] if args.shelf == "all" else [args.shelf]
     # a throwaway home: the catalogue (profiles, bars, reranker floors) is read from a fresh seed
     os.environ["HASKIE_HOME"] = tempfile.mkdtemp(prefix="haskie-gapeval-")
 
-    async def run() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        results = [await _measure(shelf, args.profile, reranker) for shelf in shelves]
-        return results, await _topics(args.profile)
+    async def run() -> tuple[Any, Any, float | None]:
+        from haskie.catalogue import catalogue
 
-    results, topics = asyncio.run(run())
+        measured, model = await _measure(shelves, args.profile, reranker)
+        floor = (await catalogue.calibration(reranker)).floor if reranker else None
+        return measured, model, floor
+
+    measured, model, floor = asyncio.run(run())
     if args.out:
-        args.out.write_text(json.dumps({"shelves": results, "topics": topics}, indent=1))
-    print(_report(results, topics))
+        rows = {
+            shelf: {
+                group: [
+                    {
+                        "question": one.logged.question,
+                        "similarities": one.logged.similarities[:5],
+                        "rerank_scores": one.logged.rerank_scores[:5],
+                        "coherence": one.logged.coherence,
+                        "nearest": one.nearest,
+                        "missing": one.missing,
+                    }
+                    for one in asked
+                ]
+                for group, asked in found.items()
+            }
+            for shelf, found in measured.items()
+        }
+        args.out.write_text(json.dumps(rows, indent=1))
+    print(_report(measured, model, floor))
 
 
 if __name__ == "__main__":

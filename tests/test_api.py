@@ -1318,6 +1318,10 @@ async def test_an_agent_reports_a_gap_on_a_question_it_asked(ready: AsyncTestCli
     )
     assert (gap["agent_verdict"], gap["agent_note"]) == ("partial", "the retry limit")
     assert gap["result_count"] == 1, "the search did answer, by its scores"
+    only = await ready.get("/api/gaps", params={"signals": ["empty", "weak"]})
+    assert only.json() == [], "listed by the reasons asked for"
+    again = await ready.get("/api/gaps", params={"signals": ["reported", "borderline"]})
+    assert [one["questions"][0]["id"] for one in again.json()] == [gap["id"]]
 
     await ready.get(
         "/api/search/excerpts", params={"q": "zebra", "collections": "ghost", "session_id": "r1"}

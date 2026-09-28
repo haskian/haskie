@@ -46,14 +46,18 @@ const topic: GapTopic = {
 const once: GapTopic = { ...topic, question: 'tone mapping', questions: [{ ...question, id: 7, signal: 'empty' }], sessions: 0, collections: [] }
 
 describe('bands', () => {
-  const cases: Array<{ name: string; value: GapTopic[]; expected: Array<[string, string[]]> }> = [
+  const maybe: GapTopic = { ...once, question: 'unsure', questions: [{ ...question, id: 9, signal: 'borderline' }] }
+  const mixed: GapTopic = { ...topic, questions: [{ ...question, id: 12, signal: 'borderline' }, { ...question, id: 11, signal: 'weak' }] }
+  const cases: Array<{ name: string; value: GapTopic[]; expected: Array<[string, string[], boolean]> }> = [
     { name: 'nothing', value: [], expected: [] },
-    { name: 'asked once only', value: [once], expected: [['Asked once', ['7']]] },
-    { name: 'both bands, in the order given', value: [once, topic], expected: [['Asked again', ['41']], ['Asked once', ['7']]] },
+    { name: 'asked once only', value: [once], expected: [['Asked once', ['7'], false]] },
+    { name: 'both bands, in the order given', value: [once, topic], expected: [['Asked again', ['41'], false], ['Asked once', ['7'], false]] },
+    { name: 'only borderline: folded away', value: [maybe], expected: [['Borderline', ['9'], true]] },
+    { name: 'one confirmed question makes the topic a gap', value: [mixed, maybe], expected: [['Asked again', ['12'], false], ['Borderline', ['9'], true]] },
   ]
   for (const one of cases) {
     test(one.name, () => {
-      expect(bands(one.value).map((group) => [group.label, group.items.map(topicId)])).toEqual(one.expected)
+      expect(bands(one.value).map((group) => [group.label, group.items.map(topicId), group.collapsed])).toEqual(one.expected)
     })
   }
 })
@@ -77,6 +81,7 @@ describe('signalText', () => {
     { name: 'the reranker decided', value: { signal: 'weak', best_rerank: 0.0312, best_similarity: 0.9 }, expected: 'weak match: reranker 0.03' },
     { name: 'the cosine decided', value: { signal: 'weak', best_rerank: null, best_similarity: 0.712 }, expected: 'weak match: cosine 0.71' },
     { name: 'no score kept', value: { signal: 'weak', best_rerank: null, best_similarity: null }, expected: 'weak match' },
+    { name: 'between the bars', value: { signal: 'borderline', best_rerank: null, best_similarity: 0.723 }, expected: 'maybe answered: cosine 0.72' },
     { name: 'answered', value: { signal: null, best_rerank: 0.9, best_similarity: 0.9 }, expected: 'answered' },
     {
       name: 'the agent found nothing, and said what',

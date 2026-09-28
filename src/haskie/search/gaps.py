@@ -14,6 +14,8 @@ A question is a gap when one of the detectors fires (`DETECTORS`), first one win
   the reranker's calibrated floor (`catalogue.calibration`), since it reads query and passage
   together. Otherwise the embedding profile's cosine bar (`weak_match`) decides. With no bar
   known there is no verdict.
+- `borderline`: no reranker judged it, and its best cosine sits between `weak_match` and
+  `answered_match`: maybe answered. The page shows these apart; an agent asks for them.
 
 A failed search is an error, not a gap, and is left out.
 
@@ -55,6 +57,7 @@ class Signal(StrEnum):
     EMPTY = "empty"
     UNCOVERED = "uncovered"
     WEAK = "weak"
+    BORDERLINE = "borderline"  # between the bars: maybe answered; shown apart, opt-in for agents
 
 
 class Verdict(StrEnum):
@@ -76,6 +79,7 @@ class Bars(msgspec.Struct, frozen=True):
     """What questions are judged by, keyed as a search names its models."""
 
     weak_match: dict[str, float]  # per embedding profile
+    answered_match: dict[str, float]  # per embedding profile: the top of the borderline band
     same_topic: dict[str, float]  # per embedding profile
     floor: dict[str, float]  # per reranker model: its calibrated floor
 
@@ -87,6 +91,9 @@ async def bars(rerankers: set[str]) -> Bars:
     floors = await asyncio.gather(*(catalogue.calibration(name) for name in names))
     return Bars(
         weak_match={key: m.weak_match for key, m in profiles.items() if m.weak_match is not None},
+        answered_match={
+            key: m.answered_match for key, m in profiles.items() if m.answered_match is not None
+        },
         same_topic={key: m.same_topic for key, m in profiles.items() if m.same_topic is not None},
         floor={name: one.floor for name, one in zip(names, floors, strict=True)},
     )
@@ -165,10 +172,15 @@ def _weak(search: Searched, asked: LoggedQuestion, bars: Bars) -> Signal | None:
         # the floor the search itself dropped chunks under
         floor = retrieval.rerank_floor(search.min_rerank_score, bars.floor[search.reranker])
         return Signal.WEAK if asked.best_rerank < floor else None
-    cosine_bar = bars.weak_match.get(search.embedding) if search.embedding else None
-    if asked.best_similarity is not None and cosine_bar is not None:
-        return Signal.WEAK if asked.best_similarity < cosine_bar else None
-    return None
+    profile = search.embedding
+    low = bars.weak_match.get(profile) if profile else None
+    if asked.best_similarity is None or low is None:
+        return None
+    if asked.best_similarity < low:
+        return Signal.WEAK
+    high = bars.answered_match.get(profile) if profile else None
+    # the reranker's floor gives no band: measured, no bar kept its false gaps under 15%
+    return Signal.BORDERLINE if high is not None and asked.best_similarity < high else None
 
 
 Detector = Callable[[Searched, LoggedQuestion, Bars], Signal | None]
@@ -343,8 +355,15 @@ def _stored(review: Review) -> str | None:
     return None if review == Review.OPEN else review.value
 
 
-async def load(since: float, review: Review) -> list[GapTopic]:
-    """The gap topics among the questions asked since `since` that carry `review`."""
+# what `list_gaps` returns unless asked for more: the gaps, not the maybes
+CONFIRMED = frozenset(Signal) - {Signal.BORDERLINE}
+
+
+async def load(
+    since: float, review: Review, signals: frozenset[Signal] = CONFIRMED
+) -> list[GapTopic]:
+    """The gap topics among the questions asked since `since` that carry `review`, of the
+    `signals` asked for."""
     stored = _stored(review)
     searched = await log.load(since=since)
     judged = await bars({one.reranker for one in searched if one.reranker})
@@ -352,7 +371,7 @@ async def load(since: float, review: Review) -> list[GapTopic]:
         Gap(search, asked, found)
         for search in searched
         for asked in search.questions
-        if asked.review == stored and (found := signal(search, asked, judged)) is not None
+        if asked.review == stored and (found := signal(search, asked, judged)) in signals
     ]
     # the vectors of the gaps only: most questions are answered, and a vector is kilobytes
     vectors = await log.vectors([gap.asked.id for gap in gaps if gap.asked.id is not None])

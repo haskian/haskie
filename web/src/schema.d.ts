@@ -1053,6 +1053,7 @@ export interface components {
             /** @default  */
             profile: string;
             weak_match?: number | null;
+            answered_match?: number | null;
             same_topic?: number | null;
             /** @default  */
             query_prefix: string;
@@ -2018,7 +2019,7 @@ export interface components {
          * @description Why a question counts as a gap.
          * @enum {string}
          */
-        Signal: "reported" | "empty" | "uncovered" | "weak";
+        Signal: "reported" | "empty" | "uncovered" | "weak" | "borderline";
         /** Similar */
         Similar: {
             identical: string[];
@@ -3912,6 +3913,7 @@ export interface operations {
                 /** @description What the curator decided about a gap. `open` is stored as no decision. */
                 review?: components["schemas"]["Review"];
                 days?: number;
+                signals?: components["schemas"]["Signal"][] | null;
             };
             header?: never;
             path?: never;

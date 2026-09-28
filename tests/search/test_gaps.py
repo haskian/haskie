@@ -12,7 +12,12 @@ from haskie.search.log import Asked, LoggedQuestion
 from haskie.search.passage import Excerpt, HotSection, Passage, PassageReference, Source, Span
 
 MINILM = "Xenova/ms-marco-MiniLM-L-6-v2"
-BARS = Bars(weak_match={"compact": 0.70}, same_topic={"compact": 0.70}, floor={MINILM: 0.05})
+BARS = Bars(
+    weak_match={"compact": 0.70, "arctic-m": 0.40},
+    answered_match={"compact": 0.775},
+    same_topic={"compact": 0.70},
+    floor={MINILM: 0.05},
+)
 
 # one excerpts search under the default profile and reranker, as `log.load` returns it
 SEARCH = log.Logged(
@@ -93,7 +98,26 @@ NO_RERANK = {"reranker": None}
             Signal.WEAK,
         ),
         ("the cosine under its bar", NO_RERANK, {"best_similarity": 0.692}, Signal.WEAK),
-        ("the cosine over its bar", NO_RERANK, {"best_similarity": 0.723}, None),
+        ("the cosine between the bars", NO_RERANK, {"best_similarity": 0.723}, Signal.BORDERLINE),
+        (
+            "exactly at the low bar is borderline",
+            NO_RERANK,
+            {"best_similarity": 0.70},
+            Signal.BORDERLINE,
+        ),
+        ("at the high bar is an answer", NO_RERANK, {"best_similarity": 0.775}, None),
+        (
+            "a profile with no high bar has no band",
+            {**NO_RERANK, "embedding": "arctic-m"},
+            {"best_similarity": 0.5},
+            None,
+        ),
+        (
+            "a reranked search has no band",
+            {},
+            {"best_rerank": 0.06, "best_similarity": 0.71},
+            None,
+        ),
         (
             "a profile without a bar gives no verdict",
             {**NO_RERANK, "embedding": "gte-base"},

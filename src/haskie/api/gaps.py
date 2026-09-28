@@ -28,12 +28,18 @@ class GapReport(msgspec.Struct):
 
 
 @get("/api/gaps", mcp_tool="list_gaps")
-async def list_gaps(review: gaps.Review = gaps.Review.OPEN, days: int = 30) -> list[gaps.GapTopic]:
+async def list_gaps(
+    review: gaps.Review = gaps.Review.OPEN,
+    days: int = 30,
+    signals: list[gaps.Signal] | None = None,
+) -> list[gaps.GapTopic]:
     """The questions the collections could not answer, grouped by topic, the most asked first:
     what to add to the collections next.
 
-    Each question says why (`signal`): `empty`, its search returned nothing; `uncovered`, asked
-    with others, no excerpt answers it; `weak`, its best match is under the bar its models set.
+    Each question says why (`signal`): `reported`, you or another agent said the excerpts did not
+    answer it; `empty`, its search returned nothing; `uncovered`, asked with others, no excerpt
+    answers it; `weak`, its best match is under the bar its models set; `borderline`, maybe
+    answered, its best match between the bars, left out unless `signals` asks for it.
     `near_misses` cites what came closest. A topic is one thing asked, in one wording or several,
     in any session. To close a gap, add a document that answers it (`add_document`,
     `add_document_to_collection`), check with `replay_gaps`, then `review_gaps` with `resolved`.
@@ -41,8 +47,10 @@ async def list_gaps(review: gaps.Review = gaps.Review.OPEN, days: int = 30) -> l
     Args:
         review: open (the default), or the ones already dismissed or resolved.
         days: How far back, 1 to 366.
+        signals: Which reasons to list; every one but `borderline` by default.
     """
-    return await gaps.load(days_ago(days), review)
+    wanted = frozenset(signals) if signals else gaps.CONFIRMED
+    return await gaps.load(days_ago(days), review, wanted)
 
 
 @put("/api/gaps/review", mcp_tool="review_gaps")

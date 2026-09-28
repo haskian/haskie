@@ -5,12 +5,17 @@ import type { RangeGroup } from '../../ui'
 /** A topic's address: the id of its newest question, which names it. */
 export const topicId = (topic: GapTopic): string => String(topic.questions[0].id)
 
-/** Two bands, each in the order the server ranked them: the questions asked more than once,
- *  then the ones asked once. */
-export function bands(topics: GapTopic[]): RangeGroup<GapTopic>[] {
+/** A topic every question of which is only borderline: maybe answered, not a confirmed gap. */
+export const isBorderline = (topic: GapTopic): boolean => topic.questions.every((question) => question.signal === 'borderline')
+
+/** Three bands, each in the order the server ranked them: the confirmed gaps asked more than once,
+ *  those asked once, then the topics that are only borderline, which the page folds away. */
+export function bands(topics: GapTopic[]): (RangeGroup<GapTopic> & { collapsed: boolean })[] {
+  const gaps = topics.filter((topic) => !isBorderline(topic))
   return [
-    { label: 'Asked again', items: topics.filter((topic) => topic.questions.length > 1) },
-    { label: 'Asked once', items: topics.filter((topic) => topic.questions.length === 1) },
+    { label: 'Asked again', items: gaps.filter((topic) => topic.questions.length > 1), collapsed: false },
+    { label: 'Asked once', items: gaps.filter((topic) => topic.questions.length === 1), collapsed: false },
+    { label: 'Borderline', items: topics.filter(isBorderline), collapsed: true },
   ].filter((group) => group.items.length > 0)
 }
 
@@ -22,6 +27,7 @@ const REASONS: Record<GapSignal, string> = {
   empty: 'nothing came back',
   uncovered: 'no excerpt answers it',
   weak: 'weak match',
+  borderline: 'maybe answered',
 }
 
 /** The line under a topic tile's question: how often, by how many sessions, how recently. */
@@ -48,6 +54,9 @@ export function signalText(
   if (question.signal === 'reported') {
     const verdict = question.agent_verdict === 'partial' ? 'the agent found a partial answer' : REASONS.reported
     return question.agent_note ? `${verdict}: ${question.agent_note}` : verdict
+  }
+  if (question.signal === 'borderline') {
+    return question.best_similarity === null ? REASONS.borderline : `${REASONS.borderline}: cosine ${score(question.best_similarity)}`
   }
   if (question.signal !== 'weak') return question.signal === null ? 'answered' : REASONS[question.signal]
   if (question.best_rerank !== null) return `weak match: reranker ${score(question.best_rerank)}`

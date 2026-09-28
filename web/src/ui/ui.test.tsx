@@ -241,6 +241,12 @@ describe('GallerySection', () => {
     },
     { name: 'large swaps in the wide grid', element: <GallerySection label="A–E" large>{null}</GallerySection>, contains: ['class="gallery gallery-lg"'] },
     { name: 'id reaches the section', element: <GallerySection label="A–E" id="g-a-e">{null}</GallerySection>, contains: ['id="g-a-e"'] },
+    {
+      name: 'collapsed folds the band behind its label',
+      element: <GallerySection label="Borderline · 2" collapsed>x</GallerySection>,
+      contains: ['<details class="gallery-section section">', '<summary class="mono muted">Borderline · 2</summary>', '<div class="gallery">x</div>'],
+      missing: ['<section'],
+    },
   ])
 })
 

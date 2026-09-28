@@ -237,3 +237,32 @@ async def test_prune_deletes_old_searches_with_their_questions_and_results(
     async with db.connect() as conn:
         for table in (search_questions, search_results):
             assert await conn.scalar(select(func.count()).select_from(table)) == 0, table.name
+
+
+async def test_a_borderline_question_is_listed_only_when_asked_for(
+    seeded_home, fixed_models
+) -> None:
+    """Its best cosine sits between the profile's bars: a maybe, not a gap. The Gaps page asks for
+    it; an agent's default list leaves it out."""
+    from sqlalchemy import update
+
+    from haskie.search import gaps
+    from haskie.tables import embedding_profiles
+
+    async with db.connect() as conn:
+        await conn.execute(
+            update(embedding_profiles)
+            .where(embedding_profiles.c.profile == "compact")
+            .values(weak_match=0.5, answered_match=0.95)
+        )
+    await save_user_settings(UserSettings(embedding="compact"))
+    await _two_collections()
+    async with log.capturing(log.Tool.EXPLORE, ["idempotent retries"], "s1") as capture:
+        capture.answer(await flow.chunks(["a", "b"], "idempotent retries", 5))
+
+    since = time.time() - 60
+    assert await gaps.load(since, gaps.Review.OPEN) == [], "a maybe is no confirmed gap"
+    (topic,) = await gaps.load(since, gaps.Review.OPEN, frozenset(gaps.Signal))
+    (question,) = topic.questions
+    assert question.signal == gaps.Signal.BORDERLINE
+    assert 0.5 <= (question.best_similarity or 0) < 0.95

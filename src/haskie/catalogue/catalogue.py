@@ -89,6 +89,8 @@ class EmbeddingModel(msgspec.Struct):
     # The cosines the Gaps page judges by (`search.gaps`); None turns that judgement off. A best
     # match under `weak_match` is no answer; two queries over `same_topic` ask about one thing.
     weak_match: float | None = None
+    # at and over it a best match is an answer; between the two bars it is borderline
+    answered_match: float | None = None
     same_topic: float | None = None
     # What the model was trained to read ahead of a query and of a passage (e5's "query: ",
     # nomic's "search_query: "); empty for models that need none. They shape every vector, so
@@ -128,6 +130,7 @@ _PROFILE = (
     embedding_profiles.c.duplicate_chunk,
     embedding_profiles.c.duplicate_passage,
     embedding_profiles.c.weak_match,
+    embedding_profiles.c.answered_match,
     embedding_profiles.c.same_topic,
 )
 
@@ -154,6 +157,7 @@ def _model(row: Row[Any]) -> tuple[str, EmbeddingModel]:
         chunk,
         passage,
         weak_match,
+        answered_match,
         same_topic,
     ) = row
     return profile, EmbeddingModel(
@@ -162,6 +166,7 @@ def _model(row: Row[Any]) -> tuple[str, EmbeddingModel]:
         duplicate=None if chunk is None else DuplicateCosine(chunk, passage),
         profile=profile,
         weak_match=weak_match,
+        answered_match=answered_match,
         same_topic=same_topic,
         query_prefix=query_prefix,
         document_prefix=document_prefix,

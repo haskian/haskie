@@ -259,7 +259,9 @@ embedding_profiles = Table(
     # the cosines search/gaps.py judges by: a best match under `weak_match` is no answer, and two
     # queries over `same_topic` ask about one thing
     Column("weak_match", Float),
+    Column("answered_match", Float),  # at and over it an answer; between the two, borderline
     Column("same_topic", Float),
+    CheckConstraint("answered_match is null or answered_match >= weak_match"),
 )
 
 # how one reranker's scores read (`catalogue.calibration`): its floor, under which it judged a
