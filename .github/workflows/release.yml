@@ -1,7 +1,7 @@
 name: Release
 
-# Tag-driven. Every `v*` tag builds and cuts a GitHub Release with the wheel + sdist attached,
-# so it installs with `uv tool install haskie --from <release-url>`.
+# Tag-driven. Every `v*` tag builds the wheel + sdist, publishes them to PyPI, and cuts a GitHub
+# Release with them attached, so it installs with `uv tool install haskie`.
 on:
   push:
     tags: ["v*"]
@@ -65,3 +65,19 @@ jobs:
           tag_name: ${{ env.BUILD_REF }}
           files: dist/*
           generate_release_notes: true
+
+  # PyPI matches the top-level workflow, not a called one, so the project registers two trusted
+  # publishers: version.yml (bumps) and release.yml (hand-pushed tags).
+  pypi:
+    name: PyPI
+    needs: dist
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
