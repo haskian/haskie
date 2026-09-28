@@ -119,6 +119,10 @@ async def test_a_search_records_its_scope_answer_and_signals(seeded_home, fixed_
     assert (asked.question, asked.uncovered, asked.review) == ("idempotent retries", False, None)
     assert asked.best_similarity == pytest.approx(_best_cosine("idempotent retries"))
     assert asked.best_rerank == pytest.approx(1 / (1 + math.exp(-2.5))), "the sigmoid of 2.5"
+    cosines = sorted(float(np.dot(QUERIES["idempotent retries"], v)) for v in VECTORS.values())
+    assert asked.similarities == pytest.approx(cosines[::-1], abs=1e-6), "both rows, best first"
+    assert asked.rerank_scores == pytest.approx([1 / (1 + math.exp(-x)) for x in (2.5, 1.5)])
+    assert asked.coherence == pytest.approx(float(np.dot(VECTORS["a"], VECTORS["b"])), abs=1e-6)
     assert asked.id is not None
     stored = (await log.vectors([asked.id]))[asked.id]
     assert stored == pytest.approx(QUERIES["idempotent retries"], abs=1e-6), "float32, read apart"
@@ -151,10 +155,11 @@ async def test_an_excerpts_search_records_each_question_on_its_own(
         log.Tool.EXCERPTS, asked.questions, "s1", context=asked.context
     ) as capture:
         found = await flow.answers(["a", "b"], asked, 4)
-        capture.answer(found.excerpts, found.uncovered)
+        capture.answer(found.excerpts, found.uncovered, found.missing_terms)
 
     (logged,) = await log.load()
     assert logged.context == "home cooking"
+    assert logged.missing_terms == found.missing_terms, "the words no excerpt held, kept"
     assert found.uncovered == asked.questions, "the floor dropped every chunk"
     assert [(one.question, one.uncovered) for one in logged.questions] == [
         ("idempotent retries", True),

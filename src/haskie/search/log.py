@@ -118,19 +118,62 @@ def _result(place: Place, position: int, parent: int | None) -> LoggedResult:
     )
 
 
+PROFILE = 20  # scores kept per ranking: the head of the list, where an answer would be
+COHERENT = 10  # nearest rows whose likeness to each other `coherence` averages
+
+
+class ScoreProfile(msgspec.Struct, frozen=True):
+    """How one question's ranking scored, the raw signals `search.gaps` judges it by."""
+
+    similarities: list[float]  # the best cosines of the query to the rows read, best first
+    coherence: float | None  # the mean cosine between the `COHERENT` nearest rows, pair by pair
+
+
+def profile(query: Sequence[float], rows: Sequence[Sequence[float]]) -> ScoreProfile:
+    """The score profile of a query against the vectors of the rows its ranking read.
+
+    Pure, so the search log (`observe_ranking`) and an offline evaluation measure the same way.
+    Coherence is the literature's dense post-retrieval predictor: the nearest rows of an answered
+    question tend to be about one thing, those of an unanswered one scatter.
+    """
+    if not rows:
+        return ScoreProfile(similarities=[], coherence=None)
+    units = collapse.unit_rows(rows)
+    cosines = units @ collapse.unit_rows([query])[0]
+    order = np.argsort(-cosines)
+    nearest = units[order[:COHERENT]]
+    coherence = None
+    if len(nearest) > 1:
+        pairs = nearest @ nearest.T
+        count = len(nearest)
+        coherence = float((pairs.sum() - np.trace(pairs)) / (count * (count - 1)))
+    return ScoreProfile(similarities=cosines[order[:PROFILE]].tolist(), coherence=coherence)
+
+
 class LoggedQuestion(msgspec.Struct):
     """One question of a search, and what its own ranking measured. `id` is the log's, None until
-    the search is written; `review` is the curator's decision on it as a gap (`search.gaps`)."""
+    the search is written; `review` is the curator's decision on it as a gap (`search.gaps`).
+
+    `best_similarity` and `best_rerank` are the heads of the two score lists, filled from them."""
 
     question: str
     id: int | None = None
-    best_similarity: float | None = None  # the best cosine of the query to any row read
-    best_rerank: float | None = None  # the reranker's best score, before its floor dropped any
+    similarities: list[float] = []  # the best cosines of the query to any row read, best first
+    rerank_scores: list[float] = []  # the reranker's best scores before its floor, best first
+    coherence: float | None = None  # how alike the nearest rows are (`profile`)
+    best_similarity: float | None = None
+    best_rerank: float | None = None
     uncovered: bool = False  # several were asked, and no excerpt answers this one
     review: str | None = None
     # the agent's verdict on what the search gave it (`gaps.report`): insufficient or partial
     agent_verdict: str | None = None
     agent_note: str | None = None  # what the agent said the excerpts lacked
+
+    def __post_init__(self) -> None:
+        if self.similarities:
+            self.best_similarity = self.similarities[0]
+        if self.rerank_scores:
+            self.best_rerank = self.rerank_scores[0]
 
 
 class Asked(LoggedQuestion):
@@ -155,6 +198,7 @@ class Capture(msgspec.Struct):
     min_rerank_score: float | None = None
     result_limit: int | None = None
     results: list[LoggedResult] = []
+    missing_terms: list[str] = []  # the words of its questions no excerpt held
     error: str | None = None
 
     @property
@@ -162,9 +206,16 @@ class Capture(msgspec.Struct):
         """The results the caller got, without the places folded into them."""
         return sum(result.parent is None for result in self.results)
 
-    def answer(self, found: Sequence[Place], uncovered: Sequence[str] = ()) -> None:
-        """What the caller got back, and the questions no excerpt answers."""
+    def answer(
+        self,
+        found: Sequence[Place],
+        uncovered: Sequence[str] = (),
+        missing_terms: Sequence[str] = (),
+    ) -> None:
+        """What the caller got back, the questions no excerpt answers, and the words of the
+        questions no excerpt holds."""
         self.results = flatten(found)
+        self.missing_terms = list(missing_terms)
         for one in self.asked:
             one.uncovered = one.question in uncovered
 
@@ -227,8 +278,8 @@ def observe_scope(where: Plan | None, collections: list[str], mode: SearchMode, 
 
 
 def observe_ranking(question: str, where: Plan, pool: Pool) -> None:
-    """What one question's ranking measured, once it is reranked: its query vector, the best
-    cosine between it and any row read, and the reranker's best score.
+    """What one question's ranking measured, once it is reranked: its query vector and its score
+    profile, the best cosines to the rows read and the reranker's best scores before its floor.
 
     The cosine is measured on the vectors rather than read off a score column: a hybrid query's
     fusion keeps only a rank score, which says nothing about how close the best row came.
@@ -239,18 +290,25 @@ def observe_ranking(question: str, where: Plan, pool: Pool) -> None:
     asked = next((one for one in capture.asked if one.question == question), None)
     if asked is None:
         return
-    asked.best_rerank = pool.best_rerank
-    if where.vector is None:
-        return
-    asked.vector = where.vector
-    stored = [row["vector"] for _, row in pool.rows.values() if row.get("vector") is not None]
-    if stored:
-        cosines = collapse.unit_rows(stored) @ collapse.unit_rows([where.vector])[0]
-        asked.best_similarity = float(np.max(cosines))
+    asked.rerank_scores = pool.rerank_scores[:PROFILE]
+    if where.vector is not None:
+        asked.vector = where.vector
+        stored = [row["vector"] for _, row in pool.rows.values() if row.get("vector") is not None]
+        measured = profile(where.vector, stored)
+        asked.similarities, asked.coherence = measured.similarities, measured.coherence
+    asked.__post_init__()  # the heads of the lists just set
 
 
 def _vector_bytes(vector: list[float] | None) -> bytes | None:
     return None if vector is None else np.asarray(vector, np.float32).tobytes()
+
+
+def _floats(values: list[float]) -> bytes | None:
+    return _vector_bytes(values) if values else None
+
+
+def _unfloats(raw: bytes | None) -> list[float]:
+    return [] if raw is None else np.frombuffer(raw, np.float32).tolist()
 
 
 async def _write(capture: Capture, duration_ms: int) -> None:
@@ -267,6 +325,7 @@ async def _write(capture: Capture, duration_ms: int) -> None:
                     "ts": time.time(),
                     "actor": actor,
                     "collections": db.dumps(capture.collections),
+                    "missing_terms": db.dumps(capture.missing_terms),
                     "result_count": capture.result_count,
                     "duration_ms": duration_ms,
                 }
@@ -281,8 +340,9 @@ async def _write(capture: Capture, duration_ms: int) -> None:
                     "position": position,
                     "question": one.question,
                     "query_vector": _vector_bytes(one.vector),
-                    "best_similarity": one.best_similarity,
-                    "best_rerank": one.best_rerank,
+                    "similarities": _floats(one.similarities),
+                    "rerank_scores": _floats(one.rerank_scores),
+                    "coherence": one.coherence,
                     "uncovered": one.uncovered,
                 }
                 for position, one in enumerate(capture.asked)
@@ -319,6 +379,7 @@ class Logged(msgspec.Struct):
     result_count: int  # results returned, the places folded into them aside
     duration_ms: int
     error: str | None  # why it failed; a failed search returned nothing
+    missing_terms: list[str]  # the words of its questions no excerpt held; excerpts only
     questions: list[LoggedQuestion] = []
 
 
@@ -328,7 +389,12 @@ class LoggedSearch(Logged):
     results: list[LoggedResult] = []  # best first, without the places folded into them
 
 
-_QUESTION = tuple(search_questions.c[name] for name in LoggedQuestion.__struct_fields__)
+# the columns a `LoggedQuestion` is read from; its best scores are derived, not stored
+_QUESTION = tuple(
+    search_questions.c[name]
+    for name in LoggedQuestion.__struct_fields__
+    if name in search_questions.c
+)
 
 
 async def load(
@@ -353,7 +419,7 @@ async def load(
         statement = statement.limit(limit)
     async with db.connect() as conn:
         found = {
-            row.id: db.row_to(Logged, row, collections=list[str])
+            row.id: db.row_to(Logged, row, collections=list[str], missing_terms=list[str])
             for row in await conn.execute(statement)
         }
         # the same filters as a subquery, not the ids as parameters: a window of history can
@@ -365,7 +431,12 @@ async def load(
             .order_by(search_questions.c.search_id, search_questions.c.position)
         )
         for row in questions:
-            found[row.search_id].questions.append(db.row_to(LoggedQuestion, row))
+            record = db.record(row)
+            record["similarities"] = _unfloats(record["similarities"])
+            record["rerank_scores"] = _unfloats(record["rerank_scores"])
+            found[record.pop("search_id")].questions.append(
+                msgspec.convert(record, LoggedQuestion, strict=False)
+            )
     return list(found.values())
 
 

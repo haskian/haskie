@@ -35,6 +35,7 @@ mise run dev     # API and MCP on :8452 with reload, Vite on :8453
 | `clean-run` | destroy `~/haskie-dev` (asks first), reinstall the fresh build, run it on a clean home |
 | `install-dev` | build, then install this checkout as the `haskie-dev` command, which always uses `~/haskie-dev` and port 8452 |
 | `calibrate-rerankers` | `sample` writes this home's searched questions and their chunks ranked 10 to 30 to `eval/candidates.jsonl`; after you copy one borderline chunk a question into `eval/borderline.jsonl`, `measure --model NAME [--write]` sets each reranker's floor and score curve (`haskie.catalogue.calibrate`) |
+| `evaluate-gaps` | scores every gap signal by AUROC on labelled questions over the Rust book (fetched at a pinned commit) and haskie's docs, and checks the current bars (`tests/gapeval/`); `--profile`, `--reranker`, `--out` |
 | `bump` | version bump from the commit subjects (CI only) |
 
 A change is done when `mise run check` and `mise run test` pass. Tests that download models carry

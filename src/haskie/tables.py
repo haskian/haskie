@@ -168,6 +168,8 @@ searches = Table(
     Column("result_count", Integer, nullable=False, server_default=ZERO),
     Column("duration_ms", Integer, nullable=False, server_default=ZERO),
     Column("error", Text),
+    # the words of its questions no excerpt held (`Answer.missing_terms`), JSON; excerpts only
+    Column("missing_terms", Text, nullable=False, server_default="[]"),
     Index("idx_searches_ts", "ts"),
     Index("idx_searches_session", "session_id", "ts"),
 )
@@ -182,8 +184,12 @@ search_questions = Table(
     Column("position", Integer, nullable=False),
     Column("question", Text, nullable=False),
     Column("query_vector", LargeBinary),  # float32, the search's `embedding` dimensions
-    Column("best_similarity", Float),  # the best cosine between the query and any row read
-    Column("best_rerank", Float),  # the reranker's best score, before its floor dropped any
+    # the score profile of its ranking (`log.ScoreProfile`): the best cosines of the query to the
+    # rows read and the reranker's best scores before its floor, each float32 and best first, and
+    # how alike the nearest rows are to each other
+    Column("similarities", LargeBinary),
+    Column("rerank_scores", LargeBinary),
+    Column("coherence", Float),
     Column("uncovered", Integer, nullable=False, server_default=ZERO),  # no excerpt answers it
     Column("review", Text, CheckConstraint("review in ('dismissed', 'resolved')")),
     # the agent's own verdict on what the search gave it (`gaps.report`), and what it lacked

@@ -1,0 +1,14 @@
+[
+  ["How should a background job retry a failed Kafka message without duplicates?", "retrying failed Kafka consumers idempotently", "What is the right retry strategy for Kafka consumers so side effects are not repeated?"],
+  ["How do I center a div with CSS grid?", "centering an element horizontally and vertically with CSS", "What CSS makes a box sit in the middle of the page?"],
+  ["How long should sourdough starter ferment before baking?", "sourdough starter fermentation time", "When is my sourdough starter ready to use for bread?"],
+  ["How do I configure Kubernetes pod security admission?", "Kubernetes pod security standards enforce restricted", "How can I stop pods from running as root in a Kubernetes namespace?"],
+  ["How do I serialize a struct to JSON with serde?", "serde derive Serialize Deserialize JSON", "How can I turn my Rust types into JSON and back?"],
+  ["How do I implement JWT refresh token rotation?", "refresh token rotation and reuse detection", "How should an API issue new refresh tokens securely when the old one is used?"],
+  ["How does gradient checkpointing save memory in PyTorch?", "activation checkpointing torch memory trade-off", "How can I train a bigger model on one GPU by recomputing activations?"],
+  ["What is the best time of year to prune apple trees?", "pruning apple trees in winter", "When should I cut back the branches of my apple tree?"],
+  ["How do Swift actors isolate mutable state?", "Swift concurrency actor isolation", "How does Swift prevent data races between concurrent tasks?"],
+  ["How do I set up a GitHub Actions matrix build?", "GitHub Actions strategy matrix for several Python versions", "How can one CI workflow test my project on many operating systems?"],
+  ["What are the symptoms of vitamin D deficiency?", "signs of low vitamin D", "How do I know if I am not getting enough vitamin D?"],
+  ["How do Docker multi-stage builds reduce image size?", "Dockerfile multi stage build smaller image", "How can I keep build tools out of my final container image?"]
+]

@@ -1307,6 +1307,9 @@ export interface components {
         LoggedQuestion: {
             question: string;
             id?: number | null;
+            similarities?: number[];
+            rerank_scores?: number[];
+            coherence?: number | null;
             best_similarity?: number | null;
             best_rerank?: number | null;
             /** @default false */
@@ -1347,6 +1350,7 @@ export interface components {
             result_count: number;
             duration_ms: number;
             error: string | null;
+            missing_terms: string[];
             questions?: components["schemas"]["LoggedQuestion"][];
             results?: components["schemas"]["LoggedResult"][];
         };

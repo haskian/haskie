@@ -1,0 +1,26 @@
+{
+  "files": ["README.md", "docs/search.md", "docs/indexing.md", "docs/storage.md"],
+  "answered": [
+    "How does haskie chunk a markdown document?",
+    "What happens when the schema version changes?",
+    "How are searches across several collections merged?",
+    "Which search modes are there and how does hybrid fusion work?",
+    "How does the CPU budget limit indexing work?",
+    "Where does haskie store its documents and database?",
+    "How does a reranker rescore the candidates?",
+    "What is an excerpt and how is a passage widened?",
+    "How does DBOS resume indexing after a crash?",
+    "How does search_sources pick the collections to select?",
+    "What is the embedding cache keyed by?",
+    "How does maintenance compact a collection's table?"
+  ],
+  "unanswered_near": [
+    "How should a background job retry a failed Kafka message without duplicates?",
+    "retrying failed Kafka consumers idempotently",
+    "How do I center a div with CSS grid?",
+    "How does the Rust borrow checker reason about lifetimes?"
+  ],
+  "unanswered_far": [
+    "What grape varieties are used in Rioja wine?"
+  ]
+}

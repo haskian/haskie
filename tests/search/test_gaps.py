@@ -31,6 +31,7 @@ SEARCH = log.Logged(
     result_count=25,
     duration_ms=48,
     error=None,
+    missing_terms=[],
 )
 ASKED = Asked(
     question="How should a background job retry a failed Kafka message without duplicates?",
@@ -364,3 +365,43 @@ def test_an_excerpt_flattens_its_passages_repeats_under_itself() -> None:
         (2, 0, "replication.md", 9, 9),
     ]
     assert [one.uncovered for one in capture.asked] == [False, True]
+
+
+# --- the score profile ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "rows", "similarities", "coherence"),
+    [
+        ("no rows read", [], [], None),
+        ("one row: no pair to be alike", [[1.0, 0.0]], [1.0], None),
+        (
+            "best first, and the nearest rows alike",
+            [[0.0, 1.0], [1.0, 0.0], [1.0, 0.1]],
+            [1.0, 0.995, 0.0],
+            (0.995 + 0.0 + 0.0995) / 3,
+        ),
+        ("a zero vector scores 0, never divides by 0", [[0.0, 0.0], [2.0, 0.0]], [1.0, 0.0], 0.0),
+    ],
+)
+def test_the_profile_of_a_ranking(
+    name: str, rows: list[list[float]], similarities: list[float], coherence: float | None
+) -> None:
+    found = log.profile([1.0, 0.0], rows)
+    assert found.similarities == pytest.approx(similarities, abs=1e-3), name
+    assert (found.coherence is None) == (coherence is None), name
+    if coherence is not None:
+        assert found.coherence == pytest.approx(coherence, abs=1e-3), name
+
+
+def test_the_profile_keeps_the_head_of_a_long_ranking() -> None:
+    rows = [[1.0, float(n)] for n in range(50)]
+    found = log.profile([1.0, 0.0], rows)
+    assert len(found.similarities) == log.PROFILE
+    assert found.similarities == sorted(found.similarities, reverse=True)
+
+
+def test_best_scores_are_the_heads_of_the_lists() -> None:
+    asked = log.LoggedQuestion("kafka", similarities=[0.8, 0.5], rerank_scores=[0.9])
+    assert (asked.best_similarity, asked.best_rerank) == (0.8, 0.9)
+    assert log.LoggedQuestion("kafka").best_similarity is None

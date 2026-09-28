@@ -160,9 +160,9 @@ class Pool(msgspec.Struct):
     rows: dict[RowKey, tuple[CollectionIndex, dict]]
     rankings: dict[str, list[RowKey]]  # one per collection, in that collection's own order
     ranked: list[tuple[RowKey, float]] = []  # merged, best first
-    # the reranker's best score over the pool, kept when its floor drops every chunk: how close
+    # the reranker's scores over the pool, best first, kept before its floor drops any: how close
     # the search came is what the search log records (`log.observe_ranking`)
-    best_rerank: float | None = None
+    rerank_scores: list[float] = []
 
 
 async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True) -> Pool:
@@ -241,8 +241,8 @@ async def rerank(pool: Pool, query: str, where: Plan) -> Pool:
     # the reranker's score has a scale: under the floor it judged the chunk no answer, and a
     # search that keeps it would fill a slot, or tag a question, with it
     kept = [(key, score) for key, score in rescored if score >= where.rerank_floor]
-    best = max((score for _, score in rescored), default=None)
-    return msgspec.structs.replace(pool, ranked=kept, best_rerank=best)
+    scores = sorted((score for _, score in rescored), reverse=True)
+    return msgspec.structs.replace(pool, ranked=kept, rerank_scores=scores)
 
 
 class Scanned(msgspec.Struct):

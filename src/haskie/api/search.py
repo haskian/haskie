@@ -156,7 +156,7 @@ async def search_excerpts(
         log.Tool.EXCERPTS, asked.questions, session_id, context=asked.context
     ) as capture:
         found = await flow.answers(await retrieval.scope(session_id, collections), asked, limit)
-        capture.answer(found.excerpts, found.uncovered)
+        capture.answer(found.excerpts, found.uncovered, found.missing_terms)
     return found
 
 
