@@ -791,6 +791,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/gaps/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** ReportGap */
+        post: operations["ApiGapsReportReportGap"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1130,10 +1147,18 @@ export interface components {
             best_similarity: number | null;
             best_rerank: number | null;
             near_misses: components["schemas"]["LoggedResult"][];
+            agent_verdict?: components["schemas"]["Verdict"] | null;
+            agent_note?: string | null;
         };
         /** GapReplay */
         GapReplay: {
             ids: number[];
+        };
+        /** GapReport */
+        GapReport: {
+            question: string;
+            verdict: components["schemas"]["Verdict"];
+            missing?: string | null;
         };
         /** GapReview */
         GapReview: {
@@ -1287,6 +1312,8 @@ export interface components {
             /** @default false */
             uncovered: boolean;
             review?: string | null;
+            agent_verdict?: string | null;
+            agent_note?: string | null;
         };
         /** LoggedResult */
         LoggedResult: {
@@ -1669,6 +1696,12 @@ export interface components {
             best_rerank: number | null;
             results: components["schemas"]["LoggedResult"][];
         };
+        /** Reported */
+        Reported: {
+            id: number;
+            question: string;
+            verdict: components["schemas"]["Verdict"];
+        };
         /**
          * Reranker
          * @description Second-stage scoring applied to the Candidates of any mode (vector, fts or hybrid). cross-encoder: a model reads query and chunk together and rescores each pair; slower but more precise than embeddings. none: keep the retrieval order.
@@ -1981,7 +2014,7 @@ export interface components {
          * @description Why a question counts as a gap.
          * @enum {string}
          */
-        Signal: "empty" | "uncovered" | "weak";
+        Signal: "reported" | "empty" | "uncovered" | "weak";
         /** Similar */
         Similar: {
             identical: string[];
@@ -2079,6 +2112,12 @@ export interface components {
             search?: components["schemas"]["SearchSettings"];
             retention?: components["schemas"]["RetentionSettings"];
         };
+        /**
+         * Verdict
+         * @description What an agent says the excerpts of a search gave it (`report`).
+         * @enum {string}
+         */
+        Verdict: "insufficient" | "partial";
     };
     responses: never;
     parameters: never;
@@ -3961,6 +4000,47 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReplayedGap"][];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiGapsReportReportGap: {
+        parameters: {
+            query: {
+                session_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GapReport"];
+            };
+        };
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Reported"];
                 };
             };
             /** @description Bad request syntax or unsupported method */

@@ -128,6 +128,9 @@ class LoggedQuestion(msgspec.Struct):
     best_rerank: float | None = None  # the reranker's best score, before its floor dropped any
     uncovered: bool = False  # several were asked, and no excerpt answers this one
     review: str | None = None
+    # the agent's verdict on what the search gave it (`gaps.report`): insufficient or partial
+    agent_verdict: str | None = None
+    agent_note: str | None = None  # what the agent said the excerpts lacked
 
 
 class Asked(LoggedQuestion):

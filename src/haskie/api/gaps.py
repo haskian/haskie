@@ -19,6 +19,14 @@ class GapReplay(msgspec.Struct):
     ids: list[int]
 
 
+class GapReport(msgspec.Struct):
+    """An agent's verdict on what a search it just ran gave it."""
+
+    question: str  # as it was asked: one `q` of `search_excerpts`, or `search_sources`' `q`
+    verdict: gaps.Verdict
+    missing: str | None = None  # what the excerpts lacked
+
+
 @get("/api/gaps", mcp_tool="list_gaps")
 async def list_gaps(review: gaps.Review = gaps.Review.OPEN, days: int = 30) -> list[gaps.GapTopic]:
     """The questions the collections could not answer, grouped by topic, the most asked first:
@@ -54,3 +62,24 @@ async def replay_gaps(data: GapReplay) -> list[gaps.ReplayedGap]:
     every collection, and judge each again: `signal` null means the collections answer it now,
     and `results` cites where. Not recorded as searches."""
     return await gaps.replay(data.ids)
+
+
+@post("/api/gaps/report", status_code=200, mcp_tool="report_gap")
+@audit.audited("gaps.report")
+async def report_gap(session_id: str, data: GapReport) -> gaps.Reported:
+    """Say that a search you just ran did not answer your question: the gap then shows to the
+    user as one the collections should close.
+
+    Call it when the excerpts do not let a careful reader answer the question from them alone
+    (`insufficient`), or answer only part of it (`partial`). Not when they answer it in other
+    words, and not for a question you did not search. `question` is one of the questions you
+    passed to `search_excerpts` (or `search_sources`) with this `session_id`, word for word, in
+    the last hour. `missing` says in a sentence what the excerpts lacked, at most 300 characters.
+    One call per miss; reporting again replaces the verdict.
+
+    Args:
+        session_id: The conversation's id, the one the search ran with.
+    """
+    reported = await gaps.report(session_id, data.question, data.verdict, data.missing)
+    audit.attach(session_id=session_id, verdict=reported.verdict)
+    return reported

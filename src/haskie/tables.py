@@ -186,6 +186,9 @@ search_questions = Table(
     Column("best_rerank", Float),  # the reranker's best score, before its floor dropped any
     Column("uncovered", Integer, nullable=False, server_default=ZERO),  # no excerpt answers it
     Column("review", Text, CheckConstraint("review in ('dismissed', 'resolved')")),
+    # the agent's own verdict on what the search gave it (`gaps.report`), and what it lacked
+    Column("agent_verdict", Text, CheckConstraint("agent_verdict in ('insufficient', 'partial')")),
+    Column("agent_note", Text),
     Index("idx_search_questions_search", "search_id", "position", unique=True),
 )
 

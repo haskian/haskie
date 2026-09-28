@@ -5,6 +5,8 @@ those measurements on read, so a bar measured again re-judges every stored searc
 
 A question is a gap when one of the detectors fires (`DETECTORS`), first one wins:
 
+- `reported`: the agent that asked it said the excerpts do not answer it (`report`). It reads
+  the excerpts, so its verdict outranks every score.
 - `empty`: its search returned nothing.
 - `uncovered`: several questions were asked at once, and no excerpt answers this one.
 - `weak`: something came back, but the question's best match is under the bar. A reranked search
@@ -20,27 +22,27 @@ results: each is compared with the topics kept so far and joins the closest one 
 questions match when their query vectors, embedded under one profile that has a `same_topic`
 bar, clear it; without vectors, when they are the same words.
 
-A new signal (the agent's own verdict through a tool, say) is one more `Signal` and one more
-detector.
+A new signal is one more `Signal` and one more detector.
 """
 
 import asyncio
+import time
 from collections.abc import Callable, Sequence
 from enum import StrEnum
 from typing import Protocol
 
 import msgspec
 import numpy as np
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from haskie import cpu, db
 from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection
-from haskie.errors import InvalidInput
-from haskie.search import aspects, collapse, flow, log, retrieval
+from haskie.errors import Conflict, InvalidInput, NotFound
+from haskie.search import aspects, collapse, flow, log, retrieval, session
 from haskie.search.collapse import WORD
 from haskie.search.log import LoggedQuestion, LoggedResult
-from haskie.tables import search_questions
+from haskie.tables import search_questions, searches
 
 NEAR_MISSES = 3  # results shown per gap question: what came closest, not a page to read
 MAX_REPLAY = 50  # questions one replay asks again; each embeds and searches again
@@ -49,9 +51,17 @@ MAX_REPLAY = 50  # questions one replay asks again; each embeds and searches aga
 class Signal(StrEnum):
     """Why a question counts as a gap."""
 
+    REPORTED = "reported"
     EMPTY = "empty"
     UNCOVERED = "uncovered"
     WEAK = "weak"
+
+
+class Verdict(StrEnum):
+    """What an agent says the excerpts of a search gave it (`report`)."""
+
+    INSUFFICIENT = "insufficient"  # a careful reader could not answer from them alone
+    PARTIAL = "partial"  # they answer part of the question, not all of it
 
 
 class Review(StrEnum):
@@ -101,6 +111,10 @@ class Searched(Protocol):
     def error(self) -> str | None: ...
 
 
+def _reported(_: Searched, asked: LoggedQuestion, __: Bars) -> Signal | None:
+    return Signal.REPORTED if asked.agent_verdict is not None else None
+
+
 def _empty(search: Searched, _: LoggedQuestion, __: Bars) -> Signal | None:
     return Signal.EMPTY if search.result_count == 0 else None
 
@@ -121,7 +135,7 @@ def _weak(search: Searched, asked: LoggedQuestion, bars: Bars) -> Signal | None:
 
 
 Detector = Callable[[Searched, LoggedQuestion, Bars], Signal | None]
-DETECTORS: tuple[Detector, ...] = (_empty, _uncovered, _weak)
+DETECTORS: tuple[Detector, ...] = (_reported, _empty, _uncovered, _weak)
 
 
 def signal(search: Searched, asked: LoggedQuestion, bars: Bars) -> Signal | None:
@@ -151,6 +165,8 @@ class GapQuestion(msgspec.Struct):
     best_similarity: float | None
     best_rerank: float | None
     near_misses: list[LoggedResult]  # its search's best results, at most `NEAR_MISSES`
+    agent_verdict: Verdict | None = None  # what the agent said, when it reported the gap
+    agent_note: str | None = None
 
 
 class GapTopic(msgspec.Struct):
@@ -265,6 +281,8 @@ def _listed(gap: Gap, near_misses: dict[int, list[LoggedResult]]) -> GapQuestion
         best_similarity=asked.best_similarity,
         best_rerank=asked.best_rerank,
         near_misses=near_misses.get(search.id, []),
+        agent_verdict=Verdict(asked.agent_verdict) if asked.agent_verdict else None,
+        agent_note=asked.agent_note,
     )
 
 
@@ -317,6 +335,64 @@ async def review(ids: list[int], decision: Review) -> int:
             .values(review=_stored(decision))
         )
         return done.rowcount
+
+
+REPORT_WINDOW = 3600  # seconds after a search in which its agent may still judge it
+MAX_NOTE = 300  # what the excerpts lacked, in a sentence or two
+
+
+class Reported(msgspec.Struct):
+    """The logged question an agent's verdict was recorded on."""
+
+    id: int  # the question's, in the search log, as `list_gaps` lists it
+    question: str
+    verdict: Verdict
+
+
+async def report(
+    session_id: str, question: str, verdict: Verdict, note: str | None = None
+) -> Reported:
+    """Record an agent's verdict on the question it asked last in this session with these words:
+    the excerpts did not let it answer (`insufficient`), or answered only part (`partial`).
+
+    Only a question of this session's last hour, and only one whose search ran: a verdict judges
+    what a search returned, so without the search there is nothing to judge. Reporting again
+    replaces the verdict.
+    """
+    session.checked(session_id)
+    asked = question.strip()
+    note = (note or "").strip() or None
+    if not asked:
+        raise InvalidInput("question is empty")
+    if note is not None and len(note) > MAX_NOTE:
+        raise InvalidInput(f"missing is at most {MAX_NOTE} characters, got {len(note)}")
+    since = time.time() - REPORT_WINDOW
+    async with db.connect() as conn:
+        found = (
+            await conn.execute(
+                select(search_questions.c.id, searches.c.error)
+                .join(searches, searches.c.id == search_questions.c.search_id)
+                .where(
+                    searches.c.session_id == session_id,
+                    searches.c.ts >= since,
+                    search_questions.c.question == asked,
+                )
+                .order_by(searches.c.ts.desc(), searches.c.id.desc())
+                .limit(1)
+            )
+        ).first()
+        if found is None:
+            raise NotFound(
+                f"no search in session {session_id} asked this in the last hour: {asked[:60]}"
+            )
+        if found.error is not None:
+            raise Conflict(f"that search failed, so it returned nothing to judge: {found.error}")
+        await conn.execute(
+            update(search_questions)
+            .where(search_questions.c.id == found.id)
+            .values(agent_verdict=verdict.value, agent_note=note)
+        )
+    return Reported(id=found.id, question=asked, verdict=verdict)
 
 
 class ReplayedGap(msgspec.Struct):

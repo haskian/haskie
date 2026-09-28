@@ -38,6 +38,7 @@ TOOLS = {
     "list_gaps",
     "replay_gaps",
     "review_gaps",
+    "report_gap",
 }
 # Two notes on retries and one on ordering, with no word in common between the two topics, so a
 # full-text search finds each question in its own note.
@@ -356,13 +357,22 @@ async def test_an_agent_finds_a_gap_closes_it_and_resolves_it(
         (None, "bread.md")
     ]
 
-    error, reviewed = await _call(
-        library, "review_gaps", {"ids": [gap["id"]], "review": "resolved"}
+    error, reported = await _call(
+        library,
+        "report_gap",
+        {"session_id": SESSION, "question": BY_RETRY, "verdict": "partial", "missing": "backoff"},
     )
-    assert (error, reviewed) == (False, 1)
+    assert not error and reported["verdict"] == "partial", reported
+    error, both = await _call(library, "list_gaps", {})
+    assert {one["questions"][0]["signal"] for one in both} == {"reported", "uncovered"}
+
+    error, reviewed = await _call(
+        library, "review_gaps", {"ids": [gap["id"], reported["id"]], "review": "resolved"}
+    )
+    assert (error, reviewed) == (False, 2)
     assert (await _call(library, "list_gaps", {}))[1] == []
     error, resolved = await _call(library, "list_gaps", {"review": "resolved"})
-    assert [one["question"] for one in resolved] == [unanswered]
+    assert sorted(one["question"] for one in resolved) == sorted([unanswered, BY_RETRY])
 
 
 async def test_a_web_only_route_is_not_a_tool(library: AsyncTestClient) -> None:

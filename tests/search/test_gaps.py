@@ -45,6 +45,18 @@ NO_RERANK = {"reranker": None}
     ("name", "search", "asked", "expected"),
     [
         ("an answered question is no gap", {}, {}, None),
+        (
+            "the agent's verdict outranks every score",
+            {},
+            {"agent_verdict": "partial", "best_rerank": 0.99},
+            Signal.REPORTED,
+        ),
+        (
+            "a failed search is no gap, whatever the agent said",
+            {"error": "NotReady: loading"},
+            {"agent_verdict": "insufficient"},
+            None,
+        ),
         ("its search returned nothing", {"result_count": 0}, {}, Signal.EMPTY),
         (
             "a failed search is an error",

@@ -165,6 +165,12 @@ haskie keeps every search, so the collections can grow where they fall short.
   add next.
 - **`replay_gaps(ids)`** → each gap question asked again over every collection, at most 50:
   `signal` null means it is answered now, and `results` cites where. Nothing is logged.
+- **`report_gap(session_id, question, verdict, missing?)`** → the question's `id` and `verdict`.
+  Call it when the excerpts of a search you just ran do not let a careful reader answer the
+  question from them alone (`insufficient`), or answer only part (`partial`). `question` is the
+  question as you passed it, in this session, in the last hour. `missing` is what they lacked, at
+  most 300 characters. The gap then shows as `reported`, above every score-based one. Not for a
+  question answered in other words.
 - **`review_gaps(ids, review)`** → how many questions it reached. `resolved` after a document now
   answers them, `dismissed` when the collections are not meant to, `open` to take it back. Resolve
   a gap only after `replay_gaps` shows it answered.

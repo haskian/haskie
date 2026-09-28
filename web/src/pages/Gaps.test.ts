@@ -32,6 +32,8 @@ const question: GapQuestion = {
   best_similarity: 0.712,
   best_rerank: null,
   near_misses: [near],
+  agent_verdict: null,
+  agent_note: null,
 }
 const topic: GapTopic = {
   question: question.question,
@@ -76,6 +78,16 @@ describe('signalText', () => {
     { name: 'the cosine decided', value: { signal: 'weak', best_rerank: null, best_similarity: 0.712 }, expected: 'weak match: cosine 0.71' },
     { name: 'no score kept', value: { signal: 'weak', best_rerank: null, best_similarity: null }, expected: 'weak match' },
     { name: 'answered', value: { signal: null, best_rerank: 0.9, best_similarity: 0.9 }, expected: 'answered' },
+    {
+      name: 'the agent found nothing, and said what',
+      value: { signal: 'reported', best_rerank: 0.9, best_similarity: 0.9, agent_verdict: 'insufficient', agent_note: 'the retry limit' },
+      expected: 'the agent found no answer: the retry limit',
+    },
+    {
+      name: 'the agent found part',
+      value: { signal: 'reported', best_rerank: 0.9, best_similarity: 0.9, agent_verdict: 'partial', agent_note: null },
+      expected: 'the agent found a partial answer',
+    },
   ]
   for (const one of cases) test(one.name, () => expect(signalText(one.value)).toBe(one.expected))
 })

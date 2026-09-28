@@ -18,6 +18,7 @@ const count = (n: number, one: string, many: string): string => `${n} ${n === 1 
 
 // Why a question counts as a gap, in the page's words (`search.gaps.Signal`).
 const REASONS: Record<GapSignal, string> = {
+  reported: 'the agent found no answer',
   empty: 'nothing came back',
   uncovered: 'no excerpt answers it',
   weak: 'weak match',
@@ -41,7 +42,13 @@ const score = (value: number): string => value.toFixed(2).replace('-', '−')
 
 /** Why one question counts as a gap. For a weak match, the score that fell short: the reranker
  *  decides over the cosine when the search had one (`search.gaps`), so it is the one named. */
-export function signalText(question: Pick<GapQuestion, 'best_rerank' | 'best_similarity'> & { signal: GapSignal | null }): string {
+export function signalText(
+  question: Pick<GapQuestion, 'best_rerank' | 'best_similarity'> & { signal: GapSignal | null; agent_verdict?: GapQuestion['agent_verdict']; agent_note?: GapQuestion['agent_note'] },
+): string {
+  if (question.signal === 'reported') {
+    const verdict = question.agent_verdict === 'partial' ? 'the agent found a partial answer' : REASONS.reported
+    return question.agent_note ? `${verdict}: ${question.agent_note}` : verdict
+  }
   if (question.signal !== 'weak') return question.signal === null ? 'answered' : REASONS[question.signal]
   if (question.best_rerank !== null) return `weak match: reranker ${score(question.best_rerank)}`
   if (question.best_similarity !== null) return `weak match: cosine ${score(question.best_similarity)}`

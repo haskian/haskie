@@ -1294,6 +1294,54 @@ async def test_gaps_group_review_and_replay(ready: AsyncTestClient, tmp_path: Pa
     assert no_window.status_code == 422 and "days must be 1.." in no_window.text
 
 
+async def test_an_agent_reports_a_gap_on_a_question_it_asked(ready: AsyncTestClient) -> None:
+    """A verdict lands on the newest question of that session with those words, and makes it a
+    gap whatever its scores say; a question it did not ask, or whose search failed, is refused."""
+    await _converted("guide.md", MD)
+    await ready.get("/api/search/excerpts", params={"q": "alpha body", "session_id": "r1"})
+    await ready.get("/api/search/excerpts", params={"q": "alpha body", "session_id": "r2"})
+    assert (await ready.get("/api/gaps")).json() == [], "answered: no gap yet"
+
+    reported = await ready.post(
+        "/api/gaps/report",
+        params={"session_id": "r1"},
+        json={"question": " alpha body ", "verdict": "partial", "missing": "the retry limit"},
+    )
+
+    assert reported.status_code == 200, reported.text
+    (topic,) = (await ready.get("/api/gaps")).json()
+    (gap,) = topic["questions"]
+    assert (gap["id"], gap["session_id"], gap["signal"]) == (
+        reported.json()["id"],
+        "r1",
+        "reported",
+    )
+    assert (gap["agent_verdict"], gap["agent_note"]) == ("partial", "the retry limit")
+    assert gap["result_count"] == 1, "the search did answer, by its scores"
+
+    await ready.get(
+        "/api/search/excerpts", params={"q": "zebra", "collections": "ghost", "session_id": "r1"}
+    )
+    for name, params, body, status, detail in [
+        ("a question not asked", {"session_id": "r1"}, {"question": "beta"}, 404, "no search"),
+        ("another session's", {"session_id": "r3"}, {"question": "alpha body"}, 404, "r3"),
+        ("a failed search", {"session_id": "r1"}, {"question": "zebra"}, 409, "failed"),
+        ("an empty question", {"session_id": "r1"}, {"question": "  "}, 422, "empty"),
+        (
+            "a long note",
+            {"session_id": "r1"},
+            {"question": "alpha body", "missing": "x" * 301},
+            422,
+            "300",
+        ),
+        ("no session", {}, {"question": "alpha body"}, 422, "session_id"),
+    ]:
+        response = await ready.post(
+            "/api/gaps/report", params=params, json={"verdict": "insufficient", **body}
+        )
+        assert response.status_code == status and detail in response.text, (name, response.text)
+
+
 async def test_session_search_survives_the_deletion_of_a_collection(
     client: AsyncTestClient,
 ) -> None:

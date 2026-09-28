@@ -12,7 +12,7 @@ are the REST handlers marked `mcp_tool=`, so both surfaces share one contract. T
 | search | `search_excerpts`, `search_sources`, `set_session_collections` |
 | catalogue | `list_collections`, `get_collection`, `list_collection_documents`, `list_documents`, `get_document` |
 | write | `add_document`, `add_document_to_collection`, `remove_document_from_collection`, `describe_document` |
-| log and gaps | `list_searches`, `list_gaps`, `replay_gaps`, `review_gaps` ([Gaps](gaps.md)) |
+| log and gaps | `list_searches`, `list_gaps`, `replay_gaps`, `review_gaps`, `report_gap` ([Gaps](gaps.md)) |
 
 Everything else stays in the web UI and the REST API: managing collections, re-indexing,
 deleting or re-importing documents, operations and settings.

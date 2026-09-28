@@ -49,12 +49,18 @@ search already stored. A question is a gap when a detector fires:
 
 | signal | when |
 | --- | --- |
+| `reported` | the agent that asked it said the excerpts do not answer it (`report_gap`), fully or in part. It reads the excerpts, so its verdict outranks every score |
 | `empty` | its search returned nothing |
 | `uncovered` | several questions were asked at once, and no excerpt answers this one |
 | `weak` | its best match is under the bar. A reranked search is judged by the floor it dropped chunks under: the settings' `min_rerank_score` when one is set, else the reranker's calibrated floor (`reranker_calibration`), because the reranker reads query and passage together. Otherwise the profile's `weak_match` cosine decides. No bar known: no verdict |
 
 A failed search is an error, not a gap. A new signal is one `Signal` member and one detector
-function. The agent's own verdict, through a tool, is the planned next one.
+function.
+
+`report_gap` takes the session, the question as asked and a verdict, `insufficient` or `partial`,
+with a note on what the excerpts lacked. It lands on the newest question with those words in that
+session, within the last hour, and only on a search that ran. Its wording follows the
+sufficient-context test: could a careful reader answer from these excerpts alone?
 
 Gap questions are grouped into topics by leader clustering, newest first, as `collapse` folds
 results. Each joins the closest topic whose newest question it matches, so a chain of near matches
@@ -62,8 +68,9 @@ never merges two topics that do not match each other. Two questions match when b
 under one profile with a `same_topic` bar and their query cosine clears it. Otherwise only the same
 words match. Topics rank by how many times they were asked, then by the newest.
 
-The page and an agent share the routes: `list_gaps`, `replay_gaps` and `review_gaps` are MCP
-tools too, so an agent that adds a document can check the gap closed and resolve it.
+The page and an agent share the routes: `list_gaps`, `replay_gaps`, `review_gaps` and
+`report_gap` are MCP tools too, so an agent that adds a document can check the gap closed and
+resolve it.
 
 Replay asks each question again on its own, as `search_excerpts` over every collection with the
 context it had. Every collection, not the scope it had: the question is whether the shelf answers
