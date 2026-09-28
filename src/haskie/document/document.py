@@ -286,17 +286,16 @@ async def sweep_staging(max_age_seconds: float) -> int:
     A file with no row goes too, once it is that old: it is an interrupted `stage`, and nobody can
     import it because the import reads the row. An upload that was never imported is not a
     document, so nothing but its bytes is lost.
+
+    The bytes go by the files in `staging/`, never by turning a row's id into a path: every file
+    there is ours, and one a live row names is kept. So a row an older build staged under an id
+    `staging_path` now refuses (`notes.md~`) is cleared like any other.
     """
     cutoff = time.time() - max_age_seconds
     async with db.connect() as conn:
         rows = (await conn.execute(select(staging.c.staging_id, staging.c.created_at))).all()
-    staged = {staging_id for staging_id, _ in rows}
-    expired = [staging_id for staging_id, created_at in rows if created_at < cutoff]
-    for staging_id in expired:
-        # By its own name, not through `staging_path`: a row an older build staged may carry an
-        # id that the check refuses (`notes.md~`), and the sweep must still clear it. `.name`
-        # keeps it inside `staging/`, and the id is ours, from a row, not from a caller.
-        await anyio.Path(home.STAGING_ROOT / Path(staging_id).name).unlink(missing_ok=True)
+    live = {staging_id for staging_id, created_at in rows if created_at >= cutoff}
+    expired = {staging_id for staging_id, created_at in rows if created_at < cutoff}
     if expired:
         async with db.connect() as conn:
             await conn.execute(delete(staging).where(staging.c.staging_id.in_(expired)))
@@ -305,8 +304,11 @@ async def sweep_staging(max_age_seconds: float) -> int:
     if not await directory.is_dir():
         return deleted
     async for file in directory.iterdir():
-        orphan = STAGING_ID.match(file.name) and file.name not in staged
-        if orphan and (await file.stat()).st_mtime < cutoff:
+        if file.name in live:
+            continue
+        if file.name in expired:
+            await file.unlink(missing_ok=True)
+        elif (await file.stat()).st_mtime < cutoff:  # an orphan, once it is that old
             await file.unlink(missing_ok=True)
             deleted += 1
     return deleted
