@@ -8,14 +8,18 @@ them.
 """
 
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 from conftest import NO_MODELS, attach_via_api, stage_and_import, wait_for, wait_import
 from litestar.testing import AsyncTestClient
 
 from haskie.app import MCP_PATH
+from haskie.collection.collection import Collection
+from haskie.document import document
 
 pytestmark = pytest.mark.anyio
 
@@ -383,3 +387,54 @@ async def test_a_web_only_route_is_not_a_tool(library: AsyncTestClient) -> None:
             library, "tools/call", {"name": name, "arguments": {"q": "x"}}, status=400
         )
         assert reply["error"]["message"] == f"Tool not found: {name}", reply
+
+
+@pytest.mark.parametrize(
+    ("name", "tool", "arguments", "expected"),
+    [
+        (
+            "a collection tool binds the collection",
+            "get_collection",
+            {"collection": "notes"},
+            {"collection": "notes"},
+        ),
+        (
+            "a document tool binds the document alone",
+            "get_document",
+            {"document": "retries.md"},
+            {"document": "retries.md"},
+        ),
+        ("a tool with neither binds neither", "list_collections", {}, {}),
+    ],
+)
+async def test_a_tool_call_logs_the_names_it_is_routed_by(
+    library: AsyncTestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    tool: str,
+    arguments: dict,
+    expected: dict,
+) -> None:
+    """The app's request hook ran for the outer `/mcp` request only, which has no path
+    parameters; the log lines a tool writes still carry the names its route is keyed by."""
+    seen: list[dict[str, Any]] = []
+
+    def seeing[**P, R](real: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+        """`real`, noting the log context of the handler that called it."""
+
+        async def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+            seen.append(dict(structlog.contextvars.get_contextvars()))
+            return await real(*args, **kwargs)
+
+        return wrapped
+
+    # what each of the three handlers reads first
+    monkeypatch.setattr(Collection, "get", staticmethod(seeing(Collection.get)))
+    monkeypatch.setattr(Collection, "page", staticmethod(seeing(Collection.page)))
+    monkeypatch.setattr(document, "get", seeing(document.get))
+
+    error, found = await _call(library, tool, arguments)
+
+    assert not error, found
+    (context,) = seen
+    assert {k: context[k] for k in ("collection", "document") if k in context} == expected, name

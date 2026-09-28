@@ -5,10 +5,11 @@ every request: the request context, the error mapping, and how the application i
 """
 
 import os
+from collections.abc import Mapping
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
@@ -70,20 +71,33 @@ async def bind_request_context(request: Request) -> None:
     request.scope["state"][TRACE_KEY] = flow.start_trace()
     logs.clear()
     path = request.scope["path"]
-    # `collection` and `document` are what every collection and document route is keyed by, so the
-    # request context carries them for free instead of each handler binding them again. A document
-    # route has no collection at all: the document belongs to none.
-    routed = request.path_params
-    scoped: dict[str, str] = {
-        key: routed[key] for key in ("collection", "document") if routed.get(key)
-    }
     logs.bind(
         request_id=request_id,
         actor=Actor.MCP if path.startswith(MCP_PATH) else Actor.WEB,
         method=request.method,
         path=path,
-        **scoped,
+        **_scope_names(request.path_params),
     )
+
+
+async def bind_tool_context(_tool: str, arguments: dict[str, Any], _request: Request) -> None:
+    """The names an MCP tool call is keyed by. litestar-mcp does not run the app's
+    `before_request` again for the tool, and the outer `/mcp` request it did run for has no path
+    parameters. Nor does the request it builds for the tool: it finds a route's parameters by the
+    handler's identity, which Litestar's copy on registering breaks. The tool's arguments carry
+    them either way."""
+    logs.bind(**_scope_names(arguments))
+
+
+def _scope_names(values: Mapping[str, Any]) -> dict[str, str]:
+    """`collection` and `document` are what every collection and document route is keyed by, so
+    the request context carries them instead of each handler binding them again. A document route
+    has no collection at all: the document belongs to none."""
+    return {
+        key: value
+        for key in ("collection", "document")
+        if isinstance(value := values.get(key), str) and value
+    }
 
 
 async def add_request_id(message: Message, scope: Scope) -> None:
@@ -186,9 +200,7 @@ def validation_error(_: Request, exc: ValidationException) -> Response:
     own 400; a rejected body is invalid input, so it keeps our 422. `extra` carries the message
     of the field that failed, which the bare exception text drops."""
     reasons = [str(item.get("message", item)) for item in exc.extra or [] if isinstance(item, dict)]
-    return _client_error(
-        exc, 422, message=": ".join([exc.detail, *reasons]) if reasons else exc.detail
-    )
+    return _client_error(exc, 422, message=": ".join([exc.detail, *reasons]))
 
 
 def internal_error(request: Request, exc: Exception) -> Response:
@@ -274,7 +286,14 @@ def create_app() -> Litestar:
         _log.warning("web_ui_missing", expected=str(WEB_DIST), serving="api and mcp only")
     return Litestar(
         route_handlers=route_handlers,
-        plugins=[LitestarMCP(MCPConfig(allowed_origins=sorted(allowed_origins())))],
+        plugins=[
+            LitestarMCP(
+                MCPConfig(
+                    allowed_origins=sorted(allowed_origins()),
+                    before_tool_call=bind_tool_context,
+                )
+            )
+        ],
         middleware=[guard_callers],
         openapi_config=OpenAPIConfig(title="haskie", version=APP_VERSION),
         logging_config=None,  # `logs.configure` above owns it (see logs.py)
