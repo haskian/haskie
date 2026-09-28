@@ -399,6 +399,8 @@ body.over .drop-overlay { opacity: 1; }
 .hint-rows { display: grid; grid-template-columns: max-content max-content max-content; gap: 2px var(--sp-4); white-space: nowrap; }
 .statusbar .hint .muted { color: var(--text-muted); }
 .hint-rows .code { font-size: var(--fs-sm); text-align: right; }
+/* branches that ran side by side: one block under a rule, on the columns of the rows around it */
+.hint-parallel { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; gap: 2px var(--sp-4); margin: var(--sp-1) 0; padding-left: var(--sp-3); border-left: 1px solid rgba(255, 255, 255, 0.35); }
 .statusbar .muted { color: rgba(255, 255, 255, 0.5); }
 body:has(.statusbar) { padding-top: 40px; }
 /* picker: details-based dropdown, each option carries a description */

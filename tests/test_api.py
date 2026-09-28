@@ -838,6 +838,58 @@ async def test_deleting_a_collection_keeps_its_documents(client: AsyncTestClient
     assert (await client.get("/api/search/explore", params=kept)).json()
 
 
+async def test_renaming_a_collection_moves_everything_that_names_it(
+    client: AsyncTestClient,
+) -> None:
+    """Members, settings, description, the index and every session that chose it follow the new
+    name; the old name is gone."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes", "description": "what I read"})
+    await client.put("/api/collections/notes/overrides", json={"search": {"limit": 7}})
+    await stage_and_import(client, "guide.md", MD.encode())
+    await attach_via_api(client, "notes", "guide.md")
+    await client.put("/api/sessions/s1", json={"collections": ["notes"]})
+
+    renamed = await client.put("/api/collections/notes/name", json={"name": "read later"})
+
+    assert renamed.status_code == 200, renamed.text
+    info = renamed.json()
+    assert (info["name"], info["description"]) == ("read-later", "what I read"), "a safe name"
+    assert (info["overrides"]["search"]["limit"], info["counts"]["indexed"]) == (7, 1)
+    listed = (await client.get("/api/collections")).json()["items"]
+    assert [one["name"] for one in listed] == ["read-later"]
+    assert (await client.get("/api/collections/notes")).status_code == 404
+    assert (await client.get("/api/documents/guide.md/collections")).json() == ["read-later"]
+    assert (await client.get("/api/sessions")).json()[0]["collections"] == ["read-later"]
+    found = (await client.get("/api/search/explore", params=_explore("s1", "lancedb"))).json()
+    assert [(hit["collection"], hit["document"]) for hit in found] == [("read-later", "guide.md")]
+
+
+@pytest.mark.parametrize(
+    ("name", "path", "body", "status", "detail"),
+    [
+        ("the same name is a no-op", "notes", "notes", 200, None),
+        ("a name taken is refused", "notes", "other", 409, "collection already exists: other"),
+        ("a missing collection", "ghost", "spirit", 404, "collection not found: ghost"),
+        ("a name with nothing safe in it", "notes", "***", 422, "invalid name"),
+    ],
+)
+async def test_a_rename_refused_changes_nothing(
+    client: AsyncTestClient, name: str, path: str, body: str, status: int, detail: str | None
+) -> None:
+    await client.post("/api/init", json={"profile": "none"})
+    for existing in ("notes", "other"):
+        await client.post("/api/collections", json={"name": existing})
+
+    response = await client.put(f"/api/collections/{path}/name", json={"name": body})
+
+    assert response.status_code == status, f"{name}: {response.text}"
+    if detail is not None:
+        assert detail in response.json()["detail"], name
+    listed = (await client.get("/api/collections")).json()["items"]
+    assert [one["name"] for one in listed] == ["notes", "other"], name
+
+
 async def test_deleting_a_document_removes_it_from_every_collection(
     client: AsyncTestClient,
 ) -> None:
@@ -1147,48 +1199,54 @@ async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
     )
 
 
+RANKING_STEPS = ["retrieve", "merge", "rerank", "hits"]
+EXCERPT_STEPS = ["fold", "group", "budget", "probe_gaps", "fill", "quote", "rerank_excerpts"]
+
+
 @pytest.mark.parametrize(
-    ("name", "path", "params", "steps"),
+    ("name", "path", "params", "steps", "branches"),
     [
         (
             "chunks: the ranking, then the fold",
             "/api/search/explore",
             {"q": "lancedb", "granularity": "chunk"},
-            ["plan", "retrieve", "merge", "rerank", "hits", "collapse_hits"],
+            ["plan", *RANKING_STEPS, "collapse_hits"],
+            {},
         ),
         (
             "excerpts: the ranking, then passages merged, folded and read",
             "/api/search/excerpts",
             {"q": "lancedb"},
-            [
-                "plan",
-                "retrieve",
-                "merge",
-                "rerank",
-                "hits",
-                "judge_thin",
-                "fold",
-                "group",
-                "budget",
-                "probe_gaps",
-                "fill",
-                "quote",
-                "rerank_excerpts",
-            ],
+            ["plan", *RANKING_STEPS, "judge_thin", *EXCERPT_STEPS],
+            {},
+        ),
+        (
+            "excerpts of several questions: each ranked in its own branch, side by side",
+            "/api/search/excerpts",
+            {"q": ["lancedb", "beta body"]},
+            ["plan", *EXCERPT_STEPS],
+            {"Q1": [*RANKING_STEPS, "judge_thin"], "Q2": [*RANKING_STEPS, "judge_thin"]},
         ),
         (
             "sources: the ranking, then documents",
             "/api/search/sources",
             {"q": "lancedb"},
-            ["plan", "retrieve", "merge", "rerank", "hits", "shortlist"],
+            ["plan", *RANKING_STEPS, "shortlist"],
+            {},
         ),
     ],
 )
 async def test_a_search_answers_with_the_time_each_step_took(
-    client: AsyncTestClient, name: str, path: str, params: dict, steps: list[str]
+    client: AsyncTestClient,
+    name: str,
+    path: str,
+    params: dict,
+    steps: list[str],
+    branches: dict[str, list[str]],
 ) -> None:
     """`Server-Timing`, the W3C header browsers show beside a request: one entry per step, in the
-    order the steps ran, each with how long it took and what it is."""
+    order the steps ran, each with how long it took and what it is. A step of one of several runs
+    side by side names its branch; the branches finish interleaved, so each is in order alone."""
     await client.post("/api/init", json={"profile": "none"})
     await client.post("/api/collections", json={"name": "notes"})
     await stage_and_import(client, "guide.md", MD.encode())
@@ -1198,9 +1256,14 @@ async def test_a_search_answers_with_the_time_each_step_took(
 
     assert response.status_code == 200, f"{name}: {response.text}"
     entries = [entry.strip().split(";") for entry in response.headers["server-timing"].split(",")]
-    assert [entry[0] for entry in entries] == steps, name
+    ran: dict[str | None, list[str]] = {}
+    for entry in entries:
+        branch = next((p.removeprefix("branch=") for p in entry if p.startswith("branch=")), None)
+        ran.setdefault(branch, []).append(entry[0])
+    assert ran == {None: steps, **branches}, name
     assert all(entry[1].startswith("dur=") and float(entry[1][4:]) >= 0 for entry in entries), name
-    assert entries[1][2] == 'desc="LanceDB retrieval"', name
+    retrieved = next(entry for entry in entries if entry[0] == "retrieve")
+    assert retrieved[2] == 'desc="LanceDB retrieval"', name
 
 
 @pytest.mark.parametrize(

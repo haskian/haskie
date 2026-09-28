@@ -1493,6 +1493,45 @@ async def start_delete_collection(collection: str) -> str:
     )
 
 
+async def rename_collection(collection: str, name: str) -> Collection:
+    """Rename one collection; the same name is a no-op, and any other is refused while work of
+    the collection runs. Each such run holds the old name: an index write or a maintenance run
+    would put the old folder back, and a bulk index or delete would go on queueing under it. A
+    run queued after this check is the window left open; the rename itself is one transaction
+    and a folder move."""
+    found = await Collection.get(collection)  # NotFound before anything else
+    if document.safe_name(name) == found.name:
+        return found
+    busy = await _active_ids(
+        [
+            INDEX_COLLECTION_WORKFLOW,
+            DELETE_COLLECTION_WORKFLOW,
+            COLLECTION_DOCUMENT_WORKFLOW,
+            MAINTAIN_PARTITION_WORKFLOW,
+        ],
+        [
+            f"{prefix}:{collection}:"
+            for prefix in (
+                BULK_INDEX_PREFIX,
+                BULK_DELETE_PREFIX,
+                COLLECTION_DOCUMENT_PREFIX,
+                MAINTAIN_PREFIX,
+            )
+        ],
+        limit=1,
+    )
+    if busy:
+        raise Conflict(f"collection is busy with {busy[0]}; rename it once that finishes")
+    renamed = await found.rename(name)
+    # a run debounced under the old name finds no row and skips, so the pending documents it was
+    # for are asked for again under the new one
+    state = await renamed.maintenance_state()
+    if state is not None and state.pending_documents > 0:
+        user = await load_user_settings()
+        await request_maintenance(renamed.name, state.pending_documents, user.pipeline)
+    return renamed
+
+
 async def cancel_operation(operation_id: str) -> None:
     """Cancel one pipeline operation and record what that left behind: an import stops the
     document, an index stops that one membership, and an embed stops neither - it writes only the

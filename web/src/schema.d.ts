@@ -365,6 +365,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/collections/{collection}/name": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** RenameCollection */
+        put: operations["ApiCollectionsNameRenameCollection"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/collections/{collection}/index": {
         parameters: {
             query?: never;
@@ -1455,6 +1472,10 @@ export interface components {
          * @enum {string}
          */
         Relation: "duplicate" | "contained" | "equivalent";
+        /** Rename */
+        Rename: {
+            name: string;
+        };
         /** Rendered */
         Rendered: {
             html: string;
@@ -2750,6 +2771,47 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["Describe"];
+            };
+        };
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CollectionInfo"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    ApiCollectionsNameRenameCollection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Rename"];
             };
         };
         responses: {

@@ -16,6 +16,7 @@ export function SearchBox({
   busy = false,
   scope,
   id,
+  clearLabel = 'Clear',
 }: {
   value: string
   onChange: (value: string) => void
@@ -25,6 +26,7 @@ export function SearchBox({
   busy?: boolean
   scope?: ReactNode
   id?: string
+  clearLabel?: string // what the clear button does, when `onClear` does more than empty the box
 }) {
   const clear = onClear ?? (() => onChange(''))
   return (
@@ -43,7 +45,7 @@ export function SearchBox({
           <LoaderCircle className="icon spin spin-fast" />
         </span>
       ) : (
-        <button className="btn btn-ghost" type="button" aria-label="Clear" onClick={clear}>
+        <button className="btn btn-ghost" type="button" aria-label={clearLabel} onClick={clear}>
           <X className="icon" />
         </button>
       )}

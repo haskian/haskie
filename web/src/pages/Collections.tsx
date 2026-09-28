@@ -53,6 +53,7 @@ export function Collections({ route, counts, refreshStatus }: PageProps<Extract<
   }
 
   const close = useCallback(() => navigate({ name: 'collections' }), [])
+  const renamed = useCallback((to: string) => navigate({ name: 'collections', collection: to }), [])
   // stable, because the modal's polls restart whenever it changes
   const changed = useCallback(() => Promise.all([refresh(), refreshStatus()]), [refresh, refreshStatus])
 
@@ -85,7 +86,7 @@ export function Collections({ route, counts, refreshStatus }: PageProps<Extract<
         )}
       </div>
       {/* a collection's reranker override is a model the status bar lists */}
-      <CollectionModal name={route.collection} onClose={close} onChanged={changed} />
+      <CollectionModal name={route.collection} onClose={close} onChanged={changed} onRenamed={renamed} />
       <Modal open={creating} onClose={() => setCreating(false)} title="New collection" subtitle="collection">
         {/* A form, so Enter creates the way the browser already does it. */}
         <form className="collection-panel" onSubmit={create}>

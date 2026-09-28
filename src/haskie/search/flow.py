@@ -80,6 +80,9 @@ class Search(msgspec.Struct):
     # `answers` holds them all, and `query` is its own
     questions: list[probe.Question]
     sections: int = DEFAULT_SECTIONS  # `sources` only
+    # what its steps are timed under (`StepTime.branch`): `Q1`, `Q2` in the order the questions
+    # were asked when several run side by side, None when one runs alone
+    branch: str | None = None
 
     @property
     def rerank_query(self) -> str:
@@ -98,6 +101,10 @@ class StepTime(msgspec.Struct, frozen=True):
     step: str  # the step's function name
     label: str  # what it does, as the web UI names it
     ms: float
+    # the run it belongs to when several ran at once (`Q1`, `Q2`: one per question of an
+    # `answers`), None for a step every run shares. Steps of one branch run one after another;
+    # the branches run side by side, so a total adds the slowest branch, not all of them
+    branch: str | None = None
 
 
 # What each step is, for a person reading the breakdown, in the order the pipelines run them.
@@ -168,7 +175,7 @@ def _lineage(step: str, state: Search, read: Any, answered: Any) -> None:
 
 
 @contextmanager
-def _timing(step: str) -> Iterator[None]:
+def _timing(step: str, branch: str | None = None) -> Iterator[None]:
     """Records how long the block took under `step`, failed or not."""
     started = time.perf_counter()
     try:
@@ -177,12 +184,19 @@ def _timing(step: str) -> Iterator[None]:
         trace = _trace.get()
         if trace is not None:
             elapsed = (time.perf_counter() - started) * 1000
-            trace.steps.append(StepTime(step=step, label=STEP_LABELS.get(step, step), ms=elapsed))
+            label = STEP_LABELS.get(step, step)
+            trace.steps.append(StepTime(step=step, label=label, ms=elapsed, branch=branch))
 
 
 def server_timing(steps: list[StepTime]) -> str:
-    """The `Server-Timing` header (W3C) of a trace: `retrieve;dur=41.2;desc="LanceDB retrieval"`."""
-    return ", ".join(f'{one.step};dur={one.ms:.1f};desc="{one.label}"' for one in steps)
+    """The `Server-Timing` header (W3C) of a trace: `retrieve;dur=41.2;desc="LanceDB retrieval"`,
+    and `;branch=Q1` on a step of one of several runs side by side. A browser ignores a parameter
+    it does not know, so the extra one costs its devtools nothing."""
+    return ", ".join(
+        f'{one.step};dur={one.ms:.1f};desc="{one.label}"'
+        + (f";branch={one.branch}" if one.branch is not None else "")
+        for one in steps
+    )
 
 
 def _traced[F: StepFunction[Any, Any, Any, Any]](step: F, name: str) -> F:
@@ -190,7 +204,7 @@ def _traced[F: StepFunction[Any, Any, Any, Any]](step: F, name: str) -> F:
 
     @functools.wraps(step)
     async def run(ctx: StepContext[Any, Any, Any]) -> Any:
-        with _timing(name):
+        with _timing(name, ctx.state.branch):
             answered = await step(ctx)
         _lineage(name, ctx.state, ctx.inputs, answered)
         return answered
@@ -415,7 +429,10 @@ async def answers(names: list[str], asked: aspects.Questions, limit: int | None 
     if states is None:
         return probe.report([], asked.asked())
     ranged = await asyncio.gather(*(RANKED.run(state=state) for state in states))
-    found = await ANSWERED.run(state=states[0], inputs=list(ranged))
+    # the steps after the ranking are shared: timed under no branch
+    found = await ANSWERED.run(
+        state=msgspec.structs.replace(states[0], branch=None), inputs=list(ranged)
+    )
     return probe.report(found, states[0].questions)
 
 
@@ -482,6 +499,7 @@ async def _searches(
         DEFAULT_SECTIONS if sections is None else sections, MAX_SECTIONS, "sections"
     )
     questions = asked.asked([where.vector for where in plans])
+    several = len(asked.questions) > 1
     return [
         Search(
             query=query,
@@ -492,6 +510,9 @@ async def _searches(
             candidates=candidates,
             sections=sections,
             questions=questions,
+            branch=f"Q{at}" if several else None,
         )
-        for query, framed, where in zip(asked.questions, asked.framed, plans, strict=True)
+        for at, (query, framed, where) in enumerate(
+            zip(asked.questions, asked.framed, plans, strict=True), 1
+        )
     ]

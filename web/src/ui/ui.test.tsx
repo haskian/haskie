@@ -847,6 +847,28 @@ describe('SearchTook', () => {
       ],
     },
     {
+      name: 'branches side by side: one block under a rule, each branch its own rows, the slowest counted once',
+      element: (
+        <SearchTook
+          counts="11 excerpts"
+          ms={14202}
+          steps={[
+            { step: 'plan', label: 'Embed the query', ms: 44 },
+            { step: 'rerank', label: 'Rerank', ms: 13872, branch: 'Q2' },
+            { step: 'rerank', label: 'Rerank', ms: 13253, branch: 'Q1' },
+            { step: 'fold', label: 'Take turns and fold passages', ms: 20 },
+          ]}
+        />
+      ),
+      contains: [
+        '<span class="label label-mono">Server · 13936 ms</span>',
+        '<span class="code">44 ms</span><span class="hint-parallel"><span class="label label-mono">In parallel · 2</span><span class="muted">slowest</span><span class="code">13872 ms</span>',
+        '<span class="label label-mono">Q1</span><span></span><span class="code muted">13253 ms</span><span>Rerank</span>',
+        '<span class="label label-mono">Q2</span><span></span><span class="code muted">13872 ms</span><span>Rerank</span>',
+        '</span><span>Take turns and fold passages</span>',
+      ],
+    },
+    {
       name: 'a search that timed no steps: the total alone, no hint',
       element: <SearchTook counts="3 chunks" ms={80} />,
       contains: ['<p class="mono muted search-took">3 chunks · 80 ms</p>'],

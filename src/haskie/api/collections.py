@@ -33,6 +33,10 @@ class CreateCollection(msgspec.Struct):
     description: str = ""
 
 
+class Rename(msgspec.Struct):
+    name: str
+
+
 class AddDocument(msgspec.Struct):
     """Which already-imported document to attach."""
 
@@ -100,6 +104,16 @@ async def describe_collection(collection: str, data: Describe) -> CollectionInfo
     found = await Collection.get(collection)
     await found.describe(data.description)
     return await found.info()
+
+
+@put("/api/collections/{collection:str}/name")
+@audit.audited("collection.rename")
+async def rename_collection(collection: str, data: Rename) -> CollectionInfo:
+    """Rename the collection; its documents, settings, index and every session that chose it
+    move with it. Refused while any work of the collection runs. The same name is a no-op."""
+    renamed = await workflows.rename_collection(collection, data.name)
+    audit.attach(renamed_to=renamed.name)
+    return await renamed.info()
 
 
 @post("/api/collections/{collection:str}/index", status_code=202)

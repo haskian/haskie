@@ -150,6 +150,7 @@ export interface StepTiming {
   step: string
   label: string
   ms: number
+  branch?: string // the run it belongs to when several ran side by side (`Q1`), else absent
 }
 
 /** How one step of a search set or changed the scores it answered with (`search.scoring`). */
@@ -172,14 +173,15 @@ export function parseScoreLineage(header: string | null): ScoreStep[] {
   return header ? (JSON.parse(decodeURIComponent(header)) as ScoreStep[]) : []
 }
 
-/** `retrieve;dur=41.2;desc="LanceDB retrieval", merge;dur=0.3;desc="Fuse rankings"` as steps. A
- *  missing header is no steps; a step without a `desc` is named by itself. */
+/** `retrieve;dur=41.2;desc="LanceDB retrieval";branch=Q1, merge;dur=0.3;desc="Fuse rankings"` as
+ *  steps. A missing header is no steps; a step without a `desc` is named by itself. */
 export function parseServerTiming(header: string | null): StepTiming[] {
   if (!header) return []
   return header.split(',').map((entry) => {
     const [step, ...params] = entry.trim().split(';')
     const param = (key: string) => params.map((one) => one.trim()).find((one) => one.startsWith(`${key}=`))?.slice(key.length + 1)
-    return { step, label: param('desc')?.replace(/^"|"$/g, '') ?? step, ms: Number(param('dur') ?? 0) }
+    const branch = param('branch')
+    return { step, label: param('desc')?.replace(/^"|"$/g, '') ?? step, ms: Number(param('dur') ?? 0), ...(branch && { branch }) }
   })
 }
 
@@ -263,6 +265,7 @@ export const api = {
     request<CollectionInfo>('/api/collections', json('POST', { name, description })),
   describeCollection: (name: string, description: string) =>
     request<CollectionInfo>(`${collectionPath(name)}/description`, json('PUT', { description })),
+  renameCollection: (name: string, to: string) => request<CollectionInfo>(`${collectionPath(name)}/name`, json('PUT', { name: to })),
   collection: (name: string) => request<CollectionInfo>(collectionPath(name)),
   deleteCollection: (name: string) => request<BulkStarted>(collectionPath(name), { method: 'DELETE' }),
   saveCollectionOverrides: (name: string, s: CollectionOverrides) =>

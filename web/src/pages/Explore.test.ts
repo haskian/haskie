@@ -171,6 +171,11 @@ describe('parseServerTiming', () => {
       ],
     },
     { name: 'a step with no desc is named by itself', header: 'merge;dur=0.4', expected: [{ step: 'merge', label: 'merge', ms: 0.4 }] },
+    {
+      name: 'a step of one of several runs side by side names its branch',
+      header: 'rerank;dur=13253.0;desc="Rerank";branch=Q2',
+      expected: [{ step: 'rerank', label: 'Rerank', ms: 13253, branch: 'Q2' }],
+    },
   ]
   for (const { name, header, expected } of cases) test(name, () => expect(parseServerTiming(header)).toEqual(expected))
 })

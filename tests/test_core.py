@@ -1108,6 +1108,41 @@ async def test_add_is_idempotent_and_member_reads_the_document_with_it() -> None
         await collection.member("ghost.md")
 
 
+@pytest.mark.parametrize(
+    ("name", "status", "to", "refused"),
+    [
+        ("a member imported: the name moves", "imported", "HEALTH", None),
+        (
+            "a member being deleted: its removal is queued under the old name",
+            "deleting",
+            "new",
+            "document a.md is being deleted",
+        ),
+    ],
+)
+@pytest.mark.anyio
+async def test_rename_moves_the_folder_unless_a_member_is_being_deleted(
+    name: str, status: str, to: str, refused: str | None
+) -> None:
+    """`health` and `HEALTH` share a shard, so on a case-insensitive disk the target folder is
+    the source itself: it is moved, never swept away as a leftover."""
+    collection = await Collection.create("health")
+    doc = await attachable("a.md")
+    await collection.add(doc.name)
+    await document.set_status(doc.name, status)  # ty: ignore
+
+    if refused is not None:
+        with pytest.raises(Conflict, match=refused):
+            await collection.rename(to)
+        assert await Collection.names() == ["health"] and collection.root.is_dir(), name
+        return
+    renamed = await collection.rename(to)
+
+    assert await Collection.names() == [to], name
+    assert renamed.root.is_dir(), f"{name}: the folder moved, not removed"
+    assert await renamed.member_names() == [doc.name], name
+
+
 @pytest.mark.parametrize("status", ["queued", "converting", "embedding", "error", "deleting"])
 @pytest.mark.anyio
 async def test_add_refuses_a_document_that_is_not_imported(status: str) -> None:

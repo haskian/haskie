@@ -45,7 +45,7 @@ export function SettingsForm({
   outdated: boolean
   busy: boolean
   onSave: (next: CollectionOverrides) => void
-  children?: ReactNode // the actions that are not "Save": index, delete, and how they are going
+  children?: ReactNode // the actions that are not "Save": index, and how it is going
 }) {
   const [draft, setDraft] = useState<CollectionOverrides>(overrides)
   const current = effectiveSearch(draft.search, searchDefaults)
