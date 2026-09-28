@@ -1131,81 +1131,114 @@ async def test_ensure_embedding_fails_permanently_under_another_model(dbos, tmp_
     assert "plan" not in await _steps(handle.workflow_id), "it never reached the embed stage"
 
 
-@pytest.mark.parametrize(
-    "model",
-    [
-        # a first install or a model switch: the run waits before it cuts any slice
-        "downloading",
-        # a failed download ends the import, as before
-        "failed",
-        # a restart resumes the batch before the boot warmed the model again
-        "warming when the batch runs",
-    ],
-)
-async def test_an_import_waits_for_the_embedding_model(
-    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str
-) -> None:
-    """A model still downloading or warming is a normal state, not a failure: the embedding run
-    sleeps durably until the model is ready, and only a model that failed ends the import in
-    `error`. The download and the vectors are fakes, so the test fetches nothing."""
+async def _fake_compact_model(monkeypatch: pytest.MonkeyPatch, load_model) -> str:
+    """Fake the compact model's download (`load_model`) and its vectors, so the test fetches
+    nothing, and let a run wait 20 ms between two asks. Returns the download's workflow id."""
     monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
-    release = threading.Event()
-
-    async def load_model(kind: str, name: str) -> None:
-        if model == "failed":
-            raise RuntimeError("no such model")
-        if model == "downloading":
-            assert await wait_event(release), "the test never finished the download"
-
     monkeypatch.setattr(models, "load_model", load_model)
     monkeypatch.setattr(embed, "embed_texts", lambda m, texts: [[0.5] * m.dims for _ in texts])
-    download = models._model_id(models.ModelKind.EMBEDDING, (await compact_model()).name)
+    return models._model_id(models.ModelKind.EMBEDDING, (await compact_model()).name)
+
+
+def _record_embeds(monkeypatch: pytest.MonkeyPatch, before=lambda calls: None) -> list[str]:
+    """The documents the embed step ran for, one entry per call. `before(calls)` runs ahead of
+    each call, with the number of calls so far, this one included."""
     embedded: list[str] = []
     real = pipeline.embed_batch
 
-    async def cold_at_first(*args) -> int:
+    async def recorded(*args) -> int:
         embedded.append(doc_of(args))
-        if model == "warming when the batch runs" and len(embedded) == 1:
-            models._ready.discard(download)  # what a restart does to the caches
-        elif len(embedded) == 2:
-            models._mark_ready(download)  # the boot's warm-up is done
+        before(len(embedded))
         return await real(*args)
 
-    monkeypatch.setattr(pipeline, "embed_batch", cold_at_first)
+    monkeypatch.setattr(pipeline, "embed_batch", recorded)
+    return embedded
+
+
+async def test_an_import_waits_for_the_embedding_model_to_download(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first install or a model switch: a model still downloading is a normal state, not a
+    failure, so the embedding run sleeps durably before it cuts any slice."""
+    release = threading.Event()
+
+    async def load_model(kind: str, name: str) -> None:
+        assert await wait_event(release), "the test never finished the download"
+
+    await _fake_compact_model(monkeypatch, load_model)
+    embedded = _record_embeds(monkeypatch)
     await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
-    if model != "downloading":
-        await await_terminal([download])
     doc = await import_row("a.md", MD, tmp_path)
     job_id = await dbos.start_import(doc.name)
     run = _embed_id(job_id, doc.name)
 
-    if model == "downloading":
+    async def waiting() -> bool:
+        return "DBOS.sleep" in await _steps(run)
 
-        async def waiting() -> bool:
-            return "DBOS.sleep" in await _steps(run)
+    await until(waiting, "the embedding run never waited for the download")
+    assert "plan" not in await _steps(run), "no slice was cut while the model downloads"
+    assert (await document.get(doc.name)).status == "embedding"
+    release.set()
 
-        await until(waiting, "the embedding run never waited for the download")
-        assert "plan" not in await _steps(run), "no slice was cut while the model downloads"
-        assert (await document.get(doc.name)).status == "embedding"
-        release.set()
-
-    if model == "failed":
-        with pytest.raises(workflows.PipelineError, match="failed to load: .*no such model"):
-            await wait_for(job_id)
-        assert (await document.get(doc.name)).status == "error"
-        assert "plan" not in await _steps(run), "it never reached the embed stage"
-        assert embedded == []
-        return
     assert await wait_for(job_id) == "imported"
     steps = await _steps(run)
-    if model == "downloading":
-        assert steps.index("plan") > steps.index("DBOS.sleep") > steps.index("embedding_ready")
-        assert embedded == [doc.name], "one batch, run once the model was there"
-    else:
-        assert "DBOS.sleep" not in steps, "the model was ready when the run asked"
-        assert await _steps(f"{run}:{Stage.EMBED}:0") == ["try_batch", "DBOS.sleep", "try_batch"]
-        assert embedded == [doc.name, doc.name], "the batch waited, then ran again"
+    assert steps.index("plan") > steps.index("DBOS.sleep") > steps.index("embedding_ready")
+    assert embedded == [doc.name], "one batch, run once the model was there"
     assert await embed_cache.entries(doc.name), "the embedding is cached"
+
+
+async def test_a_batch_waits_for_the_embedding_model_to_warm(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart resumes the batch before the boot warmed the model again: the batch sleeps
+    durably and runs again once the model is warm, rather than failing."""
+
+    async def load_model(kind: str, name: str) -> None:
+        pass
+
+    download = await _fake_compact_model(monkeypatch, load_model)
+
+    def restart_then_warm(calls: int) -> None:
+        if calls == 1:
+            models._ready.discard(download)  # what a restart does to the caches
+        elif calls == 2:
+            models._mark_ready(download)  # the boot's warm-up is done
+
+    embedded = _record_embeds(monkeypatch, restart_then_warm)
+    await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
+    await await_terminal([download])
+    doc = await import_row("a.md", MD, tmp_path)
+    job_id = await dbos.start_import(doc.name)
+    run = _embed_id(job_id, doc.name)
+
+    assert await wait_for(job_id) == "imported"
+    assert "DBOS.sleep" not in await _steps(run), "the model was ready when the run asked"
+    assert await _steps(f"{run}:{Stage.EMBED}:0") == ["try_batch", "DBOS.sleep", "try_batch"]
+    assert embedded == [doc.name, doc.name], "the batch waited, then ran again"
+    assert await embed_cache.entries(doc.name), "the embedding is cached"
+
+
+async def test_an_import_whose_embedding_model_failed_ends_in_error(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a model still downloading or warming is waited for: a failed download ends the
+    import in `error`, as before."""
+
+    async def load_model(kind: str, name: str) -> None:
+        raise RuntimeError("no such model")
+
+    download = await _fake_compact_model(monkeypatch, load_model)
+    embedded = _record_embeds(monkeypatch)
+    await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
+    await await_terminal([download])
+    doc = await import_row("a.md", MD, tmp_path)
+    job_id = await dbos.start_import(doc.name)
+
+    with pytest.raises(workflows.PipelineError, match="failed to load: .*no such model"):
+        await wait_for(job_id)
+    assert (await document.get(doc.name)).status == "error"
+    assert "plan" not in await _steps(_embed_id(job_id, doc.name)), "it never reached embedding"
+    assert embedded == []
 
 
 # --- collection index maintenance --------------------------------------------------
