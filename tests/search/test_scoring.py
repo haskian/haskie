@@ -6,14 +6,14 @@ from typing import Any
 
 import msgspec
 import pytest
-from conftest import hit
+from conftest import hit, words_scan
 
 from haskie.catalogue.catalogue import UNCALIBRATED, EmbeddingModel, RerankerCalibration
-from haskie.collection.index import CollectionIndex
-from haskie.search import flow
+from haskie.collection.index import CollectionIndex, Hit
+from haskie.search import collapse, flow
 from haskie.search.flow import Search
-from haskie.search.passage import ranges
-from haskie.search.retrieval import Plan, Pool
+from haskie.search.passage import HitRange, ranges
+from haskie.search.retrieval import Plan, Pool, Ranged, Scanned
 from haskie.search.scoring import RULES
 from haskie.search.section import Group, Section
 from haskie.settings import Fusion, Reranker, ScoreFold, SearchMode, SearchSettings
@@ -39,6 +39,20 @@ RERANKS = (
 )
 RERANK = f"{RERANKS} Chunks it scores under 0.05 (uncalibrated) are dropped."
 PASSAGE = "A passage scores the sum of its matched chunks' scores."
+FILLED = (
+    "Text filled in around and between passages scores 0, so a passage it grows keeps its score."
+)
+SWAPPED = (
+    "A fuller result that takes the slot of one it contains takes that one's score too, and lists "
+    "it under it (also_in)."
+)
+RETRY = "A background job retries a failed HTTP call, so the call has to be idempotent."
+BACKOFF = "Exponential backoff with jitter spreads the retries and avoids a thundering herd."
+# RETRY with a sentence either side: a fuller passage that holds the whole of RETRY
+FULLER = f"Retries are where most duplicate side effects come from. {RETRY} Key it on a request id."
+# a fold with nothing to swap, and one where FULLER, ranked below RETRY, takes its slot
+DISTINCT = [hit(RETRY, 0.9, document="a.md"), hit(BACKOFF, 0.8, document="b.md")]
+SUPERSET = [hit(RETRY, 0.9, document="a.md"), hit(FULLER, 0.8, document="book.md")]
 
 
 def _search(
@@ -89,6 +103,24 @@ def _read(*columns: str | None) -> Pool:
         f"c{n}": [(f"c{n}", "a.md", 1)] if column else [] for n, column in enumerate(columns)
     }
     return Pool(rows=rows, rankings=rankings)  # ty: ignore[invalid-argument-type]
+
+
+def _scanned(found: list[Hit]) -> Scanned:
+    return Scanned(hits=found, vectors=[None] * len(found))
+
+
+def _ranged(found: list[Hit]) -> Ranged:
+    return Ranged(ranges=ranges(found, how=HARMONIC), scanned=_scanned(found))
+
+
+def _hits_folded(found: list[Hit]) -> list[Hit]:
+    """What `collapse_hits` answers for these hits, folded by words."""
+    return collapse.hits(found, words_scan(found), 5)
+
+
+def _ranges_folded(found: list[Hit]) -> list[HitRange]:
+    """What `collapse_ranges` answers for the ranges of these hits, folded by words."""
+    return collapse.ranges(_ranged(found).ranges, found, words_scan(found), 5)
 
 
 LINEAR = (
@@ -279,7 +311,54 @@ def test_retrieval_says_how_each_collection_scored(
             None,
             f"{PASSAGE} A chunk a short passage grew into scores 0, so it adds nothing.",
         ),
-        ("one question's fold keeps its order", "fold", _search(), [None], None, None),
+        (
+            "hits folded with nothing swapped keep their scores",
+            "collapse_hits",
+            _search(),
+            _scanned(DISTINCT),
+            _hits_folded(DISTINCT),
+            None,
+        ),
+        (
+            "a fuller hit that swaps in takes the score of the slot",
+            "collapse_hits",
+            _search(),
+            _scanned(SUPERSET),
+            _hits_folded(SUPERSET),
+            SWAPPED,
+        ),
+        (
+            "ranges folded with nothing swapped keep their scores",
+            "collapse_ranges",
+            _search(),
+            _ranged(DISTINCT),
+            _ranges_folded(DISTINCT),
+            None,
+        ),
+        (
+            "a fuller range that swaps in takes the score of the slot",
+            "collapse_ranges",
+            _search(),
+            _ranged(SUPERSET),
+            _ranges_folded(SUPERSET),
+            SWAPPED,
+        ),
+        (
+            "one question's fold keeps its order and its scores",
+            "fold",
+            _search(),
+            [_ranged(DISTINCT)],
+            _ranges_folded(DISTINCT),
+            None,
+        ),
+        (
+            "one question's fold, where a fuller range swaps in",
+            "fold",
+            _search(),
+            [_ranged(SUPERSET)],
+            _ranges_folded(SUPERSET),
+            SWAPPED,
+        ),
         (
             "several questions take turns",
             "fold",
@@ -327,7 +406,16 @@ def test_retrieval_says_how_each_collection_scored(
             _search(),
             _groups(1),
             _groups(1, 2),
-            "Text filled in around and between passages scores 0; each passage keeps its score.",
+            FILLED,
+        ),
+        (
+            "a fill that bridged the gap between two passages",
+            "fill",
+            _search(),
+            _groups(1, 3),
+            _groups(1, 2, 3),
+            f"{FILLED} Two passages it joins make one, and that one scores the sum of its matched "
+            "chunks' scores.",
         ),
         (
             "a document",
@@ -346,9 +434,7 @@ def test_a_step_says_how_it_changed_the_scores(
     assert RULES[step](state, read, answered) == expected, name
 
 
-@pytest.mark.parametrize(
-    "step", ["hits", "collapse_hits", "collapse_ranges", "read", "budget", "quote"]
-)
+@pytest.mark.parametrize("step", ["hits", "read", "budget", "quote"])
 def test_a_step_that_leaves_scores_alone_has_no_rule(step: str) -> None:
     assert step not in RULES
 

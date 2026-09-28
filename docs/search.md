@@ -15,7 +15,7 @@ flowchart LR
     rerank --> hits["<b>hits</b><br/>cut to scan depth"]
     hits --> fchunks["collapse hits"] --> chunks(["chunks"])
     hits --> franges["merge neighbours,<br/>grow or drop short ones,<br/>collapse ranges"] --> read["read the spans"] --> passages(["passages"])
-    franges --> group["group by section"] --> budget["cut to<br/>the budget"] --> probe["search again for<br/>missing words"] --> fill["fill around<br/>and between"] --> excerpts(["excerpts"])
+    franges --> group["group by section"] --> budget["cut to<br/>the budget"] --> probe["search again for<br/>missing words"] --> fill["fill around<br/>and between"] --> rerankx["rerank whole excerpts<br/>(experiment)"] --> excerpts(["excerpts"])
     hits --> shortlist["group by document"] --> sources(["sources"])
 ```
 
@@ -132,7 +132,8 @@ takes its best question's value. Without a reranker that question tags it; with 
 reranker's judgement tags (`aspects.tagged`), so a filled chunk brings no tag.
 
 - A gap between two passages is filled when its values sum above 0, and the two become one. So a
-  gap of up to twice `max_passage_grow` chunks can be filled.
+  gap of up to twice `max_passage_grow` chunks can be filled. The joined passage scores by
+  `score_fold` over the chunks of both.
 - Every passage grows outward by the run of chunks next to it whose values sum highest, when that
   is above 0: into a gap as far as its half, so the passages on either side never reach for one
   chunk.
@@ -292,8 +293,9 @@ code says so.
 
 A folded result becomes an `also_in` entry under the result it repeats, and `also_in` is a tree.
 When a fuller result takes a slot (the superset swap), the old one moves under it with everything
-folded into it. Each place stays under the place it was measured against. Each entry carries its
-`relation` to its parent. It also carries `to_parent` and `to_root`, measured by words and by
+folded into it. The fuller one takes the old one's score too, and the score lineage says so. Each
+place stays under the place it was measured against. Each entry carries its `relation` to its
+parent. It also carries `to_parent` and `to_root`, measured by words and by
 embedding: `contained`, `contains`, `alike`, and `score`, the harmonic mean of the two directions.
 That score is the Dice coefficient for words and the F1 of the best chunk matches for embeddings.
 
@@ -318,7 +320,7 @@ flowchart LR
     ranges --> turns["<b>take turns</b><br/>round-robin<br/>over the parts"]
     turns --> fold["collapse ranges<br/>across all parts"]
     fold --> tag["tag each passage<br/>with its parts"]
-    tag --> group["group by section"] --> budget["budget"] --> probe["probe"] --> fill["fill"] --> excerpts(["excerpts"])
+    tag --> group["group by section"] --> budget["budget"] --> probe["probe"] --> fill["fill"] --> rerankx["rerank whole<br/>excerpts"] --> excerpts(["excerpts"])
 ```
 
 Each part runs the shared ranking on its own, as deep as one search of that `limit` would go.

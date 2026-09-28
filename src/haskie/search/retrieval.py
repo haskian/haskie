@@ -428,38 +428,33 @@ def _values(
 # --- what the hits are folded into ------------------------------------------------
 
 
-def _spaces(scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode) -> collapse.Scan:
-    return collapse.spaces([hit.text for hit in scanned.hits], scanned.vectors, model, mode)
+def _spaces(scanned: Scanned, where: Plan) -> collapse.Scan:
+    texts = [hit.text for hit in scanned.hits]
+    return collapse.spaces(texts, scanned.vectors, where.embedding, where.settings.mode)
 
 
-def _fold_hits(
-    scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode, limit: int
-) -> list[Hit]:
-    scan = _spaces(scanned, model, mode)
+def _fold_hits(scanned: Scanned, where: Plan, limit: int) -> list[Hit]:
+    scan = _spaces(scanned, where)
     kept = collapse.hits(scanned.hits, scan, limit)
     _log_collapse(scan.deciding[0].kind, len(scanned.hits), kept, limit)
     return kept
 
 
-def _fold_ranges(
-    ranged: Ranged, model: EmbeddingModel | None, mode: SearchMode, limit: int | None
-) -> list[passage.HitRange]:
-    scan = _spaces(ranged.scanned, model, mode)
+def _fold_ranges(ranged: Ranged, where: Plan, limit: int | None) -> list[passage.HitRange]:
+    scan = _spaces(ranged.scanned, where)
     kept = collapse.ranges(ranged.ranges, ranged.scanned.hits, scan, limit)
     _log_collapse(scan.deciding[0].kind, len(ranged.ranges), kept, limit)
     return kept
 
 
-async def collapse_hits(
-    scanned: Scanned, model: EmbeddingModel | None, mode: SearchMode, limit: int
-) -> list[Hit]:
+async def collapse_hits(scanned: Scanned, where: Plan, limit: int) -> list[Hit]:
     """The `limit` best hits, each with the near-duplicates it stands for (see `collapse`).
 
     CPU work that grows with the square of the scan - tens of milliseconds at the default depth -
     so it runs in a worker thread rather than on the event loop the search came in on, the
     comparison spaces included.
     """
-    return await cpu.on_cpu(_fold_hits, scanned, model, mode, limit)
+    return await cpu.on_cpu(_fold_hits, scanned, where, limit)
 
 
 def standing(ranged: Ranged) -> Ranged:
@@ -467,9 +462,7 @@ def standing(ranged: Ranged) -> Ranged:
     return msgspec.structs.replace(ranged, ranges=[one for one in ranged.ranges if not one.alone])
 
 
-async def collapse_ranges(
-    ranged: Ranged, model: EmbeddingModel | None, mode: SearchMode, limit: int | None
-) -> list[passage.HitRange]:
+async def collapse_ranges(ranged: Ranged, where: Plan, limit: int | None) -> list[passage.HitRange]:
     """The `limit` best hit ranges, each with the near-duplicates it stands for; every range that
     repeats none without a `limit`.
 
@@ -477,7 +470,7 @@ async def collapse_ranges(
     sit next to each other and read alike, and folding them would split the passage they make up.
     A worker thread runs the fold, as `collapse_hits` says.
     """
-    return await cpu.on_cpu(_fold_ranges, ranged, model, mode, limit)
+    return await cpu.on_cpu(_fold_ranges, ranged, where, limit)
 
 
 def _picked(picks: list[aspects.Pick], scanned: list[Scanned]) -> Scanned:
@@ -493,21 +486,16 @@ def _picked(picks: list[aspects.Pick], scanned: list[Scanned]) -> Scanned:
 
 
 def _cover(
-    ranged: list[Ranged],
-    labels: list[str],
-    model: EmbeddingModel | None,
-    mode: SearchMode,
-    depth: int,
-    cap: int,
-    by_score: bool,
-    how: ScoreFold,
+    ranged: list[Ranged], labels: list[str], where: Plan, depth: int, cap: int
 ) -> list[passage.HitRange]:
+    how = where.settings.score_fold
     picks = aspects.interleave([one.ranges for one in ranged], depth, cap, how)
     joined = _picked(picks, [one.scanned for one in ranged])
-    scan = _spaces(joined, model, mode)
+    scan = _spaces(joined, where)
     # none cut: the sections they fall in are what the answer counts (`sections`)
     kept = collapse.ranges([pick.span for pick in picks], joined.hits, scan, None)
     scans = [{chunk_key(hit): hit.score for hit in one.scanned.hits} for one in ranged]
+    by_score = where.settings.reranker != Reranker.NONE
     found = aspects.tagged(kept, picks, labels, scans, by_score, how)
     _log_collapse(scan.deciding[0].kind, len(picks), kept, None)
     _log.info(
@@ -522,21 +510,14 @@ def _cover(
 
 
 async def cover(
-    ranged: list[Ranged],
-    labels: list[str],
-    model: EmbeddingModel | None,
-    mode: SearchMode,
-    depth: int,
-    cap: int,
-    by_score: bool,
-    how: ScoreFold,
+    ranged: list[Ranged], labels: list[str], where: Plan, depth: int, cap: int
 ) -> list[passage.HitRange]:
     """The ranges across the parts of one question, in the order the parts took them, each with
     its near-duplicates folded in and tagged with the parts it answers (see `aspects`). None is
     cut: `sections` counts the answer. `ranged` holds one set of ranges and `labels` one question
-    per part; `by_score` tags by the reranker's scores (`aspects.tagged`). A worker thread runs
-    it, as `collapse_hits` says."""
-    return await cpu.on_cpu(_cover, ranged, labels, model, mode, depth, cap, by_score, how)
+    per part; with a reranker on, the tags read its scores (`aspects.tagged`). A worker thread
+    runs it, as `collapse_hits` says."""
+    return await cpu.on_cpu(_cover, ranged, labels, where, depth, cap)
 
 
 def _log_collapse(
