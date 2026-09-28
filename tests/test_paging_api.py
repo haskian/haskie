@@ -5,7 +5,6 @@ rows are written straight through `document` and `Collection` rather than throug
 nothing reaches a workflow. What is under test is the paging, not how a row came to exist.
 """
 
-from base64 import urlsafe_b64encode
 from pathlib import Path
 
 import pytest
@@ -15,6 +14,7 @@ from litestar.testing import AsyncTestClient
 from haskie.collection.collection import Collection, MemberStatus
 from haskie.document import document
 from haskie.document.document import DocumentStatus
+from haskie.paging import Order, encode_cursor
 
 pytestmark = pytest.mark.anyio
 
@@ -315,12 +315,6 @@ PAGING_PARAMS = frozenset({"cursor", "page_size", "sort", "order"})
 PAGED_LISTINGS = ("/api/documents", "/api/collections", "/api/collections/{collection}/documents")
 
 
-def _forged(key: str) -> str:
-    """A cursor for the documents by size that haskie never issued: its key is written by hand."""
-    raw = f'{{"k":{key},"s":"size","o":"asc","v":1}}'.encode()
-    return urlsafe_b64encode(raw).decode().rstrip("=")
-
-
 async def test_the_paging_arguments_are_query_parameters_of_every_listing(
     api_client: AsyncTestClient,
 ) -> None:
@@ -389,19 +383,19 @@ async def test_the_paging_arguments_are_inputs_of_the_listing_mcp_tools(
         (
             "forged cursor whose key holds a list",
             "/api/documents",
-            {"cursor": _forged('[[300],"a.md"]')},
+            {"cursor": encode_cursor([[300], "a.md"], "size", Order.ASC)},
             "invalid cursor",
         ),
         (
             "forged cursor whose key holds an object",
             "/api/documents",
-            {"cursor": _forged('[{"size":300},"a.md"]')},
+            {"cursor": encode_cursor([{"size": 300}, "a.md"], "size", Order.ASC)},
             "invalid cursor",
         ),
         (
             "forged cursor whose key overflows sqlite's integer",
             "/api/documents",
-            {"cursor": _forged('[9223372036854775808,"a.md"]')},
+            {"cursor": encode_cursor([2**63, "a.md"], "size", Order.ASC)},
             "invalid cursor",
         ),
         ("unknown collection sort", "/api/collections", {"sort": "bogus"}, "unknown sort 'bogus'"),

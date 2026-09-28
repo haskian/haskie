@@ -8,7 +8,7 @@ operation history.
 
 The cursor is not signed: this is a single-user local app, the cursor never leaves the machine,
 and nothing inside it reaches SQL — columns come from the caller's whitelist only, the cursor
-contributes bound parameters, each checked to be one sqlite can bind.
+contributes bound parameters, each typed to be one sqlite can bind.
 """
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
@@ -31,7 +31,6 @@ class Order(StrEnum):
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 1000
 CURSOR_VERSION = 1
-SQLITE_INTEGERS = range(-(2**63), 2**63)  # what sqlite's INTEGER holds
 
 
 def check_page_size(size: int, cap: int = MAX_PAGE_SIZE, field: str = "page_size") -> int:
@@ -63,10 +62,15 @@ class Page[T](msgspec.Struct):
     total: int | None = None
 
 
+# A key value sqlite can bind: a string, a float, or an integer its INTEGER holds. Any other JSON
+# value, forged into a cursor, would fail in the driver as a 500; msgspec refuses it while decoding.
+_KeyValue = str | Annotated[int, msgspec.Meta(ge=-(2**63), le=2**63 - 1)] | float
+
+
 class _Cursor(msgspec.Struct):
     """Wire form of a cursor: short field names, because it is encoded into every response."""
 
-    k: list[Any]  # the sort key of the last row of the page, one value per keyset column
+    k: list[_KeyValue]  # the sort key of the last row of the page, one value per keyset column
     s: str  # public sort name it was built for
     o: Order
     v: int = CURSOR_VERSION
@@ -114,15 +118,6 @@ def _read_cursor(cursor: str) -> _Cursor:
         raise InvalidInput("invalid cursor") from exc
 
 
-def _bindable(value: Any) -> bool:
-    """A key value sqlite can bind: a string, a float, or an integer in its 64-bit range. Any
-    other JSON value, forged into a cursor, would fail in the driver as a 500."""
-    # `type(...) is` rather than isinstance: JSON true/false decode as int subclasses
-    if type(value) is int:
-        return value in SQLITE_INTEGERS
-    return type(value) is str or type(value) is float
-
-
 def decode_cursor(cursor: str, sort: str, order: Order, width: int) -> list[Any]:
     """The sort key inside `cursor`, rejected unless it was built for this sort, order, version
     and keyset width: a cursor from another listing would compare the wrong columns."""
@@ -134,8 +129,6 @@ def decode_cursor(cursor: str, sort: str, order: Order, width: int) -> list[Any]
         or len(decoded.k) != width
     ):
         raise InvalidInput("cursor does not match sort/order")
-    if not all(_bindable(value) for value in decoded.k):
-        raise InvalidInput("invalid cursor")
     return decoded.k
 
 
