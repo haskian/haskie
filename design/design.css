@@ -171,6 +171,7 @@ mark { background: none; color: inherit; font-weight: 600; text-decoration: unde
 /* gallery: same tiles, as many per row as fit */
 .gallery { --tile: 114px; display: grid; grid-template-columns: repeat(auto-fill, var(--tile)); gap: var(--sp-2); }
 .gallery-lg { --tile: 228px; }
+.gallery-section > .mono { padding-top: 0.5em; } /* the band's label, a span or a summary */
 
 /* slider */
 .slider { display: block; width: 160px; }
