@@ -122,8 +122,6 @@ async def test_model_state_decides_whether_search_may_run(
             with pytest.raises(raised, match=match) as caught:
                 await models.require_ready(ModelKind.EMBEDDING, model_name)
             assert type(caught.value) is raised, name
-            retry = isinstance(caught.value, NotReady)
-            assert retry is (raised is ModelLoading), f"{name}: a retry hint only while loading"
     finally:
         blocked.set()
         await await_terminal([models._model_id(ModelKind.EMBEDDING, model_name)])

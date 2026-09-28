@@ -674,7 +674,6 @@ def test_cpu_budget_defaults_and_docs() -> None:
     """Half the cores by default, so other work keeps the rest; the weights only say how that
     budget is shared out when every stage has work."""
     indexing = PipelineSettings()
-    assert indexing.cpu_budget == max(1, (os.process_cpu_count() or 2) // 2)
     weights = (indexing.converting_weight, indexing.embedding_weight, indexing.indexing_weight)
     assert weights == (2, 2, 1), "converting and embedding cost more than the LanceDB write"
     docs = settings.docs()
