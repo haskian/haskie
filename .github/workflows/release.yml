@@ -5,23 +5,17 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # version.yml dispatches this on the tag it cuts. It cannot rely on the tag push above: GitHub
+  # starts no workflow from a ref pushed with GITHUB_TOKEN, except through a dispatch. A dispatch,
+  # not a `workflow_call`, because PyPI's trusted publishing refuses a reusable workflow.
   workflow_dispatch:
-  # version.yml calls this after it cuts a tag. It cannot rely on the tag push above: GitHub does
-  # not start a workflow from a ref pushed with GITHUB_TOKEN, so a bump would tag and publish nothing.
-  workflow_call:
-    inputs:
-      ref:
-        description: Tag to build, e.g. `v0.1.0`.
-        type: string
-        required: true
 
 permissions:
   contents: read
 
-# `github.ref_name` on a tag push; the input when version.yml calls this, because a called
-# workflow inherits the caller's `github` context, where the SHA is the commit before the bump.
+# The tag, on a tag push and on a dispatch with `--ref <tag>`.
 env:
-  BUILD_REF: ${{ inputs.ref || github.ref_name }}
+  BUILD_REF: ${{ github.ref_name }}
 
 jobs:
   # Publishing an artifact that fails its own test suite is not worth the convenience. Neither
@@ -66,8 +60,7 @@ jobs:
           files: dist/*
           generate_release_notes: true
 
-  # PyPI matches the top-level workflow, not a called one, so the project registers two trusted
-  # publishers: version.yml (bumps) and release.yml (hand-pushed tags).
+  # PyPI's trusted publisher for this project names release.yml and the `pypi` environment.
   pypi:
     name: PyPI
     needs: dist
