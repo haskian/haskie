@@ -84,6 +84,23 @@ def test_the_vocabulary_stems_each_distinct_word_once(
     assert sorted(calls) == sorted(stemmed), f"{name}: each distinct word once"
 
 
+def test_a_word_is_stemmed_once_across_reads() -> None:
+    """Each search reads its words twice (`retrieval.probe_gaps`, then `probe.report`), so `stem`
+    remembers what it stemmed, in a bounded cache: the second read stems nothing again."""
+    probe.stem.cache_clear()
+    texts = ["Orders keep inventory consistent.", "orders KEEP inventory"]
+
+    first = probe.vocabulary(texts)
+    cold = probe.stem.cache_info()
+    second = probe.vocabulary(texts)
+    warm = probe.stem.cache_info()
+
+    assert first == second == {"order", "keep", "inventori", "consist"}
+    assert (cold.misses, cold.hits) == (4, 0), "each distinct word stemmed once"
+    assert (warm.misses, warm.hits) == (4, 4), "the second read stems none of them again"
+    assert warm.maxsize == probe.STEM_CACHE, "bounded"
+
+
 @pytest.mark.parametrize(
     ("name", "questions", "covered", "expected"),
     [
