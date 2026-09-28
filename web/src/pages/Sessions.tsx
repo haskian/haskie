@@ -155,9 +155,9 @@ function SessionBody({ id, chosen, onSaved }: { id: string; chosen: string[]; on
   }
 
   const run = async (query: string) => {
-    const hits = (await api.explore(query, 'chunk', { session_id: id })).body
+    const found = await api.explore(query, 'chunk', { session_id: id })
     setSearched((count) => count + 1)
-    return hits
+    return found
   }
 
   return (
@@ -184,7 +184,7 @@ function SessionBody({ id, chosen, onSaved }: { id: string; chosen: string[]; on
       </div>
 
       <div id={TABS[1].id} role="tabpanel" className="session-panel" hidden={tab !== TABS[1].id}>
-        <SearchPanel run={run} placeholder="Search this session" />
+        <SearchPanel run={run} placeholder="Search this session" plural="chunks" />
       </div>
 
       <div id={TABS[2].id} role="tabpanel" className="session-panel" hidden={tab !== TABS[2].id}>

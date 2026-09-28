@@ -37,7 +37,15 @@ from haskie.indexing import models
 from haskie.indexing.chunk import HEADING_SEP, Chunk, CutReason, Position, framed
 from haskie.indexing.chunk import record as chunk_record
 from haskie.logs import get_logger
-from haskie.settings import Fusion, Reranker, SearchMode, SearchSettings, load_user_settings
+from haskie.settings import Fusion, SearchMode, SearchSettings, load_user_settings
+
+# What identifies one chunk, wherever it is stored. The collection is deliberately not part of it:
+# the same chunk of the same document is the same answer, whichever collection's table it came out
+# of, so `search.retrieval.fan_out` and `search.text.merge` both count it once.
+RowKey = tuple[str, int]
+# One chunk as a search result: the collection too, since two collections may chunk one document
+# with different settings and each numbers its own `seq` (`search.passage.ranges`).
+ChunkKey = tuple[str, str, int]  # (collection, document, seq)
 
 
 class Row(msgspec.Struct):
@@ -191,12 +199,17 @@ class Hit(msgspec.Struct):
     also_in: list[HitReference] = []  # the near-duplicates folded into this hit, a tree
 
 
+def chunk_key(hit: "Hit") -> ChunkKey:
+    """Which chunk a hit is, as a search keys it."""
+    return (hit.collection, hit.document, hit.seq)
+
+
 def location(
     doc: str, page_start: int | None, page_end: int | None, line_start: int, line_end: int
 ) -> str:
     """The citation of one span of a document: "doc p.3-4 L10-20", pages only for a PDF.
 
-    Shared so a passage (`passage.widen`) cites in exactly the format a chunk does.
+    Shared so a passage (`passage.quote`) cites in exactly the format a chunk does.
     """
     pages = ""
     if page_start is not None:
@@ -272,6 +285,13 @@ class CollectionIndex:
                 self._cached = await conn.open_table(TABLE)
         return self._cached
 
+    async def open(self) -> None:
+        """Open the connection and the table now, if the table exists. Searches that then run at
+        once over this index share one handle, so they read one version of the table. Otherwise
+        each would find nothing cached and open its own, and the last to finish would stay
+        cached."""
+        await self._existing()
+
     async def _for_write(self) -> lancedb.AsyncTable:
         """Write path: create the table when it is missing, never drop one."""
         table = await self._existing()
@@ -344,13 +364,15 @@ class CollectionIndex:
     async def delete_document(self, doc: str) -> None:
         table = await self._deletable()
         if table is not None:
-            await table.delete(f"document = '{doc}'")  # doc names sanitized in document/document.py
+            await table.delete(f"document = {_quoted(doc)}")
 
     async def delete_parts(self, doc: str, start: int, end: int) -> None:
         """Drop the parts `[start, end)` of one document, leaving every other part alone."""
         table = await self._deletable()
         if table is not None:
-            await table.delete(f"document = '{doc}' and part >= {int(start)} and part < {int(end)}")
+            await table.delete(
+                f"document = {_quoted(doc)} and part >= {int(start)} and part < {int(end)}"
+            )
 
     async def add_parts(
         self,
@@ -493,21 +515,8 @@ class CollectionIndex:
         )
 
     # --- search ----------------------------------------------------------
-    # Split into three steps so a cross-collection search embeds the query once, retrieves from
-    # every index in parallel and rescores the merge once (see search.flow). `search` below
-    # is the single-index composition of the same steps.
-
-    async def query_vector(self, query: str, settings: SearchSettings) -> list[float] | None:
-        """The query embedding, or None when this index can only answer lexically: mode `fts`, no
-        embedding model, or a table written without a vector column."""
-        if settings.mode == SearchMode.FTS or self.embedding is None:
-            return None
-        if not await self.has_vector_column():
-            return None
-        from haskie.indexing.embed import embed_query
-
-        await models.require_ready(models.ModelKind.EMBEDDING, self.embedding.name)
-        return await cpu.on_cpu(embed_query, self.embedding, query)
+    # Retrieval and row-to-Hit only: a search embeds the query once (`retrieval.plan`), retrieves
+    # from every index in parallel and rescores the merge once (see search.flow).
 
     async def _readable(self) -> lancedb.AsyncTable | None:
         """The table to read from, or None when there is nothing this build can read.
@@ -527,31 +536,42 @@ class CollectionIndex:
         return table
 
     async def search_rows(
-        self, query: str, vector: list[float] | None, settings: SearchSettings, limit: int
+        self,
+        query: str,
+        vector: list[float] | None,
+        settings: SearchSettings,
+        limit: int,
+        vectors: bool = True,
     ) -> list[dict]:
         """Retrieval only: at most `limit` raw LanceDB rows, neither cut to `settings.limit` nor
         rescored by a cross-encoder.
 
-        `vector` is None for a lexical query (see `query_vector`); a table without a vector column
+        `vector` is None for a lexical query; a table without a vector column
         falls back to full text whatever the caller passed, so one collection of a session can lack
         the embedding the others have. A hybrid query always fuses over at least
         `settings.candidates` rows, because the fusion is only as good as its candidate pool.
+
+        `vectors` False leaves the vector column out of a lexical read, for a caller that only
+        wants the chunks: the probe for missing words (`search.retrieval.probe_gaps`).
         """
         table = await self._readable()
         if table is None:
             return []
         if vector is None or not await self.has_vector_column():
-            return await (await table.search(query, query_type="fts")).limit(limit).to_list()
+            found = await table.search(query, query_type="fts")
+            if not vectors:
+                found = found.select([*PLAIN_SCHEMA.names, "_score"])
+            return _rows(await found.limit(limit).to_arrow())
         if settings.mode == SearchMode.VECTOR:
             found = _tuned(await table.search(vector, query_type="vector"), settings)
-            return await found.limit(limit).to_list()
+            return _rows(await found.limit(limit).to_arrow())
         # the async API builds a hybrid query out of its two halves instead of `query_type=hybrid`
         hybrid = table.query().nearest_to(vector).nearest_to_text(query)
-        return (
+        return _rows(
             await _tuned(hybrid, settings)
             .limit(max(settings.candidates, limit))
             .rerank(reranker=_fusion(settings))
-            .to_list()
+            .to_arrow()
         )
 
     async def fts_rows(self, query: str, limit: int) -> list[dict]:
@@ -566,16 +586,38 @@ class CollectionIndex:
         table = await self._readable()
         if table is None or not await self.has_index(FTS_COLUMN):
             return []
-        return await (await table.search(query, query_type="fts")).limit(limit).to_list()
+        return _rows(await (await table.search(query, query_type="fts")).limit(limit).to_arrow())
 
-    async def search(self, query: str, settings: SearchSettings) -> list[Hit]:
-        rerank = settings.reranker != Reranker.NONE
-        fetch = max(settings.candidates, settings.limit) if rerank else settings.limit
-        vector = await self.query_vector(query, settings)
-        rows = await self.search_rows(query, vector, settings, fetch)
-        if rerank:
-            rows = await cross_encode(query, rows, settings)
-        return [self.hit(r) for r in rows[: settings.limit]]
+    async def rows_at(self, keys: Iterable[RowKey], vectors: bool) -> list[dict]:
+        """The stored rows of these chunks, in no order: what a search reads to look at the
+        neighbours of a chunk it matched. Their vectors only when `vectors` says the search can
+        compare them. `[]` when there is nothing readable."""
+        by_document: dict[str, set[int]] = {}
+        for doc, seq in keys:
+            by_document.setdefault(doc, set()).add(seq)
+        table = await self._readable()
+        if table is None or not by_document:
+            return []
+        wanted = " OR ".join(
+            f"(document = {_quoted(doc)} AND seq IN ({', '.join(map(str, sorted(seqs)))}))"
+            for doc, seqs in sorted(by_document.items())
+        )
+        columns = PLAIN_SCHEMA.names + (
+            ["vector"] if vectors and await self.has_vector_column() else []
+        )
+        return _rows(await table.query().where(wanted).select(columns).to_arrow())
+
+    async def outline_rows(self, documents: Iterable[str]) -> list[dict]:
+        """Where every chunk of these documents sits: its `document`, `seq`, heading path and char
+        span, and nothing else, in no order. What a search reads to know how large each section
+        around a match is. `[]` when there is nothing readable."""
+        names = sorted(set(documents))
+        table = await self._readable()
+        if table is None or not names:
+            return []
+        wanted = f"document IN ({', '.join(_quoted(name) for name in names)})"
+        columns = ["document", "seq", "headings", "char_start", "char_end"]
+        return await table.query().where(wanted).select(columns).to_list()
 
     def hit(self, r: dict, score: float | None = None) -> Hit:
         """One result row as a `Hit`, with the file paths resolved against this index's home.
@@ -636,7 +678,13 @@ def _tuned(builder: Any, settings: SearchSettings) -> Any:
 
 
 async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -> list[dict]:
-    """Second stage for any mode: rescore candidate rows with a cross-encoder, best first.
+    """Second stage for any mode: rescore candidate rows with a cross-encoder, in place, and
+    return them best first.
+
+    The score is the sigmoid of the model's logit, in (0, 1). A raw logit is mostly negative for
+    all but the few best candidates, and a passage's score (`passage.harmonic`) is 0 for any score
+    at or below 0, so every passage after the first few would tie at 0 and lose its rank. The
+    sigmoid keeps the order and bounds the scale; it is not a calibrated probability.
 
     Module-level, so a session rescores one merged candidate list instead of running a
     cross-encoder per collection. The cross-encoder itself is CPU work, so it runs in a worker
@@ -648,14 +696,69 @@ async def cross_encode(query: str, rows: list[dict], settings: SearchSettings) -
     read = [r[FTS_COLUMN] for r in rows]  # as they were embedded
     accelerator = (await load_user_settings()).pipeline.accelerator
     scores = await cpu.on_cpu(rerank_scores, settings.reranker_model, accelerator, query, read)
-    for row, score in zip(rows, scores, strict=True):
-        row["_relevance_score"] = score
+    for row, logit in zip(rows, scores, strict=True):
+        row["_relevance_score"] = _sigmoid(logit)
     return sorted(rows, key=lambda r: r["_relevance_score"], reverse=True)
+
+
+def logit(score: float) -> float:
+    """The logit a reranker score (`cross_encode`) came from. Reranker scores are compared on this
+    scale: the sigmoid squeezes every weak score toward 0, so their differences vanish there. A
+    logit past about ±37 rounds to 0 or 1, so the score is kept just inside them."""
+    kept = min(max(score, _SMALLEST), _LARGEST)
+    return math.log(kept) - math.log1p(-kept)
+
+
+_SMALLEST = math.ulp(0.0)  # the smallest positive float: e^−744, the sigmoid's own floor
+_LARGEST = math.nextafter(1.0, 0.0)
+
+
+def _sigmoid(logit: float) -> float:
+    """1 / (1 + e^−logit), without the overflow `math.exp` raises for a logit below about −709."""
+    if logit >= 0:
+        return 1.0 / (1.0 + math.exp(-logit))
+    lifted = math.exp(logit)
+    return lifted / (1.0 + lifted)
+
+
+def _rows(found: pa.Table) -> list[dict]:
+    """A read's rows as dicts, each vector a row of one float32 array rather than a thousand
+    Python floats: what a search compares vectors in anyway (`search.collapse.unit_rows`), so
+    the list a row would carry is never built. A row without a vector holds None."""
+    if "vector" not in found.column_names:
+        return found.to_pylist()
+    column = found.column("vector").combine_chunks()
+    width = column.type.list_size
+    matrix = column.flatten().to_numpy(zero_copy_only=False).reshape(-1, width)
+    rows = found.drop_columns(["vector"]).to_pylist()
+    if column.null_count:
+        # `flatten` skips the slots of a null vector, so the rows of the matrix follow the others
+        present = iter(matrix)
+        for row, missing in zip(rows, column.is_null().to_pylist(), strict=True):
+            row["vector"] = None if missing else next(present)
+        return rows
+    for row, vector in zip(rows, matrix, strict=True):
+        row["vector"] = vector
+    return rows
+
+
+def _quoted(value: str) -> str:
+    """`value` as a SQL string literal for a LanceDB filter. A document name is the user's file
+    name, so a quote in it is doubled rather than allowed to end the literal."""
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _header(r: dict) -> str:
     """The header of a stored row, as `Chunk.header` builds it."""
     return HEADING_SEP.join(r["headings"] or [])
+
+
+def row_mode(r: dict) -> SearchMode:
+    """The search a row came out of, read off the score column it carries, as `row_score` reads
+    it: fused scores for hybrid, a distance for vector, BM25 for full text."""
+    if "_relevance_score" in r:
+        return SearchMode.HYBRID
+    return SearchMode.VECTOR if "_distance" in r else SearchMode.FTS
 
 
 def row_score(r: dict) -> float:
@@ -671,12 +774,6 @@ def row_score(r: dict) -> float:
     if "_distance" in r:
         return 1.0 / (1.0 + float(r["_distance"]))
     return 0.0
-
-
-# What identifies one chunk, wherever it is stored. The collection is deliberately not part of it:
-# the same chunk of the same document is the same answer, whichever collection's table it came out
-# of, so `search.retrieval.fan_out` and `search.text.merge` both count it once.
-RowKey = tuple[str, int]
 
 
 def row_key(row: dict) -> RowKey:

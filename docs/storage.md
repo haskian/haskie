@@ -38,6 +38,7 @@ erDiagram
     collections ||--o{ session_collections : ""
     sessions ||--o{ session_events : ""
     models ||--o{ embedding_profiles : ""
+    models ||--o| reranker_calibration : ""
     documents {
         text name PK
         text suffix
@@ -87,12 +88,23 @@ erDiagram
         int dims
         text document_prefix
     }
+    reranker_calibration {
+        text model PK
+        real floor
+        real beta_a
+        real beta_b
+        text source
+    }
 ```
 
 `models` and `embedding_profiles` are the model catalogue (`catalogue/`). A fresh home fills them
 once from `catalogue/seed.sql`, and the database holds them from then on. Settings name a profile
 and a reranker model by key, checked against these tables when settings are written or read. How
 a model loads stays in code: the loaders and their pinned revisions in `indexing/`.
+`reranker_calibration` says how one reranker's scores read: the floor a search drops chunks under
+when `min_rerank_score` is empty, and the beta curve `fill_values = absolute` spreads its scores
+by. The seed gives every reranker an uncalibrated floor of 0.05 and the identity curve, until
+`catalogue/calibrate.py` measures both on borderline pairs of your own collections.
 
 Two more tables stand alone: `settings` (one row of JSON) and `staging` (uploads waiting for a
 name). DBOS keeps its own workflow and queue tables in the same file. `sysdb.py` reads them for
@@ -100,8 +112,8 @@ the Operations view, through `table()` declarations of its own: DBOS owns their 
 
 Every table and index is a SQLAlchemy Core `Table` in `tables.py`, the one source of the schema.
 `db.migrate` generates the DDL from it on a fresh home, and every query is a Core statement over
-the same tables, so a column name is written once. Index names start with `idx_` (a home created before
-`tables.py` keeps its older, unprefixed names).
+the same tables, so a column name is written once. Index names start with `idx_`. A home created
+before `tables.py` keeps its older, unprefixed names.
 
 ## How each store is written
 
@@ -114,9 +126,8 @@ the same tables, so a column name is written once. Index names start with `idx_`
 
 ## Schema changes
 
-Before 1.0 there are no migrations. A storage change edits `tables.py` and bumps `SCHEMA_VERSION` in
-`db.py`, stored in
-`PRAGMA user_version`. A home written with another version is refused at startup, with a message
+Before 1.0 there are no migrations. A storage change edits `tables.py` and bumps `SCHEMA_VERSION`
+in `db.py`, which is stored in `PRAGMA user_version`. A home written with another version is refused at startup, with a message
 that says so. The fix is `haskie destroy` and a fresh import.
 
 Code: `tables.py`, `db.py`, `catalogue/catalogue.py`, `catalogue/seed.sql`, `home.py`, `sysdb.py`.

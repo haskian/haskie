@@ -58,6 +58,22 @@ class Fusion(StrEnum):
     LINEAR = "linear"
 
 
+class ScoreFold(StrEnum):
+    """How the scores of several matched chunks fold into one: a passage's, a document's, a
+    section's (`passage.fold`)."""
+
+    MAX = "max"
+    SUM = "sum"
+    HARMONIC = "harmonic"
+
+
+class FillValues(StrEnum):
+    """How a chunk near a passage is valued when a passage grows or a section fills (`fill`)."""
+
+    RELATIVE = "relative"
+    ABSOLUTE = "absolute"
+
+
 class Reranker(StrEnum):
     NONE = "none"
     CROSS_ENCODER = "cross-encoder"
@@ -221,6 +237,49 @@ ACCELERATOR = Meta(
     ),
 )
 LIMIT = Meta(title="Results", description="Number of results a search returns.")
+MIN_PASSAGE_CHARS = Meta(
+    title="Shortest passage (characters)",
+    description=(
+        "A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its "
+        "section that match the question (see Chunks a passage may grow by). One that grows by "
+        "none is dropped, unless it is the best result, or its excerpt's section holds another "
+        "passage. A whole short section is kept as it is. 0 turns this off."
+    ),
+)
+MAX_SECTION_CHARS = Meta(
+    title="Largest section (characters)",
+    description=(
+        "An excerpt is one section of a document: the largest heading whose text fits this many "
+        "characters. The passages a search keeps under it come back together, in document order."
+    ),
+)
+MAX_ANSWER_CHARS = Meta(
+    title="Largest answer (characters)",
+    description=(
+        "How much text the sections of one excerpts search hold. Sections past it are left out, "
+        "the last first, and the text around and between passages that answers too is added "
+        "while it fits. One excerpt found for words no section holds may come past it."
+    ),
+)
+MAX_PASSAGE_GROW = Meta(
+    title="Chunks a passage may grow by",
+    description=(
+        "How many neighbouring chunks of its section a passage may grow by on each side, once, "
+        "never past a heading, and only where they match the question: a short passage as the "
+        "passages are ranked, every excerpt's passages as the excerpt is filled. Twice this is "
+        "the longest gap between two passages that is filled. 0 turns growing off."
+    ),
+)
+GROW_BIAS = Meta(
+    title="Growth bias",
+    description=(
+        "Added to the value of every chunk a passage could grow by, -1 to 1 (see Values for "
+        "growing and filling). A stretch of chunks is taken when its values sum above 0, so "
+        "above 0 passages grow more eagerly, taking weaker chunks, and below 0 only by stronger "
+        "ones. At -1 nothing grows, so every short passage is dropped that Shortest passage "
+        "would drop."
+    ),
+)
 CANDIDATES = Meta(
     title="Candidates",
     description=(
@@ -243,6 +302,15 @@ FUSION = Meta(
         "Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank "
         "fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores "
         "using Vector weight and BM25 weight."
+    ),
+)
+SCORE_FOLD = Meta(
+    title="Passage and document score",
+    description=(
+        "How the scores of a passage's matched chunks, or a document's, fold into one. sum: every "
+        "matched chunk adds, so more evidence ranks higher (Vespa's chunk example). max: the best "
+        "chunk alone (Elasticsearch semantic_text). harmonic: between the best and twice it, so "
+        "more chunks lift a result but many weak ones never outrank one strong one."
     ),
 )
 RRF_K = Meta(
@@ -288,6 +356,48 @@ RERANKER = Meta(
         "but more precise than embeddings. none: keep the retrieval order."
     ),
 )
+MIN_RERANK_SCORE = Meta(
+    title="Lowest reranker score",
+    description=(
+        "With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are "
+        "built: the reranker judged it does not answer. A question nothing clears is reported "
+        "unanswered, and a question tags only the excerpts it scores this high. 0 keeps every "
+        "chunk. Empty in the user settings: the chosen reranker's own floor, 0.05 until it is "
+        "calibrated on borderline pairs of your collections "
+        "(python -m haskie.catalogue.calibrate). Empty for a collection: the user setting."
+    ),
+)
+FILL_VALUES = Meta(
+    title="Values for growing and filling",
+    description=(
+        "How a chunk next to a passage is judged worth taking. relative: its score against the "
+        "ranked chunks, 0 at their median and 1 at their best. A short passage is judged against "
+        "the chunks the search scanned, by the reranker when one is on; an excerpt's text around "
+        "its passages against the passages kept, by the query vector or the question's words, "
+        "since asking the reranker there would take seconds. absolute (experiment, with a "
+        "reranker on): the reranker judges both, its score "
+        "spread by its calibrated curve, minus 0.18, as dsRAG's Relevant Segment Extraction "
+        "values a chunk."
+    ),
+)
+RERANK_EXCERPTS = Meta(
+    title="Rerank whole excerpts (experiment)",
+    description=(
+        "With a reranker on, an excerpts search scores each finished excerpt as one text against "
+        "the questions it answers, instead of folding its chunks' scores, and a single question's "
+        "excerpts are sorted by it. Only when every excerpt fits what the reranker reads; else "
+        "the chunk scores stand. Off until measured to help."
+    ),
+)
+RERANK_WITH_CONTEXT = Meta(
+    title="Rerank with the shared context",
+    description=(
+        "When several questions share a context, the query embedding reads the context in front "
+        "of each question to find candidates. Off: the reranker, which sets the final order, reads "
+        'each question alone, so a context every document matches ("ddd" over a DDD book) '
+        "cannot outrank what the question asks. On: the reranker reads it too."
+    ),
+)
 RERANKER_MODEL = Meta(
     title="Reranker model",
     description=(
@@ -331,6 +441,30 @@ def _at_least(minimum: int | float, **values: int | float) -> None:
     for name, value in values.items():
         if value < minimum:
             raise InvalidInput(f"{name} must be >= {minimum}, got {value}")
+
+
+def _check_search(search: "SearchSettings | SearchOverrides") -> None:
+    """Shared by the user-level search settings and a collection's overrides, where a field left
+    unset (None) inherits the user value and is not checked here."""
+    given = without_none(search)
+    at_least_one = (
+        "limit",
+        "candidates",
+        "rrf_k",
+        "nprobes",
+        "refine_factor",
+        "max_section_chars",
+        "max_answer_chars",
+    )
+    _at_least(1, **{name: given[name] for name in at_least_one if name in given})
+    at_least_zero = ("vector_weight", "bm25_weight", "min_passage_chars", "max_passage_grow")
+    _at_least(0, **{name: given[name] for name in at_least_zero if name in given})
+    floor = given.get("min_rerank_score")
+    if floor is not None and not 0 <= floor <= 1:
+        raise InvalidInput(f"min_rerank_score must be 0 to 1, got {floor}")
+    bias = given.get("grow_bias")
+    if bias is not None and not -1 <= bias <= 1:
+        raise InvalidInput(f"grow_bias must be -1 to 1, got {bias}")
 
 
 def _check_chunking(chunk_size: int | None, chunk_merge_below: int | None) -> None:
@@ -392,19 +526,21 @@ class SearchSettings(msgspec.Struct):
     refine_factor: Annotated[int, REFINE_FACTOR] = 10
     reranker: Annotated[Reranker, RERANKER] = Reranker.NONE
     reranker_model: Annotated[str, RERANKER_MODEL] = DEFAULT_RERANKER
+    rerank_with_context: Annotated[bool, RERANK_WITH_CONTEXT] = False
+    score_fold: Annotated[ScoreFold, SCORE_FOLD] = ScoreFold.SUM
+    rerank_excerpts: Annotated[bool, RERANK_EXCERPTS] = False
+    fill_values: Annotated[FillValues, FILL_VALUES] = FillValues.RELATIVE
+    min_rerank_score: Annotated[float | None, MIN_RERANK_SCORE] = None
+    min_passage_chars: Annotated[int, MIN_PASSAGE_CHARS] = 300
+    max_passage_grow: Annotated[int, MAX_PASSAGE_GROW] = 3
+    grow_bias: Annotated[float, GROW_BIAS] = 0.0
+    max_section_chars: Annotated[int, MAX_SECTION_CHARS] = 12000
+    max_answer_chars: Annotated[int, MAX_ANSWER_CHARS] = 36000
 
     def __post_init__(self) -> None:
-        _at_least(
-            1,
-            limit=self.limit,
-            candidates=self.candidates,
-            rrf_k=self.rrf_k,
-            nprobes=self.nprobes,
-            refine_factor=self.refine_factor,
-        )
         # `reranker_model` is checked against the catalogue where settings are written
         # (`catalogue.check`): the catalogue is in the database, and decoding reads none
-        _at_least(0, vector_weight=self.vector_weight, bm25_weight=self.bm25_weight)
+        _check_search(self)
 
 
 class SearchOverrides(msgspec.Struct):
@@ -421,6 +557,21 @@ class SearchOverrides(msgspec.Struct):
     refine_factor: Annotated[int | None, REFINE_FACTOR] = None
     reranker: Annotated[Reranker | None, RERANKER] = None
     reranker_model: Annotated[str | None, RERANKER_MODEL] = None
+    rerank_with_context: Annotated[bool | None, RERANK_WITH_CONTEXT] = None
+    score_fold: Annotated[ScoreFold | None, SCORE_FOLD] = None
+    rerank_excerpts: Annotated[bool | None, RERANK_EXCERPTS] = None
+    fill_values: Annotated[FillValues | None, FILL_VALUES] = None
+    min_rerank_score: Annotated[float | None, MIN_RERANK_SCORE] = None
+    min_passage_chars: Annotated[int | None, MIN_PASSAGE_CHARS] = None
+    max_passage_grow: Annotated[int | None, MAX_PASSAGE_GROW] = None
+    grow_bias: Annotated[float | None, GROW_BIAS] = None
+    max_section_chars: Annotated[int | None, MAX_SECTION_CHARS] = None
+    max_answer_chars: Annotated[int | None, MAX_ANSWER_CHARS] = None
+
+    def __post_init__(self) -> None:
+        # checked as it is decoded, before it is saved: otherwise a value no search can run with
+        # would be stored, and only fail as the collection's settings resolve, from then on
+        _check_search(self)
 
     def resolve(self, user: SearchSettings) -> SearchSettings:
         return msgspec.structs.replace(user, **without_none(self))

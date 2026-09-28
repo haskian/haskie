@@ -34,11 +34,14 @@ export type Document = Wire<'Listed'>
 export type CollectionInfo = Wire<'CollectionInfo'>
 export type EmbeddingEntry = Wire<'Entry'> // `embed_cache.Entry`: one cached embedding of a document
 export type Hit = Wire<'Hit'>
-// A passage: consecutive matched chunks of one document, read back from the markdown and widened
-// on each side (`passage.widen`). Widening stops at the nearest newline, else at the outermost
-// whole sentence within 300 characters, else at 300 characters. `Excerpt` is a passage on the
-// wire today; the type name is what a later trimming step keeps.
+// A passage: consecutive matched chunks of one section, read back from the markdown by their
+// offsets (`passage.quote`).
 export type Passage = Wire<'Passage'>
+// An excerpt: one section of a document, holding every passage the search kept in it as a span
+// (`section.excerpt`). Its folded places are the spans', not its own.
+export type Excerpt = Wire<'Excerpt'>
+// What an excerpts search answers with: the excerpts, and what they leave out (`probe.report`).
+export type Answer = Wire<'Answer'>
 export type Source = Wire<'Source'>
 export type Sources = Wire<'Sources'>
 export type HotSection = Wire<'HotSection'>
@@ -63,6 +66,7 @@ export type BulkStarted = Wire<'BulkStarted'>
 export type OperationProgress = Wire<'OperationProgress'>
 export type Preview = Wire<'Preview'>
 export type Staged = Wire<'Staged'>
+export type Rendered = Wire<'Rendered'>
 export type Member = Wire<'Member'>
 export type CollectionSummary = Wire<'CollectionSummary'>
 
@@ -79,6 +83,8 @@ export type MemberStatus = Member['status']
 export type SearchMode = NonNullable<SearchSettings['mode']>
 export type Fusion = NonNullable<SearchSettings['fusion']>
 export type Reranker = NonNullable<SearchSettings['reranker']>
+export type ScoreFold = NonNullable<SearchSettings['score_fold']>
+export type FillValues = NonNullable<SearchSettings['fill_values']>
 export type OperationKind = Operation['kind']
 export type Stage = Job['stage']
 export type RunStatus = Operation['status']
@@ -146,10 +152,24 @@ export interface StepTiming {
   ms: number
 }
 
-/** An answer, and the steps the server took to give it. */
+/** How one step of a search set or changed the scores it answered with (`search.scoring`). */
+export interface ScoreStep {
+  step: string
+  label: string
+  rule: string
+}
+
+/** An answer, the steps the server took to give it, and how its scores came to be, step by step. */
 export interface Timed<T> {
   body: T
   steps: StepTiming[]
+  scoring: ScoreStep[]
+}
+
+/** The `X-Score-Lineage` header: percent-encoded JSON, since its formulas are not Latin-1. A
+ *  missing header is no lineage. */
+export function parseScoreLineage(header: string | null): ScoreStep[] {
+  return header ? (JSON.parse(decodeURIComponent(header)) as ScoreStep[]) : []
 }
 
 /** `retrieve;dur=41.2;desc="LanceDB retrieval", merge;dur=0.3;desc="Fuse rankings"` as steps. A
@@ -166,7 +186,11 @@ export function parseServerTiming(header: string | null): StepTiming[] {
 async function timedRequest<T>(url: string): Promise<Timed<T>> {
   const response = await fetch(url)
   await failed(response)
-  return { body: (await response.json()) as T, steps: parseServerTiming(response.headers.get('Server-Timing')) }
+  return {
+    body: (await response.json()) as T,
+    steps: parseServerTiming(response.headers.get('Server-Timing')),
+    scoring: parseScoreLineage(response.headers.get('X-Score-Lineage')),
+  }
 }
 
 const json = (method: string, body: unknown): RequestInit => ({
@@ -176,12 +200,15 @@ const json = (method: string, body: unknown): RequestInit => ({
 })
 
 // Query string for a paged endpoint, `?k=v&…` or empty. Unset and empty values are dropped:
-// an absent filter is not the same request as a filter on the empty string.
-const pageQuery = (q: PageRequest, extra: Record<string, string | undefined> = {}): string => {
+// an absent filter is not the same request as a filter on the empty string. A list repeats its
+// key once a value (`?q=a&q=b`), as the backend reads a list parameter.
+export const pageQuery = (q: PageRequest, extra: Record<string, string | string[] | undefined> = {}): string => {
   const params = new URLSearchParams()
-  const values: Record<string, string | number | null | undefined> = { ...q, ...extra }
+  const values: Record<string, string | string[] | number | null | undefined> = { ...q, ...extra }
   for (const [key, value] of Object.entries(values)) {
-    if (value !== undefined && value !== null && value !== '') params.set(key, String(value))
+    for (const one of Array.isArray(value) ? value : [value]) {
+      if (one !== undefined && one !== null && one !== '') params.append(key, String(one))
+    }
   }
   const query = params.toString()
   return query ? `?${query}` : ''
@@ -238,7 +265,6 @@ export const api = {
     request<CollectionInfo>(`${collectionPath(name)}/description`, json('PUT', { description })),
   collection: (name: string) => request<CollectionInfo>(collectionPath(name)),
   deleteCollection: (name: string) => request<BulkStarted>(collectionPath(name), { method: 'DELETE' }),
-  searchCollection: (name: string, q: string) => request<Hit[]>(`${collectionPath(name)}/search?q=${encodeURIComponent(q)}`),
   saveCollectionOverrides: (name: string, s: CollectionOverrides) =>
     request<CollectionInfo>(`${collectionPath(name)}/overrides`, json('PUT', s)),
   indexCollection: (name: string) => request<BulkStarted>(`${collectionPath(name)}/index`, { method: 'POST' }),
@@ -260,6 +286,8 @@ export const api = {
     return request<Page<Document>>(`/api/documents${pageQuery(page, { status })}`)
   },
   document: (doc: string) => request<Document>(documentPath(doc)),
+  // a search result's text as HTML, raw HTML stripped by the server (`render.fragment_html`)
+  renderMarkdown: (markdown: string) => request<Rendered>('/api/documents/render', json('POST', { markdown })),
   // Upload step one: the bytes land in staging under an id. Nothing is imported until `importStaged`.
   stageUpload: (file: File) => {
     const body = new FormData()
@@ -304,11 +332,14 @@ export const api = {
   saveSession: (id: string, collections: string[]) =>
     request<string[]>(`/api/sessions/${encodeURIComponent(id)}`, json('PUT', { collections })),
 
-  // The two searches Explore runs, over one scope: `collections` when given, else the session's
+  // The three searches Explore runs, over one scope: `collections` when given, else the session's
   // selection, else every collection (the backend applies that order). Each answers with the
   // steps it took, for the breakdown under the total.
   explore: <G extends Granularity>(q: string, granularity: G, scope: SearchScope = {}) =>
     timedRequest<ExploreResult<G>>(`/api/search/explore${pageQuery({}, { q, granularity, ...scopeQuery(scope) })}`),
+  // one question, or 2 to 5 parts of one and the background they share (`context`)
+  searchExcerpts: (q: string[], scope: SearchScope = {}, context?: string) =>
+    timedRequest<Answer>(`/api/search/excerpts${pageQuery({}, { q, context, ...scopeQuery(scope) })}`),
   searchSources: (q: string, scope: SearchScope = {}) =>
     timedRequest<Sources>(`/api/search/sources${pageQuery({}, { q, ...scopeQuery(scope) })}`),
 }

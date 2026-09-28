@@ -73,6 +73,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/render": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** RenderMarkdown */
+        post: operations["ApiDocumentsRenderRenderMarkdown"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/staging": {
         parameters: {
             query?: never;
@@ -309,23 +326,6 @@ export interface paths {
         post?: never;
         /** DeleteCollection */
         delete: operations["ApiCollectionsDeleteCollection"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/collections/{collection}/search": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** SearchCollection */
-        get: operations["ApiCollectionsSearchSearchCollection"];
-        put?: never;
-        post?: never;
-        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -714,6 +714,12 @@ export interface components {
         AddDocument: {
             document: string;
         };
+        /** Answer */
+        Answer: {
+            excerpts: components["schemas"]["Excerpt"][];
+            uncovered: string[];
+            missing_terms: string[];
+        };
         /** BulkProgress */
         BulkProgress: {
             done: number;
@@ -851,7 +857,7 @@ export interface components {
          * @default edge
          * @enum {string}
          */
-        CutReason: "edge" | "heading" | "paragraph" | "length_block" | "length_sentence" | "length_oversize";
+        CutReason: "edge" | "part" | "heading" | "paragraph" | "length_block" | "length_sentence" | "length_oversize";
         /** Describe */
         Describe: {
             description: string;
@@ -953,6 +959,8 @@ export interface components {
             documents?: string[] | null;
             collection?: string | null;
             collections?: string[] | null;
+            questions?: string[] | null;
+            context?: string | null;
         };
         /** Excerpt */
         Excerpt: {
@@ -972,13 +980,24 @@ export interface components {
             score: number;
             source_file: string;
             markdown_file: string;
-            also_in?: components["schemas"]["PassageReference"][];
+            spans: components["schemas"]["Span"][];
+            aspects?: string[];
+            aspect_scores?: {
+                [key: string]: number;
+            };
         };
         /** FieldDoc */
         FieldDoc: {
             title: string;
             description: string;
         };
+        /**
+         * FillValues
+         * @description How a chunk next to a passage is judged worth taking. relative: its score against the ranked chunks, 0 at their median and 1 at their best. A short passage is judged against the chunks the search scanned, by the reranker when one is on; an excerpt's text around its passages against the passages kept, by the query vector or the question's words, since asking the reranker there would take seconds. absolute (experiment, with a reranker on): the reranker judges both, its score spread by its calibrated curve, minus 0.18, as dsRAG's Relevant Segment Extraction values a chunk.
+         * @default relative
+         * @enum {string}
+         */
+        FillValues: "relative" | "absolute";
         /**
          * Fusion
          * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
@@ -991,7 +1010,7 @@ export interface components {
          * @default chunk
          * @enum {string}
          */
-        Granularity: "chunk" | "passage" | "excerpt";
+        Granularity: "chunk" | "passage";
         /** Hit */
         Hit: {
             collection: string;
@@ -1120,6 +1139,10 @@ export interface components {
             last_maintained_at: number | null;
             vector_index_rows: number;
         };
+        /** Markdown */
+        Markdown: {
+            markdown: string;
+        };
         /** Matryoshka */
         Matryoshka: {
             /** @default false */
@@ -1200,6 +1223,8 @@ export interface components {
             accelerators: components["schemas"]["Accelerator"][];
             search_modes: components["schemas"]["SearchMode"][];
             fusions: components["schemas"]["Fusion"][];
+            score_folds: components["schemas"]["ScoreFold"][];
+            fill_values: components["schemas"]["FillValues"][];
             rerankers: components["schemas"]["Reranker"][];
             reranker_models: string[];
             reranker_metadata: {
@@ -1281,8 +1306,6 @@ export interface components {
         Parser: "anydoc" | "plain";
         /** Passage */
         Passage: {
-            collection: string;
-            document: string;
             header: string;
             location: string;
             seq_start: number;
@@ -1293,11 +1316,17 @@ export interface components {
             char_end: number;
             page_start: number | null;
             page_end: number | null;
-            text: string;
             score: number;
+            also_in?: components["schemas"]["PassageReference"][];
+            aspects?: string[];
+            aspect_scores?: {
+                [key: string]: number;
+            };
+            collection: string;
+            document: string;
+            text: string;
             source_file: string;
             markdown_file: string;
-            also_in?: components["schemas"]["PassageReference"][];
         };
         /** PassageReference */
         PassageReference: {
@@ -1426,6 +1455,10 @@ export interface components {
          * @enum {string}
          */
         Relation: "duplicate" | "contained" | "equivalent";
+        /** Rendered */
+        Rendered: {
+            html: string;
+        };
         /**
          * Reranker
          * @description Second-stage scoring applied to the Candidates of any mode (vector, fts or hybrid). cross-encoder: a model reads query and chunk together and rescores each pair; slower but more precise than embeddings. none: keep the retrieval order.
@@ -1471,6 +1504,13 @@ export interface components {
          * @enum {string}
          */
         Runtime: "onnx" | "mlx" | "gguf";
+        /**
+         * ScoreFold
+         * @description How the scores of a passage's matched chunks, or a document's, fold into one. sum: every matched chunk adds, so more evidence ranks higher (Vespa's chunk example). max: the best chunk alone (Elasticsearch semantic_text). harmonic: between the best and twice it, so more chunks lift a result but many weak ones never outrank one strong one.
+         * @default sum
+         * @enum {string}
+         */
+        ScoreFold: "max" | "sum" | "harmonic";
         /** SearchAt */
         SearchAt: {
             ts: number;
@@ -1540,6 +1580,56 @@ export interface components {
              * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded on first use.
              */
             reranker_model?: string | null;
+            /**
+             * Rerank with the shared context
+             * @description When several questions share a context, the query embedding reads the context in front of each question to find candidates. Off: the reranker, which sets the final order, reads each question alone, so a context every document matches ("ddd" over a DDD book) cannot outrank what the question asks. On: the reranker reads it too.
+             */
+            rerank_with_context?: boolean | null;
+            /**
+             * Passage and document score
+             * @description How the scores of a passage's matched chunks, or a document's, fold into one. sum: every matched chunk adds, so more evidence ranks higher (Vespa's chunk example). max: the best chunk alone (Elasticsearch semantic_text). harmonic: between the best and twice it, so more chunks lift a result but many weak ones never outrank one strong one.
+             */
+            score_fold?: components["schemas"]["ScoreFold"] | null;
+            /**
+             * Rerank whole excerpts (experiment)
+             * @description With a reranker on, an excerpts search scores each finished excerpt as one text against the questions it answers, instead of folding its chunks' scores, and a single question's excerpts are sorted by it. Only when every excerpt fits what the reranker reads; else the chunk scores stand. Off until measured to help.
+             */
+            rerank_excerpts?: boolean | null;
+            /**
+             * Values for growing and filling
+             * @description How a chunk next to a passage is judged worth taking. relative: its score against the ranked chunks, 0 at their median and 1 at their best. A short passage is judged against the chunks the search scanned, by the reranker when one is on; an excerpt's text around its passages against the passages kept, by the query vector or the question's words, since asking the reranker there would take seconds. absolute (experiment, with a reranker on): the reranker judges both, its score spread by its calibrated curve, minus 0.18, as dsRAG's Relevant Segment Extraction values a chunk.
+             */
+            fill_values?: components["schemas"]["FillValues"] | null;
+            /**
+             * Lowest reranker score
+             * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. 0 keeps every chunk. Empty in the user settings: the chosen reranker's own floor, 0.05 until it is calibrated on borderline pairs of your collections (python -m haskie.catalogue.calibrate). Empty for a collection: the user setting.
+             */
+            min_rerank_score?: number | null;
+            /**
+             * Shortest passage (characters)
+             * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question (see Chunks a passage may grow by). One that grows by none is dropped, unless it is the best result, or its excerpt's section holds another passage. A whole short section is kept as it is. 0 turns this off.
+             */
+            min_passage_chars?: number | null;
+            /**
+             * Chunks a passage may grow by
+             * @description How many neighbouring chunks of its section a passage may grow by on each side, once, never past a heading, and only where they match the question: a short passage as the passages are ranked, every excerpt's passages as the excerpt is filled. Twice this is the longest gap between two passages that is filled. 0 turns growing off.
+             */
+            max_passage_grow?: number | null;
+            /**
+             * Growth bias
+             * @description Added to the value of every chunk a passage could grow by, -1 to 1 (see Values for growing and filling). A stretch of chunks is taken when its values sum above 0, so above 0 passages grow more eagerly, taking weaker chunks, and below 0 only by stronger ones. At -1 nothing grows, so every short passage is dropped that Shortest passage would drop.
+             */
+            grow_bias?: number | null;
+            /**
+             * Largest section (characters)
+             * @description An excerpt is one section of a document: the largest heading whose text fits this many characters. The passages a search keeps under it come back together, in document order.
+             */
+            max_section_chars?: number | null;
+            /**
+             * Largest answer (characters)
+             * @description How much text the sections of one excerpts search hold. Sections past it are left out, the last first, and the text around and between passages that answers too is added while it fits. One excerpt found for words no section holds may come past it.
+             */
+            max_answer_chars?: number | null;
         };
         /** SearchSettings */
         SearchSettings: {
@@ -1594,6 +1684,55 @@ export interface components {
              * @default Xenova/ms-marco-MiniLM-L-6-v2
              */
             reranker_model: string;
+            /**
+             * Rerank with the shared context
+             * @description When several questions share a context, the query embedding reads the context in front of each question to find candidates. Off: the reranker, which sets the final order, reads each question alone, so a context every document matches ("ddd" over a DDD book) cannot outrank what the question asks. On: the reranker reads it too.
+             * @default false
+             */
+            rerank_with_context: boolean;
+            score_fold?: components["schemas"]["ScoreFold"];
+            /**
+             * Rerank whole excerpts (experiment)
+             * @description With a reranker on, an excerpts search scores each finished excerpt as one text against the questions it answers, instead of folding its chunks' scores, and a single question's excerpts are sorted by it. Only when every excerpt fits what the reranker reads; else the chunk scores stand. Off until measured to help.
+             * @default false
+             */
+            rerank_excerpts: boolean;
+            fill_values?: components["schemas"]["FillValues"];
+            /**
+             * Lowest reranker score
+             * @description With a reranker on, a chunk it scores under this (0 to 1) is dropped before passages are built: the reranker judged it does not answer. A question nothing clears is reported unanswered, and a question tags only the excerpts it scores this high. 0 keeps every chunk. Empty in the user settings: the chosen reranker's own floor, 0.05 until it is calibrated on borderline pairs of your collections (python -m haskie.catalogue.calibrate). Empty for a collection: the user setting.
+             */
+            min_rerank_score?: number | null;
+            /**
+             * Shortest passage (characters)
+             * @description A passage shorter than this, or under 7 words, grows by the neighbouring chunks of its section that match the question (see Chunks a passage may grow by). One that grows by none is dropped, unless it is the best result, or its excerpt's section holds another passage. A whole short section is kept as it is. 0 turns this off.
+             * @default 300
+             */
+            min_passage_chars: number;
+            /**
+             * Chunks a passage may grow by
+             * @description How many neighbouring chunks of its section a passage may grow by on each side, once, never past a heading, and only where they match the question: a short passage as the passages are ranked, every excerpt's passages as the excerpt is filled. Twice this is the longest gap between two passages that is filled. 0 turns growing off.
+             * @default 3
+             */
+            max_passage_grow: number;
+            /**
+             * Growth bias
+             * @description Added to the value of every chunk a passage could grow by, -1 to 1 (see Values for growing and filling). A stretch of chunks is taken when its values sum above 0, so above 0 passages grow more eagerly, taking weaker chunks, and below 0 only by stronger ones. At -1 nothing grows, so every short passage is dropped that Shortest passage would drop.
+             * @default 0
+             */
+            grow_bias: number;
+            /**
+             * Largest section (characters)
+             * @description An excerpt is one section of a document: the largest heading whose text fits this many characters. The passages a search keeps under it come back together, in document order.
+             * @default 12000
+             */
+            max_section_chars: number;
+            /**
+             * Largest answer (characters)
+             * @description How much text the sections of one excerpts search hold. Sections past it are left out, the last first, and the text around and between passages that answers too is added while it fits. One excerpt found for words no section holds may come past it.
+             * @default 36000
+             */
+            max_answer_chars: number;
         };
         /** SessionCollections */
         SessionCollections: {
@@ -1635,6 +1774,25 @@ export interface components {
         Sources: {
             documents: components["schemas"]["Source"][];
             collections: string[];
+        };
+        /** Span */
+        Span: {
+            header: string;
+            location: string;
+            seq_start: number;
+            seq_end: number;
+            line_start: number;
+            line_end: number;
+            char_start: number;
+            char_end: number;
+            page_start: number | null;
+            page_end: number | null;
+            score: number;
+            also_in?: components["schemas"]["PassageReference"][];
+            aspects?: string[];
+            aspect_scores?: {
+                [key: string]: number;
+            };
         };
         /**
          * Stage
@@ -1823,6 +1981,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Options"];
+                };
+            };
+        };
+    };
+    ApiDocumentsRenderRenderMarkdown: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Markdown"];
+            };
+        };
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Rendered"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
                 };
             };
         };
@@ -2500,53 +2697,6 @@ export interface operations {
             };
         };
     };
-    ApiCollectionsSearchSearchCollection: {
-        parameters: {
-            query: {
-                q: string;
-                limit?: number | null;
-                mode?: components["schemas"]["SearchMode"] | null;
-                fusion?: components["schemas"]["Fusion"] | null;
-                vector_weight?: number | null;
-                bm25_weight?: number | null;
-                reranker?: components["schemas"]["Reranker"] | null;
-                candidates?: number | null;
-                session_id?: string | null;
-            };
-            header?: never;
-            path: {
-                collection: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Request fulfilled, document follows */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Hit"][];
-                };
-            };
-            /** @description Bad request syntax or unsupported method */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        status_code: number;
-                        detail: string;
-                        extra?: null | {
-                            [key: string]: unknown;
-                        } | unknown[];
-                    };
-                };
-            };
-        };
-    };
     ApiCollectionsOverridesPutCollectionOverrides: {
         parameters: {
             query?: never;
@@ -3101,7 +3251,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Hit"][] | components["schemas"]["Passage"][] | components["schemas"]["Excerpt"][];
+                    "application/json": components["schemas"]["Hit"][] | components["schemas"]["Passage"][];
                 };
             };
             /** @description Bad request syntax or unsupported method */
@@ -3124,7 +3274,8 @@ export interface operations {
     ApiSearchExcerptsSearchExcerpts: {
         parameters: {
             query: {
-                q: string;
+                q: string[];
+                context?: string | null;
                 session_id?: string | null;
                 collections?: string | null;
                 limit?: number | null;
@@ -3141,7 +3292,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Excerpt"][];
+                    "application/json": components["schemas"]["Answer"];
                 };
             };
             /** @description Bad request syntax or unsupported method */

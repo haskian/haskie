@@ -1,40 +1,40 @@
-"""Passages out of chunks: folding hits into ranges, widening a range to boundaries a reader would
-stop at, and folding the same hits into the documents and collections that cover a query.
+"""Passages out of chunks: folding hits into ranges, quoting a range as it was cut, and folding
+the same hits into the documents and collections that cover a query.
 
 Every offset below is a real offset into `MARKDOWN`: the fixture builds a `Hit` from a pair of
 snippets and reads its text, lines and char range out of the document, the way the index does.
 """
 
+import random
+
 import msgspec
 import pytest
+from conftest import chunk_hit, hit
 
 from haskie.collection.index import Hit, Overlap, Overlaps, Relation, location
+from haskie.indexing.chunk import Chunk, open_headings, split
+from haskie.indexing.segment import CutReason
 from haskie.search.passage import (
-    MAX_WIDEN,
-    Excerpt,
     HitRange,
     Passage,
     PassageReference,
     Sources,
-    Window,
+    fold,
     fold_sources,
     harmonic,
     min_cover,
+    part,
+    quote,
     ranges,
+    rejoin,
     top_documents,
-    widen,
 )
+from haskie.settings import ChunkSettings, ScoreFold
 
-# A long line with no sentence terminator and no newline in it: what the widening has nothing to
-# stop at, so the cap is all that bounds it.
-RUN = ", ".join(f"service-{i:03d}" for i in range(80))
+HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
 
-# A long line that does offer sentences: past the cap in both directions, so the widening has to
-# fall back from the newline rule to the outermost whole sentences it can reach.
-SENTENCE_TAIL = "explains how a consumer handles a duplicate message."
-SENTENCES = " ".join(f"Sentence {i} {SENTENCE_TAIL}" for i in range(12))
 
-MARKDOWN = f"""# Retries
+MARKDOWN = """# Retries
 
 A background job retries a failed HTTP call. The retry has to be idempotent, or the side
 effect happens twice.
@@ -53,19 +53,7 @@ Hosts drift apart by milliseconds.
 ## Deduplication
 
 The consumer keys on an idempotency key. It drops any message it has already handled.
-
-## Backpressure
-
-{RUN}
-
-## Long line
-
-{SENTENCES}
 """
-
-# What `widen` is handed: `retrieval` reads a window around the range, and the whole fixture is
-# one such window that happens to start at the beginning of the document.
-WHOLE = Window(text=MARKDOWN, char_start=0)
 
 DOC = "retries.md"
 OTHER = "ordering.md"
@@ -172,6 +160,58 @@ def test_harmonic_folds_the_best_chunk_with_the_sum(
 
 
 @pytest.mark.parametrize(
+    ("name", "scores", "sum_", "max_", "harmonic_"),
+    [
+        ("one chunk scores itself under every rule", [3.0], 3.0, 3.0, 3.0),
+        ("a second chunk adds to the sum, not to the max", [3.0, 3.0], 6.0, 3.0, 4.0),
+        (
+            "many weak chunks: the sum outgrows the harmonic mean",
+            [1.0] * 100,
+            100.0,
+            1.0,
+            200 / 101,
+        ),
+        ("a chunk nobody ranked scores 0 and adds nothing", [2.0, 0.0], 2.0, 2.0, 2.0),
+        ("nothing matched scores nothing", [], 0.0, 0.0, 0.0),
+    ],
+)
+def test_a_passages_chunks_fold_by_the_rule_the_settings_choose(
+    name: str, scores: list[float], sum_: float, max_: float, harmonic_: float
+) -> None:
+    """`sum` as Vespa's chunk example, `max` as Elasticsearch's semantic_text, `harmonic` haskie's
+    own: between the best and twice it."""
+    found = {how: fold(scores, how) for how in ScoreFold}
+
+    assert found == pytest.approx(
+        {ScoreFold.SUM: sum_, ScoreFold.MAX: max_, ScoreFold.HARMONIC: harmonic_}
+    ), name
+
+
+@pytest.mark.parametrize(
+    ("how", "order"),
+    [
+        (ScoreFold.SUM, [OTHER, DOC]),
+        (ScoreFold.MAX, [DOC, OTHER]),
+        (ScoreFold.HARMONIC, [DOC, OTHER]),
+    ],
+)
+def test_documents_rank_by_the_rule_the_settings_choose(how: ScoreFold, order: list[str]) -> None:
+    """One strong chunk (5) against three fair ones (2, 2, 2): the sum ranks the document with
+    more evidence first, the best chunk and the harmonic mean the strong one."""
+    strong = _hit(BACKOFF, 2, 5.0)
+    fair = [
+        _hit(text, seq, 2.0, document=OTHER, collection="ops", header="Retries")
+        for seq, text in ((1, OPENING), (2, BACKOFF), (3, SKEW))
+    ]
+    hits = [strong, *fair]
+
+    found = fold_sources(top_documents(hits, 10, how), {}, 3, how).documents
+
+    assert [one.document for one in found] == order, how
+    assert [ranges(hits, how)[0].hits[0].document] == [order[0]], f"{how}: passages the same"
+
+
+@pytest.mark.parametrize(
     ("name", "shares", "expected"),
     [
         ("a copy: whole both ways", (1.0, 1.0), 1.0),
@@ -221,6 +261,30 @@ def test_harmonic_of_an_overlap_is_pulled_toward_its_weakest_measure(
             [(COLLECTION, DOC, 1, 1), ("ops", DOC, 2, 2)],
         ),
         (
+            "a heading between two chunks ends the section: they never merge",
+            [
+                msgspec.structs.replace(ONE, end_reason=CutReason.HEADING),
+                msgspec.structs.replace(TWO, start_reason=CutReason.HEADING),
+            ],
+            [(COLLECTION, DOC, 1, 1), (COLLECTION, DOC, 2, 2)],
+        ),
+        (
+            "a paragraph between two chunks is one section: they merge",
+            [
+                msgspec.structs.replace(ONE, end_reason=CutReason.PARAGRAPH),
+                msgspec.structs.replace(TWO, start_reason=CutReason.PARAGRAPH),
+            ],
+            [(COLLECTION, DOC, 1, 2)],
+        ),
+        (
+            "the edge between two parts of a PDF is no section end: they merge",
+            [
+                msgspec.structs.replace(ONE, end_reason=CutReason.EDGE),
+                msgspec.structs.replace(TWO, start_reason=CutReason.EDGE),
+            ],
+            [(COLLECTION, DOC, 1, 2)],
+        ),
+        (
             "spans that score the same sort by document, then by position",
             [_hit(SKEW, 3, 4.0), ONE, OTHER_ONE],
             [("ops", OTHER, 1, 1), (COLLECTION, DOC, 1, 1), (COLLECTION, DOC, 3, 3)],
@@ -230,7 +294,7 @@ def test_harmonic_of_an_overlap_is_pulled_toward_its_weakest_measure(
 def test_ranges_folds_consecutive_chunks_of_one_document(
     name: str, hits: list[Hit], expected: list[tuple[str, str, int, int]]
 ) -> None:
-    folded = ranges(hits)
+    folded = ranges(hits, how=HARMONIC)
 
     shape = [(r.hits[0].collection, r.hits[0].document, r.seq_start, r.seq_end) for r in folded]
     assert shape == expected, name
@@ -239,7 +303,7 @@ def test_ranges_folds_consecutive_chunks_of_one_document(
 def test_a_range_carries_the_span_and_the_score_of_its_members() -> None:
     """The span is the union of its chunks, and the score is the document rule applied to one
     span: one strong chunk lifted by what sits next to it."""
-    (folded,) = ranges([ONE, TWO])
+    (folded,) = ranges([ONE, TWO], how=HARMONIC)
 
     assert (folded.char_start, folded.char_end) == (ONE.char_start, TWO.char_end)
     assert (folded.line_start, folded.line_end) == (ONE.line_start, TWO.line_end)
@@ -247,12 +311,17 @@ def test_a_range_carries_the_span_and_the_score_of_its_members() -> None:
     assert folded.score == pytest.approx(2 * 4.0 * 7.0 / 11.0), "harmonic(best 4, sum 7)"
 
 
-# --- widen ---------------------------------------------------------------------------
+# --- quote ---------------------------------------------------------------------------
 
 
 def _range(char_start: int, char_end: int, **fields) -> HitRange:
     """A range of one chunk over `[char_start, char_end)`, as `ranges` would build it."""
-    return ranges([_hit((char_start, char_end), 1, 2.0, **fields)])[0]
+    return ranges([_hit((char_start, char_end), 1, 2.0, **fields)], how=HARMONIC)[0]
+
+
+def _quote(hit_range: HitRange) -> Passage:
+    """`hit_range` as a passage, handed the markdown its offsets cover, as `retrieval` reads it."""
+    return quote(hit_range, MARKDOWN[hit_range.char_start : hit_range.char_end])
 
 
 @pytest.mark.parametrize(
@@ -278,14 +347,14 @@ def test_a_passage_cites_every_page_its_chunks_cover(
             zip([OPENING, BACKOFF, SKEW], pages, strict=False), 1
         )
     ]
-    (hit_range,) = ranges(hits)
+    (hit_range,) = ranges(hits, how=HARMONIC)
 
-    widened = widen(hit_range, WHOLE, Passage)
+    quoted = _quote(hit_range)
 
     assert (hit_range.page_start, hit_range.page_end) == expected, f"{name}: set once, on the range"
-    assert (widened.page_start, widened.page_end) == expected, name
+    assert (quoted.page_start, quoted.page_end) == expected, name
     cited = "" if expected[0] is None else f" p.{expected[0]}-{expected[1]} "
-    assert cited in widened.location, f"{name}: the citation names the same pages"
+    assert cited in quoted.location, f"{name}: the citation names the same pages"
 
 
 # a place measured close to the passage it folded into, in words and in its vectors
@@ -296,7 +365,7 @@ CLOSE = Overlaps(
 )
 
 
-def test_widening_a_range_keeps_what_was_folded_into_it() -> None:
+def test_quoting_a_range_keeps_what_was_folded_into_it() -> None:
     """The pointers are decided on the range (`collapse`), before anything is read, and the
     passage is what the caller sees them on."""
     folded = PassageReference(
@@ -331,70 +400,44 @@ def test_widening_a_range_keeps_what_was_folded_into_it() -> None:
             )
         ],
     )
-    (hit_range,) = ranges([ONE, TWO])
+    (hit_range,) = ranges([ONE, TWO], how=HARMONIC)
     hit_range = msgspec.structs.replace(hit_range, also_in=[folded])
 
-    widened = widen(hit_range, WHOLE, Passage)
+    quoted = _quote(hit_range)
 
-    assert widened.also_in == [folded]
+    assert quoted.also_in == [folded]
 
 
 @pytest.mark.parametrize(
-    ("name", "span", "expected", "lines"),
+    ("name", "span", "lines"),
     [
         (
-            "a newline bounds the passage: the line the span sits on",
+            "a range that starts and ends mid-line gains nothing around it",
             _span("has to be idempotent", "or the side"),
-            _text("A background job", "or the side"),
             (3, 3),
         ),
+        ("a heading line", _span("### Skew", "### Skew"), (14, 14)),
+        ("the start of the file", (0, len("# Retries")), (1, 1)),
         (
-            "a heading is a line of its own, so it is never widened into",
-            _span("drift apart", "by milliseconds"),
-            "Hosts drift apart by milliseconds.",
-            (15, 15),
-        ),
-        (
-            "the line before a heading stops at itself",
-            _span("a wall clock", "clock for ordering"),
-            "Never trust a wall clock for ordering",
-            (13, 13),
-        ),
-        (
-            "the start of the file is a boundary of its own",
-            (0, len("# Retries")),
-            "# Retries",
-            (1, 1),
-        ),
-        (
-            "a line longer than the cap falls back to the outermost whole sentences",
-            (_at("Sentence 5 explains"), _at("Sentence 5 explains") + 30),
-            _text("Sentence 1 explains", f"Sentence 9 {SENTENCE_TAIL}"),
-            (27, 27),
-        ),
-        (
-            "neither a newline nor a sentence end in range: the cap is all there is",
-            (_at(RUN) + 400, _at(RUN) + 450),
-            MARKDOWN[_at(RUN) + 400 - MAX_WIDEN : _at(RUN) + 450 + MAX_WIDEN].strip(),
-            (23, 23),
-        ),
-        (
-            "the end of the file stops the widening",
-            (len(MARKDOWN) - 40, len(MARKDOWN)),
-            _text("Sentence 7 explains", f"Sentence 11 {SENTENCE_TAIL}"),
-            (27, 27),
+            "a whole paragraph, as the chunker cuts most of them",
+            _span("The consumer keys", "already handled."),
+            (19, 19),
         ),
     ],
 )
-def test_expand_widens_a_range_to_the_nearest_boundary(
-    name: str, span: tuple[int, int], expected: str, lines: tuple[int, int]
+def test_a_passage_is_its_range_and_nothing_around_it(
+    name: str, span: tuple[int, int], lines: tuple[int, int]
 ) -> None:
-    passage = widen(_range(*span), WHOLE, Passage)
+    """The chunker already cuts where the author did, so the range is quoted as it was cut: the
+    text, the offsets and the lines are the range's own."""
+    hit_range = _range(*span)
 
-    assert passage.text == expected, name
-    assert (passage.line_start, passage.line_end) == lines, f"{name}: lines recounted"
-    assert MARKDOWN[passage.char_start : passage.char_end] == expected, f"{name}: offsets agree"
-    assert not passage.text[:1].isspace() and not passage.text[-1:].isspace(), name
+    passage = _quote(hit_range)
+
+    assert passage.text == MARKDOWN[span[0] : span[1]], name
+    assert (passage.char_start, passage.char_end) == span, f"{name}: the range's offsets"
+    assert (passage.line_start, passage.line_end) == lines, f"{name}: the range's lines"
+    assert (passage.line_start, passage.line_end) == (hit_range.line_start, hit_range.line_end)
 
 
 def test_a_passage_across_a_page_break_carries_no_page_marker() -> None:
@@ -402,45 +445,15 @@ def test_a_passage_across_a_page_break_carries_no_page_marker() -> None:
     it, as a chunk does, while its offsets still cut the source the file holds."""
     markdown = "# Retries\n\nThe retry waits.\n\n<!-- page 2 -->\n\nThen it runs again.\n"
     span = (markdown.index("The retry"), markdown.index("again.") + len("again."))
-    passage = widen(_range(*span), Window(text=markdown, char_start=0), Passage)
+    passage = quote(_range(*span), markdown[span[0] : span[1]])
     assert "<!--" not in passage.text
     assert passage.text == "The retry waits.\n\nThen it runs again."
     assert "<!-- page 2 -->" in markdown[passage.char_start : passage.char_end], "the source's"
 
 
-@pytest.mark.parametrize(
-    ("name", "span", "before"),
-    [
-        ("a window opening mid-line", _span("The consumer keys", "idempotency key."), 200),
-        (
-            "a window opening exactly at the widened start",
-            _span("Hosts drift", "milliseconds."),
-            35,
-        ),
-        ("a window with nothing to spare after it", _span("### Skew", "milliseconds."), 500),
-    ],
-)
-def test_expand_reports_document_offsets_from_a_window(
-    name: str, span: tuple[int, int], before: int
-) -> None:
-    """A search reads a few hundred bytes around the range, not the document, so `widen` works in
-    window coordinates and has to hand back offsets and lines of the document itself."""
-    start = max(0, span[0] - before)
-    window = Window(text=MARKDOWN[start : span[1] + before], char_start=start)
-    folded = _range(*span)
-
-    passage = widen(folded, window, Passage)
-
-    whole = widen(folded, WHOLE, Passage)
-    assert (passage.char_start, passage.char_end) == (whole.char_start, whole.char_end), name
-    assert (passage.line_start, passage.line_end) == (whole.line_start, whole.line_end), name
-    assert passage.text == whole.text, name
-    assert MARKDOWN[passage.char_start : passage.char_end] == passage.text, name
-
-
-def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() -> None:
+def test_a_passage_carries_the_citation_of_the_best_chunk_over_its_lines() -> None:
     """A passage is cited the way a chunk is: `header` from the chunk that ranked it, `location`
-    over the lines it ended up covering and the pages every one of its chunks is on."""
+    over the lines all its chunks cover and the pages every one of its chunks is on."""
     hits = [
         _hit(_span("# Retries", "HTTP call."), 1, 1.0, page_start=1, page_end=1),
         _hit(
@@ -453,7 +466,7 @@ def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() 
         ),
     ]
 
-    passage = widen(ranges(hits)[0], WHOLE, Passage)
+    passage = _quote(ranges(hits, how=HARMONIC)[0])
 
     assert passage.header == "Retries > Backoff", "the best-scoring chunk names the passage"
     assert (passage.page_start, passage.page_end) == (1, 3), "both chunks' pages, not the best's"
@@ -465,23 +478,13 @@ def test_expand_carries_the_citation_of_the_best_chunk_over_the_widened_lines() 
     assert passage.text.startswith("# Retries") and passage.text.endswith("twice.")
 
 
-def test_an_excerpt_is_a_passage() -> None:
-    """The trimming step is not written yet, so the type exists, the shape is the passage's, and
-    `widen` builds whichever of the two the caller asked for."""
-    span = _range(*OPENING)
-    passage = widen(span, WHOLE, Passage)
-
-    excerpt = widen(span, WHOLE, Excerpt)
-
-    assert isinstance(excerpt, Excerpt) and isinstance(excerpt, Passage)
-    assert excerpt.text == passage.text and excerpt.location == passage.location
-
-
 # --- fold_sources ---------------------------------------------------------------------
 
 
 def _sources(hits: list[Hit], memberships=None, limit: int = 10, sections: int = 3) -> Sources:
-    return fold_sources(top_documents(hits, limit), memberships or {}, sections)
+    return fold_sources(
+        top_documents(hits, limit, how=HARMONIC), memberships or {}, sections, how=HARMONIC
+    )
 
 
 def test_one_document_folds_to_one_row_of_evidence() -> None:
@@ -616,3 +619,219 @@ def test_min_cover_is_the_fewest_collections_that_hold_every_document(
     name: str, doc_collections: dict[str, list[str]], expected: list[str]
 ) -> None:
     assert min_cover(doc_collections) == expected, name
+
+
+# --- a passage of every cut the chunker makes -------------------------------------------------
+
+RULES = "\n".join(f"- Rule {i} tells the consumer how to retry one failed call." for i in range(12))
+LONG = " ".join(f"Sentence {i} explains how the consumer handles a duplicate." for i in range(12))
+CODE = "\n".join(f"retry_{i} = backoff(attempt={i}, jitter=True)" for i in range(20))
+EVERY_CUT = f"""# Retries
+
+A background job retries a failed HTTP call. The retry has to be idempotent, or the side effect
+happens twice, and the consumer has no way to tell the second call from the first.
+
+Exponential backoff with jitter spreads the retries out over time. A fixed delay buys a thundering
+herd instead, because every client that failed at once also retries at once.
+
+## Rules
+
+{RULES}
+
+## Long
+
+{LONG}
+
+## Code
+
+```
+{CODE}
+```
+"""
+
+
+def test_every_chunk_is_quoted_as_it_was_cut() -> None:
+    """Whatever the reason a chunk starts or ends where it does, its passage is its own text:
+    nothing from the chunk before or after it joins. Snapping to line or sentence ends used to
+    add text past a sentence cut, from a neighbour the query never matched. The fixture is
+    chunked in two parts, as a PDF is, so a part boundary is one of the cuts."""
+    settings = ChunkSettings(chunk_size=300)
+    at = EVERY_CUT.index("## Long")
+    first, rest = EVERY_CUT[:at], EVERY_CUT[at:]
+    chunks = [
+        *split(first, settings, end_reason=CutReason.PART),
+        *split(
+            rest,
+            settings,
+            line_offset=first.count("\n"),
+            char_offset=len(first),
+            byte_offset=len(first.encode()),
+            opened=open_headings(first),
+            start_reason=CutReason.PART,
+        ),
+    ]
+    reasons = {chunk.start_reason for chunk in chunks} | {chunk.end_reason for chunk in chunks}
+
+    passages = [
+        quote(_one_chunk(chunk), EVERY_CUT[chunk.char_start : chunk.char_end]) for chunk in chunks
+    ]
+
+    assert reasons == set(CutReason), "the fixture makes every cut the chunker knows"
+    for chunk, passage in zip(chunks, passages, strict=True):
+        cut = f"{chunk.start_reason} -> {chunk.end_reason}"
+        assert passage.text == chunk.text.strip(), cut
+        assert (passage.char_start, passage.char_end) == (chunk.char_start, chunk.char_end), cut
+        assert (passage.line_start, passage.line_end) == (chunk.line_start, chunk.line_end), cut
+
+
+def _one_chunk(chunk: Chunk) -> HitRange:
+    """A chunk of `EVERY_CUT` as the range a search would build from its hit."""
+    (hit_range,) = ranges([chunk_hit(chunk, 1, document=DOC, collection=COLLECTION)], how=HARMONIC)
+    return hit_range
+
+
+# --- rejoin ---------------------------------------------------------------------------
+
+
+def _place(document: str) -> PassageReference:
+    """A place folded under a range, as `collapse` lists it."""
+    return PassageReference(
+        collection=COLLECTION,
+        document=document,
+        seq_start=1,
+        seq_end=1,
+        header="Retries",
+        location=f"{document} L1-1",
+        line_start=1,
+        line_end=1,
+        score=1.0,
+        relation=Relation.DUPLICATE,
+        similarity=1.0,
+        to_parent=CLOSE,
+        to_root=CLOSE,
+    )
+
+
+def _part(
+    *hits: Hit, aspects: list[str] | None = None, alone: bool = False, place: str = ""
+) -> HitRange:
+    (found,) = ranges(list(hits), how=HARMONIC)
+    return msgspec.structs.replace(
+        found, aspects=aspects or [], alone=alone, also_in=[_place(place)] if place else []
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "parts", "expected"),
+    [
+        (
+            "parts that continue each other become one, carrying what each carried",
+            [_part(ONE, aspects=["a"], place="x.md"), _part(TWO, aspects=["b", "a"], place="y.md")],
+            [((1, 2), ["a", "b"], ["x.md", "y.md"], False)],
+        ),
+        (
+            "parts apart stay apart, each with its own",
+            [_part(ONE, aspects=["a"]), _part(THREE, aspects=["b"])],
+            [((1, 1), ["a"], [], False), ((3, 3), ["b"], [], False)],
+        ),
+        (
+            "alone only when every part it holds was",
+            [_part(ONE, alone=True), _part(TWO, alone=True), _part(FOUR, alone=True)],
+            [((1, 2), [], [], True), ((4, 4), [], [], True)],
+        ),
+        (
+            "one part that stands makes the whole stand",
+            [_part(ONE, alone=True), _part(TWO)],
+            [((1, 2), [], [], False)],
+        ),
+        (
+            "overlapping parts hold a shared chunk once",
+            [_part(ONE, TWO, aspects=["a"]), _part(TWO, THREE, aspects=["b"])],
+            [((1, 3), ["a", "b"], [], False)],
+        ),
+        ("nothing to rejoin", [], []),
+    ],
+)
+def test_rejoin_rebuilds_ranges_over_every_part_and_keeps_what_they_carried(
+    name: str,
+    parts: list[HitRange],
+    expected: list[tuple[tuple[int, int], list[str], list[str], bool]],
+) -> None:
+    rebuilt = rejoin(parts, how=HARMONIC)
+
+    shape = [
+        (
+            (one.seq_start, one.seq_end),
+            one.aspects,
+            [place.document for place in one.also_in],
+            one.alone,
+        )
+        for one in sorted(rebuilt, key=lambda one: one.seq_start)
+    ]
+    assert shape == expected, name
+
+
+def test_a_shared_chunk_is_held_as_the_first_part_listed_has_it() -> None:
+    ranked, unranked = TWO, msgspec.structs.replace(TWO, score=0.0)
+
+    (rebuilt,) = rejoin([_part(ONE, ranked), _part(unranked, THREE)], how=HARMONIC)
+
+    assert [hit.score for hit in rebuilt.hits] == [4.0, 3.0, 2.0]
+
+
+def test_a_part_is_an_unranked_chunk_with_the_questions_it_answers() -> None:
+    found = part(TWO, ["a"])
+
+    assert [(hit.seq, hit.score) for hit in found.hits] == [(2, 0.0)]
+    assert (found.aspects, found.alone) == (["a"], False)
+    assert part(TWO).aspects == []
+
+
+# --- rejoin, over many random parts ---------------------------------------------------------
+
+
+def _random_parts(rng: random.Random) -> list[HitRange]:
+    """Runs of consecutive chunks of one section of twelve, some overlapping, some apart, with
+    random questions and random `alone` marks."""
+    chunks = {
+        seq: hit(f"Chunk {seq} says one thing.", 1.0, seq=seq, char_start=seq * 40)
+        for seq in range(1, 13)
+    }
+    parts = []
+    for _ in range(rng.randint(1, 6)):
+        start = rng.randint(1, 12)
+        end = rng.randint(start, min(12, start + 2))
+        (found,) = ranges([chunks[seq] for seq in range(start, end + 1)], how=HARMONIC)
+        parts.append(
+            msgspec.structs.replace(
+                found,
+                aspects=rng.sample(["a", "b", "c"], rng.randint(0, 2)),
+                alone=rng.random() < 0.5,
+            )
+        )
+    return parts
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_rejoin_keeps_every_chunk_once_and_what_each_part_carried(seed: int) -> None:
+    rng = random.Random(seed)
+    parts = _random_parts(rng)
+
+    rebuilt = rejoin(parts, how=HARMONIC)
+
+    held = [hit.seq for one in rebuilt for hit in one.hits]
+    assert sorted(held) == sorted({hit.seq for one in parts for hit in one.hits}), "each chunk once"
+    spans = sorted((one.seq_start, one.seq_end) for one in rebuilt)
+    for start, end in spans:
+        assert [hit.seq for one in rebuilt if one.seq_start == start for hit in one.hits] == list(
+            range(start, end + 1)
+        ), "a range is a run of consecutive chunks"
+    assert all(after[0] > before[1] + 1 for before, after in zip(spans, spans[1:], strict=False)), (
+        "ranges that touch are one range"
+    )
+    for one in rebuilt:
+        inside = [part for part in parts if one.seq_start <= part.seq_start <= one.seq_end]
+        assert one.alone == all(part.alone for part in inside)
+        assert one.aspects == list(
+            dict.fromkeys(label for part in inside for label in part.aspects)
+        )

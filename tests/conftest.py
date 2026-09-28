@@ -20,7 +20,10 @@ from haskie.indexing.segment import PieceType
 
 if TYPE_CHECKING:  # every helper below imports haskie when it runs, not when pytest collects
     from haskie.catalogue.catalogue import EmbeddingModel
+    from haskie.collection.index import CollectionIndex, Hit
     from haskie.indexing.chunk import Chunk
+    from haskie.search.collapse import Scan
+    from haskie.settings import SearchOverrides, SearchSettings
 
 TEARDOWN_GRACE_SECONDS = 2.0  # how long a cancelled step may still be running at teardown
 TEARDOWN_POLL_SECONDS = 0.05
@@ -392,6 +395,94 @@ async def import_row(name: str, content: bytes | str = MD, into: Path | None = N
     return await document.import_path(str(source), document.ImportOptions(**options))
 
 
+def hit(
+    text: str,
+    score: float,
+    *,
+    document: str = "patterns.md",
+    collection: str = "backend",
+    seq: int = 1,
+    char_start: int = 0,
+) -> "Hit":
+    """One indexed chunk as a search reads it: `text` at `char_start` of `document`, on the line
+    its offset gives."""
+    from haskie.collection.index import Hit, location
+
+    line = char_start // 80 + 1
+    return Hit(
+        collection=collection,
+        document=document,
+        source_path=f"documents/{document}",
+        markdown_path=f"documents/{document}.md",
+        part=0,
+        seq=seq,
+        line_start=line,
+        line_end=line,
+        char_start=char_start,
+        char_end=char_start + len(text),
+        byte_start=char_start,
+        byte_end=char_start + len(text),
+        page_start=None,
+        page_end=None,
+        headings=["Messaging", "Retries"],
+        frame=["Messaging", "Retries"],
+        header="Messaging > Retries",
+        location=location(document, None, None, line, line),
+        text=text,
+        score=score,
+        source_file=f"/home/documents/{document}",
+        markdown_file=f"/home/documents/{document}.md",
+    )
+
+
+def chunk_hit(
+    chunk: "Chunk",
+    seq: int,
+    score: float = 1.0,
+    *,
+    document: str = "patterns.md",
+    collection: str = "backend",
+) -> "Hit":
+    """One chunk the chunker cut (`chunk.split`), as a search reads it back from the index: its
+    own offsets, lines, headings and cut reasons, numbered `seq`."""
+    from haskie.collection.index import Hit, location
+
+    return Hit(
+        collection=collection,
+        document=document,
+        source_path=f"documents/{document}",
+        markdown_path=f"documents/{document}.md",
+        part=0,
+        seq=seq,
+        line_start=chunk.line_start,
+        line_end=chunk.line_end,
+        char_start=chunk.char_start,
+        char_end=chunk.char_end,
+        byte_start=chunk.byte_start,
+        byte_end=chunk.byte_end,
+        page_start=None,
+        page_end=None,
+        headings=chunk.headings,
+        frame=chunk.frame,
+        header=chunk.header,
+        location=location(document, None, None, chunk.line_start, chunk.line_end),
+        text=chunk.text,
+        score=score,
+        layout=chunk.layout,
+        start_reason=chunk.start_reason,
+        end_reason=chunk.end_reason,
+        source_file=f"/home/documents/{document}",
+        markdown_file=f"/home/documents/{document}.md",
+    )
+
+
+def words_scan(hits: "list[Hit]") -> "Scan":
+    """The comparison spaces of a search without embeddings."""
+    from haskie.search import collapse
+
+    return collapse.spaces([one.text for one in hits], [None] * len(hits), None)
+
+
 async def compact_model() -> "EmbeddingModel":
     """The "compact" profile's model as the catalogue holds it: bge-small, with the seed's own
     thresholds."""
@@ -401,6 +492,37 @@ async def compact_model() -> "EmbeddingModel":
     model = await catalogue.embedding_model(UserSettings(embedding="compact"))
     assert model is not None
     return model
+
+
+async def index_hits(
+    index: "CollectionIndex", query: str, settings: "SearchSettings"
+) -> list["Hit"]:
+    """What one bare index retrieves for `query` by full text, as a search's `retrieve` step reads
+    it (`search_rows`), cut to `settings.limit`: no embedding, no reranker, no fold."""
+    rows = await index.search_rows(query, None, settings, settings.limit)
+    return [index.hit(row) for row in rows]
+
+
+async def collection_hits(name: str, query: str) -> list["Hit"]:
+    """What a chunk search of the one collection `name` answers (`flow.chunks`), the one search
+    the API runs, with the collection's own settings."""
+    from haskie.search import flow
+
+    return await flow.chunks([name], query)
+
+
+async def search_with(name: str, query: str, search: "SearchOverrides") -> list["Hit"]:
+    """`search` saved as the collection's search overrides, replacing any before, then its chunk
+    search (`collection_hits`): no route takes search settings per call. Later searches of the
+    collection keep them."""
+    import msgspec
+
+    from haskie.collection.collection import Collection
+
+    collection = Collection(name)
+    current = (await collection.info()).overrides
+    await collection.set_overrides(msgspec.structs.replace(current, search=search))
+    return await collection_hits(name, query)
 
 
 async def seed_index(collection: str, doc: str, text: str, heading: str = "Alpha") -> None:
@@ -511,6 +633,36 @@ def api_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from litestar.testing import AsyncTestClient
 
     return AsyncTestClient(api_app(tmp_path, monkeypatch))
+
+
+async def _release_default_executor() -> None:
+    """Hand the portal loop a thread pool of its own, so closing it shuts that one down.
+
+    Litestar's test transport answers every request on a blocking portal: an event loop of its
+    own, in another thread. Closing a portal shuts down its loop's default executor, and DBOS
+    makes *its* thread pool that executor as soon as an async DBOS call runs on the loop
+    (`DBOS._configure_asyncio_thread_pool`). Without this, the first request would leave the
+    running DBOS unable to schedule anything, teardown included. The pool below never starts a
+    thread: a `ThreadPoolExecutor` only spawns one when something is submitted to it.
+    """
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+
+
+@pytest.fixture
+async def client(api_client, dbos) -> AsyncIterator:
+    """The shared client, plus DBOS and one portal for the whole test, and no lifespan (see
+    `test_api`'s module docstring)."""
+    from anyio.from_thread import start_blocking_portal
+
+    with start_blocking_portal(backend="asyncio") as portal:
+        api_client.blocking_portal = portal
+        try:
+            yield api_client
+        finally:
+            portal.call(_release_default_executor)
 
 
 async def get_page(client, path: str, **params) -> dict:

@@ -27,12 +27,14 @@ mise run dev     # API and MCP on :8452 with reload, Vite on :8453
 | `web` | Vite dev server on :8453, proxying `/api` to :8452 |
 | `check` | lint, format and type-check both sides (ruff, ty, oxlint, tsc), and fail if `web/src/schema.d.ts` is stale. `--fix` applies ruff's fixes and formatting |
 | `test` | Python tests in parallel, with coverage |
+| `test-web` | web UI tests (`bun test`); `test` runs them first |
 | `schema` | regenerate `web/src/schema.d.ts` from the OpenAPI document |
 | `build` | build the web UI into `src/haskie/web`, where the wheel ships it |
 | `dist` | `build`, then the wheel and sdist into `dist/` |
 | `smoke` | install the built wheel in a fresh venv, check the CLI and the bundled UI |
 | `clean-run` | destroy `~/haskie-dev` (asks first), reinstall the fresh build, run it on a clean home |
 | `install-dev` | build, then install this checkout as the `haskie-dev` command, which always uses `~/haskie-dev` and port 8452 |
+| `calibrate-rerankers` | `sample` writes this home's searched questions and their chunks ranked 10 to 30 to `eval/candidates.jsonl`; after you copy one borderline chunk a question into `eval/borderline.jsonl`, `measure --model NAME [--write]` sets each reranker's floor and score curve (`haskie.catalogue.calibrate`) |
 | `bump` | version bump from the commit subjects (CI only) |
 
 A change is done when `mise run check` and `mise run test` pass. Tests that download models carry

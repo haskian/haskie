@@ -160,6 +160,7 @@ async def test_results_carry_an_absolute_path_and_position(shelf: AsyncTestClien
     span = lines[match["line_start"] - 1 : match["line_end"]]
     assert any("parsing" in line for line in span), "the reported lines contain the match"
 
-    hit = (await shelf.get("/api/collections/lit/search", params={"q": "parsing"})).json()[0]
+    in_lit = {"q": "parsing", "collections": "lit"}
+    hit = (await shelf.get("/api/search/explore", params=in_lit)).json()[0]
     assert Path(hit["markdown_file"]).is_file()
     assert hit["markdown_file"].endswith(hit["markdown_path"]), "absolute is home plus relative"

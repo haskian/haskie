@@ -13,18 +13,15 @@ runs on is opened by the fixture instead, for the reason `_release_default_execu
 whether or not `web/dist` has been built. `test_static_files_*` covers the other branch.
 """
 
-import asyncio
 import json
 import logging
 import threading
 import time
-from collections.abc import AsyncIterator
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 import structlog
-from anyio.from_thread import start_blocking_portal
 from litestar.testing import AsyncTestClient, RequestFactory
 
 from haskie import app as app_module
@@ -34,13 +31,17 @@ from haskie.collection.collection import Collection, MemberStatus
 from haskie.document import document
 from haskie.document.document import DocumentStatus
 from haskie.indexing import gguf_models, mlx_models
-from haskie.indexing.chunk import Chunk, Piece
+from haskie.indexing.chunk import Chunk, Piece, split
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order
 from haskie.settings import (
     DEFAULT_RERANKER,
     Accelerator,
+    ChunkSettings,
+    CollectionOverrides,
     PipelineSettings,
+    Reranker,
+    SearchOverrides,
     UserSettings,
     save_user_settings,
 )
@@ -55,6 +56,7 @@ from conftest import (  # isort: skip
     seed_chunks,
     seed_index,
     stage_and_import,
+    text_pdf,
     wait_for,
     wait_import,
     walk_pages,
@@ -65,31 +67,6 @@ pytestmark = pytest.mark.anyio
 MD = "# Title\n\nintro text\n\n## Alpha\n\nalpha body about lancedb\n\n## Beta\n\nbeta body\n"
 LONG_SESSION_ID = "s" * 129
 TOO_MANY_COLLECTIONS = {"collections": [f"c{i}" for i in range(101)]}
-
-
-async def _release_default_executor() -> None:
-    """Hand the portal loop a thread pool of its own, so closing it shuts that one down.
-
-    Litestar's test transport answers every request on a blocking portal: an event loop of its
-    own, in another thread. Closing a portal shuts down its loop's default executor, and DBOS
-    makes *its* thread pool that executor as soon as an async DBOS call runs on the loop
-    (`DBOS._configure_asyncio_thread_pool`). Without this, the first request would leave the
-    running DBOS unable to schedule anything, teardown included. The pool below never starts a
-    thread: a `ThreadPoolExecutor` only spawns one when something is submitted to it.
-    """
-    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
-
-
-@pytest.fixture
-async def client(api_client: AsyncTestClient, dbos) -> AsyncIterator[AsyncTestClient]:
-    """The shared client, plus DBOS and one portal for the whole test, and no lifespan (see the
-    module docstring)."""
-    with start_blocking_portal(backend="asyncio") as portal:
-        api_client.blocking_portal = portal
-        try:
-            yield api_client
-        finally:
-            portal.call(_release_default_executor)
 
 
 @pytest.fixture
@@ -202,20 +179,40 @@ def _requested(lines: list[dict]) -> list[str]:
             422, "chunk_size must be >= 1, got 0",
         ),
         (
+            "collection search override out of range -> unprocessable",
+            "PUT", "/api/collections/notes/overrides", {"search": {"limit": 0}}, None,
+            422, "limit must be >= 1, got 0",
+        ),
+        (
+            "a section cap of none -> unprocessable",
+            "PUT", "/api/settings", {"search": {"max_section_chars": 0}}, None,
+            422, "max_section_chars must be >= 1, got 0",
+        ),
+        (
+            "an answer budget of none -> unprocessable",
+            "PUT", "/api/collections/notes/overrides", {"search": {"max_answer_chars": 0}}, None,
+            422, "max_answer_chars must be >= 1, got 0",
+        ),
+        (
+            "a negative shortest passage -> unprocessable",
+            "PUT", "/api/settings", {"search": {"min_passage_chars": -1}}, None,
+            422, "min_passage_chars must be >= 0, got -1",
+        ),
+        (
+            "a negative growth -> unprocessable",
+            "PUT", "/api/collections/notes/overrides", {"search": {"max_passage_grow": -1}}, None,
+            422, "max_passage_grow must be >= 0, got -1",
+        ),
+        (
+            "explore has no excerpt granularity: excerpts have their own route",
+            "GET", "/api/search/explore?q=alpha&granularity=excerpt", None, None,
+            422, "Invalid enum value 'excerpt'",
+        ),
+        (
             "collection override naming an unknown reranker -> unprocessable",
             "PUT", "/api/collections/notes/overrides",
             {"search": {"reranker_model": "no/such-model"}}, None,
             422, "unknown reranker model: no/such-model",
-        ),
-        (
-            "search limit below one -> unprocessable",
-            "GET", "/api/collections/notes/search?q=alpha&limit=-5", None, None,
-            422, "Expected `int` >= 1",
-        ),
-        (
-            "search needs a reranker that is not loaded -> service unavailable",
-            "GET", "/api/collections/notes/search?q=alpha&reranker=cross-encoder", None, None,
-            503, "is not loaded yet",
         ),
         (
             "explore limit below one -> unprocessable",
@@ -404,7 +401,15 @@ async def test_request_id_header(
 
 
 async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClient) -> None:
-    response = await ready.get("/api/collections/notes/search?q=alpha&reranker=cross-encoder")
+    """A collection whose search needs a reranker that is not loaded: written straight to the row,
+    since the route that saves it would start the download."""
+    notes = await Collection.get("notes")
+    await notes.set_overrides(
+        CollectionOverrides(search=SearchOverrides(reranker=Reranker.CROSS_ENCODER))
+    )
+
+    response = await ready.get("/api/search/explore", params={"q": "alpha", "collections": "notes"})
+
     assert response.status_code == 503
     assert response.headers["Retry-After"] == errors.NotReady.headers["Retry-After"]
 
@@ -482,6 +487,7 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     options = (await client.get("/api/options")).json()
     assert "anydoc" in options["parsers"] and "hybrid" in options["search_modes"]
     assert options["docs"]["conversion.chunk_size"]["title"] == "Chunk size (characters)"
+    assert options["docs"]["search.grow_bias"]["title"] == "Growth bias"
     assert options["embedding_profiles"]["compact"]["dims"] == 384
     # the catalogue, read from the database: full-text only first, then the models by size
     profiles = options["embedding_profiles"]
@@ -739,7 +745,8 @@ async def test_attach_list_and_detach_a_member(client: AsyncTestClient) -> None:
     assert [entry["document"] for entry in cached] == ["guide.md"] * len(cached)
     assert cached, "indexing the member filled the document's embedding cache"
 
-    (hit,) = (await client.get("/api/collections/notes/search", params={"q": "lancedb"})).json()
+    in_notes = {"q": "lancedb", "collections": "notes"}
+    (hit,) = (await client.get("/api/search/explore", params=in_notes)).json()
     assert (hit["collection"], hit["document"]) == ("notes", "guide.md")
 
     detached = await client.delete("/api/collections/notes/documents/guide.md")
@@ -747,7 +754,7 @@ async def test_attach_list_and_detach_a_member(client: AsyncTestClient) -> None:
     assert detached.status_code == 204, detached.text
     assert (await client.get("/api/collections/notes/documents")).json()["items"] == []
     assert (await client.get("/api/documents/guide.md/collections")).json() == []
-    assert (await client.get("/api/collections/notes/search", params={"q": "lancedb"})).json() == []
+    assert (await client.get("/api/search/explore", params=in_notes)).json() == []
     assert (await client.get("/api/documents/guide.md")).json()["status"] == "imported", (
         "a detach takes nothing from the document"
     )
@@ -766,7 +773,7 @@ async def test_one_document_serves_two_collections(client: AsyncTestClient) -> N
     assert (await client.get("/api/documents/guide.md/collections")).json() == ["alpha", "beta"]
     for name in ("alpha", "beta"):
         found = (
-            await client.get(f"/api/collections/{name}/search", params={"q": "lancedb"})
+            await client.get("/api/search/explore", params={"q": "lancedb", "collections": name})
         ).json()
         assert [hit["collection"] for hit in found] == [name]
     assert len((await client.get("/api/documents/guide.md/embeddings")).json()) == 1, (
@@ -827,7 +834,8 @@ async def test_deleting_a_collection_keeps_its_documents(client: AsyncTestClient
     assert [c["name"] for c in (await client.get("/api/collections")).json()["items"]] == ["kept"]
     assert (await client.get("/api/documents/guide.md")).json()["status"] == "imported"
     assert (await client.get("/api/documents/guide.md/collections")).json() == ["kept"]
-    assert (await client.get("/api/collections/kept/search", params={"q": "lancedb"})).json()
+    kept = {"q": "lancedb", "collections": "kept"}
+    assert (await client.get("/api/search/explore", params=kept)).json()
 
 
 async def test_deleting_a_document_removes_it_from_every_collection(
@@ -849,7 +857,8 @@ async def test_deleting_a_document_removes_it_from_every_collection(
     for name in ("alpha", "beta"):
         assert (await client.get(f"/api/collections/{name}/documents")).json()["items"] == []
         assert (await client.get(f"/api/collections/{name}")).json()["counts"]["total"] == 0
-        found = await client.get(f"/api/collections/{name}/search", params={"q": "lancedb"})
+        scoped = {"q": "lancedb", "collections": name}
+        found = await client.get("/api/search/explore", params=scoped)
         assert found.json() == [], "the rows go from every collection's index too"
 
 
@@ -1065,9 +1074,9 @@ async def test_session_search_survives_the_deletion_of_a_collection(
 
 # --- passages, excerpts and sources -----------------------------------------------------
 
-# One paragraph, one sentence per line, so a passage that widens to whole sentences also has to
-# recount its lines. "lancedb" is in both of the chunks seeded below and in neither section around
-# them, so the query reaches exactly the two chunks that are meant to merge.
+# One paragraph, one sentence per line, so a passage over two chunks spans three lines. "lancedb"
+# is in both of the chunks seeded below and in neither section around them, so the query reaches
+# exactly the two chunks that are meant to merge.
 PASSAGE_MD = (
     "# Guide\n"
     "\n"
@@ -1087,7 +1096,7 @@ PASSAGE_MD = (
 
 async def _markdown_of(doc: str) -> str:
     """The converted markdown of an imported document, as it is on disk: what a chunk's
-    `char_start` and `char_end` are offsets into, and what a passage is widened in."""
+    `char_start` and `char_end` are offsets into, and what a passage is read from."""
     row = await document.get(doc)
     return (home.HOME / row.relative(row.markdown)).read_text(encoding="utf-8")
 
@@ -1095,7 +1104,7 @@ async def _markdown_of(doc: str) -> str:
 def _chunk(markdown: str, start: str, end: str, heading: str = "Retrieval") -> Chunk:
     """One chunk cut out of `markdown` between two of its own substrings, with the offsets and
     line numbers that cut really has. `start` and `end` fall mid-sentence on purpose: a passage
-    has to widen past both."""
+    quotes its chunks as they were cut, and adds nothing around them."""
     char_start = markdown.index(start)
     char_end = markdown.index(end) + len(end)
     return Chunk(
@@ -1151,7 +1160,21 @@ async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
             "excerpts: the ranking, then passages merged, folded and read",
             "/api/search/excerpts",
             {"q": "lancedb"},
-            ["plan", "retrieve", "merge", "rerank", "hits", "collapse_ranges", "widen"],
+            [
+                "plan",
+                "retrieve",
+                "merge",
+                "rerank",
+                "hits",
+                "judge_thin",
+                "fold",
+                "group",
+                "budget",
+                "probe_gaps",
+                "fill",
+                "quote",
+                "rerank_excerpts",
+            ],
         ),
         (
             "sources: the ranking, then documents",
@@ -1180,17 +1203,57 @@ async def test_a_search_answers_with_the_time_each_step_took(
     assert entries[1][2] == 'desc="LanceDB retrieval"', name
 
 
+@pytest.mark.parametrize(
+    ("name", "path", "params", "lineage"),
+    [
+        ("chunks keep their own score", "/api/search/explore", {"q": "lancedb"}, []),
+        (
+            "passages fold theirs",
+            "/api/search/explore",
+            {"q": "lancedb", "granularity": "passage"},
+            ["fill_thin"],
+        ),
+        (
+            "excerpts, and several questions say each rule once",
+            "/api/search/excerpts",
+            {"q": ["lancedb", "how are rows retrieved"]},
+            ["judge_thin", "fold", "group"],
+        ),
+        ("sources", "/api/search/sources", {"q": "lancedb"}, ["shortlist"]),
+    ],
+)
+async def test_a_search_answers_with_its_score_lineage(
+    client: AsyncTestClient, name: str, path: str, params: dict, lineage: list[str]
+) -> None:
+    """`X-Score-Lineage`: each step that set or changed a score, in the order it ran, and how.
+    JSON, percent-encoded, because the formulas are not Latin-1."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "guide.md", MD.encode())
+    await attach_via_api(client, "notes", "guide.md")
+
+    response = await client.get(path, params=params)
+
+    assert response.status_code == 200, f"{name}: {response.text}"
+    steps = json.loads(unquote(response.headers["x-score-lineage"]))
+    assert [one["step"] for one in steps] == ["retrieve", "merge", *lineage], name
+    assert steps[0]["label"] == "LanceDB retrieval", name
+    assert steps[0]["rule"].endswith("No embedding model, so every mode is BM25."), name
+    assert steps[1]["rule"] == "One collection: its scores are kept.", name
+
+
 async def test_a_request_that_searches_nothing_carries_no_timing(client: AsyncTestClient) -> None:
     response = await client.get("/api/status")
 
     assert "server-timing" not in response.headers
+    assert "x-score-lineage" not in response.headers
 
 
 async def test_explore_merges_consecutive_chunks_into_one_passage(
     client: AsyncTestClient,
 ) -> None:
     """Two chunks that sit next to each other in one document are one passage: stitched by their
-    offsets, so the text they share is in it once, and widened to the sentences they cut into."""
+    offsets, so the text they share is in it once, and nothing around them is added."""
     await _guide_with_two_chunks(client)
 
     chunks = (await client.get("/api/search/explore", params={"q": "lancedb"})).json()
@@ -1202,8 +1265,8 @@ async def test_explore_merges_consecutive_chunks_into_one_passage(
     assert {hit["seq"] for hit in chunks} == {1, 2}, "only the two that mention lancedb match"
     (passage,) = response.json()
     assert (passage["seq_start"], passage["seq_end"]) == (1, 2), "the range the chunks cover"
-    assert passage["text"].startswith("One table holds"), "widened back to the sentence start"
-    assert passage["text"].rstrip().endswith("is what a reader wants."), "and to the sentence end"
+    assert passage["text"].startswith("every chunk of a lancedb"), "starts where chunk 1 does"
+    assert passage["text"].endswith("answer back into a"), "and ends where chunk 2 does"
     assert passage["text"].count("sit in two of them") == 1, "the shared text is not repeated"
     assert (passage["line_start"], passage["line_end"]) == (5, 7), "lines recounted for the text"
     assert passage["header"] == "Guide > Retrieval"
@@ -1212,26 +1275,513 @@ async def test_explore_merges_consecutive_chunks_into_one_passage(
     assert passage["score"] > 0
 
 
-async def test_explore_excerpts_are_the_passages_and_so_is_the_excerpts_route(
-    client: AsyncTestClient,
-) -> None:
-    """An excerpt is the whole passage today (the trimming step is later), and the MCP route is
-    the same search as the exploration at that granularity."""
+async def test_an_excerpt_is_the_section_its_passages_share(client: AsyncTestClient) -> None:
+    """The passages of one section come back as one excerpt: the section's heading path, each
+    passage a span. Excerpts have one route, the one the MCP tool calls."""
     await _guide_with_two_chunks(client)
 
     passages = (
         await client.get("/api/search/explore", params={"q": "lancedb", "granularity": "passage"})
     ).json()
-    excerpts = (
-        await client.get("/api/search/explore", params={"q": "lancedb", "granularity": "excerpt"})
-    ).json()
     route = await client.get("/api/search/excerpts", params={"q": "lancedb"})
+    explored = await client.get(
+        "/api/search/explore", params={"q": "lancedb", "granularity": "excerpt"}
+    )
+    answer = route.json()
+    excerpts = answer["excerpts"]
 
-    assert excerpts == passages
+    (passage,) = passages
+    (excerpt,) = excerpts
+    assert excerpt["header"] == "Guide > Retrieval", "the section under the title"
+    assert excerpt["text"] == passage["text"], "one passage that is its section's only one"
+    assert [(span["seq_start"], span["seq_end"]) for span in excerpt["spans"]] == [(1, 2)]
+    assert excerpt["spans"][0]["location"] == passage["location"]
+    assert (excerpt["line_start"], excerpt["line_end"]) == (
+        passage["line_start"],
+        passage["line_end"],
+    )
     assert route.status_code == 200, route.text
-    assert route.json() == excerpts
+    assert (answer["uncovered"], answer["missing_terms"]) == ([], [])
+    assert explored.status_code == 422, "excerpts have a route of their own"
     nothing = await client.get("/api/search/excerpts", params={"q": "nothingmatchesthis"})
-    assert nothing.json() == [], "no hits is an answer, not an error"
+    assert nothing.json() == {
+        "excerpts": [],
+        "uncovered": [],
+        "missing_terms": ["nothingmatchesthis"],
+    }, "no hits is an answer, not an error, and it says which words the sources lack"
+
+
+# One section with two paragraphs on "lancedb" and one between them that is not, then a second
+# section on it: the chunker cuts every paragraph into a chunk of its own at this size.
+SECTIONS_MD = (
+    "# Guide\n\n"
+    "## Storage\n\n"
+    "Lancedb holds every chunk of a document in one table, with its vector and its offsets.\n\n"
+    "The offsets are bytes as well as characters, so a reader can seek straight to a passage.\n\n"
+    "Lancedb compacts the small fragments once the table has grown past a few thousand rows.\n\n"
+    "## Search\n\n"
+    "Lancedb answers a hybrid query by fusing the vector and the full-text lists by their rank.\n"
+)
+
+
+async def test_the_passages_of_one_section_come_back_as_one_excerpt(
+    client: AsyncTestClient,
+) -> None:
+    """Two passages of one section are two results as passages, and one excerpt: the section,
+    with `[…]` where the paragraph between them did not match. The other section is the other."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "sections.md", SECTIONS_MD.encode())
+    await _member("notes", "sections.md")
+    chunks = split(
+        await _markdown_of("sections.md"), ChunkSettings(chunk_size=200, chunk_merge_below=0)
+    )
+    await seed_chunks("notes", "sections.md", chunks)
+    params = {"q": "lancedb", "limit": 2}
+
+    passages = (
+        await client.get("/api/search/explore", params={**params, "granularity": "passage"})
+    ).json()
+    response = await client.get("/api/search/excerpts", params=params)
+
+    assert response.status_code == 200, response.text
+    assert len(passages) == 2, "a passage each for the two best"
+    by_header = {one["header"]: one for one in response.json()["excerpts"]}
+    assert set(by_header) == {"Guide > Storage", "Guide > Search"}, "the limit counts sections"
+    storage = by_header["Guide > Storage"]
+    assert [(span["seq_start"], span["seq_end"]) for span in storage["spans"]] == [(1, 1), (3, 3)]
+    assert storage["text"] == "\n\n".join([chunks[0].text, "[…]", chunks[2].text])
+    assert (storage["seq_start"], storage["seq_end"]) == (1, 3)
+
+
+# Six paragraphs of one section, every one on retries, longer and longer: a search that scans
+# fewer than six chunks keeps only some of them, and the rest answer just as well.
+FILL_MD = "# Guide\n\n## Retries\n\n" + "\n\n".join(
+    "A retry " + "waits a little longer each time " * (count + 1) + "before it runs again."
+    for count in range(6)
+)
+
+
+async def test_the_text_between_and_around_kept_passages_is_filled_when_it_answers(
+    client: AsyncTestClient,
+) -> None:
+    """One excerpt asked for scans four chunks, so the ranking keeps four of the six paragraphs.
+    The two it left out match the question as well as those it kept, so the excerpt reads the
+    whole section, one passage with no `[…]`, while the passage granularity stays the ranking's."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "fill.md", FILL_MD.encode())
+    await _member("notes", "fill.md")
+    chunks = split(
+        await _markdown_of("fill.md"), ChunkSettings(chunk_size=300, chunk_merge_below=0)
+    )
+    await seed_chunks("notes", "fill.md", chunks)
+    # short passages growing on their own would hide what the fill does
+    overrides = {"search": {"min_passage_chars": 0}}
+    assert (await client.put("/api/collections/notes/overrides", json=overrides)).is_success
+    params = {"q": "retry", "limit": 1}
+
+    scanned = (
+        await client.get("/api/search/explore", params={**params, "granularity": "chunk"})
+    ).json()
+    response = await client.get("/api/search/excerpts", params=params)
+
+    assert len(chunks) == 6, "a chunk per paragraph"
+    assert len(scanned) == 1 and response.status_code == 200, response.text
+    (excerpt,) = response.json()["excerpts"]
+    assert [(span["seq_start"], span["seq_end"]) for span in excerpt["spans"]] == [(1, 6)]
+    assert "[…]" not in excerpt["text"]
+    assert excerpt["text"] == "\n\n".join(chunk.text for chunk in chunks)
+
+
+# Orders, section after section, and one note on stock: a question about both ranks the order
+# sections first, and "inventory" is in none of them.
+ORDERS_MD = "# Orders\n\n" + "\n\n".join(
+    f"## Step {step}\n\nAn order keeps its lines consistent at step {step}, and the order total "
+    "follows the lines." + (" Reconciliation against the ledger runs here." if step == 5 else "")
+    for step in range(1, 9)
+)
+STOCK_MD = "# Stock\n\n## Counts\n\nInventory counts drop when stock ships to a customer.\n"
+
+
+async def test_a_word_no_excerpt_holds_is_searched_for_once_more(
+    client: AsyncTestClient, caplog
+) -> None:
+    """The ranking fills the one slot with the order section on reconciliation, and "inventory"
+    is not in it.
+    The probe searches that word alone, and its best passage joins as one excerpt past the limit;
+    the answer then lacks no word of the question."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "shop"})
+    for name, body in (("orders.md", ORDERS_MD), ("stock.md", STOCK_MD)):
+        await stage_and_import(client, name, body.encode())
+        await attach_via_api(client, "shop", name)
+    question = "How does order reconciliation against the ledger keep inventory consistent?"
+    params = {"q": question, "limit": 1}
+
+    with caplog.at_level(logging.INFO):
+        response = await client.get("/api/search/excerpts", params=params)
+
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    probed = [r.msg for r in caplog.records if isinstance(r.msg, dict)]
+    (logged,) = [msg for msg in probed if msg["event"] == "search_probe"]
+    assert logged["terms"] == ["inventory"], "the only word the order sections lack"
+    assert (logged["found"], logged["joined"]) == (True, False), "past the limit, apart"
+    assert [one["document"] for one in answer["excerpts"]] == ["orders.md", "stock.md"]
+    assert answer["excerpts"][0]["header"] == "Orders > Step 5"
+    assert answer["missing_terms"] == []
+
+
+async def test_the_probed_excerpt_comes_past_the_budget_the_sections_were_cut_to(
+    client: AsyncTestClient, caplog
+) -> None:
+    """Two order sections rank, the budget keeps one of them, and "inventory" is in neither: the
+    probe's passage still joins, past the budget, since the cut came before it."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "shop"})
+    for name, body in (("orders.md", ORDERS_MD), ("stock.md", STOCK_MD)):
+        await stage_and_import(client, name, body.encode())
+        await attach_via_api(client, "shop", name)
+    overrides = {"search": {"max_answer_chars": 60}}
+    assert (await client.put("/api/collections/shop/overrides", json=overrides)).is_success
+    question = "How does order reconciliation against the ledger keep inventory consistent?"
+
+    with caplog.at_level(logging.INFO):
+        response = await client.get("/api/search/excerpts", params={"q": question, "limit": 2})
+
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    logged = {r.msg["event"]: r.msg for r in caplog.records if isinstance(r.msg, dict)}
+    assert logged["search_budget"]["cut"] == 1, "one order section cut to the budget"
+    assert (logged["search_probe"]["found"], logged["search_probe"]["joined"]) == (True, False)
+    assert [one["document"] for one in answer["excerpts"]] == ["orders.md", "stock.md"]
+    probed = answer["excerpts"][-1]
+    assert probed["score"] == 0.0 and [one["score"] for one in probed["spans"]] == [0.0], (
+        "its BM25 score is on another scale than the ranked excerpt's: it scores 0, last"
+    )
+    assert answer["missing_terms"] == []
+
+
+# A section that answers, and a lead-in of another whose table below it says nothing on the query:
+# the lead-in matches the word "lancedb" alone, and the chunk it would grow into matches nothing.
+THIN_MD = (
+    "# Guide\n\n"
+    "## Storage\n\n"
+    "Lancedb stores every chunk of a document in one table, with its vector, its offsets and the "
+    "heading path it sits under, and a full-text index over the framed text, so the words of a "
+    "heading find every chunk under it and a search reads a chunk back by its own byte offsets, "
+    "never the whole markdown document.\n\n"
+    "## Rules\n\n"
+    "Lancedb rules:\n\n"
+    "| step | what happens |\n"
+    "|---|---|\n"
+    "| open | the table is opened once per search and shared by the parts |\n"
+    "| read | rows come back in no order, so the caller sorts them |\n"
+    "| write | a part is replaced whole, so a reader never sees half of one |\n"
+    "| compact | small fragments merge once the table has grown enough |\n"
+    "| drop | an outdated table is dropped and rebuilt from the cache |\n"
+)
+
+
+async def _guide_with_a_lead_in(client: AsyncTestClient) -> list[Chunk]:
+    """`thin.md` in `notes`, cut by the real chunker: the storage section, the lead-in right after
+    its heading, and the table under the lead-in."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "thin.md", THIN_MD.encode())
+    await _member("notes", "thin.md")
+    chunks = split(await _markdown_of("thin.md"), ChunkSettings(chunk_size=400))
+    await seed_chunks("notes", "thin.md", chunks)
+    return chunks
+
+
+async def test_a_collection_reads_the_rows_of_named_chunks(client: AsyncTestClient) -> None:
+    """What a search reads to look at the neighbours of a chunk it matched: the stored rows by
+    (document, seq), and nothing for a chunk or a name it does not hold."""
+    chunks = await _guide_with_a_lead_in(client)
+    index = Collection("notes").index_with(None)
+
+    rows = await index.rows_at([("thin.md", 3), ("thin.md", 2), ("thin.md", 99)], vectors=True)
+    quoted = await index.rows_at([("o'brien.md", 1)], vectors=False)
+
+    assert sorted((row["document"], row["seq"]) for row in rows) == [("thin.md", 2), ("thin.md", 3)]
+    assert {row["seq"]: row["text"] for row in rows}[3] == chunks[2].text
+    assert quoted == [], "a quote in a name is a literal, not the end of the filter"
+    assert all("vector" not in row for row in rows), "a table without vectors has none to read"
+
+
+async def test_an_excerpt_too_short_to_stand_alone_goes_when_nothing_around_it_matches(
+    client: AsyncTestClient,
+) -> None:
+    """The lead-in matched one word of the query and its table none. It sits right after the
+    section that answers, but a heading is between them, so it does not join that passage. On its
+    own it is one line, so it is dropped, and the section that answers is all that is left."""
+    chunks = await _guide_with_a_lead_in(client)
+    lead_in = next(seq for seq, one in enumerate(chunks, start=1) if one.text == "Lancedb rules:")
+
+    chunk_hits = (
+        await client.get(
+            "/api/search/explore",
+            params={"q": "lancedb stores every chunk", "granularity": "chunk"},
+        )
+    ).json()
+    response = await client.get("/api/search/excerpts", params={"q": "lancedb stores every chunk"})
+
+    assert response.status_code == 200, response.text
+    assert lead_in in {hit["seq"] for hit in chunk_hits}, "the lead-in did match"
+    assert [(one["seq_start"], one["seq_end"]) for one in response.json()["excerpts"]] == [(1, 1)]
+
+
+# Three short notes on aggregates: one on references, one on events, and a copy of the first under
+# another name, as a note pasted into a second file is. The two notes share no word, and each
+# question uses only its own note's words, so full-text search finds each part in one note alone.
+REFERENCES = (
+    "# Aggregates\n\n"
+    "Reference other aggregates by identity, never through a direct object pointer.\n"
+)
+EVENTS = "# Events\n\nDomain events carry each change eventually, keeping consistency loose.\n"
+BY_IDENTITY = "Reference other aggregates by identity or by direct object pointer?"
+BY_EVENT = "Which domain events carry each change?"
+
+
+async def _notes_on_aggregates(client: AsyncTestClient) -> None:
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "ddd"})
+    for name, body in (
+        ("references.md", REFERENCES),
+        ("events.md", EVENTS),
+        ("pasted.md", REFERENCES),
+    ):
+        await stage_and_import(client, name, body.encode())
+        await attach_via_api(client, "ddd", name)
+
+
+async def test_several_questions_take_turns_and_say_which_they_answer(
+    client: AsyncTestClient,
+) -> None:
+    """Each part of the question is searched on its own, the copy of one note folds into it across
+    the parts, and each excerpt names the parts it answers. The session keeps what was asked."""
+    await _notes_on_aggregates(client)
+
+    response = await client.get(
+        "/api/search/excerpts",
+        params={"q": [BY_IDENTITY, BY_EVENT], "session_id": "s1", "limit": 4},
+    )
+
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    found = answer["excerpts"]
+    assert (answer["uncovered"], answer["missing_terms"]) == ([], [])
+    tagged = {one["document"]: one["aspects"] for one in found}
+    kept_note = "references.md" if "references.md" in tagged else "pasted.md"
+    assert tagged == {kept_note: [BY_IDENTITY], "events.md": [BY_EVENT]}
+    ((copy,),) = [
+        span["also_in"] for one in found if one["document"] == kept_note for span in one["spans"]
+    ]
+    assert copy["document"] == ({"references.md", "pasted.md"} - {kept_note}).pop()
+    assert copy["relation"] == "duplicate", "the pasted note is the same text"
+    steps = [entry.split(";")[0].strip() for entry in response.headers["server-timing"].split(",")]
+    assert sorted(steps) == sorted(
+        ["plan"]
+        + ["retrieve", "merge", "rerank", "hits", "judge_thin"] * 2
+        + ["fold", "group", "budget", "probe_gaps", "fill", "quote", "rerank_excerpts"]
+    ), "one plan for every question, the ranking once per question, then the turns, the sections"
+    (event,) = (await client.get("/api/sessions/s1/history")).json()
+    assert event["subject"] == f"{BY_IDENTITY} | {BY_EVENT}"
+    assert event["detail"]["questions"] == [BY_IDENTITY, BY_EVENT]
+    assert event["detail"]["hits"] == 2
+
+
+async def test_every_question_plans_over_one_open_index(client: AsyncTestClient) -> None:
+    """The parts of one question run at once over the same indexes. Planned together, they share
+    each index with its table already open, so they read one version of it rather than each
+    opening its own."""
+    from haskie.search import retrieval
+
+    await _notes_on_aggregates(client)
+
+    plans = await retrieval.plan(["ddd"], [BY_IDENTITY, BY_EVENT])
+
+    assert plans is not None and len(plans) == 2
+    (first, _), (second, _) = plans[0].indexes[0], plans[1].indexes[0]
+    assert first is second, "one index for every question"
+    assert first._cached is not None, "its table opened before any part searches"
+
+
+async def test_a_question_nothing_answers_is_named_with_the_words_it_used(
+    client: AsyncTestClient,
+) -> None:
+    """Two questions, and the notes answer one: the other is `uncovered`, and its words no
+    excerpt holds are `missing_terms`, even after the search looked for them once more."""
+    await _notes_on_aggregates(client)
+    unanswered = "Which warehouse ledger reconciles stock?"
+
+    response = await client.get(
+        "/api/search/excerpts", params={"q": [BY_EVENT, unanswered], "limit": 2}
+    )
+
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    assert [one["document"] for one in answer["excerpts"]] == ["events.md"]
+    assert answer["uncovered"] == [unanswered]
+    assert answer["missing_terms"] == ["warehouse", "ledger", "reconciles", "stock"]
+
+
+async def test_the_answer_budget_cuts_the_last_sections(client: AsyncTestClient, caplog) -> None:
+    """A collection whose answers may hold 100 characters: the best section stays, however long,
+    and the next one is cut, which the search logs."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await stage_and_import(client, "sections.md", SECTIONS_MD.encode())
+    await _member("notes", "sections.md")
+    markdown = await _markdown_of("sections.md")
+    await seed_chunks(
+        "notes", "sections.md", split(markdown, ChunkSettings(chunk_size=200, chunk_merge_below=0))
+    )
+    overrides = {"search": {"max_answer_chars": 100}}
+    assert (await client.put("/api/collections/notes/overrides", json=overrides)).is_success
+
+    with caplog.at_level(logging.INFO):
+        response = await client.get("/api/search/excerpts", params={"q": "lancedb", "limit": 2})
+
+    assert response.status_code == 200, response.text
+    (only,) = response.json()["excerpts"]
+    assert only["header"] == "Guide > Storage", "the best section, over the budget, stays"
+    logged = [r.msg for r in caplog.records if isinstance(r.msg, dict)]
+    (cut,) = [msg for msg in logged if msg["event"] == "search_budget"]
+    assert cut["cut"] == 1
+
+
+async def test_one_question_with_a_context_is_the_single_search(client: AsyncTestClient) -> None:
+    """One question, however it is sent, is today's search: no turns and no tags. Its context is
+    for the models to read; the full-text search reads the question's own words."""
+    await _notes_on_aggregates(client)
+
+    plain = await client.get("/api/search/excerpts", params={"q": BY_EVENT})
+    repeated = await client.get("/api/search/excerpts", params={"q": [BY_EVENT, f" {BY_EVENT} "]})
+    framed = await client.get(
+        "/api/search/excerpts",
+        params={
+            "q": "Which change reaches the warehouse?",
+            "context": "Domain events, keeping consistency loose.",
+        },
+    )
+
+    assert plain.status_code == repeated.status_code == framed.status_code == 200
+    assert [one["document"] for one in plain.json()["excerpts"]] == ["events.md"]
+    assert all(one["aspects"] == [] for one in plain.json()["excerpts"])
+    assert repeated.json() == plain.json(), "a repeated question is asked once"
+    assert "cover" not in plain.headers["server-timing"]
+    found = framed.json()["excerpts"]
+    assert "events.md" in {one["document"] for one in found}, "found by its own word, change"
+    missing = framed.json()["missing_terms"]
+    assert missing == ["reaches", "warehouse"], (
+        "the question's words no note has, not the context's"
+    )
+
+
+async def test_a_context_never_makes_a_question_match_by_its_own_words(
+    client: AsyncTestClient,
+) -> None:
+    """The shared context names the notes' topic, and one part asks about something they never
+    mention. Its full-text search reads the part alone, so the context's words find it nothing:
+    it is uncovered, and no excerpt is tagged with it."""
+    await _notes_on_aggregates(client)
+    offtopic = "Which warehouse ledger reconciles stock?"
+
+    response = await client.get(
+        "/api/search/excerpts",
+        params={
+            "q": [BY_EVENT, offtopic],
+            "context": "Domain events carry each change between aggregates.",
+            "limit": 4,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    assert answer["uncovered"] == [offtopic]
+    assert all(offtopic not in one["aspects"] for one in answer["excerpts"])
+    assert "events.md" in {one["document"] for one in answer["excerpts"]}
+
+
+async def test_several_questions_over_collections_since_deleted_find_nothing(
+    client: AsyncTestClient,
+) -> None:
+    """A session whose only collection is gone has nothing left to search: an empty answer, as
+    one question gets, not an error."""
+    await _notes_on_aggregates(client)
+    await client.put("/api/sessions/s1", json={"collections": ["ddd"]})
+    deleted = await client.delete("/api/collections/ddd")
+    await wait_for(deleted.json()["operation_id"])
+
+    response = await client.get(
+        "/api/search/excerpts", params={"q": [BY_IDENTITY, BY_EVENT], "session_id": "s1"}
+    )
+
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    assert answer["excerpts"] == []
+    assert answer["uncovered"] == [BY_IDENTITY, BY_EVENT], "every question, unanswered"
+    too_few = {"q": [BY_IDENTITY, BY_EVENT], "session_id": "s1", "limit": 1}
+    refused = await client.get("/api/search/excerpts", params=too_few)
+    assert refused.status_code == 422, "a caller's own bad limit is refused all the same"
+    one = await client.get("/api/search/excerpts", params={"q": BY_EVENT, "session_id": "s1"})
+    assert one.json() == {
+        "excerpts": [],
+        "uncovered": [],
+        "missing_terms": ["domain", "events", "carry", "change"],
+    }, "one question: no excerpts, and every word of it missing"
+
+
+@pytest.mark.parametrize(
+    ("name", "params", "message"),
+    [
+        ("a blank question", {"q": "  "}, "q must hold 1..5 questions, got 0"),
+        ("six parts", {"q": [f"{BY_EVENT} {n}" for n in range(6)]}, "got 6"),
+        ("fewer slots than parts", {"q": [BY_IDENTITY, BY_EVENT], "limit": 1}, "got 1"),
+        ("a context past 200 characters", {"q": BY_EVENT, "context": "x" * 201}, "got 201"),
+    ],
+)
+async def test_questions_a_search_cannot_run_are_refused_before_it_runs(
+    client: AsyncTestClient, name: str, params: dict, message: str
+) -> None:
+    await _notes_on_aggregates(client)
+
+    response = await client.get("/api/search/excerpts", params=params)
+
+    assert response.status_code == 422, f"{name}: {response.text}"
+    assert message in response.text, name
+
+
+async def test_a_default_limit_below_the_questions_gives_each_a_slot(
+    client: AsyncTestClient,
+) -> None:
+    """The collection's own limit is below the questions asked: a caller who set no limit, as
+    Explore and an agent do, gets a slot for each question rather than a refusal."""
+    await _notes_on_aggregates(client)
+    await client.put("/api/collections/ddd/overrides", json={"search": {"limit": 1}})
+
+    response = await client.get(
+        "/api/search/excerpts", params={"q": [BY_IDENTITY, BY_EVENT], "collections": "ddd"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(response.json()["excerpts"]) >= 2, "one slot per question at least"
+
+
+async def test_the_mcp_tool_takes_one_question_or_several(api_client: AsyncTestClient) -> None:
+    """The tool schema is what an agent reads: `q` is a list, one question or up to five parts."""
+    from litestar_mcp import LitestarMCP
+    from litestar_mcp.schema_builder import generate_schema_for_handler
+
+    tool = api_client.app.plugins.get(LitestarMCP).discovered_tools["search_excerpts"]
+    schema = generate_schema_for_handler(tool)
+
+    assert schema["properties"]["q"] == {"type": "array", "items": {"type": "string"}}
+    assert schema["properties"]["context"] == {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    assert schema["required"] == ["q"]
 
 
 async def _two_collections_sharing_a_document(client: AsyncTestClient) -> str:
@@ -1338,7 +1888,7 @@ async def test_the_search_scope_is_the_names_then_the_session_then_everything(
     ("path", "key"),
     [
         ("/api/search/explore", None),
-        ("/api/search/excerpts", None),
+        ("/api/search/excerpts", "excerpts"),
         ("/api/search/sources", "documents"),
     ],
 )
@@ -1367,6 +1917,73 @@ async def test_the_mcp_surface_offers_one_search_per_question(api_client: AsyncT
 
     assert {"search_excerpts", "search_sources"} <= served
     assert served.isdisjoint({"search", "search_text", "explore", "search_collection"})
+
+
+@pytest.mark.parametrize("bias", [-1.0, 1.0])
+async def test_a_growth_bias_at_either_end_is_saved_and_searched_with(
+    client: AsyncTestClient, bias: float
+) -> None:
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+
+    body = {"search": {"grow_bias": bias}}
+    saved = await client.put("/api/collections/notes/overrides", json=body)
+
+    assert saved.status_code == 200, saved.text
+    after = (await client.get("/api/collections/notes")).json()
+    assert (after["overrides"]["search"]["grow_bias"], after["search"]["grow_bias"]) == (bias, bias)
+    scoped = {"q": "alpha", "collections": "notes"}
+    searched = await client.get("/api/search/explore", params=scoped)
+    assert searched.status_code == 200, searched.text
+
+
+@pytest.mark.parametrize(
+    ("name", "search"),
+    [
+        ("a limit below one", {"limit": 0}),
+        ("a negative weight", {"vector_weight": -1}),
+        ("no candidates", {"candidates": 0}),
+        ("a reranker floor above 1", {"min_rerank_score": 1.5}),
+        ("a reranker floor below 0", {"min_rerank_score": -0.1}),
+        ("a growth bias above 1", {"grow_bias": 1.5}),
+        ("a growth bias below -1", {"grow_bias": -1.01}),
+    ],
+)
+async def test_a_refused_search_override_is_never_saved(
+    client: AsyncTestClient, name: str, search: dict
+) -> None:
+    """Refused as it is read, before anything is written: a value no search can run with would
+    otherwise be stored, and every later read of the collection would fail on it."""
+    await client.post("/api/init", json={"profile": "none"})
+    await client.post("/api/collections", json={"name": "notes"})
+    await client.put("/api/collections/notes/overrides", json={"search": {"limit": 3}})
+
+    refused = await client.put("/api/collections/notes/overrides", json={"search": search})
+
+    assert refused.status_code == 422, f"{name}: {refused.text}"
+    after = await client.get("/api/collections/notes")
+    assert after.status_code == 200, f"{name}: the collection still reads: {after.text}"
+    assert after.json()["overrides"]["search"]["limit"] == 3, f"{name}: the old value stands"
+    assert after.json()["search"]["limit"] == 3, name
+    scoped = {"q": "alpha", "collections": "notes"}
+    searched = await client.get("/api/search/explore", params=scoped)
+    assert searched.status_code == 200, f"{name}: and it still searches: {searched.text}"
+
+
+async def test_the_original_opens_under_its_own_name_and_media_type(
+    client: AsyncTestClient,
+) -> None:
+    """The UI's "Open original" opens this URL in a new tab: a PDF has to arrive as a PDF,
+    named for the document, or the browser downloads a nameless file instead of showing it."""
+    await client.post("/api/init", json={"profile": "none"})
+    await stage_and_import(client, "paper.pdf", text_pdf(["Facility location covers the pool"]))
+
+    source = await client.get("/api/documents/paper.pdf/source")
+
+    assert source.status_code == 200, source.text
+    assert source.headers["content-type"] == "application/pdf"
+    assert source.headers["content-disposition"] == 'inline; filename="paper.pdf"'
+    assert source.content.startswith(b"%PDF-")
 
 
 # --- audit trail ---------------------------------------------------------------------
@@ -1897,3 +2514,34 @@ async def test_chunk_trend_lists_imports_and_indexes_and_bounds_its_window(
     assert all(abs(point["ts"] - time.time()) < 60 for point in points)
     bad = await client.get("/api/insights/chunks", params={"days": 367})
     assert bad.status_code == 422 and "days must be 1.." in bad.text
+
+
+@pytest.mark.parametrize(
+    ("name", "markdown", "status", "expected"),
+    [
+        (
+            "an excerpt's headings, lists and emphasis as HTML, headings without ids",
+            "### Rules\n\n- one *rule*\n- two\n\n[…]",
+            200,
+            "<h3>Rules</h3>\n<ul>\n<li>one <em>rule</em></li>\n<li>two</li>\n</ul>\n<p>[…]</p>\n",
+        ),
+        (
+            "raw HTML a document holds is stripped, never passed on",
+            "text <script>alert(1)</script> after",
+            200,
+            "<p>text alert(1) after</p>\n",
+        ),
+        ("past the limit is refused", "x" * 100_001, 422, "at most 100000 characters"),
+    ],
+)
+async def test_a_search_results_text_renders_as_markdown(
+    client: AsyncTestClient, name: str, markdown: str, status: int, expected: str
+) -> None:
+    response = await client.post("/api/documents/render", json={"markdown": markdown})
+
+    assert response.status_code == status, f"{name}: {response.text}"
+    body = response.json()
+    if status == 200:
+        assert body["html"] == expected, name
+    else:
+        assert expected in body["detail"], name

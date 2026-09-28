@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { FileText } from 'lucide-react'
 import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { EmbedderMetadata, Hit, Passage, RerankerMetadata, Source, Status } from '../api'
+import type { EmbedderMetadata, Excerpt, Hit, Passage, RerankerMetadata, Source, Status } from '../api'
 import { Field } from './Field'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
@@ -105,6 +105,34 @@ const PASSAGE: Passage = {
   source_file: '/home/ada/.haskie/sources/area.pdf',
   markdown_file: '/home/ada/.haskie/markdown/area.md',
   also_in: [],
+  aspects: [],
+  aspect_scores: {},
+}
+
+// A section of two passages: its heading path, and its lines from the first passage to the last.
+const EXCERPT: Excerpt = {
+  collection: 'A–E',
+  document: 'area.pdf',
+  header: 'Lighting',
+  location: 'area.pdf p.2-3 L41-90',
+  seq_start: 4,
+  seq_end: 9,
+  line_start: 41,
+  line_end: 90,
+  char_start: 1204,
+  char_end: 3900,
+  page_start: 2,
+  page_end: 3,
+  text: '## Soft shadows\n\nArea lights soften the shadow edge.\n\n[…]\n\n## Hard shadows\n\nA point light casts a hard one.',
+  score: 0.88,
+  source_file: '/home/ada/.haskie/sources/area.pdf',
+  markdown_file: '/home/ada/.haskie/markdown/area.md',
+  spans: [
+    { ...PASSAGE, header: 'Lighting > Soft shadows', seq_end: 4, aspects: [], also_in: [] },
+    { ...PASSAGE, header: 'Lighting > Hard shadows', seq_start: 9, seq_end: 9, also_in: [] },
+  ].map(({ collection: _c, document: _d, text: _t, source_file: _s, markdown_file: _m, ...span }) => span),
+  aspects: [],
+  aspect_scores: {},
 }
 
 const bar = (over: Partial<JobBar> = {}): JobBar => ({ label: 'Embed', done: 9, total: 22, state: 'active', ...over })
@@ -500,6 +528,51 @@ describe('HitGrid', () => {
       element: <HitGrid results={[{ ...SOURCE, description: '' }]} query="shadow" />,
       contains: ['<mark>shadow</mark> 1.4×'],
     },
+    {
+      name: 'an excerpt: its section heading, its pages and lines from the first passage to the last',
+      element: <HitGrid results={[EXCERPT]} query="shadow" />,
+      contains: ['<footer class="hit-foot"><span>Lighting</span><span>p. 2–3 · lines 41–90</span><span>chunks 4–9</span></footer>', '<mark>shadow</mark>'],
+    },
+    {
+      name: 'an excerpt names the questions it answers when several were asked',
+      element: <HitGrid results={[{ ...EXCERPT, aspects: ['Why soft?'] }]} query="shadow" questions={['Why hard?', 'Why soft?']} />,
+      contains: [
+        '<span class="mono muted">0.88</span>',
+        '</footer><div class="hit-questions"><span class="question-tag" tabindex="0">Q2<span class="hint hint-below hint-wide" role="tooltip"><strong>Q2</strong><span>Why soft?</span></span></span></div>',
+      ],
+    },
+    {
+      name: 'a tag carries how well the excerpt matched its question',
+      element: (
+        <HitGrid
+          results={[{ ...EXCERPT, aspects: ['Why soft?'], aspect_scores: { 'Why soft?': 0.84 } }]}
+          query="shadow"
+          questions={['Why hard?', 'Why soft?']}
+          reranked
+        />
+      ),
+      contains: [
+        '<span class="question-tag" tabindex="0">Q2<span class="question-score"> 0.84</span>',
+        '<strong>Q2 · 0.84</strong><span>Why soft?</span><span class="muted">The reranker&#x27;s score for this excerpt&#x27;s best chunk against Q2: 0 to 1',
+      ],
+    },
+    {
+      name: "without a reranker, the score is on its own search's scale",
+      element: (
+        <HitGrid
+          results={[{ ...EXCERPT, aspects: ['Why soft?'], aspect_scores: { 'Why soft?': 7.3 } }]}
+          query="shadow"
+          questions={['Why hard?', 'Why soft?']}
+        />
+      ),
+      contains: ['score in Q2&#x27;s own search: on that search&#x27;s scale, so not comparable'],
+    },
+    {
+      name: 'one question asked: no names',
+      element: <HitGrid results={[EXCERPT]} query="shadow" questions={['Why soft?']} />,
+      contains: ['<span class="mono muted">0.88</span>'],
+      missing: ['hit-questions'],
+    },
     { name: 'no hits renders an empty grid', element: <HitGrid results={[] as Hit[]} query="" />, contains: ['<div class="hits"></div>'] },
     { name: 'no sources renders an empty grid', element: <HitGrid results={[] as Source[]} query="" />, contains: ['<div class="hits"></div>'] },
   ])
@@ -528,6 +601,66 @@ describe('MatchModal', () => {
         '<span class="chunk-piece">- Area lights soften it.\n\n<span class="hint" role="tooltip"><strong>List item</strong><span class="sub mono">position 0 · 26 chars · 4 words</span></span></span>',
         '<span class="chunk-piece">| a |\n|---|<span class="hint" role="tooltip"><strong>Table</strong>',
       ],
+    },
+    {
+      name: 'the score has a hint with its lineage, each step that scored in the order it ran',
+      element: (
+        <MatchModal
+          match={HIT}
+          query="shadow"
+          scoring={[
+            { step: 'retrieve', label: 'LanceDB retrieval', rule: '1 / (1 + d).' },
+            { step: 'rerank', label: 'Rerank', rule: 'The logit replaces it.' },
+          ]}
+          onClose={noop}
+        />
+      ),
+      contains: [
+        '<dt>Score</dt><dd><span class="score"><span class="mono">0.91</span><span class="score-basis" tabindex="0" aria-label="How the score is computed">',
+        '<span class="score-lineage"><span>LanceDB retrieval</span><span class="muted">1 / (1 + d).</span><span>Rerank</span><span class="muted">The logit replaces it.</span></span>',
+      ],
+    },
+    {
+      name: 'an excerpt of several questions shows the context, then each question it answers',
+      element: (
+        <MatchModal
+          match={{ ...EXCERPT, aspects: ['Why soft?'], aspect_scores: { 'Why soft?': 0.84 } }}
+          query="Why hard?"
+          asked={{ questions: ['Why hard?', 'Why soft?'], context: 'area lights' }}
+          onClose={noop}
+        />
+      ),
+      contains: ['<dt>Context</dt><dd>area lights</dd><dt>Q2</dt><dd><span><span class="code">Why soft?</span><span class="mono muted"> · 0.84</span></span></dd></dl>'],
+      missing: ['<dt>Query</dt>', '<dt>Q1</dt>'],
+    },
+    {
+      name: 'no context sent: the questions alone',
+      element: (
+        <MatchModal
+          match={{ ...EXCERPT, aspects: ['Why hard?', 'Why soft?'] }}
+          query="Why hard?"
+          asked={{ questions: ['Why hard?', 'Why soft?'], context: '' }}
+          onClose={noop}
+        />
+      ),
+      contains: ['<dt>Q1</dt><dd><span><span class="code">Why hard?</span></span></dd><dt>Q2</dt>'],
+      missing: ['<dt>Context</dt>'],
+    },
+    {
+      name: 'one question asked: the query, as for any match',
+      element: <MatchModal match={EXCERPT} query="shadow" asked={{ questions: ['shadow'], context: '' }} onClose={noop} />,
+      contains: ['<dt>Query</dt><dd><span class="code">shadow</span></dd>'],
+    },
+    {
+      name: 'a search that did not say how it scored shows the score alone',
+      element: <MatchModal match={HIT} query="shadow" onClose={noop} />,
+      contains: ['<dt>Score</dt><dd><span class="score"><span class="mono">0.91</span></span></dd>'],
+      missing: ['score-basis'],
+    },
+    {
+      name: 'a passage quotes its text as markdown, the plain text marked until the server renders it',
+      element: <MatchModal match={PASSAGE} query="shadow" onClose={noop} />,
+      contains: ['<blockquote class="match-text match-markdown"><div class="markdown"><p>Area lights soften the <mark>shadow</mark> edge'],
     },
     {
       name: 'a chunk before any heading has no grey path',

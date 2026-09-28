@@ -8,7 +8,7 @@ import {
 } from '../api'
 import type { PageProps } from '../App'
 import { errorText } from '../format'
-import { choices, docFor, EmbedderFacts, Field, Num, Picker, profileOptions, SearchField, Shell, Toggle, visibleSearchFields, type NumericKeys } from '../ui'
+import { choices, docFor, EmbedderFacts, Field, Num, Picker, profileOptions, SearchField, Shell, Toggle, visibleExpansionFields, visibleSearchFields, type NumericKeys } from '../ui'
 import { classicBackground, setBackground as storeBackground } from './settings/background'
 import './Settings.css'
 
@@ -17,6 +17,7 @@ const SECTIONS: { id: string; label: string }[] = [
   { id: 'import', label: 'Import' },
   { id: 'chunking', label: 'Chunking' },
   { id: 'search', label: 'Search' },
+  { id: 'expansion', label: 'Expansion' },
   { id: 'pipeline', label: 'Pipeline' },
   { id: 'maintenance', label: 'Maintenance' },
   { id: 'retention', label: 'Retention' },
@@ -221,6 +222,13 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
         <section id="search">
           <span className="mono muted">Search</span>
           {visibleSearchFields(settings.search).map((name) => (
+            <SearchField key={name} name={name} search={settings.search} options={options} onChange={(search) => update({ search })} />
+          ))}
+        </section>
+
+        <section id="expansion">
+          <span className="mono muted">Expansion</span>
+          {visibleExpansionFields(settings.search).map((name) => (
             <SearchField key={name} name={name} search={settings.search} options={options} onChange={(search) => update({ search })} />
           ))}
         </section>

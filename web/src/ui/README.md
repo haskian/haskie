@@ -32,8 +32,8 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `SearchBox` | `<SearchBox value={q} onChange={setQ} onSubmit={run} placeholder="Search" scope={<Picker … />} />` | The one search or filter box; a filter passes `onChange` alone |
 | `SearchTook` | `<SearchTook counts="12 chunks · 3 sources" ms={took} />` | The line above the results |
 | `HitGrid` | `<HitGrid results={hits} query={q} onOpen={open} />` | Chunks, passages, excerpts or sources; one card shape |
-| `SearchPanel` | `<SearchPanel run={(q) => api.searchCollection(name, q)} placeholder="Search this collection" />` | Box, hits and match modal for one scope |
-| `MatchModal` | `<MatchModal match={open} query={q} onClose={close} />` | One result, and the document it came from. A chunk shows as the models read it: its frame, its typed pieces, the cut reason on each side and its sizes. A passage shows its text, a source its hot sections |
+| `SearchPanel` | `<SearchPanel run={(q) => api.explore(q, 'passage', { collections: [name] })} placeholder="Search this collection" plural="passages" />` | Box, results, the search's timings and the match modal with its score lineage, for one scope |
+| `MatchModal` | `<MatchModal match={open} query={q} scoring={how} onClose={close} />` | One result, and the document it came from. A chunk shows as the models read it: its frame, its typed pieces, the cut reason on each side and its sizes. A passage shows its text, a source its hot sections. `scoring` (the `X-Score-Lineage` header) is the hint beside the score |
 | `Jobs` | `<Jobs jobs={jobs} variant="glass" stripes />` | One weighted bar per job of an operation |
 | `Kv` | `<Kv rows={[['Status', doc.status], ['Size', bytes.format(doc.size)]]} />` | Key and value rows |
 | `Field` | `<Field label="Chunk size" help={docs['conversion.chunk_size'].description}><input className="input" /></Field>` | A labelled form control with the setting's help text |
@@ -56,7 +56,7 @@ imported from `ui/match` or `ui/anchor` directly, mostly by `ui/` itself.
 | Module | Usage | What it is |
 | --- | --- | --- |
 | `documents` | `documentIcon(doc.suffix)`, `nameRange(name)`, `groupByRange(rows, (row) => row.name)` and `NAME_RANGES` | The icon and the gallery bands every listing uses |
-| `searchFields` | `effectiveSearch(overrides, defaults)`, `visibleSearchFields(effective)` and `SEARCH_BOUNDS` | The settings a search runs with, which fields a form asks for, and the legal numeric bounds |
+| `searchFields` | `effectiveSearch(overrides, defaults)`, `visibleSearchFields(effective)`, `visibleExpansionFields(effective)` and `SEARCH_BOUNDS` | The settings a search runs with, which search and expansion fields a form asks for, and the legal numeric bounds |
 | `match` | `position(match)`, `headingOf(match)`, the kind guards, the `Match` type; `piecesOf`, `frameOf`, `chunkSizes`, `CUT_REASONS`, `PIECE_NAMES`; `HEADING_SEP` | Where a result sits in its document. A chunk as the chunk view draws it. The heading path separator the backend uses |
 | `anchor` | `headingPath(toc, index)` and `anchorIndex(toc, anchor)` | The heading path down to a table-of-contents entry, and the entry a result opens at |
 | `markTerms` | `markTerms(text, query)` | The list `Mark` renders |

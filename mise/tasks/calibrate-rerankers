@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="Calibrate rerankers on this home's collections: 'sample' writes candidates to judge, 'measure --model NAME [--write]' sets each one's floor and score curve (see haskie.catalogue.calibrate)"
+set -euo pipefail
+uv run python -m haskie.catalogue.calibrate "$@"

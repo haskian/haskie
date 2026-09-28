@@ -1,10 +1,12 @@
 import { useState, type ReactNode } from 'react'
-import type { Chunker, ChunkSettings, CollectionOverrides, Fusion, Options, Reranker, SearchMode, SearchSettings } from '../../api'
-import { effectiveSearch, Field, Picker, rerankerOption, SEARCH_BOUNDS, visibleSearchFields, type NumericKeys, type PickerOption } from '../../ui'
+import type { Chunker, ChunkSettings, CollectionOverrides, FillValues, Fusion, Options, Reranker, ScoreFold, SearchMode, SearchSettings } from '../../api'
+import { effectiveSearch, Field, Picker, rerankerOption, SEARCH_BOUNDS, visibleExpansionFields, visibleSearchFields, type KeysOf, type NumericKeys, type PickerOption } from '../../ui'
 
 type SearchField = keyof SearchSettings
 
 type NumberField = NumericKeys<SearchSettings>
+
+type SwitchField = KeysOf<SearchSettings, boolean>
 
 interface NumberSpec {
   step: number
@@ -58,7 +60,7 @@ export function SettingsForm({
     key: string,
     docKey: string,
     value: number | null,
-    placeholder: number,
+    placeholder: number | string, // the default the empty field falls back to
     spec: NumberSpec,
     onChange: (next: number | null) => void,
   ): ReactNode => (
@@ -97,6 +99,13 @@ export function SettingsForm({
   const searchNumber = (key: NumberField): ReactNode =>
     numberInput(key, `search.${key}`, draft.search[key], searchDefaults[key], SEARCH_BOUNDS[key], (next) => setSearch(key, next))
 
+  // on, off, or left to the user settings (null)
+  const switchInput = (key: string, docKey: string, value: boolean | null | undefined, fallback: boolean, onChange: (next: boolean | null) => void): ReactNode =>
+    enumInput(key, docKey, [ON, OFF], value == null ? null : onOff(value), onOff(fallback), (next) => onChange(next === null ? null : next === ON))
+
+  const searchSwitch = (key: SwitchField): ReactNode =>
+    switchInput(key, `search.${key}`, draft.search[key], searchDefaults[key], (next) => setSearch(key, next))
+
   const searchFields: Record<SearchField, ReactNode> = {
     limit: searchNumber('limit'),
     mode: enumInput('mode', 'search.mode', options.search_modes, draft.search.mode, searchDefaults.mode, (next) =>
@@ -122,7 +131,28 @@ export function SettingsForm({
       (next) => setSearch('reranker_model', next),
       (item) => rerankerOption(item, options.reranker_metadata),
     ),
+    rerank_with_context: searchSwitch('rerank_with_context'),
+    min_rerank_score: numberInput(
+      'min_rerank_score',
+      'search.min_rerank_score',
+      draft.search.min_rerank_score ?? null,
+      searchDefaults.min_rerank_score ?? "the reranker's floor",
+      { min: 0, max: 1, step: 0.01 },
+      (next) => setSearch('min_rerank_score', next),
+    ),
+    score_fold: enumInput('score_fold', 'search.score_fold', options.score_folds, draft.search.score_fold, searchDefaults.score_fold, (next) =>
+      setSearch('score_fold', next as ScoreFold | null),
+    ),
+    rerank_excerpts: searchSwitch('rerank_excerpts'),
+    fill_values: enumInput('fill_values', 'search.fill_values', options.fill_values, draft.search.fill_values, searchDefaults.fill_values, (next) =>
+      setSearch('fill_values', next as FillValues | null),
+    ),
     candidates: searchNumber('candidates'),
+    min_passage_chars: searchNumber('min_passage_chars'),
+    max_passage_grow: searchNumber('max_passage_grow'),
+    grow_bias: searchNumber('grow_bias'),
+    max_section_chars: searchNumber('max_section_chars'),
+    max_answer_chars: searchNumber('max_answer_chars'),
   }
 
   return (
@@ -139,17 +169,12 @@ export function SettingsForm({
         {numberInput('chunk_merge_below', 'conversion.chunk_merge_below', draft.chunk_merge_below, effective.chunk_merge_below, { step: 1, min: 0, max: 100 }, (next) =>
           setDraft({ ...draft, chunk_merge_below: next }),
         )}
-        {enumInput(
-          'chunk_frame',
-          'conversion.chunk_frame',
-          [ON, OFF],
-          draft.chunk_frame === null || draft.chunk_frame === undefined ? null : onOff(draft.chunk_frame),
-          onOff(effective.chunk_frame),
-          (next) => setDraft({ ...draft, chunk_frame: next === null ? null : next === ON }),
-        )}
+        {switchInput('chunk_frame', 'conversion.chunk_frame', draft.chunk_frame, effective.chunk_frame, (next) => setDraft({ ...draft, chunk_frame: next }))}
       </div>
       <span className="mono muted">Search</span>
       <div className="collection-fields">{visibleSearchFields(current).map((key) => searchFields[key])}</div>
+      <span className="mono muted">Expansion</span>
+      <div className="collection-fields">{visibleExpansionFields(current).map((key) => searchFields[key])}</div>
       <div className="row row-loose">
         <button className="btn btn-primary" type="button" disabled={busy} onClick={() => onSave(draft)}>
           Save

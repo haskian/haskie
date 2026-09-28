@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react'
-import { api, type Document, type Hit, type HotSection } from '../api'
+import { Info } from 'lucide-react'
+import { Fragment, useEffect, useState, type ReactNode } from 'react'
+import { api, type Document, type Hit, type HotSection, type ScoreStep } from '../api'
 import type { Anchor } from './anchor'
 import { DocumentPanes } from './DocumentPanes'
 import { Kv } from './Kv'
 import { Mark } from './Mark'
-import { CUT_REASONS, PIECE_NAMES, RELATIONS, alsoOf, chunkSizes, cite, everyPlace, overlapHint, frameOf, headingOf, isHit, isSource, lastHeading, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Reference, type Size } from './match'
+import { MarkdownQuote } from './MarkdownQuote'
+import { CUT_REASONS, PIECE_NAMES, RELATIONS, alsoOf, chunkSizes, cite, everyPlace, overlapHint, frameOf, headingOf, isHit, isSource, lastHeading, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Reference, type Size, isExcerpt, questionLabels } from './match'
 import { errorText } from '../format'
 import { Modal } from './Modal'
 import { Tabs, type TabDef } from './Tabs'
@@ -17,16 +19,35 @@ const tabsFor = (source: boolean): TabDef[] => [
   { id: DOCUMENT_TAB, label: 'Document' },
 ]
 
+/** What a search asked, when it asked several questions under one shared context. */
+export interface Asked {
+  questions: string[]
+  context: string
+}
+
 /**
  * One search result, opened: the match itself, and the document it came from. Every page with a
- * `HitGrid` opens the same thing.
+ * `HitGrid` opens the same thing. An excerpt of a search of several questions shows the context
+ * and the questions it answers where a single query shows the query.
  */
-export function MatchModal({ match, query, onClose }: { match: Match | null; query: string; onClose: () => void }) {
+export function MatchModal({
+  match,
+  query,
+  scoring = [],
+  asked,
+  onClose,
+}: {
+  match: Match | null
+  query: string
+  scoring?: ScoreStep[]
+  asked?: Asked
+  onClose: () => void
+}) {
   return (
     <Modal open={match !== null} onClose={onClose} title={match?.document ?? ''} subtitle={match?.collection}>
       {/* Keyed by document: a result from another document starts its panels over, while one
           from the same document only scrolls them. */}
-      {match !== null && <MatchBody key={match.document} match={match} query={query} />}
+      {match !== null && <MatchBody key={match.document} match={match} query={query} scoring={scoring} asked={asked} />}
     </Modal>
   )
 }
@@ -35,6 +56,32 @@ export function MatchModal({ match, query, onClose }: { match: Match | null; que
 const anchorOf = (match: Match): Anchor => ({ heading: headingOf(match), offset: isSource(match) ? undefined : match.char_start })
 // A section is a header; its last heading is the one the document is anchored by.
 const sectionAnchor = (section: HotSection): Anchor => ({ heading: lastHeading(section.header) })
+
+/** A result's score, with its lineage on hover or focus: each step that set or changed it, in
+ *  the order they ran, and how. Nothing to hover when the search said nothing. */
+function Score({ score, scoring }: { score: number; scoring: ScoreStep[] }) {
+  return (
+    <span className="score">
+      <span className="mono">{score.toFixed(2)}</span>
+      {scoring.length > 0 && (
+        <span className="score-basis" tabIndex={0} aria-label="How the score is computed">
+          <Info className="icon" />
+          <span className="hint hint-below hint-wide" role="tooltip">
+            <span className="label label-mono">Score lineage</span>
+            <span className="score-lineage">
+              {scoring.map((one) => (
+                <Fragment key={`${one.step} ${one.rule}`}>
+                  <span>{one.label}</span>
+                  <span className="muted">{one.rule}</span>
+                </Fragment>
+              ))}
+            </span>
+          </span>
+        </span>
+      )}
+    </span>
+  )
+}
 
 /** One edge of a chunk: the reason it was cut there, and what that reason means. */
 function Cut({ side, reason }: { side: 'before' | 'after'; reason: Hit['start_reason'] }) {
@@ -205,7 +252,25 @@ function AlsoIn({ match, query }: { match: Match; query: string }) {
   )
 }
 
-function MatchBody({ match, query }: { match: Match; query: string }) {
+/** The rows that say what was asked: the context and each question the excerpt answers, labelled
+ *  as the results are ("Q2"), when several were asked; else the query. */
+function askedRows(match: Match, query: string, asked?: Asked): [string, ReactNode][] {
+  if (asked === undefined || asked.questions.length < 2 || !isExcerpt(match)) {
+    return [['Query', <span key="query" className="code">{query}</span>]]
+  }
+  return [
+    ...(asked.context === '' ? [] : [['Context', asked.context] as [string, ReactNode]]),
+    ...questionLabels(match.aspects, asked.questions, match.aspect_scores).map(({ label, question, score }): [string, ReactNode] => [
+      label,
+      <span key={label}>
+        <span className="code">{question}</span>
+        {score !== undefined && <span className="mono muted"> · {score}</span>}
+      </span>,
+    ]),
+  ]
+}
+
+function MatchBody({ match, query, scoring, asked }: { match: Match; query: string; scoring: ScoreStep[]; asked?: Asked }) {
   const [tab, setTab] = useState(MATCH_TAB)
   // Fetched because the panes need the document's preview kind, which a match does not carry.
   const [row, setRow] = useState<Document | null>(null)
@@ -238,12 +303,12 @@ function MatchBody({ match, query }: { match: Match; query: string }) {
       <div id={MATCH_TAB} role="tabpanel" className="match" hidden={tab !== MATCH_TAB}>
         <Kv
           rows={[
-            ['Score', <span key="score" className="mono">{match.score.toFixed(2)}</span>],
+            ['Score', <Score key="score" score={match.score} scoring={scoring} />],
             ['Collection', source ? match.collections.join(', ') : match.collection],
             source ? ['Chunks', match.chunks] : ['Position', position(match)],
             // a chunk shows its heading path once, on grey at the top of its quote
             ...(isHit(match) ? [] : [['Heading', headingOf(match) || '—'] as [string, string]]),
-            ['Query', <span key="query" className="code">{query}</span>],
+            ...askedRows(match, query, asked),
           ]}
         />
         {source ? (
@@ -267,8 +332,8 @@ function MatchBody({ match, query }: { match: Match; query: string }) {
         ) : isHit(match) ? (
           <ChunkQuote hit={match} query={query} />
         ) : (
-          <blockquote className="match-text">
-            <Mark text={match.text} query={query} />
+          <blockquote className="match-text match-markdown">
+            <MarkdownQuote text={match.text} query={query} />
             <span className="match-seq" title={`chunk ${seqLabel(match)}`}>{seqLabel(match)}</span>
           </blockquote>
         )}

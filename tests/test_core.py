@@ -8,6 +8,7 @@ the HTTP contract lives in `tests/test_api.py`.
 
 import base64
 import io
+import math
 import random
 import sqlite3
 import sys
@@ -27,9 +28,11 @@ import pytest
 import structlog
 from conftest import (
     MD,
+    collection_hits,
     document_names,
     events,
     import_row,
+    index_hits,
     legacy_index,
     maintenance_state,
     text_pdf,
@@ -39,6 +42,7 @@ from sqlalchemy.exc import IntegrityError
 
 from haskie import audit, db, home, logs, tables
 from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
+from haskie.collection import index as index_module
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection, DocumentCounts, Member, MemberStatus
 from haskie.collection.index import (
@@ -64,7 +68,7 @@ from haskie.errors import (
 )
 from haskie.indexing import chunk, embed, embed_cache, pipeline
 from haskie.indexing.chunk import Chunk, Piece, Position
-from haskie.indexing.segment import PieceType
+from haskie.indexing.segment import CutReason, PieceType
 from haskie.paging import Order, PageRequest
 from haskie.settings import (
     Accelerator,
@@ -1418,7 +1422,7 @@ async def test_existing_is_none_for_a_directory_without_the_table(tmp_path: Path
 @pytest.mark.anyio
 async def test_search_of_a_never_indexed_collection_is_empty(tmp_path: Path) -> None:
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
-    assert await index.search("anything", SearchSettings()) == []
+    assert await index_hits(index, "anything", SearchSettings()) == []
 
 
 @pytest.mark.anyio
@@ -1531,7 +1535,7 @@ async def test_finish_builds_fts_once_and_later_rows_are_still_found(
     assert builds == [FTS_COLUMN], "one build across two documents"
     assert await index.has_index(FTS_COLUMN) is True
     assert [list(i.columns) for i in await table.list_indices()] == [[FTS_COLUMN]], "and one index"
-    found = {hit.document for hit in await index.search("lancedb", SearchSettings(limit=10))}
+    found = {hit.document for hit in await index_hits(index, "lancedb", SearchSettings(limit=10))}
     assert found == {"a.md", "b.md"}, "the rows added after the build are still found"
 
 
@@ -1798,7 +1802,7 @@ async def test_search_falls_back_to_fts_without_an_embedding_model(tmp_path: Pat
     index = CollectionIndex(path, "notes", tmp_path, None)
     await index.finish()  # build the full-text index the fallback needs
 
-    hits = await index.search("hi", SearchSettings(mode=SearchMode.VECTOR))
+    hits = await index_hits(index, "hi", SearchSettings(mode=SearchMode.VECTOR))
 
     assert [h.document for h in hits] == ["a.md"]
 
@@ -1913,19 +1917,45 @@ def test_fusion_reranker_per_setting(name: str, settings: SearchSettings, expect
     assert type(_fusion(settings)).__name__.startswith(expected), name
 
 
+@pytest.mark.parametrize(
+    ("name", "score", "expected"),
+    [
+        ("a middling score", 0.5, 0.0),
+        ("a strong one", 1 / (1 + math.exp(-3.25)), 3.25),
+        ("a weak one", 1 / (1 + math.exp(30.0)), -30.0),
+        ("0, where the sigmoid rounds a logit below about -745", 0.0, math.log(math.ulp(0.0))),
+        ("1, where it rounds one above about 37", 1.0, 36.7368005696771),
+    ],
+)
+def test_logit_undoes_the_rerankers_sigmoid(name: str, score: float, expected: float) -> None:
+    from haskie.collection.index import logit
+
+    assert logit(score) == pytest.approx(expected, abs=1e-9), name
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("name", "texts", "expected"),
+    ("name", "logits", "expected"),
     [
-        ("nothing retrieved, nothing to rescore", [], []),
-        ("best first, whatever retrieval scored", ["short", "a longer chunk"], [14.0, 5.0]),
+        ("nothing retrieved, nothing to rescore", {}, []),
+        (
+            "best first, whatever retrieval scored, as the sigmoid of the logit",
+            {"short": 5.0, "a longer chunk": 14.0},
+            [1 / (1 + math.exp(-14.0)), 1 / (1 + math.exp(-5.0))],
+        ),
+        (
+            "a negative logit keeps its rank above 0, where a passage score can use it",
+            {"off topic": -9.5, "near": -1.25, "on topic": 0.0},
+            [0.5, 1 / (1 + math.exp(1.25)), 1 / (1 + math.exp(9.5))],
+        ),
+        ("a logit past what exp can take is 0, not an error", {"noise": -800.0}, [0.0]),
     ],
 )
 async def test_cross_encode_rescores_candidates_best_first(
-    monkeypatch: pytest.MonkeyPatch, name: str, texts: list[str], expected: list[float]
+    monkeypatch: pytest.MonkeyPatch, name: str, logits: dict[str, float], expected: list[float]
 ) -> None:
-    """The cross-encoder is CPU work, so it runs in a worker thread; its score replaces whatever
-    the retrieval stage put on the row (see `row_score`)."""
+    """The cross-encoder is CPU work, so it runs in a worker thread; the sigmoid of its logit
+    replaces whatever the retrieval stage put on the row (see `row_score`)."""
     from haskie.collection.index import cross_encode
     from haskie.indexing import models
 
@@ -1939,16 +1969,17 @@ async def test_cross_encode_rescores_candidates_best_first(
 
     def rerank_scores(model: str, accelerator: Accelerator, q: str, ts: list[str]) -> list[float]:
         hardware.append(accelerator)
-        return [float(len(t)) for t in ts]
+        return [logits[t] for t in ts]
 
     monkeypatch.setattr(embed, "rerank_scores", rerank_scores)
     await save_user_settings(UserSettings(pipeline=PipelineSettings(accelerator=Accelerator.CPU)))
     settings = SearchSettings(reranker=Reranker.CROSS_ENCODER)
-    rows = [{"text": text, FTS_COLUMN: text, "frame": [], "_score": 9.0} for text in texts]
+    rows = [{"text": text, FTS_COLUMN: text, "frame": [], "_score": 9.0} for text in logits]
 
     ranked = await cross_encode("q", rows, settings)
 
-    assert [row_score(row) for row in ranked] == expected, name
+    assert [row_score(row) for row in ranked] == pytest.approx(expected), name
+    assert all(0.0 <= row_score(row) < 1.0 for row in ranked), f"{name}: bounded"
     assert checked == [("reranker", settings.reranker_model)], name
     assert hardware == [Accelerator.CPU], f"{name}: on the hardware the settings choose"
 
@@ -2054,7 +2085,7 @@ async def test_a_hit_carries_what_the_models_read_and_its_pieces(tmp_path: Path)
     await index.add_parts("d.md", "documents/d.md", "documents/d.md.md", _aparts([(0, rows)]))
     await index.finish()
 
-    hits = {h.seq: h for h in await index.search("lancedb", SearchSettings(limit=20))}
+    hits = {h.seq: h for h in await index_hits(index, "lancedb", SearchSettings(limit=20))}
     middle = hits[2]
     assert middle.header == "Costs > Europe", "the heading path the models read it after"
     assert middle.layout == chunks[1].layout, "stored as the chunk has them"
@@ -2071,7 +2102,7 @@ async def test_a_hit_carries_what_the_models_read_and_its_pieces(tmp_path: Path)
 @pytest.mark.anyio
 async def test_search_rows_returns_raw_rows_without_cutting(tmp_path: Path) -> None:
     """Retrieval only: as many rows as the caller asked for, carrying the engine's own score and
-    no cross-encoder score. `search` is what cuts to `settings.limit`."""
+    no cross-encoder score."""
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     chunks = [
         c for i in range(6) for c in chunk.split(f"# H\n\nlancedb chapter {i}\n", ChunkSettings())
@@ -2088,68 +2119,8 @@ async def test_search_rows_returns_raw_rows_without_cutting(tmp_path: Path) -> N
     assert all("_score" in row and "_relevance_score" not in row for row in rows)
     assert {row["document"] for row in rows} == {"d.md"}
     assert len(await index.search_rows("lancedb", None, settings, 100)) == 6, "no more than exist"
-    assert len(await index.search("lancedb", settings)) == 2, "the composed search cuts to limit"
     missing = CollectionIndex(tmp_path / "missing", "notes", tmp_path, None)
     assert await missing.search_rows("lancedb", None, settings, 4) == [], "no table, no rows"
-    assert await missing.search("lancedb", settings) == [], "and nothing to compose a search from"
-
-
-@pytest.mark.parametrize(
-    ("name", "embedding", "settings", "vector_column", "expected"),
-    [
-        ("mode fts never embeds", COMPACT, SearchSettings(mode=SearchMode.FTS), True, None),
-        ("no embedding profile", None, SearchSettings(mode=SearchMode.HYBRID), True, None),
-        ("no vector column", COMPACT, SearchSettings(mode=SearchMode.HYBRID), False, None),
-        (
-            "hybrid over a vector table",
-            COMPACT,
-            SearchSettings(mode=SearchMode.HYBRID),
-            True,
-            [0.5] * 384,
-        ),
-        (
-            "vector mode over a vector table",
-            COMPACT,
-            SearchSettings(mode=SearchMode.VECTOR),
-            True,
-            [0.5] * 384,
-        ),
-    ],
-)
-@pytest.mark.anyio
-async def test_query_vector_is_none_for_fts_and_without_embedding(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-    embedding: EmbeddingModel | None,
-    settings: SearchSettings,
-    vector_column: bool,
-    expected: list[float] | None,
-) -> None:
-    from haskie.indexing import models
-
-    path = tmp_path / "index"
-    vector_field = pa.field("vector", pa.list_(pa.float32(), 384))
-    _table_with(path, PLAIN_SCHEMA.append(vector_field) if vector_column else PLAIN_SCHEMA)
-    checked: list[tuple[str, str]] = []
-
-    async def require_ready(kind: str, model: str) -> None:
-        checked.append((kind, model))
-
-    monkeypatch.setattr(models, "require_ready", require_ready)
-    monkeypatch.setattr(embed, "embed_query", lambda model, text: [0.5] * model.dims)
-    index = CollectionIndex(path, "notes", tmp_path, embedding)
-
-    assert await index.query_vector("q", settings) == expected, name
-    assert checked == ([("embedding", COMPACT.name)] if expected else []), name
-
-
-@pytest.mark.anyio
-async def test_query_vector_of_a_never_indexed_collection_is_none(tmp_path: Path) -> None:
-    """No table means no search, so the model is never asked for (it may not be loaded)."""
-    index = CollectionIndex(tmp_path / "index", "notes", tmp_path, COMPACT)
-    assert await index.query_vector("q", SearchSettings(mode=SearchMode.HYBRID)) is None
-    assert await index.search("q", SearchSettings(mode=SearchMode.HYBRID)) == []
 
 
 # --- pipeline ----------------------------------------------------------------------
@@ -2206,7 +2177,8 @@ async def _index(
 @pytest.mark.anyio
 async def test_a_part_is_embedded_under_the_headings_an_earlier_part_opened() -> None:
     """A PDF converts ten pages a part: a chapter opened in one part still frames the chunks
-    of the next, both in the chunk's headings and in what the model embeds."""
+    of the next, both in the chunk's headings and in what the model embeds. Where the two parts
+    meet is a part boundary, not the document's edge: the section goes on across it."""
     doc = await import_row("g.md")
     parts = ["# Replication\n\n## Leaders\n\nOne leader takes writes.", "Followers apply the log."]
     doc.parts_dir.mkdir(parents=True, exist_ok=True)
@@ -2217,12 +2189,65 @@ async def test_a_part_is_embedded_under_the_headings_an_earlier_part_opened() ->
     batches = await pipeline.plan_embed(doc)
 
     assert [[text for _, text in b.opened] for b in batches] == [[], ["Replication", "Leaders"]]
-    await pipeline.embed_batch(doc, batches[1], "cache", SMALL, None)
-    rows = msgspec.json.decode(
-        embed_cache.rows_path(doc.name, "cache", 1).read_bytes(), type=list[Row]
+    assert [(b.start_reason, b.end_reason) for b in batches] == [
+        (CutReason.EDGE, CutReason.PART),
+        (CutReason.PART, CutReason.EDGE),
+    ]
+    for batch in batches:
+        await pipeline.embed_batch(doc, batch, "cache", SMALL, None)
+    first, rows = (
+        msgspec.json.decode(
+            embed_cache.rows_path(doc.name, "cache", seq).read_bytes(), type=list[Row]
+        )
+        for seq in (0, 1)
     )
     assert [row.chunk.headings for row in rows] == [["Replication", "Leaders"]]
     assert rows[0].chunk.char_start == len(parts[0]) + len(pipeline.JOINER)
+    reasons = [(row.chunk.start_reason, row.chunk.end_reason) for row in [*first, *rows]]
+    assert reasons == [(CutReason.EDGE, CutReason.PART), (CutReason.PART, CutReason.EDGE)]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "second", "meets"),
+    [
+        ("text goes on: the section crosses the boundary", "More of it.", CutReason.PART),
+        (
+            "the next part opens with a heading, behind its page marker: the section ends",
+            "<!-- page 11 -->\n\n# Chapter 4\n\nMore.",
+            CutReason.HEADING,
+        ),
+    ],
+)
+async def test_where_two_parts_meet_is_cut_for_what_comes_next(
+    name: str, second: str, meets: CutReason
+) -> None:
+    """A PDF chapter often starts on a new page, so a part often opens with its heading. The cut
+    between the two parts is then a heading on both sides, and a short section just before it is
+    whole: nothing grows across the heading."""
+    doc = await import_row("g.md")
+    parts = ["# Chapter 3\n\nA short note.", second]
+    doc.parts_dir.mkdir(parents=True, exist_ok=True)
+    for seq, text in enumerate(parts):
+        doc.part_path(seq).write_text(text)
+    doc.markdown.write_text(pipeline.JOINER.join(parts))
+
+    batches = await pipeline.plan_embed(doc)
+    for batch in batches:
+        await pipeline.embed_batch(doc, batch, "cache", SMALL, None)
+    rows = [
+        row
+        for seq in (0, 1)
+        for row in msgspec.json.decode(
+            embed_cache.rows_path(doc.name, "cache", seq).read_bytes(), type=list[Row]
+        )
+    ]
+
+    assert [(b.start_reason, b.end_reason) for b in batches] == [
+        (CutReason.EDGE, meets),
+        (meets, CutReason.EDGE),
+    ], name
+    assert (rows[0].chunk.end_reason, rows[1].chunk.start_reason) == (meets, meets), name
 
 
 @pytest.mark.anyio
@@ -2310,7 +2335,7 @@ async def test_the_pipeline_indexes_a_markdown_document_into_a_collection() -> N
     assert written == await _indexed_rows(collection) > 0
     (entry,) = await embed_cache.entries(doc.name)
     assert (entry.id, entry.rows) == (cache_id, written)
-    (hit,) = await collection.search("lancedb")
+    (hit,) = await collection_hits(collection.name, "lancedb")
     assert (hit.collection, hit.document) == ("notes", "guide.md")
     assert hit.source_file == str(doc.original), "the hit points at the document's own files"
     assert hit.markdown_file == str(doc.markdown)
@@ -2368,14 +2393,14 @@ async def test_two_collections_with_the_same_chunk_settings_share_one_cache_entr
     rows_beta = await _index(beta, doc, second)
 
     assert rows_alpha > 0 and rows_beta > rows_alpha, "beta chunks the same markdown smaller"
-    assert len(await alpha.search("lancedb")) > 0 and len(await beta.search("lancedb")) > 0
+    assert await collection_hits("alpha", "lancedb") and await collection_hits("beta", "lancedb")
     assert await document.collections_of(doc.name) == ["alpha", "beta"]
 
 
 # --- sessions and cross-collection search --------------------------------------------
 #
-# `CollectionIndex` splits search into retrieval (`search_rows`), the query embedding
-# (`query_vector`) and row-to-Hit (`hit`), so a session embeds once, fans out and rescores once.
+# `CollectionIndex` answers retrieval (`search_rows`) and row-to-Hit (`hit`); the search embeds the
+# query once (`retrieval.plan`), fans out and rescores once.
 # `retrieval.rrf_merge` fuses the per-collection rankings by rank, because two indexes do not
 # score on the same scale. `search.text.merge` merges raw BM25 scores instead: one lexical scorer
 # with the same tokenizer answers in every collection. Both count a passage once, because one
@@ -2486,7 +2511,7 @@ async def test_session_search_reads_its_collections_concurrently(monkeypatch) ->
     await session.set_collections("s1", ["a", "b"])
     arrived = {"a": asyncio.Event(), "b": asyncio.Event()}
 
-    async def paired(self, query, vector, settings_, limit) -> list[dict]:
+    async def paired(self, query, vector, settings_, limit, vectors=True) -> list[dict]:
         arrived[self.collection].set()
         other = arrived["b" if self.collection == "a" else "a"]
         await asyncio.wait_for(other.wait(), CONCURRENT_SEARCH_SECONDS)
@@ -3028,3 +3053,35 @@ def test_the_audit_record_names_a_collection_and_a_document() -> None:
     """A document belongs to no collection, so a document-scoped action carries `doc` alone."""
     assert {"collection", "document"} <= audit.RECORD_FIELDS
     assert "library" not in audit.RECORD_FIELDS
+
+
+@pytest.mark.parametrize(
+    ("name", "vectors", "expected"),
+    [
+        (
+            "every row a vector: rows of one float32 array",
+            [[1.0, 2.0], [3.0, 4.0]],
+            [[1.0, 2.0], [3.0, 4.0]],
+        ),
+        (
+            "a row without one holds None, the others keep their own",
+            [[1.0, 2.0], None, [5.0, 6.0]],
+            [[1.0, 2.0], None, [5.0, 6.0]],
+        ),
+        ("no rows", [], []),
+    ],
+)
+def test_a_read_holds_each_vector_as_an_array_row(name: str, vectors: list, expected: list) -> None:
+    """A search compares vectors as arrays (`collapse.unit_rows`), so a read never builds the
+    list of floats each row would carry."""
+    column = pa.array(vectors, type=pa.list_(pa.float32(), 2))
+    found = index_module._rows(pa.table({"seq": list(range(len(vectors))), "vector": column}))
+
+    assert [row["seq"] for row in found] == list(range(len(vectors))), name
+    got = [None if row["vector"] is None else row["vector"].tolist() for row in found]
+    assert got == expected, name
+    assert all(row["vector"] is None or row["vector"].dtype == np.float32 for row in found), name
+
+
+def test_a_read_without_a_vector_column_is_plain_rows() -> None:
+    assert index_module._rows(pa.table({"seq": [1, 2]})) == [{"seq": 1}, {"seq": 2}]

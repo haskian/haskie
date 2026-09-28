@@ -41,6 +41,7 @@ from haskie.collection.index import Row
 from haskie.document import convert
 from haskie.document.document import Document
 from haskie.indexing import chunk, embed_cache, models
+from haskie.indexing.segment import CutReason
 from haskie.settings import ChunkSettings
 
 JOINER = "\n\n"  # between parts in the assembled markdown
@@ -55,6 +56,9 @@ class Batch(msgspec.Struct):
     byte_offset: int = 0
     # embed: the headings still open where this part starts, opened in an earlier one
     opened: list[chunk.Opened] = []
+    # embed: why the part's first chunk starts and its last one ends (`chunk.split`)
+    start_reason: CutReason = CutReason.EDGE
+    end_reason: CutReason = CutReason.EDGE
 
 
 # --- convert --------------------------------------------------------------------
@@ -126,14 +130,32 @@ async def _parts(doc: Document) -> list[Path]:
 
 
 async def plan_embed(doc: Document) -> list[Batch]:
-    """One batch per part, carrying the part's offsets inside the assembled file and the headings
-    still open where it starts (one pass)."""
+    """One batch per part, carrying the part's offsets inside the assembled file, the headings
+    still open where it starts (one pass), and why its first chunk starts and its last one ends:
+    the document's edge, a heading the next part opens with, or a section going on (`PART`)."""
+    texts = [await anyio.Path(part).read_text(encoding="utf-8") for part in await _parts(doc)]
+    headed = await cpu.on_cpu(lambda: [chunk.opens_with_heading(text) for text in texts])
+    # why a part's start is cut, where the one before it meets it; the first starts the document
+    meets = [CutReason.EDGE] + [
+        CutReason.HEADING if heading else CutReason.PART for heading in headed[1:]
+    ]
     batches: list[Batch] = []
     line_offset = char_offset = byte_offset = 0
     opened: list[chunk.Opened] = []
-    for i, part in enumerate(await _parts(doc)):
-        batches.append(Batch(i, i, i + 1, line_offset, char_offset, byte_offset, opened))
-        text = await anyio.Path(part).read_text(encoding="utf-8")
+    for i, text in enumerate(texts):
+        batches.append(
+            Batch(
+                seq=i,
+                start=i,
+                end=i + 1,
+                line_offset=line_offset,
+                char_offset=char_offset,
+                byte_offset=byte_offset,
+                opened=opened,
+                start_reason=meets[i],
+                end_reason=meets[i + 1] if i + 1 < len(texts) else CutReason.EDGE,
+            )
+        )
         opened = await cpu.on_cpu(chunk.open_headings, text, opened)  # a parse: off the loop
         line_offset += text.count("\n") + JOINER.count("\n")
         char_offset += len(text) + len(JOINER)
@@ -158,7 +180,14 @@ async def embed_batch(
 
     def chunk_and_embed() -> list[Row]:
         chunks = chunk.split(
-            text, chunking, batch.line_offset, batch.char_offset, batch.byte_offset, batch.opened
+            text,
+            chunking,
+            batch.line_offset,
+            batch.char_offset,
+            batch.byte_offset,
+            batch.opened,
+            batch.start_reason,
+            batch.end_reason,
         )
         vectors: list[list[float] | None] = [None] * len(chunks)
         if embedding is not None and chunks:

@@ -5,8 +5,10 @@ every request: the request context, the error mapping, and how the application i
 """
 
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 
+import msgspec
 from litestar import Litestar, Request, Response
 from litestar.datastructures import MutableScopeHeaders
 from litestar.exceptions import HTTPException, ValidationException
@@ -32,6 +34,7 @@ WEB_DIST = _PACKAGED_WEB if _PACKAGED_WEB.is_dir() else _CHECKOUT_WEB
 REQUEST_ID_KEY = "request_id"
 REQUEST_ID_HEADER = "X-Request-Id"
 TRACE_KEY = "search_trace"
+SCORING_HEADER = "X-Score-Lineage"
 MCP_PATH = "/mcp"
 
 _log = logs.get_logger(__name__)
@@ -74,9 +77,14 @@ async def add_request_id(message: Message, scope: Scope) -> None:
         request_id = scope["state"].get(REQUEST_ID_KEY)
         if request_id is not None:
             MutableScopeHeaders(message)[REQUEST_ID_HEADER] = request_id
-        # a search's step timings (`search.flow`): what its breakdown on screen is read from
-        if steps := scope["state"].get(TRACE_KEY):
-            MutableScopeHeaders(message)["Server-Timing"] = flow.server_timing(steps)
+        # a search's step timings and how it scored (`search.flow`), which the web UI shows
+        trace = scope["state"].get(TRACE_KEY)
+        if trace is not None and trace.steps:
+            MutableScopeHeaders(message)["Server-Timing"] = flow.server_timing(trace.steps)
+        if trace is not None and trace.scoring:
+            # JSON, percent-encoded: a header is Latin-1, and the formulas are not
+            lineage = msgspec.json.encode(trace.scoring).decode()
+            MutableScopeHeaders(message)[SCORING_HEADER] = quote(lineage)
 
 
 # --- errors -----------------------------------------------------------------
