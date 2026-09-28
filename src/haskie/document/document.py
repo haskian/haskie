@@ -489,6 +489,18 @@ async def set_status(name: str, status: DocumentStatus, error: str | None = None
         )
 
 
+async def cancel_import(name: str) -> None:
+    """Record a cancelled import as `cancelled`, but only while the document is still in the
+    import pipeline. An import that ended between the cancel's read and this write keeps the status
+    it ended on (DBOS keeps its SUCCESS or ERROR too), and a delete keeps `deleting`."""
+    async with db.connect() as conn:
+        await conn.execute(
+            update(documents)
+            .where(documents.c.name == name, documents.c.status.in_(ACTIVE_DOCUMENT_STATUSES))
+            .values(status=DocumentStatus.CANCELLED, error=None, updated_at=time.time())
+        )
+
+
 async def describe(name: str, description: str) -> Document:
     """Replace the document's description; empty clears it. Returns the row as it now stands.
 

@@ -622,6 +622,17 @@ class Collection:
         cancelled again. Only its removal ends that status (see `fail_removal`)."""
         await self._move_member(doc, status, error, not_(_REMOVING))
 
+    async def cancel_index(self, doc: str) -> None:
+        """Record a cancelled index as `cancelled`, but only while the membership is still being
+        indexed. An index that ended between the cancel's read and this write keeps the status it
+        ended on (DBOS keeps its SUCCESS or ERROR too), and a removal keeps `removing`."""
+        await self._move_member(
+            doc,
+            MemberStatus.CANCELLED,
+            None,
+            collection_documents.c.status.in_((MemberStatus.PENDING, MemberStatus.INDEXING)),
+        )
+
     async def start_removal(self, doc: str) -> None:
         """Mark the membership `removing`, whatever it was: a detach answers once its removal is
         queued, and this is what the member listing shows until that removal ran."""

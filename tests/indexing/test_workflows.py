@@ -1654,6 +1654,40 @@ async def test_cancel_operation_rejects_unknown_ids_and_leaves_finished_ones_alo
     assert (await operations._pipeline_page("done")).items[0].status == "SUCCESS"
 
 
+@pytest.mark.parametrize("action", ["import", "index"])
+async def test_cancel_operation_after_the_run_finished_keeps_its_end_state(
+    dbos, tmp_path: Path, monkeypatch, action: str
+) -> None:
+    """The race: the cancel reads the operation while it still runs, the run then finishes, and
+    only then does the cancel write. DBOS keeps its SUCCESS, so the document (for an import) or
+    the membership (for an index) must keep the status the run ended on too."""
+    await Collection.create("race")
+    doc = await import_row("r.md", MD, tmp_path)
+    job_id = await dbos.start_import(doc.name)
+    assert await wait_for(job_id) == "imported"
+    if action == "index":
+        job_id = await dbos.attach("race", doc.name)
+        assert await wait_for(job_id) == "indexed"
+    read = workflows.DBOS.get_workflow_status_async
+
+    async def read_while_it_ran(workflow_id: str):
+        found = await read(workflow_id)
+        assert found is not None
+        found.status = "PENDING"  # what the cancel saw before the run finished
+        return found
+
+    monkeypatch.setattr(workflows.DBOS, "get_workflow_status_async", read_while_it_ran)
+
+    await workflows.cancel_operation(job_id)
+
+    assert (await document.get(doc.name)).status == "imported"
+    if action == "index":
+        assert (await Collection("race").member(doc.name)).status == "indexed"
+    monkeypatch.undo()
+    finished = await DBOS.get_workflow_status_async(job_id)
+    assert finished is not None and finished.status == "SUCCESS"
+
+
 async def test_delete_document_while_it_indexes_leaves_nothing_behind(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:

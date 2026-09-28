@@ -1649,7 +1649,9 @@ async def cancel_operation(operation_id: str) -> None:
     Here rather than in `operations`, which is a read model: this writes, and it reads the names it
     writes by out of the id grammar this module owns (see `pipeline_names`).
 
-    No-op on an operation that already finished: its document status is final."""
+    No-op on an operation that already finished: its document status is final. One that finishes
+    between this read and the cancel keeps its end state too (`document.cancel_import`,
+    `Collection.cancel_index`)."""
     found = await DBOS.get_workflow_status_async(operation_id)
     if found is None:
         raise NotFound(f"operation not found: {operation_id}")
@@ -1661,6 +1663,6 @@ async def cancel_operation(operation_id: str) -> None:
         return
     action, collection, doc = names
     if action == PipelineAction.IMPORT:
-        await document.set_status(doc, DocumentStatus.CANCELLED)
+        await document.cancel_import(doc)
     elif collection is not None:
-        await Collection(collection).set_member_status(doc, MemberStatus.CANCELLED)
+        await Collection(collection).cancel_index(doc)
