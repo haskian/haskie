@@ -228,10 +228,15 @@ def location(
 # in this process, so the answer is cached per (index directory, embedding) and forgotten whenever
 # a table is created, dropped, or its collection deleted.
 #
+# Forgetting also bumps the directory's generation. A read that started before a drop would
+# otherwise cache its answer about the dropped table as the answer for the new one, and the next
+# document's `reset_for_write` would drop the new table with every row in it.
+#
 # A `threading.Lock` rather than an async one: both event loops (Litestar's and DBOS's) read this
 # cache, and a lock made on one of them cannot be taken from the other. Nothing is awaited while
 # it is held, so it is never contended for longer than a dict lookup.
 _schema_current: dict[tuple[str, str | None], bool] = {}
+_schema_generation: dict[str, int] = {}  # index directory -> times its answers were forgotten
 _schema_lock = threading.Lock()
 # Schema metadata: the `cache_name` of the embedding a table's vectors were made by. LanceDB keeps
 # it through every write, delete, compaction and index build.
@@ -242,6 +247,7 @@ def forget_schema(path: Path) -> None:
     """Drop the cached `schema_current` answers for one index directory."""
     directory = str(path)
     with _schema_lock:
+        _schema_generation[directory] = _schema_generation.get(directory, 0) + 1
         for key in [k for k in _schema_current if k[0] == directory]:
             del _schema_current[key]
 
@@ -324,7 +330,7 @@ class CollectionIndex:
         it is the only copy of anything: every document of the collection is rewritten from its
         embedding cache by "Index all"."""
         table = await self._existing()
-        if table is not None and not await self.schema_current(table):
+        if table is not None and not await self.schema_current():
             _log.warning("index_table_outdated", collection=self.collection, path=str(self.path))
             await (await self._connection()).drop_table(TABLE)
             # the connection too, not only the table handle: an AsyncConnection that dropped a
@@ -336,7 +342,7 @@ class CollectionIndex:
             forget_schema(self.path)  # the answer just cached is about a table that is gone
         return await self._for_write()
 
-    async def schema_current(self, table: lancedb.AsyncTable | None = None) -> bool:
+    async def schema_current(self) -> bool:
         """False when the table cannot hold rows written by this build: a missing column, or
         vectors made by another embedding than the current one. Another model of the same size
         would fit the column, and its vectors would be compared with the query's all the same, so
@@ -345,17 +351,20 @@ class CollectionIndex:
         A missing table is never cached (see `_schema_current`), so one created later is
         inspected.
         """
-        key = (str(self.path), self.embedding.cache_name if self.embedding else None)
+        directory = str(self.path)
+        key = (directory, self.embedding.cache_name if self.embedding else None)
         with _schema_lock:
             cached = _schema_current.get(key)
+            generation = _schema_generation.get(directory, 0)
         if cached is not None:
             return cached
-        table = table or await self._existing()
+        table = await self._existing()
         if table is None:
             return True
         current = self._fits(await table.schema())
         with _schema_lock:
-            _schema_current[key] = current
+            if _schema_generation.get(directory, 0) == generation:  # no drop or create meanwhile
+                _schema_current[key] = current
         return current
 
     def _fits(self, schema: pa.Schema) -> bool:
@@ -379,7 +388,7 @@ class CollectionIndex:
         """A delete on a missing or outdated table has nothing to remove; dropping it instead
         would wipe every document of the collection."""
         table = await self._existing()
-        return table if table is not None and await self.schema_current(table) else None
+        return table if table is not None and await self.schema_current() else None
 
     async def delete_document(self, doc: str) -> None:
         table = await self._deletable()
@@ -517,7 +526,8 @@ class CollectionIndex:
         a collection to an approximate index does not change what `row_score` means.
 
         The training itself is CPU work inside LanceDB's runtime, so it cannot be put under the
-        CPU budget (`cpu.on_cpu`); maintenance runs one collection at a time instead."""
+        CPU budget (`cpu.on_cpu`); the index queue bounds it instead, one run per collection
+        partition (see `maintenance.run`)."""
         table = await self._existing()
         if table is None or self.embedding is None:
             return
@@ -529,7 +539,7 @@ class CollectionIndex:
                 # one 8-bit code per 16 dimensions: the usual PQ ratio, and it divides every
                 # embedding profile's dimension count
                 num_sub_vectors=max(1, self.embedding.dims // 16),
-                num_bits=8,
+                num_bits=PQ_BITS,
             ),
             replace=True,
         )
@@ -550,7 +560,7 @@ class CollectionIndex:
         table = await self._existing()
         if table is None or await table.count_rows() == 0:
             return None
-        if not await self.schema_current(table):
+        if not await self.schema_current():
             _log.warning("index_table_outdated", collection=self.collection, path=str(self.path))
             return None
         return table
@@ -691,6 +701,9 @@ class CollectionIndex:
 SEARCH_CONCURRENCY = 8  # LanceDB reads are IO bound; more in flight than this only queues up
 MIN_PARTITIONS = 16  # below this an IVF index buys nothing over a scan
 MAX_PARTITIONS = 4096  # above this training costs more than the queries save
+PQ_BITS = 8  # one byte per PQ sub-vector code
+# LanceDB trains each PQ codebook's 2^bits centroids on at least that many rows, and refuses fewer
+PQ_MIN_ROWS = 2**PQ_BITS
 
 
 def _partitions(num_rows: int) -> int:

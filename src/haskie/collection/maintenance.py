@@ -20,7 +20,7 @@ import msgspec
 
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.collection import Collection
-from haskie.collection.index import IndexStats
+from haskie.collection.index import PQ_MIN_ROWS, IndexStats
 from haskie.logs import get_logger
 from haskie.settings import PipelineSettings
 
@@ -47,22 +47,23 @@ class Report(msgspec.Struct):
     it as the record of the run."""
 
     collection: str
-    num_rows: int
-    fragments_before: int
-    fragments_after: int
-    ann_trained: bool
+    num_rows: int = 0
+    fragments_before: int = 0
+    fragments_after: int = 0
+    ann_trained: bool = False
     skipped: SkipReason | None = None
 
 
 def ann_due(stats: IndexStats, settings: PipelineSettings, trained_rows: int) -> bool:
     """Whether the approximate vector index should be (re)trained.
 
-    Below `ann_min_rows` an exact scan is both faster and exact, so no index is built at all.
-    Above it, one is trained once and retrained after the collection grew by `RETRAIN_GROWTH`;
+    Below `ann_min_rows` an exact scan is both faster and exact, so no index is built at all. Nor
+    is one below `PQ_MIN_ROWS`, whatever the setting says: LanceDB refuses to train on fewer.
+    Above both, one is trained once and retrained after the collection grew by `RETRAIN_GROWTH`;
     `trained_rows` is the row count of the last training, not the rows the index currently
     covers, because `optimize` folds later rows into the partitions it was trained with.
     """
-    if stats.num_rows < settings.ann_min_rows:
+    if stats.num_rows < max(settings.ann_min_rows, PQ_MIN_ROWS):
         return False
     if not stats.has_vector_index:
         return True
@@ -97,12 +98,11 @@ async def run(
     await index.optimize(KEEP_VERSIONS)
     after = await index.stats() or before
 
-    trained = False
-    if embedding is not None and await index.has_vector_column():
-        if ann_due(after, settings, state_.vector_index_rows):
-            await index.build_vector_index(after.num_rows)
-            trained = True
-            after = await index.stats() or after
+    # with an embedding, the current schema above already holds its vector column
+    trained = embedding is not None and ann_due(after, settings, state_.vector_index_rows)
+    if trained:
+        await index.build_vector_index(after.num_rows)
+        after = await index.stats() or after
 
     report = Report(
         collection=collection.name,
@@ -111,24 +111,10 @@ async def run(
         fragments_after=after.num_fragments,
         ann_trained=trained,
     )
-    _log.info(
-        "collection_maintained",
-        collection=collection.name,
-        rows=report.num_rows,
-        fragments_before=report.fragments_before,
-        fragments_after=report.fragments_after,
-        ann_trained=trained,
-    )
+    _log.info("collection_maintained", **msgspec.structs.asdict(report))
     return report
 
 
 def _skipped(collection: str, reason: SkipReason) -> Report:
     _log.info("collection_maintenance_skipped", collection=collection, reason=reason)
-    return Report(
-        collection=collection,
-        num_rows=0,
-        fragments_before=0,
-        fragments_after=0,
-        ann_trained=False,
-        skipped=reason,
-    )
+    return Report(collection=collection, skipped=reason)

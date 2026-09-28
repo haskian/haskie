@@ -233,9 +233,8 @@ async def _overrides_of(conn: AsyncConnection, names: list[str]) -> dict[str, Co
 
 
 def _overrides(raw: str) -> CollectionOverrides:
-    """One `overrides` column as the struct every caller reads. Unreadable JSON falls back to the
-    defaults, which is what a collection that never set any has."""
-    return db.loads(raw, CollectionOverrides) or CollectionOverrides()
+    """One `overrides` column as the struct every caller reads."""
+    return msgspec.json.decode(raw, type=CollectionOverrides)
 
 
 class Collection:
@@ -305,9 +304,8 @@ class Collection:
     async def delete(self) -> None:
         """Delete the collection. `delete_*` is the whole operation, `remove_*` is one step of it.
 
-        Rows first, then the folder: while the row exists the collection is still listed, so a
-        crash in between leaves a collection that can be deleted again rather than a phantom.
-        No document is touched: the documents stay, in their folders and in every other
+        Rows first, then the folder, as `workflows.delete_collection_workflow` runs them. No
+        document is touched: the documents stay, in their folders and in every other
         collection that holds them."""
         await self.remove_rows()
         await self.remove_tree()
@@ -428,19 +426,13 @@ class Collection:
         One query over the `overrides` column: the model downloads have to cover the overrides too,
         and a search of that collection loads whichever model it names."""
         async with db.read() as conn:
-            rows = await conn.execute(
-                select(collections.c.name, collections.c.overrides).order_by(collections.c.name)
-            )
-        found = {name: _overrides(raw) for name, raw in rows}
-        chosen = [v.search.reranker_model for v in found.values() if v.search.reranker_model]
-        return list(dict.fromkeys(chosen))
+            rows = await conn.scalars(select(collections.c.overrides).order_by(collections.c.name))
+        chosen = [_overrides(raw).search.reranker_model for raw in rows]
+        return list(dict.fromkeys(model for model in chosen if model))
 
     async def chunk_settings(self) -> ChunkSettings:
         """How this collection splits a document: what the embedding cache is keyed by."""
         return (await self.overrides()).resolve(await load_user_settings())
-
-    async def search_settings(self) -> SearchSettings:
-        return (await self.overrides()).resolve_search(await load_user_settings())
 
     async def info(self) -> CollectionInfo:
         """Everything the collection panel shows, off one connection: the whole `collections` row

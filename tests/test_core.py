@@ -1104,7 +1104,7 @@ async def test_chunk_settings_of_a_collection_resolve_against_the_user_settings(
     await collection.set_overrides(CollectionOverrides(chunker=Chunker.TEXT))
 
     assert await collection.chunk_settings() == ChunkSettings(Chunker.TEXT, 800, 66)
-    assert (await collection.search_settings()).limit == SearchSettings().limit
+    assert (await collection.info()).search.limit == SearchSettings().limit
 
 
 @pytest.mark.anyio
@@ -1685,6 +1685,32 @@ async def test_schema_current_is_cached_until_a_write(
 
 
 @pytest.mark.anyio
+async def test_a_schema_read_that_spans_a_reset_caches_nothing(tmp_path: Path) -> None:
+    """A search reads the schema of an outdated table while a document's index stage drops it and
+    creates the new one. The search's answer is about the dropped table: cached, it would make the
+    next document's write drop the new table with its rows."""
+    path = tmp_path / "index"
+    _table_with(path, pa.schema([("doc", pa.string()), ("text", pa.string())]))  # older build
+    reader = CollectionIndex(path, "notes", tmp_path, None)
+    await reader.open()
+    old = reader._cached
+    assert old is not None
+
+    class ResetMidRead:
+        """The reader's table handle, with the index stage's reset landing mid-read."""
+
+        async def schema(self) -> pa.Schema:
+            schema = await old.schema()
+            await CollectionIndex(path, "notes", tmp_path, None).reset_for_write()
+            return schema
+
+    reader._cached = ResetMidRead()  # ty: ignore[invalid-assignment]
+
+    assert await reader.schema_current() is False, "the reader's own table is outdated"
+    assert await CollectionIndex(path, "notes", tmp_path, None).schema_current() is True
+
+
+@pytest.mark.anyio
 async def test_a_missing_table_is_never_cached(tmp_path: Path) -> None:
     """Caching "nothing to reject" would hide the table the index stage creates a moment later."""
     path = tmp_path / "index"
@@ -1893,6 +1919,8 @@ def test_partitions_rule(name: str, num_rows: int, expected: int) -> None:
         ("grown, but not doubled", 90_000, True, 50_000, 50_000, False),
         ("doubled -> retrain", 100_000, True, 50_000, 50_000, True),
         ("index of unknown age retrains once", 60_000, True, 0, 50_000, True),
+        ("a setting under what PQ trains on waits for its rows", 255, False, 0, 10, False),
+        ("and trains once they are there", 256, False, 0, 10, True),
     ],
 )
 def test_ann_due(
