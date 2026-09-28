@@ -8,8 +8,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from sqlalchemy import func, select, update
 
-from haskie import errors
+from haskie import db, errors, home, tables
 from haskie.document import document
 
 from conftest import MD, NO_MODELS, audit_lines, document_names  # isort: skip
@@ -114,3 +115,51 @@ async def test_a_path_import_passes_on_a_failure_that_is_not_the_source(
     assert not isinstance(raised.value, errors.InvalidInput), name
     assert raised.value.errno == errno.ENOSPC, name
     assert await document_names() == [], name
+
+
+# --- staging ----------------------------------------------------------------------
+
+# A name `stored_name` accepts once cleaned, and the suffix the staging id must carry.
+STAGED_NAMES = [
+    ("a plain name", "guide.md", ".md", "guide.md"),
+    ("an upper-case suffix", "Guide.MD", ".md", "Guide.MD"),
+    ("a trailing dot", "report.md.", ".md", "report.md"),
+    ("an editor backup tilde", "notes.md~", ".md", "notes.md"),
+]
+
+
+@pytest.mark.parametrize(("name", "filename", "suffix", "imported_as"), STAGED_NAMES)
+async def test_a_staged_upload_can_be_imported_whatever_its_raw_name(
+    client, name: str, filename: str, suffix: str, imported_as: str
+) -> None:
+    """The staging id carries the suffix of the name the import will store, so every upload
+    staging accepts is one the import can find again."""
+    await client.post("/api/init", json=NO_MODELS)
+
+    staged = await client.post(
+        "/api/documents/staging", files={"data": (filename, MD.encode(), "text/markdown")}
+    )
+    assert staged.status_code == 201, name
+    staging_id = staged.json()["staging_id"]
+    assert document.STAGING_ID.match(staging_id) and staging_id.endswith(suffix), name
+
+    imported = await client.post("/api/documents/import", json={"staging_id": staging_id})
+
+    assert imported.status_code == 201, f"{name}: {imported.text}"
+    assert imported.json()["name"] == imported_as, name
+    assert await document_names() == [imported_as], name
+    assert not (home.STAGING_ROOT / staging_id).exists(), f"{name}: the import consumed it"
+
+
+async def test_the_sweep_removes_every_expired_upload_whatever_its_raw_name() -> None:
+    """One upload the sweep could not turn back into a path would stop it every night."""
+    staged = [await document.stage(filename, MD.encode()) for _, filename, _, _ in STAGED_NAMES]
+    async with db.connect() as conn:
+        await conn.execute(update(tables.staging).values(created_at=0))
+
+    assert await document.sweep_staging(max_age_seconds=3600) == len(STAGED_NAMES)
+
+    assert list(home.STAGING_ROOT.iterdir()) == [], "every expired upload's bytes go"
+    async with db.connect() as conn:
+        assert (await conn.scalar(select(func.count()).select_from(tables.staging))) == 0
+    assert [s.filename for s in staged] == [filename for _, filename, _, _ in STAGED_NAMES]

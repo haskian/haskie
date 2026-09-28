@@ -254,10 +254,13 @@ async def stage(filename: str, content: bytes) -> Staged:
     Bytes first, row second: a crash in between leaves a file the sweep removes as an orphan,
     where a row without bytes would be an upload the import cannot read.
     """
-    stored_name(filename)  # refuse what could never be imported, before writing anything
+    # refuse what could never be imported, before writing anything
+    importable = stored_name(filename)
     if len(content) > UPLOAD_MAX_BYTES:
         raise InvalidInput(f"file larger than {UPLOAD_MAX_BYTES} bytes: {len(content)}")
-    staging_id = f"{uuid4().hex}{Path(filename).suffix.lower()}"
+    # The cleaned name's suffix, not the raw one: `report.md.` or `notes.md~` would give an id
+    # `STAGING_ID` refuses, which neither the import nor the sweep could turn back into a path.
+    staging_id = f"{uuid4().hex}{Path(importable).suffix.lower()}"
     name = Path(filename).name
     await anyio.Path(home.STAGING_ROOT).mkdir(parents=True, exist_ok=True, mode=home.DIR_MODE)
     await home.atomic_write(home.STAGING_ROOT / staging_id, content)
