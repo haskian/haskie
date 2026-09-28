@@ -17,12 +17,11 @@ import signal
 import sqlite3
 import stat
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from conftest import holding
+from conftest import fresh_attribute, holding
 from typer.testing import CliRunner
 
 from haskie import APP_VERSION, claude, db, home
@@ -1187,16 +1186,7 @@ def test_the_default_url_matches_where_mcp_is_mounted() -> None:
 )
 def test_haskie_port_moves_the_default_url(port: str | None, expected: str) -> None:
     """Read once at import, so only a fresh interpreter shows it."""
-    env = {key: value for key, value in os.environ.items() if key != "HASKIE_PORT"}
-    if port is not None:
-        env["HASKIE_PORT"] = port
-    printed = subprocess.run(
-        [sys.executable, "-c", "from haskie import claude; print(claude.MCP_URL)"],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
+    printed = fresh_attribute("haskie.claude", "MCP_URL", {"HASKIE_PORT": port})
     assert printed == expected
 
 
@@ -1209,15 +1199,6 @@ def test_claude_config_dir_moves_the_user_scope(
     config_dir: str | None, expected: str, tmp_path: Path
 ) -> None:
     """Read once at import, so only a fresh interpreter shows it."""
-    env = {key: value for key, value in os.environ.items() if key != "CLAUDE_CONFIG_DIR"}
-    env["HOME"] = str(tmp_path / "home")
-    if config_dir is not None:
-        env["CLAUDE_CONFIG_DIR"] = config_dir
-    printed = subprocess.run(
-        [sys.executable, "-c", "from haskie import claude; print(claude.USER_CLAUDE)"],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
+    env = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": config_dir}
+    printed = fresh_attribute("haskie.claude", "USER_CLAUDE", env)
     assert printed == str(tmp_path / expected)

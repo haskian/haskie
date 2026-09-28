@@ -1,9 +1,12 @@
 """Fixtures shared by every test module: the temp home, and the DBOS runtime on top of it."""
 
 import functools
+import os
 import shutil
 import signal
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
@@ -306,6 +309,23 @@ def holding(address: str = "http://127.0.0.1:8451") -> Iterator[None]:
         yield
     finally:
         home.release_home()
+
+
+def fresh_attribute(
+    module: str, attribute: str, env: dict[str, str | None], cwd: Path | None = None
+) -> str:
+    """`module.attribute` as a fresh interpreter prints it: what a module reads once, at import.
+    `env` is laid over this process's environment, and a None in it unsets that variable."""
+    environment = {key: value for key, value in {**os.environ, **env}.items() if value is not None}
+    code = f"import importlib; print(importlib.import_module({module!r}).{attribute})"
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        env=environment,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
 
 
 WAIT = 30.0  # generous: every wait in the suite is released by another thread, never by a timer

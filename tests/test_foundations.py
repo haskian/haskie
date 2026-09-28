@@ -9,8 +9,6 @@ import logging.config
 import os
 import sqlite3
 import stat
-import subprocess
-import sys
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -54,7 +52,7 @@ from haskie.settings import (
     without_none,
 )
 
-from conftest import audit_lines, events, forget_settings, holding  # isort: skip
+from conftest import audit_lines, events, forget_settings, fresh_attribute, holding  # isort: skip
 
 # --- errors -----------------------------------------------------------------------
 
@@ -289,14 +287,7 @@ def test_the_home_from_the_environment_is_absolute(
     """`litestar run` hands `HASKIE_HOME` over as written, without the CLI's resolving. A relative
     home would follow every later change of directory, and `scrub` would rewrite the bare word
     `data` in every log line. The module reads it once, at import, so a fresh interpreter does."""
-    shown = subprocess.run(
-        [sys.executable, "-c", "from haskie import home; print(home.HOME)"],
-        cwd=tmp_path,
-        env={**os.environ, "HASKIE_HOME": configured},
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
+    shown = fresh_attribute("haskie.home", "HOME", {"HASKIE_HOME": configured}, cwd=tmp_path)
 
     wanted = expected.format(cwd=tmp_path.resolve(), user=Path.home())
     assert shown == str(Path(wanted).resolve()), name
