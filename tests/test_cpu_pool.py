@@ -8,8 +8,10 @@ runs, so the pickling boundary and the forkserver context stay covered.
 import asyncio
 import hashlib
 import os
+import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import anyio
@@ -19,7 +21,7 @@ from pebble import ProcessExpired
 from haskie import cpu, shutdown
 from haskie.document import convert
 
-from conftest import text_pdf, until  # isort: skip
+from conftest import WAIT, text_pdf, until  # isort: skip
 
 pytestmark = [pytest.mark.anyio, pytest.mark.usefixtures("pooled")]
 
@@ -142,3 +144,66 @@ async def test_a_worker_that_dies_fails_only_its_own_extraction() -> None:
 
     assert await beside is None, "the extraction beside the crash finished"
     assert await cpu.off_interpreter(sum, [1, 2]) == 3, "the pool takes the next call"
+
+
+# --- a budget resized under load --------------------------------------------------
+
+# Long enough for a newcomer the budget should not admit to show up, if the budget let it in.
+ADMISSION_SETTLE = 0.3
+
+
+@dataclass
+class ResizeCase:
+    before: int
+    after: int
+    running_under_load: int  # what runs at once while the old holders still hold
+
+
+RESIZE_CASES = {
+    "a raise admits only the new slots beside the running work": ResizeCase(2, 3, 3),
+    "a cut admits nothing until the running work is under it": ResizeCase(3, 1, 3),
+    "the same size admits nothing more": ResizeCase(2, 2, 2),
+}
+
+
+@pytest.mark.parametrize("case", RESIZE_CASES.values(), ids=list(RESIZE_CASES))
+async def test_a_resized_budget_counts_the_work_already_running(case: ResizeCase) -> None:
+    """A resize moves the limit against the holders it finds, or a raise from 2 to 3 under
+    load would run 5 at once."""
+    counted = threading.Lock()
+    running, peak = 0, 0
+    old_may_finish = threading.Event()
+    newcomers_meet = threading.Barrier(case.after)
+
+    def work(wait: Callable[[], object]) -> None:
+        nonlocal running, peak
+        with counted:
+            running += 1
+            peak = max(peak, running)
+        try:
+            wait()
+        finally:
+            with counted:
+                running -= 1
+
+    async def ran_at_once(count: int) -> None:
+        async def reached() -> bool:
+            return peak >= count
+
+        await until(reached, f"{count} callers never ran at once")
+
+    cpu.configure_cpu_budget(case.before)
+    async with anyio.create_task_group() as callers:
+        for _ in range(case.before):
+            callers.start_soon(cpu.on_cpu, work, lambda: old_may_finish.wait(WAIT))
+        await ran_at_once(case.before)
+
+        try:
+            cpu.configure_cpu_budget(case.after)
+            for _ in range(case.after):
+                callers.start_soon(cpu.on_cpu, work, lambda: newcomers_meet.wait(WAIT))
+            await ran_at_once(case.running_under_load)
+            await anyio.sleep(ADMISSION_SETTLE)
+            assert peak == case.running_under_load, "the old holders count against the new size"
+        finally:
+            old_may_finish.set()  # the newcomers now meet at the barrier: all `after` at once

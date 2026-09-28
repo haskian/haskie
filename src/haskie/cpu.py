@@ -27,11 +27,11 @@ from haskie.settings import PipelineSettings
 
 
 class ResizableSemaphore[S]:
-    """A semaphore the settings may resize while work is in flight.
+    """A semaphore the settings may resize while work is in flight, for work on one event loop.
 
-    A caller acquires `current` and releases that same object, so a resize under it neither
-    over-admits nor raises. Generic over the semaphore itself: the CPU budget needs a thread-safe
-    one (two event loops take from it), a preview slot an anyio one.
+    A caller acquires `current` and releases that same object, so a resize under it never raises.
+    A resize does over-admit: the fresh semaphore starts with every slot free while the old
+    holders still run. The CPU budget, which must not, is a `SlotBudget` instead.
     """
 
     def __init__(self, make: Callable[[int], S], size: int) -> None:
@@ -44,12 +44,46 @@ class ResizableSemaphore[S]:
             self.size, self.current = size, self._make(size)
 
 
+class SlotBudget:
+    """A thread-safe count of slots, which the settings may resize while work holds slots.
+
+    Holders and the size live under one condition, so a resize moves the limit against the work
+    already running: from 2 to 3 under load admits one more, and from 3 to 1 admits none until
+    two holders finish. Thread-safe on purpose: two event loops take from the CPU budget -
+    Litestar's (previews, requests) and DBOS's background loop (tasks, maintenance) - and an
+    asyncio or anyio primitive belongs to exactly one of them.
+    """
+
+    def __init__(self, size: int) -> None:
+        self._changed = threading.Condition()
+        self._size = size
+        self._held = 0
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    def resize(self, size: int) -> None:
+        with self._changed:
+            self._size = size
+            self._changed.notify_all()
+
+    def acquire(self) -> None:
+        with self._changed:
+            self._changed.wait_for(lambda: self._held < self._size)
+            self._held += 1
+
+    def release(self) -> None:
+        with self._changed:
+            if self._held == 0:
+                raise ValueError("released a slot that no one holds")
+            self._held -= 1
+            self._changed.notify()
+
+
 # Sized from `cpu_budget` by `workflows.apply_settings`; the default is what a process that never
 # applied settings runs on.
-# a threading primitive on purpose. Two event loops take from this budget - Litestar's
-# (previews, requests) and DBOS's background loop (tasks, maintenance) - and an asyncio or anyio
-# primitive belongs to exactly one of them. Only a thread-safe one can be the shared ceiling.
-_cpu_slots = ResizableSemaphore(threading.BoundedSemaphore, PipelineSettings().cpu_budget)
+_cpu_slots = SlotBudget(PipelineSettings().cpu_budget)
 
 # anyio's default is 40 worker threads per event loop, which would queue previews and searches
 # behind pipeline work before the budget is even reached; `_cpu_slots` is meant to be the only
@@ -70,12 +104,11 @@ def cpu_slot() -> Iterator[None]:
     is unbounded on purpose: the caller's turn comes as soon as other CPU work finishes, and giving
     up would fail a document for finding the machine busy.
     """
-    slots = _cpu_slots.current  # the object to release, even if the pool is resized meanwhile
-    slots.acquire()
+    _cpu_slots.acquire()
     try:
         yield
     finally:
-        slots.release()
+        _cpu_slots.release()
 
 
 async def _in_thread[T](call: Callable[[], T]) -> T:
