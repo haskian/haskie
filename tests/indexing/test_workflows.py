@@ -1772,6 +1772,39 @@ async def test_attaching_while_a_delete_runs_is_refused(dbos, tmp_path: Path, mo
     assert await document_names() == []
 
 
+async def test_rename_is_refused_while_a_document_delete_removes_a_member(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """A document delete queues its removal from each collection under that collection's name
+    (`del-doc:…:rm:{collection}`), which the rename's busy check does not match. The document reads
+    `deleting` until every removal ran, and its membership stays until its own removal ran, so
+    the rename refuses on that member instead; once the delete is done the name moves."""
+    await Collection.create("old")
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await attach_document(dbos, "old", doc.name)
+    entered, release = threading.Event(), threading.Event()
+    real = CollectionIndex.delete_document
+
+    async def gated(self: CollectionIndex, name: str) -> None:
+        entered.set()
+        assert await wait_event(release), "the test never released the removal"
+        await real(self, name)
+
+    monkeypatch.setattr(CollectionIndex, "delete_document", gated)
+    job_id = await dbos.start_delete_document(doc.name)
+    assert await wait_event(entered), "the delete's removal from `old` never started"
+
+    with pytest.raises(Conflict, match="document a.md is being deleted"):
+        await dbos.rename_collection("old", "new")
+    assert await Collection.names() == ["old"], "a refused rename changes nothing"
+
+    release.set()
+    await wait_for(job_id)
+    assert await document_names() == [], "the removal found the membership under the old name"
+    assert (await dbos.rename_collection("old", "new")).name == "new"
+    assert await Collection("new").member_names() == []
+
+
 async def test_detach_leaves_the_document_and_the_other_collection(dbos, tmp_path: Path) -> None:
     """A detach is one collection's business: its rows and its membership go, and the document,
     its cache and every other collection holding it are untouched."""
