@@ -8,6 +8,7 @@ import os
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
@@ -24,6 +25,7 @@ from litestar.types import (
     ASGIApp,
     ControllerRouterHandler,
     ExceptionHandlersMap,
+    HTTPScope,
     Message,
     Receive,
     Scope,
@@ -124,7 +126,7 @@ def served_hosts() -> frozenset[str] | None:
     return LOOPBACK_HOSTS | ({bound} if bound else set())
 
 
-def _refusal(scope: Scope, hosts: frozenset[str] | None, origins: frozenset[str]) -> str | None:
+def _refusal(scope: HTTPScope, hosts: frozenset[str] | None, origins: frozenset[str]) -> str | None:
     """Why a request is refused, or None. Agents, MCP clients and scripts send no `Origin`, so
     they pass. A browser does, and a browser ignores the loopback bind: without these checks any
     page the user opens could post to the API, and a DNS-rebinding page could read it too."""
@@ -149,7 +151,9 @@ def guard_callers(app: ASGIApp) -> ASGIApp:
     hosts, origins = served_hosts(), allowed_origins()
 
     async def guarded(scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and (reason := _refusal(scope, hosts, origins)):
+        if scope["type"] == "http" and (
+            reason := _refusal(cast("HTTPScope", scope), hosts, origins)
+        ):
             raise Forbidden(reason)
         await app(scope, receive, send)
 
