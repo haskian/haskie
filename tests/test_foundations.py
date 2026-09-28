@@ -54,7 +54,7 @@ from haskie.settings import (
     without_none,
 )
 
-from conftest import audit_lines, events, forget_settings  # isort: skip
+from conftest import audit_lines, events, forget_settings, holding  # isort: skip
 
 # --- errors -----------------------------------------------------------------------
 
@@ -307,43 +307,64 @@ def test_the_home_from_the_environment_is_absolute(
 HOLDER_ADDRESS = "http://127.0.0.1:8452"
 
 
+# Ids of their own: a case that expects this process's pid would otherwise carry it in its id,
+# and every xdist worker would collect a different test.
 @pytest.mark.parametrize(
-    ("name", "left_behind", "written_while_held", "expected_pid"),
+    ("name", "left_behind", "server_pid", "written_while_held", "expected_pid"),
     [
-        (
+        pytest.param(
             "a longer line an earlier holder left is cut to ours",
             "pid 4194304, http://127.0.0.1:65535 (an older build said more)",
             None,
-            "ours",
+            None,
+            os.getpid(),
+            id="stale-tail",
         ),
-        ("a line that is not ours reads as no pid", None, "held, but not by haskie", None),
-        ("a pid that is not at the start reads as no pid", None, "holder pid 4194304", None),
+        # under `--reload` the claim runs in a worker; `stop` must signal `run`, which outlives it
+        pytest.param("a worker under run --reload names run", None, 4242, None, 4242, id="reload"),
+        pytest.param(
+            "a line that is not ours reads as no pid",
+            None,
+            None,
+            "held, but not by haskie",
+            None,
+            id="foreign-line",
+        ),
+        pytest.param(
+            "a pid that is not at the start reads as no pid",
+            None,
+            None,
+            "holder pid 4194304",
+            None,
+            id="pid-not-first",
+        ),
     ],
 )
 def test_the_holder_line(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
     left_behind: str | None,
+    server_pid: int | None,
     written_while_held: str | None,
-    expected_pid: str | None,
+    expected_pid: int | None,
 ) -> None:
     """`stop` signals the pid it reads off the lock, so the line must be exactly the one
     `claim_home` wrote: a stale tail or a foreign line must never pass for a pid to signal."""
     if left_behind is not None:
         home.LOCK_FILE.write_text(left_behind)
-    monkeypatch.setenv(home.ADDRESS_ENV, HOLDER_ADDRESS)
+    if server_pid is None:
+        monkeypatch.delenv(home.SERVER_PID_ENV, raising=False)
+    else:
+        monkeypatch.setenv(home.SERVER_PID_ENV, str(server_pid))
 
-    home.claim_home()
-    try:
+    with holding(HOLDER_ADDRESS):
         if written_while_held is None:
-            assert home.LOCK_FILE.read_text() == f"pid {os.getpid()}, {HOLDER_ADDRESS}", name
+            assert home.LOCK_FILE.read_text() == f"pid {expected_pid}, {HOLDER_ADDRESS}", name
         else:
             home.LOCK_FILE.write_text(written_while_held)  # the lock is advisory: this is allowed
         pid = home.running_pid()
-    finally:
-        home.release_home()
 
-    assert pid == (os.getpid() if expected_pid == "ours" else None), name
+    assert pid == expected_pid, name
 
 
 # --- home.remove_tree -------------------------------------------------------------

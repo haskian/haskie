@@ -293,6 +293,21 @@ def extraction_pool(monkeypatch: pytest.MonkeyPatch, workers: int) -> Iterator[N
         cpu.configure_cpu_budget(budget)
 
 
+@contextmanager
+def holding(address: str = "http://127.0.0.1:8451") -> Iterator[None]:
+    """Claim the home for the body, and give it back afterwards. `claim_home` takes the address
+    from the environment, the way `run` leaves it there."""
+    from haskie import home
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(home.ADDRESS_ENV, address)
+        home.claim_home()
+    try:
+        yield
+    finally:
+        home.release_home()
+
+
 WAIT = 30.0  # generous: every wait in the suite is released by another thread, never by a timer
 
 

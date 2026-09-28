@@ -18,12 +18,11 @@ import sqlite3
 import stat
 import subprocess
 import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from conftest import holding
 from typer.testing import CliRunner
 
 from haskie import APP_VERSION, claude, db, home
@@ -384,19 +383,6 @@ def test_version_flag_answers_without_a_subcommand() -> None:
 # --- one haskie per home ----------------------------------------------------
 
 
-@contextmanager
-def holding(address: str = "http://127.0.0.1:8451") -> Iterator[None]:
-    """Claim the home for the body, and give it back afterwards. `claim_home` takes the address
-    from the environment, the way `run` leaves it there."""
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv(home.ADDRESS_ENV, address)
-        home.claim_home()
-    try:
-        yield
-    finally:
-        home.release_home()
-
-
 def test_claim_home_refuses_a_second_holder_and_says_who_has_it(
     elsewhere: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -428,29 +414,6 @@ def test_claim_home_claims_once_and_gives_the_home_back(elsewhere: Path) -> None
 
     with holding():
         assert home.LOCK_FILE.read_text().startswith("pid "), "the next one gets in"
-
-
-@pytest.mark.parametrize(
-    ("name", "server_pid"),
-    [
-        pytest.param("a server that is its own process", None, id="own-process"),
-        # under `--reload` the claim runs in a worker; `stop` must signal `run`, which outlives it
-        pytest.param("a worker under run --reload", 4242, id="reload-worker"),
-    ],
-)
-def test_the_lock_names_the_process_stop_must_signal(
-    elsewhere: Path, monkeypatch: pytest.MonkeyPatch, name: str, server_pid: int | None
-) -> None:
-    home.use(elsewhere)
-    if server_pid is not None:
-        monkeypatch.setenv(home.SERVER_PID_ENV, str(server_pid))
-    else:
-        monkeypatch.delenv(home.SERVER_PID_ENV, raising=False)
-
-    with holding():
-        line = home.LOCK_FILE.read_text()
-
-    assert line.startswith(f"pid {server_pid or os.getpid()},"), name
 
 
 def test_run_exports_its_own_pid_for_the_lock(
