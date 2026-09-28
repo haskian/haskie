@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="Calibrate an embedding profile's gap bars on this home's own questions: 'sample' writes logged questions to label, 'measure --profile NAME [--write]' sets its weak and answered bars (see haskie.catalogue.calibrate_gaps)"
+set -euo pipefail
+uv run python -m haskie.catalogue.calibrate_gaps "$@"

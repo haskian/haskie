@@ -117,9 +117,25 @@ What the measurements say:
   either: holding its 9 missed questions would flag 26% of answered.
 - **The reranker is the sharper judge** on the Rust book (AUROC 0.998, and its floor catches 36
   of 45), weaker on the small docs shelf (0.883).
+- **Missing words do not tell a wording gap from a missing document.** The idea: a borderline
+  question whose words no near miss holds (`missing_terms`) exists under other words. But every
+  unanswered question has such words (45 of 45), so the rule would label 14 of 45 true content
+  gaps "wording", and catches only 12 of 20 questions asked in words the docs do not use
+  (`reworded` in `tests/gapeval`). Not shipped.
+- **Shared near misses do not group topics.** Joining two gap questions by a lower cosine plus
+  shared near misses joined 94% of same-topic pairs on the Rust book, against 89% by cosine alone,
+  but merged 3 to 13 pairs of different topics on the docs shelf: on a small shelf, every
+  unanswerable question lands on the same few chunks. Only identical near misses merge nothing,
+  and they add nothing. Not shipped.
 
 A profile without `weak_match` gives no cosine verdict; its questions can still be `reported`,
 `empty` or `uncovered`.
+
+Because a bar does not travel, a home can measure its own: `mise run calibrate-gaps sample` writes
+the questions its searches logged, each with its best cosine and near misses; a person marks each
+answered or not; `measure --profile NAME --write` sets the two bars by the same rules (no answered
+question under the low bar, a band only while it flags at most 15% of answered ones). It needs 10
+labelled questions of each kind.
 
 Code: `search/log.py`, `search/gaps.py`, `api/gaps.py`, `catalogue/seed.sql`,
 `web/src/pages/Gaps.tsx`.
