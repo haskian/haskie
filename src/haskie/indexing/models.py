@@ -31,7 +31,7 @@ from dbos import WorkflowStatus as DbosWorkflowStatus
 
 from haskie import cpu
 from haskie.catalogue import catalogue
-from haskie.errors import HaskieError, NotReady
+from haskie.errors import HaskieError, NotReady, Unavailable
 from haskie.indexing import embed, hardware
 from haskie.indexing.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, RunStatus, root_cause
 from haskie.indexing.hardware import Device
@@ -57,8 +57,7 @@ _warm_tasks: set[asyncio.Task[None]] = set()
 
 class ModelLoading(NotReady):
     """Not ready, but on its way: asked for, downloading or warming up. A caller that can wait
-    waits it out; a failed model raises the plain `NotReady` instead, which waiting would not
-    change."""
+    waits it out; a failed model raises `Unavailable` instead, which waiting would not change."""
 
 
 class ModelKind(StrEnum):
@@ -313,7 +312,7 @@ async def require_ready(kind: ModelKind, name: str) -> None:
     found = await DBOS.list_workflows_async(workflow_ids=[workflow_id])
     status = _model_status(kind, name, found[0] if found else None)
     if status.state == ModelState.ERROR:
-        raise NotReady(f"{kind} model {name} failed to load: {status.error}")
+        raise Unavailable(f"{kind} model {name} failed to load: {status.error}")
     if status.state == ModelState.PENDING:
         raise ModelLoading(f"{kind} model {name} is not loaded yet; check /api/status")
     if (

@@ -68,7 +68,8 @@ Errors are part of the contract. Each type in `errors.py` carries its status cod
 | `InvalidInput` | 422 | a bad argument |
 | `ValidationException` (Litestar's) | 422 | a parameter or body that does not decode: a wrong type, a missing field, a value out of bounds |
 | `PermanentError` | 422 | the file cannot be processed as it is |
-| `NotReady` | 503, `Retry-After: 2` | a model is downloading, warming or failed to load, or every preview builder is busy |
+| `NotReady` | 503, `Retry-After: 2` | a model is downloading or warming, or every preview builder is busy |
+| `Unavailable` | 503 | a model failed to load; it stays failed until a restart or a settings save |
 
 Each of these answers `{"detail": "<message>"}` and nothing else. Litestar documents a route that
 validates its input with its own 400 `{status_code, detail, extra}` body. `app.RejectingOperation`

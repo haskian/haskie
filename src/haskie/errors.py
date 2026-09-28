@@ -46,6 +46,13 @@ class NotReady(HaskieError):
     headers = {"Retry-After": "2"}
 
 
+class Unavailable(HaskieError):
+    """Cannot serve this until something changes, such as a model that failed to load: it stays
+    failed until a restart or a settings save, so no `Retry-After` invites a retry loop."""
+
+    status_code = 503
+
+
 class PermanentError(HaskieError):
     """Pipeline failure that must not be retried: the file cannot be processed as it is."""
 
