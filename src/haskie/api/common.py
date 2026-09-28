@@ -9,7 +9,7 @@ from litestar.params import Parameter
 
 from haskie.errors import InvalidInput
 from haskie.paging import page_request
-from haskie.search.flow import MAX_SCAN
+from haskie.settings import MAX_SCAN
 
 # The four paging query arguments, declared once. Litestar reads a provider's own parameters from
 # the query string, so a handler that asks for `page: PageRequest` takes `cursor`, `page_size`,

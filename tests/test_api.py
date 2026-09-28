@@ -471,7 +471,7 @@ async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClie
 
 
 async def test_a_limit_at_the_scan_depth_is_searched(ready: AsyncTestClient) -> None:
-    """The top of the shared `limit` bound (`flow.MAX_SCAN`) is a search, not a rejection; one
+    """The top of the shared `limit` bound (`settings.MAX_SCAN`) is a search, not a rejection; one
     past it is in the error table."""
     response = await ready.get(
         "/api/search/explore", params={"q": "alpha", "session_id": "s1", "limit": 200}

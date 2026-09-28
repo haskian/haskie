@@ -236,7 +236,13 @@ ACCELERATOR = Meta(
         "CPU for them."
     ),
 )
-LIMIT = Meta(title="Results", description="Number of results a search returns.")
+# How deep any search reads. A passage or a document row is folded from several chunks, so the scan
+# goes deeper than the answer; this is where that stops, and the most results a search returns.
+MAX_SCAN = 200
+LIMIT = Meta(
+    title="Results",
+    description=f"Number of results a search returns, at most {MAX_SCAN}.",
+)
 MIN_PASSAGE_CHARS = Meta(
     title="Shortest passage (characters)",
     description=(
@@ -473,6 +479,10 @@ def _check_search(search: "SearchSettings | SearchOverrides") -> None:
     bias = given.get("grow_bias")
     if bias is not None and not -1 <= bias <= 1:
         raise InvalidInput(f"grow_bias must be -1 to 1, got {bias}")
+    # `limit` is the scan depth of a search that names none, so it has the request's bound
+    limit = given.get("limit")
+    if limit is not None and limit > MAX_SCAN:
+        raise InvalidInput(f"limit must be at most {MAX_SCAN}, got {limit}")
 
 
 def _check_chunking(chunk_size: int | None, chunk_merge_below: int | None) -> None:

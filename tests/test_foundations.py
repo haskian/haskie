@@ -26,6 +26,7 @@ from haskie.indexing import embed_cache
 from haskie.indexing.chunk import Chunk, Piece
 from haskie.indexing.segment import CutReason, PieceType
 from haskie.settings import (
+    MAX_SCAN,
     Chunker,
     ChunkSettings,
     CollectionOverrides,
@@ -340,6 +341,11 @@ async def test_remove_tree_reports_a_file_it_cannot_delete(
             "task_timeout_seconds must be >= 1",
         ),
         ("limit below 1", lambda: SearchSettings(limit=0), "limit must be >= 1"),
+        (
+            "limit over the scan depth",
+            lambda: SearchOverrides(limit=MAX_SCAN + 1).resolve(SearchSettings()),
+            f"limit must be at most {MAX_SCAN}",
+        ),
         ("candidates below 1", lambda: SearchSettings(candidates=0), "candidates must be >= 1"),
         ("rrf_k below 1", lambda: SearchSettings(rrf_k=0), "rrf_k must be >= 1"),
         (

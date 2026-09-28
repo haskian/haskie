@@ -50,11 +50,8 @@ from haskie.collection.index import Hit
 from haskie.paging import check_page_size
 from haskie.search import aspects, log, probe, retrieval, scoring, section
 from haskie.search.passage import Answer, Excerpt, HitRange, Passage, Sources
-from haskie.settings import Reranker, SearchMode
+from haskie.settings import MAX_SCAN, Reranker, SearchMode
 
-# How deep any of these searches reads. A passage or a document row is folded from several chunks,
-# so the scan goes deeper than the answer; this is where that stops.
-MAX_SCAN = 200
 CHUNK_SCAN = 2  # chunks scanned per chunk asked for: a folded near-duplicate frees its slot
 PASSAGE_SCAN = 4  # chunks scanned per passage asked for: consecutive ones merge into one passage
 DEFAULT_SECTIONS = 3  # hot sections per document: where in it the answer is, not an outline
