@@ -1195,6 +1195,27 @@ async def test_a_search_reads_one_rule_for_a_document_on_its_way_out(
     assert await Collection.holding(docs, []) == {}, "no collection searched"
 
 
+def test_the_leaving_query_reads_by_index_not_every_membership() -> None:
+    """Almost always nothing is leaving, so finding that out must not read every membership of
+    the searched collections: each road of `LEAVING` is bound by its status index."""
+    from sqlalchemy.dialects import sqlite as sqlite_dialect
+
+    from haskie.collection.collection import _leaving_query
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(db.schema_ddl())
+    sql = str(
+        _leaving_query(["notes", "other"]).compile(
+            dialect=sqlite_dialect.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+    plan = [row[3] for row in conn.execute(f"explain query plan {sql}")]
+
+    assert any("idx_collection_documents_status (collection=? AND status=?)" in s for s in plan)
+    assert any("idx_documents_status (status=?)" in s for s in plan), plan
+    assert not any(s.startswith("SCAN") for s in plan), plan
+
+
 @pytest.mark.anyio
 async def test_reranker_overrides_lists_every_model_a_collection_chose() -> None:
     """The model downloads have to cover the overrides too, so they are read in one query."""
@@ -2841,20 +2862,13 @@ async def test_session_collections_keep_their_order_and_survive_reorder() -> Non
 
 
 @pytest.mark.anyio
-async def test_session_search_skips_a_collection_that_disappeared(caplog, monkeypatch) -> None:
+async def test_session_search_skips_a_collection_that_disappeared(caplog) -> None:
     """Deleting a collection drops it from every session (one cascade), so a name without a row
     can only come from a delete between the two reads of the search. It is skipped, not raised."""
-    from haskie.search import flow, session
-
-    async def nothing_found(names: list[str]) -> dict:
-        return {}
-
-    await Collection.create("ghost")
-    await session.set_collections("s1", ["ghost"])
-    monkeypatch.setattr(Collection, "load_overrides", staticmethod(nothing_found))
+    from haskie.search import flow
 
     with caplog.at_level("WARNING"):
-        assert await flow.chunks(await session.collections_for("s1"), "anything") == []
+        assert await flow.chunks(["ghost"], "anything") == []
     assert events(caplog) == ["session_collection_missing"]
 
 

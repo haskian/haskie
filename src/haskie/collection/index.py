@@ -272,7 +272,7 @@ class CollectionIndex:
         self.home = home  # stored paths are relative to it (see Document.relative)
         self.embedding = embedding
         # the documents on their way out of the collection when a search opened this index
-        # (`Collection.leaving`): no search read answers with their rows (see `_excluding`)
+        # (`collection.LEAVING`): no search read answers with their rows (see `_excluding`)
         self.leaving = leaving
         self._conn: lancedb.AsyncConnection | None = None  # one connection per index instance
         self._cached: lancedb.AsyncTable | None = None  # one handle per index instance

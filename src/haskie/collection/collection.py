@@ -19,7 +19,7 @@ from typing import Any
 
 import anyio
 import msgspec
-from sqlalchemy import Row, delete, func, not_, or_, select, update
+from sqlalchemy import CompoundSelect, Row, delete, func, not_, select, union, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -51,7 +51,7 @@ class MemberStatus(StrEnum):
 MEMBER_STATUSES: tuple[MemberStatus, ...] = tuple(MemberStatus)
 # A document on its way out of a collection, by either road: its membership is being removed, or
 # the document is being deleted. Its rows stay in the table until the removal queued for them runs,
-# so a search reads around it. `leaving` finds such documents, `holding` keeps them out.
+# so a search reads around it. `for_search` leaves them out, and so does `holding`.
 LEAVING = (
     collection_documents.c.status == MemberStatus.REMOVING,
     documents.c.status == document.DocumentStatus.DELETING,
@@ -182,6 +182,45 @@ async def _counts_by_collection(
     for collection, status, count in rows:
         by_collection[collection][status] = count
     return {name: _counts(by_status) for name, by_status in by_collection.items()}
+
+
+def _leaving_query(names: list[str]) -> CompoundSelect:
+    """The (collection, document) pairs of these collections that are on their way out
+    (`LEAVING`): one select per road, joined by UNION rather than one OR across the two tables.
+    An OR over the join reads every membership of the collections to find a set that is almost
+    always empty; each select alone is bound by an index, the membership's by
+    `idx_collection_documents_status` and the document's by `idx_documents_status`."""
+    member = collection_documents.c
+    wanted = list(set(names))
+    return union(
+        *(
+            _MEMBERS.with_only_columns(member.collection, member.document).where(
+                member.collection.in_(wanted), road
+            )
+            for road in LEAVING
+        )
+    )
+
+
+async def _leaving(conn: AsyncConnection, names: list[str]) -> dict[str, frozenset[str]]:
+    """The documents on their way out of each of these collections, on the caller's connection;
+    a collection nothing is leaving is absent."""
+    found: dict[str, set[str]] = {}
+    for collection, doc in await conn.execute(_leaving_query(names)):
+        found.setdefault(collection, set()).add(doc)
+    return {collection: frozenset(docs) for collection, docs in found.items()}
+
+
+async def _overrides_of(conn: AsyncConnection, names: list[str]) -> dict[str, CollectionOverrides]:
+    """The overrides of these collections in one query, on the caller's connection; a name with
+    no row is absent."""
+    wanted = list(dict.fromkeys(names))
+    if not wanted:
+        return {}
+    rows = await conn.execute(
+        select(collections.c.name, collections.c.overrides).where(collections.c.name.in_(wanted))
+    )
+    return {name: _overrides(raw) for name, raw in rows}
 
 
 def _overrides(raw: str) -> CollectionOverrides:
@@ -349,16 +388,8 @@ class Collection:
     async def load_overrides(names: list[str]) -> dict[str, CollectionOverrides]:
         """The overrides of several collections in one query, keyed by name. A name with no row
         is absent from the result, which is how a caller learns the collection is gone."""
-        wanted = list(dict.fromkeys(names))
-        if not wanted:
-            return {}
         async with db.connect() as conn:
-            rows = await conn.execute(
-                select(collections.c.name, collections.c.overrides).where(
-                    collections.c.name.in_(wanted)
-                )
-            )
-            return {name: _overrides(raw) for name, raw in rows}
+            return await _overrides_of(conn, names)
 
     @staticmethod
     async def for_search(
@@ -366,9 +397,12 @@ class Collection:
     ) -> dict[str, tuple[CollectionIndex, CollectionOverrides]]:
         """The index of each of these collections, with its overrides, once each and in the order
         given: what a search reads. Each index leaves out the documents on their way out of its
-        collection (`leaving`). A name with no row is absent, as in `load_overrides`."""
-        found = await Collection.load_overrides(names)
-        leaving = await Collection.leaving(list(found))
+        collection (`LEAVING`). A name with no row is absent, as in `load_overrides`.
+
+        One unit of work, so the overrides and the documents leaving are read at one moment."""
+        async with db.connect() as conn:
+            found = await _overrides_of(conn, names)
+            leaving = await _leaving(conn, list(found))
         return {
             name: (
                 Collection(name).index_with(embedding, leaving.get(name, frozenset())),
@@ -614,23 +648,6 @@ class Collection:
                     collection_documents.c.document == doc,
                 )
             )
-
-    @staticmethod
-    async def leaving(names: list[str]) -> dict[str, frozenset[str]]:
-        """The documents on their way out of each of these collections (`LEAVING`), which a
-        search leaves out by name. One query for every collection a search covers; a collection
-        nothing is leaving is absent."""
-        member = collection_documents.c
-        async with db.connect() as conn:
-            rows = await conn.execute(
-                _MEMBERS.with_only_columns(member.collection, member.document).where(
-                    member.collection.in_(list(set(names))), or_(*LEAVING)
-                )
-            )
-            found: dict[str, set[str]] = {}
-            for collection, doc in rows:
-                found.setdefault(collection, set()).add(doc)
-        return {collection: frozenset(docs) for collection, docs in found.items()}
 
     @staticmethod
     async def holding(docs: set[str], names: list[str]) -> dict[str, list[str]]:
