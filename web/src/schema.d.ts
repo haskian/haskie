@@ -1469,11 +1469,7 @@ export interface components {
             };
             document_statuses: components["schemas"]["DocumentStatus"][];
             active_document_statuses: components["schemas"]["DocumentStatus"][];
-            member_statuses: components["schemas"]["MemberStatus"][];
-            active_member_statuses: components["schemas"]["MemberStatus"][];
             active_run_statuses: components["schemas"]["RunStatus"][];
-            operation_kinds: components["schemas"]["OperationKind"][];
-            bulk_kinds: components["schemas"]["BulkWorkflow"][];
         };
         /**
          * Order
@@ -1580,7 +1576,7 @@ export interface components {
         PipelineSettings: {
             /**
              * CPU budget
-             * @description Maximum number of tasks haskie runs at the same time across every queue: converting, embedding, indexing and maintenance. Defaults to half the machine's cores so other work keeps the rest. Never exceeded, whatever the weights below say.
+             * @description Maximum number of tasks haskie runs at the same time across every queue: converting, embedding and indexing. Defaults to half the cores haskie may run on, so other work keeps the rest. Never exceeded, whatever the weights below say.
              */
             cpu_budget?: number;
             /**
@@ -1748,7 +1744,7 @@ export interface components {
         };
         /**
          * Review
-         * @description What the curator decided about a gap. `open` is stored as no decision.
+         * @description One of: open, dismissed, resolved.
          * @default open
          * @enum {string}
          */
@@ -1836,7 +1832,7 @@ export interface components {
             reranker?: components["schemas"]["Reranker"] | null;
             /**
              * Reranker model
-             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded on first use.
+             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded as soon as it is chosen; a search that needs it is refused until the download finishes.
              */
             reranker_model?: string | null;
             /**
@@ -1939,7 +1935,7 @@ export interface components {
             reranker?: components["schemas"]["Reranker"];
             /**
              * Reranker model
-             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded on first use.
+             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded as soon as it is chosen; a search that needs it is refused until the download finishes.
              * @default Xenova/ms-marco-MiniLM-L-6-v2
              */
             reranker_model: string;
@@ -3740,9 +3736,10 @@ export interface operations {
     ApiGapsListGaps: {
         parameters: {
             query?: {
-                /** @description What the curator decided about a gap. `open` is stored as no decision. */
+                /** @description One of: open, dismissed, resolved. */
                 review?: components["schemas"]["Review"];
                 days?: number;
+                /** @description One of: reported, empty, uncovered, weak, borderline. */
                 signals?: components["schemas"]["Signal"][] | null;
             };
             header?: never;
