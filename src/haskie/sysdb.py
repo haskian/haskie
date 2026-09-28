@@ -96,8 +96,8 @@ async def operation_activity(skip: Sequence[str] = ()) -> dict[str, int]:
 
 async def stale_active(app_version: str, limit: int) -> list[tuple[str, str | None]]:
     """One page of workflows still enqueued or running under another application version, oldest
-    first, as (id, queue name). Ids only: a boot after a long outage must not load the whole
-    backlog. No offset: `move_to_version` takes each page out of the result."""
+    first, as (id, queue name). A page, never the whole backlog: a boot after a long outage must
+    not load it. No offset: `move_to_version` takes each page out of the result."""
     async with db.connect() as conn:
         workflow = workflow_status.c
         rows = await conn.execute(
@@ -106,7 +106,7 @@ async def stale_active(app_version: str, limit: int) -> list[tuple[str, str | No
             .order_by(workflow.created_at)
             .limit(limit)
         )
-        return [(workflow_id, queue) for workflow_id, queue in rows.tuples()]
+        return list(rows.tuples())
 
 
 async def move_to_version(workflow_ids: list[str], app_version: str) -> None:

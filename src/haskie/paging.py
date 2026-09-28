@@ -90,14 +90,9 @@ def page_request(
     """
     if cursor is not None:
         issued = _read_cursor(cursor)
-        sort = sort or issued.s  # an empty sort is an omitted one, as `resolve_sort` reads it
-        order = order if order is not None else issued.o
-    return PageRequest(
-        cursor=cursor,
-        page_size=page_size,
-        sort=sort,
-        order=order if order is not None else Order.ASC,
-    )
+        # an empty sort is an omitted one, as `resolve_sort` reads it
+        sort, order = sort or issued.s, order or issued.o
+    return PageRequest(cursor=cursor, page_size=page_size, sort=sort, order=order or Order.ASC)
 
 
 def encode_cursor(key: list[Any], sort: str, order: Order) -> str:
