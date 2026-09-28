@@ -26,7 +26,8 @@ import hashlib
 import re
 import shutil
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
@@ -410,17 +411,36 @@ async def import_path(path: str, options: ImportOptions | None = None) -> Docume
     """
     options = options or ImportOptions()
     source = Path(path).expanduser()
+    # Every refusal names the file alone: the audit trail copies the error, and it never holds
+    # the folder an import came from (see `api.documents.import_document`).
     if not source.is_absolute():
-        raise InvalidInput(f"path must be absolute: {home.scrub(str(source))}")
+        raise InvalidInput(f"path must be absolute: {source.name}")
     if not await anyio.Path(source).is_file():
-        raise InvalidInput(f"file not found: {home.scrub(str(source))}")
+        raise InvalidInput(f"file not found: {source.name}")
     final = stored_name(source.name, options.name)
-    size = (await anyio.Path(source).stat()).st_size
-    if size > UPLOAD_MAX_BYTES:
-        raise InvalidInput(f"file larger than {UPLOAD_MAX_BYTES} bytes: {size}")
-    md5 = await anyio.to_thread.run_sync(_md5_of_file, source)
+    with _reading(source):
+        size = (await anyio.Path(source).stat()).st_size
+        if size > UPLOAD_MAX_BYTES:
+            raise InvalidInput(f"file larger than {UPLOAD_MAX_BYTES} bytes: {size}")
+        md5 = await anyio.to_thread.run_sync(_md5_of_file, source)
     document = await _create(final, size, md5, options)
-    return await _place(document, False, source)
+    with _reading(source):
+        return await _place(document, False, source)
+
+
+@contextmanager
+def _reading(source: Path) -> Iterator[None]:
+    """Refuse a source the process cannot read, naming the file but not its folder.
+
+    A file can pass `is_file` and still fail to open: its mode, or macOS privacy protection on
+    a folder like Documents. The `OSError` then carries the full path. A failure about any
+    other file, such as the document's own folder filling the disk, passes through unchanged."""
+    try:
+        yield
+    except OSError as exc:
+        if exc.filename is None or Path(exc.filename) != source:
+            raise
+        raise InvalidInput(f"cannot read file: {source.name}: {exc.strerror}") from None
 
 
 # --- rows ---------------------------------------------------------------------

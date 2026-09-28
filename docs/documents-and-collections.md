@@ -37,8 +37,10 @@ computes the cache id from its own chunk settings and reads that entry.
 An upload from the UI lands in `staging/` first, as a file and a `staging` row, with no document
 yet. The import then fixes the name, creates the document and moves the file into its folder. A
 name is taken ignoring case: the folder is named after it, and on a case-insensitive disk
-`Notes.md` and `notes.md` would be one folder. An agent's `add_document` imports a local path directly and copies the file. The nightly run (at
-03:17, if haskie is running then) sweeps uploads older than a day.
+`Notes.md` and `notes.md` would be one folder. An agent's `add_document` imports a local path directly and copies the file. When it refuses the
+path, the error names the file alone. The audit trail copies that error, and it never records the
+folder an import came from. The nightly run (at 03:17, if haskie is running then) sweeps uploads
+older than a day.
 
 ```mermaid
 stateDiagram-v2
