@@ -942,7 +942,7 @@ async def test_ensure_preview_bounds_concurrent_builds(
     from haskie import cpu
 
     # a build holds a CPU slot too, so the budget must not be the ceiling under test here
-    monkeypatch.setattr(cpu, "_cpu_slots", cpu.ResizableSemaphore(threading.BoundedSemaphore, 4))
+    monkeypatch.setattr(cpu, "_cpu_slots", cpu.SlotBudget(4))
     names = [(await import_row(f"doc-{i}.md")).name for i in range(4)]
     entered, release, counted = threading.Semaphore(0), threading.Event(), threading.Lock()
     live, peak, builds = 0, 0, []
