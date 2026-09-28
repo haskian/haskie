@@ -34,6 +34,8 @@ from haskie import logs
 from haskie.errors import Conflict
 
 HOME = Path(os.environ.get("HASKIE_HOME", Path.home() / ".haskie"))
+# Where `run` serves, which it puts in the environment for the holder line and the app's host check
+ADDRESS_ENV = "HASKIE_ADDRESS"
 
 # The layout, relative to `HOME`. Every name here is readable as a module attribute
 # (`home.DB_FILE`) and derived on access, so `use()` has one global to rebind.
@@ -122,7 +124,7 @@ def claim_home() -> None:
     os.ftruncate(handle, 0)
     # `run` puts the address in the environment for this; an app started another way has none to
     # give, so the holder line says so rather than inventing one.
-    address = os.environ.get("HASKIE_ADDRESS", "address unknown")
+    address = os.environ.get(ADDRESS_ENV, "address unknown")
     os.write(handle, f"pid {os.getpid()}, {address}".encode())
     _holding = handle
 

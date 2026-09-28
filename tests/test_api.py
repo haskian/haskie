@@ -2810,7 +2810,7 @@ async def test_only_served_hosts_and_trusted_browser_origins_reach_a_route(
     DNS-rebinding page could read it. Agents send no `Origin` and pass. A request that passes is
     answered by the route itself: a 422 for its invalid input, which the guard never looks at."""
     if bound is not None:
-        monkeypatch.setenv("HASKIE_ADDRESS", bound)
+        monkeypatch.setenv(home.ADDRESS_ENV, bound)
     monkeypatch.setenv(app_module.ALLOWED_ORIGINS_ENV, trusted)
     client = AsyncTestClient(api_app(tmp_path, monkeypatch), base_url=base_url)
     headers = {} if origin is None else {"Origin": origin}

@@ -229,7 +229,7 @@ async def get_source(document: str) -> File:
         path=row.source_path(),
         filename=row.name,
         content_disposition_type="inline",
-        headers=_untrusted_headers(Path(row.name).suffix.lower() == ".pdf"),
+        headers=_untrusted_headers(row.suffix == ".pdf"),
     )
 
 

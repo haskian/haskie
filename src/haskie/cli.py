@@ -155,7 +155,7 @@ def run(
         raise typer.Exit(code=1)
     # The address the startup hook records, for the next process's message. The environment is the
     # one carrier, so a `--reload` child that re-imports `home` records the same thing.
-    os.environ["HASKIE_ADDRESS"] = f"http://{host}:{port}"
+    os.environ[home.ADDRESS_ENV] = f"http://{host}:{port}"
     typer.echo(f"haskie {APP_VERSION} on http://{host}:{port}  (home: {home.HOME})")
     uvicorn.run(
         "haskie.app:create_app",

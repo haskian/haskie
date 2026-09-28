@@ -120,7 +120,7 @@ def allowed_origins() -> frozenset[str]:
 def served_hosts() -> frozenset[str] | None:
     """The host names a request may address: loopback and the address `run` bound, or None for a
     wildcard bind, where any name can reach the server and none can be told apart."""
-    bound = urlsplit(os.environ.get("HASKIE_ADDRESS", "")).hostname
+    bound = urlsplit(os.environ.get(home.ADDRESS_ENV, "")).hostname
     if bound in WILDCARD_HOSTS:
         return None
     return LOOPBACK_HOSTS | ({bound} if bound else set())
