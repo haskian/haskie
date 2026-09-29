@@ -5,8 +5,8 @@
 <h1 align="center">haskie</h1>
 
 <p align="center">
-  <strong>Haskie "has a key" to your private bookshelf, giving your AI agents your exact taste.</strong><br>
-  Your trusted sources, searchable by your agents, cited to the page, kept on your machine.
+  <em><strong>Haskie "has a key" to your private bookshelf, giving your AI agents your exact taste.</strong> 
+  Your trusted sources, searchable by your agents, cited to the page, kept on your machine.</em>
 </p>
 
 Your AI agent knows what everyone wrote. It does not know what you trust.
@@ -19,6 +19,20 @@ search them first. Every answer comes back as a short passage to quote, with the
 under and, for PDFs, the page.
 
 It runs on your laptop. A few commands set it up, and a web UI handles the curating.
+
+- [Why this exists](#why-this-exists)
+- [Mission](#mission)
+- [What that means in practice](#what-that-means-in-practice)
+- [Status: early, and already useful](#status-early-and-already-useful)
+- [Install](#install)
+- [From files to answers](#from-files-to-answers)
+- [How it works with Claude Code](#how-it-works-with-claude-code)
+- [MCP tools](#mcp-tools)
+- [Under the hood](#under-the-hood)
+- [Supported formats](#supported-formats)
+- [Good to know](#good-to-know)
+- [References](#references)
+- [License](#license)
 
 ## Why this exists
 
@@ -266,11 +280,6 @@ rest. A PDF with only scanned pages fails, with a clear message.
   `haskie install claude` again.
 - **One server per home.** A second `haskie run` on the same home refuses to start and names the
   process that holds it.
-
-## Contributing
-
-[CONTRIBUTING.md](CONTRIBUTING.md) covers setup, the development commands and the technical
-decisions. [docs/](docs/README.md) explains how each part works.
 
 ## References
 
