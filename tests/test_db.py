@@ -30,7 +30,10 @@ from haskie.tables import collections
 
 from conftest import import_row  # isort: skip
 
-PAUSE_SECONDS = 0.5  # how long the rename sits between its check and its first write
+PAUSE_SECONDS = 0.5  # how long a unit sits paused while the delete cannot finish before it
+# The ceiling on a pause that ends when the delete does: long enough for a slow runner's delete
+# to open its connection and reach the lock, and ended far sooner by the delete itself.
+SETTLE_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,9 @@ class RaceCase:
     name: str
     busy_timeout: float  # how long the delete's unit waits for the rename's lock
     delete_error: str | None  # the busy error the delete surfaces, when it gives up waiting
+    # The rename's pause, at most. A delete that must give up ends it; one that must wait for
+    # the rename cannot, so that pause runs its time.
+    pause_seconds: float = PAUSE_SECONDS
 
 
 @dataclass
@@ -45,17 +51,20 @@ class Race:
     """A unit paused between its read and its write, and a document delete run meanwhile."""
 
     doc: str
+    pause_seconds: float = SETTLE_SECONDS
     checked: anyio.Event = field(default_factory=anyio.Event)
     deleted: anyio.Event = field(default_factory=anyio.Event)
+    settled: anyio.Event = field(default_factory=anyio.Event)  # the delete finished or gave up
     deleted_during_pause: bool | None = None
     snapshot: list[str] | None = None
     delete_error: str | None = None
 
     async def pause(self) -> None:
-        """Where the paused unit waits: until the delete has run, or `PAUSE_SECONDS`."""
+        """Where the paused unit waits: until the delete is done, or `pause_seconds`. Not a fixed
+        window: a slow runner's delete may not reach the lock inside one."""
         self.checked.set()
-        with anyio.move_on_after(PAUSE_SECONDS):
-            await self.deleted.wait()
+        with anyio.move_on_after(self.pause_seconds):
+            await self.settled.wait()
         self.deleted_during_pause = self.deleted.is_set()
 
     async def delete(self) -> None:
@@ -66,16 +75,23 @@ class Race:
             await document.set_status(self.doc, DocumentStatus.DELETING)
         except OperationalError as error:
             self.delete_error = str(error.orig)
+            self.settled.set()
             return
         self.snapshot = await document.collections_of(self.doc)
         self.deleted.set()
+        self.settled.set()
 
 
 @pytest.mark.parametrize(
     "case",
     [
         RaceCase("the delete waits for the rename to commit", db.BUSY_TIMEOUT_SECONDS, None),
-        RaceCase("the delete gives up waiting with a busy error", 0.1, "database is locked"),
+        RaceCase(
+            "the delete gives up waiting with a busy error",
+            0.1,
+            "database is locked",
+            SETTLE_SECONDS,
+        ),
     ],
     ids=lambda case: case.name,
 )
@@ -92,7 +108,7 @@ async def test_a_write_waits_for_a_unit_between_its_read_and_its_write(
     doc = (await import_row("a.md")).name
     await document.set_status(doc, DocumentStatus.IMPORTED)
     await collection.add(doc)
-    race = Race(doc)
+    race = Race(doc, case.pause_seconds)
 
     def pause_after_member_check(_conn, _cursor, statement: str, parameters, *_args) -> None:
         # the rename's check is the one SELECT that asks for a `deleting` member
