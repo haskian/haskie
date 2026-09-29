@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.17.0 - 2026-09-29
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>scrollable upload modal, newest-first attach list with also-in (#28) - (45a80c8) - Črtomir Majer
+
+- - -
+
 ## v0.16.0 - 2026-09-29
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>one haskie run, multi-file import, GPU support on every platform (#27) - (143d745) - Črtomir Majer
