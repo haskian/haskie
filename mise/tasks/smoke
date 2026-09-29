@@ -1,14 +1,26 @@
 #!/usr/bin/env bash
-#MISE description="Install the built wheel in a fresh venv and check the CLI + bundled UI"
+#MISE description="Install the built wheel in a fresh venv, then check the CLI, and that one `haskie run` serves the web UI, the REST API and MCP"
 set -euo pipefail
 # A throwaway venv, off the source tree, so nothing resolves from the working directory instead
 # of the wheel.
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+haskie="$tmp/venv/bin/haskie"
+export HASKIE_HOME="$tmp/home" HASKIE_PORT=8499 # clear of an installed haskie and of development
+trap '"$haskie" stop >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
 uv venv "$tmp/venv"
 VIRTUAL_ENV="$tmp/venv" uv pip install dist/*.whl
-"$tmp/venv/bin/haskie" --help >/dev/null
+"$haskie" --help >/dev/null
 # The UI is the whole reason for `mise run build`; a headless wheel would pass every other check.
 test -f "$tmp/venv"/lib/python*/site-packages/haskie/web/index.html \
   || { echo "wheel is missing the built UI" >&2; exit 1; }
-echo "wheel installs, CLI runs, UI is bundled"
+# What the install guides do first: one background server, the UI beside the API and MCP.
+"$haskie" run --no-browser </dev/null
+base="http://127.0.0.1:$HASKIE_PORT"
+curl -fsS "$base/" | grep -q '<div id="root">' || { echo "no web UI at $base/" >&2; exit 1; }
+curl -fsS "$base/api/status" | grep -q '"initialized":false' || { echo "no API at $base/api" >&2; exit 1; }
+# Any JSON-RPC answer, even a refusal of this bare request, is MCP mounted in the same process.
+curl -sS -X POST "$base/mcp" -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | grep -q '"jsonrpc":"2.0"' \
+  || { echo "no MCP at $base/mcp" >&2; exit 1; }
+"$haskie" stop
+echo "wheel installs, CLI runs, one server serves the UI, the API and MCP"

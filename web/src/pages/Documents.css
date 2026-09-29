@@ -6,4 +6,7 @@
 
 /* The add modal: two ways in, stacked; staged files are a name to edit, a size and a remove. */
 .add-documents { display: grid; gap: var(--sp-6); align-content: start; }
-.staged .list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: var(--sp-3); align-items: center; }
+.staged .list-item { display: grid; grid-template-columns: minmax(0, 1fr) 8ch auto; gap: var(--sp-3); align-items: center; }
+.staged .list-item > .mono { text-align: end; } /* each row is its own grid: a fixed size column lines the names up */
+/* A file's notices (a repeat, a refusal) run under its row, the whole width. */
+.staged .list-item > p { grid-column: 1 / -1; margin: 0; }

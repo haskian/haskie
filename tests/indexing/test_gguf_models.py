@@ -95,7 +95,7 @@ def test_the_embedder_answers_as_fastembed_does(llama) -> None:
 def test_without_llama_cpp_the_model_says_what_it_needs(monkeypatch) -> None:
     monkeypatch.setattr(gguf_models, "available", lambda: False)
 
-    with pytest.raises(RuntimeError, match="uv sync --extra gguf"):
+    with pytest.raises(RuntimeError, match=r"the `haskie\[gguf\]` extra"):
         gguf_models.GgufEmbedder(BGE_SMALL)
 
 

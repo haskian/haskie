@@ -381,7 +381,7 @@ describe('ModelFacts', () => {
         '<dt>Model</dt><dd>BAAI/bge-small-en-v1.5</dd><dt>Dimensions</dt><dd>384</dd><dt>Parameters</dt><dd>33M</dd>' +
           '<dt>Context</dt><dd>512 tokens</dd><dt>Released</dt><dd>2023-09-12</dd>' +
           '<dt>Languages</dt><dd>English</dd><dt>License</dt><dd>MIT</dd><dt>Runtime</dt><dd>ONNX</dd>' +
-          '<dt>Devices</dt><dd>CPU, Apple Silicon, GPU (the gpu extra)</dd>' +
+          '<dt>Devices</dt><dd>CPU, Apple Silicon, GPU (CUDA)</dd>' +
           '<dt>Model card</dt><dd><a href="https://huggingface.co/BAAI/bge-small-en-v1.5" target="_blank" rel="noreferrer">' +
           'huggingface.co/BAAI/bge-small-en-v1.5</a></dd>',
       ],

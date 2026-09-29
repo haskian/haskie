@@ -108,42 +108,47 @@ cited answers in Claude Code. Not there yet:
 ## Install
 
 haskie needs [uv](https://docs.astral.sh/uv/), which fetches Python 3.13 or newer if you have none.
+Each guide goes step by step from `uv` to a first document your agent can search, with a check
+after every step: [macOS](docs/install-macos.md), [Linux](docs/install-linux.md).
+
+macOS on Apple Silicon, with the MLX and GGUF models on the GPU (needs the Xcode command-line
+tools, since GGUF compiles llama.cpp):
+
+```sh
+uv tool install "haskie[mlx,gguf]"
+haskie run                  # starts the server, opens the first-run page in the browser
+haskie install claude       # MCP server, skill, rule and SessionStart hook for Claude Code
+```
+
+Linux, with ONNX Runtime's CUDA build: on an NVIDIA GPU with CUDA 13 and cuDNN 9, else on the CPU:
 
 ```sh
 uv tool install haskie
-haskie install claude       # MCP server, skill, rule and SessionStart hook for Claude Code
-haskie run                  # web UI, REST API and MCP on http://127.0.0.1:8451
+haskie run
+haskie install claude
 ```
 
-Open http://127.0.0.1:8451, or run `haskie init`, which starts the server and opens it for you.
-The first screen asks for an embedding model and the search defaults: by default the
-cross-encoder reranker is on. The default model is bge-small (English, about 130 MB). Pick a
-multilingual one for other languages, or none for keyword search only. The model applies to every collection, and changing
+`haskie run` starts one background process that serves the web UI, the REST API and MCP on
+http://127.0.0.1:8451. It is safe to repeat. On a new home it opens the first-run page, which
+asks for an embedding model and the search defaults: by default the cross-encoder reranker is on.
+The default model is bge-small (English, about 130 MB). Pick a multilingual one for other
+languages, or none for keyword search only. The model applies to every collection, and changing
 it later means running *Index all* in each one.
-
-- **Extras:** install `"haskie[gpu]"` to run embeddings and
-  rerankers on CUDA. On Apple Silicon, `haskie[mlx]` adds the MLX rerankers and embedding models, and
-  `haskie[gguf]` the `-gguf` embedding profiles, which run on the GPU through llama.cpp (installing
-  it compiles llama.cpp, which needs the Xcode command-line tools and cmake). Other ONNX embeddings
-  run on the CPU there; the `coreml` hardware setting runs them through CoreML instead, which today
-  is slower. To install both Apple Silicon extras, drop the one you do not need:
-
-  ```sh
-  uv tool install "haskie[mlx,gguf]"
-  ```
 
 - **Port:** 8451 by default, clear of the usual 8000 and 8080. For another, run
   `haskie run --port <n>` and `haskie install claude --url http://127.0.0.1:<n>/mcp`, or set
-  `HASKIE_PORT`, which moves the default of `run`, `ensure` and `install claude` at once.
-- **Other commands:** `haskie stop` stops the server. `haskie destroy` deletes `~/.haskie` after
-  showing what would be lost, and refuses while a server is running for it. `--home` or
-  `HASKIE_HOME` keeps the data elsewhere.
+  `HASKIE_PORT`, which moves the default of `run` and `install claude` at once.
+- **Other commands:** `haskie stop` stops the server. `haskie run --foreground` serves in the
+  terminal instead, for a supervisor. `haskie destroy` deletes `~/.haskie` after showing what
+  would be lost, and refuses while a server is running for it. `--home` or `HASKIE_HOME` keeps
+  the data elsewhere.
 
 ## From files to answers
 
-1. **Documents.** Drop a file onto the page, one at a time. haskie converts it to markdown (text
-   formats are read as they are) and embeds it in the background, with a side-by-side preview.
-   It warns when the same file is already imported, and shows the nearest documents once done.
+1. **Documents.** Drop files onto the page, rename each one if you like, and import them with
+   one button. haskie converts each to markdown (text formats are read as they are) and embeds it
+   in the background, with a side-by-side preview. It warns when the same file is already
+   imported, and shows the nearest documents once done.
 2. **Collections.** Create one per topic and add its documents. Give it a one-line description.
    The agent reads it to choose where to look.
 3. **Explore.** Search and see exactly what your agent gets: *Excerpts* and *Sources*. Switch to
@@ -163,13 +168,13 @@ chunks over time. **Settings** describes every default.
 | MCP server entry | `claude mcp add --transport http` | gives Claude the tools |
 | skill | `~/.claude/skills/haskie/SKILL.md` | how to use the tools and what to cite. Its trigger names your collections, so it fires on *coffee roasting*, not on the word "documents" |
 | rule | `~/.claude/rules/haskie.md` | loads into every session, so Claude searches your collections first, even for a plain "what is X?" that never triggers a skill |
-| SessionStart hook | `~/.claude/settings.json` | runs `haskie ensure`: starts the server if it is down, and passes the session id so Sessions can record it |
+| SessionStart hook | `~/.claude/settings.json` | runs `haskie run --hook`: starts the server if it is down, and passes the session id so Sessions can record it |
 
 Run it again after adding a collection, to refresh the names. `--scope project` installs into
 `./.claude` of the directory you run it from. With `CLAUDE_CONFIG_DIR` set, the user scope
 installs there instead of `~/.claude`, as Claude Code reads it. The hook does not wait for the server, so a session
-that starts while nothing is serving, such as the first after a reboot, has no haskie tools. Keep
-`haskie run` open if that session matters.
+that starts while nothing is serving, such as the first after a reboot, has no haskie tools. Run
+`haskie run` first if that session matters.
 
 A typical exchange: you ask *"How should a background job retry a failed HTTP call without
 charging twice?"* The rule sends Claude to `search_excerpts` before the web. haskie returns

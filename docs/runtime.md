@@ -61,7 +61,7 @@ Sync IO runs in worker threads wherever a library has no async form. The main ca
 ## Model loads
 
 ONNX Runtime holds the GIL while it builds a session. Every request waits for as long as the build
-takes, which can be seconds. ONNX models run on CUDA with the `gpu` extra, else on the CPU. On
+takes, which can be seconds. ONNX models run on CUDA on Linux with an NVIDIA GPU, else on the CPU. On
 Apple Silicon the GPU is reached through MLX (`indexing/mlx_models.py`) and llama.cpp
 (`indexing/gguf_models.py`, the `-gguf` profiles), which load a model in under a second and release
 the GIL while they compute. llama.cpp's first load on a machine also compiles its Metal shaders,

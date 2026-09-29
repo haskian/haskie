@@ -75,7 +75,7 @@ def _download(name: str) -> Path:
     if not available():
         raise RuntimeError(
             f"{name} runs on llama.cpp with Metal, which is not installed: it needs Apple Silicon "
-            "and `uv sync --extra gguf`"
+            "and the `haskie[gguf]` extra"
         )
     from huggingface_hub import hf_hub_download
 

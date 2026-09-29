@@ -5,9 +5,10 @@ Each model loads through its runtime (`hardware.runtime`): fastembed or `onnx_re
 Runtime, `mlx_models` on MLX, `gguf_models` on llama.cpp. Embedders and rerankers take the same
 hardware setting the same way.
 
-Hardware: ONNX Runtime execution providers. `auto` takes CUDA where the `gpu` extra
-(onnxruntime-gpu) installs it, else the CPU. On Apple Silicon the GPU is reached through other
-runtimes: the MLX profiles (`mlx_models`) and the GGUF profiles (`gguf_models`).
+Hardware: ONNX Runtime execution providers. `auto` takes CUDA where it runs, else the CPU. Linux
+installs ONNX Runtime's CUDA build, which runs on the CPU where no NVIDIA GPU is. On Apple Silicon
+the GPU is reached through other runtimes: the MLX profiles (`mlx_models`) and the GGUF profiles
+(`gguf_models`).
 
 CoreML runs only when the settings ask for it (`Accelerator.COREML`). It runs a transformer on the
 GPU only at fixed sizes, and fastembed's sizes are dynamic, so CoreML takes a fraction of each
@@ -21,6 +22,7 @@ freezes for it), and CoreML adds a model compilation to that. CoreML keeps its c
 `home.MODEL_CACHE`, so only the first build of a model pays for it.
 """
 
+import ctypes
 import threading
 from functools import cache
 from pathlib import Path
@@ -45,6 +47,7 @@ _MODEL_LOCK = threading.Lock()
 
 
 COREML = "CoreMLExecutionProvider"
+CUDA_PROVIDERS = frozenset({"TensorrtExecutionProvider", "CUDAExecutionProvider"})
 # what `auto` takes, best first: CoreML is not among them (see the module docstring)
 PREFERENCE = (
     "TensorrtExecutionProvider",
@@ -54,8 +57,11 @@ PREFERENCE = (
 )
 
 
-def select_providers(available: list[str], accelerator: Accelerator) -> list[str]:
-    """Ordered provider list for ONNX Runtime; CPU is always the final fallback."""
+def select_providers(available: list[str], accelerator: Accelerator, cuda: bool) -> list[str]:
+    """Ordered provider list for ONNX Runtime; CPU is always the final fallback. `cuda` says
+    whether CUDA runs here at all (see `cuda_loads`)."""
+    if not cuda:
+        available = [p for p in available if p not in CUDA_PROVIDERS]
     if accelerator == Accelerator.CPU:
         return ["CPUExecutionProvider"]
     if accelerator == Accelerator.COREML:
@@ -86,9 +92,29 @@ def onnx_runtime() -> Any:
     return onnxruntime
 
 
+@cache
+def cuda_loads() -> bool:
+    """Whether CUDA runs here: the NVIDIA driver, and the CUDA and cuDNN libraries that ONNX
+    Runtime's CUDA provider links to.
+
+    Its CUDA build lists the provider on every machine. A session asked for it without them logs
+    an error and falls back to the CPU, while the status would report the GPU. Loading the
+    provider's own library follows whichever CUDA version the installed build needs.
+    """
+    library = Path(onnx_runtime().__file__).parent / "capi" / "libonnxruntime_providers_cuda.so"
+    try:
+        ctypes.CDLL("libcuda.so.1")  # the driver's, present only with an NVIDIA driver
+        ctypes.CDLL(str(library))
+    except OSError:
+        return False
+    return True
+
+
 def providers(accelerator: Accelerator = Accelerator.AUTO) -> list[Provider]:
-    names = select_providers(onnx_runtime().get_available_providers(), accelerator)
-    return with_options(names, str(home.MODEL_CACHE))
+    available = onnx_runtime().get_available_providers()
+    # Asked only where the build offers CUDA, so a CPU build never loads a library for nothing.
+    cuda = not CUDA_PROVIDERS.isdisjoint(available) and cuda_loads()
+    return with_options(select_providers(available, accelerator, cuda), str(home.MODEL_CACHE))
 
 
 def provider_name(provider: Provider) -> str:

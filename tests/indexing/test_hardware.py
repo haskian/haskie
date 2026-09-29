@@ -96,5 +96,6 @@ def test_the_device_a_model_runs_on_here(
     monkeypatch.setattr(gguf_models, "available", lambda: installed)
     stand_in = types.SimpleNamespace(get_available_providers=lambda: providers)
     monkeypatch.setattr(embed, "onnx_runtime", lambda: stand_in)
+    monkeypatch.setattr(embed, "cuda_loads", lambda: True)  # a machine where CUDA runs
 
     assert hardware.device(model, accelerator) == expected, name

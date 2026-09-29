@@ -229,11 +229,11 @@ TASK_TIMEOUT = Meta(
 ACCELERATOR = Meta(
     title="Model hardware",
     description=(
-        "Device for the embedding and reranker models. auto: CUDA with the gpu extra, else "
-        "CPU. On Apple Silicon, the MLX and GGUF models run on the GPU, and auto runs the rest "
-        "on the CPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. "
-        "coreml: run ONNX models through CoreML on Apple Silicon; today that is slower than the "
-        "CPU for them."
+        "Device for the embedding and reranker models. auto: CUDA on Linux with an NVIDIA "
+        "GPU, else CPU. On Apple Silicon, the MLX and GGUF models run on the GPU, and auto runs "
+        "the rest on the CPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is "
+        "offered. coreml: run ONNX models through CoreML on Apple Silicon; today that is slower "
+        "than the CPU for them."
     ),
 )
 # How deep any search reads. A passage or a document row is folded from several chunks, so the scan

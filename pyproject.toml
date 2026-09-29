@@ -14,7 +14,11 @@ dependencies = [
     "pdf-inspector>=1.20.0",
     "pyromark>=0.9.13",
     "pypdf>=5.0.0",
-    "fastembed>=0.8.0",
+    # ONNX Runtime's CUDA build by default on Linux; it runs on the CPU where no NVIDIA GPU is. Never
+    # both builds: each ships the `onnxruntime` package, so whichever installs last overwrites the
+    # other's files, and an install that ends with the CPU build's has no CUDA at all.
+    "fastembed>=0.8.0 ; sys_platform == 'darwin'",
+    "fastembed-gpu>=0.8.0 ; sys_platform != 'darwin'",
     "semantic-text-splitter>=0.32.0",
     "aiosqlite>=0.21.0",
     "sqlalchemy[asyncio]>=2.0.43",
@@ -31,9 +35,6 @@ dependencies = [
 haskie = "haskie.cli:cli"
 
 [project.optional-dependencies]
-# CUDA for embeddings and rerankers, opted into with `uv sync --extra gpu`; onnxruntime-gpu ships no macOS
-# wheel, so the marker makes the extra a no-op there.
-gpu = ["onnxruntime-gpu>=1.17.0; sys_platform != 'darwin'"]
 # The MLX rerankers and embedders on Apple Silicon (`indexing/mlx_models.py`), opted into with
 # `uv sync --extra mlx`; the marker makes the extra a no-op anywhere MLX has no Metal to run on.
 mlx = [

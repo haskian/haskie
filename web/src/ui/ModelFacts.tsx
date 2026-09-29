@@ -5,7 +5,7 @@ import { count } from '../format'
 
 // what each needs beyond the default install, in its name, so the picker says it before a download
 const RUNTIMES: Record<Runtime, string> = { onnx: 'ONNX', mlx: 'MLX (the mlx extra)', gguf: 'llama.cpp GGUF (the gguf extra)' }
-const DEVICES: Record<Device, string> = { cpu: 'CPU', apple_silicon: 'Apple Silicon', gpu: 'GPU (the gpu extra)' }
+const DEVICES: Record<Device, string> = { cpu: 'CPU', apple_silicon: 'Apple Silicon', gpu: 'GPU (CUDA)' }
 
 /** One model's facts under its picker: its name, an embedder's vector size, then what the
  *  catalogue says about it (`catalogue.ModelMetadata`). */

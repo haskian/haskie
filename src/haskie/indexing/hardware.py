@@ -17,7 +17,7 @@ class Runtime(StrEnum):
 class Device(StrEnum):
     CPU = "cpu"
     APPLE_SILICON = "apple_silicon"  # MLX or llama.cpp on the GPU, or ONNX through CoreML
-    GPU = "gpu"  # ONNX through CUDA, TensorRT or ROCm: the `gpu` extra
+    GPU = "gpu"  # ONNX through CUDA, TensorRT or ROCm: Linux, on an NVIDIA GPU
 
 
 # CoreML compiles a whole model into one protobuf, which caps at 2 GB: a model past that fails to
@@ -58,7 +58,7 @@ def nowhere(name: str) -> str:
     extra = runtime(name).value
     return (
         f"{name} runs on {extra} on the Apple GPU: it needs Apple Silicon, "
-        f"`uv sync --extra {extra}`, and a hardware setting other than cpu"
+        f"the `haskie[{extra}]` extra, and a hardware setting other than cpu"
     )
 
 
