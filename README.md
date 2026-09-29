@@ -127,6 +127,7 @@ Needs [uv](https://docs.astral.sh/uv/), which fetches Python 3.13 if you have no
 uv tool install haskie
 haskie run                  # web UI, REST API and MCP on http://127.0.0.1:8451; opens the first-run page
 haskie install claude       # MCP server, skill, rule and SessionStart hook for Claude Code
+haskie uninstall claude     # removes all four again; documents and collections stay
 ```
 
 - **macOS (Apple Silicon):** also installs MLX and llama.cpp for the Apple GPU. llama.cpp
@@ -166,7 +167,8 @@ chunks over time. **Settings** describes every default.
 | rule | `~/.claude/rules/haskie.md` | loads into every session, so Claude searches your collections first, even for a plain "what is X?" that never triggers a skill |
 | SessionStart hook | `~/.claude/settings.json` | runs `haskie run --hook`: starts the server if it is down, and passes the session id so Sessions can record it |
 
-Run it again after adding a collection, to refresh the names. `--scope project` installs into
+haskie records where it installed and rewrites the skill and rule in the background whenever
+a collection is created, described, renamed or deleted. `--scope project` installs into
 `./.claude` of the directory you run it from. With `CLAUDE_CONFIG_DIR` set, the user scope
 installs there instead of `~/.claude`, as Claude Code reads it. The hook does not wait for the server, so a session
 that starts while nothing is serving, such as the first after a reboot, has no haskie tools. Run

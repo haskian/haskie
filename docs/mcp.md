@@ -37,7 +37,17 @@ Claude Code does. `--url` points them at another endpoint. The hook's full comma
 is the absolute path of `haskie` with `run --home <home> --host <host> --port <port> --hook`.
 Re-installing replaces any haskie hook, including one in the older `ensure` form. The skill's
 trigger and the rule both name the home's collections, so they fire on the topics you collected.
-Run `haskie install claude` again after adding a collection to refresh them.
+haskie records each directory it installed into (the `installations` table). Creating,
+describing, renaming or deleting a collection rewrites the skill and rule there in the background,
+and so does every server start: that covers a change a crash lost and a template an upgrade
+changed. A refresh skips an installation whose skill and rule are both gone, or whose
+SessionStart hook another home's install took: the last install into a directory owns it. Only
+uninstalling forgets one.
+
+`haskie uninstall claude` (same `--scope`) removes all four: the MCP entry, the skill, the rule
+and every haskie SessionStart hook in the settings file, leaving the user's own hooks and
+settings. It forgets the installation first, so a running server does not write the files back.
+Documents and collections stay.
 
 ## A session, end to end
 
@@ -85,4 +95,5 @@ One server serves the web UI, the REST API and every MCP client at once. litesta
 `2026-07-28`, which replaced `initialize` with `server/discover`. A stdio client cannot connect,
 and an HTTP client that opens with an older `initialize` request is refused.
 
-Code: `claude.py`, `cli.py` (`run`, `install claude`), `src/haskie/claude_code/`.
+Code: `claude.py`, `cli.py` (`run`, `install claude`, `uninstall claude`),
+`src/haskie/claude_code/`.

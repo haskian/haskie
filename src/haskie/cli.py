@@ -425,8 +425,8 @@ def install_claude(
 
     Four things a client needs that the tool descriptions cannot supply: the endpoint, a server
     running at it, a skill saying how to search the user's own documents, and a rule loaded into
-    every session saying when to - before answering from memory, planning, or the web. Re-run
-    after adding a collection to refresh both.
+    every session saying when to - before answering from memory, planning, or the web. haskie
+    records the installation and rewrites both whenever a collection changes.
     """
     _use_home(home_dir)
     try:
@@ -440,9 +440,11 @@ def _install_claude(url: str, scope: Scope) -> None:
     """The steps of `install claude`, each reporting as it goes; failures are `HaskieError`."""
     import asyncio
 
-    # `read_collections` reaches the database through `db.connect`, which migrates the home and
-    # makes it first - so there is no prelude to repeat here.
-    found = asyncio.run(claude.read_collections())
+    from haskie import db
+
+    # First, so a home this build cannot read is refused before Claude Code's files are touched.
+    # It also makes the home, so there is no prelude to repeat here.
+    asyncio.run(db.migrate_once())
 
     manual = claude.register_mcp(url, scope)
     if manual is None:
@@ -451,19 +453,74 @@ def _install_claude(url: str, scope: Scope) -> None:
         typer.echo("the `claude` CLI is not on PATH; register the server by hand:")
         typer.echo(f"  {manual}")
 
-    destination = claude.write_skill(scope, found)
-    named = ", ".join(collection.name for collection in found) or "none yet"
-    typer.echo(f"wrote {destination}")
-    typer.echo(f"wrote {claude.write_rule(scope, found)}")
-    typer.echo(f"  collections in the trigger: {named}")
-
-    added = claude.install_hook(scope, home.HOME, url)
-    settings_file = claude.settings_path(scope)
+    directory = claude.claude_dir(scope)
+    added = claude.install_hook(directory, home.HOME, url)
+    settings_file = claude.settings_path(directory)
     typer.echo(f"{'added' if added else 'updated'} the SessionStart hook in {settings_file}")
+
+    # read last, so a collection changed during the `claude` calls above still lands
+    found = asyncio.run(claude.read_collections())
+    for written in claude.write_instructions(directory, found):
+        typer.echo(f"wrote {written}")
+    named = ", ".join(collection.name for collection in found) or "none yet"
+    typer.echo(f"  collections in the trigger: {named}")
+    asyncio.run(claude.record_installation(directory))
+
     # `_serve`, not the `run` command: installing wants the server up, not the first-run page
     # `run` would open in the browser. Already-serving is its fast path, not ours.
     _serve(url, wait=True)
-    typer.echo("re-run `haskie install claude` after adding a collection, to refresh the trigger")
+    typer.echo("haskie rewrites the skill and rule whenever a collection changes")
+
+
+uninstall = typer.Typer(
+    name="uninstall",
+    help="Remove haskie from an MCP client.",
+    no_args_is_help=True,
+)
+cli.add_typer(uninstall)
+
+
+@uninstall.command("claude")
+def uninstall_claude(
+    home_dir: HomeOption = None,
+    scope: Annotated[Scope, typer.Option(help="Where Claude Code recorded it.")] = Scope.USER,
+) -> None:
+    """Remove what `install claude` added: the MCP entry, the skill, the rule and the
+    SessionStart hook, and stop rewriting them when a collection changes.
+
+    Every haskie hook in the scope goes, whichever home it starts. Documents and collections stay;
+    `haskie destroy` removes those. Uninstalling what is not installed does nothing.
+    """
+    _use_home(home_dir)
+    try:
+        _uninstall_claude(scope)
+    except HaskieError as exc:  # a home too old to read, a settings file that is not JSON, ...
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _uninstall_claude(scope: Scope) -> None:
+    """The steps of `uninstall claude`, each reporting as it goes; failures are `HaskieError`."""
+    import asyncio
+
+    directory = claude.claude_dir(scope)
+    # The record first, so a server refreshing meanwhile no longer writes the files back. Only
+    # when the home exists: uninstalling must not make one.
+    if home.DB_FILE.is_file() and asyncio.run(claude.forget_installation(directory)):
+        typer.echo(f"stopped refreshing {directory}")
+
+    manual = claude.unregister_mcp(scope)
+    if manual is None:
+        typer.echo(f"removed the haskie MCP server ({scope} scope)")
+    else:
+        typer.echo("the `claude` CLI is not on PATH; remove the server by hand:")
+        typer.echo(f"  {manual}")
+
+    settings_file = claude.settings_path(directory)
+    if claude.uninstall_hook(directory):
+        typer.echo(f"removed the SessionStart hook from {settings_file}")
+    for removed in claude.remove_instructions(directory):
+        typer.echo(f"removed {removed}")
 
 
 @cli.command()

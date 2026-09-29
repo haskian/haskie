@@ -290,3 +290,12 @@ staging = Table(
     Column("md5", Text, nullable=False),  # of the bytes, carried to the import
     Column("created_at", Float, nullable=False, server_default=ZERO),
 )
+
+# where `haskie install <agent>` wrote the skill and rule, so a collection change can rewrite them
+# (`claude.refresh_installations`); `directory` is the agent's configuration directory
+installations = Table(
+    "installations",
+    metadata,
+    Column("agent", Text, CheckConstraint("agent in ('claude')"), primary_key=True),
+    Column("directory", Text, primary_key=True),
+)

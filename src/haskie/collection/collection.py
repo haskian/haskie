@@ -35,7 +35,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from haskie import db, home
+from haskie import claude, db, home
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.index import CollectionIndex, IndexStats, forget_schema
@@ -291,6 +291,7 @@ class Collection:
         if not created:
             raise Conflict(f"collection already exists: {collection.name}")
         await anyio.Path(collection.root).mkdir(parents=True, exist_ok=True)
+        claude.refresh_in_background()
         return collection
 
     @classmethod
@@ -353,6 +354,7 @@ class Collection:
                 await renamed.remove_tree()
             await anyio.Path(renamed.root.parent).mkdir(parents=True, exist_ok=True)
             await anyio.Path(self.root).rename(renamed.root)
+        claude.refresh_in_background()
         return renamed
 
     async def remove_rows(self) -> None:
@@ -360,6 +362,7 @@ class Collection:
         (`session_collections`); `pragma foreign_keys = on` is set on every connection."""
         async with db.connect() as conn:
             await conn.execute(delete(collections).where(collections.c.name == self.name))
+        claude.refresh_in_background()
 
     async def remove_tree(self) -> None:
         """Delete the collection's folder, and with it the index table."""
@@ -482,6 +485,7 @@ class Collection:
                 .where(collections.c.name == self.name)
                 .values(description=description)
             )
+        claude.refresh_in_background()
 
     # --- maintenance columns ---------------------------------------------
     # `workflows` decides when a run is due and `maintenance` what it does; these are the four
