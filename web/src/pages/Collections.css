@@ -25,3 +25,15 @@
 .collection-error {
   overflow-wrap: anywhere;
 }
+
+/* The tag and its hint are siblings: `.tag > *` would pad and clip a hint inside it. */
+.also-in {
+  position: relative;
+  display: flex; /* as tall as the tag, so the hint's 100% is the tag's bottom edge */
+  cursor: default;
+}
+/* flush under the tag, which reads as the hint's own header. One pixel of overlap: the tag's
+   bottom falls between device pixels, and two antialiased edges meeting there leave a light seam. */
+.also-in > .hint-below {
+  top: calc(100% - 1px);
+}

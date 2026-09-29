@@ -36,7 +36,7 @@ from uuid import uuid4
 import anyio
 import anyio.to_thread
 import msgspec
-from sqlalchemy import ColumnElement, Row, delete, func, literal, select, update
+from sqlalchemy import ColumnElement, Row, delete, literal, select, update
 from sqlalchemy.dialects.sqlite import insert
 
 from haskie import cpu, db, home
@@ -76,6 +76,7 @@ DOCUMENT_SORTS = {
     "name": documents.c.name,
     "size": documents.c.size,
     "status": documents.c.status,
+    "created_at": documents.c.created_at,
     "updated_at": documents.c.updated_at,
 }
 
@@ -145,26 +146,27 @@ DOCUMENT_COLUMNS = db.columns_of(documents, Document)
 
 
 class Listed(Document):
-    """A document as the API lists it: the row, plus how many collections hold it. A read model
-    for the gallery, not a column: `DOCUMENT_COLUMNS` reads the base class alone."""
+    """A document as the API lists it: the row, plus the collections that hold it, by name. A
+    read model for the gallery, not a column: `DOCUMENT_COLUMNS` reads the base class alone."""
 
-    collections: int = 0
+    collections: list[str] = []
 
 
 async def listed(docs: list[Document]) -> list[Listed]:
-    """The same documents with their collection counts, from one query."""
+    """The same documents with the collections holding each, from one query."""
     names_ = [doc.name for doc in docs]
-    counts: dict[str, int] = {}
+    held: dict[str, list[str]] = {}
     if names_:
         async with db.read() as conn:
             rows = await conn.execute(
-                select(collection_documents.c.document, func.count())
+                select(collection_documents.c.document, collection_documents.c.collection)
                 .where(collection_documents.c.document.in_(names_))
-                .group_by(collection_documents.c.document)
+                .order_by(collection_documents.c.collection)
             )
-            counts = dict(rows.tuples().all())
+            for doc, collection in rows.tuples():
+                held.setdefault(doc, []).append(collection)
     return [
-        Listed(**msgspec.structs.asdict(doc), collections=counts.get(doc.name, 0)) for doc in docs
+        Listed(**msgspec.structs.asdict(doc), collections=held.get(doc.name, [])) for doc in docs
     ]
 
 

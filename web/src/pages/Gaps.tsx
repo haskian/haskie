@@ -132,7 +132,7 @@ function TopicBody({ topic, review, now, onReviewed }: { topic: GapTopic; review
           </button>
         )}
       </div>
-      <div role="tabpanel" className="gap-panel">
+      <div className="gap-panel modal-scroll">
         {error !== null && <p className="muted">{error}</p>}
         <p className="muted">Replay asks each question again over every collection. Nothing is recorded.</p>
         <ul className="list">

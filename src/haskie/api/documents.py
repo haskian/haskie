@@ -126,11 +126,11 @@ async def import_document(data: ImportRequest, session_id: SessionId = None) -> 
 async def list_documents(
     page: PageRequest, status: Annotated[DocumentStatus | None, one_of(DocumentStatus)] = None
 ) -> Page[documents.Listed]:
-    """List every imported document, one page at a time, with how many collections hold each.
+    """List every imported document, one page at a time, with the collections holding each.
 
-    Sort by name, size, status or updated_at; `status` keeps one lifecycle state only (queued,
-    converting, embedding, imported, error, cancelled, deleting). Pass the `next_cursor` of a
-    response back as `cursor` to continue; it is null on the last page.
+    Sort by name, size, status, created_at or updated_at; `status` keeps one lifecycle state only
+    (queued, converting, embedding, imported, error, cancelled, deleting). Pass the `next_cursor`
+    of a response back as `cursor` to continue; it is null on the last page.
     """
     found = await documents.page(page, status)
     return Page(
@@ -142,8 +142,8 @@ async def list_documents(
 
 @get("/api/documents/{document:str}", mcp_tool="get_document")
 async def get_document(document: str) -> documents.Listed:
-    """One document: its import status, its size, what it is said to be, and how many collections
-    hold it."""
+    """One document: its import status, its size, what it is said to be, and the collections
+    holding it."""
     (found,) = await documents.listed([await documents.get(document)])
     return found
 

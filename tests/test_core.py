@@ -778,6 +778,9 @@ async def test_document_page_sorts_filters_and_resumes_by_keyset() -> None:
     by_size = await document.page(PageRequest(sort="size", order=Order.DESC))
     assert [d.name for d in by_size.items] == ["a.md", "c.md", "b.md"]
 
+    newest_first = await document.page(PageRequest(sort="created_at", order=Order.DESC))
+    assert [d.name for d in newest_first.items] == ["c.md", "b.md", "a.md"]
+
     filtered = await document.page(PageRequest(), status=DocumentStatus.IMPORTED)
     assert [d.name for d in filtered.items] == ["a.md"]
     assert filtered.total == 1, "total counts the filtered rows, not every document"
