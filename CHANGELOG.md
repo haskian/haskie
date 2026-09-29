@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.18.0 - 2026-09-29
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>refresh Claude Code installs on collection change; add uninstall (#29) - (b3744b1) - Črtomir Majer
+
+- - -
+
 ## v0.17.0 - 2026-09-29
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>scrollable upload modal, newest-first attach list with also-in (#28) - (45a80c8) - Črtomir Majer
