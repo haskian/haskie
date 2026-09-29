@@ -12,7 +12,9 @@ Every heading after content starts a new section (`sections`). Within a section,
 is a chunk of its own: `pack` merges short ones with their neighbours and cuts long ones into
 whole sentences. A heading over text is never part of a chunk's text. It is citation metadata
 (`Chunk.headings`), worked out whatever the settings say. A section of headings alone makes no
-chunk: its headings go on to the next chunk's path.
+chunk: its headings go on to the next chunk's path. A text whose every word sits in a heading is
+chunked as text instead (`split`): a converter can read a whole page as headings, a PDF set all in
+one font, and dropping them all would leave the document unsearchable.
 
 `frames` is the one optional step (`chunk_frame`). It frames each section with its
 heading path, and the models read every chunk with that path in front (`framed`). The chunk size
@@ -46,8 +48,8 @@ from haskie.indexing.segment import CutReason, Packed, PieceType, Span, SpanKind
 from haskie.settings import Chunker, ChunkSettings
 
 # see the module docstring; 3: e5's query and passage prefixes; 4: a part boundary is `part` or
-# `heading`, not `edge`
-CHUNK_VERSION = 4
+# `heading`, not `edge`; 5: a text of headings alone is chunked as text
+CHUNK_VERSION = 5
 HEADING_SEP = " > "  # between two headings of a heading path: "Part I > Chapter 2 > Retries"
 WORD = re.compile(r"\w")  # what a piece needs one of to say anything
 type Opened = tuple[int, str]  # a heading still open: its level, 1 to 6, and its text
@@ -288,7 +290,8 @@ def split(
     `opened` holds the headings still open where it starts (see `open_headings`), and
     `start_reason` and `end_reason` say why its ends are cut: the document's own (`EDGE`), else
     where another part meets it, at a heading the later part opens with (`HEADING`) or partway
-    through a section (`PART`)."""
+    through a section (`PART`). A markdown text that packs into no chunk though it holds a word
+    has all its words in headings, and is chunked as text: its heading lines become its text."""
     run = Chunking(
         text,
         settings,
@@ -302,6 +305,11 @@ def split(
     value: Any = None
     for step in pipeline(settings):
         value = step(run, value)
+    if not value and settings.chunker == Chunker.MARKDOWN and WORD.search(without_markers(text)):
+        as_text = msgspec.structs.replace(settings, chunker=Chunker.TEXT)
+        return split(
+            text, as_text, line_offset, char_offset, byte_offset, opened, start_reason, end_reason
+        )
     return value
 
 

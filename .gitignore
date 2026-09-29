@@ -13,7 +13,7 @@ src/haskie/web/
 
 evals/corpus/
 evals/.haskie-eval*/
-evals/runs/
+evals/runs*/
 # regenerated from a seed by `evals/synth.py`
 evals/synth/
 evals/tasks/synth_*/

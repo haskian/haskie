@@ -133,7 +133,7 @@ def ensure_collection(collection: str, description: str, api: str) -> None:
 
 
 # Arm F's collections: the same documents as a synthetic corpus's own collection, chunked smaller.
-SMALL_CHUNKS = {"chunk_size": 300, "chunk_overlap": 40}
+SMALL_CHUNKS = {"chunk_size": 300}
 
 
 def small_chunks(collection: str) -> str:
@@ -143,15 +143,17 @@ def small_chunks(collection: str) -> str:
 def ensure_chunking(collection: str, chunking: dict, api: str) -> None:
     """Set the collection's chunking before any document is attached, so its first index already
     uses it - changing it later would mean re-indexing everything attached."""
-    current = call("GET", f"/api/collections/{collection}", api)["settings"]
+    current = call("GET", f"/api/collections/{collection}", api)["overrides"]
     if any(current.get(key) != value for key, value in chunking.items()):
-        call("PUT", f"/api/collections/{collection}/settings", api, chunking)
+        call("PUT", f"/api/collections/{collection}/overrides", api, chunking)
 
 
 def ensure_profile(profile: str, api: str) -> None:
-    """Choose the embedding profile on a fresh instance, then wait for its model. An instance
-    already initialized with a different profile is an error, not something to change here:
-    switching profiles re-indexes every collection, which a setup script shouldn't do silently."""
+    """Run a fresh instance's first run - the embedding profile, with the search a first run
+    starts from (since 0.16, a cross-encoder reranker and its score floor) - then wait for its
+    models. An instance already initialized with a different profile is an error, not something
+    to change here: switching profiles re-indexes every collection, which a setup script shouldn't
+    do silently."""
     status = call("GET", "/api/status", api)
     if not status["initialized"]:
         call("POST", "/api/init", api, {"profile": profile})
@@ -161,7 +163,7 @@ def ensure_profile(profile: str, api: str) -> None:
         models = call("GET", "/api/status", api)["models"]
         if any(m["state"] == "error" for m in models):
             raise RuntimeError(f"model failed to load: {models}")
-        if models and all(m["state"] == "ready" for m in models):
+        if all(m["state"] == "ready" for m in models):
             return
         time.sleep(POLL_SECONDS)
 
@@ -233,10 +235,11 @@ def load(
     return ok and len(ready) == len(files)
 
 
-def main(api: str = DEFAULT_API, collection: str = COLLECTION, profile: str = "") -> int:
-    """`profile` picks an embedding profile for a fresh instance; empty leaves it full-text only."""
-    if profile:
-        ensure_profile(profile, api)
+def main(api: str = DEFAULT_API, collection: str = COLLECTION, profile: str = "none") -> int:
+    """`profile` is the embedding profile a fresh instance's first run picks; `none` is full-text
+    search only. Every instance gets a real first run: an uninitialized one searches with bare
+    defaults no user ever has, so it would measure a haskie nobody runs."""
+    ensure_profile(profile, api)
     ok = load(fetch(), collection, DESCRIPTION, api)
     for seed in synth.SEEDS:
         synth.generate(seed)
@@ -247,7 +250,7 @@ def main(api: str = DEFAULT_API, collection: str = COLLECTION, profile: str = ""
             ok = load(files, name, f"Synthetic runbooks, {len(files)} documents.", api) and ok
             # Arm F runs against the full-text instance only, and its question was answered on
             # the default seed - other seeds don't need the extra index.
-            if not profile and seed == synth.DEFAULT_SEED:
+            if profile == "none" and seed == synth.DEFAULT_SEED:
                 description = f"Synthetic runbooks, {len(files)} documents, small chunks."
                 ok = load(files, small_chunks(name), description, api, SMALL_CHUNKS) and ok
     return 0 if ok else 1

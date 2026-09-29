@@ -57,7 +57,11 @@ HASKIE_TOOLS = (
     "mcp__haskie__set_session_collections",
     "mcp__haskie__search_sources",
     "mcp__haskie__search_excerpts",
+    "mcp__haskie__report_gap",
 )
+# Deliberately left out: `list_searches` and `list_gaps` show other sessions' searches and near
+# misses - in an eval instance, earlier runs of the same task, citing its answer. `review_gaps` and
+# `replay_gaps` curate collections; an agent answering a task has no use for them.
 ARMS = ("a", "b", "c", "d", "e", "f")
 HASKIE_ARMS = ("b", "c", "e", "f")
 BOOK_TASKS = (

@@ -55,10 +55,10 @@ class FakeServer:
                 collection = path.removeprefix("/api/collections/").removesuffix("/documents")
                 self.documents[body["document"]]["in_collections"].append(collection)
                 return {}
-        if method == "PUT" and path.endswith("/settings"):
+        if method == "PUT" and path.endswith("/overrides"):
             assert body is not None, f"PUT {path} with no body"
-            collection = path.removeprefix("/api/collections/").removesuffix("/settings")
-            self.collections[collection].setdefault("settings", {}).update(body)
+            collection = path.removeprefix("/api/collections/").removesuffix("/overrides")
+            self.collections[collection].setdefault("overrides", {}).update(body)
             return {}
         raise AssertionError(f"unhandled: {method} {path}")
 
@@ -131,14 +131,14 @@ def test_import_all_refuses_a_name_imported_earlier_with_different_content(
 
 
 def test_ensure_chunking_writes_only_when_the_settings_differ(monkeypatch) -> None:
-    server = FakeServer(collections={"c": {"name": "c", "settings": {"chunk_size": None}}})
+    server = FakeServer(collections={"c": {"name": "c", "overrides": {"chunk_size": None}}})
     _install(monkeypatch, server)
 
     setup.ensure_chunking("c", setup.SMALL_CHUNKS, "http://x")
     setup.ensure_chunking("c", setup.SMALL_CHUNKS, "http://x")
 
     puts = [call for call in server.calls if call[0] == "PUT"]
-    assert puts == [("PUT", "/api/collections/c/settings", setup.SMALL_CHUNKS)]
+    assert puts == [("PUT", "/api/collections/c/overrides", setup.SMALL_CHUNKS)]
 
 
 def test_import_all_imports_a_file_not_seen_before(monkeypatch, tmp_path: Path) -> None:

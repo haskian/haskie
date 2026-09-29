@@ -23,7 +23,10 @@ class Device(StrEnum):
 # CoreML compiles a whole model into one protobuf, which caps at 2 GB: a model past that fails to
 # build on Apple Silicon ("CoreML.Specification.Model exceeded maximum protobuf size of 2GB") and
 # runs on the CPU instead. bge-m3 and e5-large pass, because CoreML takes only part of their graph.
-COREML_TOO_LARGE = frozenset({"jinaai/jina-embeddings-v3"})
+# bge-large on CoreML: ONNX Runtime splits the graph into 146 partitions and allocates per
+# partition - 30 chunks peaked at 35.7 GB of RSS against 2.5 GB on the CPU (SIGKILL), and ran
+# slower too (10.5 s against 1.7 s).
+COREML_TOO_LARGE = frozenset({"jinaai/jina-embeddings-v3", "BAAI/bge-large-en-v1.5"})
 
 
 def runtime(name: str) -> Runtime:

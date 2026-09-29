@@ -7,7 +7,8 @@ embed_home="${HASKIE_EVAL_EMBED_HOME:-$PWD/evals/.haskie-eval-embed}"
 embed_api="${HASKIE_EVAL_EMBED_URL:-http://127.0.0.1:8124}"
 embed_profile="${HASKIE_EVAL_EMBED_PROFILE:-compact}"
 collection="${HASKIE_EVAL_COLLECTION:-eval-programming-books}"
-uv run haskie ensure --home "$home" --url "$api/mcp"
-uv run haskie ensure --home "$embed_home" --url "$embed_api/mcp"
-uv run python -m evals.setup "$api" "$collection"
+# --no-browser: a home whose first run isn't done yet would otherwise open the web UI on it
+uv run haskie run --home "$home" --port "${api##*:}" --no-browser
+uv run haskie run --home "$embed_home" --port "${embed_api##*:}" --no-browser
+uv run python -m evals.setup "$api" "$collection" none
 uv run python -m evals.setup "$embed_api" "$collection" "$embed_profile"
