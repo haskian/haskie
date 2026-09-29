@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="web/public/favicon.svg" alt="" width="96">
+  <img src="design/haskie-logo.jpg" alt="haskie" width="96">
 </p>
 
 <h1 align="center">haskie</h1>
