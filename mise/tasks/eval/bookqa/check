@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="Lint, type-check and test the book QA eval. No haskie instance, no Claude."
+set -euo pipefail
+uv run ruff check evals/bookqa
+uv run ruff format --check evals/bookqa
+uv run ty check
+uv run python -m pytest evals/bookqa/tests -q

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="Book QA eval: validate the dataset (schema, duplicate ids and questions, citations, source hashes, quotes on their pages). Args: [--candidates] [--dataset PATH]"
+set -euo pipefail
+uv run python -m evals.bookqa.review "$@"

@@ -18,6 +18,10 @@ evals/runs*/
 evals/synth/
 evals/tasks/synth_*/
 evals/results.md
+# bookqa: unreviewed generations (`eval:bookqa:generate`) and run output (`eval:bookqa:run`);
+# the reviewed dataset, evals/bookqa/dataset.jsonl, is the one versioned
+evals/bookqa/candidates/
+evals/bookqa/reports/
 
 library/
 
