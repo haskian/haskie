@@ -49,7 +49,7 @@ haskie --version
 
 The first prints `haskie` and its version. The second prints what haskie runs its ONNX models on:
 `['CUDAExecutionProvider', 'CPUExecutionProvider']` with a working GPU, `['CPUExecutionProvider']`
-without one.
+without one. With TensorRT installed as well, `TensorrtExecutionProvider` comes first.
 
 If the shell says `haskie: command not found`, run `uv tool update-shell` and open a new terminal.
 

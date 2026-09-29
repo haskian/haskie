@@ -47,7 +47,11 @@ _MODEL_LOCK = threading.Lock()
 
 
 COREML = "CoreMLExecutionProvider"
-CUDA_PROVIDERS = frozenset({"TensorrtExecutionProvider", "CUDAExecutionProvider"})
+# The NVIDIA providers, each by the library of ONNX Runtime's that must load for it to run.
+NVIDIA_LIBRARIES = {
+    "TensorrtExecutionProvider": "libonnxruntime_providers_tensorrt.so",
+    "CUDAExecutionProvider": "libonnxruntime_providers_cuda.so",
+}
 # what `auto` takes, best first: CoreML is not among them (see the module docstring)
 PREFERENCE = (
     "TensorrtExecutionProvider",
@@ -57,11 +61,8 @@ PREFERENCE = (
 )
 
 
-def select_providers(available: list[str], accelerator: Accelerator, cuda: bool) -> list[str]:
-    """Ordered provider list for ONNX Runtime; CPU is always the final fallback. `cuda` says
-    whether CUDA runs here at all (see `cuda_loads`)."""
-    if not cuda:
-        available = [p for p in available if p not in CUDA_PROVIDERS]
+def select_providers(available: list[str], accelerator: Accelerator) -> list[str]:
+    """Ordered provider list for ONNX Runtime; CPU is always the final fallback."""
     if accelerator == Accelerator.CPU:
         return ["CPUExecutionProvider"]
     if accelerator == Accelerator.COREML:
@@ -93,15 +94,15 @@ def onnx_runtime() -> Any:
 
 
 @cache
-def cuda_loads() -> bool:
-    """Whether CUDA runs here: the NVIDIA driver, and the CUDA and cuDNN libraries that ONNX
-    Runtime's CUDA provider links to.
+def nvidia_loads(provider: str) -> bool:
+    """Whether NVIDIA provider `provider` runs here: the driver, and the libraries its ONNX
+    Runtime library links to (CUDA and cuDNN; TensorRT's own for TensorRT).
 
-    Its CUDA build lists the provider on every machine. A session asked for it without them logs
-    an error and falls back to the CPU, while the status would report the GPU. Loading the
-    provider's own library follows whichever CUDA version the installed build needs.
+    ONNX Runtime's CUDA build lists both on every machine. A session asked for one that cannot
+    load logs an error and falls back, while the status would report the GPU. Loading the
+    provider's own library follows whichever versions the installed build needs.
     """
-    library = Path(onnx_runtime().__file__).parent / "capi" / "libonnxruntime_providers_cuda.so"
+    library = Path(onnx_runtime().__file__).parent / "capi" / NVIDIA_LIBRARIES[provider]
     try:
         ctypes.CDLL("libcuda.so.1")  # the driver's, present only with an NVIDIA driver
         ctypes.CDLL(str(library))
@@ -111,10 +112,12 @@ def cuda_loads() -> bool:
 
 
 def providers(accelerator: Accelerator = Accelerator.AUTO) -> list[Provider]:
-    available = onnx_runtime().get_available_providers()
-    # Asked only where the build offers CUDA, so a CPU build never loads a library for nothing.
-    cuda = not CUDA_PROVIDERS.isdisjoint(available) and cuda_loads()
-    return with_options(select_providers(available, accelerator, cuda), str(home.MODEL_CACHE))
+    runnable = [
+        name
+        for name in onnx_runtime().get_available_providers()
+        if name not in NVIDIA_LIBRARIES or nvidia_loads(name)
+    ]
+    return with_options(select_providers(runnable, accelerator), str(home.MODEL_CACHE))
 
 
 def provider_name(provider: Provider) -> str:

@@ -214,10 +214,23 @@ describe('importing the staged set', () => {
   ]
   for (const testCase of cases) {
     test(testCase.name, () => {
-      const got = settled(waiting, testCase.results)
+      const got = settled(waiting, waiting, testCase.results)
       expect({ waiting: got.waiting.map((one) => [one.name, one.error]), imported: got.imported }).toEqual(testCase.expected)
     })
   }
+  test('a file staged and a name edited while the imports ran are kept as they are now', () => {
+    const late: StagedFile = { staging_id: 'c3', filename: 'grinding.md', size: 512, duplicates: [], name: 'grinding.md', error: null }
+    const now = [{ ...waiting[1], name: 'Notes on brewing' }, late] // the first file left, the second renamed
+    const got = settled(now, waiting, [
+      { status: 'fulfilled', value: row('Area lights') },
+      { status: 'rejected', reason: new Error("a document named 'notes.md' already exists") },
+    ])
+    expect(got.waiting.map((one) => [one.name, one.error])).toEqual([
+      ['Notes on brewing', "a document named 'notes.md' already exists"],
+      ['grinding.md', null],
+    ])
+    expect(got.imported).toEqual(['Area lights'])
+  })
 })
 
 describe('importLabel', () => {

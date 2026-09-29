@@ -403,7 +403,7 @@ class RunCase:
     expect_opened: bool = False
     flags: list[str] = field(default_factory=list)
     child_exits: bool = False  # the spawned child is gone by the first check
-    home_held: bool = False  # another haskie holds the home: a race the child lost
+    held_at: str | None = None  # the address of another haskie holding this home, if one does
     ui: bool = True  # whether the server answers `/` with the web UI
     deadline: float = 5.0
 
@@ -454,13 +454,13 @@ RUN_CASES = {
         expect_in_output=["starting haskie", "haskie is serving", "web UI at"],
         expect_spawn=True,
     ),
-    "no-wait returns once it has spawned": RunCase(
+    "the hook returns once it has spawned": RunCase(
         before=None,
         after=None,
         exit_code=0,
         expect_in_output=["starting haskie"],
         expect_spawn=True,
-        flags=["--no-wait"],
+        flags=["--hook"],
     ),
     "a server that never answers fails": RunCase(
         before=None,
@@ -485,7 +485,15 @@ RUN_CASES = {
         expect_in_output=["haskie is serving"],
         expect_spawn=True,
         child_exits=True,
-        home_held=True,
+        held_at="http://127.0.0.1:9",
+    ),
+    "the home held at another address: refused at once, naming the holder": RunCase(
+        before=None,
+        after=None,
+        exit_code=1,
+        expect_in_output=["already running", "http://127.0.0.1:8451"],
+        expect_spawn=False,
+        held_at="http://127.0.0.1:8451",
     ),
 }
 
@@ -520,7 +528,9 @@ def test_run(case: RunCase, elsewhere: Path, monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(cli_module, "_status", status)
     monkeypatch.setattr(cli_module, "_has_ui", lambda _url: case.ui)
-    monkeypatch.setattr(home, "running_pid", lambda: HELD_PID if case.home_held else None)
+    held = f"haskie is already running for {this} (pid {HELD_PID}, {case.held_at})"
+    monkeypatch.setattr(home, "home_holder", lambda: held if case.held_at else None)
+    monkeypatch.setattr(home, "running_pid", lambda: HELD_PID if case.held_at else None)
     monkeypatch.setattr(webbrowser, "open", lambda url: browsed.append(url) or True)
     monkeypatch.setattr(subprocess, "Popen", Child)
     monkeypatch.setattr(cli_module, "POLL_INTERVAL", 0.01)
@@ -534,9 +544,8 @@ def test_run(case: RunCase, elsewhere: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert bool(spawned) is case.expect_spawn
     if case.expect_spawn:
         prefix = claude.own_command()
-        assert spawned[0][: len(prefix) + 2] == [*prefix, "run", "--foreground"], (
-            "spawned through this haskie, serving in its own process"
-        )
+        assert spawned[0][: len(prefix) + 1] == [*prefix, "run"], "spawned through this haskie"
+        assert spawned[0][-1] == "--foreground", "serving in its own process"
         assert this in spawned[0], "the child serves the same home"
     assert browsed == (["http://127.0.0.1:9/"] if case.expect_opened else [])
     if case.child_exits and case.exit_code:

@@ -3323,80 +3323,92 @@ async def test_connect_rolls_back_a_failed_unit_of_work() -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "available", "accelerator", "cuda", "expected"),
+    ("name", "available", "accelerator", "expected"),
     [
         (
             "cuda first; auto never takes coreml",
             ["CPUExecutionProvider", "CoreMLExecutionProvider", "CUDAExecutionProvider"],
             "auto",
-            True,
             ["CUDAExecutionProvider", "CPUExecutionProvider"],
         ),
         (
             "apple silicon on auto: the cpu, coreml available or not",
             ["CoreMLExecutionProvider", "AzureExecutionProvider", "CPUExecutionProvider"],
             "auto",
-            False,
             ["CPUExecutionProvider"],
         ),
         (
             "coreml when asked for, then cpu",
             ["CoreMLExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
             "coreml",
-            True,
             ["CoreMLExecutionProvider", "CPUExecutionProvider"],
         ),
         (
             "coreml asked for where there is none: the cpu",
             ["CUDAExecutionProvider", "CPUExecutionProvider"],
             "coreml",
-            True,
             ["CPUExecutionProvider"],
         ),
-        ("cpu only", ["CPUExecutionProvider"], "auto", False, ["CPUExecutionProvider"]),
+        ("cpu only", ["CPUExecutionProvider"], "auto", ["CPUExecutionProvider"]),
         (
             "forced cpu ignores gpu",
             ["CUDAExecutionProvider", "CPUExecutionProvider"],
             "cpu",
-            True,
             ["CPUExecutionProvider"],
         ),
         (
             "cpu always appended",
             ["CUDAExecutionProvider"],
             "auto",
-            True,
             ["CUDAExecutionProvider", "CPUExecutionProvider"],
-        ),
-        (
-            "the cuda build with no driver or libraries: the cpu, never a failing cuda",
-            ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
-            "auto",
-            False,
-            ["CPUExecutionProvider"],
         ),
     ],
 )
 def test_select_providers(
-    name: str, available: list[str], accelerator, cuda: bool, expected: list[str]
+    name: str, available: list[str], accelerator, expected: list[str]
 ) -> None:
-    assert embed.select_providers(available, accelerator, cuda) == expected, name
+    assert embed.select_providers(available, accelerator) == expected, name
 
 
-def test_the_cuda_build_without_cuda_runs_on_the_cpu(tmp_path: Path, monkeypatch) -> None:
-    """Linux installs ONNX Runtime's CUDA build, which lists CUDA on every machine. Where its
-    provider library cannot load (no driver, no CUDA libraries, here no library at all), the
-    providers, and so the device the status reports, are the CPU's."""
-    stand_in = types.SimpleNamespace(
-        __file__=str(tmp_path / "onnxruntime" / "__init__.py"),
-        get_available_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
-    )
+@pytest.mark.parametrize(
+    ("name", "loads", "expected"),
+    [
+        ("nothing NVIDIA loads: the cpu, never a failing gpu", set(), ["CPUExecutionProvider"]),
+        (
+            "cuda without tensorrt: cuda, not a tensorrt that fails first",
+            {"CUDAExecutionProvider"},
+            ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        ),
+        (
+            "both load: tensorrt first",
+            {"TensorrtExecutionProvider", "CUDAExecutionProvider"},
+            ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
+        ),
+    ],
+)
+def test_the_cuda_build_offers_only_the_nvidia_providers_that_load(
+    name: str, loads: set[str], expected: list[str], monkeypatch
+) -> None:
+    """Linux installs ONNX Runtime's CUDA build, which lists TensorRT and CUDA on every machine.
+    Only those whose library loads here are asked for, so the device the status reports is the
+    one the models run on."""
+    listed = ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
+    stand_in = types.SimpleNamespace(get_available_providers=lambda: listed)
     monkeypatch.setattr(embed, "onnx_runtime", lambda: stand_in)
-    embed.cuda_loads.cache_clear()
+    monkeypatch.setattr(embed, "nvidia_loads", lambda provider: provider in loads)
+
+    assert embed.providers() == expected, name
+
+
+def test_an_nvidia_provider_whose_library_is_missing_does_not_load(tmp_path: Path, monkeypatch):
+    """No driver or no library, as on any machine without an NVIDIA GPU: not runnable."""
+    stand_in = types.SimpleNamespace(__file__=str(tmp_path / "onnxruntime" / "__init__.py"))
+    monkeypatch.setattr(embed, "onnx_runtime", lambda: stand_in)
+    embed.nvidia_loads.cache_clear()
     try:
-        assert embed.providers() == ["CPUExecutionProvider"]
+        assert embed.nvidia_loads("CUDAExecutionProvider") is False
     finally:
-        embed.cuda_loads.cache_clear()
+        embed.nvidia_loads.cache_clear()
 
 
 def test_onnx_runtime_comes_with_its_telemetry_off_once(monkeypatch) -> None:
@@ -3516,7 +3528,7 @@ def test_every_onnx_model_runs_on_the_hardware_the_settings_choose(
 
     stand_in = types.SimpleNamespace(get_available_providers=lambda: available)
     monkeypatch.setattr(embed, "onnx_runtime", lambda: stand_in)
-    monkeypatch.setattr(embed, "cuda_loads", lambda: True)  # a machine where CUDA runs
+    monkeypatch.setattr(embed, "nvidia_loads", lambda _provider: True)  # CUDA runs here
     monkeypatch.setattr(cross_encoder, "TextCrossEncoder", Recorder)
     headed = lambda model, providers: seen.append(providers)  # noqa: E731
     monkeypatch.setattr(onnx_rerank, "HeadedCrossEncoder", headed)

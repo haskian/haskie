@@ -202,22 +202,17 @@ def register_mcp(url: str, scope: Scope) -> str | None:
     return None
 
 
+def run_command(home_dir: Path, url: str, mode: str) -> list[str]:
+    """This haskie's `run` for `home_dir` at the address of `url`, with `mode`: `--hook` for the
+    SessionStart hook, `--foreground` for the server the CLI starts."""
+    parts = urlsplit(url)
+    host, port = parts.hostname or DEFAULT_HOST, str(parts.port or DEFAULT_PORT)
+    return [*own_command(), "run", "--home", str(home_dir), "--host", host, "--port", port, mode]
+
+
 def hook_command(home_dir: Path, url: str) -> str:
     """The SessionStart command, as one shell string: that is the shape Claude Code runs."""
-    parts = urlsplit(url)
-    return shlex.join(
-        [
-            *own_command(),
-            "run",
-            "--home",
-            str(home_dir),
-            "--host",
-            parts.hostname or DEFAULT_HOST,
-            "--port",
-            str(parts.port or DEFAULT_PORT),
-            "--hook",
-        ]
-    )
+    return shlex.join(run_command(home_dir, url, "--hook"))
 
 
 def install_hook(scope: Scope, home_dir: Path, url: str) -> bool:

@@ -87,9 +87,6 @@ def run(
     home_dir: HomeOption = None,
     host: Annotated[str, typer.Option(help="Interface to bind.")] = DEFAULT_HOST,
     port: Annotated[int, typer.Option(help="Port to listen on.")] = DEFAULT_PORT,
-    wait: Annotated[
-        bool, typer.Option(help="Wait for the server to answer before returning.")
-    ] = True,
     browser: Annotated[
         bool, typer.Option(help="Open the web UI when the first run still needs its settings.")
     ] = True,
@@ -134,9 +131,8 @@ def run(
         # so without this line every search is recorded against no session at all.
         typer.echo(claude.session_announcement(session_id))
     url = f"http://{host}:{port}"
-    waited = wait and not hook
-    _serve(url, waited)
-    if waited:
+    _serve(url, wait=not hook)
+    if not hook:
         _greet(url, browser)
 
 
@@ -344,7 +340,8 @@ def _serve(url: str, wait: bool) -> None:
     Racing callers are safe: the app claims the home before it touches the database, so a loser
     exits early while the home stays held, and the wait goes on for the winner. A child that
     exits with the home free failed to boot, and its own last words say why, at once rather
-    than after the whole deadline.
+    than after the whole deadline. A home held at another address is refused before anything
+    starts: a child would exit on it at once, while its held lock looks like a winner booting.
     """
     if _serving(url):
         typer.echo(f"haskie is already serving {url}")
@@ -352,19 +349,14 @@ def _serve(url: str, wait: bool) -> None:
 
     _check_schema()
     parts = urlsplit(url)
+    address = f"http://{parts.hostname or DEFAULT_HOST}:{parts.port or DEFAULT_PORT}"
+    held = home.home_holder()
+    if held is not None and address not in held:  # the line names the holder's address
+        typer.echo(held, err=True)
+        raise typer.Exit(code=1)
     home.ensure_home_sync()
     log_file = home.HOME / "server.log"
-    command = [
-        *claude.own_command(),
-        "run",
-        "--foreground",
-        "--home",
-        str(home.HOME),
-        "--host",
-        parts.hostname or DEFAULT_HOST,
-        "--port",
-        str(parts.port or DEFAULT_PORT),
-    ]
+    command = claude.run_command(home.HOME, url, "--foreground")
     typer.echo(f"starting haskie on {url} (log: {log_file})")
     with open(log_file, "ab") as stream:
         logged_from = stream.tell()
@@ -485,8 +477,8 @@ def _install_claude(url: str, scope: Scope) -> None:
     added = claude.install_hook(scope, home.HOME, url)
     settings_file = claude.settings_path(scope)
     typer.echo(f"{'added' if added else 'updated'} the SessionStart hook in {settings_file}")
-    # `_serve`, not the `run` command: that one reads a hook payload from stdin, which here is
-    # the rest of a piped script. Already-serving is its fast path, not ours.
+    # `_serve`, not the `run` command: installing wants the server up, not the first-run page
+    # `run` would open in the browser. Already-serving is its fast path, not ours.
     _serve(url, wait=True)
     typer.echo("re-run `haskie install claude` after adding a collection, to refresh the trigger")
 

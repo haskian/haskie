@@ -110,12 +110,13 @@ export function Documents({
   // taken, stays in the set with the reason, to be renamed or removed.
   const importStaged = () =>
     run(async () => {
+      const sent = staged;
       const results = await Promise.allSettled(
-        staged.map((one) => api.importStaged({ staging_id: one.staging_id, name: one.name.trim() })),
+        sent.map((one) => api.importStaged({ staging_id: one.staging_id, name: one.name.trim() })),
       );
-      const after = settled(staged, results);
-      setStaged(after.waiting);
-      setImported((before) => [...before, ...after.imported]);
+      // the names only: the set itself may have changed while the requests ran
+      setImported((before) => [...before, ...settled([], sent, results).imported]);
+      setStaged((now) => settled(now, sent, results).waiting);
     });
 
   const rename = (id: string, name: string) =>
