@@ -7,7 +7,8 @@ they sit in the fastembed and Hugging Face caches, outside the home.
 ```
 ~/.haskie/
   haskie.db               SQLite (WAL): settings, documents, collections, memberships,
-                          embedding metadata, sessions, the search log, and the DBOS tables
+                          embedding metadata, sessions, the search log, installations, and the
+                          DBOS tables
   haskie.lock             the home lock, naming the process that holds it
   server.log              output of a server that `haskie run` started
   staging/                uploads not yet imported; the nightly run sweeps those over a day old
@@ -148,8 +149,10 @@ history reads its searches from here and its other actions from `session_events`
 judges the questions on read ([Gaps](gaps.md)). The nightly run deletes searches older than
 `retention.search_days`.
 
-Two more tables stand alone: `settings` (one row of JSON) and `staging` (uploads waiting for a
-name, with the MD5 of their bytes). DBOS keeps its own workflow and queue tables in the same file. `sysdb.py` reads them for
+Three more tables stand alone: `settings` (one row of JSON), `staging` (uploads waiting for a
+name, with the MD5 of their bytes) and `installations` (each agent configuration directory that
+`haskie install` wrote the skill and rule into, rewritten when a collection changes; see
+[MCP](mcp.md)). DBOS keeps its own workflow and queue tables in the same file. `sysdb.py` reads them for
 the Operations view, through `table()` declarations of its own: DBOS owns their schema.
 
 Every table and index is a SQLAlchemy Core `Table` in `tables.py`, the one source of the schema.

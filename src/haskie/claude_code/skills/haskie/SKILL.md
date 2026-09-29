@@ -68,7 +68,7 @@ Paged tools take `page_size` (default 100, at most 1000), `cursor`, `sort` and `
 
 - **`list_collections(sort: name|created_at)`** → `name`, `description`, `created_at`, `counts`
   (`total`, `indexed`, `active`, `error`, `by_status`). This list is current; the trigger above is
-  a snapshot from install time.
+  only as fresh as the session that loaded it.
 - **`get_collection(collection)`** → `name`, `description`, `counts`, its `overrides`, the
   `effective` chunk settings, the `search` settings, `index_outdated`, `maintenance` and `index`
   statistics. It does not list the documents.

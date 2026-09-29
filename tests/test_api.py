@@ -26,7 +26,7 @@ from litestar.testing import AsyncTestClient, RequestFactory
 from sqlalchemy import update
 
 from haskie import app as app_module
-from haskie import audit, db, errors, home, logs
+from haskie import audit, claude, db, errors, home, logs
 from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection, MemberStatus
 from haskie.collection.index import CollectionIndex
@@ -57,6 +57,8 @@ from conftest import (  # isort: skip
     api_app,
     attach_via_api,
     audit_lines,
+    claude_installed,
+    refresh_settled,
     document_names,
     forget_settings,
     get_page,
@@ -1136,6 +1138,64 @@ async def test_a_name_whose_delete_still_runs_can_be_taken(
     assert [
         p.name for p in Collection("gone").root.parent.iterdir() if p.name.startswith(".")
     ] == [], f"{claim}: the folder the delete moved aside is gone"
+
+
+@pytest.mark.parametrize(
+    ("change", "method", "path", "body", "expect", "not_expect"),
+    [
+        (
+            "create",
+            "POST",
+            "/api/collections",
+            {"name": "adr", "description": "ADRs."},
+            "adr: ADRs",
+            None,
+        ),
+        (
+            "describe",
+            "PUT",
+            "/api/collections/notes/description",
+            {"description": "Field notes."},
+            "notes: Field notes",
+            None,
+        ),
+        ("rename", "PUT", "/api/collections/notes/name", {"name": "journal"}, "journal", "notes"),
+        ("delete", "DELETE", "/api/collections/notes", None, "currently other", "notes"),
+    ],
+)
+async def test_a_collection_change_refreshes_every_installation(
+    client: AsyncTestClient,
+    tmp_path: Path,
+    change: str,
+    method: str,
+    path: str,
+    body: dict | None,
+    expect: str,
+    not_expect: str | None,
+) -> None:
+    """The skill and rule name the collections, so each change rewrites them where `install
+    claude` put them, in the background: the request never waits on it."""
+    await client.post("/api/init", json=NO_MODELS)
+    directory = claude_installed(tmp_path / "project" / ".claude")
+    await claude.record_installation(directory)
+    for name in ("notes", "other"):
+        await client.post("/api/collections", json={"name": name})
+    skill, rule = claude.skill_path(directory), claude.rule_path(directory)
+
+    async def names(text: str) -> bool:
+        return all(path.is_file() and text in path.read_text() for path in (skill, rule))
+
+    await until(lambda: names("notes; other"), "the creates reached the skill and rule")
+
+    response = await client.request(method, path, json=body)
+    assert response.status_code in (200, 201, 202), f"{change}: {response.text}"
+    if method == "DELETE":
+        await wait_for(response.json()["operation_id"])
+
+    await until(lambda: names(expect), f"{change}: the change reached the skill and rule")
+    if not_expect is not None:
+        assert f"{not_expect};" not in skill.read_text(), f"{change}: the old name is gone"
+        assert f"currently {not_expect}" not in rule.read_text(), f"{change}: the old name is gone"
 
 
 async def test_deleting_a_document_removes_it_from_every_collection(
@@ -2982,6 +3042,29 @@ async def test_lifespan_starts_and_destroys_dbos_on_every_run(
         if thread not in before and not thread.daemon and thread.name.startswith("dbos-")
     ]
     assert leaked == [], f"threads outliving DBOS block interpreter exit: {leaked}"
+
+
+async def test_startup_refreshes_every_installation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, seeded_home: Path
+) -> None:
+    """A change a crash lost before its refresh, or a template an upgrade changed, reaches the
+    installations at the next start."""
+    await Collection.create("roasting", "Coffee.")
+
+    await until(
+        refresh_settled, "the create's own refresh ended"
+    )  # before the install it would write
+    directory = claude_installed(tmp_path / "project" / ".claude")
+    await claude.record_installation(directory)
+
+    async with AsyncTestClient(api_app(tmp_path, monkeypatch), base_url=LOOPBACK_URL) as client:
+        assert (await client.get("/api/status")).status_code == 200
+
+        async def rewritten() -> bool:
+            rule = claude.rule_path(directory)
+            return rule.is_file() and "roasting: Coffee" in rule.read_text()
+
+        await until(rewritten, "the startup refresh reached the rule")
 
 
 # --- S4: full-text search across collections ------------------------------------------

@@ -296,6 +296,23 @@ def extraction_pool(monkeypatch: pytest.MonkeyPatch, workers: int) -> Iterator[N
         cpu.configure_cpu_budget(budget)
 
 
+def claude_installed(directory: Path, home_dir: Path | None = None) -> Path:
+    """A Claude Code directory as `install claude` leaves it: the skill, the rule, and the
+    SessionStart hook that starts `home_dir` (the current home by default)."""
+    from haskie import claude, home
+
+    claude.write_instructions(directory, [])
+    claude.install_hook(directory, home_dir or home.HOME, claude.MCP_URL)
+    return directory
+
+
+async def refresh_settled() -> bool:
+    """Whether no installation refresh is running; the task discards itself when it ends."""
+    from haskie import claude
+
+    return not claude._refresh_tasks
+
+
 @contextmanager
 def holding(address: str = "http://127.0.0.1:8451") -> Iterator[None]:
     """Claim the home for the body, and give it back afterwards. `claim_home` takes the address

@@ -34,7 +34,7 @@ from litestar.types import (
 )
 from litestar_mcp import LitestarMCP, MCPConfig
 
-from haskie import APP_VERSION, home, logs, shutdown
+from haskie import APP_VERSION, claude, home, logs, shutdown
 from haskie.api import ROUTE_HANDLERS
 from haskie.api.settings import WEB_UI_STATE
 from haskie.audit import Actor
@@ -311,6 +311,8 @@ def create_app() -> Litestar:
             shutdown.bound_exit,
             shutdown.debounce_signals,
             workflows.start,
+            # a change a crash lost, or templates an upgrade changed, reach the installations
+            claude.refresh_in_background,
         ],
         on_shutdown=[stop_runtime],
     )
