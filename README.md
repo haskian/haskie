@@ -107,41 +107,23 @@ cited answers in Claude Code. Not there yet:
 
 ## Install
 
-haskie needs [uv](https://docs.astral.sh/uv/), which fetches Python 3.13 or newer if you have none.
-Each guide goes step by step from `uv` to a first document your agent can search, with a check
-after every step: [macOS](docs/install-macos.md), [Linux](docs/install-linux.md).
-
-macOS on Apple Silicon, with the MLX and GGUF models on the GPU (needs the Xcode command-line
-tools, since GGUF compiles llama.cpp):
-
-```sh
-uv tool install "haskie[mlx,gguf]"
-haskie run                  # starts the server, opens the first-run page in the browser
-haskie install claude       # MCP server, skill, rule and SessionStart hook for Claude Code
-```
-
-Linux, with ONNX Runtime's CUDA build: on an NVIDIA GPU with CUDA 13 and cuDNN 9, else on the CPU:
+Needs [uv](https://docs.astral.sh/uv/), which fetches Python 3.13 if you have none.
 
 ```sh
 uv tool install haskie
-haskie run
-haskie install claude
+haskie run                  # web UI, REST API and MCP on http://127.0.0.1:8451; opens the first-run page
+haskie install claude       # MCP server, skill, rule and SessionStart hook for Claude Code
 ```
 
-`haskie run` starts one background process that serves the web UI, the REST API and MCP on
-http://127.0.0.1:8451. It is safe to repeat. On a new home it opens the first-run page, which
-asks for an embedding model and the search defaults: by default the cross-encoder reranker is on.
-The default model is bge-small (English, about 130 MB). Pick a multilingual one for other
-languages, or none for keyword search only. The model applies to every collection, and changing
-it later means running *Index all* in each one.
-
-- **Port:** 8451 by default, clear of the usual 8000 and 8080. For another, run
-  `haskie run --port <n>` and `haskie install claude --url http://127.0.0.1:<n>/mcp`, or set
-  `HASKIE_PORT`, which moves the default of `run` and `install claude` at once.
-- **Other commands:** `haskie stop` stops the server. `haskie run --foreground` serves in the
-  terminal instead, for a supervisor. `haskie destroy` deletes `~/.haskie` after showing what
-  would be lost, and refuses while a server is running for it. `--home` or `HASKIE_HOME` keeps
-  the data elsewhere.
+- **macOS (Apple Silicon):** also installs MLX and llama.cpp for the Apple GPU. llama.cpp
+  compiles during the install, so run `xcode-select --install` first.
+- **Linux:** ONNX Runtime runs on an NVIDIA GPU with CUDA 13 and cuDNN 9, else on the CPU.
+- **First run:** pick an embedding model. The default, bge-small, is English and about 130 MB.
+  Changing it later means running *Index all* in each collection.
+- **Smoke test:** import a file on *Documents*, add it to a collection, then ask about it on
+  *Explore*.
+- **Other commands:** `haskie stop`, `haskie run --foreground` (for a supervisor),
+  `haskie destroy`. `--port` or `HASKIE_PORT` moves the port, `--home` or `HASKIE_HOME` the data.
 
 ## From files to answers
 

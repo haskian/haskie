@@ -86,7 +86,7 @@ The web UI stages several files at once, and checks each new book for repeats in
 - **The same file.** Staging and a path import both take the MD5 of the bytes. Staging answers
   with `duplicates`, the documents that already hold those bytes. The row names them, and the one
   import button turns into "Import anyway". A file the import refuses, such as a name already
-  taken, stays in the list with the reason, to be renamed or removed.
+  taken, stays in the list with the reason, so you can rename or remove it.
 - **The nearest documents.** Writing a cache entry also stores the document as one vector: the
   mean of its unit chunk vectors, normalized. `GET /api/documents/{name}/similar` names the
   identical documents and the three nearest by cosine, under the current embedding model. The

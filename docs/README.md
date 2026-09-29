@@ -5,8 +5,6 @@ Start with the architecture, then follow a document from import to a cited answe
 
 | page | what it covers |
 | --- | --- |
-| [Install on macOS](install-macos.md) | from `uv` to a first searchable document, with MLX and llama.cpp on the Apple GPU |
-| [Install on Linux](install-linux.md) | the same, with ONNX Runtime on CUDA where an NVIDIA GPU is |
 | [Architecture](architecture.md) | the process, the packages, the home lock, startup |
 | [Documents and collections](documents-and-collections.md) | the two core entities, their lifecycles, the embedding cache |
 | [Indexing](indexing.md) | the durable DBOS pipeline, queues, the CPU budget, recovery |
