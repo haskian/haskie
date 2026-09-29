@@ -809,7 +809,7 @@ describe('also_in', () => {
 })
 
 describe('Statusbar', () => {
-  const status = (models: Status['models']): Status => ({ initialized: true, home: '/home/ada/.haskie', embedding: null, models, settings_error: null })
+  const status = (models: Status['models']): Status => ({ initialized: true, home: '/home/ada/.haskie', embedding: null, models, settings_error: null, web_ui: true })
   const bge = { kind: 'embedding' as const, name: 'BAAI/bge-small-en-v1.5', state: 'ready' as const, error: null, device: 'cpu' as const }
   const minilm = { kind: 'reranker' as const, name: 'Xenova/ms-marco-MiniLM-L-6-v2', state: 'loading' as const, error: null, device: 'cpu' as const }
   check([

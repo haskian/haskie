@@ -20,28 +20,24 @@ export function staged(
   return { added, failures }
 }
 
+/** The documents one Import created, by name. */
+export const importedNames = (results: PromiseSettledResult<ImportedDocument>[]): string[] =>
+  results.flatMap((result) => (result.status === 'fulfilled' ? [result.value.name] : []))
+
 /** What one Import leaves of the staged set: `sent` went out, `results` came back in its order.
  *  Applied by id to the set as it is now, so a file staged or renamed meanwhile stays as it is.
- *  Refused files stay with why, to be renamed or removed; the names are the documents created. */
-export function settled(
+ *  Refused files stay with why, to be renamed or removed. */
+export function waitingAfter(
   current: StagedFile[],
   sent: StagedFile[],
   results: PromiseSettledResult<ImportedDocument>[],
-): { waiting: StagedFile[]; imported: string[] } {
-  const refused = new Map<string, string>()
-  const done = new Set<string>()
-  const imported: string[] = []
-  sent.forEach((one, at) => {
-    const result = results[at]
-    if (result.status === 'fulfilled') {
-      done.add(one.staging_id)
-      imported.push(result.value.name)
-    } else refused.set(one.staging_id, errorText(result.reason))
+): StagedFile[] {
+  const outcome = new Map(sent.map((one, at) => [one.staging_id, results[at]]))
+  return current.flatMap((one) => {
+    const result = outcome.get(one.staging_id)
+    if (result === undefined) return [one]
+    return result.status === 'fulfilled' ? [] : [{ ...one, error: errorText(result.reason) }]
   })
-  const waiting = current
-    .filter((one) => !done.has(one.staging_id))
-    .map((one) => (refused.has(one.staging_id) ? { ...one, error: refused.get(one.staging_id) ?? null } : one))
-  return { waiting, imported }
 }
 
 /** The one button's label: the count once there is more than one file. */

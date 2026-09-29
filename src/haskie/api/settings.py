@@ -2,6 +2,7 @@
 
 import msgspec
 from litestar import get, post, put
+from litestar.datastructures import State
 
 from haskie import audit, home
 from haskie.catalogue import catalogue
@@ -32,6 +33,9 @@ from haskie.settings import (
     settings_problem,
 )
 
+# The app's state key saying whether it serves the web UI: `create_app` decides, the status says.
+WEB_UI_STATE = "web_ui"
+
 
 class Status(msgspec.Struct):
     initialized: bool
@@ -39,6 +43,7 @@ class Status(msgspec.Struct):
     embedding: EmbeddingModel | None
     models: list[models.ModelStatus]  # download/load state of every model the settings need
     settings_error: str | None = None  # stored settings unreadable; defaults are in use
+    web_ui: bool = False  # whether this server serves the built web UI at `/`
 
 
 class Init(msgspec.Struct):
@@ -89,7 +94,7 @@ def _changed_fields(before: msgspec.Struct, after: msgspec.Struct, prefix: str =
 
 
 @get("/api/status")
-async def get_status() -> Status:
+async def get_status(state: State) -> Status:
     saved = await load_user_settings_or_none()
     return Status(
         initialized=saved is not None,
@@ -97,6 +102,7 @@ async def get_status() -> Status:
         embedding=(await catalogue.embedding_model(saved)) if saved else None,
         models=(await models.model_statuses()) if saved else [],
         settings_error=settings_problem(),
+        web_ui=state.get(WEB_UI_STATE, False),
     )
 
 

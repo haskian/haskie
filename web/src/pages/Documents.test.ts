@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { Document, DocumentStatus, EmbeddingEntry, ImportedDocument, Staged } from '../api'
 import { embeddingLabel } from './documents/embedding'
 import { groupByDay, groupByStatus } from './documents/group'
-import { importLabel, settled, staged, type StagedFile } from './documents/staged'
+import { importedNames, importLabel, staged, waitingAfter, type StagedFile } from './documents/staged'
 
 // One real row, overridden per case: the listing hands the page whole documents, so the fixtures do too.
 const DOC: Document = {
@@ -139,7 +139,7 @@ describe('staging several files', () => {
     name: string
     files: File[]
     results: PromiseSettledResult<Staged>[]
-    expected: { added: string[]; failures: string[] }
+    expected: { added: Array<[string, string[]]>; failures: string[] }
   }> = [
     { name: 'nothing picked stages nothing', files: [], results: [], expected: { added: [], failures: [] } },
     {
@@ -149,7 +149,7 @@ describe('staging several files', () => {
         { status: 'fulfilled', value: STAGED },
         { status: 'fulfilled', value: { ...STAGED, staging_id: '9a1c', filename: 'soft-shadows.pdf', duplicates: ['shadows.pdf'] } },
       ],
-      expected: { added: ['area-lights.pdf', 'soft-shadows.pdf'], failures: [] },
+      expected: { added: [['area-lights.pdf', []], ['soft-shadows.pdf', ['shadows.pdf']]], failures: [] },
     },
     {
       name: 'a refused file costs only itself, and says which one it was',
@@ -158,20 +158,16 @@ describe('staging several files', () => {
         { status: 'fulfilled', value: STAGED },
         { status: 'rejected', reason: new Error('Request Entity Too Large') },
       ],
-      expected: { added: ['area-lights.pdf'], failures: ['huge.pdf: Request Entity Too Large'] },
+      expected: { added: [['area-lights.pdf', []]], failures: ['huge.pdf: Request Entity Too Large'] },
     },
   ]
   for (const testCase of cases) {
     test(testCase.name, () => {
       const got = staged(testCase.files, testCase.results)
-      expect({ added: got.added.map((one) => one.name), failures: got.failures }).toEqual(testCase.expected)
+      expect({ added: got.added.map((one) => [one.name, one.duplicates]), failures: got.failures }).toEqual(testCase.expected)
       expect(got.added.every((one) => one.error === null)).toBe(true)
     })
   }
-  test('a repeat keeps the documents it repeats', () => {
-    const [second] = staged([file('b.pdf')], [{ status: 'fulfilled', value: { ...STAGED, duplicates: ['shadows.pdf'] } }]).added
-    expect(second.duplicates).toEqual(['shadows.pdf'])
-  })
 })
 
 describe('importing the staged set', () => {
@@ -214,22 +210,21 @@ describe('importing the staged set', () => {
   ]
   for (const testCase of cases) {
     test(testCase.name, () => {
-      const got = settled(waiting, waiting, testCase.results)
-      expect({ waiting: got.waiting.map((one) => [one.name, one.error]), imported: got.imported }).toEqual(testCase.expected)
+      const left = waitingAfter(waiting, waiting, testCase.results)
+      expect({ waiting: left.map((one) => [one.name, one.error]), imported: importedNames(testCase.results) }).toEqual(testCase.expected)
     })
   }
   test('a file staged and a name edited while the imports ran are kept as they are now', () => {
     const late: StagedFile = { staging_id: 'c3', filename: 'grinding.md', size: 512, duplicates: [], name: 'grinding.md', error: null }
     const now = [{ ...waiting[1], name: 'Notes on brewing' }, late] // the first file left, the second renamed
-    const got = settled(now, waiting, [
+    const left = waitingAfter(now, waiting, [
       { status: 'fulfilled', value: row('Area lights') },
       { status: 'rejected', reason: new Error("a document named 'notes.md' already exists") },
     ])
-    expect(got.waiting.map((one) => [one.name, one.error])).toEqual([
+    expect(left.map((one) => [one.name, one.error])).toEqual([
       ['Notes on brewing', "a document named 'notes.md' already exists"],
       ['grinding.md', null],
     ])
-    expect(got.imported).toEqual(['Area lights'])
   })
 })
 

@@ -131,9 +131,9 @@ def run(
         # so without this line every search is recorded against no session at all.
         typer.echo(claude.session_announcement(session_id))
     url = f"http://{host}:{port}"
-    _serve(url, wait=not hook)
-    if not hook:
-        _greet(url, browser)
+    status = _serve(url, wait=not hook)
+    if status is not None and not hook:
+        _greet(url, status, browser)
 
 
 def _serve_here(host: str, port: int, reload: bool) -> None:
@@ -146,7 +146,15 @@ def _serve_here(host: str, port: int, reload: bool) -> None:
     if held is not None:
         typer.echo(held, err=True)
         raise typer.Exit(code=1)
-    _check_schema()
+    # The server refuses a home another schema wrote as well, but as a traceback in its log. Here
+    # it is one line, which `_serve` shows when this runs as its detached child.
+    from haskie import db  # the database stack, only once a server is about to start
+
+    try:
+        db.check_schema()
+    except HaskieError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
     # The address the startup hook records, for the next process's message. The environment is the
     # one carrier, so a `--reload` child that re-imports `home` records the same thing.
     os.environ[home.ADDRESS_ENV] = f"http://{host}:{port}"
@@ -169,17 +177,6 @@ def _serve_here(host: str, port: int, reload: bool) -> None:
 # --- keeping a server up ----------------------------------------------------
 
 
-def _check_schema() -> None:
-    """One line and exit 1 for a home the server would refuse at startup (see `db.check_schema`)."""
-    from haskie import db  # the database stack, only once a server is about to start
-
-    try:
-        db.check_schema()
-    except HaskieError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
-
-
 PROBE_TIMEOUT = 1.0  # loopback: either the server answers at once or it is not there
 START_DEADLINE = 60.0  # a cold boot runs migrations and launches DBOS before it serves
 POLL_INTERVAL = 0.25
@@ -196,14 +193,8 @@ def _poll_until(ready: Callable[[], bool], seconds: float) -> bool:
     return False
 
 
-def _serving(url: str) -> bool:
-    """Whether a haskie answers at `url`."""
-    return _status(url) is not None
-
-
-def _get(url: str, path: str) -> tuple[int, bytes] | None:
-    """One GET of `path` on the server behind `url`: its status and body, or None when nothing
-    answers.
+def _status(url: str) -> dict[str, Any] | None:
+    """`/api/status` of the app serving `url`, or None: the cheapest proof that a haskie is up.
 
     `http.client` rather than `urllib.request`, and imported here rather than at module scope:
     `urlopen` builds a global opener whose `ProxyHandler` reads the system proxy configuration,
@@ -214,30 +205,13 @@ def _get(url: str, path: str) -> tuple[int, bytes] | None:
     parts = urlsplit(url)
     connection = HTTPConnection(parts.hostname or "", parts.port or 80, timeout=PROBE_TIMEOUT)
     try:
-        connection.request("GET", path)
+        connection.request("GET", "/api/status")
         response = connection.getresponse()
-        return response.status, response.read()
-    except OSError:  # refused or timed out
+        return json.loads(response.read()) if response.status == 200 else None
+    except (OSError, ValueError):  # refused, timed out, or not haskie's JSON
         return None
     finally:
         connection.close()
-
-
-def _status(url: str) -> dict[str, Any] | None:
-    """`/api/status` of the app serving `url`, or None: the cheapest proof that a haskie is up."""
-    answer = _get(url, "/api/status")
-    if answer is None or answer[0] != 200:
-        return None
-    try:
-        return json.loads(answer[1])
-    except ValueError:  # something else holds the port
-        return None
-
-
-def _has_ui(url: str) -> bool:
-    """Whether the server behind `url` serves the web UI at its root."""
-    answer = _get(url, "/")
-    return answer is not None and answer[0] == 200
 
 
 # The graceful budget `run` gives uvicorn, and what `stop` allows on top of it: the app's own
@@ -334,48 +308,67 @@ def _hook_session_id() -> str | None:
 LOG_TAIL_LINES = 20  # enough for the error and the traceback line that raised it
 
 
-def _serve(url: str, wait: bool) -> None:
+def _serve(url: str, wait: bool) -> dict[str, Any] | None:
     """Start haskie detached if nothing is serving `url`, and wait for it unless told not to.
+    Returns the server's status, or None when it was not waited for.
 
-    Racing callers are safe: the app claims the home before it touches the database, so a loser
-    exits early while the home stays held, and the wait goes on for the winner. A child that
-    exits with the home free failed to boot, and its own last words say why, at once rather
-    than after the whole deadline. A home held at another address is refused before anything
-    starts: a child would exit on it at once, while its held lock looks like a winner booting.
+    Refuses a haskie of another home at `url`: its tools and its UI would search and import into
+    that home. Racing callers are safe: the app claims the home before it touches the database, so
+    a loser exits early while the winner holds the home at this address, and the wait goes on for
+    it. A child that exits with the home free or held at another address could not start, and its
+    own last words say why, at once rather than after the whole deadline.
     """
-    if _serving(url):
+    status = _status(url)
+    if status is not None:
         typer.echo(f"haskie is already serving {url}")
-        return
-
-    _check_schema()
-    parts = urlsplit(url)
-    address = f"http://{parts.hostname or DEFAULT_HOST}:{parts.port or DEFAULT_PORT}"
-    held = home.home_holder()
-    if held is not None and address not in held:  # the line names the holder's address
-        typer.echo(held, err=True)
+    else:
+        status = _start(url, wait)
+        if status is None:
+            return None
+    served = status.get("home")
+    if served != str(home.HOME):
+        typer.echo(
+            f"{url} serves another home ({served}); stop it, or pick another --port", err=True
+        )
         raise typer.Exit(code=1)
+    return status
+
+
+def _start(url: str, wait: bool) -> dict[str, Any] | None:
+    """Spawn `run --foreground` detached, and wait for its status unless told not to."""
     home.ensure_home_sync()
     log_file = home.HOME / "server.log"
-    command = claude.run_command(home.HOME, url, "--foreground")
+    host, port = claude.address(url)
     typer.echo(f"starting haskie on {url} (log: {log_file})")
     with open(log_file, "ab") as stream:
         logged_from = stream.tell()
         child = subprocess.Popen(
-            command,
+            claude.run_command(home.HOME, url, "--foreground"),
             stdin=subprocess.DEVNULL,
             stdout=stream,
             stderr=stream,
             start_new_session=True,  # survives the client that spawned it
         )
     if not wait:
-        return
+        return None
 
     def failed() -> bool:
-        return child.poll() is not None and home.running_pid() is None
+        held = home.holder()
+        return child.poll() is not None and (
+            held is None or held.address != f"http://{host}:{port}"
+        )
 
-    if _poll_until(lambda: _serving(url) or failed(), START_DEADLINE) and not failed():
+    status: dict[str, Any] | None = None
+
+    def settled() -> bool:
+        nonlocal status
+        status = _status(url)
+        return status is not None or failed()
+
+    _poll_until(settled, START_DEADLINE)
+    if status is not None:
         typer.echo(f"haskie is serving {url}")
-        return
+        return status
     if failed():
         typer.echo(f"haskie exited while starting; the end of {log_file}:", err=True)
         typer.echo(_tail(log_file, logged_from), err=True)
@@ -392,22 +385,12 @@ def _tail(log_file: Path, start: int) -> str:
     return "\n".join(written.rstrip().splitlines()[-LOG_TAIL_LINES:])
 
 
-def _greet(url: str, browser: bool) -> None:
-    """Say where the web UI is, and open it when the first run is still to be finished there.
-
-    Refuses a server of another home: its UI would pick that home's settings and import into it.
-    """
+def _greet(url: str, status: dict[str, Any], browser: bool) -> None:
+    """Say where the web UI is, and open it when the first run is still to be finished there."""
     import webbrowser
 
-    status = _status(url) or {}
-    served = status.get("home")
-    if served != str(home.HOME):
-        typer.echo(
-            f"{url} serves another home ({served}); stop it, or pick another --port", err=True
-        )
-        raise typer.Exit(code=1)
     ui = f"{url}/"
-    if not _has_ui(url):
+    if not status.get("web_ui"):
         # A build product, not source: a checkout that never ran `mise run build` serves the API
         # and MCP alone. Said here, where the user expects a page, not only in the server's log.
         typer.echo(

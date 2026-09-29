@@ -112,12 +112,11 @@ def nvidia_loads(provider: str) -> bool:
 
 
 def providers(accelerator: Accelerator = Accelerator.AUTO) -> list[Provider]:
-    runnable = [
-        name
-        for name in onnx_runtime().get_available_providers()
-        if name not in NVIDIA_LIBRARIES or nvidia_loads(name)
-    ]
-    return with_options(select_providers(runnable, accelerator), str(home.MODEL_CACHE))
+    available = onnx_runtime().get_available_providers()
+    # Only `auto` may pick an NVIDIA provider, so only it loads their libraries to find out.
+    if accelerator == Accelerator.AUTO:
+        available = [p for p in available if p not in NVIDIA_LIBRARIES or nvidia_loads(p)]
+    return with_options(select_providers(available, accelerator), str(home.MODEL_CACHE))
 
 
 def provider_name(provider: Provider) -> str:

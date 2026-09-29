@@ -15,7 +15,7 @@ from uuid import uuid4
 
 import msgspec
 from litestar import Litestar, MediaType, Request, Response
-from litestar.datastructures import Headers, MutableScopeHeaders
+from litestar.datastructures import Headers, MutableScopeHeaders, State
 from litestar.exceptions import HTTPException, ValidationException
 from litestar.exceptions.responses import create_exception_response
 from litestar.handlers import HTTPRouteHandler
@@ -36,6 +36,7 @@ from litestar_mcp import LitestarMCP, MCPConfig
 
 from haskie import APP_VERSION, home, logs, shutdown
 from haskie.api import ROUTE_HANDLERS
+from haskie.api.settings import WEB_UI_STATE
 from haskie.audit import Actor
 from haskie.document.document import UPLOAD_MAX_BYTES
 from haskie.errors import Forbidden, HaskieError
@@ -275,7 +276,8 @@ def create_app() -> Litestar:
     route_handlers: list[ControllerRouterHandler] = [
         documented(handler) for handler in ROUTE_HANDLERS
     ]
-    if WEB_DIST.is_dir():
+    web_ui = WEB_DIST.is_dir()
+    if web_ui:
         route_handlers.append(
             create_static_files_router("/", directories=[WEB_DIST], html_mode=True)
         )
@@ -295,6 +297,7 @@ def create_app() -> Litestar:
             )
         ],
         middleware=[guard_callers],
+        state=State({WEB_UI_STATE: web_ui}),
         openapi_config=OpenAPIConfig(title="haskie", version=APP_VERSION),
         logging_config=None,  # `logs.configure` above owns it (see logs.py)
         exception_handlers=EXCEPTION_HANDLERS,

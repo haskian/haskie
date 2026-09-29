@@ -41,7 +41,7 @@ import "./Documents.css";
 import { embeddingLabel } from "./documents/embedding";
 import { groupByDay, groupByStatus } from "./documents/group";
 import { Duplicates, JustImported, SimilarDocuments } from "./documents/Similar";
-import { importLabel, settled, staged as stagedFrom, type StagedFile } from "./documents/staged";
+import { importedNames, importLabel, staged as stagedFrom, waitingAfter, type StagedFile } from "./documents/staged";
 
 type GroupBy = "status" | "name" | "day";
 const GROUPS: { id: GroupBy; label: string }[] = [
@@ -114,9 +114,8 @@ export function Documents({
       const results = await Promise.allSettled(
         sent.map((one) => api.importStaged({ staging_id: one.staging_id, name: one.name.trim() })),
       );
-      // the names only: the set itself may have changed while the requests ran
-      setImported((before) => [...before, ...settled([], sent, results).imported]);
-      setStaged((now) => settled(now, sent, results).waiting);
+      setImported((before) => [...before, ...importedNames(results)]);
+      setStaged((now) => waitingAfter(now, sent, results));
     });
 
   const rename = (id: string, name: string) =>

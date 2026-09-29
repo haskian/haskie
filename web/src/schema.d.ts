@@ -2079,6 +2079,8 @@ export interface components {
             embedding: components["schemas"]["EmbeddingModel"] | null;
             models: components["schemas"]["ModelStatus"][];
             settings_error?: string | null;
+            /** @default false */
+            web_ui: boolean;
         };
         /** Task */
         Task: {

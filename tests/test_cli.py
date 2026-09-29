@@ -9,6 +9,7 @@ configuration, the other is what keeps a second haskie off a home a first one is
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -74,28 +75,28 @@ def _pre_collection_home(root: Path) -> None:
         conn.close()
 
 
+def _serves(root: Path, **status: object):
+    """A stand-in for `cli._status`: a haskie of `root` answers at every address."""
+    return lambda _url: {"home": str(root.resolve()), "web_ui": True, **status}
+
+
 def _make_home(root: Path) -> None:
     """A home as a first server start leaves it, with the process pointed at it."""
     home.use(root.resolve())
     asyncio.run(db.migrate_once())
 
 
-@pytest.mark.parametrize(
-    "flags", [[], ["--foreground"]], ids=["in the background", "in the foreground"]
-)
 def test_run_refuses_a_home_from_before_collections(
-    flags: list[str], elsewhere: Path, monkeypatch: pytest.MonkeyPatch
+    elsewhere: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No migration path exists for the old storage shape, so the user is told to destroy it
-    rather than losing rows to a silent drop. In one line, before any server starts: the
-    server's own refusal is a traceback in its log."""
+    rather than losing rows to a silent drop. In one line, before the server starts: its own
+    refusal is a traceback. A detached `run` shows this line from the log (see `test_run`)."""
     _pre_collection_home(elsewhere)
     started: list[object] = []
-    monkeypatch.setattr(cli_module, "_serving", lambda _url: False)
-    monkeypatch.setattr(subprocess, "Popen", lambda command, **_: started.append(command))
     monkeypatch.setattr("uvicorn.run", lambda *args, **_: started.append(args))
 
-    refused = runner.invoke(cli, ["run", "--home", str(elsewhere), *flags])
+    refused = runner.invoke(cli, ["run", "--home", str(elsewhere), "--foreground"])
 
     assert refused.exit_code == 1
     assert refused.stderr.strip() == db.INCOMPATIBLE_HOME_MESSAGE, "one line, on stderr"
@@ -132,11 +133,7 @@ def test_run_knows_its_own_server_through_a_linked_home(
     link = tmp_path / ".haskie"
     link.symlink_to(real)
     home.use(link)  # the default, as `~/.haskie` would be
-    monkeypatch.setattr(cli_module, "_serve", lambda _url, wait: None)
-    monkeypatch.setattr(
-        cli_module, "_status", lambda _url: {"home": str(real.resolve()), "initialized": False}
-    )
-    monkeypatch.setattr(cli_module, "_has_ui", lambda _url: True)
+    monkeypatch.setattr(cli_module, "_status", _serves(real, initialized=False))
     monkeypatch.setattr(webbrowser, "open", lambda _url: True)
 
     result = runner.invoke(cli, ["run", *(["--home", str(link)] if given else [])])
@@ -389,8 +386,8 @@ def test_claim_home_creates_the_home_it_locks(elsewhere: Path) -> None:
 # --- keeping a server up ----------------------------------------------------
 
 THIS_HOME = "this home"  # stands for the home the command was given, as the server reports it
-DONE: dict[str, object] = {"home": THIS_HOME, "initialized": True}
-FIRST_RUN: dict[str, object] = {"home": THIS_HOME, "initialized": False}
+DONE: dict[str, object] = {"home": THIS_HOME, "initialized": True, "web_ui": True}
+FIRST_RUN: dict[str, object] = {"home": THIS_HOME, "initialized": False, "web_ui": True}
 
 
 @dataclass
@@ -404,7 +401,6 @@ class RunCase:
     flags: list[str] = field(default_factory=list)
     child_exits: bool = False  # the spawned child is gone by the first check
     held_at: str | None = None  # the address of another haskie holding this home, if one does
-    ui: bool = True  # whether the server answers `/` with the web UI
     deadline: float = 5.0
 
 
@@ -440,12 +436,11 @@ RUN_CASES = {
         expect_spawn=False,
     ),
     "a build without the web UI says how to get it": RunCase(
-        before=DONE,
+        before={**DONE, "web_ui": False},
         after=None,
         exit_code=0,
         expect_in_output=["no web UI at", "mise run build"],
         expect_spawn=False,
-        ui=False,
     ),
     "nothing serving: started and waited for": RunCase(
         before=None,
@@ -487,12 +482,13 @@ RUN_CASES = {
         child_exits=True,
         held_at="http://127.0.0.1:9",
     ),
-    "the home held at another address: refused at once, naming the holder": RunCase(
+    "the home held at another address: the child's refusal, at once": RunCase(
         before=None,
         after=None,
         exit_code=1,
-        expect_in_output=["already running", "http://127.0.0.1:8451"],
-        expect_spawn=False,
+        expect_in_output=["exited while starting", "already running"],
+        expect_spawn=True,
+        child_exits=True,
         held_at="http://127.0.0.1:8451",
     ),
 }
@@ -514,8 +510,12 @@ def test_run(case: RunCase, elsewhere: Path, monkeypatch: pytest.MonkeyPatch) ->
 
         def __init__(self, command: list[str], stdout, **_) -> None:
             spawned.append(command)
-            if case.child_exits:
-                stdout.write(b"ERROR: [Errno 48] address already in use\n")
+            if case.child_exits:  # the line its refusal leaves in the log
+                stdout.write(
+                    b"haskie is already running for this home\n"
+                    if case.held_at
+                    else b"ERROR: [Errno 48] address already in use\n"
+                )
 
         def poll(self) -> int | None:
             return 1 if case.child_exits else None
@@ -527,16 +527,14 @@ def test_run(case: RunCase, elsewhere: Path, monkeypatch: pytest.MonkeyPatch) ->
         return {**answer, "home": this if answer["home"] == THIS_HOME else answer["home"]}
 
     monkeypatch.setattr(cli_module, "_status", status)
-    monkeypatch.setattr(cli_module, "_has_ui", lambda _url: case.ui)
-    held = f"haskie is already running for {this} (pid {HELD_PID}, {case.held_at})"
-    monkeypatch.setattr(home, "home_holder", lambda: held if case.held_at else None)
-    monkeypatch.setattr(home, "running_pid", lambda: HELD_PID if case.held_at else None)
     monkeypatch.setattr(webbrowser, "open", lambda url: browsed.append(url) or True)
     monkeypatch.setattr(subprocess, "Popen", Child)
     monkeypatch.setattr(cli_module, "POLL_INTERVAL", 0.01)
     monkeypatch.setattr(cli_module, "START_DEADLINE", case.deadline)
 
-    result = runner.invoke(cli, ["run", "--home", str(elsewhere), "--port", "9", *case.flags])
+    home.use(elsewhere.resolve())
+    with holding(case.held_at) if case.held_at else contextlib.nullcontext():
+        result = runner.invoke(cli, ["run", "--home", str(elsewhere), "--port", "9", *case.flags])
 
     assert result.exit_code == case.exit_code, _text(result)
     for expected in case.expect_in_output:
@@ -756,11 +754,7 @@ def test_run_announces_the_hook_session_id(
     is what puts it in the agent's context. Only `--hook` reads stdin: `run` by hand or in a
     script may have a pipe there that nobody closes, and anything that is not a payload is
     ignored."""
-    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)  # fast path, spawns nothing
-    monkeypatch.setattr(
-        cli_module, "_status", lambda _url: {"home": str(elsewhere.resolve()), "initialized": True}
-    )
-    monkeypatch.setattr(cli_module, "_has_ui", lambda _url: True)
+    monkeypatch.setattr(cli_module, "_status", _serves(elsewhere, initialized=True))  # fast path
     flags = ["--hook"] if case.hook else []
 
     result = runner.invoke(
@@ -868,7 +862,7 @@ def test_install_claude(
         asyncio.run(Collection.create(name, description))
     if case.claude_on_path:
         _with_claude(claude_workspace)
-    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)  # never start a real server
+    monkeypatch.setattr(cli_module, "_status", _serves(elsewhere))  # never start a real server
 
     result = runner.invoke(
         cli, ["install", "claude", "--home", str(elsewhere), "--scope", case.scope]
@@ -884,7 +878,7 @@ def test_install_claude(
     assert "before answering from memory" in rule, "the rule fires on knowledge questions"
     hooks = json.loads(claude.settings_path(case.scope).read_text())["hooks"]["SessionStart"]
     hooked = hooks[0]["hooks"][0]["command"]
-    assert claude.HOOK_MARKER in hooked, "the hook starts haskie"
+    assert claude.HOOK_MARKERS[0] in hooked, "the hook starts haskie"
     assert hooked.endswith("--hook"), "a session start reads its payload, never waits on a boot"
     argv_log = tmp_path / "argv.log"
     if case.claude_on_path:
@@ -901,7 +895,7 @@ def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
     """Re-running is how the trigger is refreshed after a collection is added."""
     _make_home(elsewhere)
     asyncio.run(Collection.create("roasting", "Coffee."))
-    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)
+    monkeypatch.setattr(cli_module, "_status", _serves(elsewhere))
     arguments = ["install", "claude", "--home", str(elsewhere), "--scope", "project"]
 
     runner.invoke(cli, arguments)
@@ -1030,7 +1024,7 @@ def test_install_claude_refuses_in_one_line(
         settings_file = claude.settings_path(Scope.PROJECT)
         settings_file.parent.mkdir(parents=True)
         settings_file.write_text(case.settings)
-    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)
+    monkeypatch.setattr(cli_module, "_status", _serves(elsewhere))
 
     result = runner.invoke(
         cli, ["install", "claude", "--home", str(elsewhere), "--scope", "project"]
@@ -1102,7 +1096,9 @@ def test_install_hook(case: HookCase, claude_workspace: Path, tmp_path: Path) ->
         for hook in matcher["hooks"]
     ]
     assert len(commands) == case.expect_commands, "ours is replaced, a stranger's is kept beside"
-    assert sum(claude.HOOK_MARKER in command for command in commands) == 1, "exactly one of ours"
+    assert sum(claude.HOOK_MARKERS[0] in command for command in commands) == 1, (
+        "exactly one of ours"
+    )
     if case.keeps:
         assert settings[case.keeps] == "opus", "an unrelated setting survives"
 
@@ -1185,7 +1181,7 @@ def test_install_hook_keeps_the_settings_file_what_it_was(
     expect_mode = 0o666 & ~umask if case.expect_mode is None else case.expect_mode
     assert stat.S_IMODE(real.stat().st_mode) == expect_mode
     written = json.loads(real.read_text())
-    assert claude.HOOK_MARKER in written["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert claude.HOOK_MARKERS[0] in written["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     if case.mode is not None:
         assert written["env"] == {"API_KEY": "sk-test"}, "the rest of the file survives"
 

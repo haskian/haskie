@@ -52,19 +52,17 @@ sequenceDiagram
     participant App as Litestar app
     participant Home as ~/.haskie
     participant DBOS
-    CLI->>CLI: probe /api/status (already serving? done)
-    CLI->>Home: check the schema version, read-only
-    Note over CLI,Home: a home at another schema version is refused here, in one line
+    CLI->>CLI: probe /api/status (already serving this home? done)
     CLI->>Server: spawn, detached; wait until it answers or exits
-    Server->>Home: home_holder (is another server running?)
-    Note over Server,Home: refused here, naming the holder
+    Server->>Home: home_holder, then the schema version, read-only
+    Note over Server,Home: refused here in one line, which the CLI shows from the log
     Server->>App: start on 127.0.0.1:8451 (default)
     App->>Home: claim_home (create folders, exclusive lock)
     Note over App,Home: any other ASGI server, or a race, stops here
     App->>DBOS: workflows.start
     DBOS->>Home: migrate (check schema version, WAL on a new file)
     DBOS->>DBOS: start queues, recover unfinished workflows
-    CLI->>App: GET / and /api/status: the web UI is there, first run done?
+    CLI->>App: /api/status: this home, the web UI there, first run done?
     Note over CLI: a first run not done opens the browser on it
 ```
 

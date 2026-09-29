@@ -28,7 +28,7 @@ import textwrap
 from enum import StrEnum
 from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 from haskie import home
@@ -50,10 +50,10 @@ USER_CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude
 # The skill and the rule are markdown, laid out under `claude_code/` exactly as they land under
 # `.claude/`, with `{topics}` and `{announcement}` for what only install time knows.
 TEMPLATES = files("haskie") / "claude_code"
-HOOK_MARKER = " run --home "  # what identifies a hook of ours, whatever path invoked it
-# The hook's shape before `ensure` became `run`: still ours, so re-installing replaces it rather
-# than leaving a hook that fails at every session start beside the new one.
-OLD_HOOK_MARKER = " ensure --home "
+# What identifies a hook of ours, whatever path invoked it. The second is the shape before `ensure`
+# became `run`: still ours, so re-installing replaces it rather than leaving a hook that fails at
+# every session start beside the new one.
+HOOK_MARKERS = (" run --home ", " ensure --home ")
 HOOK_TIMEOUT_SECONDS = 90
 DEFAULT_HOST = "127.0.0.1"  # loopback: one user's documents, and nothing authenticates a caller
 # An environment variable, so a development install (`haskie-dev`, the mise tasks) can serve
@@ -202,12 +202,27 @@ def register_mcp(url: str, scope: Scope) -> str | None:
     return None
 
 
-def run_command(home_dir: Path, url: str, mode: str) -> list[str]:
+def address(url: str) -> tuple[str, int]:
+    """The host and port a server for `url` binds, with haskie's defaults for what it leaves out."""
+    parts = urlsplit(url)
+    return parts.hostname or DEFAULT_HOST, parts.port or DEFAULT_PORT
+
+
+def run_command(home_dir: Path, url: str, mode: Literal["--hook", "--foreground"]) -> list[str]:
     """This haskie's `run` for `home_dir` at the address of `url`, with `mode`: `--hook` for the
     SessionStart hook, `--foreground` for the server the CLI starts."""
-    parts = urlsplit(url)
-    host, port = parts.hostname or DEFAULT_HOST, str(parts.port or DEFAULT_PORT)
-    return [*own_command(), "run", "--home", str(home_dir), "--host", host, "--port", port, mode]
+    host, port = address(url)
+    return [
+        *own_command(),
+        "run",
+        "--home",
+        str(home_dir),
+        "--host",
+        host,
+        "--port",
+        str(port),
+        mode,
+    ]
 
 
 def hook_command(home_dir: Path, url: str) -> str:
@@ -240,7 +255,7 @@ def install_hook(scope: Scope, home_dir: Path, url: str) -> bool:
         hook
         for matcher in matchers
         for hook in matcher.get("hooks", [])
-        if any(marker in str(hook.get("command", "")) for marker in (HOOK_MARKER, OLD_HOOK_MARKER))
+        if any(marker in str(hook.get("command", "")) for marker in HOOK_MARKERS)
     ]
     for hook in ours:
         hook["command"] = command

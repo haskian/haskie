@@ -9,11 +9,8 @@ export HASKIE_HOME="$tmp/home" HASKIE_PORT=8499 # clear of an installed haskie a
 trap '"$haskie" stop >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
 uv venv "$tmp/venv"
 VIRTUAL_ENV="$tmp/venv" uv pip install dist/*.whl
-"$haskie" --help >/dev/null
-# The UI is the whole reason for `mise run build`; a headless wheel would pass every other check.
-test -f "$tmp/venv"/lib/python*/site-packages/haskie/web/index.html \
-  || { echo "wheel is missing the built UI" >&2; exit 1; }
-# What the install guides do first: one background server, the UI beside the API and MCP.
+# What the install guides do first: one background server, the UI beside the API and MCP. The UI
+# is the whole reason for `mise run build`, and a headless wheel fails on it here.
 "$haskie" run --no-browser </dev/null
 base="http://127.0.0.1:$HASKIE_PORT"
 curl -fsS "$base/" | grep -q '<div id="root">' || { echo "no web UI at $base/" >&2; exit 1; }
