@@ -1,7 +1,7 @@
 """The `haskie` command.
 
 `destroy` deletes a user's whole document store, so its guards are the point of this module: it
-refuses a directory that is not a haskie home, and it asks before it deletes. `init` is the other
+refuses a directory that is not a haskie home, and it asks before it deletes. `run` is the other
 guard: a home written before documents became collection-independent is refused, not migrated.
 
 `install claude` and the home lock are the other two: one writes into a user's Claude Code
@@ -9,6 +9,7 @@ configuration, the other is what keeps a second haskie off a home a first one is
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -17,8 +18,9 @@ import signal
 import sqlite3
 import stat
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from conftest import fresh_attribute, holding
@@ -73,104 +75,56 @@ def _pre_collection_home(root: Path) -> None:
         conn.close()
 
 
-def test_init_creates_the_home_and_repeats_safely(elsewhere: Path) -> None:
-    """Idempotent: `init` is also how an existing home is migrated after an upgrade."""
-    first = runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
-    assert first.exit_code == 0, _text(first)
-    assert (elsewhere / "haskie.db").is_file()
-    for directory in ("documents", "collections", "staging", "audit"):
-        assert (elsewhere / directory).is_dir(), directory
-
-    again = runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
-    assert again.exit_code == 0, _text(again)
+def _serves(root: Path, **status: object):
+    """A stand-in for `cli._status`: a haskie of `root` answers at every address."""
+    return lambda _url: {"home": str(root.resolve()), "web_ui": True, **status}
 
 
-UI = f"http://{claude.DEFAULT_HOST}:{claude.DEFAULT_PORT}/"
-THIS_HOME = None  # the server reached serves the home `init` made
+def _make_home(root: Path) -> None:
+    """A home as a first server start leaves it, with the process pointed at it."""
+    home.use(root.resolve())
+    asyncio.run(db.migrate_once())
 
 
-@pytest.mark.parametrize(
-    ("name", "picked", "flags", "serving", "exit_code", "served", "opened", "says"),
-    [
-        (
-            "a first run not done: a server, and the UI opened on it",
-            False,
-            [],
-            THIS_HOME,
-            0,
-            True,
-            [UI],
-            "pick the embedding model and the search at",
-        ),
-        (
-            "another home serves the port: refused, nothing opened",
-            False,
-            [],
-            "/elsewhere",
-            1,
-            True,
-            [],
-            "serves another home (/elsewhere)",
-        ),
-        (
-            "no browser: nothing started, only where to go",
-            False,
-            ["--no-browser"],
-            THIS_HOME,
-            0,
-            False,
-            [],
-            "(haskie run serves it)",
-        ),
-        ("a first run done: the home as it is", True, [], THIS_HOME, 0, False, [], "ready in"),
-    ],
-)
-def test_init_finishes_the_first_run_in_the_browser_once(
-    elsewhere: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-    picked: bool,
-    flags: list[str],
-    serving: str | None,
-    exit_code: int,
-    served: bool,
-    opened: list[str],
-    says: str,
+def test_run_refuses_a_home_from_before_collections(
+    elsewhere: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The settings the first run needs are picked in the web UI, so `init` opens it on a server
-    it starts, unless they are picked already, the caller has no browser, or the port is taken
-    by another home, whose UI would pick that home's settings."""
-    import webbrowser
+    """No migration path exists for the old storage shape, so the user is told to destroy it
+    rather than losing rows to a silent drop. In one line, before the server starts: its own
+    refusal is a traceback. A detached `run` shows this line from the log (see `test_run`)."""
+    _pre_collection_home(elsewhere)
+    started: list[object] = []
+    monkeypatch.setattr("uvicorn.run", lambda *args, **_: started.append(args))
 
-    from haskie import settings
+    refused = runner.invoke(cli, ["run", "--home", str(elsewhere), "--foreground"])
 
-    if picked:
-        runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
-        assert asyncio.run(settings.init_user_settings(settings.UserSettings()))
-    serves: list[str] = []
-    browsed: list[str] = []
-    answers = {"home": serving or str(elsewhere.resolve())}
-    monkeypatch.setattr(cli_module, "_serve", lambda url, wait: serves.append(url))
-    monkeypatch.setattr(cli_module, "_status", lambda _url: answers)
-    monkeypatch.setattr(webbrowser, "open", lambda url: browsed.append(url) or True)
+    assert refused.exit_code == 1
+    assert refused.stderr.strip() == db.INCOMPATIBLE_HOME_MESSAGE, "one line, on stderr"
+    assert started == [], "no server started"
+    with sqlite3.connect(elsewhere / "haskie.db") as conn:
+        (version,) = conn.execute("pragma user_version").fetchone()
+    assert version == db.SCHEMA_VERSION - 1, "the refused home is left as it was"
 
-    result = runner.invoke(cli, ["init", "--home", str(elsewhere), *flags])
 
-    assert result.exit_code == exit_code, f"{name}: {_text(result)}"
-    assert (elsewhere / "haskie.db").is_file(), name
-    assert serves == ([claude.MCP_URL] if served else []), name
-    assert browsed == opened, name
-    assert says in _text(result), name
+def test_destroy_after_a_refused_run_lets_it_start_over(elsewhere: Path) -> None:
+    """The recovery path the message prescribes has to actually work."""
+    _pre_collection_home(elsewhere)
+
+    assert runner.invoke(cli, ["destroy", "--home", str(elsewhere), "--yes"]).exit_code == 0
+    _make_home(elsewhere)
+
+    db.check_schema()  # would raise for a home still at the old version
+    assert (elsewhere / "collections").is_dir()
 
 
 @pytest.mark.parametrize(
     "given", [True, False], ids=["--home through a link", "the default home through a link"]
 )
-def test_init_knows_its_own_server_through_a_linked_home(
+def test_run_knows_its_own_server_through_a_linked_home(
     given: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`~/.haskie` may be a link into a synced folder. The server `init` starts is given the
-    resolved root and reports that back, so `init` must resolve the home it compares, whether it
+    """`~/.haskie` may be a link into a synced folder. The server `run` starts is given the
+    resolved root and reports that back, so `run` must resolve the home it compares, whether it
     came from `--home` or from the default, or it calls its own server another home's."""
     import webbrowser
 
@@ -179,47 +133,19 @@ def test_init_knows_its_own_server_through_a_linked_home(
     link = tmp_path / ".haskie"
     link.symlink_to(real)
     home.use(link)  # the default, as `~/.haskie` would be
-    monkeypatch.setattr(cli_module, "_serve", lambda _url, wait: None)
-    monkeypatch.setattr(cli_module, "_status", lambda _url: {"home": str(real.resolve())})
+    monkeypatch.setattr(cli_module, "_status", _serves(real, initialized=False))
     monkeypatch.setattr(webbrowser, "open", lambda _url: True)
 
-    result = runner.invoke(cli, ["init", *(["--home", str(link)] if given else [])])
+    result = runner.invoke(cli, ["run", *(["--home", str(link)] if given else [])])
 
     assert result.exit_code == 0, _text(result)
     assert "serves another home" not in _text(result)
     assert home.HOME == real.resolve()
     assert os.environ["HASKIE_HOME"] == str(real.resolve()), "a --reload child reads the same root"
-    assert (real / "haskie.db").is_file()
-
-
-def test_init_refuses_a_home_from_before_collections(elsewhere: Path) -> None:
-    """No migration path exists for the old storage shape, so the user is told to destroy it
-    rather than losing rows to a silent drop."""
-    _pre_collection_home(elsewhere)
-
-    refused = runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
-
-    assert refused.exit_code == 1
-    assert db.INCOMPATIBLE_HOME_MESSAGE in _text(refused)
-    assert refused.stderr.strip() == db.INCOMPATIBLE_HOME_MESSAGE, "a failure goes to stderr"
-    with sqlite3.connect(elsewhere / "haskie.db") as conn:
-        (version,) = conn.execute("pragma user_version").fetchone()
-    assert version == db.SCHEMA_VERSION - 1, "the refused migration did not run"
-
-
-def test_destroy_after_a_refused_init_lets_it_start_over(elsewhere: Path) -> None:
-    """The recovery path the message prescribes has to actually work."""
-    _pre_collection_home(elsewhere)
-
-    assert runner.invoke(cli, ["destroy", "--home", str(elsewhere), "--yes"]).exit_code == 0
-    again = runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
-
-    assert again.exit_code == 0, _text(again)
-    assert (elsewhere / "collections").is_dir()
 
 
 def test_destroy_asks_first_and_leaves_everything_when_refused(elsewhere: Path) -> None:
-    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    _make_home(elsewhere)
     _shelve(home.COLLECTION_ROOT, "notes")
     _shelve(home.DOCUMENT_ROOT, "guide.md")
 
@@ -233,7 +159,7 @@ def test_destroy_asks_first_and_leaves_everything_when_refused(elsewhere: Path) 
 
 
 def test_destroy_deletes_the_home_when_confirmed(elsewhere: Path) -> None:
-    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    _make_home(elsewhere)
 
     done = runner.invoke(cli, ["destroy", "--home", str(elsewhere)], input="y\n")
 
@@ -242,7 +168,7 @@ def test_destroy_deletes_the_home_when_confirmed(elsewhere: Path) -> None:
 
 
 def test_destroy_yes_skips_the_prompt(elsewhere: Path) -> None:
-    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    _make_home(elsewhere)
 
     done = runner.invoke(cli, ["destroy", "--home", str(elsewhere), "--yes"])
 
@@ -284,7 +210,7 @@ def test_destroy_refuses_a_directory_that_is_not_a_home(tmp_path: Path) -> None:
 def test_destroy_refuses_a_home_a_server_holds(elsewhere: Path) -> None:
     """The SessionStart hook usually keeps a server up. Deleting under it leaves it serving from
     deleted files and takes the home lock with it, so `destroy` refuses before it asks."""
-    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    _make_home(elsewhere)
 
     with holding():
         refused = runner.invoke(cli, ["destroy", "--home", str(elsewhere)], input="y\n")
@@ -322,7 +248,7 @@ LEFT_OVER_CASES = {
 def test_destroy_fails_when_something_is_left(case: LeftOverCase, elsewhere: Path) -> None:
     """`remove_tree` logs what it cannot delete and carries on, so `destroy` looks afterwards: a
     home still on disk is a failure, and the message says what is left."""
-    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    _make_home(elsewhere)
     pinned = elsewhere / "documents" / "pinned"
     pinned.mkdir()
     for name in case.files:
@@ -351,16 +277,17 @@ def test_destroy_on_a_missing_home_says_so(tmp_path: Path) -> None:
     assert "nothing to destroy" in _text(response)
 
 
-def test_init_after_destroy_migrates_again(elsewhere: Path) -> None:
+def test_a_home_made_after_destroy_migrates_again(elsewhere: Path) -> None:
     """`destroy` clears the per-process "already migrated" set, or the new home would have no
     schema."""
-    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    _make_home(elsewhere)
     runner.invoke(cli, ["destroy", "--home", str(elsewhere), "--yes"])
 
-    again = runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    _make_home(elsewhere)
 
-    assert again.exit_code == 0, _text(again)
-    assert (elsewhere / "haskie.db").is_file(), "the schema was applied to the new file"
+    with sqlite3.connect(elsewhere / "haskie.db") as conn:
+        (version,) = conn.execute("pragma user_version").fetchone()
+    assert version == db.SCHEMA_VERSION, "the schema was applied to the new file"
 
 
 def test_version_reports_the_home_it_would_use(elsewhere: Path) -> None:
@@ -386,8 +313,8 @@ def test_claim_home_refuses_a_second_holder_and_says_who_has_it(
     elsewhere: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`flock` is per open file description, so a second claim from this process conflicts exactly
-    as a second process would - no subprocess needed to prove the guard. No `init` either: the
-    lock needs no database, and makes the home itself."""
+    as a second process would - no subprocess needed to prove the guard. No database either: the
+    lock needs none, and makes the home itself."""
     home.use(elsewhere)
 
     with holding():
@@ -440,7 +367,7 @@ def test_run_refuses_in_one_line_when_the_home_is_taken(elsewhere: Path) -> None
     home.use(elsewhere)
 
     with holding():
-        refused = runner.invoke(cli, ["run", "--home", str(elsewhere)])
+        refused = runner.invoke(cli, ["run", "--home", str(elsewhere), "--foreground"])
 
     assert refused.exit_code == 1
     assert "already running" in refused.stderr
@@ -458,71 +385,168 @@ def test_claim_home_creates_the_home_it_locks(elsewhere: Path) -> None:
 
 # --- keeping a server up ----------------------------------------------------
 
-# Nothing ever connects: every case below stubs the probe, so a port is only a string to parse.
-DEAD_URL = "http://127.0.0.1:9/mcp"
+THIS_HOME = "this home"  # stands for the home the command was given, as the server reports it
+DONE: dict[str, object] = {"home": THIS_HOME, "initialized": True, "web_ui": True}
+FIRST_RUN: dict[str, object] = {"home": THIS_HOME, "initialized": False, "web_ui": True}
 
 
 @dataclass
-class EnsureCase:
-    serving: bool
-    wait: bool
-    deadline: float
+class RunCase:
+    before: dict[str, object] | None  # `/api/status` before anything starts; None: nothing serves
+    after: dict[str, object] | None  # `/api/status` once a child is spawned
     exit_code: int
-    expect_in_output: str
+    expect_in_output: list[str]
     expect_spawn: bool
+    expect_opened: bool = False
+    flags: list[str] = field(default_factory=list)
+    child_exits: bool = False  # the spawned child is gone by the first check
+    held_at: str | None = None  # the address of another haskie holding this home, if one does
+    deadline: float = 5.0
 
 
-ENSURE_CASES = {
-    "a served url costs one probe": EnsureCase(
-        serving=True,
-        wait=True,
-        deadline=60.0,
+RUN_CASES = {
+    "a served home costs one probe and starts nothing": RunCase(
+        before=DONE,
+        after=None,
         exit_code=0,
-        expect_in_output="already serving",
+        expect_in_output=["already serving", "web UI at"],
         expect_spawn=False,
     ),
-    "no-wait returns once it has spawned": EnsureCase(
-        serving=False,
-        wait=False,
-        deadline=60.0,
+    "a first run not done opens the UI on it": RunCase(
+        before=FIRST_RUN,
+        after=None,
         exit_code=0,
-        expect_in_output="starting haskie",
+        expect_in_output=["pick the embedding model and the search at"],
+        expect_spawn=False,
+        expect_opened=True,
+    ),
+    "no browser: only where to go": RunCase(
+        before=FIRST_RUN,
+        after=None,
+        exit_code=0,
+        expect_in_output=["pick the embedding model and the search at"],
+        expect_spawn=False,
+        flags=["--no-browser"],
+    ),
+    "another home serves the port: refused, nothing opened": RunCase(
+        before={"home": "/elsewhere", "initialized": False},
+        after=None,
+        exit_code=1,
+        expect_in_output=["serves another home (/elsewhere)"],
+        expect_spawn=False,
+    ),
+    "a build without the web UI says how to get it": RunCase(
+        before={**DONE, "web_ui": False},
+        after=None,
+        exit_code=0,
+        expect_in_output=["no web UI at", "mise run build"],
+        expect_spawn=False,
+    ),
+    "nothing serving: started and waited for": RunCase(
+        before=None,
+        after=DONE,
+        exit_code=0,
+        expect_in_output=["starting haskie", "haskie is serving", "web UI at"],
         expect_spawn=True,
     ),
-    "a server that never answers fails": EnsureCase(
-        serving=False,
-        wait=True,
-        deadline=0.0,
-        exit_code=1,
-        expect_in_output="did not come up",
+    "the hook returns once it has spawned": RunCase(
+        before=None,
+        after=None,
+        exit_code=0,
+        expect_in_output=["starting haskie"],
         expect_spawn=True,
+        flags=["--hook"],
+    ),
+    "a server that never answers fails": RunCase(
+        before=None,
+        after=None,
+        exit_code=1,
+        expect_in_output=["did not come up"],
+        expect_spawn=True,
+        deadline=0.0,
+    ),
+    "a child that exits while starting shows its last words": RunCase(
+        before=None,
+        after=None,
+        exit_code=1,
+        expect_in_output=["exited while starting", "address already in use"],
+        expect_spawn=True,
+        child_exits=True,
+    ),
+    "a race lost to a winner that comes up is served": RunCase(
+        before=None,
+        after=DONE,
+        exit_code=0,
+        expect_in_output=["haskie is serving"],
+        expect_spawn=True,
+        child_exits=True,
+        held_at="http://127.0.0.1:9",
+    ),
+    "the home held at another address: the child's refusal, at once": RunCase(
+        before=None,
+        after=None,
+        exit_code=1,
+        expect_in_output=["exited while starting", "already running"],
+        expect_spawn=True,
+        child_exits=True,
+        held_at="http://127.0.0.1:8451",
     ),
 }
 
 
-@pytest.mark.parametrize("case", ENSURE_CASES.values(), ids=list(ENSURE_CASES))
-def test_ensure(case: EnsureCase, elsewhere: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`ensure` runs on every Claude Code session start, so its fast path spawns nothing and its
-    slow path must fail rather than hang the client waiting on it."""
+@pytest.mark.parametrize("case", RUN_CASES.values(), ids=list(RUN_CASES))
+def test_run(case: RunCase, elsewhere: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`run` starts every Claude Code session and every first run, so its fast path spawns
+    nothing, its slow path fails rather than hangs, and it opens the UI only where a first run is
+    still to be finished, on a server of this home."""
+    import webbrowser
+
     spawned: list[list[str]] = []
-    monkeypatch.setattr(cli_module, "_serving", lambda _url: case.serving)
+    browsed: list[str] = []
+    this = str(elsewhere.resolve())
+
+    class Child:
+        """A spawned server: it writes to the log it is given, and may already be gone."""
+
+        def __init__(self, command: list[str], stdout, **_) -> None:
+            spawned.append(command)
+            if case.child_exits:  # the line its refusal leaves in the log
+                stdout.write(
+                    b"haskie is already running for this home\n"
+                    if case.held_at
+                    else b"ERROR: [Errno 48] address already in use\n"
+                )
+
+        def poll(self) -> int | None:
+            return 1 if case.child_exits else None
+
+    def status(_url: str) -> dict[str, object] | None:
+        answer = case.after if spawned else case.before
+        if answer is None:
+            return None
+        return {**answer, "home": this if answer["home"] == THIS_HOME else answer["home"]}
+
+    monkeypatch.setattr(cli_module, "_status", status)
+    monkeypatch.setattr(webbrowser, "open", lambda url: browsed.append(url) or True)
+    monkeypatch.setattr(subprocess, "Popen", Child)
+    monkeypatch.setattr(cli_module, "POLL_INTERVAL", 0.01)
     monkeypatch.setattr(cli_module, "START_DEADLINE", case.deadline)
-    monkeypatch.setattr(subprocess, "Popen", lambda command, **_: spawned.append(command))
 
-    result = runner.invoke(
-        cli,
-        ["ensure", "--home", str(elsewhere), "--url", DEAD_URL]
-        + ([] if case.wait else ["--no-wait"]),
-    )
+    home.use(elsewhere.resolve())
+    with holding(case.held_at) if case.held_at else contextlib.nullcontext():
+        result = runner.invoke(cli, ["run", "--home", str(elsewhere), "--port", "9", *case.flags])
 
-    assert result.exit_code == case.exit_code, result.output
-    assert case.expect_in_output in _text(result)
+    assert result.exit_code == case.exit_code, _text(result)
+    for expected in case.expect_in_output:
+        assert expected in _text(result), expected
     assert bool(spawned) is case.expect_spawn
     if case.expect_spawn:
         prefix = claude.own_command()
         assert spawned[0][: len(prefix) + 1] == [*prefix, "run"], "spawned through this haskie"
-        assert str(elsewhere) in spawned[0], "the child serves the same home"
-    if case.exit_code:
+        assert spawned[0][-1] == "--foreground", "serving in its own process"
+        assert this in spawned[0], "the child serves the same home"
+    assert browsed == (["http://127.0.0.1:9/"] if case.expect_opened else [])
+    if case.child_exits and case.exit_code:
         assert str(elsewhere / "server.log") in result.stderr, "names the log to read"
 
 
@@ -532,7 +556,7 @@ def test_ensure(case: EnsureCase, elsewhere: Path, monkeypatch: pytest.MonkeyPat
 def test_own_command_is_this_install_not_the_first_on_path(
     has_script: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`haskie-dev` and an installed `haskie` sit on one PATH. Whichever runs `ensure` must spawn
+    """`haskie-dev` and an installed `haskie` sit on one PATH. Whichever runs `run` must spawn
     itself, never the other one's code on its own home."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -697,6 +721,7 @@ def test_the_home_is_released_only_once_the_runtime_stopped(
 class HookInputCase:
     stdin: str
     expect_announced: str | None
+    hook: bool = True  # whether the command runs as the hook, the only caller whose stdin is read
 
 
 HOOK_INPUT_CASES = {
@@ -713,20 +738,27 @@ HOOK_INPUT_CASES = {
     "stdin that is not a payload announces nothing": HookInputCase(
         stdin="not a hook payload", expect_announced=None
     ),
+    "a payload without --hook is never read": HookInputCase(
+        stdin=json.dumps({"session_id": "abc-123", "source": "startup"}),
+        expect_announced=None,
+        hook=False,
+    ),
 }
 
 
 @pytest.mark.parametrize("case", HOOK_INPUT_CASES.values(), ids=list(HOOK_INPUT_CASES))
-def test_ensure_announces_the_hook_session_id(
+def test_run_announces_the_hook_session_id(
     case: HookInputCase, elsewhere: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Nothing in an MCP call carries the conversation's id, so the SessionStart hook's own output
-    is what puts it in the agent's context. Anything on stdin that is not a payload is ignored:
-    `ensure` is also run by hand and by `install claude`."""
-    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)  # fast path, spawns nothing
+    is what puts it in the agent's context. Only `--hook` reads stdin: `run` by hand or in a
+    script may have a pipe there that nobody closes, and anything that is not a payload is
+    ignored."""
+    monkeypatch.setattr(cli_module, "_status", _serves(elsewhere, initialized=True))  # fast path
+    flags = ["--hook"] if case.hook else []
 
     result = runner.invoke(
-        cli, ["ensure", "--home", str(elsewhere), "--url", DEAD_URL], input=case.stdin
+        cli, ["run", "--home", str(elsewhere), "--port", "9", *flags], input=case.stdin
     )
 
     assert result.exit_code == 0, result.output
@@ -825,14 +857,12 @@ def test_install_claude(
     claude_workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runner.invoke(
-        cli, ["init", "--home", str(elsewhere), "--no-browser"]
-    )  # `init` points the process at it
+    _make_home(elsewhere)
     for name, description in case.collections:
         asyncio.run(Collection.create(name, description))
     if case.claude_on_path:
         _with_claude(claude_workspace)
-    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)  # never start a real server
+    monkeypatch.setattr(cli_module, "_status", _serves(elsewhere))  # never start a real server
 
     result = runner.invoke(
         cli, ["install", "claude", "--home", str(elsewhere), "--scope", case.scope]
@@ -848,8 +878,8 @@ def test_install_claude(
     assert "before answering from memory" in rule, "the rule fires on knowledge questions"
     hooks = json.loads(claude.settings_path(case.scope).read_text())["hooks"]["SessionStart"]
     hooked = hooks[0]["hooks"][0]["command"]
-    assert claude.HOOK_MARKER in hooked, "the hook starts haskie"
-    assert hooked.endswith("--no-wait"), "a session start must not wait on a boot"
+    assert claude.HOOK_MARKERS[0] in hooked, "the hook starts haskie"
+    assert hooked.endswith("--hook"), "a session start reads its payload, never waits on a boot"
     argv_log = tmp_path / "argv.log"
     if case.claude_on_path:
         recorded = argv_log.read_text().splitlines()
@@ -863,9 +893,9 @@ def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
     elsewhere: Path, claude_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Re-running is how the trigger is refreshed after a collection is added."""
-    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    _make_home(elsewhere)
     asyncio.run(Collection.create("roasting", "Coffee."))
-    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)
+    monkeypatch.setattr(cli_module, "_status", _serves(elsewhere))
     arguments = ["install", "claude", "--home", str(elsewhere), "--scope", "project"]
 
     runner.invoke(cli, arguments)
@@ -884,9 +914,9 @@ def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
 def test_install_claude_leaves_stdin_to_the_script_that_runs_it(
     elsewhere: Path, claude_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only a SessionStart hook's `ensure` reads a payload from stdin. `install claude` inside a
+    """Only a SessionStart hook's `run --hook` reads a payload from stdin. `install claude` inside a
     piped script must not read the script's next lines as one, nor wait on a pipe held open."""
-    runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+    _make_home(elsewhere)
     served: list[tuple[str, bool]] = []
     monkeypatch.setattr(cli_module, "_serve", lambda url, wait: served.append((url, wait)))
     payload = json.dumps({"session_id": "abc-123", "source": "startup"})
@@ -930,14 +960,24 @@ def test_a_long_trigger_line_keeps_the_fixed_triggers() -> None:
     ids=["a plain url", "a url with a shell operator", "a url with a space"],
 )
 def test_a_url_stays_one_argument(url: str, claude_workspace: Path, tmp_path: Path) -> None:
-    """The hook and the by-hand line are both run by a shell, so a URL that holds `&` or a space
-    must reach haskie and `claude` as one argument, not split into a second command."""
+    """The hook and the by-hand line are both run by a shell, so a home or a URL that holds `&` or
+    a space must reach haskie and `claude` as one argument, not split into a second command."""
     home_dir = tmp_path / "my home"
 
     hooked = shlex.split(claude.hook_command(home_dir, url))
     manual = claude.register_mcp(url, Scope.PROJECT)  # no `claude` on the workspace's PATH
 
-    assert hooked[-6:] == ["ensure", "--home", str(home_dir), "--url", url, "--no-wait"]
+    parts = urlsplit(url)
+    assert hooked[-8:] == [
+        "run",
+        "--home",
+        str(home_dir),
+        "--host",
+        parts.hostname,
+        "--port",
+        str(parts.port or claude.DEFAULT_PORT),
+        "--hook",
+    ]
     assert manual is not None
     assert shlex.split(manual)[-2:] == ["haskie", url]
 
@@ -975,7 +1015,7 @@ def test_install_claude_refuses_in_one_line(
     if case.old_home:
         _pre_collection_home(elsewhere)
     else:
-        runner.invoke(cli, ["init", "--home", str(elsewhere), "--no-browser"])
+        _make_home(elsewhere)
     if case.claude_fails:
         stub = claude_workspace / "claude"
         stub.write_text("#!/bin/sh\necho 'error: no such scope' >&2\nexit 1\n")
@@ -984,7 +1024,7 @@ def test_install_claude_refuses_in_one_line(
         settings_file = claude.settings_path(Scope.PROJECT)
         settings_file.parent.mkdir(parents=True)
         settings_file.write_text(case.settings)
-    monkeypatch.setattr(cli_module, "_serving", lambda _url: True)
+    monkeypatch.setattr(cli_module, "_status", _serves(elsewhere))
 
     result = runner.invoke(
         cli, ["install", "claude", "--home", str(elsewhere), "--scope", "project"]
@@ -1018,6 +1058,14 @@ HOOK_CASES = {
     "a hook of ours already there": HookCase(
         before=(
             '{"hooks": {"SessionStart": [{"hooks": [{"type": "command",'
+            ' "command": "/old/haskie run --home /old --host h --port 1 --hook"}]}]}}'
+        ),
+        added=False,
+        expect_commands=1,
+    ),
+    "a hook of ours from before `run`": HookCase(
+        before=(
+            '{"hooks": {"SessionStart": [{"hooks": [{"type": "command",'
             ' "command": "/old/haskie ensure --home /old --url u --no-wait"}]}]}}'
         ),
         added=False,
@@ -1048,7 +1096,9 @@ def test_install_hook(case: HookCase, claude_workspace: Path, tmp_path: Path) ->
         for hook in matcher["hooks"]
     ]
     assert len(commands) == case.expect_commands, "ours is replaced, a stranger's is kept beside"
-    assert sum(claude.HOOK_MARKER in command for command in commands) == 1, "exactly one of ours"
+    assert sum(claude.HOOK_MARKERS[0] in command for command in commands) == 1, (
+        "exactly one of ours"
+    )
     if case.keeps:
         assert settings[case.keeps] == "opus", "an unrelated setting survives"
 
@@ -1131,7 +1181,7 @@ def test_install_hook_keeps_the_settings_file_what_it_was(
     expect_mode = 0o666 & ~umask if case.expect_mode is None else case.expect_mode
     assert stat.S_IMODE(real.stat().st_mode) == expect_mode
     written = json.loads(real.read_text())
-    assert claude.HOOK_MARKER in written["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert claude.HOOK_MARKERS[0] in written["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     if case.mode is not None:
         assert written["env"] == {"API_KEY": "sk-test"}, "the rest of the file survives"
 

@@ -3370,6 +3370,47 @@ def test_select_providers(
     assert embed.select_providers(available, accelerator) == expected, name
 
 
+@pytest.mark.parametrize(
+    ("name", "loads", "expected"),
+    [
+        ("nothing NVIDIA loads: the cpu, never a failing gpu", set(), ["CPUExecutionProvider"]),
+        (
+            "cuda without tensorrt: cuda, not a tensorrt that fails first",
+            {"CUDAExecutionProvider"},
+            ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        ),
+        (
+            "both load: tensorrt first",
+            {"TensorrtExecutionProvider", "CUDAExecutionProvider"},
+            ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
+        ),
+    ],
+)
+def test_the_cuda_build_offers_only_the_nvidia_providers_that_load(
+    name: str, loads: set[str], expected: list[str], monkeypatch
+) -> None:
+    """Linux installs ONNX Runtime's CUDA build, which lists TensorRT and CUDA on every machine.
+    Only those whose library loads here are asked for, so the device the status reports is the
+    one the models run on."""
+    listed = ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
+    stand_in = types.SimpleNamespace(get_available_providers=lambda: listed)
+    monkeypatch.setattr(embed, "onnx_runtime", lambda: stand_in)
+    monkeypatch.setattr(embed, "nvidia_loads", lambda provider: provider in loads)
+
+    assert embed.providers() == expected, name
+
+
+def test_an_nvidia_provider_whose_library_is_missing_does_not_load(tmp_path: Path, monkeypatch):
+    """No driver or no library, as on any machine without an NVIDIA GPU: not runnable."""
+    stand_in = types.SimpleNamespace(__file__=str(tmp_path / "onnxruntime" / "__init__.py"))
+    monkeypatch.setattr(embed, "onnx_runtime", lambda: stand_in)
+    embed.nvidia_loads.cache_clear()
+    try:
+        assert embed.nvidia_loads("CUDAExecutionProvider") is False
+    finally:
+        embed.nvidia_loads.cache_clear()
+
+
 def test_onnx_runtime_comes_with_its_telemetry_off_once(monkeypatch) -> None:
     """Its telemetry thread crashed processes exiting mid-upload (`embed.onnx_runtime`)."""
     calls: list[str] = []
@@ -3487,6 +3528,7 @@ def test_every_onnx_model_runs_on_the_hardware_the_settings_choose(
 
     stand_in = types.SimpleNamespace(get_available_providers=lambda: available)
     monkeypatch.setattr(embed, "onnx_runtime", lambda: stand_in)
+    monkeypatch.setattr(embed, "nvidia_loads", lambda _provider: True)  # CUDA runs here
     monkeypatch.setattr(cross_encoder, "TextCrossEncoder", Recorder)
     headed = lambda model, providers: seen.append(providers)  # noqa: E731
     monkeypatch.setattr(onnx_rerank, "HeadedCrossEncoder", headed)

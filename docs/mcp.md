@@ -24,7 +24,7 @@ flowchart LR
     install["haskie install claude"] --> mcp["MCP entry<br/>claude mcp add --transport http"]
     install --> skill["skill<br/>.claude/skills/haskie/SKILL.md"]
     install --> rule["rule<br/>.claude/rules/haskie.md"]
-    install --> hook["SessionStart hook<br/>in .claude/settings.json:<br/>haskie ensure --no-wait"]
+    install --> hook["SessionStart hook<br/>in .claude/settings.json:<br/>haskie run --hook"]
     mcp --> tools["Claude has the tools"]
     skill --> how["Claude knows how:<br/>which tool, which fields to cite"]
     rule --> when["Claude knows when:<br/>search first, in every session"]
@@ -34,7 +34,8 @@ flowchart LR
 The files go under `~/.claude` with `--scope user` (the default), or `./.claude` of the current
 directory with `--scope project`. With `CLAUDE_CONFIG_DIR` set, the user scope follows it, as
 Claude Code does. `--url` points them at another endpoint. The hook's full command
-is the absolute path of `haskie` with `ensure --home <home> --url <url> --no-wait`. The skill's
+is the absolute path of `haskie` with `run --home <home> --host <host> --port <port> --hook`.
+Re-installing replaces any haskie hook, including one in the older `ensure` form. The skill's
 trigger and the rule both name the home's collections, so they fire on the topics you collected.
 Run `haskie install claude` again after adding a collection to refresh them.
 
@@ -43,13 +44,13 @@ Run `haskie install claude` again after adding a collection to refresh them.
 ```mermaid
 sequenceDiagram
     participant CC as Claude Code
-    participant Hook as haskie ensure
+    participant Hook as haskie run --hook
     participant H as haskie server
     CC->>Hook: SessionStart (JSON with session_id on stdin)
     Hook-->>CC: prints the session id announcement
     Hook->>H: probe 127.0.0.1:8451
     alt nothing serving
-        Hook->>H: start detached haskie run
+        Hook->>H: start haskie run --foreground, detached
         Hook-->>CC: prints "starting haskie on ..."
     else already serving
         Hook-->>CC: prints "haskie is already serving ..."
@@ -75,8 +76,8 @@ without an id, and the Gaps page reads it ([Gaps](gaps.md)).
 The hook does not wait for the server, and Claude Code connects to MCP while the hook still runs.
 So a session that starts while nothing is serving, such as the first one after a reboot, has no
 haskie tools. Sessions that start once the server is up do. `haskie install claude` itself waits
-for the server, so the session right after installing has them. Keep `haskie run` open if the
-first session matters.
+for the server, so the session right after installing has them. After a reboot, run `haskie run`
+before the first session if that session matters.
 
 ## Why HTTP, not stdio
 
@@ -84,4 +85,4 @@ One server serves the web UI, the REST API and every MCP client at once. litesta
 `2026-07-28`, which replaced `initialize` with `server/discover`. A stdio client cannot connect,
 and an HTTP client that opens with an older `initialize` request is refused.
 
-Code: `claude.py`, `cli.py` (`ensure`, `install claude`), `src/haskie/claude_code/`.
+Code: `claude.py`, `cli.py` (`run`, `install claude`), `src/haskie/claude_code/`.

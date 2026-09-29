@@ -28,7 +28,8 @@ import textwrap
 from enum import StrEnum
 from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlsplit
 
 from haskie import home
 from haskie.errors import Conflict, InvalidInput
@@ -49,7 +50,10 @@ USER_CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude
 # The skill and the rule are markdown, laid out under `claude_code/` exactly as they land under
 # `.claude/`, with `{topics}` and `{announcement}` for what only install time knows.
 TEMPLATES = files("haskie") / "claude_code"
-HOOK_MARKER = " ensure --home "  # what identifies a hook of ours, whatever path invoked it
+# What identifies a hook of ours, whatever path invoked it. The second is the shape before `ensure`
+# became `run`: still ours, so re-installing replaces it rather than leaving a hook that fails at
+# every session start beside the new one.
+HOOK_MARKERS = (" run --home ", " ensure --home ")
 HOOK_TIMEOUT_SECONDS = 90
 DEFAULT_HOST = "127.0.0.1"  # loopback: one user's documents, and nothing authenticates a caller
 # An environment variable, so a development install (`haskie-dev`, the mise tasks) can serve
@@ -198,18 +202,39 @@ def register_mcp(url: str, scope: Scope) -> str | None:
     return None
 
 
+def address(url: str) -> tuple[str, int]:
+    """The host and port a server for `url` binds, with haskie's defaults for what it leaves out."""
+    parts = urlsplit(url)
+    return parts.hostname or DEFAULT_HOST, parts.port or DEFAULT_PORT
+
+
+def run_command(home_dir: Path, url: str, mode: Literal["--hook", "--foreground"]) -> list[str]:
+    """This haskie's `run` for `home_dir` at the address of `url`, with `mode`: `--hook` for the
+    SessionStart hook, `--foreground` for the server the CLI starts."""
+    host, port = address(url)
+    return [
+        *own_command(),
+        "run",
+        "--home",
+        str(home_dir),
+        "--host",
+        host,
+        "--port",
+        str(port),
+        mode,
+    ]
+
+
 def hook_command(home_dir: Path, url: str) -> str:
     """The SessionStart command, as one shell string: that is the shape Claude Code runs."""
-    return shlex.join(
-        [*own_command(), "ensure", "--home", str(home_dir), "--url", url, "--no-wait"]
-    )
+    return shlex.join(run_command(home_dir, url, "--hook"))
 
 
 def install_hook(scope: Scope, home_dir: Path, url: str) -> bool:
     """Teach Claude Code to bring haskie up at the start of a session.
 
     The MCP entry is HTTP, so a session that starts while nothing is serving gets no haskie tools
-    at all, and nothing says why. A SessionStart hook running `haskie ensure` fixes that: it costs
+    at all, and nothing says why. A SessionStart hook running `haskie run` fixes that: it costs
     one loopback request when the server is already up, which is the usual case.
 
     Returns whether this call added the hook. Reads and rewrites the file as a whole, so an
@@ -230,7 +255,7 @@ def install_hook(scope: Scope, home_dir: Path, url: str) -> bool:
         hook
         for matcher in matchers
         for hook in matcher.get("hooks", [])
-        if HOOK_MARKER in str(hook.get("command", ""))
+        if any(marker in str(hook.get("command", "")) for marker in HOOK_MARKERS)
     ]
     for hook in ours:
         hook["command"] = command

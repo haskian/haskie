@@ -14,7 +14,6 @@ import {
   type Document,
   type EmbeddingEntry,
   type Similar,
-  type Staged,
 } from "../api";
 import type { DroppedProps, PageProps } from "../App";
 import { errorText, bytes, dateTime, day, matchesText, needleOf } from "../format";
@@ -42,6 +41,7 @@ import "./Documents.css";
 import { embeddingLabel } from "./documents/embedding";
 import { groupByDay, groupByStatus } from "./documents/group";
 import { Duplicates, JustImported, SimilarDocuments } from "./documents/Similar";
+import { importedNames, importLabel, staged as stagedFrom, waitingAfter, type StagedFile } from "./documents/staged";
 
 type GroupBy = "status" | "name" | "day";
 const GROUPS: { id: GroupBy; label: string }[] = [
@@ -49,7 +49,6 @@ const GROUPS: { id: GroupBy; label: string }[] = [
   { id: "name", label: "Name" },
   { id: "day", label: "Date" },
 ];
-type StagedFile = Staged & { name: string }; // the name the document will get; the filename until edited
 
 /** Every document in the home, imported once and shared by the collections that hold it. */
 export function Documents({
@@ -62,10 +61,10 @@ export function Documents({
   const [search, setSearch] = useState("");
   const [path, setPath] = useState("");
   const [adding, setAdding] = useState(false);
-  // One book at a time, so each gets looked at: the upload waiting to be named and imported,
-  // then the book just imported, followed until its nearest documents are known.
-  const [staged, setStaged] = useState<StagedFile | null>(null);
-  const [imported, setImported] = useState<string | null>(null);
+  // The uploads waiting to be named and imported, then the books just imported, each followed
+  // until its nearest documents are known.
+  const [staged, setStaged] = useState<StagedFile[]>([]);
+  const [imported, setImported] = useState<string[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const options = useOptions();
@@ -82,14 +81,17 @@ export function Documents({
   usePoll(active, refresh);
 
   // Upload is two steps: the bytes are staged, which also says whether the same file is already
-  // imported, then the book is named and imported. A new upload replaces one not yet imported.
+  // imported, then the books are named and imported together. A new pick adds to the set.
   const upload = useCallback(
     (files: File[]) =>
       run(async () => {
         setAdding(true);
-        if (files.length !== 1) throw new Error("One book at a time: add a single file.");
-        const one = await api.stageUpload(files[0]);
-        setStaged({ ...one, name: one.filename });
+        const { added, failures } = stagedFrom(
+          files,
+          await Promise.allSettled(files.map((file) => api.stageUpload(file))),
+        );
+        setStaged((before) => [...before, ...added]);
+        if (failures.length > 0) throw new Error(failures.join("; "));
       }),
     [run],
   );
@@ -104,28 +106,38 @@ export function Documents({
     void upload(dropped);
   }, [dropped, onDropHandled, upload]);
 
+  // All at once: the pipeline queues them. A file the server refuses, such as a name already
+  // taken, stays in the set with the reason, to be renamed or removed.
   const importStaged = () =>
     run(async () => {
-      if (staged === null) return;
-      const row = await api.importStaged({ staging_id: staged.staging_id, name: staged.name.trim() });
-      setStaged(null);
-      setImported(row.name);
+      const sent = staged;
+      const results = await Promise.allSettled(
+        sent.map((one) => api.importStaged({ staging_id: one.staging_id, name: one.name.trim() })),
+      );
+      setImported((before) => [...before, ...importedNames(results)]);
+      setStaged((now) => waitingAfter(now, sent, results));
     });
+
+  const rename = (id: string, name: string) =>
+    setStaged((before) => before.map((one) => (one.staging_id === id ? { ...one, name, error: null } : one)));
+  // only forgotten here; the staged bytes age out on the server
+  const forget = (id: string) => setStaged((before) => before.filter((one) => one.staging_id !== id));
 
   const importPath = (event: FormEvent) => {
     event.preventDefault();
     void run(async () => {
       const row = await api.importPath(path.trim());
       setPath("");
-      setImported(row.name);
+      setImported((before) => [...before, row.name]);
     });
   };
 
-  const repeats = staged !== null && staged.duplicates.length > 0;
+  const repeats = staged.some((one) => one.duplicates.length > 0);
+  const unnamed = staged.some((one) => one.name.trim() === "");
 
   const closeAdding = () => {
     setAdding(false);
-    setImported(null);
+    setImported([]);
   };
 
   const closeModal = useCallback(() => navigate({ name: "documents" }), []);
@@ -171,9 +183,9 @@ export function Documents({
         <GallerySection label="New" large>
           <Tile
             icon={Plus}
-            name="Add a document"
+            name="Add documents"
             sub="Upload or import"
-            hint="Drop a file anywhere, upload it, or import a path."
+            hint="Drop files anywhere, upload them, or import a path."
             add
             onClick={() => setAdding(true)}
           />
@@ -212,12 +224,13 @@ export function Documents({
       <Modal
         open={adding}
         onClose={closeAdding}
-        title="Add a document"
+        title="Add documents"
         subtitle="import"
       >
         <div className="add-documents">
           <input
             type="file"
+            multiple
             hidden
             ref={fileInput}
             onChange={(event) => {
@@ -227,7 +240,7 @@ export function Documents({
             }}
           />
           <div className="field">
-            <span className="label">File</span>
+            <span className="label">Files</span>
             <div className="row">
               <button
                 className="btn"
@@ -236,56 +249,55 @@ export function Documents({
                 onClick={() => fileInput.current?.click()}
               >
                 <Upload className="icon" />
-                Choose a file
+                Choose files
               </button>
-              <span className="muted">or drop it anywhere on the page</span>
+              <span className="muted">or drop them anywhere on the page</span>
             </div>
           </div>
-          {staged !== null && (
+          {staged.length > 0 && (
             <div className="field">
-              <span className="label">Ready to import</span>
-              {/* Nothing is converted or embedded until the name below is confirmed. */}
+              <span className="label">Ready to import · {staged.length}</span>
+              {/* Nothing is converted or embedded until the names below are confirmed. */}
               <ul className="list staged">
-                <li className="list-item">
-                  <input
-                    className="input"
-                    value={staged.name}
-                    aria-label="Document name"
-                    onChange={(event) => setStaged({ ...staged, name: event.target.value })}
-                  />
-                  <span className="mono muted">{bytes.format(staged.size)}</span>
-                  {/* only forgotten here; the staged bytes age out on the server */}
-                  <button
-                    className="btn btn-ghost"
-                    type="button"
-                    aria-label="Remove"
-                    onClick={() => setStaged(null)}
-                  >
-                    <X className="icon" />
-                  </button>
-                </li>
+                {staged.map((one) => (
+                  <li className="list-item" key={one.staging_id}>
+                    <input
+                      className="input"
+                      value={one.name}
+                      aria-label="Document name"
+                      onChange={(event) => rename(one.staging_id, event.target.value)}
+                    />
+                    <span className="mono muted">{bytes.format(one.size)}</span>
+                    <button
+                      className="btn btn-ghost"
+                      type="button"
+                      aria-label={`Remove ${one.name}`}
+                      onClick={() => forget(one.staging_id)}
+                    >
+                      <X className="icon" />
+                    </button>
+                    {one.duplicates.length > 0 && (
+                      <Duplicates names={one.duplicates} advice="Importing it again only adds a copy." />
+                    )}
+                    {one.error !== null && <p className="muted">{one.error}</p>}
+                  </li>
+                ))}
               </ul>
-              {repeats && (
-                <Duplicates names={staged.duplicates} advice="Importing it again only adds a copy." />
-              )}
               <div className="row">
                 <button
                   className={repeats ? "btn" : "btn btn-primary"}
                   type="button"
-                  disabled={busy || staged.name.trim() === ""}
+                  disabled={busy || unnamed}
                   onClick={importStaged}
                 >
-                  {repeats ? "Import anyway" : "Import"}
+                  {repeats ? `${importLabel(staged.length)} anyway` : importLabel(staged.length)}
                 </button>
-                {repeats && (
-                  <button className="btn btn-primary" type="button" onClick={() => setStaged(null)}>
-                    Discard
-                  </button>
-                )}
               </div>
             </div>
           )}
-          {imported !== null && <JustImported key={imported} name={imported} />}
+          {imported.map((name) => (
+            <JustImported key={name} name={name} />
+          ))}
           {/* A form, so Enter imports the way the browser already does it. */}
           <form className="field" onSubmit={importPath}>
             <span className="label">Path</span>

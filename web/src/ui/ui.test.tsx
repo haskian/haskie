@@ -381,7 +381,7 @@ describe('ModelFacts', () => {
         '<dt>Model</dt><dd>BAAI/bge-small-en-v1.5</dd><dt>Dimensions</dt><dd>384</dd><dt>Parameters</dt><dd>33M</dd>' +
           '<dt>Context</dt><dd>512 tokens</dd><dt>Released</dt><dd>2023-09-12</dd>' +
           '<dt>Languages</dt><dd>English</dd><dt>License</dt><dd>MIT</dd><dt>Runtime</dt><dd>ONNX</dd>' +
-          '<dt>Devices</dt><dd>CPU, Apple Silicon, GPU (the gpu extra)</dd>' +
+          '<dt>Devices</dt><dd>CPU, Apple Silicon, GPU (CUDA)</dd>' +
           '<dt>Model card</dt><dd><a href="https://huggingface.co/BAAI/bge-small-en-v1.5" target="_blank" rel="noreferrer">' +
           'huggingface.co/BAAI/bge-small-en-v1.5</a></dd>',
       ],
@@ -391,7 +391,7 @@ describe('ModelFacts', () => {
       element: <ModelFacts name="soichisumi/bge-reranker-v2-m3-mlx-affine8" metadata={RERANKER} />,
       contains: [
         '<dt>Parameters</dt><dd>568M</dd><dt>Context</dt><dd>8.2K tokens</dd>',
-        '<dt>Runtime</dt><dd>MLX (the mlx extra)</dd><dt>Devices</dt><dd>Apple Silicon</dd>',
+        '<dt>Runtime</dt><dd>MLX</dd><dt>Devices</dt><dd>Apple Silicon</dd>',
         'href="https://huggingface.co/BAAI/bge-reranker-v2-m3"',
       ],
       missing: ['Dimensions'],
@@ -809,7 +809,7 @@ describe('also_in', () => {
 })
 
 describe('Statusbar', () => {
-  const status = (models: Status['models']): Status => ({ initialized: true, home: '/home/ada/.haskie', embedding: null, models, settings_error: null })
+  const status = (models: Status['models']): Status => ({ initialized: true, home: '/home/ada/.haskie', embedding: null, models, settings_error: null, web_ui: true })
   const bge = { kind: 'embedding' as const, name: 'BAAI/bge-small-en-v1.5', state: 'ready' as const, error: null, device: 'cpu' as const }
   const minilm = { kind: 'reranker' as const, name: 'Xenova/ms-marco-MiniLM-L-6-v2', state: 'loading' as const, error: null, device: 'cpu' as const }
   check([

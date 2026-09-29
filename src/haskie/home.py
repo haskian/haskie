@@ -24,7 +24,7 @@ import shutil
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import anyio
 import anyio.to_thread
@@ -137,7 +137,14 @@ def claim_home() -> None:
 
 
 HOLDER_BYTES = 256  # the holder line is one short sentence; anything longer is not one of ours
-_HOLDER_PID = re.compile(r"pid (\d+)")  # reads back the line `claim_home` writes above
+_HOLDER = re.compile(r"pid (\d+), (.*)")  # reads back the line `claim_home` writes above
+
+
+class Holder(NamedTuple):
+    """The haskie holding a home, as `claim_home` recorded it."""
+
+    pid: int
+    address: str  # `http://host:port`, or "address unknown" for an app started without `run`
 
 
 def _holder_line(held: str) -> str:
@@ -175,16 +182,23 @@ def home_holder() -> str | None:
     return None if held is None else _holder_line(held)
 
 
-def running_pid() -> int | None:
-    """The process id of the haskie holding this home, or None when nothing holds it.
+def holder() -> Holder | None:
+    """The haskie holding this home, or None when nothing holds it.
 
-    The lock is what says a haskie is running, and the pid `claim_home` writes into it is how a
-    caller reaches that process: `stop` signals it. A held lock whose line is not ours (an
-    interrupted write, an older format) reads as no pid rather than as a pid to signal.
+    The lock is what says a haskie is running, and what `claim_home` writes into it is how a
+    caller reaches that process: `stop` signals its pid, `run` compares its address. A held lock
+    whose line is not ours (an interrupted write, an older format) reads as no holder rather than
+    as a pid to signal.
     """
     held = _held_by()
-    found = None if held is None else _HOLDER_PID.match(held)
-    return int(found[1]) if found else None
+    found = None if held is None else _HOLDER.fullmatch(held.strip())
+    return Holder(int(found[1]), found[2]) if found else None
+
+
+def running_pid() -> int | None:
+    """The process id of the haskie holding this home, or None when nothing holds it."""
+    found = holder()
+    return None if found is None else found.pid
 
 
 def release_home() -> None:

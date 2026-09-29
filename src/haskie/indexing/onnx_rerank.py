@@ -91,7 +91,7 @@ class HeadedCrossEncoder:
 
 def _tensors(path: Path) -> dict[str, np.ndarray]:
     """The F32 tensors of a safetensors file: an 8-byte header length, a JSON header, the data.
-    Read here rather than through `safetensors`, which only the mlx extra installs."""
+    Read here rather than through `safetensors`, which only Apple Silicon installs."""
     raw = path.read_bytes()
     (size,) = struct.unpack("<Q", raw[:8])
     header = json.loads(raw[8 : 8 + size])

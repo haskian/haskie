@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="web/public/favicon.svg" alt="" width="96">
+  <img src="design/haskie-logo.jpg" alt="haskie" width="96" height="96">
 </p>
 
 <h1 align="center">haskie</h1>
 
 <p align="center">
-  <strong>Haskie "has a key" to your private bookshelf, giving your AI agents your exact taste.</strong><br>
-  Your trusted sources, searchable by your agents, cited to the page, kept on your machine.
+  <em><strong>Haskie "has a key" to your private bookshelf, giving your AI agents your exact taste.</strong> 
+  Your trusted sources, searchable by your agents, cited to the page, kept on your machine.</em>
 </p>
 
 Your AI agent knows what everyone wrote. It does not know what you trust.
@@ -19,6 +19,20 @@ search them first. Every answer comes back as a short passage to quote, with the
 under and, for PDFs, the page.
 
 It runs on your laptop. A few commands set it up, and a web UI handles the curating.
+
+- [Why this exists](#why-this-exists)
+- [Mission](#mission)
+- [What that means in practice](#what-that-means-in-practice)
+- [Status: early, and already useful](#status-early-and-already-useful)
+- [Install](#install)
+- [From files to answers](#from-files-to-answers)
+- [How it works with Claude Code](#how-it-works-with-claude-code)
+- [MCP tools](#mcp-tools)
+- [Under the hood](#under-the-hood)
+- [Supported formats](#supported-formats)
+- [Good to know](#good-to-know)
+- [References](#references)
+- [License](#license)
 
 ## Why this exists
 
@@ -107,43 +121,30 @@ cited answers in Claude Code. Not there yet:
 
 ## Install
 
-haskie needs [uv](https://docs.astral.sh/uv/), which fetches Python 3.13 or newer if you have none.
+Needs [uv](https://docs.astral.sh/uv/), which fetches Python 3.13 if you have none.
 
 ```sh
 uv tool install haskie
+haskie run                  # web UI, REST API and MCP on http://127.0.0.1:8451; opens the first-run page
 haskie install claude       # MCP server, skill, rule and SessionStart hook for Claude Code
-haskie run                  # web UI, REST API and MCP on http://127.0.0.1:8451
 ```
 
-Open http://127.0.0.1:8451, or run `haskie init`, which starts the server and opens it for you.
-The first screen asks for an embedding model and the search defaults: by default the
-cross-encoder reranker is on. The default model is bge-small (English, about 130 MB). Pick a
-multilingual one for other languages, or none for keyword search only. The model applies to every collection, and changing
-it later means running *Index all* in each one.
-
-- **Extras:** install `"haskie[gpu]"` to run embeddings and
-  rerankers on CUDA. On Apple Silicon, `haskie[mlx]` adds the MLX rerankers and embedding models, and
-  `haskie[gguf]` the `-gguf` embedding profiles, which run on the GPU through llama.cpp (installing
-  it compiles llama.cpp, which needs the Xcode command-line tools and cmake). Other ONNX embeddings
-  run on the CPU there; the `coreml` hardware setting runs them through CoreML instead, which today
-  is slower. To install both Apple Silicon extras, drop the one you do not need:
-
-  ```sh
-  uv tool install "haskie[mlx,gguf]"
-  ```
-
-- **Port:** 8451 by default, clear of the usual 8000 and 8080. For another, run
-  `haskie run --port <n>` and `haskie install claude --url http://127.0.0.1:<n>/mcp`, or set
-  `HASKIE_PORT`, which moves the default of `run`, `ensure` and `install claude` at once.
-- **Other commands:** `haskie stop` stops the server. `haskie destroy` deletes `~/.haskie` after
-  showing what would be lost, and refuses while a server is running for it. `--home` or
-  `HASKIE_HOME` keeps the data elsewhere.
+- **macOS (Apple Silicon):** also installs MLX and llama.cpp for the Apple GPU. llama.cpp
+  compiles during the install, so run `xcode-select --install` first.
+- **Linux:** ONNX Runtime runs on an NVIDIA GPU with CUDA 13 and cuDNN 9, else on the CPU.
+- **First run:** pick an embedding model. The default, bge-small, is English and about 130 MB.
+  Changing it later means running *Index all* in each collection.
+- **Smoke test:** import a file on *Documents*, add it to a collection, then ask about it on
+  *Explore*.
+- **Other commands:** `haskie stop`, `haskie run --foreground` (for a supervisor),
+  `haskie destroy`. `--port` or `HASKIE_PORT` moves the port, `--home` or `HASKIE_HOME` the data.
 
 ## From files to answers
 
-1. **Documents.** Drop a file onto the page, one at a time. haskie converts it to markdown (text
-   formats are read as they are) and embeds it in the background, with a side-by-side preview.
-   It warns when the same file is already imported, and shows the nearest documents once done.
+1. **Documents.** Drop files onto the page, rename each one if you like, and import them with
+   one button. haskie converts each to markdown (text formats are read as they are) and embeds it
+   in the background, with a side-by-side preview. It warns when the same file is already
+   imported, and shows the nearest documents once done.
 2. **Collections.** Create one per topic and add its documents. Give it a one-line description.
    The agent reads it to choose where to look.
 3. **Explore.** Search and see exactly what your agent gets: *Excerpts* and *Sources*. Switch to
@@ -163,13 +164,13 @@ chunks over time. **Settings** describes every default.
 | MCP server entry | `claude mcp add --transport http` | gives Claude the tools |
 | skill | `~/.claude/skills/haskie/SKILL.md` | how to use the tools and what to cite. Its trigger names your collections, so it fires on *coffee roasting*, not on the word "documents" |
 | rule | `~/.claude/rules/haskie.md` | loads into every session, so Claude searches your collections first, even for a plain "what is X?" that never triggers a skill |
-| SessionStart hook | `~/.claude/settings.json` | runs `haskie ensure`: starts the server if it is down, and passes the session id so Sessions can record it |
+| SessionStart hook | `~/.claude/settings.json` | runs `haskie run --hook`: starts the server if it is down, and passes the session id so Sessions can record it |
 
 Run it again after adding a collection, to refresh the names. `--scope project` installs into
 `./.claude` of the directory you run it from. With `CLAUDE_CONFIG_DIR` set, the user scope
 installs there instead of `~/.claude`, as Claude Code reads it. The hook does not wait for the server, so a session
-that starts while nothing is serving, such as the first after a reboot, has no haskie tools. Keep
-`haskie run` open if that session matters.
+that starts while nothing is serving, such as the first after a reboot, has no haskie tools. Run
+`haskie run` first if that session matters.
 
 A typical exchange: you ask *"How should a background job retry a failed HTTP call without
 charging twice?"* The rule sends Claude to `search_excerpts` before the web. haskie returns
@@ -279,11 +280,6 @@ rest. A PDF with only scanned pages fails, with a clear message.
   `haskie install claude` again.
 - **One server per home.** A second `haskie run` on the same home refuses to start and names the
   process that holds it.
-
-## Contributing
-
-[CONTRIBUTING.md](CONTRIBUTING.md) covers setup, the development commands and the technical
-decisions. [docs/](docs/README.md) explains how each part works.
 
 ## References
 

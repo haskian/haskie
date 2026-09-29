@@ -7,7 +7,8 @@
   <link rel="stylesheet" href="design.css" />
   <style>
     /* page layout only; tokens live in design.css */
-    .staged .list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: var(--sp-3); align-items: center; }
+    .staged .list-item { display: grid; grid-template-columns: minmax(0, 1fr) 8ch auto; gap: var(--sp-3); align-items: center; }
+.staged .list-item > .mono { text-align: end; } /* each row is its own grid: a fixed size column lines the names up */
   </style>
 </head>
 <body>

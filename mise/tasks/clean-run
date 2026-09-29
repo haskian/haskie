@@ -6,5 +6,6 @@ set -euo pipefail
 # a server still running would keep writing into the files destroy deletes
 uv run haskie stop
 uv run haskie destroy
-uv sync --extra mlx --reinstall-package haskie  # mlx: a no-op off Apple Silicon
+uv sync --reinstall-package haskie
+# in the background, as a user starts it: a clean home opens the first-run page
 uv run haskie run

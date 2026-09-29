@@ -150,7 +150,7 @@ def test_an_embedder_answers_one_vector_per_text(name: str, count: int) -> None:
 def test_without_mlx_the_model_says_what_it_needs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mlx_models, "available", lambda: False)
 
-    with pytest.raises(RuntimeError, match="uv sync --extra mlx"):
+    with pytest.raises(RuntimeError, match="mlx-embeddings, which haskie installs there"):
         mlx_models.reranker(RERANKER)
 
 

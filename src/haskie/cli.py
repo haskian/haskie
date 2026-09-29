@@ -1,8 +1,8 @@
-"""The `haskie` command: set the home directory up, serve the app, and install it into a client.
+"""The `haskie` command: serve the app, stop it, and install it into a client.
 
-Thin on purpose. What the app already does at startup, the CLI calls rather than repeats — `init`
-creates the schema, `run` is uvicorn over `app:create_app` — so it adds a way in, never a second
-way of doing the work.
+Thin on purpose. What the app already does at startup, the CLI calls rather than repeats — the
+server makes the home and its schema, the web UI picks the first-run settings, `run` is uvicorn
+over `app:create_app` — so it adds a way in, never a second way of doing the work.
 """
 
 import json
@@ -79,56 +79,6 @@ def _use_home(path: Path | None) -> None:
     home.use(Path(resolved))
 
 
-async def _first_run_done() -> bool:
-    """Make the home (see `db.migrate_once`), and say whether its first run picked the settings."""
-    from haskie import db, settings
-
-    await db.migrate_once()
-    return await settings.load_user_settings_or_none() is not None
-
-
-@cli.command()
-def init(
-    home_dir: HomeOption = None,
-    browser: Annotated[
-        bool, typer.Option(help="Open the web UI to pick the settings the first run needs.")
-    ] = True,
-) -> None:
-    """Create the home directory and its database, then finish the first run in the browser.
-
-    The embedding model and the search are picked in the web UI, which shows what each model
-    costs, so a home without them starts a server (as `ensure` does) and opens the UI there.
-    A home that has them is left as it is: safe to repeat.
-
-    There is no upgrade path. A home written at another schema version is refused, and the message
-    says what to do instead (see `db.INCOMPATIBLE_HOME_MESSAGE`).
-    """
-    import asyncio
-    import webbrowser
-
-    _use_home(home_dir)
-    try:
-        done = asyncio.run(_first_run_done())
-    except HaskieError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
-    typer.echo(f"haskie {APP_VERSION} ready in {home.HOME}")
-    if done:
-        return
-    ui = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/"
-    if not browser:
-        typer.echo(f"pick the embedding model and the search at {ui} (haskie run serves it)")
-        return
-    _serve(MCP_URL, wait=True)
-    # a haskie of another home may hold the port, and its UI would pick that home's settings
-    served = (_status(MCP_URL) or {}).get("home")
-    if served != str(home.HOME):
-        typer.echo(f"{ui} serves another home ({served}); stop it, or set HASKIE_PORT", err=True)
-        raise typer.Exit(code=1)
-    typer.echo(f"pick the embedding model and the search at {ui}")
-    webbrowser.open(ui)  # False without a browser to open; the line above says where to go
-
-
 SHUTDOWN_DRAIN = 10.0  # what `run` gives uvicorn to finish the requests in flight when it is told
 
 
@@ -137,22 +87,74 @@ def run(
     home_dir: HomeOption = None,
     host: Annotated[str, typer.Option(help="Interface to bind.")] = DEFAULT_HOST,
     port: Annotated[int, typer.Option(help="Port to listen on.")] = DEFAULT_PORT,
-    reload: Annotated[bool, typer.Option(help="Restart on code changes (development).")] = False,
+    browser: Annotated[
+        bool, typer.Option(help="Open the web UI when the first run still needs its settings.")
+    ] = True,
+    foreground: Annotated[
+        bool, typer.Option(help="Serve in this process until stopped, for a supervisor.")
+    ] = False,
+    reload: Annotated[
+        bool, typer.Option(help="Restart on code changes; serves in the foreground (development).")
+    ] = False,
+    hook: Annotated[
+        bool,
+        typer.Option(
+            help="Run as Claude Code's SessionStart hook: read its payload, do not wait.",
+            hidden=True,
+        ),
+    ] = False,
 ) -> None:
-    """Run the web UI, the REST API and the MCP server.
+    """Serve the web UI, the REST API and the MCP server, and finish the first run in the browser.
+
+    One process serves all three, in the background, and outlives this command: the next Claude
+    Code session reuses it, and the web UI stays up. A haskie already serving the address is left
+    as it is, so this is safe to repeat. The server makes the home and its database; a home whose
+    first run has not picked the embedding model and the search opens the web UI on that page.
+
+    Claude Code's SessionStart hook passes `--hook`, which does not wait: a client connects to the
+    MCP endpoint while the hook is still running, so waiting cannot help the session that starts
+    it, and a haskie that fails to boot would stall every session start. Only the hook's stdin is
+    read: anywhere else stdin may be a pipe that nobody writes to or closes, and reading it would
+    hang the command.
 
     Binds loopback by default: the home directory is one user's documents, and nothing in the app
     authenticates a caller.
     """
+    _use_home(home_dir)
+    if foreground or reload:
+        _serve_here(host, port, reload)
+        return
+    session_id = _hook_session_id() if hook else None
+    if session_id is not None:
+        # A SessionStart hook's output becomes context for the session it starts, which is the one
+        # place the conversation's own id can reach the tools: nothing in an MCP call carries it,
+        # so without this line every search is recorded against no session at all.
+        typer.echo(claude.session_announcement(session_id))
+    url = f"http://{host}:{port}"
+    status = _serve(url, wait=not hook)
+    if status is not None and not hook:
+        _greet(url, status, browser)
+
+
+def _serve_here(host: str, port: int, reload: bool) -> None:
+    """uvicorn over the app, in this process, until a signal ends it."""
     import uvicorn
 
-    _use_home(home_dir)
     # The app's first startup hook is what claims the home; this only asks, so that the common
     # refusal is one line here instead of a lifespan traceback out of uvicorn.
     held = home.home_holder()
     if held is not None:
         typer.echo(held, err=True)
         raise typer.Exit(code=1)
+    # The server refuses a home another schema wrote as well, but as a traceback in its log. Here
+    # it is one line, which `_serve` shows when this runs as its detached child.
+    from haskie import db  # the database stack, only once a server is about to start
+
+    try:
+        db.check_schema()
+    except HaskieError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
     # The address the startup hook records, for the next process's message. The environment is the
     # one carrier, so a `--reload` child that re-imports `home` records the same thing.
     os.environ[home.ADDRESS_ENV] = f"http://{host}:{port}"
@@ -174,6 +176,7 @@ def run(
 
 # --- keeping a server up ----------------------------------------------------
 
+
 PROBE_TIMEOUT = 1.0  # loopback: either the server answers at once or it is not there
 START_DEADLINE = 60.0  # a cold boot runs migrations and launches DBOS before it serves
 POLL_INTERVAL = 0.25
@@ -188,11 +191,6 @@ def _poll_until(ready: Callable[[], bool], seconds: float) -> bool:
         if ready():
             return True
     return False
-
-
-def _serving(url: str) -> bool:
-    """Whether a haskie answers at `url`."""
-    return _status(url) is not None
 
 
 def _status(url: str) -> dict[str, Any] | None:
@@ -251,7 +249,7 @@ def stop(home_dir: HomeOption = None) -> None:
     The lock is both how this finds the server and how it knows the server is gone; nothing else
     is left behind to clean up (see `home.running_pid`).
     """
-    import signal  # only this command signals anything, and `ensure` runs on every session start
+    import signal  # only this command signals anything, and `run` starts every session
 
     def released() -> bool:
         """The kernel drops the lock when the holder exits, so this is the exit itself."""
@@ -286,11 +284,11 @@ MAX_HOOK_PAYLOAD = 64 * 1024  # a SessionStart payload is a few hundred bytes of
 def _hook_session_id() -> str | None:
     """The conversation's id, out of the SessionStart payload Claude Code writes to our stdin.
 
-    None for every other way of running the command: a terminal, or anything on stdin that is not
-    the hook's JSON. One bounded read rather than a read to end of file, because a writer that
-    holds the pipe open would otherwise stall the session start it is part of.
+    None for a terminal, or for anything on stdin that is not the hook's JSON. One bounded read
+    rather than a read to end of file, because a writer that holds the pipe open would otherwise
+    stall the session start it is part of.
     """
-    import msgspec  # `ensure` runs on every session start; only a hook payload needs a decoder
+    import msgspec  # `run` starts every session; only a hook payload needs a decoder
 
     if sys.stdin is None or sys.stdin.isatty():
         return None
@@ -307,69 +305,104 @@ def _hook_session_id() -> str | None:
     return session_id if isinstance(session_id, str) and session_id else None
 
 
-@cli.command()
-def ensure(
-    home_dir: HomeOption = None,
-    url: Annotated[str, typer.Option(help="Where haskie should be serving.")] = MCP_URL,
-    wait: Annotated[
-        bool, typer.Option(help="Wait for the server to answer before returning.")
-    ] = True,
-) -> None:
-    """Start haskie if nothing is serving `url`, and wait for it unless told not to.
+LOG_TAIL_LINES = 20  # enough for the error and the traceback line that raised it
 
-    The server it starts is detached and outlives this command on purpose: the next session reuses
-    it, and the web UI stays up. Racing callers are safe - the app claims the home before it
-    touches the database, so every loser exits early and the wait below finds the one winner.
 
-    Claude Code's SessionStart hook passes `--no-wait`: a client connects to the MCP endpoint
-    while the hook is still running, so waiting cannot help the session that starts it, and a
-    haskie that fails to boot would stall every session start.
+def _serve(url: str, wait: bool) -> dict[str, Any] | None:
+    """Start haskie detached if nothing is serving `url`, and wait for it unless told not to.
+    Returns the server's status, or None when it was not waited for.
+
+    Refuses a haskie of another home at `url`: its tools and its UI would search and import into
+    that home. Racing callers are safe: the app claims the home before it touches the database, so
+    a loser exits early while the winner holds the home at this address, and the wait goes on for
+    it. A child that exits with the home free or held at another address could not start, and its
+    own last words say why, at once rather than after the whole deadline.
     """
-    _use_home(home_dir)
-    session_id = _hook_session_id()
-    if session_id is not None:
-        # A SessionStart hook's output becomes context for the session it starts, which is the one
-        # place the conversation's own id can reach the tools: nothing in an MCP call carries it,
-        # so without this line every search is recorded against no session at all.
-        typer.echo(claude.session_announcement(session_id))
-    _serve(url, wait)
-
-
-def _serve(url: str, wait: bool) -> None:
-    """Start haskie detached if nothing is serving `url`, and wait for it unless told not to."""
-    if _serving(url):
+    status = _status(url)
+    if status is not None:
         typer.echo(f"haskie is already serving {url}")
-        return
+    else:
+        status = _start(url, wait)
+        if status is None:
+            return None
+    served = status.get("home")
+    if served != str(home.HOME):
+        typer.echo(
+            f"{url} serves another home ({served}); stop it, or pick another --port", err=True
+        )
+        raise typer.Exit(code=1)
+    return status
 
-    parts = urlsplit(url)
+
+def _start(url: str, wait: bool) -> dict[str, Any] | None:
+    """Spawn `run --foreground` detached, and wait for its status unless told not to."""
     home.ensure_home_sync()
     log_file = home.HOME / "server.log"
-    command = [
-        *claude.own_command(),
-        "run",
-        "--home",
-        str(home.HOME),
-        "--host",
-        parts.hostname or DEFAULT_HOST,
-        "--port",
-        str(parts.port or DEFAULT_PORT),
-    ]
+    host, port = claude.address(url)
     typer.echo(f"starting haskie on {url} (log: {log_file})")
     with open(log_file, "ab") as stream:
-        subprocess.Popen(
-            command,
+        logged_from = stream.tell()
+        child = subprocess.Popen(
+            claude.run_command(home.HOME, url, "--foreground"),
             stdin=subprocess.DEVNULL,
             stdout=stream,
             stderr=stream,
             start_new_session=True,  # survives the client that spawned it
         )
     if not wait:
-        return
-    if _poll_until(lambda: _serving(url), START_DEADLINE):
+        return None
+
+    def failed() -> bool:
+        held = home.holder()
+        return child.poll() is not None and (
+            held is None or held.address != f"http://{host}:{port}"
+        )
+
+    status: dict[str, Any] | None = None
+
+    def settled() -> bool:
+        nonlocal status
+        status = _status(url)
+        return status is not None or failed()
+
+    _poll_until(settled, START_DEADLINE)
+    if status is not None:
         typer.echo(f"haskie is serving {url}")
-        return
-    typer.echo(f"haskie did not come up within {START_DEADLINE:.0f}s; see {log_file}", err=True)
+        return status
+    if failed():
+        typer.echo(f"haskie exited while starting; the end of {log_file}:", err=True)
+        typer.echo(_tail(log_file, logged_from), err=True)
+    else:
+        typer.echo(f"haskie did not come up within {START_DEADLINE:.0f}s; see {log_file}", err=True)
     raise typer.Exit(code=1)
+
+
+def _tail(log_file: Path, start: int) -> str:
+    """The last lines written to `log_file` past `start`: what one child said, not the history."""
+    with open(log_file, "rb") as stream:
+        stream.seek(start)
+        written = stream.read().decode("utf-8", "replace")
+    return "\n".join(written.rstrip().splitlines()[-LOG_TAIL_LINES:])
+
+
+def _greet(url: str, status: dict[str, Any], browser: bool) -> None:
+    """Say where the web UI is, and open it when the first run is still to be finished there."""
+    import webbrowser
+
+    ui = f"{url}/"
+    if not status.get("web_ui"):
+        # A build product, not source: a checkout that never ran `mise run build` serves the API
+        # and MCP alone. Said here, where the user expects a page, not only in the server's log.
+        typer.echo(
+            f"no web UI at {ui}: this haskie was built without it (mise run build)", err=True
+        )
+        return
+    if status.get("initialized"):
+        typer.echo(f"web UI at {ui}")
+        return
+    typer.echo(f"pick the embedding model and the search at {ui}")
+    if browser:
+        webbrowser.open(ui)  # False without a browser to open; the line above says where to go
 
 
 # --- installing into a client -----------------------------------------------
@@ -427,8 +460,8 @@ def _install_claude(url: str, scope: Scope) -> None:
     added = claude.install_hook(scope, home.HOME, url)
     settings_file = claude.settings_path(scope)
     typer.echo(f"{'added' if added else 'updated'} the SessionStart hook in {settings_file}")
-    # `_serve`, not the `ensure` command: that one reads a hook payload from stdin, which here is
-    # the rest of a piped script. Already-serving is its fast path, not ours.
+    # `_serve`, not the `run` command: installing wants the server up, not the first-run page
+    # `run` would open in the browser. Already-serving is its fast path, not ours.
     _serve(url, wait=True)
     typer.echo("re-run `haskie install claude` after adding a collection, to refresh the trigger")
 

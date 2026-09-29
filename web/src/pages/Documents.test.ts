@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import type { Document, DocumentStatus, EmbeddingEntry } from '../api'
+import type { Document, DocumentStatus, EmbeddingEntry, ImportedDocument, Staged } from '../api'
 import { embeddingLabel } from './documents/embedding'
 import { groupByDay, groupByStatus } from './documents/group'
+import { importedNames, importLabel, staged, waitingAfter, type StagedFile } from './documents/staged'
 
 // One real row, overridden per case: the listing hands the page whole documents, so the fixtures do too.
 const DOC: Document = {
@@ -128,4 +129,109 @@ describe('embeddingLabel', () => {
       expect(embeddingLabel(testCase.value)).toBe(testCase.expected)
     })
   }
+})
+
+describe('staging several files', () => {
+  // `POST /api/documents/staging` as it answers for a real upload.
+  const STAGED: Staged = { staging_id: '3f2b9c1e8a7d4b6f', filename: 'area-lights.pdf', size: 421_904, duplicates: [] }
+  const file = (name: string) => new File(['%PDF-1.4'], name, { type: 'application/pdf' })
+  const cases: Array<{
+    name: string
+    files: File[]
+    results: PromiseSettledResult<Staged>[]
+    expected: { added: Array<[string, string[]]>; failures: string[] }
+  }> = [
+    { name: 'nothing picked stages nothing', files: [], results: [], expected: { added: [], failures: [] } },
+    {
+      name: 'each landed file is named after itself, a repeat keeps its duplicates',
+      files: [file('area-lights.pdf'), file('soft-shadows.pdf')],
+      results: [
+        { status: 'fulfilled', value: STAGED },
+        { status: 'fulfilled', value: { ...STAGED, staging_id: '9a1c', filename: 'soft-shadows.pdf', duplicates: ['shadows.pdf'] } },
+      ],
+      expected: { added: [['area-lights.pdf', []], ['soft-shadows.pdf', ['shadows.pdf']]], failures: [] },
+    },
+    {
+      name: 'a refused file costs only itself, and says which one it was',
+      files: [file('area-lights.pdf'), file('huge.pdf')],
+      results: [
+        { status: 'fulfilled', value: STAGED },
+        { status: 'rejected', reason: new Error('Request Entity Too Large') },
+      ],
+      expected: { added: [['area-lights.pdf', []]], failures: ['huge.pdf: Request Entity Too Large'] },
+    },
+  ]
+  for (const testCase of cases) {
+    test(testCase.name, () => {
+      const got = staged(testCase.files, testCase.results)
+      expect({ added: got.added.map((one) => [one.name, one.duplicates]), failures: got.failures }).toEqual(testCase.expected)
+      expect(got.added.every((one) => one.error === null)).toBe(true)
+    })
+  }
+})
+
+describe('importing the staged set', () => {
+  const waiting: StagedFile[] = [
+    { staging_id: 'a1', filename: 'area-lights.pdf', size: 421_904, duplicates: [], name: 'Area lights', error: null },
+    { staging_id: 'b2', filename: 'notes.md', size: 2_048, duplicates: [], name: 'notes.md', error: 'an older refusal' },
+  ]
+  // `POST /api/documents/import` answers with the document row, without the listing's collection count.
+  const { collections: _count, ...IMPORTED } = DOC
+  const row = (name: string): ImportedDocument => ({ ...IMPORTED, name, status: 'queued' })
+  const cases: Array<{
+    name: string
+    results: PromiseSettledResult<ImportedDocument>[]
+    expected: { waiting: Array<[string, string | null]>; imported: string[] }
+  }> = [
+    {
+      name: 'every file imported empties the set',
+      results: [
+        { status: 'fulfilled', value: row('Area lights') },
+        { status: 'fulfilled', value: row('notes.md') },
+      ],
+      expected: { waiting: [], imported: ['Area lights', 'notes.md'] },
+    },
+    {
+      name: 'a refused file stays, with the reason, while the rest import',
+      results: [
+        { status: 'fulfilled', value: row('Area lights') },
+        { status: 'rejected', reason: new Error("a document named 'notes.md' already exists") },
+      ],
+      expected: { waiting: [['notes.md', "a document named 'notes.md' already exists"]], imported: ['Area lights'] },
+    },
+    {
+      name: 'every file refused keeps the whole set',
+      results: [
+        { status: 'rejected', reason: new Error('staging expired') },
+        { status: 'rejected', reason: 'offline' },
+      ],
+      expected: { waiting: [['Area lights', 'staging expired'], ['notes.md', 'offline']], imported: [] },
+    },
+  ]
+  for (const testCase of cases) {
+    test(testCase.name, () => {
+      const left = waitingAfter(waiting, waiting, testCase.results)
+      expect({ waiting: left.map((one) => [one.name, one.error]), imported: importedNames(testCase.results) }).toEqual(testCase.expected)
+    })
+  }
+  test('a file staged and a name edited while the imports ran are kept as they are now', () => {
+    const late: StagedFile = { staging_id: 'c3', filename: 'grinding.md', size: 512, duplicates: [], name: 'grinding.md', error: null }
+    const now = [{ ...waiting[1], name: 'Notes on brewing' }, late] // the first file left, the second renamed
+    const left = waitingAfter(now, waiting, [
+      { status: 'fulfilled', value: row('Area lights') },
+      { status: 'rejected', reason: new Error("a document named 'notes.md' already exists") },
+    ])
+    expect(left.map((one) => [one.name, one.error])).toEqual([
+      ['Notes on brewing', "a document named 'notes.md' already exists"],
+      ['grinding.md', null],
+    ])
+  })
+})
+
+describe('importLabel', () => {
+  const cases: Array<[string, number, string]> = [
+    ['one file is a plain Import', 1, 'Import'],
+    ['several say how many', 3, 'Import 3 documents'],
+  ]
+  for (const [name, count, expected] of cases) test(name, () => expect(importLabel(count)).toBe(expected))
 })

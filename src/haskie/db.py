@@ -76,22 +76,43 @@ BUSY_TIMEOUT_SECONDS = 30.0  # how long a writer waits for another writer before
 _migrate_lock = threading.Lock()  # both event loops get here through worker threads of their own
 
 
+def _refuse_other_schemas(version: int) -> None:
+    """A home stamped with a version other than this one's, or 0 for a fresh file, was written by
+    a build whose storage shape this one cannot read, and there is no path from it."""
+    if version not in (0, SCHEMA_VERSION):
+        raise HaskieError(INCOMPATIBLE_HOME_MESSAGE)
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     """Create the schema on a fresh file, and leave a file at `SCHEMA_VERSION` as it is.
 
-    A home stamped with anything else was written by a build whose storage shape this one cannot
-    read, and there is no path from it. It is refused with `user_version` untouched and the user is
-    told to destroy it, rather than losing its rows to a silent drop."""
+    Another schema is refused with `user_version` untouched and the user is told to destroy the
+    home, rather than losing its rows to a silent drop."""
     (version,) = conn.execute("pragma user_version").fetchone()
+    _refuse_other_schemas(version)
     if version == SCHEMA_VERSION:
         return
-    if version != 0:
-        raise HaskieError(INCOMPATIBLE_HOME_MESSAGE)
     conn.execute("pragma journal_mode = wal")  # persistent; needs an exclusive lock, so once
     conn.executescript(schema_ddl())
     conn.executescript(SEED.read_text(encoding="utf-8"))
     conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
     conn.commit()
+
+
+def check_schema() -> None:
+    """Refuse a home another schema wrote, reading only.
+
+    For the CLI before it starts a server: the server refuses the same home at startup, but as a
+    traceback in its log. Read-only, so it never races the migration of a server already starting.
+    """
+    if not home.DB_FILE.is_file():
+        return
+    conn = sqlite3.connect(f"{home.DB_FILE.as_uri()}?mode=ro", uri=True)
+    try:
+        (version,) = conn.execute("pragma user_version").fetchone()
+    finally:
+        conn.close()
+    _refuse_other_schemas(version)
 
 
 def _migrate_sync() -> None:

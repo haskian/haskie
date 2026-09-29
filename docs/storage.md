@@ -9,7 +9,7 @@ they sit in the fastembed and Hugging Face caches, outside the home.
   haskie.db               SQLite (WAL): settings, documents, collections, memberships,
                           embedding metadata, sessions, the search log, and the DBOS tables
   haskie.lock             the home lock, naming the process that holds it
-  server.log              output of a server that `haskie ensure` started
+  server.log              output of a server that `haskie run` started
   staging/                uploads not yet imported; the nightly run sweeps those over a day old
   documents/<sh>/<doc>/
     original.<ext>        the file as imported
