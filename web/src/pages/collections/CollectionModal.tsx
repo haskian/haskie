@@ -75,9 +75,13 @@ function CollectionBody({
       ),
     [name],
   )
-  // A document may be attached only once it is imported, so the other pane lists exactly those.
+  // A document may be attached only once it is imported, so the other pane lists exactly those,
+  // newest first: the one just imported is usually the one to add.
   const refreshImported = useCallback(
-    () => api.documents({ status: 'imported', page_size: MAX_PAGE_SIZE, sort: 'name' }).then((page) => setImported(page.items)),
+    () =>
+      api
+        .documents({ status: 'imported', page_size: MAX_PAGE_SIZE, sort: 'created_at', order: 'desc' })
+        .then((page) => setImported(page.items)),
     [],
   )
   // what a mutation re-reads: this collection, plus the gallery behind the modal
@@ -204,6 +208,20 @@ function CollectionBody({
                         {doc.name}
                         <span className="sub">{doc.description || 'No description'}</span>
                       </span>
+                      {doc.collections.length > 0 && (
+                        <span className="also-in" tabIndex={0}>
+                          <span className="tag">
+                            <span className="kind">also in</span>
+                            <span>{doc.collections.length}</span>
+                          </span>
+                          {/* flipped: the tag sits at the pane's right edge */}
+                          <span className="hint hint-below flip" role="tooltip">
+                            {doc.collections.map((collection) => (
+                              <span key={collection}>{collection}</span>
+                            ))}
+                          </span>
+                        </span>
+                      )}
                       <button
                         className="btn btn-ghost"
                         type="button"

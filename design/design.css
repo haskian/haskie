@@ -227,8 +227,10 @@ body:has(.modal[open]) { overflow: hidden; }
 .modal::before { content: ""; position: absolute; inset: -100px; z-index: -1; background-image: var(--modern-gradient); filter: blur(100px); } /* same layer as the page background */
 .modal::backdrop { background: var(--glass-dark); backdrop-filter: blur(6px); }
 .modal-body:focus { outline: none; } /* dialog focuses the body, not the close button, so no ring on open */
-.modal-body { height: 100%; display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: var(--sp-4); padding: var(--sp-6); }
-.modal-body > [role="tabpanel"] { min-height: 0; overflow: auto; padding-right: var(--sp-4); } /* room for an overlay scrollbar, which would otherwise sit on the tiles */
+.modal-body { height: 100%; display: flex; flex-direction: column; gap: var(--sp-4); padding: var(--sp-6); }
+/* any number of fixed rows (head, tabs, actions) above one region that takes the rest and scrolls: a tab panel, or .modal-scroll in a modal without tabs */
+.modal-body > * { flex: none; }
+.modal-body > [role="tabpanel"], .modal-body > .modal-scroll { flex: 1 1 0; min-height: 0; overflow: auto; padding-right: var(--sp-4); } /* room for an overlay scrollbar, which would otherwise sit on the tiles */
 .modal-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: var(--sp-3); }
 .modal-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--sp-4); }
 

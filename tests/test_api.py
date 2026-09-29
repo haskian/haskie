@@ -1364,11 +1364,16 @@ async def test_a_document_on_its_way_out_answers_no_search(
         )
 
 
-async def test_documents_are_listed_with_their_collection_counts(ready: AsyncTestClient) -> None:
-    """The gallery says how many collections hold each document; a member of none says 0."""
+async def test_documents_are_listed_with_their_collections(ready: AsyncTestClient) -> None:
+    """The gallery names the collections holding each document, by name; a member of none has
+    none."""
+    await ready.post("/api/collections", json={"name": "archive"})
+    await ready.post("/api/collections/archive/documents", json={"document": "guide.md"})
+    held = ["archive", "notes"]
     items = (await ready.get("/api/documents")).json()["items"]
-    assert {row["name"]: row["collections"] for row in items} == {"guide.md": 1, "pending.md": 0}
-    assert (await ready.get("/api/documents/guide.md")).json()["collections"] == 1
+    listed = {row["name"]: row["collections"] for row in items}
+    assert listed == {"guide.md": held, "pending.md": []}
+    assert (await ready.get("/api/documents/guide.md")).json()["collections"] == held
 
 
 async def test_session_history_holds_every_action_newest_first(

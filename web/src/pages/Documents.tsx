@@ -199,7 +199,7 @@ export function Documents({
                 name={doc.name}
                 sub={
                   <>
-                    <Library className="glyph" /> {doc.collections}
+                    <Library className="glyph" /> {doc.collections.length}
                     {doc.status !== "imported" && ` · ${doc.status}`}
                   </>
                 }
@@ -227,7 +227,7 @@ export function Documents({
         title="Add documents"
         subtitle="import"
       >
-        <div className="add-documents">
+        <div className="add-documents modal-scroll">
           <input
             type="file"
             multiple

@@ -1301,8 +1301,7 @@ export interface components {
             description: string;
             /** @default  */
             md5: string;
-            /** @default 0 */
-            collections: number;
+            collections?: string[];
         };
         /** LoggedQuestion */
         LoggedQuestion: {

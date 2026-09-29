@@ -18,7 +18,7 @@ const DOC: Document = {
   updated_at: 1_547_907_180,
   description: 'Notes on area lights and soft shadow falloff.',
   md5: '9e107d9d372bb6826bd81d3542a419d6',
-  collections: 2,
+  collections: ['lighting', 'rendering'],
 }
 
 const doc = (over: Partial<Document>): Document => ({ ...DOC, ...over })
@@ -175,8 +175,8 @@ describe('importing the staged set', () => {
     { staging_id: 'a1', filename: 'area-lights.pdf', size: 421_904, duplicates: [], name: 'Area lights', error: null },
     { staging_id: 'b2', filename: 'notes.md', size: 2_048, duplicates: [], name: 'notes.md', error: 'an older refusal' },
   ]
-  // `POST /api/documents/import` answers with the document row, without the listing's collection count.
-  const { collections: _count, ...IMPORTED } = DOC
+  // `POST /api/documents/import` answers with the document row, without the listing's collections.
+  const { collections: _held, ...IMPORTED } = DOC
   const row = (name: string): ImportedDocument => ({ ...IMPORTED, name, status: 'queued' })
   const cases: Array<{
     name: string
