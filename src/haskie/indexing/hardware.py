@@ -57,8 +57,8 @@ def nowhere(name: str) -> str:
     """Why `device` finds no device for model `name`, which only an MLX or GGUF model lacks."""
     extra = runtime(name).value
     return (
-        f"{name} runs on {extra} on the Apple GPU: it needs Apple Silicon, "
-        f"the `haskie[{extra}]` extra, and a hardware setting other than cpu"
+        f"{name} runs on {extra} on the Apple GPU: it needs Apple Silicon, where haskie installs "
+        f"{extra}, and a hardware setting other than cpu"
     )
 
 

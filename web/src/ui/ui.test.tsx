@@ -391,7 +391,7 @@ describe('ModelFacts', () => {
       element: <ModelFacts name="soichisumi/bge-reranker-v2-m3-mlx-affine8" metadata={RERANKER} />,
       contains: [
         '<dt>Parameters</dt><dd>568M</dd><dt>Context</dt><dd>8.2K tokens</dd>',
-        '<dt>Runtime</dt><dd>MLX (the mlx extra)</dd><dt>Devices</dt><dd>Apple Silicon</dd>',
+        '<dt>Runtime</dt><dd>MLX</dd><dt>Devices</dt><dd>Apple Silicon</dd>',
         'href="https://huggingface.co/BAAI/bge-reranker-v2-m3"',
       ],
       missing: ['Dimensions'],

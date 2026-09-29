@@ -95,7 +95,7 @@ def test_the_embedder_answers_as_fastembed_does(llama) -> None:
 def test_without_llama_cpp_the_model_says_what_it_needs(monkeypatch) -> None:
     monkeypatch.setattr(gguf_models, "available", lambda: False)
 
-    with pytest.raises(RuntimeError, match=r"the `haskie\[gguf\]` extra"):
+    with pytest.raises(RuntimeError, match="llama-cpp-python, which haskie installs there"):
         gguf_models.GgufEmbedder(BGE_SMALL)
 
 
@@ -121,7 +121,7 @@ def test_the_embed_path_routes_every_gguf_name_to_llama_cpp(monkeypatch) -> None
 
 
 @pytest.mark.network
-@pytest.mark.skipif(not gguf_models.available(), reason="the gguf extra is not installed")
+@pytest.mark.skipif(not gguf_models.available(), reason="llama.cpp is not installed here")
 def test_the_real_file_loads_fast_and_embeds_as_onnx_does() -> None:
     """bge-small in GGUF on Metal against the same model in ONNX on the CPU. The load is timed
     after the download: the 10 s bar is for the app waiting on a model it already has."""

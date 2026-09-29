@@ -6,8 +6,7 @@ set -euo pipefail
 # a `uv tool install` would put a second `haskie` on PATH over the system one.
 env_dir="$HOME/.local/share/haskie-dev"
 bin_dir="$HOME/.local/bin"
-# every extra, as the install guides do: each one's marker makes it a no-op where it cannot run
-UV_PROJECT_ENVIRONMENT="$env_dir" uv sync --frozen --no-dev --no-editable --all-extras
+UV_PROJECT_ENVIRONMENT="$env_dir" uv sync --frozen --no-dev --no-editable
 mkdir -p "$bin_dir"
 cat >"$bin_dir/haskie-dev" <<SCRIPT
 #!/bin/sh

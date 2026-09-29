@@ -64,7 +64,7 @@ PINS: dict[str, Pin] = {
 
 @functools.cache
 def available() -> bool:
-    """Whether llama.cpp is installed here. The `gguf` extra installs it on Apple Silicon only,
+    """Whether llama.cpp is installed here. haskie installs it on Apple Silicon only,
     where it builds with Metal, so installed means it runs on the GPU. A spec lookup, not an
     import: the import starts Metal, which the first time on a machine takes seconds."""
     return importlib.util.find_spec("llama_cpp") is not None
@@ -75,7 +75,7 @@ def _download(name: str) -> Path:
     if not available():
         raise RuntimeError(
             f"{name} runs on llama.cpp with Metal, which is not installed: it needs Apple Silicon "
-            "and the `haskie[gguf]` extra"
+            "and llama-cpp-python, which haskie installs there"
         )
     from huggingface_hub import hf_hub_download
 

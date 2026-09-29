@@ -88,7 +88,7 @@ def _download(name: str) -> Path:
     if not available():
         raise RuntimeError(
             f"{name} runs on MLX, which is not installed: it needs Apple Silicon and "
-            "the `haskie[mlx]` extra"
+            "mlx-embeddings, which haskie installs there"
         )
     from huggingface_hub import snapshot_download
 
