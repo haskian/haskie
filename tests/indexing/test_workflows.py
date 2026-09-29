@@ -2155,11 +2155,15 @@ async def test_index_collection_workflow_is_idempotent_on_replay(
     monkeypatch.setattr(workflows, "member_page", gated)
     job_id = await dbos.start_index_collection("b")
     assert await wait_event(entered), "the second page never started"
+    # A crash in this process leaves the old executor's threads running, where a real crash ends
+    # them. So nothing of it may write while the restart migrates the same file: the first page's
+    # indexes finish first, and the paused listing stays paused until the replay is done.
+    await await_terminal(await _member_workflows("b"))
     DBOS.destroy(workflow_completion_timeout_sec=0)  # crash, between two pages
-    release.set()
     await dbos.start()  # restart: same application_version, so recovery picks the workflow up
 
     assert await wait_for(job_id) == workflows.BulkResult(done=5)
+    release.set()  # the old executor's listing ends; its late result is refused as a duplicate
 
     queued = await _member_workflows("b")
     assert len(queued) == 5, "the replay re-attached instead of queueing the first page again"
