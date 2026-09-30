@@ -70,9 +70,9 @@ def around(hit_ranges: list[HitRange], min_chars: int, grow: int) -> set[ChunkKe
         first, last = hit_range.hits[0], hit_range.hits[-1]
         for step in range(1, grow + 1):
             if first.start_reason != CutReason.HEADING and first.seq - step >= 1:
-                wanted.add((first.collection, first.document, first.seq - step))
+                wanted.add((first.collection, first.document_id, first.seq - step))
             if not ends_section(last):
-                wanted.add((last.collection, last.document, last.seq + step))
+                wanted.add((last.collection, last.document_id, last.seq + step))
     return wanted
 
 
@@ -158,8 +158,8 @@ def _settled(hit_range: HitRange, offered: set[ChunkKey]) -> HitRange:
         return hit_range
     first, last = hit_range.hits[0], hit_range.hits[-1]
     beside = {
-        (first.collection, first.document, first.seq - 1),
-        (last.collection, last.document, last.seq + 1),
+        (first.collection, first.document_id, first.seq - 1),
+        (last.collection, last.document_id, last.seq + 1),
     }
     return msgspec.structs.replace(hit_range, owed=False, alone=not beside & offered)
 

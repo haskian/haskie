@@ -177,7 +177,10 @@ async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkey
         # a document name per collection: the merge keys on (document, seq), so one name
         # shared by all three would be one passage and this test would see a single hit
         await index.add_parts(
-            f"{name}.md", f"documents/{name}.md", f"documents/{name}.md.md", one_part(0, [row])
+            f"{name}.md",
+            f"documents/{name}.md",
+            f"documents/{name}.md.md",
+            one_part(0, [row]),
         )
         await index.finish()
     await session.set_collections("s", ["a", "b", "c"])

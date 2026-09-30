@@ -40,6 +40,7 @@ const noop = (): void => {}
 
 const HIT: Hit = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area.pdf',
   source_path: 'sources/area.pdf',
   markdown_path: 'markdown/area.md',
@@ -69,6 +70,7 @@ const HIT: Hit = {
 
 const SOURCE: Source = {
   collection: 'P–T',
+  document_id: 'a1',
   document: 'sun.pdf',
   score: 0.79,
   chunks: 6,
@@ -89,6 +91,7 @@ const SOURCE: Source = {
 
 const PASSAGE: Passage = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area.pdf',
   header: 'Lighting > Soft shadows',
   location: 'area.pdf p.2 L41-58',
@@ -112,6 +115,7 @@ const PASSAGE: Passage = {
 // A section of two passages: its heading path, and its lines from the first passage to the last.
 const EXCERPT: Excerpt = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area.pdf',
   header: 'Lighting',
   location: 'area.pdf p.2-3 L41-90',
@@ -699,6 +703,7 @@ describe('also_in', () => {
   // the same paragraph in a second book, folded into the result by the search
   const REFERENCE = {
     collection: 'A–E',
+    document_id: 'a1',
     document: 'lighting-notes.md',
     header: 'Shadows > Area lights',
     location: 'lighting-notes.md L12-14',
@@ -771,6 +776,7 @@ describe('also_in', () => {
                   {
                     ...REFERENCE,
                     seq: 8,
+                    document_id: 'a1',
                     document: 'notes.md',
                     header: 'Delivery',
                     location: 'notes.md L4-5',

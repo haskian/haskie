@@ -129,7 +129,7 @@ async def test_a_path_import_passes_on_a_failure_that_is_not_the_source(
 # A name `stored_name` accepts once cleaned, and the suffix the staging id must carry.
 STAGED_NAMES = [
     ("a plain name", "guide.md", ".md", "guide.md"),
-    ("an upper-case suffix", "Guide.MD", ".md", "Guide.MD"),
+    ("an upper-case name", "Guide.MD", ".md", "guide.md"),
     ("a trailing dot", "report.md.", ".md", "report.md"),
     ("an editor backup tilde", "notes.md~", ".md", "notes.md"),
 ]
@@ -232,7 +232,7 @@ async def test_a_pdf_preview_is_built_outside_the_interpreter(
 
     assert response.status_code == status, f"{name}: {response.text}"
     assert (cpu._pool is not None) == in_pool, name
-    built = await document.get(filename)
+    built = await document.named(filename)
     if media is None:
         assert response.json()["detail"].startswith("could not convert original.pdf: "), name
         assert built.preview is None, name
@@ -268,7 +268,7 @@ IN_THE_PIPELINE = tables.documents.c.status.in_(document.ACTIVE_DOCUMENT_STATUSE
             "salary.md",
             False,
         ),
-        ("an unknown document moves nothing", document.DocumentStatus.ERROR, (), "ghost.md", False),
+        ("an unknown document moves nothing", document.DocumentStatus.ERROR, (), "0" * 32, False),
     ],
 )
 async def test_set_status_moves_the_row_only_where_every_guard_holds(
@@ -281,11 +281,13 @@ async def test_set_status_moves_the_row_only_where_every_guard_holds(
 ) -> None:
     """It answers whether it moved the row, so a caller can tell a guarded write that lost."""
     doc = await document.import_path(str(_source(tmp_path / "private")))
-    await document.set_status(doc.name, start, "an earlier failure")
+    await document.set_status(doc.id, start, "an earlier failure")
 
-    answered = await document.set_status(target, document.DocumentStatus.CANCELLED, None, *guard)
+    # `target` names the document, or is an id no document has
+    target_id = doc.id if target == doc.name else target
+    answered = await document.set_status(target_id, document.DocumentStatus.CANCELLED, None, *guard)
 
-    row = await document.get(doc.name)
+    row = await document.named(doc.name)
     assert answered is moved, name
     expected = ("cancelled", None) if moved else (start, "an earlier failure")
     assert (row.status, row.error) == expected, name

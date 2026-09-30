@@ -3,7 +3,7 @@ by a canonical URN, plus the `embeddings` row that makes it visible.
 
 Chunking and embedding a document is the expensive part of indexing, and it depends on nothing a
 collection owns except its chunk settings. So it is computed once per distinct `Params` and kept
-with the document (`documents/<shard>/<doc>/embeddings/<id>.parquet`): a collection that attaches
+with the document (`documents/<shard>/<doc id>/embeddings/<id>.parquet`): a collection that attaches
 the document reads the rows back out of the cache into its own LanceDB table (`pipeline.index_*`)
 and computes nothing when the file already exists. The parquet file has one row group per
 convert part, in part order, so the index stage can stream it a group at a time.
@@ -32,7 +32,7 @@ pyarrow is sync.
 
 import hashlib
 import time
-from collections.abc import AsyncIterator, Collection
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import anyio
@@ -60,7 +60,7 @@ class Params(msgspec.Struct, frozen=True):
     """Everything the cached rows of one document depend on. Field order is the URN order, and
     the `embeddings` columns `Entry` inherits."""
 
-    document: str
+    document_id: str  # the document's id (`Document.id`)
     model: str  # EmbeddingModel.cache_name, or NO_MODEL
     chunk_size: int
     chunk_merge_below: int
@@ -90,7 +90,7 @@ def params(
 ) -> Params:
     """The key of one document under one collection's chunk settings and the global model."""
     return Params(
-        document=doc.name,
+        document_id=doc.id,
         model=embedding.cache_name if embedding else NO_MODEL,
         chunk_version=CHUNK_VERSION,
         parser=doc.parser,
@@ -101,7 +101,7 @@ def params(
 
 def urn(p: Params) -> str:
     """Canonical form: `name:value` per field in declaration order, so equal params always give
-    equal text. `document` is safe inside it because `document.safe_name` allows no `;` or `:`."""
+    equal text. `document_id` is safe inside it: an MD5 is hex."""
     return ";".join(
         f"{name}:{str(value).lower() if isinstance(value, bool) else value}"
         for name, value in msgspec.structs.asdict(p).items()
@@ -221,7 +221,7 @@ async def lookup(p: Params) -> str | None:
     id = key(p)
     async with db.read() as conn:
         found = await conn.scalar(select(embeddings.c.id).where(embeddings.c.id == id))
-    if found is None or not await anyio.Path(file_path(p.document, id)).is_file():
+    if found is None or not await anyio.Path(file_path(p.document_id, id)).is_file():
         return None
     return id
 
@@ -230,7 +230,7 @@ async def write(p: Params, parts: list[Path], dims: int | None) -> str:
     """Merge the scratch rows of every part into the cache file, publish the row, then drop the
     scratch directory - last, so a retry before the row was written still finds its input."""
     id = key(p)
-    target = file_path(p.document, id)
+    target = file_path(p.document_id, id)
     rows, size, vector = await anyio.to_thread.run_sync(_merge, parts, target, dims)
     entry = Entry(
         **msgspec.structs.asdict(p),
@@ -246,7 +246,7 @@ async def write(p: Params, parts: list[Path], dims: int | None) -> str:
             .values({**msgspec.to_builtins(entry), "vector": vector})
             .on_conflict_do_nothing()
         )
-    await home.remove_tree(scratch_dir(p.document, id))
+    await home.remove_tree(scratch_dir(p.document_id, id))
     return id
 
 
@@ -287,7 +287,7 @@ async def forget(doc: str) -> None:
     """Drop every cached embedding of one document, rows and files. For a reconversion: the
     markdown the rows were chunked from is about to change, so none of them is reusable."""
     async with db.connect() as conn:
-        await conn.execute(delete(embeddings).where(embeddings.c.document == doc))
+        await conn.execute(delete(embeddings).where(embeddings.c.document_id == doc))
     await home.remove_tree(document.embeddings_dir(doc))
 
 
@@ -296,7 +296,7 @@ async def entries(doc: str) -> list[Entry]:
     async with db.read() as conn:
         rows = await conn.execute(
             select(*ENTRY_COLUMNS)
-            .where(embeddings.c.document == doc)
+            .where(embeddings.c.document_id == doc)
             .order_by(embeddings.c.created_at.desc())
         )
         return [db.row_to(Entry, row) for row in rows]
@@ -310,18 +310,18 @@ class Neighbour(msgspec.Struct):
     similarity: float
 
 
-async def nearest(doc: str, model: str, limit: int, but: Collection[str] = ()) -> list[Neighbour]:
-    """The `limit` imported documents whose vector under `model` lies closest to `doc`'s, closest
-    first, `but` left out: the copies of the same file, which would only fill the slots at 1.0.
-    Empty while `doc` has no vector under it: still importing, or no embedding model.
+async def nearest(doc: str, model: str, limit: int) -> list[Neighbour]:
+    """The `limit` imported documents whose vector under `model` lies closest to that of `doc`
+    (an id), closest first, by name. Empty while `doc` has no vector under it: still importing,
+    or no embedding model.
 
     Each document is compared by its newest cache entry under the model: the entries of one
     document differ only in how it was chunked, which barely moves the mean. Every vector is read
     and compared in memory; a library of thousands of books is a few megabytes of them."""
     async with db.read() as conn:
         rows = await conn.execute(
-            select(embeddings.c.document, embeddings.c.vector)
-            .join_from(embeddings, documents, embeddings.c.document == documents.c.name)
+            select(embeddings.c.document_id, documents.c.name, embeddings.c.vector)
+            .join_from(embeddings, documents, embeddings.c.document_id == documents.c.id)
             .where(
                 embeddings.c.model == model,
                 embeddings.c.vector.is_not(None),
@@ -330,22 +330,24 @@ async def nearest(doc: str, model: str, limit: int, but: Collection[str] = ()) -
             .order_by(embeddings.c.created_at.desc())
         )
         vectors: dict[str, bytes] = {}
-        for name, vector in rows:
-            vectors.setdefault(name, vector)  # newest first, so the first one is kept
+        names: dict[str, str] = {}
+        for id, name, vector in rows:
+            vectors.setdefault(id, vector)  # newest first, so the first one is kept
+            names[id] = name
     target = vectors.pop(doc, None)
-    for name in but:
-        vectors.pop(name, None)
     if target is None or not vectors:
         return []
     # in a worker thread, like every other numpy and pyarrow call here: the matrix grows with
     # the library
-    return await anyio.to_thread.run_sync(_closest, vectors, target, limit)
+    found = await anyio.to_thread.run_sync(_closest, vectors, target, limit)
+    return [Neighbour(document=names[id], similarity=similarity) for id, similarity in found]
 
 
-def _closest(vectors: dict[str, bytes], target: bytes, limit: int) -> list[Neighbour]:
-    """The `limit` of `vectors` with the highest cosine to `target`; all are unit length."""
-    names = list(vectors)
-    matrix = np.frombuffer(b"".join(vectors.values()), dtype=np.float32).reshape(len(names), -1)
+def _closest(vectors: dict[str, bytes], target: bytes, limit: int) -> list[tuple[str, float]]:
+    """The `limit` of `vectors` (by document id) with the highest cosine to `target`, as (id,
+    cosine); all are unit length."""
+    ids = list(vectors)
+    matrix = np.frombuffer(b"".join(vectors.values()), dtype=np.float32).reshape(len(ids), -1)
     scores = matrix @ np.frombuffer(target, dtype=np.float32)
     closest = np.argsort(-scores, kind="stable")[:limit]
-    return [Neighbour(document=names[at], similarity=round(float(scores[at]), 4)) for at in closest]
+    return [(ids[at], round(float(scores[at]), 4)) for at in closest]

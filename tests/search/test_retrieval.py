@@ -43,6 +43,7 @@ def _hit(markdown: str, path: Path, snippet: str) -> Hit:
     line_end = markdown.count("\n", 0, char_end - 1) + 1
     return Hit(
         collection="backend",
+        document_id="doc.md",
         document="doc.md",
         source_path="documents/doc.md",
         markdown_path="documents/doc.md",
@@ -123,8 +124,20 @@ SCANNED = Scanned(
     vectors=[[1.0, 0.0], [0.6, 0.8], [0.0, 1.0]],
 )
 NEIGHBOURS = [
-    {"document": "doc.md", "seq": 7, "text": "idempotent retries", "vector": [0.8, 0.6]},
-    {"document": "doc.md", "seq": 8, "text": "unrelated", "vector": [0.0, 1.0]},
+    {
+        "document_id": "doc.md",
+        "document": "doc.md",
+        "seq": 7,
+        "text": "idempotent retries",
+        "vector": [0.8, 0.6],
+    },
+    {
+        "document_id": "doc.md",
+        "document": "doc.md",
+        "seq": 8,
+        "text": "unrelated",
+        "vector": [0.0, 1.0],
+    },
 ]
 
 
@@ -229,7 +242,7 @@ def test_reranker_scores_are_valued_around_the_scanned_hits_scores() -> None:
 WEIGHED = {
     ("backend", "doc.md", seq): (
         msgspec.structs.replace(SCANNED.hits[0], seq=seq, text=text),
-        {"document": "doc.md", "seq": seq, "text": text, "vector": vector},
+        {"document_id": "doc.md", "document": "doc.md", "seq": seq, "text": text, "vector": vector},
     )
     for seq, text, vector in [
         (1, "retries are idempotent", [1.0, 0.0]),
@@ -350,7 +363,15 @@ async def test_with_a_reranker_a_thin_range_grows_by_the_neighbours_it_scores(
 
     async def rows_at(where: Plan, wanted: set) -> dict:
         found = {
-            chunk_key(one): (one, {"document": one.document, "seq": one.seq, "text": one.text})
+            chunk_key(one): (
+                one,
+                {
+                    "document_id": one.document_id,
+                    "document": one.document,
+                    "seq": one.seq,
+                    "text": one.text,
+                },
+            )
             for one in near.values()
         }
         return {key: row for key, row in found.items() if key in wanted}
@@ -387,7 +408,15 @@ async def test_each_collections_neighbour_keeps_its_own_reranker_score(
 
     async def rows_at(where: Plan, wanted: set) -> dict:
         return {
-            chunk_key(one): (one, {"document": one.document, "seq": 3, "text": one.text})
+            chunk_key(one): (
+                one,
+                {
+                    "document_id": one.document_id,
+                    "document": one.document,
+                    "seq": 3,
+                    "text": one.text,
+                },
+            )
             for one in near.values()
         }
 
@@ -482,6 +511,7 @@ def _excerpt(text: str, score: float, aspects: list[str] | None = None) -> Excer
     """An excerpt as `quote` makes it; only its text, score and questions matter here."""
     return Excerpt(
         collection="backend",
+        document_id="a.md",
         document="a.md",
         header="Retries",
         location="a.md L1-1",
@@ -645,4 +675,4 @@ def test_the_budget_cuts_the_last_sections_first() -> None:
 
     kept = retrieval.budget(groups, where)
 
-    assert [one.document for one in kept] == ["a.md", "b.md"]
+    assert [one.document_id for one in kept] == ["a.md", "b.md"]

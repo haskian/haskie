@@ -82,6 +82,7 @@ def test_invalid_input_is_also_a_value_error() -> None:
 # --- the home layout ---------------------------------------------------------------
 
 DOC = "guide.md"
+DOC_ID = "0" * 32  # an MD5: what a document's folder is named after
 
 
 def test_shard_hashes_the_utf8_bytes_of_the_name() -> None:
@@ -106,10 +107,10 @@ def test_shard_spreads_names_over_the_whole_byte() -> None:
 def test_every_document_path_sits_under_the_same_shard() -> None:
     """A document owns one folder: the upload, the markdown, the parts, the preview and the
     embedding cache are all inside it, so one `remove_tree` deletes everything it owns."""
-    doc = Document(name=DOC, suffix=".md", size=1, status=DocumentStatus.IMPORTED)
-    root = home.DOCUMENT_ROOT / home.shard(DOC) / DOC
+    doc = Document(id=DOC_ID, name=DOC, suffix=".md", size=1, status=DocumentStatus.IMPORTED)
+    root = home.DOCUMENT_ROOT / home.shard(DOC_ID) / DOC_ID
 
-    assert document.root(DOC) == root
+    assert document.root(DOC_ID) == root
     assert doc.root == root
     assert doc.original == root / "original.md"
     assert doc.markdown == root / "original.md.md"
@@ -117,12 +118,12 @@ def test_every_document_path_sits_under_the_same_shard() -> None:
     assert doc.preview_dir == root / "preview"
     assert doc.embeddings_dir == root / "embeddings"
     assert doc.part_path(7) == doc.parts_dir / "000007.md"
-    assert embed_cache.file_path(DOC, "abc").parent == doc.embeddings_dir
+    assert embed_cache.file_path(DOC_ID, "abc").parent == doc.embeddings_dir
     assert {path.parent.parent for path in (doc.original, doc.markdown)} == {root.parent}
 
 
 def test_part_numbers_are_wide_enough_for_a_long_document() -> None:
-    doc = Document(name=DOC, suffix=".md", size=1, status=DocumentStatus.IMPORTED)
+    doc = Document(id=DOC_ID, name=DOC, suffix=".md", size=1, status=DocumentStatus.IMPORTED)
 
     assert home.PART_DIGITS == 6, "four digits would cap a document at ten thousand parts"
     assert doc.part_path(0).name == "000000.md"
@@ -147,9 +148,9 @@ async def test_a_document_lands_in_its_shard_and_is_removed_from_it(tmp_path) ->
 
     assert doc.original.read_text() == "# A\n"
     assert doc.source_path() == doc.original
-    assert [p.name for p in home.DOCUMENT_ROOT.iterdir()] == [home.shard(DOC)]
+    assert [p.name for p in home.DOCUMENT_ROOT.iterdir()] == [home.shard(doc.id)]
 
-    await document.remove_files(doc.name)
+    await document.remove_files(doc.id)
 
     assert not doc.root.exists(), "the whole folder goes, not only the upload"
 
@@ -1368,14 +1369,16 @@ WIRE_CHUNK = Chunk(
         ),
         (
             "documents row: the status column",
-            Document("guide.md", ".md", 29, DocumentStatus.IMPORTED, parser=Parser.PLAIN),
+            Document("0" * 32, "guide.md", ".md", 29, DocumentStatus.IMPORTED, parser=Parser.PLAIN),
             ["status"],
             "imported",
         ),
         (
             "embeddings row: the parser column",
             embed_cache.params(
-                Document("guide.md", ".md", 29, DocumentStatus.IMPORTED, parser=Parser.PLAIN),
+                Document(
+                    "0" * 32, "guide.md", ".md", 29, DocumentStatus.IMPORTED, parser=Parser.PLAIN
+                ),
                 ChunkSettings(chunker=Chunker.TEXT),
                 None,
             ),

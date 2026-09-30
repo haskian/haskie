@@ -168,7 +168,7 @@ def fills(at: int, one: Group, candidates: dict[ChunkKey, Candidate], reach: int
     found: list[Fill] = []
     for before, after in zip(spans, spans[1:], strict=False):
         keys = [
-            (one.collection, one.document, seq)
+            (one.collection, one.document_id, seq)
             for seq in range(before.seq_end + 1, after.seq_start)
         ]
         if keys and all(key in candidates for key in keys):
@@ -202,7 +202,7 @@ def _outward(
     found: list[Candidate] = []
     current = edge
     for _ in range(reach):
-        chunk = candidates.get((current.collection, current.document, current.seq + step))
+        chunk = candidates.get((current.collection, current.document_id, current.seq + step))
         if chunk is None or not continues(
             *((chunk.hit, current) if step < 0 else (current, chunk.hit))
         ):

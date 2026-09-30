@@ -83,6 +83,9 @@ class Plan(msgspec.Struct):
     embedding: EmbeddingModel | None  # the model every index of the search embeds with
     # how the reranker's scores read, when one is on (`catalogue.calibration`)
     calibration: RerankerCalibration | None = None
+    # the documents' names by id, filled as its reads meet them (`gather_rows`); one map shared
+    # by every plan of a search
+    document_names: dict[str, str] = msgspec.field(default_factory=dict)
 
     @property
     def rerank_floor(self) -> float:
@@ -126,6 +129,7 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
         await models.require_ready(models.ModelKind.RERANKER, settings.reranker_model)
         calibrated = await catalogue.calibration(settings.reranker_model)
     await asyncio.gather(*(index.open() for index, _ in indexes))
+    document_names: dict[str, str] = {}
     return [
         Plan(
             settings=settings,
@@ -133,6 +137,7 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
             vector=vector,
             embedding=embedding,
             calibration=calibrated,
+            document_names=document_names,
         )
         for vector in vectors
     ]
@@ -189,10 +194,10 @@ async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True
             _log.exception("session_collection_search_failed", collection=index.collection)
             raise
 
-    retrieved = await gather_rows([index for index, _ in where.indexes], read)
+    retrieved = await gather_rows([index for index, _ in where.indexes], read, where.document_names)
     pool = Pool(rows={}, rankings={index.collection: [] for index, _ in retrieved})
     for index, row in first_per_span((i, r) for i, rows in retrieved for r in rows):
-        key = (index.collection, row["document"], row["seq"])
+        key = (index.collection, row["document_id"], row["seq"])
         pool.rows[key] = (index, row)
         pool.rankings[index.collection].append(key)
     return pool
@@ -392,7 +397,9 @@ async def _per_collection[T](
     """`read` over each collection of the search that `wanted` names, with what it names there,
     all at once (`gather_rows`)."""
     indexes = [index for index, _ in where.indexes if index.collection in wanted]
-    return await gather_rows(indexes, lambda index: read(index, wanted[index.collection]))
+    return await gather_rows(
+        indexes, lambda index: read(index, wanted[index.collection]), where.document_names
+    )
 
 
 def _valued(scores: list[float], reference: list[float]) -> list[float]:
@@ -596,7 +603,8 @@ async def fill(
     # each group's own: sections of one document can nest, and a chunk near two groups is a
     # candidate of each, for the one whose passage it continues
     nears = [
-        {(one.collection, one.document, seq) for seq in filling.near(one, reach)} for one in groups
+        {(one.collection, one.document_id, seq) for seq in filling.near(one, reach)}
+        for one in groups
     ]
     wanted = set().union(*nears, (chunk_key(hit) for one in groups for hit in one.hits))
     rows = await _rows_at(where, wanted)
@@ -912,7 +920,7 @@ async def shortlist(
     # the shortlist is cut first: only a document that made it is worth a membership and a
     # description, and both are one query for the whole of it
     kept = passage.top_documents(hits, limit, how)
-    docs = {group[0].document for group in kept}
+    docs = {group[0].document_id for group in kept}
     held, described = await asyncio.gather(
         Collection.holding(docs, where.names), document.descriptions_of(docs)
     )

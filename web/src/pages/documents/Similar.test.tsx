@@ -2,11 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { Similar } from '../../api'
-import { Duplicates, SimilarDocuments } from './Similar'
+import { Duplicate, SimilarDocuments } from './Similar'
 
 // What `GET /api/documents/{name}/similar` answers for a second edition imported beside the first.
+// The same file is never two documents, so there is no copy to list.
 const SIMILAR: Similar = {
-  identical: ['ddd-copy.pdf', 'ddd.pdf'],
   nearest: [
     { document: 'ddd.pdf', similarity: 1 },
     { document: 'implementing-ddd.epub', similarity: 0.8731 },
@@ -15,24 +15,24 @@ const SIMILAR: Similar = {
 
 const cases: Array<{ name: string; element: ReactElement; contains: string[]; missing?: string[] }> = [
   {
-    name: 'the same file under other names, each a link, then the nearest with their similarity',
+    name: 'the nearest, each a link with its similarity, and no notice',
     element: <SimilarDocuments similar={SIMILAR} />,
+    missing: ['notice'],
     contains: [
-      '<p class="notice">The same file is already imported as <a href="#/documents/ddd-copy.pdf">ddd-copy.pdf</a>, <a href="#/documents/ddd.pdf">ddd.pdf</a>.</p>',
       '<a href="#/documents/implementing-ddd.epub">implementing-ddd.epub</a><span class="sub">similarity 0.87</span>',
       '<span class="sub">similarity 1.00</span>',
     ],
   },
   {
-    name: 'no copy and nothing embedded to compare with: says so, and no notice',
-    element: <SimilarDocuments similar={{ identical: [], nearest: [] }} />,
+    name: 'nothing embedded to compare with: says so',
+    element: <SimilarDocuments similar={{ nearest: [] }} />,
     contains: ['<p class="muted">Nothing to compare with'],
     missing: ['notice', '<ul'],
   },
   {
-    name: 'at staging, the copy comes with the advice not to import it',
-    element: <Duplicates names={['ddd.pdf']} advice="Importing it again only adds a copy." />,
-    contains: ['<a href="#/documents/ddd.pdf">ddd.pdf</a>. Importing it again only adds a copy.</p>'],
+    name: 'at staging, the same file names the document it already is, and is not imported',
+    element: <Duplicate name="ddd.pdf" />,
+    contains: ['<a href="#/documents/ddd.pdf">ddd.pdf</a>. It is not imported again.</p>'],
   },
 ]
 

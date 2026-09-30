@@ -18,7 +18,7 @@ import pytest
 from conftest import one_part
 
 from haskie.catalogue.catalogue import EmbeddingModel
-from haskie.collection.index import ChunkKey, CollectionIndex, Hit, Row, chunk_key
+from haskie.collection.index import ChunkKey, CollectionIndex, Hit, Row, chunk_key, gather_rows
 from haskie.indexing.chunk import split
 from haskie.search import probe, retrieval, section
 from haskie.search.collapse import Vector
@@ -53,7 +53,9 @@ async def _index(tmp_path: Path, vectors: dict[int, list[float]]) -> tuple[Plan,
     ], "the fixture the docstring names"
     rows = [Row(chunk=one, vector=vectors[seq], seq=seq) for seq, one in enumerate(chunks, 1)]
     await index.add_parts(DOC, f"documents/{DOC}", f"documents/{DOC}.md", one_part(0, rows))
-    stored = await index.rows_at([(DOC, seq) for seq in vectors], vectors=True)
+    ((_, stored),) = await gather_rows(
+        [index], lambda one: one.rows_at([(DOC, seq) for seq in vectors], vectors=True)
+    )
     hits = {row["seq"]: index.hit(row, 1.0) for row in stored}
     settings = SearchSettings(max_passage_grow=2)
     where = Plan(settings=settings, indexes=[(index, settings)], vector=ON, embedding=model)

@@ -198,7 +198,7 @@ async def embed_batch(
         return [Row(chunk=c, vector=v) for c, v in zip(chunks, vectors, strict=True)]
 
     rows = await cpu.on_cpu(chunk_and_embed)
-    target = embed_cache.rows_path(doc.name, cache_id, batch.seq)
+    target = embed_cache.rows_path(doc.id, cache_id, batch.seq)
     await anyio.Path(target.parent).mkdir(parents=True, exist_ok=True)
     await home.atomic_write(target, msgspec.json.encode(rows))
     return len(rows)
@@ -213,7 +213,7 @@ async def finalize_embed(
     leaves no partial cache file behind (see `embed_cache._merge`)."""
     cache_id = embed_cache.key(params)
     count = len(await _parts(doc))
-    paths = [embed_cache.rows_path(doc.name, cache_id, part) for part in range(count)]
+    paths = [embed_cache.rows_path(doc.id, cache_id, part) for part in range(count)]
     return await embed_cache.write(params, paths, embedding.dims if embedding else None)
 
 
@@ -224,7 +224,7 @@ async def plan_index(doc: Document, cache_id: str, group_parts: int) -> list[Bat
     """One batch per group of at most `group_parts` consecutive parts of the cache file. A group
     is one LanceDB commit, so the fragment count of a collection follows documents rather than
     pages."""
-    count = await embed_cache.row_groups(doc.name, cache_id)
+    count = await embed_cache.row_groups(doc.id, cache_id)
     return [
         Batch(seq=seq, start=start, end=min(start + group_parts, count))
         for seq, start in enumerate(range(0, count, group_parts))
@@ -239,7 +239,7 @@ async def prepare_index(
     there (a previous attach, possibly under other chunk settings)."""
     index = collection.index_with(embedding)
     await index.reset_for_write()
-    await index.delete_document(doc.name)
+    await index.delete_document(doc.id)
 
 
 async def index_batch(
@@ -255,12 +255,12 @@ async def index_batch(
 
     The document's older rows are gone before the first batch runs (see `prepare_index`)."""
     index = collection.index_with(embedding)
-    await index.delete_parts(doc.name, batch.start, batch.end)
+    await index.delete_parts(doc.id, batch.start, batch.end)
     return await index.add_parts(
-        doc.name,
+        doc.id,
         doc.relative(doc.source_path()),
         doc.relative(doc.markdown),
-        embed_cache.read(doc.name, cache_id, batch.start, batch.end),
+        embed_cache.read(doc.id, cache_id, batch.start, batch.end),
     )
 
 

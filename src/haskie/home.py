@@ -4,7 +4,8 @@ shares.
 `~/.haskie/documents/` and `~/.haskie/collections/` each hold one folder per entry. Ten thousand
 documents would make ten thousand entries in one directory, which every lookup and every listing
 pays for, so both roots insert a shard directory (`shard`) between them and the entry: an entry
-lives at `<root>/<shard>/<name>/`, and a root spreads over 256 directories.
+lives at `<root>/<shard>/<key>/`, and a root spreads over 256 directories. A document's key is
+its id, a collection's its name.
 
 A filesystem call blocks, so every async function here runs its work in a worker thread. The sync
 ones (`atomic_replace`, `atomic_write_sync`) are for code that already runs in one:

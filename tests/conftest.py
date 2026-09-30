@@ -534,8 +534,29 @@ async def import_row(name: str, content: bytes | str = MD, into: Path | None = N
 
     source = (into or home.HOME / "incoming") / name
     source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_bytes(content.encode() if isinstance(content, str) else content)
+    source.write_bytes(await unique(content.encode() if isinstance(content, str) else content))
     return await document.import_path(str(source), document.ImportOptions(**options))
+
+
+async def unique(body: bytes) -> bytes:
+    """`body`, with blank lines added at its end until no document already is these bytes: the
+    bytes are a document's id, and many tests import one sample under several names. A markdown
+    body reads the same with them; a test of the same file imported twice writes its bytes
+    itself."""
+    import hashlib
+
+    from haskie.document import document
+
+    while await document.identical(hashlib.md5(body, usedforsecurity=False).hexdigest()):
+        body += b"\n"
+    return body
+
+
+async def id_of(name: str) -> str:
+    """The id of the document called `name`: what the functions under the API take."""
+    from haskie.document import document
+
+    return await document.id_of(name)
 
 
 def hit(
@@ -554,6 +575,7 @@ def hit(
     line = char_start // 80 + 1
     return Hit(
         collection=collection,
+        document_id=document,
         document=document,
         source_path=f"documents/{document}",
         markdown_path=f"documents/{document}.md",
@@ -592,6 +614,7 @@ def chunk_hit(
 
     return Hit(
         collection=collection,
+        document_id=document,
         document=document,
         source_path=f"documents/{document}",
         markdown_path=f"documents/{document}.md",
@@ -642,7 +665,11 @@ async def index_hits(
 ) -> list["Hit"]:
     """What one bare index retrieves for `query` by full text, as a search's `retrieve` step reads
     it (`search_rows`), cut to `settings.limit`: no embedding, no reranker, no fold."""
-    rows = await index.search_rows(query, None, settings, settings.limit)
+    from haskie.collection.index import gather_rows
+
+    ((_, rows),) = await gather_rows(
+        [index], lambda one: one.search_rows(query, None, settings, settings.limit)
+    )
     return [index.hit(row) for row in rows]
 
 
@@ -704,11 +731,11 @@ async def seed_chunks(collection: str, doc: str, chunks: "list[Chunk]") -> None:
     from haskie.collection.index import Row
     from haskie.document import document
 
-    row = await document.get(doc)
+    row = await document.named(doc)
     rows = [Row(chunk=chunk, seq=seq) for seq, chunk in enumerate(chunks, start=1)]
     index = Collection(collection).index_with(None)
     await index.add_parts(
-        doc, row.relative(row.original), row.relative(row.markdown), one_part(0, rows)
+        row.id, row.relative(row.original), row.relative(row.markdown), one_part(0, rows)
     )
     await index.finish()  # the full-text index the search reads
 
@@ -733,19 +760,24 @@ async def import_document(dbos, name: str, content: bytes | str, tmp_dir: Path):
     from haskie.document import document
 
     row = await import_row(name, content, tmp_dir)
-    assert await wait_for(await dbos.start_import(row.name)) == "imported"
-    return await document.get(row.name)
+    assert await wait_for(await dbos.start_import(row)) == "imported"
+    return await document.get(row.id)
 
 
 async def attach_document(dbos, collection: str, doc: str) -> None:
     """Attach one imported document to a collection and wait for its index."""
-    assert await wait_for(await dbos.attach(collection, doc)) == "indexed"
+    from haskie.document import document
+
+    member = await document.named(doc)
+    assert await wait_for(await dbos.attach(collection, member.id)) == "indexed"
 
 
 async def delete_document(dbos, doc: str) -> None:
     """Delete one document and wait for the job: the app only ever starts it and polls the
     progress, so waiting for the result is a test's business, not the runtime's."""
-    await wait_for(await dbos.start_delete_document(doc))
+    from haskie.document import document
+
+    await wait_for(await dbos.start_delete_document(await document.named(doc)))
 
 
 async def delete_collection(dbos, collection: str) -> None:
@@ -879,7 +911,7 @@ async def stage_and_import(client, name: str, body: bytes, wait: bool = True, **
     The import names the document: staging keeps the bytes under an id of its own, so the caller
     passes back the `filename` the staging call returned (or a name of its choosing)."""
     staged = await client.post(
-        "/api/documents/staging", files={"data": (name, body, "text/markdown")}
+        "/api/documents/staging", files={"data": (name, await unique(body), "text/markdown")}
     )
     assert staged.status_code == 201, staged.text
     started = await client.post(

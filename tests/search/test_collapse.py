@@ -665,7 +665,7 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
     # each document one section of one chunk, as `CollectionIndex.outline_rows` reads it
     rows = [
         {
-            "document": one.document,
+            "document_id": one.document_id,
             "seq": one.seq,
             "headings": one.headings,
             "char_start": one.char_start,
@@ -677,7 +677,7 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
         [(one.collection, row) for one, row in zip(scanned, rows, strict=True)]
     )
     grouped = section.group(kept, outlines, max_chars=10_000, limit=len(kept) + 1)
-    assert [one.document for one in grouped] == excerpts, f"{name}: the excerpts answered with"
+    assert [one.document_id for one in grouped] == excerpts, f"{name}: the excerpts answered with"
 
 
 # --- the space ------------------------------------------------------------------------

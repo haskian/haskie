@@ -1,5 +1,5 @@
 import { Minus, Plus, RefreshCw, Trash2 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   api,
   MAX_PAGE_SIZE,
@@ -15,7 +15,7 @@ import { useOperation } from '../../hooks/useOperation'
 import { useOptions } from '../../hooks/useOptions'
 import { usePoll } from '../../hooks/usePoll'
 import { useRun } from '../../hooks/useRun'
-import { DescriptionBox, documentIcon, Kv, Modal, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
+import { DescriptionBox, documentIcon, Kv, Modal, RenameForm, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
 import { candidateDocuments } from './candidates'
 import { SettingsForm } from './SettingsForm'
 
@@ -62,7 +62,6 @@ function CollectionBody({
   const [options, setOptions] = useState<Options | null>(null)
   const [tab, setTab] = useState<string>(TABS[0].id)
   const [filter, setFilter] = useState('')
-  const [draftName, setDraftName] = useState(name)
 
   // what background work moves: the counts in the header, and how far each member got
   const refreshInfo = useCallback(
@@ -126,11 +125,10 @@ function CollectionBody({
 
   // Not through `run`: its re-read would ask for the old name. The route moves to the new one,
   // and the modal remounts there.
-  const rename = (event: FormEvent): void => {
-    event.preventDefault()
+  const rename = (to: string): void => {
     setError(null)
     api
-      .renameCollection(name, draftName.trim())
+      .renameCollection(name, to)
       .then(async (renamed) => {
         await onChanged()
         onRenamed(renamed.name)
@@ -265,13 +263,7 @@ function CollectionBody({
       </div>
 
       <div id={TABS[3].id} role="tabpanel" className="modal-panel collection-panel" hidden={tab !== TABS[3].id}>
-        {/* A form, so Enter renames the way the browser already does it. */}
-        <form className="input-group" onSubmit={rename}>
-          <input className="input" aria-label="Collection name" value={draftName} onChange={(event) => setDraftName(event.target.value)} />
-          <button className="btn" type="submit" disabled={bulk.running || draftName.trim() === '' || draftName.trim() === name}>
-            Rename
-          </button>
-        </form>
+        <RenameForm key={name} name={name} label="Collection name" busy={bulk.running} onRename={rename} />
         <div className="split">
           <section className="pane">
             <span className="pane-head mono muted">Details</span>

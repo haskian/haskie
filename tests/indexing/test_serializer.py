@@ -22,6 +22,7 @@ from haskie.indexing.workflows import Context, Stage
 from haskie.settings import ChunkSettings, Parser, PipelineSettings
 
 DOCUMENT = Document(
+    id="0" * 32,
     name="patterns.pdf",
     suffix=".pdf",
     size=48_213,

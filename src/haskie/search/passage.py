@@ -69,7 +69,8 @@ class PassageReference(msgspec.Struct):
     `HitReference` is."""
 
     collection: str
-    document: str
+    document_id: str
+    document: str  # its name, what it is cited by
     seq_start: int  # the chunks it covers, 1-based within the document
     seq_end: int
     header: str
@@ -144,9 +145,9 @@ def continues(before: Hit, after: Hit) -> bool:
     """Whether `after` is the next chunk of the same table's same document, in the same section:
     what may join `before` in one passage. A passage never crosses a heading: the two would be
     read as one quote of two topics, with the heading line in the middle."""
-    return (after.collection, after.document, after.seq) == (
+    return (after.collection, after.document_id, after.seq) == (
         before.collection,
-        before.document,
+        before.document_id,
         before.seq + 1,
     ) and not ends_section(before)
 
@@ -168,7 +169,7 @@ def ranges(hits: list[Hit], how: ScoreFold) -> list[HitRange]:
     # for it.
     found: list[HitRange] = []
     run: list[Hit] = []
-    for hit in sorted(hits, key=lambda hit: (hit.collection, hit.document, hit.seq)):
+    for hit in sorted(hits, key=lambda hit: (hit.collection, hit.document_id, hit.seq)):
         if run and not continues(run[-1], hit):
             found.append(_range(run, how))
             run = []
@@ -280,7 +281,8 @@ class Passage(Span, kw_only=True):
     """One span of a document with its text: what the `passage` granularity answers with."""
 
     collection: str  # the collection whose table matched; the document itself belongs to none
-    document: str
+    document_id: str
+    document: str  # its name, what it is cited by
     text: str
     source_file: str  # absolute, for a tool outside the app
     markdown_file: str
@@ -298,7 +300,8 @@ class Excerpt(msgspec.Struct):
     """
 
     collection: str  # the collection whose table matched; the document itself belongs to none
-    document: str
+    document_id: str
+    document: str  # its name, what it is cited by
     header: str  # the section's heading path, "Part I > Chapter 2"; empty for a whole document
     location: str  # "doc p.3-4 L10-20", from the first passage to the last
     seq_start: int
@@ -368,6 +371,7 @@ def quote(hit_range: HitRange, text: str) -> Passage:
     return Passage(
         **_cited(hit_range),
         collection=best.collection,
+        document_id=best.document_id,
         document=best.document,
         # the offsets and lines describe the source; the text a reader gets has no page markers,
         # as a chunk's has none (`convert.without_markers`)
@@ -402,7 +406,8 @@ class Source(msgspec.Struct):
     """
 
     collection: str  # the collection whose table held the best chunk; the document belongs to none
-    document: str
+    document_id: str
+    document: str  # its name, what it is cited by
     score: float
     chunks: int
     description: str
@@ -441,7 +446,7 @@ def top_documents(hits: list[Hit], limit: int, how: ScoreFold) -> list[list[Hit]
     """
     by_doc: dict[str, list[Hit]] = {}
     for hit in hits:
-        by_doc.setdefault(hit.document, []).append(hit)
+        by_doc.setdefault(hit.document_id, []).append(hit)
     ranked = sorted(
         by_doc.values(), key=lambda group: (-_document_score(group, how), group[0].document)
     )
@@ -469,6 +474,7 @@ def _source(
     best = hits[0]
     return Source(
         collection=best.collection,
+        document_id=best.document_id,
         document=best.document,
         score=_document_score(hits, how),
         chunks=len(hits),
@@ -481,7 +487,7 @@ def _source(
         line_start=best.line_start,
         line_end=best.line_end,
         # a document whose memberships were not looked up is credited to the table that matched it
-        collections=memberships.get(best.document, [best.collection]),
+        collections=memberships.get(best.document_id, [best.collection]),
         sections=_sections(hits, sections, how),
     )
 

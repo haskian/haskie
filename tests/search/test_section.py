@@ -73,7 +73,9 @@ def _hit(seq: int, score: float = 1.0) -> Hit:
 def _range(
     seq: int, score: float = 1.0, aspects: list[str] | None = None, doc: str = DOC
 ) -> HitRange:
-    (found,) = ranges([msgspec.structs.replace(_hit(seq, score), document=doc)], how=HARMONIC)
+    (found,) = ranges(
+        [msgspec.structs.replace(_hit(seq, score), document_id=doc, document=doc)], how=HARMONIC
+    )
     return msgspec.structs.replace(found, aspects=aspects or [])
 
 
@@ -97,10 +99,11 @@ def test_the_fixture_is_the_outline_the_docstring_names() -> None:
 
 
 def test_outlines_are_read_per_document_and_ordered_by_seq() -> None:
+    span = {"document_id": DOC}
     rows = [
-        ("notes", {"document": DOC, "seq": 2, "headings": ["A"], "char_start": 5, "char_end": 9}),
-        ("notes", {"document": DOC, "seq": 1, "headings": None, "char_start": 0, "char_end": 4}),
-        ("other", {"document": DOC, "seq": 1, "headings": ["B"], "char_start": 0, "char_end": 3}),
+        ("notes", span | {"seq": 2, "headings": ["A"], "char_start": 5, "char_end": 9}),
+        ("notes", span | {"seq": 1, "headings": None, "char_start": 0, "char_end": 4}),
+        ("other", span | {"seq": 1, "headings": ["B"], "char_start": 0, "char_end": 3}),
     ]
 
     found = section.outlines(rows)
@@ -222,7 +225,7 @@ def test_the_documents_read_hold_the_sections_a_short_range_opens() -> None:
 
     groups = section.group(found, outlines, 1000, 2)
 
-    assert [(one.document, one.section.path) for one in groups] == [
+    assert [(one.document_id, one.section.path) for one in groups] == [
         (DOC, STORAGE),
         ("b.md", SEARCH),
     ]
