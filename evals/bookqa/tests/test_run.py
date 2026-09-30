@@ -20,16 +20,31 @@ from evals.bookqa.metrics import Outcome
 from evals.bookqa.tests import books
 
 ROOT = Path(__file__).resolve().parents[3]
+FTS = {"fts": run.MODES["fts"]}
+BGE = "BAAI/bge-reranker-base"
+MXBAI = "mixedbread-ai/mxbai-rerank-xsmall-v1"
 
 
 class Haskie:
-    """The search API's shape, as much as `run.py` touches: a PUT per mode, a GET per question."""
+    """The search API's shape, as much as `run.py` touches: a PUT per mode, a GET per question,
+    and the status of the models, where `rerankers` lists the states each reranker goes through
+    one poll at a time (its last state stays)."""
 
     def __init__(self, answers: dict[str, list[dict]]) -> None:
         self.answers = answers
+        self.rerankers: dict[str, list[str]] = {}
         self.overrides: list[tuple[str, dict]] = []
         self.searches: list[dict[str, str]] = []
         self.bodies: dict[str, bytes] = {}
+        self.events: list[str] = []  # "put", "status" and "search", in the order they came
+
+    def status(self) -> dict:
+        models = []
+        for name, states in self.rerankers.items():
+            state = states.pop(0) if len(states) > 1 else states[0]
+            error = "no such file" if state == "error" else None
+            models.append({"kind": "reranker", "name": name, "state": state, "error": error})
+        return {"models": models}
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
         haskie = self
@@ -37,8 +52,13 @@ class Haskie:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 url = urllib.parse.urlparse(self.path)
+                if url.path == "/api/status":
+                    haskie.events.append("status")
+                    self._send(json.dumps(haskie.status()).encode())
+                    return
                 assert url.path == "/api/search/explore", url.path
                 params = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
+                haskie.events.append("search")
                 haskie.searches.append(params)
                 body = json.dumps(haskie.answers.get(params["q"], [])).encode()
                 haskie.bodies[params["q"]] = body
@@ -46,6 +66,7 @@ class Haskie:
 
             def do_PUT(self) -> None:
                 length = int(self.headers["content-length"])
+                haskie.events.append("put")
                 haskie.overrides.append((self.path, json.loads(self.rfile.read(length))))
                 self._send(b"{}")
 
@@ -91,7 +112,9 @@ def test_every_question_is_searched_once_per_mode_on_the_suite_collection(
     fake, api = haskie
     records = [books.record(corpus), books.unanswerable(corpus)]
 
-    outcomes = run.evaluate(records, api, "bookqa-test", ["fts", "hybrid+rerank"])
+    outcomes = run.evaluate(
+        records, api, "bookqa-test", run.choose_modes(["fts", "hybrid+rerank"], [])
+    )
 
     assert fake.overrides == [
         ("/api/collections/bookqa-test/overrides", {"search": run.MODES["fts"]}),
@@ -113,7 +136,7 @@ def test_an_outcome_records_the_ranking_its_scores_size_and_latency(
     fake, api = haskie
     answerable, unanswerable = books.record(corpus), books.unanswerable(corpus)
 
-    found, empty = run.evaluate([answerable, unanswerable], api, "bookqa-test", ["fts"])
+    found, empty = run.evaluate([answerable, unanswerable], api, "bookqa-test", FTS)
 
     assert [f.text for f in found.results] == [books.LINES[3], books.LINES[65]]
     assert found.scores is not None and found.scores.recall == {1: 0.0, 5: 1.0, 10: 1.0}
@@ -123,11 +146,63 @@ def test_an_outcome_records_the_ranking_its_scores_size_and_latency(
     assert (empty.results, empty.scores, empty.abstained) == ([], None, True)
 
 
+def test_each_reranker_named_is_a_mode_of_its_own_after_the_modes_picked() -> None:
+    modes = run.choose_modes(["fts", "hybrid+rerank"], [BGE, MXBAI])
+
+    assert list(modes) == ["fts", "hybrid+rerank", f"hybrid+rerank:{BGE}", f"hybrid+rerank:{MXBAI}"]
+    assert modes[f"hybrid+rerank:{BGE}"] == {
+        "mode": "hybrid",
+        "reranker": "cross-encoder",
+        "reranker_model": BGE,
+    }
+    assert "reranker_model" not in modes["hybrid+rerank"], "the instance's own model"
+
+
+def test_a_named_reranker_is_waited_for_until_it_is_loaded_then_searched_with(
+    corpus: Path, haskie: tuple[Haskie, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake, api = haskie
+    fake.rerankers = {BGE: ["pending", "loading", "ready"]}
+    monkeypatch.setattr(run.setup, "POLL_SECONDS", 0.01)
+
+    (outcome,) = run.evaluate(
+        [books.record(corpus)], api, "bookqa-test", run.choose_modes([], [BGE])
+    )
+
+    assert fake.overrides == [
+        ("/api/collections/bookqa-test/overrides", {"search": run.rerank_mode(BGE)[1]}),
+    ]
+    assert fake.events == ["put", "status", "status", "status", "search"]
+    assert outcome.mode == f"hybrid+rerank:{BGE}"
+
+
+def test_a_reranker_that_fails_to_load_stops_the_run_before_a_search(
+    corpus: Path, haskie: tuple[Haskie, str]
+) -> None:
+    fake, api = haskie
+    fake.rerankers = {BGE: ["error"]}
+
+    with pytest.raises(RuntimeError, match=f"reranker {BGE} failed to load: no such file"):
+        run.evaluate([books.record(corpus)], api, "bookqa-test", run.choose_modes([], [BGE]))
+    assert fake.searches == []
+
+
+def test_a_reranker_still_loading_at_the_deadline_stops_the_run(
+    haskie: tuple[Haskie, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake, api = haskie
+    fake.rerankers = {BGE: ["loading"]}
+    monkeypatch.setattr(run.setup, "POLL_SECONDS", 0.01)
+
+    with pytest.raises(RuntimeError, match="still not loaded"):
+        run.await_reranker(api, BGE, limit=0.05)
+
+
 def test_the_outcomes_and_the_report_are_written_side_by_side(
     corpus: Path, haskie: tuple[Haskie, str], tmp_path: Path
 ) -> None:
     _, api = haskie
-    outcomes = run.evaluate([books.record(corpus)], api, "bookqa-test", ["fts"])
+    outcomes = run.evaluate([books.record(corpus)], api, "bookqa-test", FTS)
 
     path = run.write(outcomes, tmp_path / "report")
 

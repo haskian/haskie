@@ -38,6 +38,7 @@ mise run eval:bookqa:generate -- --source raft.pdf --segments 2 --accept   # acc
 mise run eval:bookqa:review                                                # check the dataset
 mise run eval:bookqa:run                                                   # every mode
 mise run eval:bookqa:run -- --modes fts hybrid+rerank
+mise run eval:bookqa:run -- --modes hybrid+rerank --rerankers BAAI/bge-reranker-base mixedbread-ai/mxbai-rerank-xsmall-v1
 mise run eval:bookqa:check                                                 # lint, types, tests
 ```
 
@@ -126,7 +127,16 @@ search overrides on `bookqa-books`:
 - `fts`: full text, no reranker;
 - `vector`;
 - `hybrid`;
-- `hybrid+rerank`: hybrid with the cross-encoder.
+- `hybrid+rerank`: hybrid with the cross-encoder, using the instance's own reranker model;
+- `hybrid+rerank:MODEL`: the same with another reranker, one mode per model passed to
+  `--rerankers`, so the models can be compared in one report on the same questions.
+
+`/api/options` lists the models you can pass (`reranker_models`); `run` refuses an unknown one
+before searching. A model the instance has not used yet is downloaded on first use, and `run`
+waits until it is loaded. The MLX models run on Apple Silicon only. A reranker's floor, under which
+it drops a result, is its own calibration or the uncalibrated default (0.05) in the instance's
+catalogue. Abstentions therefore compare fairly across models only once each is calibrated
+(`mise run calibrate-rerankers`).
 
 ## Layout
 

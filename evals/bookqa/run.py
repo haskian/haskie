@@ -39,8 +39,45 @@ MODES = {
     "fts": {"mode": "fts", "reranker": "none"},
     "vector": {"mode": "vector", "reranker": "none"},
     "hybrid": {"mode": "hybrid", "reranker": "none"},
+    # the instance's own reranker model, the one a first run picks
     "hybrid+rerank": {"mode": "hybrid", "reranker": "cross-encoder"},
 }
+RERANK = "hybrid+rerank:"  # the mode of one named reranker model: `RERANK` + its name
+MODEL_WAIT = 1800.0  # seconds a reranker may take to download and load on first use
+
+
+def rerank_mode(model: str) -> tuple[str, dict]:
+    """The mode that reranks hybrid search with `model`, one of `known_rerankers`."""
+    return f"{RERANK}{model}", {**MODES["hybrid+rerank"], "reranker_model": model}
+
+
+def known_rerankers(api: str) -> list[str]:
+    """The reranker models the instance's catalogue offers."""
+    return setup.call("GET", "/api/options", api)["reranker_models"]
+
+
+def choose_modes(names: list[str], rerankers: list[str]) -> dict[str, dict]:
+    """The modes `names` picks from `MODES`, then one per reranker model, in that order."""
+    return {name: MODES[name] for name in names} | dict(map(rerank_mode, rerankers))
+
+
+def await_reranker(api: str, model: str, limit: float = MODEL_WAIT) -> None:
+    """Wait until `model` is loaded: a search with it fails "not loaded yet" until then. Setting
+    the override is what starts its download (`PUT .../overrides`)."""
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        states = {
+            m["name"]: m
+            for m in setup.call("GET", "/api/status", api)["models"]
+            if m["kind"] == "reranker"
+        }
+        state = states.get(model, {}).get("state")
+        if state == "ready":
+            return
+        if state == "error":
+            raise RuntimeError(f"reranker {model} failed to load: {states[model]['error']}")
+        time.sleep(setup.POLL_SECONDS)
+    raise RuntimeError(f"reranker {model} is still not loaded after {limit:.0f}s")
 
 
 def search(api: str, collection: str, query: str) -> tuple[list[Found], float, int]:
@@ -56,14 +93,21 @@ def search(api: str, collection: str, query: str) -> tuple[list[Found], float, i
     return msgspec.json.decode(body, type=list[Found]), seconds, len(body)
 
 
-def set_mode(api: str, collection: str, mode: str) -> None:
-    setup.call("PUT", f"/api/collections/{collection}/overrides", api, {"search": MODES[mode]})
+def set_mode(api: str, collection: str, knobs: dict) -> None:
+    """Search `collection` with `knobs` from now on. The overrides are replaced whole, so a
+    reranker model one mode names does not carry into the next."""
+    setup.call("PUT", f"/api/collections/{collection}/overrides", api, {"search": knobs})
+    if "reranker_model" in knobs:
+        await_reranker(api, knobs["reranker_model"])
 
 
-def evaluate(records: list[Record], api: str, collection: str, modes: list[str]) -> list[Outcome]:
+def evaluate(
+    records: list[Record], api: str, collection: str, modes: dict[str, dict]
+) -> list[Outcome]:
+    """Every record searched once per mode: `modes` maps a mode's name to its search overrides."""
     outcomes = []
-    for mode in modes:
-        set_mode(api, collection, mode)
+    for mode, knobs in modes.items():
+        set_mode(api, collection, knobs)
         for record in records:
             found, seconds, size = search(api, collection, record.query)
             scores = metrics.score(record, found) if record.answerable else None
@@ -113,6 +157,13 @@ def main(argv: list[str] | None = None) -> int:
         help="the embedding profile a fresh instance's first run picks; vector modes need one",
     )
     parser.add_argument("--modes", nargs="+", choices=list(MODES), default=list(MODES))
+    parser.add_argument(
+        "--rerankers",
+        nargs="+",
+        default=[],
+        metavar="MODEL",
+        help=f"also rerank hybrid search with each of these models, as mode '{RERANK}MODEL'",
+    )
     parser.add_argument("--corpus", type=Path, default=setup.CORPUS_DIR)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     parser.add_argument("--out", type=Path, default=REPORTS / stamp)
@@ -133,10 +184,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     files = [args.corpus / name for name in names]
     setup.ensure_profile(args.profile, args.api)
+    offered = known_rerankers(args.api)
+    unknown = sorted(set(args.rerankers) - set(offered))
+    if unknown:
+        listing = "\n  ".join(offered)
+        print(f"unknown reranker {', '.join(unknown)}; offered:\n  {listing}", file=sys.stderr)
+        return 1
     if not setup.load(files, args.collection, DESCRIPTION, args.api):
         print(f"not every source is indexed in {args.collection}", file=sys.stderr)
         return 1
-    path = write(evaluate(records, args.api, args.collection, args.modes), args.out)
+    modes = choose_modes(args.modes, args.rerankers)
+    path = write(evaluate(records, args.api, args.collection, modes), args.out)
     print(path.read_text(encoding="utf-8"))
     print(f"written to {path.parent}")
     return 0
