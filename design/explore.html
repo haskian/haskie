@@ -44,11 +44,13 @@
             </ul>
           </details>
           <details class="picker">
-            <summary><span class="picker-value"><span>Excerpts</span><span class="sub">what an agent reads</span></span><i data-lucide="chevron-down" class="icon"></i></summary>
+            <summary><span class="picker-value"><span class="picker-label"><span>Excerpts</span><span class="picker-tag" title="An agent gets the same from the MCP tool search_excerpts">MCP</span></span><span class="sub">what an agent reads</span></span><i data-lucide="chevron-down" class="icon"></i></summary>
             <ul class="picker-list" role="listbox">
-              <li role="option" tabindex="0" aria-selected="false"><span>Chunks</span><span class="sub">as indexed · may overlap</span></li>
+              <li role="option" tabindex="0" aria-selected="true"><span class="picker-label"><span>Excerpts</span><span class="picker-tag" title="An agent gets the same from the MCP tool search_excerpts">MCP</span></span><span class="sub">what an agent reads</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span class="picker-label"><span>Sections</span><span class="picker-tag" title="An agent gets the same from the MCP tool search_sections">MCP</span></span><span class="sub">a map of the sections it touches</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span class="picker-label"><span>Sources</span><span class="picker-tag" title="An agent gets the same from the MCP tool search_sources">MCP</span></span><span class="sub">the documents that answer it</span></li>
               <li role="option" tabindex="0" aria-selected="false"><span>Passages</span><span class="sub">adjacent chunks · whole sentences</span></li>
-              <li role="option" tabindex="0" aria-selected="true"><span>Excerpts</span><span class="sub">what an agent reads</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span>Chunks</span><span class="sub">as indexed · may overlap</span></li>
             </ul>
           </details>
           <input class="input" type="search" value="shadow" placeholder="Search your collections" id="q" />
@@ -58,6 +60,7 @@
         <div class="tabs" role="tablist">
           <button class="tab" role="tab" aria-selected="true" aria-controls="tab-matches">Excerpts · 6</button>
           <button class="tab" role="tab" aria-selected="false" aria-controls="tab-sources">Sources · 3</button>
+          <button class="tab" role="tab" aria-selected="false" aria-controls="tab-sections">Sections · 3</button>
         </div>
         <div id="tab-matches" role="tabpanel">
           <div class="hits">
@@ -147,6 +150,41 @@
               <div class="hit-body">
               <p class="hit-text">Wind field presets for animated foliage.</p>
               <footer class="hit-foot"><span>C. Dubois · U–Z</span><span>3/8 chunks</span></footer>
+              </div>
+            </article>
+          </div>
+        </div>
+        <!-- a map of the sections a topic touches: each pick's keywords, the ones that set it apart
+             from the other picks bordered, and the sections it covers best under it -->
+        <div id="tab-sections" role="tabpanel" hidden>
+          <p class="muted">Held by: A–E, P–T</p>
+          <div class="hits">
+            <article class="hit" style="--score: 1.00">
+              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Area</span></span><span class="mono muted">0.91</span></header>
+              <div class="hit-body">
+              <p class="section-heading">Lighting &gt; Soft shadows</p>
+              <div class="keywords"><span class="keyword distinct">penumbra</span><span class="keyword distinct">panel size</span><span class="keyword">shadow</span><span class="keyword">falloff</span><span class="keyword">umbra</span></div>
+              <footer class="hit-foot"><span>p.2-3 L41-58</span><span>2140 chars · 3 matched chunks</span></footer>
+              <ul class="related" aria-label="Related sections">
+                <li><span class="related-title">Lighting &gt; Hard shadows</span><span class="mono muted">0.82</span></li>
+                <li><span class="related-title">Lamps &gt; Point lamps</span><span class="related-place mono muted">Lamp · K–O</span><span class="mono muted">0.61</span></li>
+              </ul>
+              </div>
+            </article>
+            <article class="hit" style="--score: 0.55">
+              <header class="hit-head"><span class="tag"><span class="kind">P–T</span><span>Sun</span></span><span class="mono muted">0.79</span></header>
+              <div class="hit-body">
+              <p class="section-heading">Sun &gt; Elevation tables</p>
+              <div class="keywords"><span class="keyword distinct">elevation</span><span class="keyword distinct">latitude</span><span class="keyword">shadow length</span><span class="keyword">month</span></div>
+              <footer class="hit-foot"><span>p.4 L90-131</span><span>3310 chars · 2 matched chunks</span></footer>
+              </div>
+            </article>
+            <article class="hit" style="--score: 0.10">
+              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Cone</span></span><span class="mono muted">0.84</span></header>
+              <div class="hit-body">
+              <p class="section-heading">Geometry &gt; Tessellation</p>
+              <div class="keywords"><span class="keyword distinct">segments</span><span class="keyword">terminator</span><span class="keyword">hero objects</span></div>
+              <footer class="hit-foot"><span>p.1 L12-30</span><span>1180 chars · 1 matched chunk</span></footer>
               </div>
             </article>
           </div>

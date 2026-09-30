@@ -45,6 +45,12 @@ export type Answer = Wire<'Answer'>
 export type Source = Wire<'Source'>
 export type Sources = Wire<'Sources'>
 export type HotSection = Wire<'HotSection'>
+// A map of the sections a topic touches (`search.overview`), and one document's table of contents
+// with each section's keywords (`outline.build`).
+export type SectionMap = Wire<'SectionMap'>
+export type MappedSection = Wire<'MappedSection'>
+export type RelatedSection = Wire<'Related'>
+export type OutlineSection = Wire<'OutlineSection'>
 export type Lines = Wire<'Lines'>
 export type Status = Wire<'Status'>
 export type ModelStatus = Wire<'ModelStatus'>
@@ -315,6 +321,7 @@ export const api = {
   documentCollections: (doc: string) => request<string[]>(`${documentPath(doc)}/collections`),
   documentEmbeddings: (doc: string) => request<EmbeddingEntry[]>(`${documentPath(doc)}/embeddings`),
   similarDocuments: (doc: string) => request<Similar>(`${documentPath(doc)}/similar`),
+  outline: (doc: string) => request<OutlineSection[]>(`${documentPath(doc)}/outline`),
   renameDocument: (doc: string, to: string) => request<ImportedDocument>(`${documentPath(doc)}/name`, json('PUT', { name: to })),
   describeDocument: (doc: string, description: string) =>
     request<ImportedDocument>(`${documentPath(doc)}/description`, json('PUT', { description })),
@@ -353,7 +360,7 @@ export const api = {
   // Asks the questions again over every collection now; nothing is recorded.
   replayGaps: (ids: number[]) => request<ReplayedGap[]>('/api/gaps/replay', json('POST', { ids })),
 
-  // The three searches Explore runs, over one scope: `collections` when given, else the session's
+  // The four searches Explore runs, over one scope: `collections` when given, else the session's
   // selection, else every collection (the backend applies that order). Each answers with the
   // steps it took, for the breakdown under the total.
   explore: <G extends Granularity>(q: string, granularity: G, scope: SearchScope = {}) =>
@@ -363,6 +370,8 @@ export const api = {
     timedRequest<Answer>(`/api/search/excerpts${pageQuery({}, { q, context, ...scopeQuery(scope) })}`),
   searchSources: (q: string, scope: SearchScope = {}) =>
     timedRequest<Sources>(`/api/search/sources${pageQuery({}, { q, ...scopeQuery(scope) })}`),
+  searchSections: (q: string, scope: SearchScope = {}) =>
+    timedRequest<SectionMap>(`/api/search/sections${pageQuery({}, { q, ...scopeQuery(scope) })}`),
 }
 
 /** Which collections a search runs over; empty means every one. */

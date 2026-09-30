@@ -2,13 +2,15 @@ import { describe, expect, test } from 'bun:test'
 import { FileText } from 'lucide-react'
 import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { EmbedderMetadata, Excerpt, Hit, Passage, RerankerMetadata, Source, Status } from '../api'
+import type { EmbedderMetadata, Excerpt, Hit, MappedSection, Passage, RerankerMetadata, Source, Status } from '../api'
 import { Field } from './Field'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
 import { Kv } from './Kv'
 import { MatchModal } from './MatchModal'
 import { ModelFacts } from './ModelFacts'
+import { OutlineModal } from './OutlineModal'
+import { SectionGrid } from './SectionGrid'
 import { Mark } from './Mark'
 import { markTerms } from './markTerms'
 import { Picker } from './Picker'
@@ -177,6 +179,21 @@ describe('Picker', () => {
       name: 'aria-label reaches the summary and the listbox',
       element: <Picker options={options} value="*" onChange={noop} ariaLabel="Scope" />,
       contains: ['<summary aria-label="Scope">', 'role="listbox" aria-label="Scope"'],
+    },
+    {
+      name: 'a tagged option carries its tag beside its label, in the list and the summary',
+      element: (
+        <Picker
+          options={[...options, { value: 'mcp', label: 'Excerpts', tag: { text: 'MCP', title: 'An agent gets the same' } }]}
+          value="mcp"
+          onChange={noop}
+        />
+      ),
+      contains: [
+        '<span class="picker-value"><span class="picker-label"><span>Excerpts</span><span class="picker-tag" title="An agent gets the same">MCP</span></span></span>',
+        'aria-selected="true"><span class="picker-label"><span>Excerpts</span><span class="picker-tag"',
+        'aria-selected="false"><span>A–E</span>',
+      ],
     },
     {
       name: 'no options renders an empty list',
@@ -891,6 +908,64 @@ describe('SearchTook', () => {
       element: <SearchTook counts="" ms={null} steps={steps} />,
       contains: ['<p class="mono muted search-took" tabindex="0"> </p>'],
       missing: ['role="tooltip"'],
+    },
+  ])
+})
+
+const SAGAS: MappedSection = {
+  collection: 'patterns',
+  document_id: 'b1',
+  document: 'iddd.pdf',
+  header: 'Sagas > Compensation',
+  location: 'iddd.pdf p.12-14 L300-360',
+  line_start: 300,
+  line_end: 360,
+  score: 0.82,
+  depth: 2,
+  seq_start: 40,
+  seq_end: 44,
+  chars: 5210,
+  chunks: 3,
+  keywords: ['saga', 'compensating step', 'orchestrator'],
+  distinct: ['compensating step'],
+  markdown_file: '/Users/ada/.haskie/documents/b1/original.pdf.md',
+  related: [
+    { collection: 'patterns', document_id: 'c2', document: 'ddia.pdf', header: 'Sagas', location: 'ddia.pdf L10-40', line_start: 10, line_end: 40, score: 0.4, similarity: 0.93 },
+    { collection: 'patterns', document_id: 'b1', document: 'iddd.pdf', header: 'Sagas > Retries', location: 'iddd.pdf L361-380', line_start: 361, line_end: 380, score: 0.3, similarity: 0.88 },
+    // the pick itself, chunked by another collection: named by that collection
+    { collection: 'patterns-text', document_id: 'b1', document: 'iddd.pdf', header: 'Sagas > Compensation', location: 'iddd.pdf L300-358', line_start: 300, line_end: 358, score: 0.3, similarity: 0.99 },
+  ],
+}
+
+describe('SectionGrid', () => {
+  check([
+    {
+      name: 'a pick names its section, what it is about and where to read it',
+      element: <SectionGrid sections={[SAGAS]} />,
+      contains: ['iddd.pdf', 'patterns', '0.82', 'Sagas &gt; Compensation', 'keyword distinct">compensating step', 'keyword">saga', 'p.12-14 L300-360', '5210 chars · 3 matched chunks'],
+    },
+    {
+      name: 'the sections it covers best, another document named, its own not',
+      element: <SectionGrid sections={[SAGAS]} />,
+      contains: ['aria-label="Related sections"', 'related-place mono muted">ddia.pdf<', '>0.93<', 'Sagas &gt; Retries</span><span class="mono muted">0.88<', 'related-place mono muted">patterns-text<', '>0.99<'],
+      missing: ['related-place mono muted">iddd.pdf', 'patterns · '],
+    },
+    {
+      name: 'the whole document, no outline, nothing related: one chunk',
+      element: <SectionGrid sections={[{ ...SAGAS, header: '', keywords: [], distinct: [], related: [], chunks: 1 }]} />,
+      contains: ['The whole document', '1 matched chunk<'],
+      missing: ['class="keywords', 'Related sections'],
+    },
+  ])
+})
+
+describe('OutlineModal', () => {
+  check([
+    { name: 'closed: nothing inside', element: <OutlineModal section={null} onClose={noop} />, contains: ['<dialog class="modal"'], missing: ['Outline'] },
+    {
+      name: 'open: the document, its outline tab first, loading',
+      element: <OutlineModal section={SAGAS} onClose={noop} />,
+      contains: ['iddd.pdf', 'outline', '>Outline<', '>Document<', 'class="skeleton"'],
     },
   ])
 })

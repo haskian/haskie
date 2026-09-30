@@ -5,6 +5,20 @@ export interface PickerOption<T extends string> {
   value: T
   label: string
   sub?: string
+  tag?: { text: string; title: string } // a short mark beside the label, and what it means on hover
+}
+
+/** An option's label, with its tag beside it when it has one. */
+function Label<T extends string>({ option }: { option: PickerOption<T> }) {
+  if (option.tag === undefined) return <span>{option.label}</span>
+  return (
+    <span className="picker-label">
+      <span>{option.label}</span>
+      <span className="picker-tag" title={option.tag.title}>
+        {option.tag.text}
+      </span>
+    </span>
+  )
 }
 
 /**
@@ -45,7 +59,7 @@ export function Picker<T extends string>({
     <details className="picker" ref={details}>
       <summary aria-label={ariaLabel}>
         <span className="picker-value">
-          <span>{selected?.label ?? ''}</span>
+          {selected === undefined ? <span /> : <Label option={selected} />}
           {selected?.sub !== undefined && <span className="sub">{selected.sub}</span>}
         </span>
         <ChevronDown className="icon" />
@@ -64,7 +78,7 @@ export function Picker<T extends string>({
               pick(option.value)
             }}
           >
-            <span>{option.label}</span>
+            <Label option={option} />
             {option.sub !== undefined && <span className="sub">{option.sub}</span>}
           </li>
         ))}
