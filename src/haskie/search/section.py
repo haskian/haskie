@@ -35,6 +35,10 @@ class Entry(msgspec.Struct, frozen=True):
     headings: tuple[str, ...]
     char_start: int
     char_end: int
+    line_start: int  # what a section cites (`search.overview`); the grouping reads none of it
+    line_end: int
+    page_start: int | None
+    page_end: int | None
 
 
 type Outline = list[Entry]  # one document's chunks, by `seq`
@@ -59,6 +63,10 @@ def outlines(rows: Sequence[tuple[str, dict]]) -> dict[Place, Outline]:
             headings=tuple(row["headings"] or ()),
             char_start=row["char_start"],
             char_end=row["char_end"],
+            line_start=row["line_start"],
+            line_end=row["line_end"],
+            page_start=row["page_start"],
+            page_end=row["page_end"],
         )
         found.setdefault((collection, row["document_id"]), []).append(entry)
     for outline in found.values():

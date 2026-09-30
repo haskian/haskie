@@ -9,13 +9,14 @@ import hashlib
 import itertools
 from pathlib import Path
 
+import lancedb
 import msgspec
 import numpy as np
 import pytest
 from conftest import id_of, import_row
 from sqlalchemy import delete, select
 
-from haskie import db
+from haskie import db, home
 from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
 from haskie.collection.index import Row
 from haskie.document import document
@@ -24,6 +25,7 @@ from haskie.indexing import embed_cache
 from haskie.indexing.chunk import CHUNK_VERSION, Chunk, Piece
 from haskie.indexing.embed_cache import NO_MODEL, Params
 from haskie.indexing.segment import PieceType
+from haskie.outline import store
 from haskie.settings import Chunker, ChunkSettings, Parser
 from haskie.tables import embeddings
 
@@ -323,10 +325,11 @@ async def _vector_of(doc: str) -> list[float] | None:
     ("name", "dims", "groups", "expected"),
     [
         (
-            "each chunk counts once, however long its vector; parts add up, an empty one adds 0",
+            "each chunk counts once, however long its vector; parts add up, an empty one adds 0;"
+            " the mean is not normalized",
             4,
             [[_row("alpha", [3.0, 0.0, 0.0, 0.0])], [], [_row("beta", [0.0, 4.0, 0.0, 0.0])]],
-            [2**-0.5, 2**-0.5, 0.0, 0.0],
+            [0.5, 0.5, 0.0, 0.0],
         ),
         ("no embedding model: no vector", None, [[_row("alpha")]], None),
         (
@@ -344,7 +347,8 @@ async def test_write_stores_the_document_vector(
     groups: list[list[Row]],
     expected: list[float] | None,
 ) -> None:
-    """The mean of the unit chunk vectors, normalized: the document as one direction."""
+    """The mean of the unit chunk vectors, not normalized: its length is how tightly the chunks
+    point one way, which a mean over a collection needs (`corpus_sum`)."""
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
 
@@ -360,7 +364,7 @@ async def test_write_stores_the_document_vector(
 async def _embedded(
     tmp_path: Path, name: str, vector: list[float], model: str = TINY.cache_name, size: int = 1200
 ) -> None:
-    """One cache entry of `name` whose document vector is `vector`, normalized."""
+    """One cache entry of `name`, one chunk whose vector is `vector`."""
     params = msgspec.structs.replace(
         BASE, document_id=await id_of(name), model=model, chunk_size=size
     )
@@ -493,3 +497,116 @@ async def test_the_cache_row_goes_when_the_document_does(tmp_path: Path) -> None
     await document.remove_row(doc.id)
 
     assert await embed_cache.entries(doc.id) == []
+
+
+# --- the outline built from an entry --------------------------------------------------
+
+
+def _headed(text: str, heading: str, vector: list[float] | None = None) -> Row:
+    """A chunk under `Book > heading`, at its own offsets."""
+    row = _row(text, vector)
+    row.chunk.headings = ["Book", heading]
+    return row
+
+
+SAGAS_TEXT = (
+    "A saga splits a long transaction into local steps. When a step fails, the saga runs the "
+    "compensating step of every step before it. An orchestrator can drive the saga, or each "
+    "service can listen for the events of the others."
+)
+QUORUMS_TEXT = (
+    "A quorum write waits for a majority of replicas. A quorum read asks a majority too, so the "
+    "two quorums overlap and the read sees the latest write, unless a replica is stale."
+)
+
+
+def _book() -> list[Row]:
+    return [
+        _headed(SAGAS_TEXT, "Sagas", [1.0, 0.0, 0.0, 0.0]),
+        _headed(QUORUMS_TEXT, "Quorums", [0.0, 1.0, 0.0, 0.0]),
+    ]
+
+
+async def _index(model: str = BASE.model):
+    conn = await lancedb.connect_async(str(home.OUTLINE_ROOT))
+    return await conn.open_table(store.table_name(model))
+
+
+async def test_build_outline_reads_the_entrys_file(tmp_path: Path) -> None:
+    """Its nodes go beside the markdown and into the outline index, with their vectors; the
+    keyword candidates are embedded in one call for the whole document."""
+    doc = await import_row(DOC, BODY)
+    params = msgspec.structs.replace(BASE, document_id=doc.id)
+    await embed_cache.write(params, _parts(tmp_path / "scratch", [_book()]), 4)
+    assert await store.read([doc.id]) == {}, "the write alone builds no outline"
+    calls: list[list[str]] = []
+
+    def embed(texts: list[str]) -> list[list[float]]:
+        calls.append(texts)
+        return [[1.0, 0.0, 0.0, 0.0] if "saga" in text else [0.0, 1.0, 0.0, 0.0] for text in texts]
+
+    await embed_cache.build_outline(params, embed)
+
+    assert await store.current(doc.id, params.model)
+    nodes = (await store.read([doc.id]))[doc.id]
+    assert [node.header for node in nodes] == ["", "Book", "Book > Sagas", "Book > Quorums"]
+    assert store.path(doc.id).parent == doc.markdown.parent, "beside the markdown"
+    sagas = nodes[2]
+    assert sagas.keywords["saga"] == 3, "each keyword with how often the section uses it"
+    assert not {"quorum", "majority", "replica"} & set(sagas.keywords), "its own words only"
+    assert (sagas.line_start, sagas.page_start, sagas.page_end) == (1, 2, 3)
+    assert len(calls) == 1, "one embedding call per document"
+    rows = await (await _index()).query().where(f"document_id = '{doc.id}'").to_list()
+    by_position = {row["position"]: row for row in rows}
+    assert sorted(by_position) == [0, 1, 2, 3]
+    assert by_position[2]["headings"] == ["Book", "Sagas"]
+    assert list(by_position[2]["vector"]) == [1.0, 0.0, 0.0, 0.0], "the node's unit vector"
+    assert by_position[2]["keywords"][0] == {"keyword": next(iter(sagas.keywords)), "uses": 3}
+
+
+async def test_build_outline_of_an_entry_without_vectors(tmp_path: Path) -> None:
+    doc = await import_row(DOC, BODY)
+    params = msgspec.structs.replace(BASE, document_id=doc.id, model=NO_MODEL)
+    rows = [_headed(SAGAS_TEXT, "Sagas"), _headed(QUORUMS_TEXT, "Quorums")]
+    await embed_cache.write(params, _parts(tmp_path / "scratch", [rows]), None)
+
+    await embed_cache.build_outline(params, None)
+
+    assert len((await store.read([doc.id]))[doc.id]) == 4
+    assert "vector" not in (await (await _index(NO_MODEL)).schema()).names, "no model: no vectors"
+
+
+async def test_corpus_sum_adds_the_indexed_members_by_their_chunks(tmp_path: Path) -> None:
+    """Each indexed member's mean times its chunks: the sum a collection's centre divides."""
+    from haskie.collection.collection import Collection, MemberStatus
+
+    notes = await Collection.create("notes")
+    for name, vectors in (
+        ("a.md", [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]),
+        ("b.md", [[0.0, 0.0, 2.0, 0.0]]),
+        ("pending.md", [[0.0, 0.0, 0.0, 1.0]]),
+    ):
+        doc = await import_row(name, BODY)
+        await document.set_status(doc.id, DocumentStatus.IMPORTED)
+        params = msgspec.structs.replace(BASE, document_id=doc.id, model=TINY.cache_name)
+        rows = [_row(name, vector) for vector in vectors]
+        await embed_cache.write(params, _parts(tmp_path / name, [rows]), 4)
+        await notes.add(doc.id)
+        if name != "pending.md":
+            await notes.set_member_status(doc.id, MemberStatus.INDEXED)
+
+    found = await embed_cache.corpus_sum("notes", TINY.cache_name)
+
+    assert found is not None
+    total, rows = found
+    assert rows == 3, "a pending member is not in the table yet"
+    assert total == pytest.approx([1.0, 1.0, 1.0, 0.0]), "unit vectors, summed"
+    assert await embed_cache.corpus_sum("notes", "other/model") is None
+
+    await notes.set_centre(found, TINY.cache_name)
+    await Collection.create("empty")
+    centre = await Collection.centre(["notes", "empty"], TINY.cache_name)
+    assert centre is not None and centre == pytest.approx([1 / 3, 1 / 3, 1 / 3, 0.0])
+    assert await Collection.centre(["notes"], "other/model") is None, "a centre is per model"
+    await notes.set_centre(None, TINY.cache_name)
+    assert await Collection.centre(["notes"], TINY.cache_name) is None, "cleared"

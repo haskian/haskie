@@ -30,7 +30,7 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from haskie import home, tables
 from haskie.errors import HaskieError
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 """`pragma user_version` of the schema in `tables.py`.
 
 A home stamped with it has these tables and columns and is opened as it is. Any other stamp is a

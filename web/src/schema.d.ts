@@ -227,6 +227,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document}/outline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** DocumentOutline */
+        get: operations["ApiDocumentsOutlineDocumentOutline"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document}/source": {
         parameters: {
             query?: never;
@@ -664,6 +681,23 @@ export interface paths {
         };
         /** SearchSources */
         get: operations["ApiSearchSourcesSearchSources"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/search/sections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** SearchSections */
+        get: operations["ApiSearchSectionsSearchSections"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1379,6 +1413,26 @@ export interface components {
             last_maintained_at: number | null;
             vector_index_rows: number;
         };
+        /** MappedSection */
+        MappedSection: {
+            collection: string;
+            document_id: string;
+            document: string;
+            header: string;
+            location: string;
+            line_start: number;
+            line_end: number;
+            score: number;
+            depth: number;
+            seq_start: number;
+            seq_end: number;
+            chars: number;
+            chunks: number;
+            keywords: string[];
+            distinct: string[];
+            markdown_file: string;
+            related?: components["schemas"]["Related"][];
+        };
         /** Markdown */
         Markdown: {
             markdown: string;
@@ -1493,6 +1547,16 @@ export interface components {
          * @enum {string}
          */
         Order: "asc" | "desc";
+        /** OutlineSection */
+        OutlineSection: {
+            header: string;
+            depth: number;
+            location: string;
+            line_start: number;
+            line_end: number;
+            chars: number;
+            keywords: string[];
+        };
         /** Overlap */
         Overlap: {
             contained: number;
@@ -1688,6 +1752,18 @@ export interface components {
         QueueActivity: {
             queued: number;
             running: number;
+        };
+        /** Related */
+        Related: {
+            collection: string;
+            document_id: string;
+            document: string;
+            header: string;
+            location: string;
+            line_start: number;
+            line_end: number;
+            score: number;
+            similarity: number;
         };
         /**
          * Relation
@@ -2008,6 +2084,11 @@ export interface components {
              */
             max_answer_chars: number;
         };
+        /** SectionMap */
+        SectionMap: {
+            sections: components["schemas"]["MappedSection"][];
+            collections: string[];
+        };
         /** SessionCollections */
         SessionCollections: {
             collections: string[];
@@ -2118,7 +2199,7 @@ export interface components {
          * @description Which endpoint ran a search.
          * @enum {string}
          */
-        Tool: "excerpts" | "sources" | "explore" | "text";
+        Tool: "excerpts" | "sources" | "sections" | "explore" | "text";
         /** UserSettings */
         UserSettings: {
             /**
@@ -2609,6 +2690,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Similar"];
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
+    ApiDocumentsOutlineDocumentOutline: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutlineSection"][];
                 };
             };
             /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
@@ -3605,6 +3719,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Sources"];
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
+    ApiSearchSectionsSearchSections: {
+        parameters: {
+            query: {
+                q: string;
+                session_id?: string | null;
+                collections?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectionMap"];
                 };
             };
             /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */

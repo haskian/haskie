@@ -37,21 +37,54 @@ class Page(msgspec.Struct):
     kind: Literal["page"] = "page"  # tags this line of the NDJSON stream (see `api.documents`)
 
 
+class HeadingSpan(msgspec.Struct, frozen=True):
+    """Where one heading of the markdown is, in bytes: the whole of it, its markers included,
+    and the text inside them."""
+
+    level: int
+    start: int
+    end: int
+    text_start: int
+    text_end: int
+    text: str
+
+
+def heading_spans(markdown: str) -> list[HeadingSpan]:
+    """Every heading of the markdown, in document order, by the parser and options the chunker
+    reads it with (`segment`): a `#` line inside a code block is none."""
+    found: list[HeadingSpan] = []
+    level = start = end = 0
+    inner: list[tuple[int, int]] | None = None
+    texts: list[str] = []
+    for event, span in pyromark.events_with_range(markdown, options=OPTIONS):
+        match event:
+            case {"Start": {"Heading": {"level": depth}}}:
+                level, start, end, inner, texts = (
+                    int(str(depth)[1]),
+                    span["start"],
+                    span["end"],
+                    [],
+                    [],
+                )
+            case {"End": {"Heading": _}} if inner is not None:
+                text_start = min((one for one, _ in inner), default=start)
+                text_end = max((one for _, one in inner), default=start)
+                found.append(
+                    HeadingSpan(level, start, end, text_start, text_end, "".join(texts).strip())
+                )
+                inner = None
+            case _ if inner is not None:
+                inner.append((span["start"], span["end"]))
+                if isinstance(event, dict) and ("Text" in event or "Code" in event):
+                    texts.append(str(event.get("Text", event.get("Code"))))
+    return found
+
+
 def headings(markdown: str) -> list[Heading]:
     """The table of contents, in document order."""
-    result: list[Heading] = []
-    current: Heading | None = None
-    for event, span in pyromark.events_with_range(markdown):
-        match event:
-            case {"Start": {"Heading": {"level": level}}}:
-                current = Heading(level=int(str(level)[1]), text="", offset=span["start"])
-            case {"Text": str(text)} | {"Code": str(text)} if current is not None:
-                current.text += text
-            case {"End": {"Heading": _}} if current is not None:
-                current.text = current.text.strip()
-                result.append(current)
-                current = None
-    return result
+    return [
+        Heading(level=one.level, text=one.text, offset=one.start) for one in heading_spans(markdown)
+    ]
 
 
 def _without_raw_html(markdown: str) -> str:

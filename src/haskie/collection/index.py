@@ -28,6 +28,7 @@ from typing import Any
 import anyio
 import lancedb
 import msgspec
+import numpy as np
 import pyarrow as pa
 from lancedb.index import FTS, IvfPq
 
@@ -249,6 +250,17 @@ _schema_lock = threading.Lock()
 EMBEDDING_KEY = b"haskie.embedding"
 
 
+def vector_field(dims: int) -> pa.Field:
+    """The column every table that stores vectors holds them in: `dims` float32s per row."""
+    return pa.field("vector", pa.list_(pa.float32(), dims))
+
+
+def vector_matrix(column: pa.ChunkedArray) -> np.ndarray:
+    """The non-null vectors of a `vector_field` column as one float32 matrix, a row each."""
+    joined = column.combine_chunks()
+    return joined.flatten().to_numpy(zero_copy_only=False).reshape(-1, joined.type.list_size)
+
+
 def forget_schema(path: Path) -> None:
     """Drop the cached `schema_current` answers for one index directory."""
     directory = str(path)
@@ -385,8 +397,7 @@ class CollectionIndex:
     def _schema(self) -> Any:
         if self.embedding is None:
             return PLAIN_SCHEMA
-        vector = pa.field("vector", pa.list_(pa.float32(), self.embedding.dims))
-        return PLAIN_SCHEMA.append(vector).with_metadata(
+        return PLAIN_SCHEMA.append(vector_field(self.embedding.dims)).with_metadata(
             {EMBEDDING_KEY: self.embedding.cache_name.encode()}
         )
 
@@ -400,14 +411,14 @@ class CollectionIndex:
         """Drop every row of one document, by its id."""
         table = await self._deletable()
         if table is not None:
-            await table.delete(f"document_id = {_quoted(doc)}")
+            await table.delete(f"document_id = {quoted(doc)}")
 
     async def delete_parts(self, doc: str, start: int, end: int) -> None:
         """Drop the parts `[start, end)` of one document, leaving every other part alone."""
         table = await self._deletable()
         if table is not None:
             await table.delete(
-                f"document_id = {_quoted(doc)} and part >= {int(start)} and part < {int(end)}"
+                f"document_id = {quoted(doc)} and part >= {int(start)} and part < {int(end)}"
             )
 
     async def add_parts(
@@ -649,7 +660,7 @@ class CollectionIndex:
         if table is None or not by_document_id:
             return []
         wanted = " OR ".join(
-            f"(document_id = {_quoted(doc)} AND seq IN ({', '.join(map(str, sorted(seqs)))}))"
+            f"(document_id = {quoted(doc)} AND seq IN ({', '.join(map(str, sorted(seqs)))}))"
             for doc, seqs in sorted(by_document_id.items())
         )
         columns = PLAIN_SCHEMA.names + (
@@ -659,14 +670,16 @@ class CollectionIndex:
 
     async def outline_rows(self, document_ids: Iterable[str]) -> list[dict]:
         """Where every chunk of these documents (by id) sits: its `document_id`, `seq`, heading
-        path and char span, and nothing else, in no order. What a search reads to know how large
-        each section around a match is. `[]` when there is nothing readable."""
+        path, and its char, line and page span, and nothing else, in no order. What a search
+        reads to know how large each section around a match is, and where it is. `[]` when there
+        is nothing readable."""
         ids = set(document_ids)
         table = await self._readable()
         if table is None or not ids:
             return []
         wanted = f"document_id IN {_listed(ids)}"
         columns = ["document_id", "seq", "headings", "char_start", "char_end"]
+        columns += ["line_start", "line_end", "page_start", "page_end"]
         return await table.query().where(wanted).select(columns).to_list()
 
     def hit(self, r: dict, score: float | None = None) -> Hit:
@@ -780,9 +793,8 @@ def _rows(found: pa.Table) -> list[dict]:
     the list a row would carry is never built. A row without a vector holds None."""
     if "vector" not in found.column_names:
         return found.to_pylist()
-    column = found.column("vector").combine_chunks()
-    width = column.type.list_size
-    matrix = column.flatten().to_numpy(zero_copy_only=False).reshape(-1, width)
+    column = found.column("vector")
+    matrix = vector_matrix(column)
     rows = found.drop_columns(["vector"]).to_pylist()
     if column.null_count:
         # `flatten` skips the slots of a null vector, so the rows of the matrix follow the others
@@ -809,10 +821,10 @@ def _excluding(builder: Any, document_ids: frozenset[str]) -> Any:
 def _listed(values: Iterable[str]) -> str:
     """`values` as a parenthesized list of SQL string literals for a LanceDB `IN`, sorted so one
     set always makes one filter."""
-    return f"({', '.join(_quoted(value) for value in sorted(values))})"
+    return f"({', '.join(quoted(value) for value in sorted(values))})"
 
 
-def _quoted(value: str) -> str:
+def quoted(value: str) -> str:
     """`value` as a SQL string literal for a LanceDB filter. A document name is the user's file
     name, so a quote in it is doubled rather than allowed to end the literal."""
     return "'" + value.replace("'", "''") + "'"

@@ -9,8 +9,8 @@ are the REST handlers marked `mcp_tool=`, so both surfaces share one contract. T
 
 | group | tools |
 | --- | --- |
-| search | `search_excerpts`, `search_sources`, `set_session_collections` |
-| catalogue | `list_collections`, `get_collection`, `list_collection_documents`, `list_documents`, `get_document` |
+| search | `search_excerpts`, `search_sections`, `search_sources`, `set_session_collections` |
+| catalogue | `list_collections`, `get_collection`, `list_collection_documents`, `list_documents`, `get_document`, `document_outline` |
 | write | `add_document`, `add_document_to_collection`, `remove_document_from_collection`, `describe_document` |
 | log and gaps | `list_searches`, `list_gaps`, `replay_gaps`, `review_gaps`, `report_gap` ([Gaps](gaps.md)) |
 
@@ -66,6 +66,10 @@ sequenceDiagram
         Hook-->>CC: prints "haskie is already serving ..."
     end
     Note over CC: the rule says: search the collections first
+    opt a broad question, or not yet known where the sources discuss it
+        CC->>H: search_sections(q, session_id)
+        H-->>CC: sections with keywords, related sections, collection cover
+    end
     CC->>H: search_excerpts(q, session_id)
     H-->>CC: excerpts with header, location, spans (each with also_in), uncovered, missing_terms
     opt nothing relevant, or "which documents?"

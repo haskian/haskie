@@ -59,10 +59,21 @@ DOC = "guide.md"
 COLLECTION = "notes"
 CHUNKS = split(MARKDOWN, ChunkSettings(chunk_size=150, chunk_merge_below=0))
 OUTLINE = [
-    Entry(seq, tuple(chunk.headings), chunk.char_start, chunk.char_end)
+    Entry(
+        seq,
+        tuple(chunk.headings),
+        chunk.char_start,
+        chunk.char_end,
+        chunk.line_start,
+        chunk.line_end,
+        None,
+        None,
+    )
     for seq, chunk in enumerate(CHUNKS, start=1)
 ]
 OUTLINES = {(COLLECTION, DOC): OUTLINE}
+# the lines and pages of an outline row, which the grouping never reads
+LINES = {"line_start": 1, "line_end": 1, "page_start": None, "page_end": None}
 GUIDE, STORAGE, SEARCH = ("Guide",), ("Guide", "Storage"), ("Guide", "Search")
 
 
@@ -99,7 +110,7 @@ def test_the_fixture_is_the_outline_the_docstring_names() -> None:
 
 
 def test_outlines_are_read_per_document_and_ordered_by_seq() -> None:
-    span = {"document_id": DOC}
+    span = {"document_id": DOC, **LINES}
     rows = [
         ("notes", span | {"seq": 2, "headings": ["A"], "char_start": 5, "char_end": 9}),
         ("notes", span | {"seq": 1, "headings": None, "char_start": 0, "char_end": 4}),
@@ -109,8 +120,11 @@ def test_outlines_are_read_per_document_and_ordered_by_seq() -> None:
     found = section.outlines(rows)
 
     assert found == {
-        ("notes", DOC): [Entry(1, (), 0, 4), Entry(2, ("A",), 5, 9)],
-        ("other", DOC): [Entry(1, ("B",), 0, 3)],
+        ("notes", DOC): [
+            Entry(1, (), 0, 4, 1, 1, None, None),
+            Entry(2, ("A",), 5, 9, 1, 1, None, None),
+        ],
+        ("other", DOC): [Entry(1, ("B",), 0, 3, 1, 1, None, None)],
     }
 
 
@@ -157,7 +171,7 @@ def test_outlines_are_read_per_document_and_ordered_by_seq() -> None:
         ),
         (
             "a document without headings is one section",
-            [Entry(1, (), 0, 90), Entry(2, (), 92, 180)],
+            [Entry(1, (), 0, 90, 1, 1, None, None), Entry(2, (), 92, 180, 1, 1, None, None)],
             2,
             100,
             Section((), 1, 2),

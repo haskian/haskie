@@ -12,13 +12,14 @@ gave, else the session's selection, else every collection.
 import asyncio
 import statistics
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import ExitStack
 from itertools import islice
 from typing import BinaryIO
 
 import anyio.to_thread
 import msgspec
+import numpy as np
 
 from haskie import cpu
 from haskie.catalogue import catalogue
@@ -42,7 +43,19 @@ from haskie.indexing import hardware, mlx_models, models
 from haskie.indexing.embed import embed_query
 from haskie.indexing.hardware import Runtime
 from haskie.logs import get_logger
-from haskie.search import aspects, collapse, passage, probe, section, session, text, thin
+from haskie.outline import store
+from haskie.outline.build import Node
+from haskie.search import (
+    aspects,
+    collapse,
+    overview,
+    passage,
+    probe,
+    section,
+    session,
+    text,
+    thin,
+)
 from haskie.search import fill as filling
 from haskie.search.passage import Excerpt, Passage, Sources
 from haskie.settings import (
@@ -100,13 +113,14 @@ class Plan(msgspec.Struct):
         return [index.collection for index, _ in self.indexes]
 
 
-async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
+async def plan(names: list[str], queries: list[str], reranks: bool = True) -> list[Plan] | None:
     """One plan per query, or None when there is nothing left to search: the settings resolved
     and each model checked once for all of them, and each query embedded once. The plans differ
     only in their `vector`.
 
     A collection deleted since the caller chose it is skipped, so one stale name does not break
-    every search.
+    every search. `reranks` False plans a search with no rerank step: its settings name no
+    reranker, so it waits for none to warm and the log records none.
     """
     user = await load_user_settings()
     embedding = await catalogue.embedding_model(user)
@@ -118,6 +132,8 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
     if not indexes:
         return None
     settings = indexes[0][1] if len(indexes) == 1 else user.search
+    if not reranks:  # a search with no rerank step waits for no reranker, and logs none
+        settings = msgspec.structs.replace(settings, reranker=Reranker.NONE)
 
     vectors: list[list[float] | None] = [None] * len(queries)
     if embedding is not None and any(one.mode != SearchMode.FTS for _, one in indexes):
@@ -717,15 +733,27 @@ def _weigh(
     return weighed, signal
 
 
+def _by_collection(places: Iterable[section.Place]) -> dict[str, set[str]]:
+    """The documents of each collection, out of (collection, document) pairs."""
+    wanted: dict[str, set[str]] = {}
+    for collection, doc in places:
+        wanted.setdefault(collection, set()).add(doc)
+    return wanted
+
+
+async def _outline_rows(where: Plan, places: Iterable[section.Place]) -> list[tuple[str, dict]]:
+    """Where every chunk of these documents sits, as (collection, row) pairs, one query per
+    collection (`CollectionIndex.outline_rows`)."""
+    wanted = _by_collection(places)
+    read = await _per_collection(where, wanted, lambda index, docs: index.outline_rows(docs))
+    return [(index.collection, row) for index, found in read for row in found]
+
+
 async def _grouped(
     hit_ranges: list[passage.HitRange], where: Plan, limit: int
 ) -> list[section.Group]:
     """The first `limit` sections of the ranges, the outlines they need read first."""
-    wanted: dict[str, set[str]] = {}
-    for collection, doc in section.documents(hit_ranges, limit):
-        wanted.setdefault(collection, set()).add(doc)
-    read = await _per_collection(where, wanted, lambda index, docs: index.outline_rows(docs))
-    rows = [(index.collection, row) for index, found in read for row in found]
+    rows = await _outline_rows(where, section.documents(hit_ranges, limit))
     return await cpu.on_cpu(_group, hit_ranges, rows, where.settings.max_section_chars, limit)
 
 
@@ -927,6 +955,78 @@ async def shortlist(
     found = passage.fold_sources(kept, held, sections, how)
     document.fill_descriptions(found.documents, described)
     return found
+
+
+async def map_sections(scanned: Scanned, where: Plan, limit: int) -> overview.SectionMap:
+    """The `limit` sections the scanned hits cover the topic with (`overview`), each with what
+    its document's outline says it is about, and the collections to select to read them.
+
+    Reads at once the chunk spans of every document the scan reached (one query per collection),
+    their documents' outlines and the corpus mean to centre on; then
+    the picks' memberships. The selection runs in one worker-thread hop."""
+    hits = scanned.hits
+    if not hits:
+        return overview.SectionMap(sections=[], collections=[])
+    places = {(hit.collection, hit.document_id) for hit in hits}
+    vectored = all(one is not None for one in scanned.vectors)
+    embedding = where.embedding if vectored else None
+    rows, nodes, centre = await asyncio.gather(
+        _outline_rows(where, places),
+        store.read(sorted({doc for _, doc in places})),
+        Collection.centre(where.names, embedding.cache_name) if embedding else _none(),
+    )
+    pooled, picked, stored, words = await cpu.on_cpu(
+        _map, scanned, rows, nodes, centre, where.settings, limit, embedding is not None
+    )
+    found = overview.mapped(hits, pooled, picked, stored, words)
+    picked_docs = {one.document_id for one in found}
+    held = await Collection.holding(picked_docs, where.names)
+    _log.info(
+        "search_map",
+        chunks=len(hits),
+        pooled=len(pooled),
+        picked=len(found),
+        documents=len(picked_docs),
+        coverage=[round(share, 3) for share in picked.coverage],
+        centred=centre is not None,
+        vectors=embedding is not None,
+        lifted=picked.lifted,
+        # picked sections no outline names: a document reconverted since it was indexed
+        outlines_missing=sorted({pooled[at].document for at in picked.picks if not stored[at]}),
+    )
+    memberships = {one.document_id: held.get(one.document_id, [one.collection]) for one in found}
+    return overview.SectionMap(sections=found, collections=passage.min_cover(memberships))
+
+
+async def _none() -> None:
+    return None
+
+
+def _map(
+    scanned: Scanned,
+    rows: list[tuple[str, dict]],
+    nodes: dict[str, list[Node]],
+    centre: np.ndarray | None,
+    settings: SearchSettings,
+    limit: int,
+    vectored: bool,
+) -> tuple[list[overview.Pooled], overview.Picked, list[Node | None], dict[int, list[str]]]:
+    """The sections the scan reached, the ones picked, each section's outline node, and the
+    keywords that set each pick apart."""
+    hits = scanned.hits
+    pooled = overview.pool(
+        hits, section.outlines(rows), settings.max_section_chars, settings.score_fold
+    )
+    if vectored:
+        vectors = [vector for vector in scanned.vectors if vector is not None]
+        near = overview.nearness(vectors, centre, pooled)
+        weights = np.maximum([hit.score for hit in hits], 0.0)
+        picked = overview.cover(weights, near, pooled, limit)
+    else:
+        picked = overview.by_rank([hit.text for hit in hits], pooled, limit)
+    stored = overview.stored(pooled, nodes)
+    found = [node.keywords if node is not None else {} for node in stored]
+    return pooled, picked, stored, overview.distinct(found, picked.picks)
 
 
 # --- which collections a search covers --------------------------------------------

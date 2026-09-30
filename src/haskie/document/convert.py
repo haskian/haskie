@@ -8,8 +8,10 @@ a coroutine blocks that event loop.
 
 import io
 import re
+from collections.abc import Sequence
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import msgspec
 import pyromark
@@ -17,6 +19,9 @@ import pyromark
 from haskie import home
 from haskie.errors import PermanentError
 from haskie.settings import Parser
+
+if TYPE_CHECKING:  # `bookmarks` parses through `render`, which reads this module's markers
+    from haskie.document.bookmarks import Bookmark
 
 PREVIEW_PAGES = 10
 
@@ -98,11 +103,17 @@ def to_markdown(path: Path, parser: Parser) -> str:
         raise _conversion_error(path, exc) from exc
 
 
-def pdf_page_count(path: Path) -> int:
+def pdf_outline(path: Path) -> tuple[int, list["Bookmark"] | None]:
+    """How many pages the PDF has, and the bookmarks that set its headings (`bookmarks.read`),
+    None when it has none that do, in one read of the file: a conversion plans its batches by
+    both."""
     from pypdf import PdfReader
 
+    from haskie.document import bookmarks
+
     try:
-        return len(PdfReader(str(path)).pages)
+        reader = PdfReader(str(path))
+        return len(reader.pages), bookmarks.read(reader) or None
     except Exception as exc:
         raise _conversion_error(path, exc) from exc
 
@@ -120,28 +131,53 @@ def check_ocr_policy(ocr_pages: int, total_pages: int, skip_ocr_pages: bool) -> 
 
 
 def pdf_pages_markdown(
-    path: Path, pages: list[int] | None = None, skip_ocr_pages: bool = False
+    path: Path,
+    pages: list[int] | None = None,
+    skip_ocr_pages: bool = False,
+    marks: Sequence["Bookmark"] | None = None,
 ) -> tuple[str, list[int], int]:
     """Per-page markdown joined with page markers; returns (markdown, 1-based pages needing OCR,
-    pages in the file).
+    pages converted).
 
     With skip_ocr_pages those pages become a marker comment; otherwise their (empty) text stays.
     Policy decisions (fail or not) belong to check_ocr_policy over the whole document.
+
+    `marks` are the PDF's bookmarks (`pdf_outline`), at least those of these pages and the page
+    before them, when the document has bookmarks that set its headings: then they do, page by
+    page (`bookmarks`), since the converter judges a heading by its font and takes running
+    headers for sections, and a batch with none of its own makes all its headings text. None
+    keeps the converter's headings. The page before a batch is converted too, only to learn which
+    bookmarks it claims.
     """
     import pdf_inspector
 
+    from haskie.document import bookmarks
+
+    routed = marks is not None
+    before = pages[0] - 1 if routed and pages and pages[0] > 0 else None
+    wanted = pages if before is None or pages is None else [before, *pages]
     try:
-        result = pdf_inspector.extract_pages_markdown(str(path), pages=pages)
+        result = pdf_inspector.extract_pages_markdown(str(path), pages=wanted)
     except Exception as exc:
         raise _conversion_error(path, exc) from exc
-    ocr_pages = [p.page + 1 for p in result.pages if p.needs_ocr]
-    parts = [
-        page_marker(p.page + 1, skipped=True)
-        if p.needs_ocr and skip_ocr_pages
-        else f"{page_marker(p.page + 1)}\n\n{p.markdown}"
-        for p in result.pages
-    ]
-    return "\n\n".join(parts), ocr_pages, len(result.pages)
+    by_page = bookmarks.pages(marks or ())
+    claimed: set[Bookmark] = set()
+    ocr_pages: list[int] = []
+    parts: list[str] = []
+    for one in result.pages:
+        number = one.page + 1
+        markdown = one.markdown
+        if routed:
+            markdown = bookmarks.apply(markdown, number, by_page, claimed)
+        if one.page == before:
+            continue
+        if one.needs_ocr:
+            ocr_pages.append(number)
+        skipped = one.needs_ocr and skip_ocr_pages
+        parts.append(
+            page_marker(number, True) if skipped else f"{page_marker(number)}\n\n{markdown}"
+        )
+    return "\n\n".join(parts), ocr_pages, len(parts)
 
 
 def build_preview(
@@ -175,11 +211,14 @@ def build_preview(
 def _pdf_preview(source: Path, out_dir: Path, skip_ocr_pages: bool) -> Preview:
     from pypdf import PdfReader, PdfWriter
 
+    from haskie.document import bookmarks
+
     try:
         reader = PdfReader(str(source))
         total = len(reader.pages)
     except Exception as exc:
         raise _conversion_error(source, exc) from exc
+    marks = bookmarks.read(reader) or None
     shown = min(total, PREVIEW_PAGES)
     writer = PdfWriter()
     for page in reader.pages[:shown]:
@@ -188,6 +227,6 @@ def _pdf_preview(source: Path, out_dir: Path, skip_ocr_pages: bool) -> Preview:
     writer.write(buffer)
     home.atomic_write_sync(out_dir / "source", buffer.getvalue())
 
-    markdown, ocr_pages, _ = pdf_pages_markdown(source, list(range(shown)), skip_ocr_pages)
+    markdown, ocr_pages, _ = pdf_pages_markdown(source, list(range(shown)), skip_ocr_pages, marks)
     home.atomic_write_sync(out_dir / "preview.md", markdown)
     return Preview(kind=PreviewKind.PDF, truncated=total > shown, pages=shown, ocr_pages=ocr_pages)

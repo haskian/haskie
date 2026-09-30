@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
@@ -473,15 +473,21 @@ async def restart_dbos() -> None:
     await workflows.start()
 
 
-def text_pdf(pages: list[str | None]) -> bytes:
-    """Minimal PDF: one Helvetica line per page; None = blank page (needs OCR)."""
+def text_pdf(pages: Sequence[str | None | list[tuple[int, str]]]) -> bytes:
+    """Minimal PDF: one Helvetica line per page, or several lines of the font sizes given (a
+    larger one is what `pdf_inspector` reads as a heading); None = blank page (needs OCR)."""
     objs: list[str] = ["<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", ""]
     page_ids: list[int] = []
     for text in pages:
-        stream = "" if text is None else f"BT /F1 18 Tf 40 150 Td ({text}) Tj ET"
+        lines = text if isinstance(text, list) else [] if text is None else [(18, text)]
+        box, y, parts = ("612 792", 760, []) if isinstance(text, list) else ("400 200", 150, [])
+        for size, line in lines:
+            parts.append(f"BT /F1 {size} Tf 40 {y} Td ({line}) Tj ET")
+            y -= size * 2
+        stream = "\n".join(parts)
         objs.append(f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream")
         objs.append(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200] /Contents {len(objs)} 0 R "
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {box}] /Contents {len(objs)} 0 R "
             "/Resources << /Font << /F1 1 0 R >> >> >>"
         )
         page_ids.append(len(objs))

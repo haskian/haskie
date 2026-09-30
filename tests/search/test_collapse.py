@@ -670,6 +670,10 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
             "headings": one.headings,
             "char_start": one.char_start,
             "char_end": one.char_end,
+            "line_start": one.line_start,
+            "line_end": one.line_end,
+            "page_start": one.page_start,
+            "page_end": one.page_end,
         }
         for one in scanned
     ]

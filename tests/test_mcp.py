@@ -28,6 +28,8 @@ SESSION = "agent-1"
 TOOLS = {
     "search_excerpts",
     "search_sources",
+    "search_sections",
+    "document_outline",
     "set_session_collections",
     "list_collections",
     "get_collection",
@@ -202,6 +204,22 @@ async def test_the_tools_an_agent_is_offered(client: AsyncTestClient) -> None:
                 and len(found["documents"][0]["sections"]) == 1
             ),
         ),
+        (
+            "a map of the sections",
+            "search_sections",
+            {"q": BY_RETRY, "session_id": SESSION},
+            lambda found: (
+                found["sections"][0]["document"] == "retries.md"
+                and found["sections"][0]["keywords"]
+                and found["collections"] == ["notes"]
+            ),
+        ),
+        (
+            "a document's outline",
+            "document_outline",
+            {"document": "retries.md"},
+            lambda found: found[0]["depth"] == 0 and all("keywords" in one for one in found),
+        ),
     ],
 )
 async def test_every_read_tool_answers(
@@ -259,6 +277,18 @@ async def test_every_read_tool_answers(
             "search_sources",
             {"q": "x", "collections": "ghost"},
             "collection not found: ghost",
+        ),
+        (
+            "an unknown collection to map",
+            "search_sections",
+            {"q": "x", "collections": "ghost"},
+            "collection not found: ghost",
+        ),
+        (
+            "the outline of an unknown document",
+            "document_outline",
+            {"document": "ghost.md"},
+            "document not found",
         ),
         (
             "a document that is not a member",

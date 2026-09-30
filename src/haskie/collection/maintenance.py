@@ -10,7 +10,8 @@ index partition, so maintenance never writes a table while a document's index st
 A run's state lives in the maintenance columns of the `collections` row: `pending_documents`
 (documents indexed since the last finished run), `last_write_at`, `last_maintained_at` and
 `vector_index_rows` (rows the vector index was last trained on). This module reads the last one;
-`Collection` reads and writes them all.
+`Collection` reads and writes them all. A run also sums the collection's chunk vectors
+(`Collection.set_centre`), the corpus mean a search centres its cosines on.
 """
 
 from datetime import timedelta
@@ -21,6 +22,7 @@ import msgspec
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.collection import Collection
 from haskie.collection.index import PQ_MIN_ROWS, IndexStats
+from haskie.indexing import embed_cache
 from haskie.logs import get_logger
 from haskie.settings import PipelineSettings
 
@@ -103,6 +105,9 @@ async def run(
     if trained:
         await index.build_vector_index(after.num_rows)
         after = await index.stats() or after
+    if embedding is not None:  # O(documents), so here rather than per document indexed
+        centre = await embed_cache.corpus_sum(collection.name, embedding.cache_name)
+        await collection.set_centre(centre, embedding.cache_name)
 
     report = Report(
         collection=collection.name,

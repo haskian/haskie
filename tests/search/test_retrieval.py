@@ -10,17 +10,22 @@ from pathlib import Path
 from typing import Any
 
 import msgspec
+import numpy as np
 import pytest
-from conftest import hit
+from conftest import chunk_hit, hit, import_row, one_part
 
-from haskie.catalogue.catalogue import UNCALIBRATED
-from haskie.collection.index import Hit, chunk_key, location
+from haskie.catalogue.catalogue import UNCALIBRATED, EmbeddingModel
+from haskie.collection.collection import Collection, MemberStatus
+from haskie.collection.index import Hit, Row, chunk_key, location
+from haskie.document import document
+from haskie.document.document import DocumentStatus
+from haskie.indexing.chunk import split
 from haskie.indexing.segment import CutReason
 from haskie.search import probe, retrieval, section, thin
 from haskie.search.passage import Excerpt, ranges
 from haskie.search.retrieval import Plan, Pool, Scanned
 from haskie.search.thin import Filled
-from haskie.settings import FillValues, Reranker, ScoreFold, SearchSettings
+from haskie.settings import ChunkSettings, FillValues, Reranker, ScoreFold, SearchSettings
 
 HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
 
@@ -676,3 +681,69 @@ def test_the_budget_cuts_the_last_sections_first() -> None:
     kept = retrieval.budget(groups, where)
 
     assert [one.document_id for one in kept] == ["a.md", "b.md"]
+
+
+SHELF = """# Sagas
+
+A saga runs compensating steps when a local step fails, one per step already done.
+
+# Saga retries
+
+A saga retries a failed local step before it runs the compensating steps of the others.
+
+# Quorums
+
+A quorum read overlaps a quorum write, so the read sees the latest acknowledged write.
+"""
+# Every chunk shares one strong common direction (the third axis), as a real model's do; what sets
+# the topics apart is small beside it until the collection's mean is taken out.
+SHELF_MODEL = EmbeddingModel("test/tiny", 4)
+SHELF_VECTORS = {
+    "Sagas": [1.0, 0.0, 3.0, 0.0],
+    "Saga retries": [1.0, 0.1, 3.0, 0.0],
+    "Quorums": [0.0, 1.0, 3.0, 0.0],
+}
+
+
+@pytest.mark.anyio
+async def test_map_sections_covers_the_scan_with_centred_vectors() -> None:
+    """The vector road through real rows: the outlines read back from the table, the corpus
+    mean from the collection, the picks by facility location. The saga retries section repeats
+    the sagas one, so the map takes quorums second and lists the retries under sagas."""
+    shelf = await Collection.create("shelf")
+    doc = await import_row("shelf.md", SHELF)
+    await document.set_status(doc.id, DocumentStatus.IMPORTED)
+    await shelf.add(doc.id)
+    await shelf.set_member_status(doc.id, MemberStatus.INDEXED)
+    chunks = split(SHELF, ChunkSettings())
+    rows = [
+        Row(chunk=one, vector=SHELF_VECTORS[one.headings[0]], seq=seq)
+        for seq, one in enumerate(chunks, start=1)
+    ]
+    index = shelf.index_with(SHELF_MODEL)
+    await index.add_parts(doc.id, "documents/shelf.md", "documents/shelf.md", one_part(0, rows))
+    await shelf.set_centre((np.asarray([0.0, 0.0, 3.0, 0.0]) * 3, 3), SHELF_MODEL.cache_name)
+    await index.open()
+    scores = [0.9, 0.8, 0.3]
+    hits = [
+        chunk_hit(one, seq, score, document=doc.id, collection="shelf")
+        for seq, (one, score) in enumerate(zip(chunks, scores, strict=True), start=1)
+    ]
+    where = Plan(
+        settings=SearchSettings(),
+        indexes=[(index, SearchSettings())],
+        vector=[1.0, 0.0, 3.0, 0.0],
+        embedding=SHELF_MODEL,
+    )
+
+    found = await retrieval.map_sections(
+        Scanned(hits=hits, vectors=[row.vector for row in rows]), where, 2
+    )
+
+    assert [one.header for one in found.sections] == ["Sagas", "Quorums"]
+    sagas = found.sections[0]
+    assert [one.header for one in sagas.related] == ["Saga retries"]
+    assert sagas.related[0].similarity > 0.9, "centred, the two saga sections still agree"
+    assert (sagas.seq_start, sagas.depth, sagas.chunks) == (1, 1, 1)
+    assert sagas.keywords == [], "no cache entry was written: the document has no outline"
+    assert found.collections == ["shelf"]

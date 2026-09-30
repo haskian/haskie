@@ -28,6 +28,7 @@ slot of the CPU budget is held. So a step holds a slot for its CPU work only, ne
 IO or the LanceDB commit around it.
 """
 
+from functools import partial
 from pathlib import Path
 
 import anyio
@@ -39,9 +40,11 @@ from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.collection import Collection
 from haskie.collection.index import Row
 from haskie.document import convert
+from haskie.document.bookmarks import Bookmark
 from haskie.document.document import Document
 from haskie.indexing import chunk, embed_cache, models
 from haskie.indexing.segment import CutReason
+from haskie.outline import keywords
 from haskie.settings import ChunkSettings
 
 JOINER = "\n\n"  # between parts in the assembled markdown
@@ -59,6 +62,10 @@ class Batch(msgspec.Struct):
     # embed: why the part's first chunk starts and its last one ends (`chunk.split`)
     start_reason: CutReason = CutReason.EDGE
     end_reason: CutReason = CutReason.EDGE
+    # convert: the PDF's bookmarks of these pages and the page before, which set its headings
+    # (`convert.pdf_pages_markdown`), read once when the conversion is planned; None when the
+    # document has none that do, so its converter's headings stand
+    bookmarks: list[Bookmark] | None = None
 
 
 # --- convert --------------------------------------------------------------------
@@ -75,9 +82,15 @@ async def plan_convert(doc: Document, batch_pages: int) -> list[Batch]:
     await anyio.Path(doc.parts_dir).mkdir(parents=True, exist_ok=True)
     if source.suffix.lower() != ".pdf":
         return [Batch(seq=0, start=0, end=1)]  # anydoc/plain convert whole files in one go
-    total = await cpu.on_cpu(convert.pdf_page_count, source)
+    total, marks = await cpu.off_interpreter(convert.pdf_outline, source)
     return [
-        Batch(seq=seq, start=start, end=min(start + batch_pages, total))
+        Batch(
+            seq=seq,
+            start=start,
+            end=(end := min(start + batch_pages, total)),
+            # 1-based pages start..end: the batch's own, and the one before it
+            bookmarks=None if marks is None else [m for m in marks if start <= m.page <= end],
+        )
         for seq, start in enumerate(range(0, total, batch_pages))
     ]
 
@@ -92,6 +105,7 @@ async def convert_batch(doc: Document, batch: Batch) -> int:
             source,
             list(range(batch.start, batch.end)),
             doc.skip_ocr_pages,
+            batch.bookmarks,
         )
     else:
         markdown = await cpu.on_cpu(convert.to_markdown, source, doc.parser)
@@ -215,6 +229,23 @@ async def finalize_embed(
     count = len(await _parts(doc))
     paths = [embed_cache.rows_path(doc.id, cache_id, part) for part in range(count)]
     return await embed_cache.write(params, paths, embedding.dims if embedding else None)
+
+
+async def build_outline(params: embed_cache.Params, embedding: EmbeddingModel | None) -> None:
+    """Build the document's outline from the cache entry of `params` (`embed_cache`), embedding
+    its keyword candidates with the model. Fails fast on a model not loaded, as `embed_batch`
+    does."""
+    embed: keywords.Embed | None = None
+    if embedding is not None:
+        await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
+        embed = partial(_embed, embedding)
+    await embed_cache.build_outline(params, embed)
+
+
+def _embed(embedding: EmbeddingModel, texts: list[str]) -> list[list[float]]:
+    from haskie.indexing.embed import embed_texts  # heavy imports, as in `embed_batch`
+
+    return embed_texts(embedding, texts)
 
 
 # --- index ----------------------------------------------------------------------

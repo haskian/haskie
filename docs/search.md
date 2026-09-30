@@ -1,7 +1,7 @@
 # Search
 
-`search_excerpts`, `search_sources` and `GET /api/search/explore` share one ranking, then run the
-fold their answer needs. `search/flow.py` builds these pipelines in one screen. A search of one
+`search_excerpts`, `search_sources`, `search_sections` and `GET /api/search/explore` share one
+ranking, then run the fold their answer needs. `search/flow.py` builds these pipelines in one screen. A search of one
 collection is the same search with `collections` set to it: the collection page asks `explore`
 for passages. `/api/search/text` is the one search on its own path, a separate BM25 search that
 neither merges collections nor folds repeats.
@@ -17,6 +17,7 @@ flowchart LR
     hits --> franges["merge neighbours,<br/>grow or drop short ones,<br/>collapse ranges"] --> read["read the spans"] --> passages(["passages"])
     franges --> group["group by section"] --> budget["cut to<br/>the budget"] --> probe["search again for<br/>missing words"] --> fill["fill around<br/>and between"] --> rerankx["rerank whole excerpts<br/>(experiment)"] --> excerpts(["excerpts"])
     hits --> shortlist["group by document"] --> sources(["sources"])
+    merge -. "no rerank" .-> mapsec["group by section,<br/>pick to cover the scan"] --> sections(["sections"])
 ```
 
 ## The shared ranking
@@ -58,7 +59,7 @@ The ranking scans deeper than the answer. A folded repeat frees its slot for the
 several chunks go into one passage, several passages into one excerpt, and many chunks into one
 source row.
 
-## The four answers
+## The five answers
 
 | shape | what it is | who asks for it |
 | --- | --- | --- |
@@ -66,6 +67,7 @@ source row.
 | passage | neighbouring matched chunks of one section, merged | `explore?granularity=passage` |
 | excerpt | one section of a document, with every passage of it the search kept | `search_excerpts` (the Explore page too) |
 | source | one document: score, best chunk, hottest sections, collections | `search_sources` |
+| section | one section of a document: where it is, its keywords, the sections it covers; no text | `search_sections` |
 
 A passage is the text its chunks cover, read by their offsets, with nothing added around it.
 Chunks are cut at headings, blank lines, blocks and sentences (see [chunking](chunking.md)), so a
@@ -203,6 +205,72 @@ question.
 matched (see "How chunk scores fold" below). It also returns a small set of collections that holds
 every document listed, ready for `set_session_collections`. The set comes from the standard greedy
 approximation of set cover, so it is small but not guaranteed smallest.
+
+## Sections: a map of the shelf
+
+`search_sections` answers "what do my sources hold on this, and nearby?" before any text is
+read. It returns sections, each with where it is and what it is about, and no text: an agent
+reads the map, then asks `search_excerpts` about the sections worth reading. It runs
+`retrieve -> merge -> observe -> hits -> map_sections` (`search/overview.py`):
+
+1. **No reranker.** A map wants breadth and speed; the reranker's floor would drop chunks and
+   narrow it, and it costs about 5 ms a pair. `observe` records the ranking for the search log as
+   `rerank` does. The scan goes 20 chunks deep per section asked for, up to 200.
+2. **Group by section.** Each scanned chunk joins the section an excerpt would quote it in
+   (`section.section_of`), so a section on the map is the one `search_excerpts` returns. One span
+   of one document counts once, whichever collections hold it.
+3. **Pick to cover the scan.** Relevance-weighted facility location: every scanned chunk is a
+   demand point weighed by its share of the scan's relevance, and a section covers it as closely
+   as its nearest chunk is, `max(cos, 0)`. The first pick is the most relevant section; each next
+   is the section that covers the most demand the picks leave uncovered, so a near copy of a pick
+   adds nothing and is not picked. It stops at `limit` (12 by default, at most 40), or when no
+   section covers anything new. Without an aspect list, this is the best-supported coverage
+   method in the literature we follow: in GeoRAG's ablation [9] it beat MMR and DPP by 3 to 5
+   points of exact match, and roughly matched a cross-encoder. Greedy takes under a millisecond
+   at 200 chunks.
+4. **Centred cosines.** Facility location reads a cosine as an amount, and embedding cosines carry
+   an offset that depends on the model (bge's random pairs sit near 0.3, e5's near 0.7). So the
+   vectors are centred on the mean chunk vector of the collections searched, which maintenance
+   stores per collection (`collections.vector_sum`), then clipped at 0. Not on the scan's own
+   mean, which would take out the topic the scan shares. A collection not yet maintained has no
+   mean, and the raw cosine stands (`search_map` logs `centred`).
+5. **At most two sections of one document** while another document has a section left that
+   covers at least half the best gain left, so one long book does not fill the map (Google's site
+   cap, engineering rather than measured). A section barely on the topic does not take a slot for
+   the sake of variety: without that condition the cap spent slots on sections scored 0.007 beside
+   ones scored 0.15. Otherwise the cap gives way.
+6. **Without vectors** (full text only) nothing measures how close two chunks are, so no
+   embedding-based selector runs: sections go by relevance with the same cap, and a section whose
+   matched words repeat a pick's (word Jaccard 0.5 or more, as the collapse uses) is related to it.
+
+Each pick lists up to five `related` sections: those it covers best, by the relevance-weighted
+mean of their chunks' nearness to it. A near copy lands there, as a repeat lands in `also_in`.
+
+Each section says what it is about twice. `keywords` come from the document's outline, built at
+indexing ([Indexing](indexing.md#the-three-workflows)): the section's words weighed against the
+other sections of its depth by c-TF-IDF [10], reranked by meaning [11]. `distinct` is the few of
+those keywords that set it apart from the other sections this scan reached: c-TF-IDF again, each
+section's stored keywords with their counts as one class. It reads the stored keywords rather
+than the matched chunks' words: one to three chunks are too little text to tell a rare word from
+a common one, and on real books that put words like "anything" and "although" on the map.
+Keywords never decide what is picked: in the studies we follow, clusters of the pool used as
+aspects gained nothing, and terms mined from it only re-weighted the aspects already on top.
+
+Measured on three books (1.9 MB of markdown, bge-small), eight questions: the whole search took
+35 to 50 ms warm, `map_sections` 12 to 17 ms of it. Against the top sections by relevance on the
+same scans (0.627 of the relevance-weighted demand covered, 2.0 documents, 7.6 chapters):
+
+| selection | demand covered | documents | chapters | relevance of the top sections |
+| --- | --- | --- | --- | --- |
+| facility location, no cap | 0.638 | 2.1 | 7.6 | 96% |
+| with a hard cap of two | 0.627 | 2.6 | 7.6 | 92% |
+| with the cap held at half the best gain (shipped) | 0.637 | 2.2 | 7.8 | 96% |
+
+That is a sanity check, not an evaluation: the gains are small, as the literature says they are
+without aspects, and the half is a judgement fitted on these eight questions.
+
+Each search logs `search_map` with the chunks, the sections reached and picked, the share of
+demand covered after each pick, whether it centred, and the documents whose outline was missing.
 
 ## How chunk scores fold
 
@@ -380,7 +448,8 @@ otherwise. `limit` comes from the call, else from the same place. No route takes
 other settings is a search of a collection whose overrides say so.
 
 Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/collapse.py`,
-`search/aspects.py`, `search/thin.py`, `search/section.py`, `search/fill.py`, `search/probe.py`.
+`search/aspects.py`, `search/thin.py`, `search/section.py`, `search/fill.py`, `search/probe.py`,
+`search/overview.py`, `outline/`.
 
 ## References
 
@@ -400,3 +469,10 @@ Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/coll
    arXiv preprint, 2026. https://arxiv.org/abs/2603.24204
 8. Yuan, Y. et al. "Embedding-Based Context-Aware Reranker." arXiv preprint, 2025.
    https://arxiv.org/abs/2510.13329
+9. "GeoRAG." arXiv preprint, 2026. Facility location with demand weighed by relevance alone, its
+   "(1,0)" ablation. https://arxiv.org/abs/2606.29328
+10. Grootendorst, M. "c-TF-IDF." BERTopic documentation, 2026.
+    https://maartengr.github.io/BERTopic/getting_started/ctfidf/ctfidf.html
+11. Grootendorst, M. "Representation models": `KeyBERTInspired` and `MaximalMarginalRelevance`.
+    BERTopic documentation, 2026.
+    https://maartengr.github.io/BERTopic/getting_started/representation/representation.html

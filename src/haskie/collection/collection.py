@@ -20,6 +20,7 @@ from typing import Any
 
 import anyio
 import msgspec
+import numpy as np
 from sqlalchemy import (
     ColumnElement,
     CompoundSelect,
@@ -541,6 +542,40 @@ class Collection:
                     vector_index_rows=num_rows if retrained else collections.c.vector_index_rows,
                 )
             )
+
+    async def set_centre(self, found: tuple[np.ndarray, int] | None, model: str) -> None:
+        """Record the sum of the collection's unit chunk vectors under `model` and how many it
+        sums (`embed_cache.corpus_sum`); None clears it."""
+        vector, rows = found if found is not None else (None, 0)
+        async with db.connect() as conn:
+            await conn.execute(
+                update(collections)
+                .where(collections.c.name == self.name)
+                .values(
+                    vector_sum=None if vector is None else vector.astype(np.float64).tobytes(),
+                    vector_rows=rows,
+                    vector_model=model if vector is not None else None,
+                )
+            )
+
+    @staticmethod
+    async def centre(names: list[str], model: str) -> np.ndarray | None:
+        """The mean unit chunk vector over these collections under `model`, weighed by their
+        chunks: what a search centres cosines on (`search.overview`). None when none of them has
+        a sum under it yet, before its first maintenance or after the model changed."""
+        async with db.read() as conn:
+            rows = await conn.execute(
+                select(collections.c.vector_sum, collections.c.vector_rows).where(
+                    collections.c.name.in_(names),
+                    collections.c.vector_model == model,
+                    collections.c.vector_sum.is_not(None),
+                )
+            )
+            found = [(np.frombuffer(raw, dtype=np.float64), count) for raw, count in rows]
+        total = sum(count for _, count in found)
+        if not total:
+            return None
+        return np.sum([vector for vector, _ in found], axis=0) / total
 
     async def index(self) -> CollectionIndex:
         return self.index_with(await catalogue.embedding_model(await load_user_settings()))

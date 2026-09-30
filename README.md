@@ -190,9 +190,10 @@ change a document or collection take a `session_id`, so Sessions can replay the 
 | --- | --- |
 | `search_excerpts` | **The main search.** Passages ready to quote, best first (in turns for several parts), each with `header` and `location`. Repeats fold into `also_in`. Takes up to 5 parts of one question, and tags each excerpt with the parts it answers |
 | `search_sources` | Which documents and collections cover a topic. One row per document, with its best sections |
+| `search_sections` | A map of a topic: which sections of which documents touch it, near topics included, each with its keywords and no text. Fast, for orientation before `search_excerpts` |
 | `set_session_collections` | Limits the rest of the conversation to the collections `search_sources` suggested |
 | `list_collections`, `get_collection`, `list_collection_documents` | Browse collections and their descriptions |
-| `list_documents`, `get_document` | Browse documents |
+| `list_documents`, `get_document`, `document_outline` | Browse documents, and read one's table of contents with each section's keywords |
 | `add_document` | Import a local file by path |
 | `add_document_to_collection`, `remove_document_from_collection` | Attach or detach a document |
 | `describe_document` | Set what a document is about. `search_sources` shows it |

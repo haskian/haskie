@@ -402,11 +402,11 @@ def test_build_preview_of_a_corrupt_pdf_raises_conversion_error(tmp_path: Path) 
         convert.build_preview(bad, tmp_path / "p", Parser.ANYDOC)
 
 
-def test_pdf_page_count_of_a_corrupt_file_raises_conversion_error(tmp_path: Path) -> None:
+def test_pdf_outline_of_a_corrupt_file_raises_conversion_error(tmp_path: Path) -> None:
     bad = tmp_path / "broken.pdf"
     bad.write_bytes(b"not a pdf at all")
     with pytest.raises(PermanentError, match="broken.pdf"):
-        convert.pdf_page_count(bad)
+        convert.pdf_outline(bad)
 
 
 # --- documents: staging and import -------------------------------------------------
@@ -2150,6 +2150,32 @@ async def test_run_maintenance_trains_the_vector_index_once_it_is_big_enough() -
     assert again.ann_trained is False, "the collection has not doubled since it was trained"
 
 
+@pytest.mark.anyio
+async def test_run_maintenance_records_the_corpus_mean_a_search_centres_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under the model it indexes with; a collection without a model sums nothing. The sum
+    itself is `embed_cache.corpus_sum`'s, tested with it."""
+    asked: list[tuple[str, str]] = []
+
+    async def corpus_sum(name: str, model: str) -> tuple[np.ndarray, int]:
+        asked.append((name, model))
+        return np.asarray([2.0, 0.0, 0.0, 2.0]), 4
+
+    monkeypatch.setattr(maintenance.embed_cache, "corpus_sum", corpus_sum)
+    vec = await Collection.create("vec")
+    await _fill(vec.index_with(TINY), "a.md", 0, 3, vectors=True)
+    plain = await Collection.create("plain")
+    await _fill(plain.index_with(None), "a.md", 0, 3)
+
+    await maintenance.run(vec, TINY, PipelineSettings())
+    await maintenance.run(plain, None, PipelineSettings())
+
+    assert asked == [("vec", TINY.cache_name)]
+    centre = await Collection.centre(["vec", "plain"], TINY.cache_name)
+    assert centre is not None and centre.tolist() == [0.5, 0.0, 0.0, 0.5]
+
+
 @pytest.mark.parametrize(
     ("name", "reason"),
     [("a collection nobody indexed yet", "no-table"), ("a table an older build wrote", "outdated")],
@@ -3318,7 +3344,7 @@ def test_migrate_creates_the_schema_once_and_refuses_every_other_home(
 
 # The schema `tables.py` generates at this `SCHEMA_VERSION`: a SHA-256 of its DDL statements,
 # sorted, because a table's indexes are a set and come out in no fixed order.
-SCHEMA_PIN = (26, "c8c6b7f6b3f5ca6ad55f6cde7d99802b123274e8e684cb9fdceb33650f19a869")
+SCHEMA_PIN = (27, "bca3558ab82f080b116aa6f72af5200eb191aef8dc6e84387a9e22818967b4d9")
 
 
 def test_a_table_change_comes_with_a_new_schema_version() -> None:

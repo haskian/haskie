@@ -127,6 +127,7 @@ from haskie.indexing.dbos_names import (
     root_cause,
 )
 from haskie.indexing.pipeline import Batch
+from haskie.outline import store as outline_store
 from haskie.search import log
 from haskie.settings import ChunkSettings, PipelineSettings, UserSettings, load_user_settings
 
@@ -508,16 +509,26 @@ async def adopt_orphans(batch: int = ADOPT_PAGE) -> int:
 
 
 def _start_adoption() -> None:
-    """Adopting a long backlog takes as long as the backlog is deep, and nothing waits for its
-    result: the boot hands it to a task on the loop it runs on and returns (see `_adoption`)."""
+    """Adopting a long backlog takes as long as the backlog is deep, and compacting the outline
+    index as long as the library is large; nothing waits for either: the boot hands both to a
+    task on the loop it runs on and returns (see `_adoption`)."""
     global _adoption
-    adopting = _housekeeping(
+    _adoption = asyncio.get_running_loop().create_task(_boot_chores(), name="haskie-adopt")
+
+
+async def _boot_chores() -> None:
+    await _housekeeping(
         adopt_orphans(),
         "stale_workflow_adoption_failed",
         partial(_log.warning, "stale_workflows_resumed"),
         app_version=APP_VERSION,
     )
-    _adoption = asyncio.get_running_loop().create_task(adopting, name="haskie-adopt")
+    # at every boot too, as the prunes: a desktop app rarely runs at the nightly hour
+    await _housekeeping(
+        outline_store.compact(maintenance.KEEP_VERSIONS),
+        "outline_compact_failed",
+        partial(_log.info, "outline_fragments_compacted"),
+    )
 
 
 class Queue(msgspec.Struct, frozen=True):
@@ -724,15 +735,30 @@ async def try_finalize_convert(batches: list[Batch], ocr_total: int, ctx: Contex
 
 
 @retried_step
-async def cache_lookup(params: embed_cache.Params) -> str | None:
-    return await embed_cache.lookup(params)
+async def cache_lookup(params: embed_cache.Params) -> tuple[str | None, bool]:
+    """The cache id of a hit, else None, and whether the document has an outline under the
+    model: one step for both, since every run asks both."""
+    return await embed_cache.lookup(params), await outline_store.current(
+        params.document_id, params.model
+    )
+
+
+@retried_step
+async def compact_outlines() -> int:
+    return await outline_store.compact(maintenance.KEEP_VERSIONS)
+
+
+@retried_step
+async def build_outline(params: embed_cache.Params, ctx: Context) -> None:
+    await pipeline.build_outline(params, ctx.embedding)
 
 
 @retried_step
 async def forget_embeddings(doc: str) -> None:
-    """Before a (re)conversion: every cached embedding was chunked from markdown that is about
-    to be rewritten. A first import has none; a retried one may."""
+    """Before a (re)conversion: every cached embedding, and the outline, was built from markdown
+    that is about to be rewritten. A first import has none; a retried one may."""
     await embed_cache.forget(doc)
+    await outline_store.forget(doc)
 
 
 @retried_step
@@ -1017,15 +1043,19 @@ async def import_document(doc: str) -> DocumentStatus:
 
 @DBOS.workflow(name=EMBED_WORKFLOW)
 async def ensure_embedding(doc: str, params: embed_cache.Params) -> str:
-    """One cached embedding of one document, computed when missing; returns its cache id.
+    """One cached embedding of one document, computed when missing, and the document's outline
+    under the model, built from it when missing; returns its cache id.
 
     The chunk settings come from `params`, not from any collection: the collection's settings may
     change between the enqueue and the run, and what was asked for is what the id names. The
     embedding model is the global one, so a model changed meanwhile fails the run, and the parent
-    with it: a reindex asks again under the new model."""
+    with it: a reindex asks again under the new model.
+
+    The outline is built from the first entry a document gets under a model: the import's, unless
+    the model changed since. A hit builds it too when the model changed and changed back."""
     with logs.bound(workflow_id=DBOS.workflow_id, document_id=doc):
-        found = await cache_lookup(params)
-        if found is not None:
+        found, outlined = await cache_lookup(params)
+        if found is not None and outlined:
             return found
         ctx = await load_context(doc, None)
         current = ctx.embedding.cache_name if ctx.embedding else embed_cache.NO_MODEL
@@ -1040,8 +1070,12 @@ async def ensure_embedding(doc: str, params: embed_cache.Params) -> str:
             # here rather than in the slices: a download takes minutes, and a slice waiting it out
             # would hold a slot of `task.embedding` and run into its own timeout
             _value(await _awaiting_model(partial(embedding_ready, ctx.embedding)))
-        await _stage(Stage.EMBED, ctx)
-        return await finalize_embed(params, ctx)
+        if found is None:
+            await _stage(Stage.EMBED, ctx)
+            found = await finalize_embed(params, ctx)
+        if not outlined:
+            await build_outline(params, ctx)
+        return found
 
 
 @DBOS.workflow(name=COLLECTION_DOCUMENT_WORKFLOW)
@@ -1197,6 +1231,8 @@ async def memberships(doc: str) -> list[str]:
 
 @retried_step
 async def remove_document_files(doc: str) -> None:
+    """The document's folder, and its nodes in the outline index, which lives outside it."""
+    await outline_store.forget(doc)
     await document.remove_files(doc)
 
 
@@ -1403,18 +1439,20 @@ async def sweep_staging() -> int:
 
 @DBOS.workflow(name=DAILY_MAINTENANCE_WORKFLOW)
 async def daily_maintenance(scheduled_time: datetime, context: Any) -> None:
-    """Nightly housekeeping: the operation history, the audit trail, the search log and the
-    staging folder. Takes the two arguments every DBOS schedule passes."""
+    """Nightly housekeeping: the operation history, the audit trail, the search log, the staging
+    folder and the outline index. Takes the two arguments every DBOS schedule passes."""
     purged_before_ms = await purge_operation_history()
     deleted = await prune_audit()
     searches = await prune_searches()
     swept = await sweep_staging()
+    compacted = await compact_outlines()
     _log.info(
         "home_housekept",
         jobs_purged_before_ms=purged_before_ms,
         audit_files_pruned=deleted,
         searches_pruned=searches,
         staged_uploads_swept=swept,
+        outline_fragments_compacted=compacted,
     )
 
 

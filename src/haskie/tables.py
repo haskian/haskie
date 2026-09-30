@@ -50,6 +50,12 @@ collections = Table(
     Column("last_write_at", Float),
     Column("last_maintained_at", Float),
     Column("vector_index_rows", Integer, nullable=False, server_default=ZERO),
+    # the sum of the unit chunk vectors of its indexed documents under `vector_model`, and how
+    # many chunks it sums (`embed_cache.corpus_sum`), set by maintenance: what a search centres
+    # cosines on before it weighs them (`search.overview`)
+    Column("vector_sum", LargeBinary),
+    Column("vector_rows", Integer, nullable=False, server_default=ZERO),
+    Column("vector_model", Text),
 )
 
 # a document belongs to no collection: `collection_documents` is the many-to-many, and each
@@ -116,7 +122,7 @@ embeddings = Table(
     Column("rows", Integer, nullable=False, server_default=ZERO),
     Column("bytes", Integer, nullable=False, server_default=ZERO),
     Column("created_at", Float, nullable=False, server_default=ZERO),
-    # the document as one vector: the mean of its unit chunk vectors, normalized, as float32
+    # the document as one vector: the mean of its unit chunk vectors, not normalized, float32
     # bytes; what `embed_cache.nearest` compares documents by. Null without an embedding model
     Column("vector", LargeBinary),
     Index("idx_embeddings_document_id", "document_id"),

@@ -16,6 +16,9 @@ by the `score_fold` setting (`ScoreFold`). No IO: `retrieval.py` reads the markd
 memberships and hands them in.
 """
 
+from collections.abc import Sequence
+from typing import Protocol
+
 import msgspec
 
 from haskie.collection.index import ChunkKey, Hit, Overlaps, Relation, chunk_key, location
@@ -124,11 +127,21 @@ class HitRange(msgspec.Struct):
         )
 
 
-def pages(hits: list[Hit]) -> tuple[int | None, int | None]:
-    """The pages a group of hits covers, first to last: every hit's, not only the best one's, or
-    a passage over pages 1 to 5 would be cited as page 1. None for a document without pages."""
-    starts = [hit.page_start for hit in hits if hit.page_start is not None]
-    ends = [hit.page_end for hit in hits if hit.page_end is not None]
+class Paged(Protocol):
+    """Anything that runs over pages: a hit, a chunk, an outline entry."""
+
+    @property
+    def page_start(self) -> int | None: ...
+
+    @property
+    def page_end(self) -> int | None: ...
+
+
+def pages(spans: Sequence[Paged]) -> tuple[int | None, int | None]:
+    """The pages a group of spans covers, first to last: every span's, not only the best one's,
+    or a passage over pages 1 to 5 would be cited as page 1. None for a document without pages."""
+    starts = [one.page_start for one in spans if one.page_start is not None]
+    ends = [one.page_end for one in spans if one.page_end is not None]
     return (min(starts) if starts else None, max(ends) if ends else None)
 
 

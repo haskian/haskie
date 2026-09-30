@@ -235,6 +235,13 @@ def _shortlist(state: "Search", *_: Any) -> str | None:
     )
 
 
+def _map_sections(state: "Search", *_: Any) -> str | None:
+    return (
+        f"A section scores {_FOLDS[state.plan.settings.score_fold]}. The order is the order the "
+        "sections were picked in to cover the scan, not the order of their scores."
+    )
+
+
 def _rerank_excerpts(state: "Search", before: list, after: list) -> str | None:
     """Whole excerpts reranked, when the experiment ran and changed a score."""
     if [one.score for one in before] == [one.score for one in after]:
@@ -261,5 +268,6 @@ RULES: dict[str, Rule] = {
     "probe_gaps": _probe_gaps,
     "fill": _fill,
     "shortlist": _shortlist,
+    "map_sections": _map_sections,
     "rerank_excerpts": _rerank_excerpts,
 }

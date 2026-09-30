@@ -28,6 +28,9 @@ Module owns the parquet schema and the row shape it is read back into (`index.Ro
 column is this module's own: `seq`, the row's 1-based position among the document's chunks, which
 only the merge across parts can number (see `_merge`). File writes and reads run in a worker thread:
 pyarrow is sync.
+
+The document's outline (`outline.build`, `outline.store`) is built from one entry's file
+(`build_outline`); which entry, `workflows.ensure_embedding` decides.
 """
 
 import hashlib
@@ -44,14 +47,17 @@ import pyarrow.parquet as pq
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert
 
-from haskie import db, home
+from haskie import cpu, db, home
 from haskie.catalogue.catalogue import EmbeddingModel
-from haskie.collection.index import Row
+from haskie.collection.collection import MemberStatus
+from haskie.collection.index import Row, vector_field, vector_matrix
 from haskie.document import document
 from haskie.indexing import chunk
 from haskie.indexing.chunk import CHUNK_VERSION, Chunk
+from haskie.outline import build, keywords, store
+from haskie.search import collapse
 from haskie.settings import Chunker, ChunkSettings, Parser
-from haskie.tables import documents, embeddings
+from haskie.tables import collection_documents, documents, embeddings
 
 NO_MODEL = "none"  # the `model` of a profile without an embedding model: chunks only, no vectors
 
@@ -156,7 +162,7 @@ _PLAIN = pa.schema(
 def _schema(dims: int | None) -> pa.Schema:
     if dims is None:
         return _PLAIN
-    return _PLAIN.append(pa.field("vector", pa.list_(pa.float32(), dims)))
+    return _PLAIN.append(vector_field(dims))
 
 
 def _batch(part: int, rows: list[Row], dims: int | None) -> pa.RecordBatch:
@@ -171,46 +177,49 @@ def _rows(batch: pa.RecordBatch) -> list[Row]:
     ]
 
 
-def _unit_sum(rows: list[Row], dims: int) -> np.ndarray:
-    """The sum of the rows' vectors, each scaled to length one first, so a long chunk weighs no
-    more than a short one. An empty part sums to zero."""
-    vectors = [row.vector for row in rows if row.vector is not None]
-    matrix = np.asarray(vectors, dtype=np.float32).reshape(-1, dims)
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    return (matrix / np.where(norms > 0, norms, 1)).sum(axis=0)
+class Merged(msgspec.Struct):
+    """What `_merge` wrote: its size, its rows, and the sum of their unit vectors."""
+
+    bytes: int
+    rows: int
+    summed: np.ndarray | None  # None without an embedding model
 
 
-def _merge(parts: list[Path], target: Path, dims: int | None) -> tuple[int, int, bytes | None]:
+def _merge(parts: list[Path], target: Path, dims: int | None) -> Merged:
     """Stream every `rows.json` into `target` as one row group each, through a `.tmp` and one
-    replace, so a reader never sees a partial file. Returns (rows, bytes, document vector). An
-    empty part still gets a row group, so group `n` is always part `n` (an empty group is
-    skipped on read).
+    replace, so a reader never sees a partial file. An empty part still gets a row group, so group
+    `n` is always part `n` (an empty group is skipped on read).
 
     This is also where `Row.seq` is filled in: the parts are chunked in parallel and each one
     numbers its chunks from zero, so the merge is the first place that sees the whole document
     in order. And where the document vector is summed, since every row passes through here once.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
-    total = 0
-    summed = None if dims is None else np.zeros(dims, dtype=np.float32)
+    count = 0
+    summed = None if dims is None else np.zeros(dims, dtype=np.float64)
     with home.atomic_replace(target) as tmp, pq.ParquetWriter(tmp, _schema(dims)) as writer:
         for part, path in enumerate(parts):
             rows = msgspec.json.decode(path.read_bytes(), type=list[Row])
-            for seq, row in enumerate(rows, total + 1):
+            for seq, row in enumerate(rows, count + 1):
                 row.seq = seq
-            total += len(rows)
             writer.write_batch(_batch(part, rows, dims))
-            if summed is not None:
-                summed += _unit_sum(rows, len(summed))
-    return total, target.stat().st_size, _document_vector(summed)
+            if summed is not None and rows:  # `_batch` has refused a row without a vector by now
+                summed += collapse.unit_rows([row.vector for row in rows]).sum(axis=0)
+            count += len(rows)
+    return Merged(bytes=target.stat().st_size, rows=count, summed=summed)
 
 
-def _document_vector(summed: np.ndarray | None) -> bytes | None:
-    """The mean direction of a document's chunks, normalized, as the float32 bytes stored."""
-    if summed is None:
+def _document_vector(merged: Merged) -> bytes | None:
+    """The mean of a document's chunk vectors, each scaled to length one first so a long chunk
+    weighs no more than a short one, as the float32 bytes stored. Not normalized: its length is
+    how tightly the chunks point one way, which a mean over many documents (`corpus_sum`) needs,
+    and a cosine (`nearest`) ignores."""
+    if merged.summed is None or not merged.rows:
         return None
-    norm = float(np.linalg.norm(summed))
-    return (summed / norm).astype(np.float32).tobytes() if norm > 0 else None
+    mean = merged.summed / merged.rows
+    if not np.linalg.norm(mean):
+        return None  # chunks that cancel out: no direction to compare
+    return mean.astype(np.float32).tobytes()
 
 
 # --- the cache -----------------------------------------------------------------
@@ -227,27 +236,47 @@ async def lookup(p: Params) -> str | None:
 
 
 async def write(p: Params, parts: list[Path], dims: int | None) -> str:
-    """Merge the scratch rows of every part into the cache file, publish the row, then drop the
+    """Merge the scratch rows of every part into the cache file, publish its row, then drop the
     scratch directory - last, so a retry before the row was written still finds its input."""
     id = key(p)
     target = file_path(p.document_id, id)
-    rows, size, vector = await anyio.to_thread.run_sync(_merge, parts, target, dims)
+    merged = await anyio.to_thread.run_sync(_merge, parts, target, dims)
     entry = Entry(
         **msgspec.structs.asdict(p),
         id=id,
         urn=urn(p),
-        rows=rows,
-        bytes=size,
+        rows=merged.rows,
+        bytes=merged.bytes,
         created_at=time.time(),
     )
     async with db.connect() as conn:
         await conn.execute(
             insert(embeddings)
-            .values({**msgspec.to_builtins(entry), "vector": vector})
+            .values({**msgspec.to_builtins(entry), "vector": _document_vector(merged)})
             .on_conflict_do_nothing()
         )
     await home.remove_tree(scratch_dir(p.document_id, id))
     return id
+
+
+async def build_outline(p: Params, embed: keywords.Embed | None) -> None:
+    """Build the document's outline from the cache file of `p` and save it under `p`'s model:
+    `embed` embeds its keyword candidates; None ranks them by weight alone."""
+    path = file_path(p.document_id, key(p))
+    chunks, vectors = await anyio.to_thread.run_sync(_read_all, path)
+    nodes, pooled = await cpu.on_cpu(build.describe, chunks, vectors, embed)
+    await store.save(p.document_id, store.Outline(model=p.model, nodes=nodes), pooled)
+
+
+def _read_all(path: Path) -> tuple[list[Row], np.ndarray | None]:
+    """Every chunk of a cache file in `seq` order, without its vector, and the vectors as one
+    matrix: a float list per row would take four times the memory."""
+    table = pq.read_table(path)
+    plain = table.drop_columns(["vector"]) if "vector" in table.column_names else table
+    chunks = [row for batch in plain.to_batches() for row in _rows(batch)]
+    if plain is table:
+        return chunks, None
+    return chunks, vector_matrix(table.column("vector"))
 
 
 def _num_row_groups(path: Path) -> int:
@@ -281,6 +310,37 @@ async def read(doc: str, id: str, start: int, end: int) -> AsyncIterator[tuple[i
                 yield part, rows
     finally:
         await anyio.to_thread.run_sync(file.close)
+
+
+async def corpus_sum(collection: str, model: str) -> tuple[np.ndarray, int] | None:
+    """The sum of the unit chunk vectors of a collection's indexed documents under `model`, and
+    how many chunks it sums, each document by its newest entry; None without one. What a search
+    centres its vectors on (`search.overview`), built from the document means rather than the
+    collection's table: one row per document, not one per chunk."""
+    async with db.read() as conn:
+        rows = await conn.execute(
+            select(embeddings.c.document_id, embeddings.c.vector, embeddings.c.rows)
+            .join_from(
+                embeddings,
+                collection_documents,
+                embeddings.c.document_id == collection_documents.c.document_id,
+            )
+            .where(
+                collection_documents.c.collection == collection,
+                collection_documents.c.status == MemberStatus.INDEXED,
+                embeddings.c.model == model,
+                embeddings.c.vector.is_not(None),
+            )
+            .order_by(embeddings.c.created_at.desc())
+        )
+        newest: dict[str, tuple[bytes, int]] = {}
+        for name, vector, count in rows:
+            newest.setdefault(name, (vector, count))
+    if not newest:
+        return None
+    means = [np.frombuffer(vector, dtype=np.float32) for vector, _ in newest.values()]
+    counts = np.asarray([count for _, count in newest.values()], dtype=np.float64)
+    return (np.asarray(means, dtype=np.float64) * counts[:, None]).sum(axis=0), int(counts.sum())
 
 
 async def forget(doc: str) -> None:
@@ -345,9 +405,9 @@ async def nearest(doc: str, model: str, limit: int) -> list[Neighbour]:
 
 def _closest(vectors: dict[str, bytes], target: bytes, limit: int) -> list[tuple[str, float]]:
     """The `limit` of `vectors` (by document id) with the highest cosine to `target`, as (id,
-    cosine); all are unit length."""
+    cosine)."""
     ids = list(vectors)
     matrix = np.frombuffer(b"".join(vectors.values()), dtype=np.float32).reshape(len(ids), -1)
-    scores = matrix @ np.frombuffer(target, dtype=np.float32)
+    scores = collapse.unit_rows(matrix) @ collapse.unit_rows([np.frombuffer(target, np.float32)])[0]
     closest = np.argsort(-scores, kind="stable")[:limit]
     return [(ids[at], round(float(scores[at]), 4)) for at in closest]

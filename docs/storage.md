@@ -17,10 +17,13 @@ they sit in the fastembed and Hugging Face caches, outside the home.
     original.<ext>.md     the full conversion
     parts/NNNNNN.md       one per batch of PDF pages (one part for other files); every
                           collection re-chunks from these
+    outline.json          the outline: every section, where it runs, its keywords
     preview/              the preview source and its markdown
     embeddings/<id>.parquet   one per chunk settings and model
     embeddings/<id>.tmp/      partial results while an embedding is computed
   collections/<sh>/<name>/index/   the LanceDB table "chunks"
+  outlines/               LanceDB, one "nodes-<model hash>" table per embedding model: every
+                          document's outline, with vectors
   cache/models/           compiled CoreML models
   audit/                  one JSON line per action
 ```
@@ -56,6 +59,9 @@ erDiagram
         text name PK
         text overrides
         text description
+        blob vector_sum
+        int vector_rows
+        text vector_model
     }
     collection_documents {
         text collection PK
@@ -143,8 +149,31 @@ by. The seed gives every reranker an uncalibrated floor of 0.05 and the identity
 never imported twice. Every table, the LanceDB rows, the folders and the workflow ids refer to a
 document by this id. `documents.name` is what people and agents call it. The API and the tools
 address a document by name. It is unique, and stored in lowercase-kebab-case.
-`embeddings.vector` is the document as one vector: the mean of its unit chunk vectors,
-normalized. It is what the nearest documents are found by.
+`embeddings.vector` is the document as one vector: the mean of its unit chunk vectors, not
+normalized. Its direction is what the nearest documents are found by. Its length is how tightly
+the chunks point one way, which the collection's mean needs: maintenance sums the members' means,
+each times its chunks, into `collections.vector_sum`, with the chunks it sums in `vector_rows`
+and the model in `vector_model`. A map of sections centres its cosines on that mean
+([Search](search.md#sections-a-map-of-the-shelf)).
+
+## The outline
+
+Each document has one outline, whichever collections hold it (`outline/`). It is kept twice:
+
+- **`outline.json`**, beside the markdown: every section in document order, where it runs, by the
+  fields a chunk names its span with (`headings`, lines, chars, bytes, pages), and its keywords
+  with how often it uses each. It names the embedding model it was built under. `document_outline`
+  and `search_sections` read it.
+- **`outlines/`**, one LanceDB table per embedding model, across every collection: the same
+  nodes, one row each, keyed by `document_id` and `position`, each with its vector. The vector is
+  the mean of the section's unit chunk vectors, scaled to length one. A model change drops no
+  table, so a document's rows wait for the model to change back. Every boot and the nightly run
+  compact them.
+
+`ensure_embedding` builds it from the first cache entry it finds or computes while the document
+has no outline under the model. That is the import's, under the default chunk settings, unless
+the model changed since: then it is whichever entry the document gets first under the new
+model, or an old one when the model changed back. A reconversion or a delete drops both.
 
 `searches` is the search log (`search/log.py`): one row per search, with or without a session,
 failed or not. `search_questions` holds each question it asked and what that question's ranking

@@ -28,6 +28,7 @@ from uuid import uuid4
 
 import anyio
 import anyio.to_thread
+import lancedb
 import msgspec
 import pytest
 from conftest import (
@@ -90,6 +91,7 @@ from haskie.indexing import (
 )
 from haskie.indexing.pipeline import Batch
 from haskie.indexing.workflows import Stage
+from haskie.outline import store as outline_store
 from haskie.paging import Order
 from haskie.search import log
 from haskie.settings import (
@@ -1090,13 +1092,21 @@ async def test_reimport_reconverts_and_drops_the_stale_cache(dbos, tmp_path: Pat
     collection = await Collection.create("stale")
     await collection.set_overrides(CollectionOverrides(chunk_size=60))
     doc = await import_document(dbos, "a.md", MD, tmp_path)
+    imported = outline_store.path(doc.id).read_bytes()
     await attach_document(dbos, "stale", doc.name)
+    assert outline_store.path(doc.id).read_bytes() == imported, (
+        "another chunking under the model leaves the import's outline alone"
+    )
     before = await embed_cache.entries(doc.id)
     assert len(before) == 2, "the import's default params and the collection's"
     assert len(list(doc.embeddings_dir.glob("*.parquet"))) == 2
     await document.set_status(doc.id, DocumentStatus.ERROR, "boom")
+    # an outline current under the model but empty: only a forgotten one is built again
+    emptied = outline_store.Outline(model=embed_cache.NO_MODEL, nodes=[])
+    await outline_store.save(doc.id, emptied, None)
 
     assert await wait_for(await dbos.start_import(await document.get(doc.id))) == "imported"
+    assert (await outline_store.read([doc.id]))[doc.id], "the outline is built again"
 
     after = await embed_cache.entries(doc.id)
     default = (await load_user_settings()).conversion.chunk_size
@@ -1109,6 +1119,30 @@ async def test_reimport_reconverts_and_drops_the_stale_cache(dbos, tmp_path: Pat
         )
         is None
     ), "the collection's entry is a miss until it is indexed again"
+
+
+async def test_a_hit_builds_an_outline_left_under_another_model(dbos, tmp_path: Path) -> None:
+    """The model changed and changed back: the hit returns its entry, and the outline the other
+    model left is built again from the entry's file. A current one returns at once."""
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    row = await document.get(doc.id)
+    params = embed_cache.params(row, (await load_user_settings()).conversion.chunking, None)
+    cache_id = embed_cache.key(params)
+    built = (await outline_store.read([doc.id]))[doc.id]
+    await outline_store.save(doc.id, outline_store.Outline(model="other/model:8", nodes=[]), None)
+
+    async def ensure() -> str:
+        with SetWorkflowID(f"{workflows.EMBED_PREFIX}:{row.id}:{uuid4().hex}"):
+            handle = await DBOS.enqueue_workflow_async(
+                workflows.EMBEDDING_QUEUE, workflows.ensure_embedding, row.id, params
+            )
+        return await handle.get_result(polling_interval_sec=workflows.TASK_POLL)
+
+    assert await ensure() == cache_id, "the hit's entry, not a new one"
+    assert await outline_store.current(doc.id, params.model)
+    assert (await outline_store.read([doc.id]))[doc.id] == built
+    assert [entry.id for entry in await embed_cache.entries(doc.id)] == [cache_id]
+    assert await ensure() == cache_id, "current: the hit returns at once"
 
 
 async def test_ensure_embedding_fails_permanently_under_another_model(dbos, tmp_path: Path) -> None:
@@ -1744,6 +1778,11 @@ async def test_delete_document_clears_every_collection_it_is_in(dbos, tmp_path: 
     assert await document_names() == [other.name]
     assert not document.root(doc.id).exists()
     assert await embed_cache.entries(doc.id) == [], "the cache rows cascade with the document"
+    conn = await lancedb.connect_async(str(home.OUTLINE_ROOT))
+    nodes = await conn.open_table(outline_store.table_name(embed_cache.NO_MODEL))
+    assert {row["document_id"] for row in await nodes.query().to_list()} == {other.id}, (
+        "the outline index lives outside the folder: its rows go too"
+    )
     for name in ("left", "right"):
         assert await Collection(name).member_ids() == ([other.id] if name == "left" else []), name
         assert {
@@ -2792,11 +2831,19 @@ async def test_daily_maintenance_prunes_the_audit_trail_and_the_search_log(
     today.write_text("{}\n")
     await _old_and_new_search()
 
+    for doc in ("a.md", "b.md", "c.md"):  # one fragment per outline written
+        outline_store.document.root(doc).mkdir(parents=True)
+        await outline_store.save(doc, outline_store.Outline(model="none", nodes=[]), None)
+
     await workflows.daily_maintenance(datetime.now(UTC), None)
 
     assert not old.exists()
     assert today.exists()
     assert await _logged_questions() == kept
+    conn = await lancedb.connect_async(str(home.OUTLINE_ROOT))
+    table = await conn.open_table(outline_store.table_name("none"))
+    stats: dict = await table.stats()  # ty: ignore[invalid-assignment]  (a dict at runtime)
+    assert stats["fragment_stats"]["num_fragments"] <= 1, "compacted"
 
 
 async def test_daily_maintenance_purges_the_history_past_the_retention(

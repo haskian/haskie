@@ -26,7 +26,7 @@ counts, and how `also_in` folds repeats. This section adds what those descriptio
 fields to read, and the defaults.
 
 **`search_excerpts(q, context?, session_id?, collections?, limit?)`** → `excerpts`, `uncovered`,
-`missing_terms`. Start here.
+`missing_terms`. Start here, or with `search_sections` when the question is broad.
 
 - `limit` defaults to the collection's setting when one collection is searched, else the user's.
   It never defaults to fewer than the parts.
@@ -57,6 +57,20 @@ and `collections`.
 - Each of `sections` has `header`, `score`, `chunks`, `location` and `line_start`/`line_end`.
   Read them to know where to look in a long document.
 
+**`search_sections(q, session_id?, collections?, limit?)`** → `sections` (in pick order) and
+`collections`. A map of a topic, near topics included, with no text. Fast: no reranker.
+
+- `limit`: sections, 1 to 40, default 12. At most two of one document while another has a section
+  on the topic left.
+- Per section: `document`, `header`, `depth`, `location`, `line_start`/`line_end`,
+  `seq_start`/`seq_end`, `chars` (its length), `chunks` (how many of its chunks matched), `score`,
+  `markdown_file`.
+- `keywords`: what the section is about, against the other sections of its depth. `distinct`: the few of
+  them that set it apart from the other sections on this map.
+- `related`: sections left out because this one covers them, each with `header`, `location`,
+  `score` and `similarity`. A near copy of the section lands here.
+- Then ask `search_excerpts` about the sections worth reading, or open `markdown_file` at the lines.
+
 **`set_session_collections(session_id, collections)`** → the selection now, at most 100 names. It
 replaces the previous selection; it does not add to it. It scopes every later search of the
 session, `search_sources` included. Pass `[]` to clear it before a new topic.
@@ -80,6 +94,9 @@ Paged tools take `page_size` (default 100, at most 1000), `cursor`, `sort` and `
   `collections`: how many hold it. `status` is one of `queued`, `converting`, `embedding`,
   `imported`, `error`, `cancelled`, `deleting`.
 - **`get_document(document)`** → one such row.
+- **`document_outline(document)`** → its table of contents in document order: each section's
+  `header`, `depth` (0 is the whole document), `location`, `line_start`/`line_end`, `chars` and
+  `keywords`. Empty until the document is imported.
 - A document row: `name`, `suffix`, `size`, `status`, `error`, `preview`, `parser`,
   `skip_ocr_pages`, `description`, `created_at`, `updated_at`.
 

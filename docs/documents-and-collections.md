@@ -81,7 +81,17 @@ re-import runs from `queued`, `error` or `cancelled`, with the `parser` and `ski
 document was imported with: to change either, delete it and import it again. A delete is accepted
 in any state. The original suffix is kept in the name, because it decides the route:
 
-- PDFs convert page by page with pdf-inspector.
+- PDFs convert page by page with pdf-inspector. It judges a heading by its font, so a typeset
+  book comes out with its chapters and sections at one level, and each page's running header
+  ("348 Chapter 10 AGGREGATES") as a heading of its own. When the PDF has bookmarks of more than
+  one level, they set the headings instead (`document/bookmarks.py`, read with pypdf once, when
+  the conversion is planned, and handed to each batch): a heading that matches a bookmark of its
+  page, or of the page before, by its letters takes the bookmark's depth as its level, and every
+  other heading becomes plain text. A bookmark matches once, so a running header matches none:
+  it either adds its page number to the title, or repeats a title a page before it claimed. On
+  one 657-page book, 232 of its 283 bookmarks matched, and its 748 sections became 251, nested
+  as its table of contents is.
+  Without such bookmarks, pdf-inspector's headings stand.
 - Text and HTML files are read as they are.
 - Images are stored and previewed, with no text to index.
 - Everything else converts with anydoc, or is read as raw text when the document's `parser` is
@@ -100,7 +110,7 @@ The web UI stages several files at once, and checks each new book for repeats in
   409, naming the document. A file the import refuses for another reason, such as a name already
   taken, stays in the list with the reason, so you can rename or remove it.
 - **The nearest documents.** Writing a cache entry also stores the document as one vector: the
-  mean of its unit chunk vectors, normalized. `GET /api/documents/{name}/similar` names the
+  mean of its unit chunk vectors. `GET /api/documents/{name}/similar` names the
   three nearest by cosine, under the current embedding model. The
   vector exists only once the import has embedded the document, so the UI follows the new book
   until then. Full-text only has no vectors, so it finds no nearest documents.
@@ -151,7 +161,8 @@ folder it moved.
 ## The embedding cache
 
 The cache makes one document cheap to share between collections. Each computed embedding is one parquet file
-under the document, plus one `embeddings` row. Its id is the SHA-256 of a URN, one line, that
+under the document, plus one `embeddings` row. The first one under a model is also what the
+document's outline is built from (`outline/build.py`, see [storage](storage.md#the-outline)). Its id is the SHA-256 of a URN, one line, that
 names everything the rows depend on:
 
 ```

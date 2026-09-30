@@ -14,6 +14,7 @@ from haskie.collection.index import Hit
 from haskie.indexing import operations
 from haskie.paging import DEFAULT_PAGE_SIZE, Page
 from haskie.search import aspects, flow, log, retrieval, session, text
+from haskie.search.overview import SectionMap
 from haskie.search.passage import Answer, Passage, Sources
 
 
@@ -191,6 +192,49 @@ async def search_sources(
         names = await retrieval.scope(session_id, collections)
         found = await flow.sources(names, q, limit, sections)
         capture.answer(found.documents)
+    return found
+
+
+@get("/api/search/sections", mcp_tool="search_sections")
+async def search_sections(
+    q: str,
+    session_id: SessionId = None,
+    collections: str | None = None,
+    limit: Limit = None,
+) -> SectionMap:
+    """A map of a topic: which sections of which documents touch it, near topics included, and
+    what each is about, without their text. Fast: no reranker, no text read.
+
+    The search scans deep and groups what it finds into the sections an excerpt would quote. It
+    then picks `limit` of them (12 by default, at most 40) to cover everything the scan found
+    rather than to repeat its best part: the most relevant section first, then each time the one
+    that covers the most of what the picks so far leave out, at most two of one document while
+    another has a section on the topic left. `sections` is that list, in pick order. A section
+    that says what a pick already says is not picked: it is listed under the pick in `related`,
+    with the other sections closest to it (`similarity`).
+
+    Each section says what it is about twice. `keywords` are the words it uses more than the
+    other sections of its depth in its document, fixed when the document was indexed.
+    `distinct` are the few of its `keywords` that set it apart from the other sections this
+    search reached. `chars`
+    is how long it is, `chunks` how many of its chunks matched. Cite it by `header` and
+    `location`; `document_outline` gives the whole table of contents of one document.
+
+    Use it before `search_excerpts` to see what the sources hold on a topic and nearby, then ask
+    `search_excerpts` about the sections worth reading. `collections` at the top level is the
+    smallest set of collections holding every section listed, for `set_session_collections`.
+
+    Where it looks: the comma-separated `collections` if given, else the collections selected for
+    `session_id`, else every collection. No sections is an answer: nothing here covers the topic.
+
+    Args:
+        session_id: The conversation's id; the search then shows in that session's history.
+    """
+    q = aspects.question(q)  # stripped as `report_gap` matches it
+    async with log.capturing(log.Tool.SECTIONS, [q], session_id) as capture:
+        names = await retrieval.scope(session_id, collections)
+        found = await flow.sections(names, q, limit)
+        capture.answer(found.sections)
     return found
 
 

@@ -191,7 +191,7 @@ def spaces(
     return Scan(deciding=measured[:1] if mode == SearchMode.VECTOR else measured, measured=measured)
 
 
-def unit_rows(vectors: Sequence[Vector | None]) -> np.ndarray:
+def unit_rows(vectors: Sequence[Vector | None] | np.ndarray) -> np.ndarray:
     """The vectors as rows of unit length, so a matrix product of two is their cosines. A zero
     vector stays zero rather than dividing by it. The caller has checked that none is missing."""
     matrix = np.asarray(vectors, dtype=np.float64)

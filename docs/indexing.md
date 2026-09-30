@@ -47,6 +47,21 @@ flowchart TB
 
 `ensure_embedding` always runs, and looks up the cache inside. On a hit it returns at once.
 
+**The outline.** When a document has no outline under the model, `ensure_embedding` builds one
+from the cache file it found or computed (`outline/build.py`, `outline/store.py`): the import's,
+under the default chunk settings, unless the model changed since. Every heading's section, by the
+rule a search groups passages by, with the words that say what it is about and, with an embedding model, a vector: the mean of
+its unit chunk vectors. It goes into `outline.json` beside the markdown and into the outline index
+across every collection ([Storage](storage.md#the-outline)). A keyword strategy picks the words
+(`keywords.Strategy`). The one there is, `ClassTfidf`, weighs the sections of one depth
+against each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25 weighting: a chapter's
+words against the other chapters'. With an embedding model, each section's best 20 candidates
+are embedded, one call for the whole document, and reranked against the mean of its chunk
+vectors, as BERTopic's `KeyBERTInspired` does. A word a section uses once is left out unless the
+section is too short to have enough used twice: most are a PDF's line-split halves or two words
+that happen to meet. Measured once on one book (1.4 MB of markdown, 1,776 chunks, bge-small, on
+the dev machine): the outline took 2.4 s, the chunk embeddings 50 s.
+
 **Batches.** A PDF converts in batches of `batch_pages` pages (default 10). Any other file
 converts as one batch. Embedding runs one batch per converted part. Indexing writes
 `index_group_parts` parts per batch (default 50).
