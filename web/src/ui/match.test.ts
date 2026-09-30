@@ -21,6 +21,7 @@ describe('fillOf', () => {
 // Three whole sentences, as the chunker packs them. The layout marks where each one starts.
 const CHUNK: Hit = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area-lights.pdf',
   source_path: 'documents/area-lights.pdf',
   markdown_path: 'markdown/area-lights.md',
@@ -198,6 +199,7 @@ describe('also_in trees', () => {
   // a place as `/api/search/chunks` sends it, measured by words and by vectors
   const PLACE: Reference = {
     collection: 'A–E',
+    document_id: 'a1',
     document: 'notes.md',
     seq: 3,
     header: 'Delivery',
@@ -236,6 +238,7 @@ describe('excerpts', () => {
   // a place folded under a span, as `/api/search/excerpts` sends it
   const place = (document: string): Passage['also_in'][number] => ({
     collection: 'notes',
+    document_id: document,
     document,
     seq_start: 2,
     seq_end: 2,
@@ -268,6 +271,7 @@ describe('excerpts', () => {
   })
   const EXCERPT: Excerpt = {
     collection: 'notes',
+    document_id: 'a1',
     document: 'guide.md',
     header: 'Guide',
     location: 'guide.md L5-20',

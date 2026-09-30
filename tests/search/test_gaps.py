@@ -204,6 +204,7 @@ def _reference(
 ) -> PassageReference:
     return PassageReference(
         collection="books",
+        document_id=document,
         document=document,
         seq_start=seq[0],
         seq_end=seq[1],
@@ -223,6 +224,7 @@ def _reference(
 def _passage(document: str, seq: tuple[int, int], also_in: list[PassageReference]) -> Passage:
     return Passage(
         collection="books",
+        document_id=document,
         document=document,
         header="Part II > Replication > Leaders and Followers",
         location=f"{document} p.151-152 L4210-4231",
@@ -298,6 +300,7 @@ def test_a_chunk_and_a_document_row_flatten_with_their_own_spans() -> None:
     """A chunk covers one `seq`; a document row (`search_sources`) covers none."""
     hit = Hit(
         collection="books",
+        document_id="ddia.pdf",
         document="ddia.pdf",
         source_path="documents/ddia.pdf",
         markdown_path="documents/ddia.pdf.md",
@@ -320,6 +323,7 @@ def test_a_chunk_and_a_document_row_flatten_with_their_own_spans() -> None:
     )
     source = Source(
         collection="books",
+        document_id="raft.pdf",
         document="raft.pdf",
         score=0.2,
         chunks=4,
@@ -356,6 +360,7 @@ def test_an_excerpt_flattens_its_passages_repeats_under_itself() -> None:
     spans = [_span((3, 4), [one]), _span((6, 6), []), _span((8, 8), [other])]
     excerpt = Excerpt(
         collection="books",
+        document_id="ddia.pdf",
         document="ddia.pdf",
         header="Part II > Replication",
         location="ddia.pdf p.151-153 L4210-4290",

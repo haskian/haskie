@@ -26,6 +26,10 @@ class BulkStarted(msgspec.Struct):
     operation_id: str
 
 
+class Rename(msgspec.Struct):
+    name: str
+
+
 class Describe(msgspec.Struct):
     """What a collection or a document is said to hold; empty clears it."""
 

@@ -57,7 +57,12 @@ collections = Table(
 documents = Table(
     "documents",
     metadata,
-    Column("name", Text, primary_key=True),
+    # the MD5 of the original file's bytes: the same file is the same document, and every table
+    # and index refers to a document by it
+    Column("id", Text, primary_key=True),
+    # what people and agents call it, unique and in lowercase-kebab-case (`stored_name`): the API,
+    # the tools and a citation address a document by it
+    Column("name", Text, nullable=False),
     Column("suffix", Text, nullable=False),
     Column("size", Integer, nullable=False),
     Column("status", Text, nullable=False, server_default="queued"),
@@ -68,12 +73,11 @@ documents = Table(
     Column("created_at", Float, nullable=False, server_default=ZERO),
     Column("updated_at", Float, nullable=False, server_default=ZERO),
     Column("description", Text, nullable=False, server_default=""),
-    # MD5 of the original file's bytes: an upload with the same hash is the same file again
-    Column("md5", Text, nullable=False),
-    Index("idx_documents_status", "status", "name"),
+    # `id` last, so a search finds the documents being deleted without reading their rows
+    Index("idx_documents_status", "status", "name", "id"),
     Index("idx_documents_updated", "updated_at", "name"),
     Index("idx_documents_size", "size", "name"),
-    Index("idx_documents_md5", "md5"),
+    Index("idx_documents_name", "name", unique=True),
 )
 
 collection_documents = Table(
@@ -85,13 +89,13 @@ collection_documents = Table(
         ForeignKey("collections.name", ondelete="CASCADE"),
         primary_key=True,
     ),
-    Column("document", Text, ForeignKey("documents.name", ondelete="CASCADE"), primary_key=True),
+    Column("document_id", Text, ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True),
     Column("status", Text, nullable=False, server_default="pending"),
     Column("error", Text),
     Column("added_at", Float, nullable=False, server_default=ZERO),
     Column("updated_at", Float, nullable=False, server_default=ZERO),
-    Index("idx_collection_documents_document", "document"),
-    Index("idx_collection_documents_status", "collection", "status", "document"),
+    Index("idx_collection_documents_document_id", "document_id"),
+    Index("idx_collection_documents_status", "collection", "status", "document_id"),
 )
 
 # the durable, content-addressed embedding cache (see indexing/embed_cache.py)
@@ -99,7 +103,7 @@ embeddings = Table(
     "embeddings",
     metadata,
     Column("id", Text, primary_key=True),
-    Column("document", Text, ForeignKey("documents.name", ondelete="CASCADE"), nullable=False),
+    Column("document_id", Text, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False),
     Column("urn", Text, nullable=False),
     Column("model", Text, nullable=False),
     Column("chunk_size", Integer, nullable=False),
@@ -115,7 +119,7 @@ embeddings = Table(
     # the document as one vector: the mean of its unit chunk vectors, normalized, as float32
     # bytes; what `embed_cache.nearest` compares documents by. Null without an embedding model
     Column("vector", LargeBinary),
-    Index("idx_embeddings_document", "document"),
+    Index("idx_embeddings_document_id", "document_id"),
 )
 
 session_collections = Table(

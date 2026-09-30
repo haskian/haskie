@@ -31,6 +31,7 @@ import {
   groupByRange,
   Kv,
   Modal,
+  RenameForm,
   Shell,
   SearchBox,
   Tabs,
@@ -40,8 +41,8 @@ import {
 import "./Documents.css";
 import { embeddingLabel } from "./documents/embedding";
 import { groupByDay, groupByStatus } from "./documents/group";
-import { Duplicates, JustImported, SimilarDocuments } from "./documents/Similar";
-import { importedNames, importLabel, staged as stagedFrom, waitingAfter, type StagedFile } from "./documents/staged";
+import { Duplicate, JustImported, SimilarDocuments } from "./documents/Similar";
+import { fresh, importedNames, importLabel, staged as stagedFrom, waitingAfter, type StagedFile } from "./documents/staged";
 
 type GroupBy = "status" | "name" | "day";
 const GROUPS: { id: GroupBy; label: string }[] = [
@@ -108,9 +109,10 @@ export function Documents({
 
   // All at once: the pipeline queues them. A file the server refuses, such as a name already
   // taken, stays in the set with the reason, to be renamed or removed.
+  const sending = fresh(staged);
   const importStaged = () =>
     run(async () => {
-      const sent = staged;
+      const sent = sending;
       const results = await Promise.allSettled(
         sent.map((one) => api.importStaged({ staging_id: one.staging_id, name: one.name.trim() })),
       );
@@ -132,8 +134,7 @@ export function Documents({
     });
   };
 
-  const repeats = staged.some((one) => one.duplicates.length > 0);
-  const unnamed = staged.some((one) => one.name.trim() === "");
+  const unnamed = sending.some((one) => one.name.trim() === "");
 
   const closeAdding = () => {
     setAdding(false);
@@ -276,8 +277,8 @@ export function Documents({
                     >
                       <X className="icon" />
                     </button>
-                    {one.duplicates.length > 0 && (
-                      <Duplicates names={one.duplicates} advice="Importing it again only adds a copy." />
+                    {one.duplicate !== null && (
+                      <Duplicate name={one.duplicate} />
                     )}
                     {one.error !== null && <p className="muted">{one.error}</p>}
                   </li>
@@ -285,12 +286,12 @@ export function Documents({
               </ul>
               <div className="row">
                 <button
-                  className={repeats ? "btn" : "btn btn-primary"}
+                  className="btn btn-primary"
                   type="button"
-                  disabled={busy || unnamed}
+                  disabled={busy || unnamed || sending.length === 0}
                   onClick={importStaged}
                 >
-                  {repeats ? `${importLabel(staged.length)} anyway` : importLabel(staged.length)}
+                  {importLabel(sending.length)}
                 </button>
               </div>
             </div>
@@ -406,6 +407,20 @@ function DocumentModal({
       .catch((cause: unknown) => setError(errorText(cause)));
   };
 
+  // Not through `run`: its re-read would ask for the old name. The route moves to the new one,
+  // and the modal reads the document there.
+  const rename = (to: string) => {
+    if (doc === null) return;
+    setError(null);
+    api
+      .renameDocument(doc, to)
+      .then((renamed) => {
+        onChanged();
+        navigate({ name: "documents", document: renamed.name });
+      })
+      .catch((cause: unknown) => setError(errorText(cause)));
+  };
+
   const rows: [string, ReactNode][] =
     row === null
       ? []
@@ -481,6 +496,7 @@ function DocumentModal({
         {similar !== null && <SimilarDocuments similar={similar} />}
       </div>
       <div id={IMPORT_TAB} role="tabpanel" hidden={tab !== IMPORT_TAB}>
+        {doc !== null && <RenameForm key={doc} name={doc} label="Document name" busy={busy} onRename={rename} />}
         <div className="split">
           <section className="pane">
             <span className="pane-head mono muted">Details</span>

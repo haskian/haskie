@@ -10,7 +10,7 @@ import msgspec
 from litestar import delete, get, post, put
 
 from haskie import audit, logs
-from haskie.api.common import PAGED, BulkStarted, Describe, SessionId
+from haskie.api.common import PAGED, BulkStarted, Describe, Rename, SessionId
 from haskie.catalogue import catalogue
 from haskie.collection.collection import (
     Collection,
@@ -19,6 +19,7 @@ from haskie.collection.collection import (
     Member,
     MemberStatus,
 )
+from haskie.document import document as documents
 from haskie.indexing import models, workflows
 from haskie.paging import Page, PageRequest, one_of
 from haskie.search import session
@@ -31,10 +32,6 @@ from haskie.settings import (
 class CreateCollection(msgspec.Struct):
     name: str
     description: str = ""
-
-
-class Rename(msgspec.Struct):
-    name: str
 
 
 class AddDocument(msgspec.Struct):
@@ -171,7 +168,7 @@ async def add_document(
     """
     audit.attach(document=data.document)
     logs.bind(document=data.document)
-    operation_id = await workflows.attach(collection, data.document)
+    operation_id = await workflows.attach(collection, await documents.id_of(data.document))
     audit.attach(operation_id=operation_id)
     await session.record(
         session_id,
@@ -199,7 +196,7 @@ async def remove_document(collection: str, document: str, session_id: SessionId 
     Args:
         session_id: The conversation's id; the detach then shows in that session's history.
     """
-    await workflows.detach(collection, document)
+    await workflows.detach(collection, await documents.id_of(document))
     await session.record(
         session_id,
         session.Action.DETACH,
@@ -213,6 +210,7 @@ async def remove_document(collection: str, document: str, session_id: SessionId 
 async def index_collection_document(collection: str, document: str) -> BulkStarted:
     """(Re)index one member: chunk and embed it if the cache misses, then write it into this
     collection's index. Poll the operation for the outcome."""
-    operation_id = await workflows.start_index_collection_document(collection, document)
+    doc = await documents.id_of(document)
+    operation_id = await workflows.start_index_collection_document(collection, doc)
     audit.attach(operation_id=operation_id)
     return BulkStarted(operation_id=operation_id)

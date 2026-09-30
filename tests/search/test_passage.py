@@ -95,6 +95,7 @@ def _hit(
     line_end = MARKDOWN.count("\n", 0, char_end - 1) + 1
     return Hit(
         collection=collection,
+        document_id=document,
         document=document,
         source_path=f"documents/{document}",
         markdown_path=f"documents/{document}.md",
@@ -370,6 +371,7 @@ def test_quoting_a_range_keeps_what_was_folded_into_it() -> None:
     passage is what the caller sees them on."""
     folded = PassageReference(
         collection="ops",
+        document_id=OTHER,
         document=OTHER,
         seq_start=1,
         seq_end=1,
@@ -385,6 +387,7 @@ def test_quoting_a_range_keeps_what_was_folded_into_it() -> None:
         also_in=[
             PassageReference(
                 collection="notes",
+                document_id="notes.md",
                 document="notes.md",
                 seq_start=4,
                 seq_end=4,
@@ -697,6 +700,7 @@ def _place(document: str) -> PassageReference:
     """A place folded under a range, as `collapse` lists it."""
     return PassageReference(
         collection=COLLECTION,
+        document_id=document,
         document=document,
         seq_start=1,
         seq_end=1,

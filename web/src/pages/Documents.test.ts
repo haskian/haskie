@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { Document, DocumentStatus, EmbeddingEntry, ImportedDocument, Staged } from '../api'
 import { embeddingLabel } from './documents/embedding'
 import { groupByDay, groupByStatus } from './documents/group'
-import { importedNames, importLabel, staged, waitingAfter, type StagedFile } from './documents/staged'
+import { fresh, importedNames, importLabel, staged, waitingAfter, type StagedFile } from './documents/staged'
 
 // One real row, overridden per case: the listing hands the page whole documents, so the fixtures do too.
 const DOC: Document = {
@@ -17,7 +17,7 @@ const DOC: Document = {
   created_at: 1_547_907_120,
   updated_at: 1_547_907_180,
   description: 'Notes on area lights and soft shadow falloff.',
-  md5: '9e107d9d372bb6826bd81d3542a419d6',
+  id: '9e107d9d372bb6826bd81d3542a419d6',
   collections: ['lighting', 'rendering'],
 }
 
@@ -96,7 +96,7 @@ describe('groupByDay', () => {
 describe('embeddingLabel', () => {
   // A real row of `/api/documents/{document}/embeddings`.
   const ENTRY: EmbeddingEntry = {
-    document: 'area-lights.pdf',
+    document_id: '9e107d9d372bb6826bd81d3542a419d6',
     model: 'BAAI/bge-small-en-v1.5',
     chunk_size: 1200,
     chunk_merge_below: 33,
@@ -106,7 +106,7 @@ describe('embeddingLabel', () => {
     parser: 'anydoc',
     skip_ocr_pages: true,
     id: 'a62894d5043251b553a18ba785281ca5e3ba8a28e58317a2f4207838f219e370',
-    urn: 'document:area-lights.pdf;model:BAAI/bge-small-en-v1.5;chunk_size:1200;chunk_merge_below:33;chunk_frame:true;chunker:markdown;chunk_version:1;parser:anydoc;skip_ocr_pages:true',
+    urn: 'document_id:9e107d9d372bb6826bd81d3542a419d6;model:BAAI/bge-small-en-v1.5;chunk_size:1200;chunk_merge_below:33;chunk_frame:true;chunker:markdown;chunk_version:1;parser:anydoc;skip_ocr_pages:true',
     rows: 2009,
     bytes: 3_402_112,
     created_at: 1_547_907_180,
@@ -133,23 +133,23 @@ describe('embeddingLabel', () => {
 
 describe('staging several files', () => {
   // `POST /api/documents/staging` as it answers for a real upload.
-  const STAGED: Staged = { staging_id: '3f2b9c1e8a7d4b6f', filename: 'area-lights.pdf', size: 421_904, duplicates: [] }
+  const STAGED: Staged = { staging_id: '3f2b9c1e8a7d4b6f', filename: 'area-lights.pdf', size: 421_904, duplicate: null }
   const file = (name: string) => new File(['%PDF-1.4'], name, { type: 'application/pdf' })
   const cases: Array<{
     name: string
     files: File[]
     results: PromiseSettledResult<Staged>[]
-    expected: { added: Array<[string, string[]]>; failures: string[] }
+    expected: { added: Array<[string, string | null]>; failures: string[] }
   }> = [
     { name: 'nothing picked stages nothing', files: [], results: [], expected: { added: [], failures: [] } },
     {
-      name: 'each landed file is named after itself, a repeat keeps its duplicates',
+      name: 'each landed file is named after itself, a repeat keeps the document it already is',
       files: [file('area-lights.pdf'), file('soft-shadows.pdf')],
       results: [
         { status: 'fulfilled', value: STAGED },
-        { status: 'fulfilled', value: { ...STAGED, staging_id: '9a1c', filename: 'soft-shadows.pdf', duplicates: ['shadows.pdf'] } },
+        { status: 'fulfilled', value: { ...STAGED, staging_id: '9a1c', filename: 'soft-shadows.pdf', duplicate: 'shadows.pdf' } },
       ],
-      expected: { added: [['area-lights.pdf', []], ['soft-shadows.pdf', ['shadows.pdf']]], failures: [] },
+      expected: { added: [['area-lights.pdf', null], ['soft-shadows.pdf', 'shadows.pdf']], failures: [] },
     },
     {
       name: 'a refused file costs only itself, and says which one it was',
@@ -158,13 +158,13 @@ describe('staging several files', () => {
         { status: 'fulfilled', value: STAGED },
         { status: 'rejected', reason: new Error('Request Entity Too Large') },
       ],
-      expected: { added: [['area-lights.pdf', []]], failures: ['huge.pdf: Request Entity Too Large'] },
+      expected: { added: [['area-lights.pdf', null]], failures: ['huge.pdf: Request Entity Too Large'] },
     },
   ]
   for (const testCase of cases) {
     test(testCase.name, () => {
       const got = staged(testCase.files, testCase.results)
-      expect({ added: got.added.map((one) => [one.name, one.duplicates]), failures: got.failures }).toEqual(testCase.expected)
+      expect({ added: got.added.map((one) => [one.name, one.duplicate]), failures: got.failures }).toEqual(testCase.expected)
       expect(got.added.every((one) => one.error === null)).toBe(true)
     })
   }
@@ -172,8 +172,8 @@ describe('staging several files', () => {
 
 describe('importing the staged set', () => {
   const waiting: StagedFile[] = [
-    { staging_id: 'a1', filename: 'area-lights.pdf', size: 421_904, duplicates: [], name: 'Area lights', error: null },
-    { staging_id: 'b2', filename: 'notes.md', size: 2_048, duplicates: [], name: 'notes.md', error: 'an older refusal' },
+    { staging_id: 'a1', filename: 'area-lights.pdf', size: 421_904, duplicate: null, name: 'Area lights', error: null },
+    { staging_id: 'b2', filename: 'notes.md', size: 2_048, duplicate: null, name: 'notes.md', error: 'an older refusal' },
   ]
   // `POST /api/documents/import` answers with the document row, without the listing's collections.
   const { collections: _held, ...IMPORTED } = DOC
@@ -215,7 +215,7 @@ describe('importing the staged set', () => {
     })
   }
   test('a file staged and a name edited while the imports ran are kept as they are now', () => {
-    const late: StagedFile = { staging_id: 'c3', filename: 'grinding.md', size: 512, duplicates: [], name: 'grinding.md', error: null }
+    const late: StagedFile = { staging_id: 'c3', filename: 'grinding.md', size: 512, duplicate: null, name: 'grinding.md', error: null }
     const now = [{ ...waiting[1], name: 'Notes on brewing' }, late] // the first file left, the second renamed
     const left = waitingAfter(now, waiting, [
       { status: 'fulfilled', value: row('Area lights') },
@@ -226,6 +226,26 @@ describe('importing the staged set', () => {
       ['grinding.md', null],
     ])
   })
+})
+
+describe('fresh', () => {
+  const file = (staging_id: string, duplicate: string | null): StagedFile => ({
+    staging_id,
+    filename: `${staging_id}.md`,
+    size: 2_048,
+    duplicate,
+    name: `${staging_id}.md`,
+    error: null,
+  })
+  const cases: Array<[string, StagedFile[], string[]]> = [
+    ['nothing staged sends nothing', [], []],
+    ['new bytes are all sent', [file('a1', null), file('b2', null)], ['a1', 'b2']],
+    ['a file already imported is left out', [file('a1', null), file('b2', 'guide.md')], ['a1']],
+    ['every file already imported sends nothing', [file('a1', 'guide.md')], []],
+  ]
+  for (const [name, files, expected] of cases) {
+    test(name, () => expect(fresh(files).map((one) => one.staging_id)).toEqual(expected))
+  }
 })
 
 describe('importLabel', () => {

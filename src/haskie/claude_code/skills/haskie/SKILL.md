@@ -88,8 +88,9 @@ Paged tools take `page_size` (default 100, at most 1000), `cursor`, `sort` and `
 Every write takes `session_id`, so the change shows in the conversation's history.
 
 - **`add_document(path, name?, description?, parser?, skip_ocr_pages?)`** → the document row at
-  `queued`. `path` is an absolute local file. Converting and embedding run in the background: poll
-  `get_document` until `imported`, `error` or `cancelled`.
+  `queued`. `path` is an absolute local file. The name is stored in lowercase-kebab-case with the
+  original suffix, so use the returned row's `name` from then on. Converting and embedding run in
+  the background: poll `get_document` until `imported`, `error` or `cancelled`.
 - **`add_document_to_collection(collection, document)`** → `operation_id`. The document must be
   `imported` first. It is searchable there once its membership reads `indexed`: poll
   `list_collection_documents`.
@@ -125,7 +126,8 @@ A failed call is a tool error with a status code and a message that names the pr
 - **404**: no such collection or document, including a name in `collections`, or a document that
   is not in the collection. Check the name with `list_collections` or `list_documents`. From
   `report_gap`: no search in this session asked that question, word for word, in the last hour.
-- **409**: the document name is taken, or the document is not `imported` yet. From `report_gap`:
+- **409**: the document name is taken, the same file is already imported (the message names that
+  document: use it), or the document is not `imported` yet. From `report_gap`:
   that search failed, so there is nothing to judge.
 - **422**: a bad argument. For example: `limit` out of range or below the number of parts, no
   parts or more than 5, a question over 500 characters, a `context` over 200 characters, a page

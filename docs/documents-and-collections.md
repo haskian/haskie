@@ -10,7 +10,8 @@ erDiagram
     COLLECTION ||--o{ MEMBERSHIP : holds
     DOCUMENT ||--o{ EMBEDDING : "is cached as"
     DOCUMENT {
-        string name "fixed at import"
+        string id "MD5 of the bytes"
+        string name "lowercase-kebab-case, renamable"
         string status "queued ... imported"
         string parser
         string description
@@ -35,9 +36,19 @@ computes the cache id from its own chunk settings and reads that entry.
 ## A document's life
 
 An upload from the UI lands in `staging/` first, as a file and a `staging` row, with no document
-yet. The import then fixes the name, creates the document and moves the file into its folder. A
-name is taken ignoring case: the folder is named after it, and on a case-insensitive disk
-`Notes.md` and `notes.md` would be one folder. An agent's `add_document` imports a local path directly and copies the file. When it refuses the
+yet. The import then fixes the name, creates the document and moves the file into its folder. The
+folder is named after the document's id, the MD5 of its bytes. A name is stored in
+lowercase-kebab-case: accents dropped, the stem lowered, and every run of anything but a letter
+or a digit one dash, so `A_B--CC.d.f.pdf` is `a-b-cc-d-f.pdf`. The suffix is lowered too. One
+spelling per name, so `Notes.md` and `notes .md` are the same name, and the second is refused.
+
+A rename (`PUT /api/documents/{name}/name`, or the Info tab) changes the one `documents.name`
+column. Nothing else holds the name: the tables, folders, embedding cache and every collection's
+LanceDB rows refer to the document by its id, and a search reads the names it cites from SQLite,
+one batched query per read of the indexes. The suffix stays the original's. The search log and
+session history keep the name as it was when they were written.
+
+An agent's `add_document` imports a local path directly and copies the file. When it refuses the
 path, the error names the file alone. The audit trail copies that error, and it never records the
 folder an import came from. The nightly run (at 03:17, if haskie is running then) sweeps uploads
 older than a day.
@@ -83,13 +94,14 @@ document's cached embeddings first.
 
 The web UI stages several files at once, and checks each new book for repeats in its own row:
 
-- **The same file.** Staging and a path import both take the MD5 of the bytes. Staging answers
-  with `duplicates`, the documents that already hold those bytes. The row names them, and the one
-  import button turns into "Import anyway". A file the import refuses, such as a name already
+- **The same file.** Staging and a path import both take the MD5 of the bytes, which is the
+  document's id. Staging answers with `duplicate`: the name of the document those bytes already
+  are, or null. The row names it, and the import leaves that file out. An import of the same bytes is refused with
+  409, naming the document. A file the import refuses for another reason, such as a name already
   taken, stays in the list with the reason, so you can rename or remove it.
 - **The nearest documents.** Writing a cache entry also stores the document as one vector: the
   mean of its unit chunk vectors, normalized. `GET /api/documents/{name}/similar` names the
-  identical documents and the three nearest by cosine, under the current embedding model. The
+  three nearest by cosine, under the current embedding model. The
   vector exists only once the import has embedded the document, so the UI follows the new book
   until then. Full-text only has no vectors, so it finds no nearest documents.
 
@@ -143,7 +155,7 @@ under the document, plus one `embeddings` row. Its id is the SHA-256 of a URN, o
 names everything the rows depend on:
 
 ```
-document:<name>;model:<model>;chunk_size:<n>;chunk_merge_below:<n>;chunk_frame:<b>;chunker:<c>;chunk_version:<v>;parser:<p>;skip_ocr_pages:<b>
+document_id:<id>;model:<model>;chunk_size:<n>;chunk_merge_below:<n>;chunk_frame:<b>;chunker:<c>;chunk_version:<v>;parser:<p>;skip_ocr_pages:<b>
 ```
 
 `<model>` is `EmbeddingModel.cache_name`: the model's name and vector size, plus a hash of its

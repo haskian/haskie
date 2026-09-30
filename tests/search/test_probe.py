@@ -188,7 +188,7 @@ def test_the_probed_section_joins_the_section_it_is_part_of_else_comes_after() -
     added = probe.placed(kept, other)
 
     assert [len(one.ranges) for one in joined] == [1, 2], "into its section, not a slot"
-    assert [one.document for one in added] == ["a.md", "b.md", "c.md"], "past the others"
+    assert [one.document_id for one in added] == ["a.md", "b.md", "c.md"], "past the others"
 
 
 def _excerpt(text: str, aspects: list[str], header: str = "Shop") -> Excerpt:
@@ -208,6 +208,7 @@ def _excerpt(text: str, aspects: list[str], header: str = "Shop") -> Excerpt:
     )
     return Excerpt(
         collection="backend",
+        document_id="a.md",
         document="a.md",
         header=header,
         location="a.md L1-1",

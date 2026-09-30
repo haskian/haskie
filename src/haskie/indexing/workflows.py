@@ -61,12 +61,12 @@ Workflow ids, every one starting with a prefix that names its kind and the names
 convert or embed child and `{parent}:index` for the index child, `bulk-index:{collection}:{uuid}`
 and `bulk-delete:{collection}:{uuid}` for the two bulk operations, `del-doc:{doc}:{uuid}` for a
 document delete (and `{parent}:rm:{collection}` for each collection it leaves),
-`rm:{collection}:{doc}:{uuid}` for the removal a detach queues,
-`maint:{collection}:{parent}` for a maintenance run, and `dl:{kind}:{model}` for a model download
-(see `models`). `document.safe_name` keeps `:` out of every name, so a prefix is unambiguous: one
-query finds a whole operation. Child ids are deterministic, so a replay after a crash re-attaches
-to the child that already exists instead of starting a second one. Every workflow is registered
-under an explicit name (see `dbos_names`).
+`rm:{collection}:{doc}:{uuid}` for the removal a detach queues, `maint:{collection}:{parent}` for a
+maintenance run, and `dl:{kind}:{model}` for a model download (see `models`). A document id is MD5
+hex and `document.safe_name` keeps `:` out of a collection name, so a prefix is unambiguous: one
+query finds a whole operation. Child ids are deterministic, so a replay after a crash re-attaches to
+the child that already exists instead of starting a second one. Every workflow is registered under
+an explicit name (see `dbos_names`).
 """
 
 import asyncio
@@ -192,8 +192,8 @@ def pipeline_names(workflow_id: str) -> tuple[PipelineAction, str | None, str] |
 
     Here because this module writes those ids (see the prefixes above). `imp:{doc}:{uuid}` and
     `emb:{doc}:{uuid}` name no collection; `idx-col:{collection}:{doc}:{uuid}` names both.
-    `document.safe_name` keeps `:` out of a document and a collection name alike, so the split
-    is exact."""
+    A document id is MD5 hex and `document.safe_name` keeps `:` out of a collection name, so the
+    split is exact."""
     parts = workflow_id.split(":")
     action = _PIPELINE_ACTIONS.get(parts[0])
     if action is None:
@@ -233,11 +233,12 @@ STAGE_QUEUE: dict[Stage, str] = {
 class Context(msgspec.Struct):
     """Everything a task needs, captured once per workflow so steps stay pure.
 
-    `document` is the row at load time: its name, suffix, parser and OCR policy are immutable,
-    and they are all a pipeline step reads out of it. `chunking` is the collection's when the
-    workflow serves one, the user default otherwise. `pipeline` is carried whole rather than
-    field by field, so a step that needs another knob costs no new field here. `cache_id` is
-    filled in by the workflow that reaches the stage needing it (embed, index)."""
+    `document` is the row at load time: its id, suffix, parser and OCR policy are immutable, and
+    they are all a pipeline step reads out of it. Its name is not: a rename may change it meanwhile,
+    so a step that shows the name reads it by id (`document.name_of`). `chunking` is the
+    collection's when the workflow serves one, the user default otherwise. `pipeline` is carried
+    whole rather than field by field, so a step that needs another knob costs no new field here.
+    `cache_id` is filled in by the workflow that reaches the stage needing it (embed, index)."""
 
     document: Document
     chunking: ChunkSettings
@@ -693,7 +694,7 @@ def _value(result: BatchResult) -> int:
 async def _index_batch(batch: Batch, ctx: Context) -> int:
     """One index micro-batch, under the collection's write lock (see `index_write`)."""
     assert ctx.collection is not None, "the index stage always names a collection"
-    async with index_write(ctx.collection, ctx.document.name) as present:
+    async with index_write(ctx.collection, ctx.document.id) as present:
         if not present:
             raise PermanentError("document is no longer in the collection")
         return await pipeline.index_batch(
@@ -747,7 +748,7 @@ async def prepare_index(collection: str, ctx: Context) -> None:
 
     Recreates a missing table, so it takes the write lock like the batches do. Skipped rather than
     failed once the membership is gone: the batch write is where that is reported."""
-    async with index_write(collection, ctx.document.name) as present:
+    async with index_write(collection, ctx.document.id) as present:
         if present:
             await pipeline.prepare_index(Collection(collection), ctx.document, ctx.embedding)
 
@@ -756,7 +757,7 @@ async def prepare_index(collection: str, ctx: Context) -> None:
 async def finalize_index(collection: str, ctx: Context) -> None:
     """Rebuild the full-text index once, on the collection's partition, under the same lock and
     the same re-check as the batches (see `prepare_index`)."""
-    async with index_write(collection, ctx.document.name) as present:
+    async with index_write(collection, ctx.document.id) as present:
         if present:
             await pipeline.finalize_index(Collection(collection), ctx.embedding)
 
@@ -765,7 +766,7 @@ async def finalize_index(collection: str, ctx: Context) -> None:
 async def note_indexed_step(collection: str, doc: str) -> int:
     """Count one more indexed document for the collection; returns how many await maintenance."""
     pending = await Collection(collection).note_indexed()
-    _log.debug("index_pending", collection=collection, document=doc, pending=pending)
+    _log.debug("index_pending", collection=collection, document_id=doc, pending=pending)
     return pending
 
 
@@ -944,7 +945,7 @@ async def _ensure_embedding(ctx: Context) -> str:
     caller that was cancelled itself stops at that ask, which DBOS refuses from a cancelled
     workflow. A cancel of its own run is final."""
     params = embed_cache.params(ctx.document, ctx.chunking, ctx.embedding)
-    own = embed_id(DBOS.workflow_id or "", ctx.document.name)
+    own = embed_id(DBOS.workflow_id or "", ctx.document.id)
     while True:
         with (
             SetWorkflowID(own),
@@ -953,7 +954,7 @@ async def _ensure_embedding(ctx: Context) -> str:
             ),
         ):
             handle = await DBOS.enqueue_workflow_async(
-                EMBEDDING_QUEUE, ensure_embedding, ctx.document.name, params
+                EMBEDDING_QUEUE, ensure_embedding, ctx.document.id, params
             )
         try:
             return await handle.get_result(polling_interval_sec=TASK_POLL)
@@ -998,7 +999,7 @@ async def _outcome(
 async def import_document(doc: str) -> DocumentStatus:
     """convert, then pre-warm the embedding cache under the user's default chunk settings;
     document status mirrors the stage. Collection-independent: nothing is written to any table."""
-    with logs.bound(workflow_id=DBOS.workflow_id, document=doc):
+    with logs.bound(workflow_id=DBOS.workflow_id, document_id=doc):
         # first step, so a deduplicated submit changes nothing
         await set_status(doc, DocumentStatus.QUEUED)
         set_state = partial(set_status, doc)
@@ -1022,7 +1023,7 @@ async def ensure_embedding(doc: str, params: embed_cache.Params) -> str:
     change between the enqueue and the run, and what was asked for is what the id names. The
     embedding model is the global one, so a model changed meanwhile fails the run, and the parent
     with it: a reindex asks again under the new model."""
-    with logs.bound(workflow_id=DBOS.workflow_id, document=doc):
+    with logs.bound(workflow_id=DBOS.workflow_id, document_id=doc):
         found = await cache_lookup(params)
         if found is not None:
             return found
@@ -1048,7 +1049,7 @@ async def index_collection_document(collection: str, doc: str) -> MemberStatus:
     """Write one document into one collection's table from its embedding cache, computing the
     embedding first when the collection's chunk settings have none yet. Membership status mirrors
     the progress; the document's own status is the import's and is never touched here."""
-    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, document=doc):
+    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, document_id=doc):
         await set_member_status(collection, doc, MemberStatus.INDEXING)
         set_state = partial(set_member_status, collection, doc)
         done, failed = MemberStatus.INDEXED, MemberStatus.ERROR
@@ -1068,8 +1069,8 @@ async def index_collection_document(collection: str, doc: str) -> MemberStatus:
 async def _record(
     collection: str | None, doc: str, event: str, started: float, error: str | None
 ) -> None:
-    """One audit line per finished document. Not a step: a replay after a crash re-appends it,
-    which an append-only trail tolerates."""
+    """One audit line per finished document, naming it as the request lines do. Not a step: a
+    replay after a crash re-appends it, which an append-only trail tolerates."""
     await audit.record(
         event,
         actor=Actor.OPERATION,
@@ -1077,7 +1078,7 @@ async def _record(
         duration_ms=int((time.perf_counter() - started) * 1000),
         operation_id=DBOS.workflow_id,
         collection=collection,
-        document=doc,
+        document=await document.name_of(doc),
         error=error,
     )
 
@@ -1168,7 +1169,7 @@ async def remove_from_collection_index(collection: str, doc: str) -> None:
 
     A removal that fails moves a `removing` membership to `error`: the detach answered long ago,
     and the member listing is the only place its caller looks."""
-    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, document=doc):
+    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, document_id=doc):
         try:
             async with collection_lock(collection):
                 await remove_index_rows(collection, doc)
@@ -1207,13 +1208,14 @@ async def remove_document_row(doc: str) -> None:
 
 
 @DBOS.workflow(name=DELETE_DOCUMENT_WORKFLOW)
-async def delete_document_workflow(doc: str) -> None:
+async def delete_document_workflow(doc: str, name: str) -> None:
     """Delete a document everywhere: out of every collection's table (one child per collection,
     each on that collection's index partition), then its folder, then its row.
 
     `deleting` is set first, so an attach that lands after the membership snapshot below is
-    refused instead of leaving rows in a table no membership points at."""
-    with logs.bound(workflow_id=DBOS.workflow_id, document=doc):
+    refused instead of leaving rows in a table no membership points at. `name` is only kept, as
+    the workflow's input: the operations listing reads it once the row is gone."""
+    with logs.bound(workflow_id=DBOS.workflow_id, document_id=doc):
         await set_status(doc, DocumentStatus.DELETING)
         await cancel_document_work(doc)
         handles: list[WorkflowHandleAsync[None]] = []
@@ -1244,9 +1246,9 @@ async def count_members(collection: str) -> int:
 
 @retried_step
 async def member_page(collection: str, after: str | None) -> list[str]:
-    """One keyset page of member names, ordered by name. Empty once the collection is exhausted,
-    and also when it was deleted while the bulk index ran, which ends the walk either way."""
-    return await Collection(collection).member_names(after, BULK_INDEX_PAGE)
+    """One keyset page of member ids, in id order. Empty once the collection is exhausted, and
+    also when it was deleted while the bulk index ran, which ends the walk either way."""
+    return await Collection(collection).member_ids(after, BULK_INDEX_PAGE)
 
 
 async def enqueue_page(collection: str, after: str | None, bulk_id: str) -> BulkProgress:
@@ -1444,23 +1446,23 @@ IMPORTABLE: tuple[DocumentStatus, ...] = (
 )
 
 
-async def start_import(doc: str) -> str:
-    """Queue the import of one document; a second call while it runs returns the same operation.
-    The id names the document, so an operation and its stage children share one prefix.
+async def start_import(row: Document) -> str:
+    """Queue the import of one document, as the caller has just read it; a second call while it
+    runs returns the same operation. The id names the document, so an operation and its stage
+    children share one prefix.
 
     The only admission rule for an import, so a re-import goes through here too rather than
     repeating the check at the route."""
-    row = await document.get(doc)
     if row.status not in IMPORTABLE:
         raise Conflict(
-            f"document is {row.status}; only a queued, failed or cancelled import runs: {doc}"
+            f"document is {row.status}; only a queued, failed or cancelled import runs: {row.name}"
         )
     return await _start(
         INDEXING_QUEUE,
         import_document,
-        doc,
-        workflow_id=f"{IMPORT_PREFIX}:{doc}:{uuid4().hex}",
-        dedup_id=f"import:{doc}",
+        row.id,
+        workflow_id=f"{IMPORT_PREFIX}:{row.id}:{uuid4().hex}",
+        dedup_id=f"import:{row.id}",
     )
 
 
@@ -1567,16 +1569,16 @@ async def _active_document_workflows(doc: str) -> list[str]:
     return ids
 
 
-async def start_delete_document(doc: str) -> str:
-    """Queue the deletion of a document from everywhere; returns the id of the operation. A second
-    call while one runs is deduplicated into it."""
-    await document.get(doc)  # NotFound before anything is queued
+async def start_delete_document(row: Document) -> str:
+    """Queue the deletion of a document, as the caller has just read it, from everywhere; returns
+    the id of the operation. A second call while one runs is deduplicated into it."""
     return await _start(
         COLLECTION_QUEUE,
         delete_document_workflow,
-        doc,
-        workflow_id=f"{DELETE_DOCUMENT_PREFIX}:{doc}:{uuid4().hex}",
-        dedup_id=f"delete-doc:{doc}",
+        row.id,
+        row.name,
+        workflow_id=f"{DELETE_DOCUMENT_PREFIX}:{row.id}:{uuid4().hex}",
+        dedup_id=f"delete-doc:{row.id}",
     )
 
 

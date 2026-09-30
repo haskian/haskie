@@ -295,6 +295,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document}/name": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** RenameDocument */
+        put: operations["ApiDocumentsNameRenameDocument"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document}/description": {
         parameters: {
             query?: never;
@@ -988,6 +1005,7 @@ export interface components {
         Device: "cpu" | "apple_silicon" | "gpu";
         /** Document */
         Document: {
+            id: string;
             name: string;
             suffix: string;
             size: number;
@@ -1003,8 +1021,6 @@ export interface components {
             updated_at: number;
             /** @default  */
             description: string;
-            /** @default  */
-            md5: string;
         };
         /** DocumentCounts */
         DocumentCounts: {
@@ -1063,7 +1079,7 @@ export interface components {
         };
         /** Entry */
         Entry: {
-            document: string;
+            document_id: string;
             model: string;
             chunk_size: number;
             chunk_merge_below: number;
@@ -1092,6 +1108,7 @@ export interface components {
         /** Excerpt */
         Excerpt: {
             collection: string;
+            document_id: string;
             document: string;
             header: string;
             location: string;
@@ -1184,6 +1201,7 @@ export interface components {
         /** Hit */
         Hit: {
             collection: string;
+            document_id: string;
             document: string;
             source_path: string;
             markdown_path: string;
@@ -1215,6 +1233,7 @@ export interface components {
         /** HitReference */
         HitReference: {
             collection: string;
+            document_id: string;
             document: string;
             seq: number;
             header: string;
@@ -1284,6 +1303,7 @@ export interface components {
         };
         /** Listed */
         Listed: {
+            id: string;
             name: string;
             suffix: string;
             size: number;
@@ -1299,8 +1319,6 @@ export interface components {
             updated_at: number;
             /** @default  */
             description: string;
-            /** @default  */
-            md5: string;
             collections?: string[];
         };
         /** LoggedQuestion */
@@ -1544,6 +1562,7 @@ export interface components {
                 [key: string]: number;
             };
             collection: string;
+            document_id: string;
             document: string;
             text: string;
             source_file: string;
@@ -1552,6 +1571,7 @@ export interface components {
         /** PassageReference */
         PassageReference: {
             collection: string;
+            document_id: string;
             document: string;
             seq_start: number;
             seq_end: number;
@@ -2015,12 +2035,12 @@ export interface components {
         Signal: "reported" | "empty" | "uncovered" | "weak" | "borderline";
         /** Similar */
         Similar: {
-            identical: string[];
             nearest: components["schemas"]["Neighbour"][];
         };
         /** Source */
         Source: {
             collection: string;
+            document_id: string;
             document: string;
             score: number;
             chunks: number;
@@ -2069,7 +2089,7 @@ export interface components {
             staging_id: string;
             filename: string;
             size: number;
-            duplicates: string[];
+            duplicate: string | null;
         };
         /** Status */
         Status: {
@@ -2738,6 +2758,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Lines"];
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
+    ApiDocumentsNameRenameDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Rename"];
+            };
+        };
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Document"];
                 };
             };
             /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */

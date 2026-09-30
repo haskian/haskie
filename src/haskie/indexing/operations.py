@@ -39,6 +39,7 @@ awaited. The row builders below take what those reads returned and touch nothing
 """
 
 import asyncio
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -46,6 +47,7 @@ import msgspec
 from dbos import DBOS, WorkflowStatus
 
 from haskie import sysdb
+from haskie.document import document as documents
 from haskie.errors import InvalidInput, NotFound
 from haskie.indexing import models, workflows
 from haskie.indexing.dbos_names import (
@@ -53,6 +55,7 @@ from haskie.indexing.dbos_names import (
     BULK_WORKFLOWS,
     COLLECTION_DOCUMENT_WORKFLOW,
     DAILY_MAINTENANCE_WORKFLOW,
+    DELETE_DOCUMENT_WORKFLOW,
     DOWNLOAD_WORKFLOW,
     EMBED_WORKFLOW,
     MAINTAIN_PARTITION_WORKFLOW,
@@ -93,7 +96,8 @@ class _StageRun(msgspec.Struct):
     id: str
     action: PipelineAction
     collection: str | None
-    document: str
+    document_id: str  # as the workflow id carries it
+    document: str  # its name (`_document_names`)
     status: RunStatus
     created_at: float
     updated_at: float
@@ -205,11 +209,11 @@ class Task(msgspec.Struct):
     error: str | None
 
 
-def _named(operation_id: str) -> str:
-    """The name in the second segment of an id (`{prefix}:{name}:{rest}`): the one thing the
-    operation is about, whichever kind of name it is. "?" for any other id."""
+def _second_segment(operation_id: str) -> str | None:
+    """The second segment of an id (`{prefix}:{key}:{rest}`): the one thing the operation is
+    about, a collection's name or a document's id. None for any other id."""
     parts = operation_id.split(":", 2)
-    return parts[1] if len(parts) == 3 else "?"
+    return parts[1] if len(parts) == 3 else None
 
 
 def _collection_of(operation_id: str) -> str | None:
@@ -219,8 +223,7 @@ def _collection_of(operation_id: str) -> str | None:
     other id carries a collection, and the delete spans every collection the document is in."""
     if operation_id.startswith(f"{workflows.DELETE_DOCUMENT_PREFIX}:"):
         return None
-    name = _named(operation_id)
-    return None if name == "?" else name
+    return _second_segment(operation_id)
 
 
 # --- one listing per kind of operation -----------------------------------------------------
@@ -310,7 +313,15 @@ async def list_operations(
     # one row more than the page: its presence is what tells us another page exists
     found = await _kind_statuses(checked, collection, page_size + 1, offset)
     # every row costs a read of its own (see `_detail`), so the page is built in one round trip
-    rows = await asyncio.gather(*(_kind_row(checked, s) for s in found[:page_size]))
+    page = found[:page_size]
+    # a document delete is titled by the document's name: one lookup for the whole page
+    names = await _document_names(
+        doc
+        for s in page
+        if _bulk_kind(s.name) == BulkKind.DELETE_DOCUMENT
+        and (doc := _second_segment(s.workflow_id)) is not None
+    )
+    rows = await asyncio.gather(*(_kind_row(checked, s, names) for s in page))
     return Page(
         items=await _with_origins(list(rows)),
         next_cursor=_cursor(checked, offset + page_size) if len(found) > page_size else None,
@@ -417,7 +428,7 @@ def fold_operations(runs: list[_StageRun]) -> list[Operation]:
     """
     embeds = {run.id: run for run in runs if run.action == PipelineAction.EMBED}
     folded = {
-        workflows.embed_id(run.id, run.document)
+        workflows.embed_id(run.id, run.document_id)
         for run in runs
         if run.action != PipelineAction.EMBED
     }
@@ -427,7 +438,7 @@ def fold_operations(runs: list[_StageRun]) -> list[Operation]:
             if run.id not in folded:
                 out.append(_document_row(run, [_job(Stage.EMBED, run)]))
             continue
-        embed = embeds.get(workflows.embed_id(run.id, run.document))
+        embed = embeds.get(workflows.embed_id(run.id, run.document_id))
         imported = run.action == PipelineAction.IMPORT
         own = _job(Stage.CONVERT if imported else Stage.INDEX, run, embed)
         embed_job = [] if embed is None else [_job(Stage.EMBED, embed)]
@@ -498,11 +509,11 @@ def _document_row(run: _StageRun, jobs: list[Job]) -> Operation:
     )
 
 
-async def _kind_row(kind: OperationKind, status) -> Operation:
+async def _kind_row(kind: OperationKind, status, names: dict[str, str]) -> Operation:
     return Operation(
         id=status.workflow_id,
         kind=kind,
-        title=_title(kind, status),
+        title=_title(kind, status, names),
         status=status.status,
         created_at=(status.created_at or 0) / 1000,
         updated_at=(status.updated_at or 0) / 1000,
@@ -511,23 +522,26 @@ async def _kind_row(kind: OperationKind, status) -> Operation:
     )
 
 
-def _title(kind: OperationKind, status) -> str:
+def _title(kind: OperationKind, status, names: dict[str, str]) -> str:
     """Human text for one row: what this operation works on, read out of its id and the name DBOS
     recorded it under. The verb is the row's tag, so the title leaves it out.
 
     `document` never arrives here: it has a row builder of its own (see `list_operations`)."""
     if kind == OperationKind.COLLECTION:
         bulk = _bulk_kind(status.name)  # the listing selects exactly these three names
-        # the second segment is a collection for the two bulk kinds, a document for a delete
-        return (
-            f"{BULK_TITLES[bulk]} {_named(status.workflow_id)}" if bulk else "collection operation"
-        )
+        if bulk is None:
+            return "collection operation"
+        # the second segment is a collection for the two bulk kinds, a document's id for a delete
+        key = _second_segment(status.workflow_id) or "?"
+        if bulk == BulkKind.DELETE_DOCUMENT:
+            key = names.get(key, key)
+        return f"{BULK_TITLES[bulk]} {key}"
     if kind == OperationKind.DOWNLOAD:
         download_kind, model = models.model_names(status.workflow_id)
         return f"{download_kind} {model}"
     if status.name == DAILY_MAINTENANCE_WORKFLOW:  # the rest are maintenance runs
         return "daily housekeeping"
-    return _named(status.workflow_id)
+    return _second_segment(status.workflow_id) or "?"
 
 
 async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | None]:
@@ -552,21 +566,46 @@ async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | N
     return {"bulk": bulk}
 
 
-def _stage_run(status, children: list, done_by_child: dict[str, int]) -> _StageRun:
-    # a listing selects the three pipeline workflows by name, so every id parses; an id of an
-    # older shape is listed as an import of an unknown document rather than failing the page
-    action, collection, doc = pipeline_names(status.workflow_id) or (
-        PipelineAction.IMPORT,
-        None,
-        "?",
+async def _document_names(ids: Iterable[str]) -> dict[str, str]:
+    """What people call each of these documents, by id. One deleted since has no row, so its
+    name is the one its delete was given (`delete_document_workflow(doc, name)`). One with no
+    delete on record is absent: a caller shows its id."""
+    wanted = set(ids)
+    names = await documents.names_of(wanted)
+    gone = wanted - names.keys()
+    if not gone:
+        return names
+    deletes = await DBOS.list_workflows_async(
+        name=DELETE_DOCUMENT_WORKFLOW,
+        workflow_id_prefix=[f"{workflows.DELETE_DOCUMENT_PREFIX}:{doc}:" for doc in sorted(gone)],
+        load_output=False,
+        sort_desc=True,  # a document deleted, imported again and deleted again: its latest name
     )
+    for run in deletes:  # latest first, so the first name of each document is kept
+        if run.input:
+            names.setdefault(_second_segment(run.workflow_id) or "?", run.input["args"][1])
+    return names
+
+
+def _pipeline_of(workflow_id: str) -> tuple[PipelineAction, str | None, str]:
+    """What a pipeline run does, to which collection and document. A listing selects the three
+    pipeline workflows by name, so every id parses; an id of an older shape reads as an import
+    of an unknown document rather than failing the page."""
+    return pipeline_names(workflow_id) or (PipelineAction.IMPORT, None, "?")
+
+
+def _stage_run(
+    status, children: list, done_by_child: dict[str, int], names: dict[str, str]
+) -> _StageRun:
+    action, collection, doc = _pipeline_of(status.workflow_id)
     totals = [_batch_count(c) for c in children]
     done = [done_by_child.get(c.workflow_id, 0) for c in children]
     return _StageRun(
         id=status.workflow_id,
         action=action,
         collection=collection,
-        document=doc,
+        document_id=doc,
+        document=names.get(doc, doc),
         status=status.status,
         created_at=(status.created_at or 0) / 1000,
         updated_at=(status.updated_at or 0) / 1000,
@@ -624,12 +663,15 @@ async def _pipeline_page(
         load_input=False,
     )
     page = statuses[:page_size]
-    children = await stage_children([s.workflow_id for s in page])
+    children, names = await asyncio.gather(
+        stage_children([s.workflow_id for s in page]),
+        _document_names(_pipeline_of(s.workflow_id)[2] for s in page),
+    )
     done = await sysdb.step_counts(
         [c.workflow_id for group in children.values() for c in group], STAGE_STEP
     )
     return Page(
-        items=[_stage_run(s, children[s.workflow_id], done) for s in page],
+        items=[_stage_run(s, children[s.workflow_id], done, names) for s in page],
         next_cursor=(
             _cursor(OperationKind.DOCUMENT, offset + page_size)
             if len(statuses) > page_size
@@ -691,10 +733,13 @@ async def chunks_since(cutoff: float) -> list[ChunksAt]:
             if parent in chunks and stage in (Stage.EMBED, Stage.INDEX):
                 chunks[parent] += sum(child.output or [])
     points: list[ChunksAt] = []
+    ran = {id: _pipeline_of(id) for id in live}
+    names = await _document_names(doc for _, _, doc in ran.values())
     for workflow_id, status in live.items():
-        _, collection, document = pipeline_names(workflow_id) or (None, None, "?")
+        _, collection, doc = ran[workflow_id]
+        named = names.get(doc, doc)  # a document gone with no delete on record: its id
         points.append(
-            ChunksAt((status.completed_at or 0) / 1000, document, collection, chunks[workflow_id])
+            ChunksAt((status.completed_at or 0) / 1000, named, collection, chunks[workflow_id])
         )
     return sorted(points, key=lambda point: point.ts)
 

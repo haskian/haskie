@@ -22,6 +22,7 @@ from urllib.parse import unquote
 
 import pytest
 import structlog
+from conftest import id_of
 from litestar.testing import AsyncTestClient, RequestFactory
 from sqlalchemy import update
 
@@ -94,17 +95,39 @@ async def ready(client: AsyncTestClient, tmp_path: Path) -> AsyncTestClient:
     source = tmp_path / "guide.md"
     source.write_text(MD)
     imported = await document.import_path(str(source))
-    await document.set_status(imported.name, DocumentStatus.IMPORTED)
+    await document.set_status(imported.id, DocumentStatus.IMPORTED)
     (tmp_path / "pending.md").write_text("# pending\n")
     await document.import_path(str(tmp_path / "pending.md"))  # stays `queued`: nothing started it
 
     notes = await Collection.get("notes")
-    await notes.add(imported.name)
-    await notes.set_member_status(imported.name, MemberStatus.INDEXED)
+    await notes.add(imported.id)
+    await notes.set_member_status(imported.id, MemberStatus.INDEXED)
     await seed_index("notes", imported.name, "alpha body about lancedb")
 
     await client.put("/api/sessions/s1", json={"collections": ["notes"]})
     return client
+
+
+async def test_a_rename_moves_only_the_name(ready: AsyncTestClient) -> None:
+    """Every table and index holds the id, so the rename writes one row and a search cites the
+    new name at once. The name is spelled as at import, suffix the original's, so another
+    spelling of the same name changes nothing."""
+    before = (await ready.get("/api/documents/guide.md")).json()
+
+    renamed = await ready.put("/api/documents/guide.md/name", json={"name": "Retry Handbook"})
+
+    assert renamed.status_code == 200, renamed.text
+    assert (renamed.json()["name"], renamed.json()["id"]) == ("retry-handbook.md", before["id"])
+    assert (await ready.get("/api/documents/guide.md")).status_code == 404
+    assert (await ready.get("/api/documents/retry-handbook.md/collections")).json() == ["notes"]
+    members = (await ready.get("/api/collections/notes/documents")).json()["items"]
+    assert [member["document"]["name"] for member in members] == ["retry-handbook.md"]
+    found = (await ready.get("/api/search/sources", params={"q": "lancedb"})).json()["documents"]
+    assert [(one["document"], one["location"].split()[0]) for one in found] == [
+        ("retry-handbook.md", "retry-handbook.md")
+    ], "the index was not rewritten, yet it cites the new name"
+    same = await ready.put("/api/documents/retry-handbook.md/name", json={"name": "Retry_HANDBOOK"})
+    assert same.json() == renamed.json(), "another spelling of the same name is a no-op"
 
 
 def _requested(lines: list[dict]) -> list[str]:
@@ -311,6 +334,26 @@ def _requested(lines: list[dict]) -> list[str]:
             "delete an unknown document -> not found",
             "DELETE", "/api/documents/ghost.md", None, None,
             404, "document not found: ghost.md",
+        ),
+        (
+            "rename an unknown document -> not found",
+            "PUT", "/api/documents/ghost.md/name", {"name": "x.md"}, None,
+            404, "document not found: ghost.md",
+        ),
+        (
+            "rename to a name taken, in any spelling -> conflict",
+            "PUT", "/api/documents/guide.md/name", {"name": "Pending.md"}, None,
+            409, "document already exists: pending.md",
+        ),
+        (
+            "rename to a name that folds to nothing -> unprocessable, never `md.md`",
+            "PUT", "/api/documents/guide.md/name", {"name": "Отчёт.md"}, None,
+            422, "invalid name",
+        ),
+        (
+            "rename to a blank name -> unprocessable",
+            "PUT", "/api/documents/guide.md/name", {"name": "  "}, None,
+            422, "a document needs a name",
         ),
         (
             "source of an unknown document -> not found",
@@ -860,7 +903,7 @@ async def test_import_by_path_copies_the_file(client: AsyncTestClient, tmp_path:
 async def test_a_failed_import_can_be_re_run(client: AsyncTestClient, tmp_path: Path) -> None:
     await client.post("/api/init", json=NO_MODELS)
     row = await stage_and_import(client, "guide.md", MD.encode())
-    await document.set_status(row["name"], DocumentStatus.ERROR, "converter fell over")
+    await document.set_status(await id_of(row["name"]), DocumentStatus.ERROR, "converter fell over")
 
     again = await client.post(f"/api/documents/{row['name']}/import")
 
@@ -872,34 +915,37 @@ async def test_a_failed_import_can_be_re_run(client: AsyncTestClient, tmp_path: 
 # --- membership -----------------------------------------------------------------------
 
 
-async def test_an_upload_names_the_documents_it_repeats(
+async def test_an_upload_names_the_document_it_repeats(
     client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Staging names every document that already holds the same bytes, before anything is
-    imported. Once imported, `similar` names them again, and the nearest by document vector
-    under the embedding model; full-text only has no vectors to compare."""
+    """Staging names the document that already is these bytes, before anything is imported, and
+    the import is refused: the bytes are what a document is. `similar` names the nearest by
+    document vector under the embedding model; full-text only has no vectors to compare."""
     await client.post("/api/init", json=NO_MODELS)
-    await stage_and_import(client, "guide.md", MD.encode())
+    guide = await stage_and_import(client, "guide.md", MD.encode())  # the first: MD, unchanged
     await stage_and_import(client, "other.md", b"# Other\n\nsomething else entirely\n")
 
     staged = await client.post(
         "/api/documents/staging", files={"data": ("copy.md", MD.encode(), "text/markdown")}
     )
     assert staged.status_code == 201, staged.text
-    assert staged.json()["duplicates"] == ["guide.md"], "the same bytes, under another name"
-    await stage_and_import(client, "copy.md", MD.encode())
+    assert staged.json()["duplicate"] == "guide.md", "the same bytes, under another name"
+    refused = await client.post(
+        "/api/documents/import",
+        json={"staging_id": staged.json()["staging_id"], "name": "copy.md"},
+    )
+    assert refused.status_code == 409, refused.text
+    assert "this file is already imported as guide.md" in refused.text
 
-    similar = await client.get("/api/documents/copy.md/similar")
+    similar = await client.get("/api/documents/guide.md/similar")
 
     assert similar.status_code == 200, similar.text
-    assert similar.json() == {"identical": ["guide.md"], "nearest": []}, "no model, no vectors"
+    assert similar.json() == {"nearest": []}, "no model, no vectors"
 
-    asked: list[tuple[str, str, int, list[str]]] = []
+    asked: list[tuple[str, str, int]] = []
 
-    async def nearest(
-        doc: str, model: str, limit: int, but: list[str]
-    ) -> list[embed_cache.Neighbour]:
-        asked.append((doc, model, limit, but))
+    async def nearest(doc: str, model: str, limit: int) -> list[embed_cache.Neighbour]:
+        asked.append((doc, model, limit))
         return [embed_cache.Neighbour(document="other.md", similarity=0.42)]
 
     async def tiny(_settings: object) -> catalogue.EmbeddingModel:
@@ -907,14 +953,11 @@ async def test_an_upload_names_the_documents_it_repeats(
 
     monkeypatch.setattr(catalogue, "embedding_model", tiny)
     monkeypatch.setattr(embed_cache, "nearest", nearest)
-    under_model = await client.get("/api/documents/copy.md/similar")
+    under_model = await client.get("/api/documents/guide.md/similar")
 
-    assert under_model.json() == {
-        "identical": ["guide.md"],
-        "nearest": [{"document": "other.md", "similarity": 0.42}],
-    }
+    assert under_model.json() == {"nearest": [{"document": "other.md", "similarity": 0.42}]}
     tiny_model = catalogue.EmbeddingModel("test/tiny", 4).cache_name
-    assert asked == [("copy.md", tiny_model, 3, ["guide.md"])], "the copies left out of the three"
+    assert asked == [(guide["id"], tiny_model, 3)], "asked by id, answered by name"
     assert (await client.get("/api/documents/ghost.md/similar")).status_code == 404
 
 
@@ -935,7 +978,8 @@ async def test_attach_list_and_detach_a_member(
     assert (await client.get("/api/collections/notes")).json()["counts"]["indexed"] == 1
     assert (await client.get("/api/documents/guide.md/collections")).json() == ["notes"]
     cached = (await client.get("/api/documents/guide.md/embeddings")).json()
-    assert [entry["document"] for entry in cached] == ["guide.md"] * len(cached)
+    guide = (await client.get("/api/documents/guide.md")).json()
+    assert [entry["document_id"] for entry in cached] == [guide["id"]] * len(cached)
     assert cached, "indexing the member filled the document's embedding cache"
 
     in_notes = {"q": "lancedb", "collections": "notes"}
@@ -1404,9 +1448,9 @@ async def test_a_document_on_its_way_out_answers_no_search(
     for collection, name in (("notes", "guide.md"), ("other", "guide.md"), ("notes", "keep.md")):
         await attach_via_api(client, collection, name)
     if leaving == "guide.md removing from notes":
-        await Collection("notes").start_removal("guide.md")
+        await Collection("notes").start_removal(await id_of("guide.md"))
     elif leaving == "guide.md deleting":
-        await document.set_status("guide.md", DocumentStatus.DELETING)
+        await document.set_status(await id_of("guide.md"), DocumentStatus.DELETING)
 
     route, extra, key = SEARCH_PATHS[path]
     response = await client.get(
@@ -1512,7 +1556,7 @@ async def test_session_history_holds_every_action_newest_first(
 
 async def _converted(name: str, markdown: str) -> None:
     """The markdown a conversion would have written: what an excerpt is widened against."""
-    (await document.get(name)).markdown.write_text(markdown)
+    (await document.named(name)).markdown.write_text(markdown)
 
 
 async def test_every_search_is_logged_with_what_it_returned(ready: AsyncTestClient) -> None:
@@ -1622,9 +1666,9 @@ async def test_gaps_group_review_and_replay(ready: AsyncTestClient, tmp_path: Pa
     source = tmp_path / "zebra.md"
     source.write_text("# Zebra\n\nzebra stripes run across the flank\n")
     imported = await document.import_path(str(source))
-    await document.set_status(imported.name, DocumentStatus.IMPORTED)
-    await Collection("notes").add(imported.name)
-    await Collection("notes").set_member_status(imported.name, MemberStatus.INDEXED)
+    await document.set_status(imported.id, DocumentStatus.IMPORTED)
+    await Collection("notes").add(imported.id)
+    await Collection("notes").set_member_status(imported.id, MemberStatus.INDEXED)
     await seed_index("notes", imported.name, "zebra stripes run across the flank")
     await _converted(imported.name, "zebra stripes run across the flank\n")
     (closed,) = (await ready.post("/api/gaps/replay", json={"ids": [newest]})).json()
@@ -1780,7 +1824,7 @@ PASSAGE_MD = (
 async def _markdown_of(doc: str) -> str:
     """The converted markdown of an imported document, as it is on disk: what a chunk's
     `char_start` and `char_end` are offsets into, and what a passage is read from."""
-    row = await document.get(doc)
+    row = await document.named(doc)
     return (home.HOME / row.relative(row.markdown)).read_text(encoding="utf-8")
 
 
@@ -1807,8 +1851,8 @@ async def _member(collection: str, doc: str) -> None:
     """Make an imported document a member of a collection without running its index; the chunks
     are seeded by hand right after (as the `ready` fixture does with `seed_index`)."""
     found = await Collection.get(collection)
-    await found.add(doc)
-    await found.set_member_status(doc, MemberStatus.INDEXED)
+    await found.add(await id_of(doc))
+    await found.set_member_status(await id_of(doc), MemberStatus.INDEXED)
 
 
 async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
@@ -2196,10 +2240,11 @@ async def test_a_collection_reads_the_rows_of_named_chunks(client: AsyncTestClie
     chunks = await _guide_with_a_lead_in(client)
     index = Collection("notes").index_with(None)
 
-    rows = await index.rows_at([("thin.md", 3), ("thin.md", 2), ("thin.md", 99)], vectors=True)
-    quoted = await index.rows_at([("o'brien.md", 1)], vectors=False)
+    thin = await id_of("thin.md")
+    rows = await index.rows_at([(thin, 3), (thin, 2), (thin, 99)], vectors=True)
+    quoted = await index.rows_at([("o'brien", 1)], vectors=False)
 
-    assert sorted((row["document"], row["seq"]) for row in rows) == [("thin.md", 2), ("thin.md", 3)]
+    assert sorted((row["document_id"], row["seq"]) for row in rows) == [(thin, 2), (thin, 3)]
     assert {row["seq"]: row["text"] for row in rows}[3] == chunks[2].text
     assert quoted == [], "a quote in a name is a literal, not the end of the filter"
     assert all("vector" not in row for row in rows), "a table without vectors has none to read"
@@ -2845,7 +2890,7 @@ async def test_an_unexpected_failure_answers_500_with_a_scrubbed_message(
 
     assert response.status_code == 500
     assert response.json()["detail"] == (
-        "RuntimeError: row unreadable: $HASKIE_HOME/documents/guide.md"
+        f"RuntimeError: row unreadable: $HASKIE_HOME/documents/{await id_of('guide.md')}"
     )
     assert str(home.HOME) not in response.text
     assert app_module.REQUEST_ID_HEADER in response.headers
@@ -3127,7 +3172,7 @@ async def test_text_search_spans_all_collections_by_default(client: AsyncTestCli
     scores = [h["score"] for h in page["items"]]
     assert scores == sorted(scores, reverse=True), "raw BM25, best first, across both collections"
 
-    row = await document.get("alpha-0.md")
+    row = await document.named("alpha-0.md")
     hit = next(h for h in page["items"] if h["document"] == "alpha-0.md")
     assert hit["markdown_path"] == row.relative(row.markdown), "the document's own file"
     assert hit["source_path"] == row.relative(row.original)

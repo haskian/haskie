@@ -64,7 +64,8 @@ class MemberStatus(StrEnum):
 # the document is being deleted. Its rows stay in the table until the removal queued for them runs,
 # so a search reads around it. `for_search` leaves them out, and so does `holding`.
 _REMOVING = collection_documents.c.status == MemberStatus.REMOVING
-LEAVING = (_REMOVING, documents.c.status == document.DocumentStatus.DELETING)
+_DELETING = documents.c.status == document.DocumentStatus.DELETING
+LEAVING = (_REMOVING, _DELETING)
 # being written into or taken out of the collection right now: the states a poll waits on
 ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = (
     MemberStatus.PENDING,
@@ -151,7 +152,7 @@ _MEMBERS = select(
     collection_documents.c.error.label("member_error"),
     collection_documents.c.added_at,
     MEMBER_UPDATED_AT,
-).join_from(documents, collection_documents, collection_documents.c.document == documents.c.name)
+).join_from(documents, collection_documents, collection_documents.c.document_id == documents.c.id)
 
 
 def _member(row: Row[Any]) -> Member:
@@ -194,21 +195,18 @@ async def _counts_by_collection(
 
 
 def _leaving_query(names: list[str]) -> CompoundSelect:
-    """The (collection, document) pairs of these collections that are on their way out
+    """The (collection, document id) pairs of these collections that are on their way out
     (`LEAVING`): one select per road, joined by UNION rather than one OR across the two tables.
     An OR over the join reads every membership of the collections to find a set that is almost
     always empty; each select alone is bound by an index, the membership's by
-    `idx_collection_documents_status` and the document's by `idx_documents_status`."""
+    `idx_collection_documents_status` and the document's by `idx_documents_status`. The deleting
+    road is a subquery, not a join: joined on the id, the planner reads every membership first."""
     member = collection_documents.c
-    wanted = list(set(names))
-    return union(
-        *(
-            _MEMBERS.with_only_columns(member.collection, member.document).where(
-                member.collection.in_(wanted), road
-            )
-            for road in LEAVING
-        )
+    pairs = select(member.collection, member.document_id).where(
+        member.collection.in_(list(set(names)))
     )
+    deleting = select(documents.c.id).where(_DELETING)
+    return union(pairs.where(_REMOVING), pairs.where(member.document_id.in_(deleting)))
 
 
 async def _leaving(conn: AsyncConnection, names: list[str]) -> dict[str, frozenset[str]]:
@@ -560,16 +558,21 @@ class Collection:
     def _membership(self, doc: str) -> ColumnElement[bool]:
         """The filter that picks this collection's membership of `doc`."""
         member = collection_documents.c
-        return and_(member.collection == self.name, member.document == doc)
+        return and_(member.collection == self.name, member.document_id == doc)
 
-    def _refuse_removing(self, doc: str, status: str | None) -> None:
+    def _refuse_removing(self, name: str, status: str | None) -> None:
         """A membership being removed takes no new index work: the removal queued ahead of it
-        would take the rows that work writes."""
+        would take the rows that work writes. `name` is the document's, for the message."""
         if status == MemberStatus.REMOVING:
             raise Conflict(
                 f"document is being removed from collection {self.name}; "
-                f"attach or index it again once it is gone: {doc}"
+                f"attach or index it again once it is gone: {name}"
             )
+
+    async def _not_member(self, doc: str) -> NotFound:
+        """The error for a document that is no member, naming it as people know it."""
+        name = await document.name_of(doc)
+        return NotFound(f"document not in collection {self.name}: {name}")
 
     async def add(self, doc: str) -> None:
         """Attach a document: a `pending` membership, which indexing then moves along. Attaching
@@ -585,34 +588,39 @@ class Collection:
         """
         now = time.time()
         async with db.connect() as conn:
-            status = await conn.scalar(select(documents.c.status).where(documents.c.name == doc))
-            if status is None:
+            found = (
+                await conn.execute(
+                    select(documents.c.status, documents.c.name).where(documents.c.id == doc)
+                )
+            ).first()
+            if found is None:
                 raise NotFound(f"document not found: {doc}")
+            status, name = found
             if status != document.DocumentStatus.IMPORTED:
                 raise Conflict(
-                    f"document is {status}; only an imported document joins a collection: {doc}"
+                    f"document is {status}; only an imported document joins a collection: {name}"
                 )
             await conn.execute(
                 insert(collection_documents)
-                .values(collection=self.name, document=doc, added_at=now, updated_at=now)
+                .values(collection=self.name, document_id=doc, added_at=now, updated_at=now)
                 .on_conflict_do_nothing()
             )
             membership = await conn.scalar(
                 select(collection_documents.c.status).where(self._membership(doc))
             )
-        self._refuse_removing(doc, membership)
+        self._refuse_removing(name, membership)
 
     async def member(self, doc: str) -> Member:
         async with db.read() as conn:
             row = (await conn.execute(_MEMBERS.where(self._membership(doc)))).first()
         if row is None:
-            raise NotFound(f"document not in collection {self.name}: {doc}")
+            raise await self._not_member(doc)
         return _member(row)
 
     async def member_to_index(self, doc: str) -> Member:
         """The membership of `doc`, refused while it is being removed (`_refuse_removing`)."""
         found = await self.member(doc)
-        self._refuse_removing(doc, found.status)
+        self._refuse_removing(found.document.name, found.status)
         return found
 
     async def _move_member(
@@ -624,7 +632,7 @@ class Collection:
                 update(collection_documents)
                 .where(self._membership(doc), *guard)
                 .values(status=status, error=error, updated_at=time.time())
-                .returning(collection_documents.c.document)
+                .returning(collection_documents.c.document_id)
             )
         return moved is not None
 
@@ -651,7 +659,7 @@ class Collection:
         """Mark the membership `removing`, whatever it was: a detach answers once its removal is
         queued, and this is what the member listing shows until that removal ran."""
         if not await self._move_member(doc, MemberStatus.REMOVING, None):
-            raise NotFound(f"document not in collection {self.name}: {doc}")
+            raise await self._not_member(doc)
 
     async def fail_removal(self, doc: str, error: str) -> None:
         """A removal that failed leaves the membership in `error`, with the reason, so it does not
@@ -674,27 +682,27 @@ class Collection:
         member = collection_documents.c
         async with db.read() as conn:
             rows = await conn.execute(
-                _MEMBERS.with_only_columns(member.document, member.collection)
-                .where(member.document.in_(list(docs)), member.collection.in_(list(set(names))))
+                _MEMBERS.with_only_columns(member.document_id, member.collection)
+                .where(member.document_id.in_(list(docs)), member.collection.in_(list(set(names))))
                 .where(*(not_(one) for one in LEAVING))
-                .order_by(member.document, member.collection)
+                .order_by(member.document_id, member.collection)
             )
         held: dict[str, list[str]] = {}
         for doc, collection in rows:
             held.setdefault(doc, []).append(collection)
         return held
 
-    async def member_names(self, after: str | None = None, limit: int | None = None) -> list[str]:
-        """Names alone, ordered by name: what a caller that only iterates members needs.
+    async def member_ids(self, after: str | None = None, limit: int | None = None) -> list[str]:
+        """Document ids alone, in id order: what a caller that only iterates members needs.
 
-        `after` resumes the walk past that name and `limit` caps the page, so a bulk index can walk
-        a large collection one page at a time instead of holding every name at once."""
+        `after` resumes the walk past that id and `limit` caps the page, so a bulk index can walk
+        a large collection one page at a time instead of holding every id at once."""
         member = collection_documents.c
-        names = select(member.document).where(member.collection == self.name)
+        ids = select(member.document_id).where(member.collection == self.name)
         if after is not None:
-            names = names.where(member.document > after)
+            ids = ids.where(member.document_id > after)
         async with db.read() as conn:
-            return list(await conn.scalars(names.order_by(member.document).limit(limit)))
+            return list(await conn.scalars(ids.order_by(member.document_id).limit(limit)))
 
     async def counts(self) -> DocumentCounts:
         async with db.read() as conn:

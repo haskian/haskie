@@ -98,9 +98,9 @@ def placed(groups: list[Group], found: Group) -> list[Group]:
     """The groups with the probe's section in them: joined to the kept section it is part of,
     else after the others."""
     for at, one in enumerate(groups):
-        if (one.collection, one.document, one.section) == (
+        if (one.collection, one.document_id, one.section) == (
             found.collection,
-            found.document,
+            found.document_id,
             found.section,
         ):
             joined = msgspec.structs.replace(one, ranges=[*one.ranges, *found.ranges])

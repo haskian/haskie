@@ -12,7 +12,7 @@ they sit in the fastembed and Hugging Face caches, outside the home.
   haskie.lock             the home lock, naming the process that holds it
   server.log              output of a server that `haskie run` started
   staging/                uploads not yet imported; the nightly run sweeps those over a day old
-  documents/<sh>/<doc>/
+  documents/<sh>/<id>/
     original.<ext>        the file as imported
     original.<ext>.md     the full conversion
     parts/NNNNNN.md       one per batch of PDF pages (one part for other files); every
@@ -25,7 +25,8 @@ they sit in the fastembed and Hugging Face caches, outside the home.
   audit/                  one JSON line per action
 ```
 
-`<sh>` is the first byte of the SHA-1 of the name, in hex (`home.shard`). So 10,000 documents
+`<sh>` is the first byte of the SHA-1 of the entry's key, in hex (`home.shard`): a document's id,
+a collection's name. So 10,000 documents
 spread over 256 directories instead of filling one.
 
 ## The metadata database
@@ -44,12 +45,12 @@ erDiagram
     models ||--o{ embedding_profiles : ""
     models ||--o| reranker_calibration : ""
     documents {
-        text name PK
+        text id PK
+        text name
         text suffix
         text status
         text parser
         text description
-        text md5
     }
     collections {
         text name PK
@@ -58,12 +59,12 @@ erDiagram
     }
     collection_documents {
         text collection PK
-        text document PK
+        text document_id PK
         text status
     }
     embeddings {
         text id PK
-        text document
+        text document_id
         text urn
         text model
         blob vector
@@ -138,7 +139,10 @@ when `min_rerank_score` is empty, and the beta curve `fill_values = absolute` sp
 by. The seed gives every reranker an uncalibrated floor of 0.05 and the identity curve, until
 `catalogue/calibrate.py` measures both on borderline pairs of your own collections.
 
-`documents.md5` is the MD5 of the original file, so a second upload of the same bytes is spotted.
+`documents.id` is the MD5 of the original file. The bytes are the document, so the same file is
+never imported twice. Every table, the LanceDB rows, the folders and the workflow ids refer to a
+document by this id. `documents.name` is what people and agents call it. The API and the tools
+address a document by name. It is unique, and stored in lowercase-kebab-case.
 `embeddings.vector` is the document as one vector: the mean of its unit chunk vectors,
 normalized. It is what the nearest documents are found by.
 

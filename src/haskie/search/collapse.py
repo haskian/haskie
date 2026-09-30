@@ -206,7 +206,7 @@ class _Item(msgspec.Struct):
     """What the fold compares of a hit or a hit range: where it sits and which chunks it holds."""
 
     collection: str
-    document: str
+    document_id: str
     seq_start: int
     seq_end: int
     char_start: int
@@ -257,7 +257,7 @@ def _compare(item: _Item, kept: _Item, where: list[Space]) -> _Fold | None:
     (one document chunked two ways in two collections) are contained, exactly; a partial overlap
     is compared like any other pair.
     """
-    one_document = item.document == kept.document
+    one_document = item.document_id == kept.document_id
     if one_document and item.collection == kept.collection:
         if item.seq_start <= kept.seq_end + 1 and kept.seq_start <= item.seq_end + 1:
             return None
@@ -353,7 +353,7 @@ def _overlaps(item: _Item, other: _Item, where: list[Space]) -> Overlaps:
     where both are cut from one document."""
     by_kind = {space.kind: _overlap(space, item, other) for space in where}
     chars = None
-    if item.document == other.document:
+    if item.document_id == other.document_id:
         shared = min(item.char_end, other.char_end) - max(item.char_start, other.char_start)
         smaller = min(item.char_end - item.char_start, other.char_end - other.char_start)
         chars = max(0, shared) / smaller if smaller > 0 else 0.0
@@ -407,7 +407,7 @@ def hits(found: list[Hit], scan: Scan, limit: int) -> list[Hit]:
     items = [
         _Item(
             collection=hit.collection,
-            document=hit.document,
+            document_id=hit.document_id,
             seq_start=hit.seq,
             seq_end=hit.seq,
             char_start=hit.char_start,
@@ -427,6 +427,7 @@ def hits(found: list[Hit], scan: Scan, limit: int) -> list[Hit]:
     ) -> HitReference:
         return HitReference(
             collection=hit.collection,
+            document_id=hit.document_id,
             document=hit.document,
             seq=hit.seq,
             header=hit.header,
@@ -451,16 +452,16 @@ def ranges(
 
     `scanned` is the list the spaces were built over, so each range finds its chunks' rows in it.
     """
-    row_of = {(hit.collection, hit.document, hit.seq): row for row, hit in enumerate(scanned)}
+    row_of = {(hit.collection, hit.document_id, hit.seq): row for row, hit in enumerate(scanned)}
     items = [
         _Item(
             collection=hit_range.hits[0].collection,
-            document=hit_range.hits[0].document,
+            document_id=hit_range.hits[0].document_id,
             seq_start=hit_range.seq_start,
             seq_end=hit_range.seq_end,
             char_start=hit_range.char_start,
             char_end=hit_range.char_end,
-            rows=[row_of[(hit.collection, hit.document, hit.seq)] for hit in hit_range.hits],
+            rows=[row_of[(hit.collection, hit.document_id, hit.seq)] for hit in hit_range.hits],
             text=_exact([hit.text for hit in hit_range.hits]),
             alone=hit_range.alone,
         )
@@ -477,6 +478,7 @@ def ranges(
         best = hit_range.best
         return PassageReference(
             collection=best.collection,
+            document_id=best.document_id,
             document=best.document,
             seq_start=hit_range.seq_start,
             seq_end=hit_range.seq_end,

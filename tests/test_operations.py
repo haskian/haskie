@@ -16,6 +16,7 @@ from haskie.indexing.workflows import (
 
 TAIL = "c3680a02207a41f89078486d1b3a4c90"
 DOC = "principles.pdf"
+DOC_ID = "9e107d9d372bb6826bd81d3542a419d6"  # an MD5, what a workflow id carries
 
 
 def run(
@@ -23,9 +24,10 @@ def run(
 ) -> operations._StageRun:
     prefix = {"import": "imp", "embed": "emb", "index": "idx-col:asd"}[action]
     base = operations._StageRun(
-        id=f"{prefix}:{DOC}:{TAIL}",
+        id=f"{prefix}:{DOC_ID}:{TAIL}",
         action=action,
         collection="asd" if action == "index" else None,
+        document_id=DOC_ID,
         document=DOC,
         status=status,
         created_at=1_000.0,

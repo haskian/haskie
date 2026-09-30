@@ -33,6 +33,7 @@ from lancedb.index import FTS, IvfPq
 
 from haskie import cpu
 from haskie.catalogue.catalogue import EmbeddingModel
+from haskie.document import document
 from haskie.indexing import models
 from haskie.indexing.chunk import HEADING_SEP, Chunk, CutReason, Position, framed
 from haskie.indexing.chunk import record as chunk_record
@@ -40,16 +41,16 @@ from haskie.logs import get_logger
 from haskie.settings import Fusion, SearchMode, SearchSettings, load_user_settings
 
 # Where a row sits in one collection's table: what `rows_at` reads it back by.
-RowKey = tuple[str, int]  # (document, seq)
+RowKey = tuple[str, int]  # (document id, seq)
 # One chunk as a search result: the collection too, since two collections may chunk one document
 # with different settings and each numbers its own `seq` (`search.passage.ranges`).
-ChunkKey = tuple[str, str, int]  # (collection, document, seq)
+ChunkKey = tuple[str, str, int]  # (collection, document id, seq)
 # What identifies one chunk's text, wherever it is stored. The collection is deliberately not part
 # of it: the same span of the same document is the same answer, whichever collection's table it
 # came out of, so `search.retrieval.fan_out` and `search.text.merge` both count it once. The `seq`
 # is not part of it either: two chunk settings number one span differently, and give one `seq`
 # other text.
-SpanKey = tuple[str, int, int]  # (document, char_start, char_end)
+SpanKey = tuple[str, int, int]  # (document id, char_start, char_end)
 
 
 class Row(msgspec.Struct):
@@ -68,7 +69,9 @@ _log = get_logger(__name__)
 
 PLAIN_SCHEMA = pa.schema(
     [
-        ("document", pa.string()),
+        # `Document.id`: what the rows are kept and found by. The name a hit cites is not stored:
+        # a rename would have to rewrite every table, so `gather_rows` reads it for each search
+        ("document_id", pa.string()),
         ("source_path", pa.string()),  # relative to the haskie home (portable)
         ("markdown_path", pa.string()),
         ("part", pa.int32()),
@@ -152,7 +155,8 @@ class HitReference(msgspec.Struct):
     and moved under it with everything folded into it."""
 
     collection: str
-    document: str
+    document_id: str
+    document: str  # its name, what it is cited by
     seq: int  # 1-based position among the document's chunks
     header: str
     location: str
@@ -170,7 +174,8 @@ class Hit(msgspec.Struct):
     """One matching chunk with everything needed to cite or open it."""
 
     collection: str  # the collection whose table matched; the document itself belongs to none
-    document: str
+    document_id: str  # `Document.id`: what a search keys a hit by
+    document: str  # its name, what a hit is cited by
     source_path: str  # original upload, relative to home
     markdown_path: str  # full converted markdown, relative to home
     part: int  # micro-batch that produced the chunk
@@ -205,13 +210,14 @@ class Hit(msgspec.Struct):
 
 def chunk_key(hit: "Hit") -> ChunkKey:
     """Which chunk a hit is, as a search keys it."""
-    return (hit.collection, hit.document, hit.seq)
+    return (hit.collection, hit.document_id, hit.seq)
 
 
 def location(
-    doc: str, page_start: int | None, page_end: int | None, line_start: int, line_end: int
+    document: str, page_start: int | None, page_end: int | None, line_start: int, line_end: int
 ) -> str:
-    """The citation of one span of a document: "doc p.3-4 L10-20", pages only for a PDF.
+    """The citation of one span of the document named `document`: "guide.pdf p.3-4 L10-20",
+    pages only for a PDF.
 
     Shared so a passage (`passage.quote`) cites in exactly the format a chunk does.
     """
@@ -220,7 +226,7 @@ def location(
         pages = f" p.{page_start}"
         if page_end != page_start:
             pages += f"-{page_end}"
-    return f"{doc}{pages} L{line_start}-{line_end}"
+    return f"{document}{pages} L{line_start}-{line_end}"
 
 
 # `schema_current` opens the table and reads its Arrow schema, and the read path asks for every
@@ -391,16 +397,17 @@ class CollectionIndex:
         return table if table is not None and await self.schema_current() else None
 
     async def delete_document(self, doc: str) -> None:
+        """Drop every row of one document, by its id."""
         table = await self._deletable()
         if table is not None:
-            await table.delete(f"document = {_quoted(doc)}")
+            await table.delete(f"document_id = {_quoted(doc)}")
 
     async def delete_parts(self, doc: str, start: int, end: int) -> None:
         """Drop the parts `[start, end)` of one document, leaving every other part alone."""
         table = await self._deletable()
         if table is not None:
             await table.delete(
-                f"document = {_quoted(doc)} and part >= {int(start)} and part < {int(end)}"
+                f"document_id = {_quoted(doc)} and part >= {int(start)} and part < {int(end)}"
             )
 
     async def add_parts(
@@ -446,7 +453,7 @@ class CollectionIndex:
                 row.chunk,
                 row.vector,
                 dims,
-                document=doc,
+                document_id=doc,
                 source_path=source_path,
                 markdown_path=markdown_path,
                 part=part,
@@ -635,31 +642,31 @@ class CollectionIndex:
         """The stored rows of these chunks, in no order: what a search reads to look at the
         neighbours of a chunk it matched. Their vectors only when `vectors` says the search can
         compare them. `[]` when there is nothing readable."""
-        by_document: dict[str, set[int]] = {}
+        by_document_id: dict[str, set[int]] = {}
         for doc, seq in keys:
-            by_document.setdefault(doc, set()).add(seq)
+            by_document_id.setdefault(doc, set()).add(seq)
         table = await self._readable()
-        if table is None or not by_document:
+        if table is None or not by_document_id:
             return []
         wanted = " OR ".join(
-            f"(document = {_quoted(doc)} AND seq IN ({', '.join(map(str, sorted(seqs)))}))"
-            for doc, seqs in sorted(by_document.items())
+            f"(document_id = {_quoted(doc)} AND seq IN ({', '.join(map(str, sorted(seqs)))}))"
+            for doc, seqs in sorted(by_document_id.items())
         )
         columns = PLAIN_SCHEMA.names + (
             ["vector"] if vectors and await self.has_vector_column() else []
         )
         return _rows(await table.query().where(wanted).select(columns).to_arrow())
 
-    async def outline_rows(self, documents: Iterable[str]) -> list[dict]:
-        """Where every chunk of these documents sits: its `document`, `seq`, heading path and char
-        span, and nothing else, in no order. What a search reads to know how large each section
-        around a match is. `[]` when there is nothing readable."""
-        names = set(documents)
+    async def outline_rows(self, document_ids: Iterable[str]) -> list[dict]:
+        """Where every chunk of these documents (by id) sits: its `document_id`, `seq`, heading
+        path and char span, and nothing else, in no order. What a search reads to know how large
+        each section around a match is. `[]` when there is nothing readable."""
+        ids = set(document_ids)
         table = await self._readable()
-        if table is None or not names:
+        if table is None or not ids:
             return []
-        wanted = f"document IN {_listed(names)}"
-        columns = ["document", "seq", "headings", "char_start", "char_end"]
+        wanted = f"document_id IN {_listed(ids)}"
+        columns = ["document_id", "seq", "headings", "char_start", "char_end"]
         return await table.query().where(wanted).select(columns).to_list()
 
     def hit(self, r: dict, score: float | None = None) -> Hit:
@@ -671,6 +678,7 @@ class CollectionIndex:
         source_path, markdown_path = r["source_path"], r["markdown_path"]
         return Hit(
             collection=self.collection,
+            document_id=r["document_id"],
             document=r["document"],
             source_path=source_path,
             markdown_path=markdown_path,
@@ -787,16 +795,15 @@ def _rows(found: pa.Table) -> list[dict]:
     return rows
 
 
-def _excluding(builder: Any, documents: frozenset[str]) -> Any:
-    """A query that leaves the rows of `documents` out: those of a document on its way out of the
-    collection (`CollectionIndex.leaving`), whose rows stay until the removal queued for them runs.
-
-    A filter on the query rather than on its answer: LanceDB applies it before the limit, so a
+def _excluding(builder: Any, document_ids: frozenset[str]) -> Any:
+    """A query that leaves the rows of these documents out: those of a document on its way out of
+    the collection (`CollectionIndex.leaving`), whose rows stay until the removal queued for them
+    runs. A filter on the query rather than on its answer: LanceDB applies it before the limit, so a
     document that leaves does not take the slots of the ones that stay. No filter at all when
     nothing is leaving, which is almost every search. Sync, like `_tuned`."""
-    if not documents:
+    if not document_ids:
         return builder
-    return builder.where(f"document NOT IN {_listed(documents)}")
+    return builder.where(f"document_id NOT IN {_listed(document_ids)}")
 
 
 def _listed(values: Iterable[str]) -> str:
@@ -840,15 +847,19 @@ def row_score(r: dict) -> float:
 
 
 def span_key(row: dict) -> SpanKey:
-    """(document, char_start, char_end) of one result row."""
-    return (row["document"], row["char_start"], row["char_end"])
+    """(document id, char_start, char_end) of one result row."""
+    return (row["document_id"], row["char_start"], row["char_end"])
 
 
 async def gather_rows(
     indexes: list[CollectionIndex],
     fetch: Callable[[CollectionIndex], Awaitable[list[dict]]],
+    document_names: dict[str, str] | None = None,
 ) -> list[tuple[CollectionIndex, list[dict]]]:
-    """Read every index concurrently, at most `SEARCH_CONCURRENCY` at a time, in the order given.
+    """Read every index concurrently, at most `SEARCH_CONCURRENCY` at a time, in the order given,
+    and name each row's document (`document`, what `hit` cites) from one query for all of them.
+    `document_names` is the search's own map of them, id to name: a read asks only for the ids it
+    lacks, and adds them, so one search of many reads looks each document up once.
 
     One semaphore per call, never at import time: an anyio primitive belongs to the loop that
     first used it, and both the Litestar loop and the DBOS loop run searches.
@@ -862,7 +873,15 @@ async def gather_rows(
         async with slots:
             return index, await fetch(index)
 
-    return list(await asyncio.gather(*(read(index) for index in indexes)))
+    found = list(await asyncio.gather(*(read(index) for index in indexes)))
+    names = {} if document_names is None else document_names
+    missing = {row["document_id"] for _, rows in found for row in rows} - names.keys()
+    names.update(await document.names_of(missing))
+    for _, rows in found:
+        for row in rows:
+            # a document deleted since the read has no name left: its id stands in
+            row["document"] = names.get(row["document_id"], row["document_id"])
+    return found
 
 
 def first_per_span(

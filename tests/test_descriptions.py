@@ -14,7 +14,7 @@ from litestar.testing import AsyncTestClient
 from haskie import app as app_module
 from haskie.document import document
 
-from conftest import LOOPBACK_URL, NO_MODELS, attach_via_api, stage_and_import, wait_import  # isort: skip
+from conftest import LOOPBACK_URL, NO_MODELS, attach_via_api, id_of, stage_and_import, wait_import  # isort: skip
 
 pytestmark = pytest.mark.anyio
 
@@ -102,9 +102,9 @@ async def test_a_description_is_editable_after_the_fact(shelf: AsyncTestClient) 
             "compilers.md",
         ),
         ("rename with the same suffix is left alone", "a.md", "compilers.md", "compilers.md"),
-        # `safe_name` turns each run of punctuation into one dash, suffix included
-        ("a rename is sanitised like any name", "a.md", "my paper!", "my-paper-.md"),
-        ("a wrong suffix does not choose a parser", "a.md", "compilers.exe", "compilers.exe.md"),
+        # the stem in lowercase-kebab-case: each run of punctuation is one dash, none at the end
+        ("a rename is spelled like any name", "a.md", "My Paper!", "my-paper.md"),
+        ("a wrong suffix does not choose a parser", "a.md", "compilers.exe", "compilers-exe.md"),
     ],
 )
 async def test_rename_at_import(
@@ -135,9 +135,10 @@ async def test_rename_at_import(
 async def test_descriptions_are_read_in_one_query(shelf: AsyncTestClient) -> None:
     """`descriptions_of` is the batched read the shortlist uses; absent means no description. It
     is a document read, not a collection one: a description belongs to the document."""
-    found = await document.descriptions_of({"compilers.md", "networks.md", "gone.md"})
+    compilers, networks = await id_of("compilers.md"), await id_of("networks.md")
+    found = await document.descriptions_of({compilers, networks, "0" * 32})
 
-    assert found == {"compilers.md": "the dragon book"}, "no row for a blank or missing document"
+    assert found == {compilers: "the dragon book"}, "no row for a blank or missing document"
     assert await document.descriptions_of(set()) == {}, "nothing asked for, nothing queried"
 
 

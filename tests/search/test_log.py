@@ -65,7 +65,10 @@ async def _two_collections() -> None:
         index = collection.index_with(compact)
         row = Row(chunk=chunk_, vector=VECTORS[name], seq=1)
         await index.add_parts(
-            f"{name}.md", f"documents/{name}.md", f"documents/{name}.md.md", one_part(0, [row])
+            f"{name}.md",
+            f"documents/{name}.md",
+            f"documents/{name}.md.md",
+            one_part(0, [row]),
         )
         await index.finish()
 

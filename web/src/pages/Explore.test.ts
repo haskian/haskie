@@ -6,6 +6,7 @@ import { parseScope, scopeParams, type Scope } from './explore/scope'
 
 const HIT: Hit = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area-lights.pdf',
   source_path: 'documents/area-lights.pdf',
   markdown_path: 'markdown/area-lights.md',
@@ -35,6 +36,7 @@ const HIT: Hit = {
 
 const SOURCE: Source = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area-lights.pdf',
   score: 0.91,
   chunks: 7,
@@ -52,6 +54,7 @@ const SOURCE: Source = {
 
 const PASSAGE: Passage = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area-lights.pdf',
   header: 'Lighting > Soft shadows',
   location: 'area-lights.pdf p.2 L41-58',

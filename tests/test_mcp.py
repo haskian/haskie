@@ -452,7 +452,7 @@ async def test_a_tool_call_logs_the_names_it_is_routed_by(
     # what each of the three handlers reads first
     monkeypatch.setattr(Collection, "get", staticmethod(seeing(Collection.get)))
     monkeypatch.setattr(Collection, "page", staticmethod(seeing(Collection.page)))
-    monkeypatch.setattr(document, "get", seeing(document.get))
+    monkeypatch.setattr(document, "named", seeing(document.named))
 
     error, found = await _call(library, tool, arguments)
 

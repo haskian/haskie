@@ -38,7 +38,7 @@ class Entry(msgspec.Struct, frozen=True):
 
 
 type Outline = list[Entry]  # one document's chunks, by `seq`
-type Place = tuple[str, str]  # (collection, document)
+type Place = tuple[str, str]  # (collection, document id)
 
 
 class Section(msgspec.Struct, frozen=True):
@@ -60,7 +60,7 @@ def outlines(rows: Sequence[tuple[str, dict]]) -> dict[Place, Outline]:
             char_start=row["char_start"],
             char_end=row["char_end"],
         )
-        found.setdefault((collection, row["document"]), []).append(entry)
+        found.setdefault((collection, row["document_id"]), []).append(entry)
     for outline in found.values():
         outline.sort(key=lambda entry: entry.seq)
     return found
@@ -100,7 +100,7 @@ class Group(msgspec.Struct):
     """The kept passages of one section, in the order they were kept."""
 
     collection: str
-    document: str
+    document_id: str
     section: Section
     ranges: list[HitRange]
 
@@ -149,10 +149,10 @@ def group(
     placed: list[tuple[tuple[str, str, Section], HitRange]] = []
     for hit_range in hit_ranges:
         first = hit_range.hits[0]
-        outline = found.get((first.collection, first.document))
+        outline = found.get((first.collection, first.document_id))
         if outline is not None:
             where = section_of(outline, first.seq, max_chars)
-            placed.append(((first.collection, first.document, where), hit_range))
+            placed.append(((first.collection, first.document_id, where), hit_range))
     groups: dict[tuple[str, str, Section], Group] = {}
     for key, hit_range in placed:
         groups.setdefault(key, Group(*key, ranges=[])).ranges.append(hit_range)
@@ -170,7 +170,7 @@ def documents(hit_ranges: list[HitRange], limit: int) -> set[Place]:
     for hit_range in hit_ranges:
         if len(standing) == limit:
             break
-        place = (hit_range.hits[0].collection, hit_range.hits[0].document)
+        place = (hit_range.hits[0].collection, hit_range.hits[0].document_id)
         found.add(place)
         if not hit_range.alone:
             standing.add(place)
@@ -203,9 +203,10 @@ def excerpt(found: Group, texts: list[str]) -> Excerpt:
     best = first.best
     return Excerpt(
         collection=found.collection,
-        document=found.document,
+        document_id=best.document_id,
+        document=best.document,
         header=HEADING_SEP.join(found.section.path),
-        location=location(found.document, page_start, page_end, first.line_start, last.line_end),
+        location=location(best.document, page_start, page_end, first.line_start, last.line_end),
         seq_start=first.seq_start,
         seq_end=last.seq_end,
         line_start=first.line_start,

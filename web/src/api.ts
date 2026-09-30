@@ -73,7 +73,7 @@ export type BulkStarted = Wire<'BulkStarted'>
 export type OperationProgress = Wire<'OperationProgress'>
 export type Preview = Wire<'Preview'>
 export type Staged = Wire<'Staged'>
-export type Similar = Wire<'Similar'> // what a document may repeat: identical files, nearest by content
+export type Similar = Wire<'Similar'> // what a document may repeat: the nearest by content
 export type Rendered = Wire<'Rendered'>
 export type Member = Wire<'Member'>
 export type CollectionSummary = Wire<'CollectionSummary'>
@@ -315,6 +315,7 @@ export const api = {
   documentCollections: (doc: string) => request<string[]>(`${documentPath(doc)}/collections`),
   documentEmbeddings: (doc: string) => request<EmbeddingEntry[]>(`${documentPath(doc)}/embeddings`),
   similarDocuments: (doc: string) => request<Similar>(`${documentPath(doc)}/similar`),
+  renameDocument: (doc: string, to: string) => request<ImportedDocument>(`${documentPath(doc)}/name`, json('PUT', { name: to })),
   describeDocument: (doc: string, description: string) =>
     request<ImportedDocument>(`${documentPath(doc)}/description`, json('PUT', { description })),
   // Some lines of the converted markdown: what an `also_in` place reads back when it is opened.
