@@ -30,12 +30,12 @@ flowchart TB
   async form.
 - **CPU work is sync, in a thread.** `cpu.on_cpu` runs it in a worker thread and holds one slot of
   the `pipeline.cpu_budget` semaphore for as long as it runs. PDF page conversion and a PDF's
-  preview go one step further, to a process pool (`cpu.off_interpreter`), while the thread holds the slot. A pipeline
-  step holds a slot for its CPU part only, never for the IO around it. The pool is pebble's: a
-  parser that crashes its worker fails only its own call, and a new worker takes its place.
-  One exception runs on the event loop: stemming a search's answer (`probe.vocabulary`). It
-  remembers every word it stemmed, so it costs well under a millisecond once a server has seen
-  the words, and waiting for a slot that indexing holds would cost more. Another runs outside our
+  preview go one step further, to a process pool (`cpu.off_interpreter`), while the thread holds the
+  slot. A pipeline step holds a slot for its CPU part only, never for the IO around it. The pool is
+  pebble's: a parser that crashes its worker fails only its own call, and a new worker takes its
+  place. One exception runs on the event loop: stemming a search's answer (`probe.vocabulary`). It
+  remembers every word it stemmed, so it costs well under a millisecond once a server has seen the
+  words, and waiting for a slot that indexing holds would cost more. Another runs outside our
   threads: maintenance has LanceDB train a vector index on its own runtime, where no slot can be
   held (`maintenance.run`).
 - **A budget change applies to running work.** A resize counts the slots already held, so a
@@ -80,7 +80,8 @@ download operation.
 
 ## Shutdown
 
-Every stage of a shutdown has a bound, and each stage past the first is harder than the last:
+Every stage of a shutdown has a bound, and each stage past the first is harder than the one
+before:
 
 1. **Requests drain.** SIGTERM or Ctrl-C stops new connections. Requests in flight get 10 seconds.
 2. **The pipeline stops.** DBOS waits up to 10 seconds for running workflows, then stops waiting.

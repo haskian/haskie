@@ -48,19 +48,24 @@ flowchart TB
 `ensure_embedding` always runs, and looks up the cache inside. On a hit it returns at once.
 
 **The outline.** When a document has no outline under the model, `ensure_embedding` builds one
-from the cache file it found or computed (`outline/build.py`, `outline/store.py`): the import's,
-under the default chunk settings, unless the model changed since. Every heading's section, by the
-rule a search groups passages by, with the words that say what it is about and, with an embedding model, a vector: the mean of
-its unit chunk vectors. It goes into `outline.json` beside the markdown and into the outline index
-across every collection ([Storage](storage.md#the-outline)). A keyword strategy picks the words
-(`keywords.Strategy`). The one there is, `ClassTfidf`, weighs the sections of one depth
-against each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25 weighting: a chapter's
-words against the other chapters'. With an embedding model, each section's best 20 candidates
-are embedded, one call for the whole document, and reranked against the mean of its chunk
-vectors, as BERTopic's `KeyBERTInspired` does. A word a section uses once is left out unless the
-section is too short to have enough used twice: most are a PDF's line-split halves or two words
-that happen to meet. Measured once on one book (1.4 MB of markdown, 1,776 chunks, bge-small, on
-the dev machine): the outline took 2.4 s, the chunk embeddings 50 s.
+from the cache file it found or computed (`outline/build.py`, `outline/store.py`). That is the
+import's file, under the default chunk settings, unless the model changed since. The outline
+lists every heading's section, cut by the same rule a search groups passages by. Each section gets
+the words that say what it is about and, with an embedding model, a vector: the mean of its unit
+chunk vectors. The outline goes into `outline.json` beside the markdown and into the outline
+index across every collection ([Storage](storage.md#the-outline)). One document's outline is
+built by one run at a time. Two collections with other chunk settings both reach it after a
+model change: the second run waits, then finds it built.
+
+A keyword strategy picks the words (`keywords.Strategy`). The only one, `ClassTfidf`, weighs the
+sections of one depth against each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25
+weighting: a chapter's words against the other chapters'. With an embedding model, each
+section's best 20 candidates are embedded, one call for the whole document, and reranked against
+the mean of its chunk vectors, as BERTopic's `KeyBERTInspired` does. A word or word pair that a
+section uses once is left out, unless the section is too short to have enough used twice. Most
+such terms are halves of a word a PDF split over two lines, or two words that happen to meet.
+Measured once on one book (1.4 MB of markdown, 1,776 chunks, bge-small, on the dev machine): the
+outline took 2.4 s, the chunk embeddings 50 s.
 
 **Batches.** A PDF converts in batches of `batch_pages` pages (default 10). Any other file
 converts as one batch. Embedding runs one batch per converted part. Indexing writes
@@ -73,8 +78,9 @@ spreads over the free slots. The index stage is one child and is never sliced.
 
 **One writer per table.** Every index child runs on `task.indexing`, partitioned by collection
 with one slot per partition, and under a per-collection lock. So LanceDB sees one writer per
-table. A detach's removal waits its turn there too. The request only queues it, and the membership
-reads `removing` until it ran (see [a membership's life](documents-and-collections.md#a-memberships-life)).
+table. A detach's removal waits its turn there too. The request only queues it, and the
+membership reads `removing` until it has run (see
+[a membership's life](documents-and-collections.md#a-memberships-life)).
 
 ## Queues
 

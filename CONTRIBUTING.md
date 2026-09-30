@@ -65,7 +65,7 @@ Timing knobs are module constants, not variables (`workflows.OPERATION_POLL`,
 | `msgspec` for every model | Fast, strict decoding at the trust boundary. The same types generate the OpenAPI document | `api/`, `settings.py` |
 | Frontend types generated from OpenAPI | One source of truth for the contract. `check` fails on drift | [REST API](docs/rest-api.md) |
 | SQLite in WAL mode, through SQLAlchemy Core on `aiosqlite` | A single-user app needs no database server. One connection per unit of work, so none is ever shared. Core tables are the one source of the schema: the DDL is generated from them, and queries name columns through them | [Storage](docs/storage.md) |
-| LanceDB, one table per collection | Embedded, on local disk, vector and full-text search in one table. One writer per collection keeps writes simple | [Storage](docs/storage.md) |
+| LanceDB, one table per collection, one outline table per embedding model | Embedded, on local disk, vector and full-text search in one table. One writer per collection keeps writes simple | [Storage](docs/storage.md) |
 | DBOS on the same SQLite file | Durable, resumable, cancellable work with no broker or extra server | [Indexing](docs/indexing.md) |
 | Model catalogue in SQLite, loaders in code | A model card edit is a row, not a release. A row cannot add reviewed code, so loaders and their pinned revisions stay in `indexing/`. A test keeps the two in step | [Storage](docs/storage.md) |
 | Embedding cache keyed by everything the vectors depend on | A document is chunked and embedded once per distinct setting, however many collections share it | [Documents and collections](docs/documents-and-collections.md) |

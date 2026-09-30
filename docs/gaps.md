@@ -22,10 +22,10 @@ context variable, so no step passes it along. Two places observe what they alrea
 - the flow's plan, or the full-text listing: the collections searched, the mode that ran, and
   the limit;
 - the flow's `rerank` step, which every ranked search runs once per question: the question's
-  query vector, the profile it was embedded under, and its score profile: the 20 best cosines
-  between the query and the rows read (`log.similarities`), and the reranker's 20 best scores
-  before its floor dropped any. The best cosine and the best reranker score are the heads of
-  those lists.
+  query vector, the profile it was embedded under, and its score profile. That profile holds the
+  20 best cosines between the query and the rows read (`log.similarities`), and the reranker's 20
+  best scores before its floor dropped any. The best cosine and the best reranker score are the
+  heads of those lists.
 
 The best cosine is measured on the vectors, not read off a score column. A hybrid query's fusion
 keeps only a rank score, and a rank says nothing about how close the best row came.
@@ -94,9 +94,9 @@ trust, a missed one waits for the next search.
 `mise run evaluate-gaps` measures them (`tests/gapeval/`). It chunks and embeds two shelves, each
 read at a pinned commit: "The Rust Programming Language" (Apache-2.0 or MIT; 45 answered
 questions, 40 unanswered, 30 of them near its topics) and four of haskie's docs (12 answered, 5
-unanswered).
-For each question it takes the score profile a search would log, and scores every predictor in
-its `FEATURES` by AUROC, the chance an answered question scores above an unanswered one.
+unanswered). For each question it takes the score profile a search would log, and scores every
+predictor in its `FEATURES` by AUROC, the chance an answered question scores above an unanswered
+one.
 
 | model | answered, lowest | unanswered, highest | bars |
 | --- | --- | --- | --- |
@@ -124,7 +124,7 @@ What the measurements say:
 - **Missing words do not tell a wording gap from a missing document.** The idea: a borderline
   question whose words no near miss holds (`missing_terms`) exists under other words. But every
   unanswered question has such words (45 of 45), so the rule would label 14 of 45 true content
-  gaps "wording", and catches only 12 of 20 questions asked in words the docs do not use
+  gaps "wording", and would catch only 12 of 20 questions asked in words the docs do not use
   (`reworded` in `tests/gapeval`). Not shipped.
 - **Shared near misses do not group topics.** Joining two gap questions by a lower cosine plus
   shared near misses joined 94% of same-topic pairs on the Rust book, against 89% by cosine alone,
@@ -135,11 +135,11 @@ What the measurements say:
 A profile without `weak_match` gives no cosine verdict; its questions can still be `reported`,
 `empty` or `uncovered`.
 
-Because a bar does not travel, a home can measure its own: `mise run calibrate-gaps sample` writes
-the questions its searches logged, each with its best cosine and near misses; a person marks each
-answered or not; `measure --profile NAME --write` sets the two bars by the same rules (no answered
-question under the low bar, a band only while it flags at most 15% of answered ones). It needs 10
-labelled questions of each kind.
+Because a bar does not travel, a home can measure its own. `mise run calibrate-gaps sample`
+writes the questions its searches logged, each with its best cosine and near misses. A person
+marks each one answered or not. Then `measure --profile NAME --write` sets the two bars by the
+same rules: no answered question under the low bar, and a band only while it flags at most 15% of
+answered ones. It needs 10 labelled questions of each kind.
 
 Code: `search/log.py`, `search/gaps.py`, `api/gaps.py`, `catalogue/seed.sql`,
 `web/src/pages/Gaps.tsx`.

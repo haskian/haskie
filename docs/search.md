@@ -1,10 +1,10 @@
 # Search
 
 `search_excerpts`, `search_sources`, `search_sections` and `GET /api/search/explore` share one
-ranking, then run the fold their answer needs. `search/flow.py` builds these pipelines in one screen. A search of one
-collection is the same search with `collections` set to it: the collection page asks `explore`
-for passages. `/api/search/text` is the one search on its own path, a separate BM25 search that
-neither merges collections nor folds repeats.
+ranking, then run the fold their answer needs. `search/flow.py` builds these pipelines in one
+screen. A search of one collection is the same search with `collections` set to it: the collection
+page asks `explore` for passages. `/api/search/text` is the one search on its own path, a separate
+BM25 search that neither merges collections nor folds repeats.
 
 ```mermaid
 flowchart LR
@@ -40,8 +40,8 @@ The last of these steps to run sets a chunk's score. With a reranker on, it is t
 cross-encoder's logit, 0 to 1, so switching the mode only changes which `candidates` it reads: a
 chunk found in both modes scores the same. The sigmoid is there because most logits are negative,
 and a passage folds its chunks' scores (below): a negative one would subtract under `sum` and
-zero the whole under `harmonic`. Without one, several collections
-give a rank-fusion score, and one collection keeps its mode's own: BM25, `1 / (1 + squared L2
+zero the whole under `harmonic`. Without a reranker, a search of several collections gives a
+rank-fusion score, and a search of one keeps its mode's own: BM25, `1 / (1 + squared L2
 distance)`, or the fused score of `rrf` or `linear`. Passages, excerpts and documents then fold
 chunk scores their own way.
 
@@ -52,8 +52,8 @@ that left the scores alone says nothing. The web UI shows it beside a result's s
 
 An excerpts search of several questions ranks each question at once, side by side. Each step of
 those runs carries `branch=Q1`, `branch=Q2` and so on in `Server-Timing`, numbered in the order
-the questions were asked; a shared step carries none. The web UI draws the branches as one block, and its server total adds the slowest branch
-only, since they ran at the same time.
+the questions were asked; a shared step carries none. The web UI draws the branches as one block,
+and its server total adds the slowest branch only, since they ran at the same time.
 
 The ranking scans deeper than the answer. A folded repeat frees its slot for the next result,
 several chunks go into one passage, several passages into one excerpt, and many chunks into one
@@ -67,12 +67,17 @@ source row.
 | passage | neighbouring matched chunks of one section, merged | `explore?granularity=passage` |
 | excerpt | one section of a document, with every passage of it the search kept | `search_excerpts` (the Explore page too) |
 | source | one document: score, best chunk, hottest sections, collections | `search_sources` |
-| section | one section of a document: where it is, its keywords, the sections it covers; no text | `search_sections` |
+| section | one section of a document: where it is, its keywords, the sections it covers; no text | `search_sections` (the Explore page too, which opens a section on its document's outline) |
 
 A passage is the text its chunks cover, read by their offsets, with nothing added around it.
 Chunks are cut at headings, blank lines, blocks and sentences (see [chunking](chunking.md)), so a
-passage starts and ends where the author did. Each one carries its `header`
-(heading path) and its `location` (`doc p.3-4 L10-20`) to cite.
+passage starts and ends where the author did. Each one carries its `header` (heading path) and
+its `location` (`doc p.3-4 L10-20`) to cite.
+
+`search_sources` scores a document, and each of its sections, by folding the scores of the chunks
+it matched (see "How chunk scores fold" below). It also returns a small set of collections that
+holds every document listed, ready for `set_session_collections`. The set comes from the standard
+greedy approximation of set cover, so it is small but not guaranteed smallest.
 
 ## Excerpts: passages grouped by section
 
@@ -85,10 +90,11 @@ that no kept passage opens takes no slot.
 Which section: the largest one that still reads as a quote. A passage's heading path is tried
 from the top. A level whose section holds the whole document (a title over everything) says
 nothing, and a level whose section is longer than `max_section_chars` (12,000) is split one heading
-down. So a book groups by chapter or by section, and a short note by its title. A passage under the
-deepest heading it has takes that section, however long. The sections come from each document's
-outline: every chunk's `seq`, heading path and char span, read in one LanceDB query per
-collection. A chunk never spans two sections, so the outline is exact.
+down. So a book groups by chapter or by section, and a short note by its title. A passage under
+the deepest heading it has takes that section, however long. The sections come from where each
+chunk of the document sits: its `seq`, heading path and char span, read from the collection's
+table in one LanceDB query per collection. A chunk never spans two sections, so the grouping is
+exact.
 
 The excerpt's `text` joins its passages. Each passage opens with the headings it sits under that
 the one before it did not, below the section's own `header`, as markdown headings of their depth.
@@ -149,9 +155,9 @@ This is the arithmetic of Relevant Segment Extraction [3]: a weak chunk comes in
 ones around it pay for it. Where a gap is not filled, `[…]` stays.
 
 With a reranker on, `fill_values = absolute` (an experiment) values a chunk as dsRAG does instead:
-the reranker scores it against every question, one pass a question, and its best score, spread
-by the reranker's calibrated beta curve so its scores are about even over 0 to 1, less 0.18
-(dsRAG's balanced preset) is its value. It needs no kept chunks to compare with, and it trusts the
+the reranker scores it against every question, one pass a question. Its value is its best score,
+spread by the reranker's calibrated beta curve so the scores fall about evenly over 0 to 1, less
+0.18 (dsRAG's balanced preset). It needs no kept chunks to compare with, and it trusts the
 calibration: an uncalibrated reranker's curve is the identity. dsRAG also decays a chunk by its
 rank; here every chunk was scored, so none is. It costs one reranker pass a question over the
 chunks near every section, and short passages grow the same way.
@@ -179,12 +185,13 @@ past a heading. A neighbour's value is its score around the scanned hits' own: 0
 the median, 1 for one as good as the best, scored by the reranker when one is on, else by the
 cosine to the query vector, else by the share of the question's words it holds, then moved by
 `grow_bias`. The floor is this search's own, so it needs no calibration per model. An excerpts
-search only judges it here, whether a run worth taking is next to it, and leaves the growing to
-the fill. Such a passage stands `owed` its growth. The fill values the same chunks against the
-kept passages rather than the scanned hits, and may find none worth taking. An owed passage with
-no run worth taking beside it is then alone after all (`thin.settle`), as a thin passage that took
-nothing is below. One the fill found a run for keeps standing, even when the budget ran out. The
-slot of a section dropped so is not handed on: the sections were counted before the fill.
+search only judges it here: is a run worth taking next to it? It leaves the growing to the fill,
+and marks the passage `owed` its growth. The fill values the same chunks against the kept
+passages rather than the scanned hits, and may find none worth taking. An owed passage the fill
+found no run for is then alone after all (`thin.settle`), and counts as a thin passage that took
+nothing (below). One the fill found a run for keeps standing, even when the budget ran out. When
+a section is dropped this way, its slot is not handed on: the sections were counted before the
+fill.
 
 A thin passage that took nothing is too short to stand alone. As a passage it is dropped, and its
 slot goes to the next result. As part of an excerpt it stays when another passage of its section is
@@ -200,11 +207,6 @@ The neighbours are read only when a passage is thin, in one LanceDB query per co
 search logs `search_thin` with the signal used and how many passages grew, stayed alone and were
 dropped. With several questions, each question's passages are grown or dropped against that
 question.
-
-`search_sources` scores a document, and each of its sections, by folding the scores of the chunks it
-matched (see "How chunk scores fold" below). It also returns a small set of collections that holds
-every document listed, ready for `set_session_collections`. The set comes from the standard greedy
-approximation of set cover, so it is small but not guaranteed smallest.
 
 ## Sections: a map of the shelf
 
@@ -245,11 +247,13 @@ reads the map, then asks `search_excerpts` about the sections worth reading. It 
 
 Each pick lists up to five `related` sections: those it covers best, by the relevance-weighted
 mean of their chunks' nearness to it. A near copy lands there, as a repeat lands in `also_in`.
+The answer's `collections` holds every section listed, related ones included, by the same greedy
+set cover as `search_sources`, ready for `set_session_collections`.
 
 Each section says what it is about twice. `keywords` come from the document's outline, built at
 indexing ([Indexing](indexing.md#the-three-workflows)): the section's words weighed against the
-other sections of its depth by c-TF-IDF [10], reranked by meaning [11]. `distinct` is the few of
-those keywords that set it apart from the other sections this scan reached: c-TF-IDF again, each
+other sections of its depth by c-TF-IDF [10], reranked by meaning [11]. `distinct` holds the few
+of those keywords that set it apart from the other sections this scan reached: c-TF-IDF again, each
 section's stored keywords with their counts as one class. It reads the stored keywords rather
 than the matched chunks' words: one to three chunks are too little text to tell a rare word from
 a common one, and on real books that put words like "anything" and "although" on the map.
@@ -363,8 +367,8 @@ A folded result becomes an `also_in` entry under the result it repeats, and `als
 When a fuller result takes a slot (the superset swap), the old one moves under it with everything
 folded into it. The fuller one takes the old one's score too, and the score lineage says so. Each
 place stays under the place it was measured against. Each entry carries its `relation` to its
-parent. It also carries `to_parent` and `to_root`, measured by words and by
-embedding: `contained`, `contains`, `alike`, and `score`, the harmonic mean of the two directions.
+parent. It also carries `to_parent` and `to_root`, measured by words and by embedding:
+`contained`, `contains`, `alike`, and `score`, the harmonic mean of the two directions.
 That score is the Dice coefficient for words and the F1 of the best chunk matches for embeddings.
 
 ## Several questions at once
@@ -444,8 +448,8 @@ passages expand under Expansion: `min_passage_chars`, `max_passage_grow`, `fill_
 `grow_bias`, `max_section_chars` and `max_answer_chars`. In the shared ranking, each collection
 retrieves with its own overrides. The settings of the merged ranking (`rrf_k`, `candidates`, the
 reranker) come from the collection only when it is the one collection in scope, and from the user
-otherwise. `limit` comes from the call, else from the same place. No route takes search settings per call: a search with
-other settings is a search of a collection whose overrides say so.
+otherwise. `limit` comes from the call, else from the same place. No route takes search settings
+per call: a search with other settings is a search of a collection whose overrides say so.
 
 Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/collapse.py`,
 `search/aspects.py`, `search/thin.py`, `search/section.py`, `search/fill.py`, `search/probe.py`,

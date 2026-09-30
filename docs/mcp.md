@@ -33,8 +33,8 @@ flowchart LR
 
 The files go under `~/.claude` with `--scope user` (the default), or `./.claude` of the current
 directory with `--scope project`. With `CLAUDE_CONFIG_DIR` set, the user scope follows it, as
-Claude Code does. `--url` points them at another endpoint. The hook's full command
-is the absolute path of `haskie` with `run --home <home> --host <host> --port <port> --hook`.
+Claude Code does. `--url` points them at another endpoint. The hook's full command is the
+absolute path of `haskie` with `run --home <home> --host <host> --port <port> --hook`.
 Re-installing replaces any haskie hook, including one in the older `ensure` form. The skill's
 trigger and the rule both name the home's collections, so they fire on the topics you collected.
 haskie records each directory it installed into (the `installations` table). Creating,
