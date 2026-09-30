@@ -733,18 +733,12 @@ def _weigh(
     return weighed, signal
 
 
-def _by_collection(places: Iterable[section.Place]) -> dict[str, set[str]]:
-    """The documents of each collection, out of (collection, document) pairs."""
-    wanted: dict[str, set[str]] = {}
-    for collection, doc in places:
-        wanted.setdefault(collection, set()).add(doc)
-    return wanted
-
-
 async def _outline_rows(where: Plan, places: Iterable[section.Place]) -> list[tuple[str, dict]]:
     """Where every chunk of these documents sits, as (collection, row) pairs, one query per
     collection (`CollectionIndex.outline_rows`)."""
-    wanted = _by_collection(places)
+    wanted: dict[str, set[str]] = {}
+    for collection, doc in places:
+        wanted.setdefault(collection, set()).add(doc)
     read = await _per_collection(where, wanted, lambda index, docs: index.outline_rows(docs))
     return [(index.collection, row) for index, found in read for row in found]
 
@@ -973,13 +967,15 @@ async def map_sections(scanned: Scanned, where: Plan, limit: int) -> overview.Se
     rows, nodes, centre = await asyncio.gather(
         _outline_rows(where, places),
         store.read(sorted({doc for _, doc in places})),
-        Collection.centre(where.names, embedding.cache_name) if embedding else _none(),
+        Collection.centre(where.names, embedding.cache_name if embedding else None),
     )
     pooled, picked, stored, words = await cpu.on_cpu(
         _map, scanned, rows, nodes, centre, where.settings, limit, embedding is not None
     )
     found = overview.mapped(hits, pooled, picked, stored, words)
-    picked_docs = {one.document_id for one in found}
+    # the related sections too: a follow-up search scoped to `collections` has to reach them
+    listed: list[overview.Placed] = [*found, *(near for one in found for near in one.related)]
+    picked_docs = {one.document_id for one in listed}
     held = await Collection.holding(picked_docs, where.names)
     _log.info(
         "search_map",
@@ -994,12 +990,8 @@ async def map_sections(scanned: Scanned, where: Plan, limit: int) -> overview.Se
         # picked sections no outline names: a document reconverted since it was indexed
         outlines_missing=sorted({pooled[at].document for at in picked.picks if not stored[at]}),
     )
-    memberships = {one.document_id: held.get(one.document_id, [one.collection]) for one in found}
+    memberships = {one.document_id: held.get(one.document_id, [one.collection]) for one in listed}
     return overview.SectionMap(sections=found, collections=passage.min_cover(memberships))
-
-
-async def _none() -> None:
-    return None
 
 
 def _map(

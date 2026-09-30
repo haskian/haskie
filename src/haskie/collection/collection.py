@@ -559,10 +559,13 @@ class Collection:
             )
 
     @staticmethod
-    async def centre(names: list[str], model: str) -> np.ndarray | None:
+    async def centre(names: list[str], model: str | None) -> np.ndarray | None:
         """The mean unit chunk vector over these collections under `model`, weighed by their
         chunks: what a search centres cosines on (`search.overview`). None when none of them has
-        a sum under it yet, before its first maintenance or after the model changed."""
+        a sum under it yet, before its first maintenance or after the model changed, and without
+        a model."""
+        if model is None:
+            return None
         async with db.read() as conn:
             rows = await conn.execute(
                 select(collections.c.vector_sum, collections.c.vector_rows).where(

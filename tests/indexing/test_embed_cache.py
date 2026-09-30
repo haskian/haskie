@@ -9,6 +9,7 @@ import hashlib
 import itertools
 from pathlib import Path
 
+import anyio
 import lancedb
 import msgspec
 import numpy as np
@@ -564,6 +565,32 @@ async def test_build_outline_reads_the_entrys_file(tmp_path: Path) -> None:
     assert by_position[2]["keywords"][0] == {"keyword": next(iter(sagas.keywords)), "uses": 3}
 
 
+async def test_two_chunkings_building_at_once_build_one_outline(tmp_path: Path) -> None:
+    """After a model change two collections that chunk one document apart embed it at once, and
+    each run sees no outline: the second waits for the first, finds its outline and builds
+    nothing, so the file and the index rows come from one chunking."""
+    doc = await import_row(DOC, BODY)
+    first = msgspec.structs.replace(BASE, document_id=doc.id)
+    second = msgspec.structs.replace(first, chunk_size=400)
+    await embed_cache.write(first, _parts(tmp_path / "one", [_book()]), 4)
+    await embed_cache.write(second, _parts(tmp_path / "two", [_book()[:1]]), 4)
+    calls: list[list[str]] = []
+
+    def embed(texts: list[str]) -> list[list[float]]:
+        calls.append(texts)
+        return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(embed_cache.build_outline, first, embed)
+        group.start_soon(embed_cache.build_outline, second, embed)
+
+    assert len(calls) == 1, "one build: the other found it built"
+    nodes = (await store.read([doc.id]))[doc.id]
+    rows = await (await _index()).query().where(f"document_id = '{doc.id}'").to_list()
+    assert len(rows) == len(nodes), "the file and the index rows from one chunking"
+    assert len(embed_cache._outline_locks) == 0, "no lock is left behind"
+
+
 async def test_build_outline_of_an_entry_without_vectors(tmp_path: Path) -> None:
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id, model=NO_MODEL)
@@ -608,5 +635,6 @@ async def test_corpus_sum_adds_the_indexed_members_by_their_chunks(tmp_path: Pat
     centre = await Collection.centre(["notes", "empty"], TINY.cache_name)
     assert centre is not None and centre == pytest.approx([1 / 3, 1 / 3, 1 / 3, 0.0])
     assert await Collection.centre(["notes"], "other/model") is None, "a centre is per model"
+    assert await Collection.centre(["notes"], None) is None, "no model: nothing to centre on"
     await notes.set_centre(None, TINY.cache_name)
     assert await Collection.centre(["notes"], TINY.cache_name) is None, "cleared"

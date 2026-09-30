@@ -10,8 +10,9 @@ another. Each node also gets a vector when a model embedded the chunks: the mean
 unit vectors, scaled to length one, so a long chunk weighs no more than a short one. The strategy
 reranks against it, and the outline index stores it (`outline.store`).
 
-Built once per document and model (`embed_cache.write`), from the rows of the first cache entry
-written. No IO here: the caller passes the function that embeds.
+Built once per document and model (`embed_cache.build_outline`, from
+`workflows.ensure_embedding`), from the first cache entry found or written under the model. No IO
+here: the caller passes the function that embeds.
 """
 
 from collections.abc import Sequence

@@ -113,7 +113,7 @@ def pdf_outline(path: Path) -> tuple[int, list["Bookmark"] | None]:
 
     try:
         reader = PdfReader(str(path))
-        return len(reader.pages), bookmarks.read(reader) or None
+        return len(reader.pages), bookmarks.read(reader)
     except Exception as exc:
         raise _conversion_error(path, exc) from exc
 
@@ -218,7 +218,7 @@ def _pdf_preview(source: Path, out_dir: Path, skip_ocr_pages: bool) -> Preview:
         total = len(reader.pages)
     except Exception as exc:
         raise _conversion_error(source, exc) from exc
-    marks = bookmarks.read(reader) or None
+    marks = bookmarks.read(reader)
     shown = min(total, PREVIEW_PAGES)
     writer = PdfWriter()
     for page in reader.pages[:shown]:

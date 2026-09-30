@@ -53,16 +53,16 @@ class Bookmark(msgspec.Struct, frozen=True):
 type Pages = Mapping[int, list[Bookmark]]  # the bookmarks each 1-based page holds
 
 
-def read(reader: "PdfReader") -> list[Bookmark]:
-    """The bookmarks that set the PDF's headings, in document order: [] when it has none, one
+def read(reader: "PdfReader") -> list[Bookmark] | None:
+    """The bookmarks that set the PDF's headings, in document order: None when it has none, one
     level of them only, or an outline that cannot be read, since a broken outline is no reason to
     fail a conversion that does not need it."""
     found: list[Bookmark] = []
     try:
         _walk(reader, reader.outline, 1, found)
     except Exception:
-        return []
-    return found if len({mark.level for mark in found}) > 1 else []
+        return None
+    return found if len({mark.level for mark in found}) > 1 else None
 
 
 def _walk(reader: "PdfReader", items: list, level: int, found: list[Bookmark]) -> None:

@@ -279,7 +279,7 @@ def test_an_outline_that_cannot_be_read_is_no_bookmarks() -> None:
         def outline(self) -> list:
             raise ValueError("broken outline")
 
-    assert bookmarks.read(Broken()) == []  # ty: ignore[invalid-argument-type]
+    assert bookmarks.read(Broken()) is None  # ty: ignore[invalid-argument-type]
 
 
 def test_the_preview_sets_its_headings_by_the_bookmarks(tmp_path: Path) -> None:

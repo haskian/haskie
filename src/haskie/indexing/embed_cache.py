@@ -35,6 +35,7 @@ The document's outline (`outline.build`, `outline.store`) is built from one entr
 
 import hashlib
 import time
+import weakref
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -259,13 +260,26 @@ async def write(p: Params, parts: list[Path], dims: int | None) -> str:
     return id
 
 
+# One build of a document's outline at a time: two collections that chunk it apart embed it at
+# once after a model change, and each run sees no outline. Unserialized, both would embed its
+# keyword candidates, and their two writes could leave the file from one chunking and the index
+# rows from the other. Every workflow step runs on DBOS's one loop, so a lock per document holds.
+# Weak values: a lock lives while a run holds or awaits it, and its entry goes with the last one.
+_outline_locks: weakref.WeakValueDictionary[str, anyio.Lock] = weakref.WeakValueDictionary()
+
+
 async def build_outline(p: Params, embed: keywords.Embed | None) -> None:
-    """Build the document's outline from the cache file of `p` and save it under `p`'s model:
-    `embed` embeds its keyword candidates; None ranks them by weight alone."""
-    path = file_path(p.document_id, key(p))
-    chunks, vectors = await anyio.to_thread.run_sync(_read_all, path)
-    nodes, pooled = await cpu.on_cpu(build.describe, chunks, vectors, embed)
-    await store.save(p.document_id, store.Outline(model=p.model, nodes=nodes), pooled)
+    """Build the document's outline from the cache file of `p` and save it under `p`'s model,
+    unless it has one under that model by now: `embed` embeds its keyword candidates; None ranks
+    them by weight alone."""
+    # setdefault, with no await in between, so two runs of one document take the same lock
+    async with _outline_locks.setdefault(p.document_id, anyio.Lock()):
+        if await store.current(p.document_id, p.model):
+            return  # the run it waited on built it, or a retry of this one did
+        path = file_path(p.document_id, key(p))
+        chunks, vectors = await anyio.to_thread.run_sync(_read_all, path)
+        nodes, pooled = await cpu.on_cpu(build.describe, chunks, vectors, embed)
+        await store.save(p.document_id, store.Outline(model=p.model, nodes=nodes), pooled)
 
 
 def _read_all(path: Path) -> tuple[list[Row], np.ndarray | None]:
