@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.19.0 - 2026-09-30
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>document id is the MD5 of its bytes; rename; kebab-case names (#30) - (00c6278) - Črtomir Majer
+
+- - -
+
 ## v0.18.0 - 2026-09-29
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>refresh Claude Code installs on collection change; add uninstall (#29) - (b3744b1) - Črtomir Majer
