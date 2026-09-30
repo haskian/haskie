@@ -38,8 +38,10 @@ from conftest import (
     index_hits,
     legacy_index,
     maintenance_state,
+    refresh_settled,
     remove_collection,
     text_pdf,
+    until,
 )
 from sqlalchemy import event, insert, select, update
 from sqlalchemy.exc import IntegrityError
@@ -1141,6 +1143,9 @@ async def test_load_settings_reads_every_collection_it_was_asked_for_in_one_quer
         await Collection.create(name)
     await Collection("alpha").set_overrides(CollectionOverrides(chunker=Chunker.TEXT))
     assert await Collection.load_overrides([]) == {}, "nothing asked for, nothing read"
+    # a collection change refreshes the Claude Code installs in the background: counted, its
+    # query would land inside the window below
+    await until(refresh_settled, "the creates' own refresh ended")
     statements: list[str] = []
 
     def counted(_conn, _cursor, statement: str, *_args) -> None:
