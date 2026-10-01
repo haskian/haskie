@@ -11,9 +11,9 @@ from collections.abc import Callable
 import msgspec
 import numpy as np
 import pytest
-from conftest import compact_model, hit, words_scan
+from conftest import hit, words_scan
 
-from haskie.catalogue.catalogue import EmbeddingModel
+from haskie.catalogue.catalogue import DuplicateCosine, EmbeddingModel
 from haskie.collection.index import Hit, Overlap, Relation, location
 from haskie.indexing import chunk
 from haskie.search import collapse, section
@@ -47,8 +47,12 @@ AROUND = f"{OUTBOX} {CLOCKS}"
 
 
 @pytest.fixture
-async def bge_small() -> EmbeddingModel:
-    return await compact_model()
+def folding() -> EmbeddingModel:
+    """A model with duplicate cosines, as a profile calibrated for them holds. No seed profile has
+    them yet (`catalogue/seed.sql`); these are the bge values the seed once held."""
+    return EmbeddingModel(
+        "hotchpotch/bekko-embedding-v1-a25m", 384, duplicate=DuplicateCosine(0.92, 0.95)
+    )
 
 
 def _embedded(
@@ -340,13 +344,13 @@ def test_a_place_measures_itself_against_its_parent_both_ways_and_as_a_whole(
 )
 @pytest.mark.anyio
 async def test_words_decide_a_fold_as_they_rank_the_search(
-    name: str, mode: SearchMode, expected: list[str], bge_small: EmbeddingModel
+    name: str, mode: SearchMode, expected: list[str], folding: EmbeddingModel
 ) -> None:
     """NEAR is RETRY with one word changed, and its vector is set far from RETRY's: only the words
     can fold it. An exact copy would fold in every mode: a duplicate needs no space."""
     found = [hit(RETRY, 0.9, document="a.md"), hit(NEAR, 0.8, document="near.md")]
 
-    kept = collapse.hits(found, _embedded(found, _unit([1.0, 0.0], [0.0, 1.0]), bge_small, mode), 2)
+    kept = collapse.hits(found, _embedded(found, _unit([1.0, 0.0], [0.0, 1.0]), folding, mode), 2)
 
     assert [ref.document for ref in kept[0].also_in] == expected, name
     assert kept[0].also_in == [] or kept[0].also_in[0].to_parent.embedding is not None, (
@@ -356,7 +360,7 @@ async def test_words_decide_a_fold_as_they_rank_the_search(
 
 @pytest.mark.anyio
 async def test_a_repeat_the_new_leader_does_not_place_stays_under_the_one_it_repeats(
-    bge_small: EmbeddingModel,
+    folding: EmbeddingModel,
 ) -> None:
     """REWORDED shares no words with RETRY, but the model embeds the two alike, so it folds under
     RETRY as equivalent. FULLER then holds RETRY word for word and takes the slot. REWORDED stays
@@ -366,7 +370,7 @@ async def test_a_repeat_the_new_leader_does_not_place_stays_under_the_one_it_rep
         hit(REWORDED, 0.85, document="reworded.md"),
         hit(FULLER, 0.8, document="book.md"),
     ]
-    spaces = _embedded(found, _unit([1.0, 0.0, 0.0], [0.99, 0.14, 0.0], [0.0, 0.0, 1.0]), bge_small)
+    spaces = _embedded(found, _unit([1.0, 0.0, 0.0], [0.99, 0.14, 0.0], [0.0, 0.0, 1.0]), folding)
 
     (kept,) = collapse.hits(found, spaces, 3)
 
@@ -396,7 +400,7 @@ async def test_a_repeat_the_new_leader_does_not_place_stays_under_the_one_it_rep
 )
 @pytest.mark.anyio
 async def test_a_place_stays_under_the_chunk_it_repeats_though_another_cites_the_same_lines(
-    name: str, fold: Callable, bge_small: EmbeddingModel
+    name: str, fold: Callable, folding: EmbeddingModel
 ) -> None:
     """Chunks cut from one long line all cite that line. RETRY is found twice on line 1 of a.md,
     and REWORDED folds under the first by its vector before FULLER takes the slot: the tree keeps
@@ -417,7 +421,7 @@ async def test_a_place_stays_under_the_chunk_it_repeats_though_another_cites_the
     ]
     vectors = _unit([1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.99, 0.14, 0.0], [0.0, 0.0, 1.0])
 
-    (kept,) = fold(found, _embedded(found, vectors, bge_small))
+    (kept,) = fold(found, _embedded(found, vectors, folding))
 
     (first,) = kept.also_in
     second, reworded = first.also_in
@@ -463,19 +467,19 @@ def test_also_in_lists_every_repeat_uncapped() -> None:
 )
 @pytest.mark.anyio
 async def test_hits_fold_near_duplicates_in_embeddings(
-    name: str, cosine: float, folds: bool, bge_small: EmbeddingModel
+    name: str, cosine: float, folds: bool, folding: EmbeddingModel
 ) -> None:
     found = [hit(RETRY, 0.9, document="a.md"), hit(REWORDED, 0.8, document="b.md")]
     vectors = _unit([1.0, 0.0], [cosine, float(np.sqrt(1 - cosine**2))])
 
-    kept = collapse.hits(found, _embedded(found, vectors, bge_small), 2)
+    kept = collapse.hits(found, _embedded(found, vectors, folding), 2)
 
     assert len(kept) == (1 if folds else 2), name
 
 
 @pytest.mark.anyio
 async def test_identical_text_under_other_headings_folds_though_its_cosine_misses(
-    bge_small: EmbeddingModel,
+    folding: EmbeddingModel,
 ) -> None:
     """Each chunk is embedded under its heading path, so one paragraph in two books embeds apart:
     0.927 was measured with bge-small. The words still say it is a copy."""
@@ -485,7 +489,7 @@ async def test_identical_text_under_other_headings_folds_though_its_cosine_misse
     ]
     vectors = _unit([1.0, 0.0], [0.90, float(np.sqrt(1 - 0.90**2))])
 
-    (kept,) = collapse.hits(found, _embedded(found, vectors, bge_small), 2)
+    (kept,) = collapse.hits(found, _embedded(found, vectors, folding), 2)
 
     (reference,) = kept.also_in
     assert (reference.document, reference.to_parent.words.contained) == ("notes.md", 1.0)
@@ -560,7 +564,7 @@ async def test_ranges_fold_by_containment_or_by_their_mean_vectors(
     small: list[str],
     small_vectors: list[list[float]],
     expected: list[tuple[str, int, int, list[tuple[str, str]]]],
-    bge_small: EmbeddingModel,
+    folding: EmbeddingModel,
 ) -> None:
     """The case from the design session: a mean vector of three chunks sits far from any one of
     them, so the passage-level cosine alone would keep a copy of its middle chunk."""
@@ -568,7 +572,7 @@ async def test_ranges_fold_by_containment_or_by_their_mean_vectors(
     scanned = big + _passage(small, "note.md", 10, small_score)
     vectors = _unit(E1, E2, E3, *small_vectors)
 
-    kept = _ranges(scanned, vectors, 2, bge_small)
+    kept = _ranges(scanned, vectors, 2, folding)
 
     shape = [
         (
@@ -583,12 +587,12 @@ async def test_ranges_fold_by_containment_or_by_their_mean_vectors(
 
 
 @pytest.mark.anyio
-async def test_a_folded_range_points_at_its_own_lines(bge_small: EmbeddingModel) -> None:
+async def test_a_folded_range_points_at_its_own_lines(folding: EmbeddingModel) -> None:
     big = _passage([BACKOFF, RETRY, CLOCKS], "book.md", 1, 0.9)
     small = _passage([RETRY], "note.md", 10, 0.5)
     scanned = big + small
 
-    (kept,) = _ranges(scanned, _unit(E1, E2, E3, E2), 2, bge_small)
+    (kept,) = _ranges(scanned, _unit(E1, E2, E3, E2), 2, folding)
 
     (reference,) = kept.also_in
     (small_range,) = ranges(small, how=HARMONIC)
@@ -693,7 +697,7 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
         (
             "every row carries a vector under a model with thresholds",
             [E1, E2],
-            lambda bge: bge,
+            lambda model: model,
             SearchMode.HYBRID,
             ["embedding", "words"],
             ["embedding", "words"],
@@ -701,7 +705,7 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
         (
             "a vector search decides by vectors alone, and still measures the words",
             [E1, E2],
-            lambda bge: bge,
+            lambda model: model,
             SearchMode.VECTOR,
             ["embedding"],
             ["embedding", "words"],
@@ -709,7 +713,7 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
         (
             "a full-text search decides by both, vectors first",
             [E1, E2],
-            lambda bge: bge,
+            lambda model: model,
             SearchMode.FTS,
             ["embedding", "words"],
             ["embedding", "words"],
@@ -717,7 +721,7 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
         (
             "one row without a vector sends the whole scan to words, whatever the mode",
             [E1, None],
-            lambda bge: bge,
+            lambda model: model,
             SearchMode.VECTOR,
             ["words"],
             ["words"],
@@ -725,7 +729,7 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
         (
             "no embedding model at all",
             [None, None],
-            lambda bge: None,
+            lambda model: None,
             SearchMode.HYBRID,
             ["words"],
             ["words"],
@@ -733,12 +737,12 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
         (
             "a model without thresholds",
             [E1, E2],
-            lambda bge: EmbeddingModel("test/tiny", 2),
+            lambda model: EmbeddingModel("test/tiny", 2),
             SearchMode.VECTOR,
             ["words"],
             ["words"],
         ),
-        ("nothing scanned", [], lambda bge: bge, SearchMode.HYBRID, ["words"], ["words"]),
+        ("nothing scanned", [], lambda model: model, SearchMode.HYBRID, ["words"], ["words"]),
     ],
 )
 @pytest.mark.anyio
@@ -749,11 +753,11 @@ async def test_the_spaces_follow_the_rows_the_model_and_the_mode(
     mode: SearchMode,
     deciding: list[str],
     measured: list[str],
-    bge_small: EmbeddingModel,
+    folding: EmbeddingModel,
 ) -> None:
     texts = [RETRY, BACKOFF][: len(vectors)]
 
-    scan = collapse.spaces(texts, vectors, model(bge_small), mode)
+    scan = collapse.spaces(texts, vectors, model(folding), mode)
 
     assert [space.kind for space in scan.deciding] == deciding, f"{name}: decided by"
     assert [space.kind for space in scan.measured] == measured, f"{name}: measured in"

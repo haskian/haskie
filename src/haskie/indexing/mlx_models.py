@@ -1,20 +1,31 @@
-"""Models that run on Apple Silicon through MLX, for models fastembed cannot run.
+"""Models that run on Apple Silicon through MLX: the GPU, from a model's own weights.
 
-fastembed runs ONNX models only. These are published as MLX builds.
+mlx-embeddings runs a BERT, ModernBERT, XLM-RoBERTa or Qwen3 checkpoint as transformers saves it,
+so a model needs no MLX conversion, only a pin here. Measured on 128 real chunks against the
+model's ONNX export on the CPU (M4 Pro, batches of 16):
 
-Rerankers (`RERANKERS`: bge-reranker-v2-m3, gte-reranker-modernbert, mMiniLM): ordinary
-cross-encoders, one (query, text) pair a pass, run through mlx-embeddings. Its XLM-RoBERTa has no
-classification head, so one is added here (`_with_head`): the standard one, dense, tanh, then one
-logit, over the first token. It loads an MLX conversion and transformers' own checkpoint alike, so
-an XLM-RoBERTa cross-encoder needs no conversion. All Apache-2.0.
+- bekko-a25m (ModernBERT): 0.70 s against 3.52 s (5.0x), worst cosine 0.99997
+- F2LLM-v2-160M (Qwen3): 1.00 s against 5.31 s (5.3x), worst cosine 0.99990
+- e5-base-v2 (BERT): 1.63 s against 5.45 s (3.3x), worst cosine 1.00000
 
-Embedders (`EMBEDDERS`), each answering `embed(texts)` and `query_embed(text)` the way fastembed's
-`TextEmbedding` does, so `embed` calls them the same way:
+Granite's R2 models run wrong on it (worst cosine 0.77 for granite-97m, 0.56 for granite-english),
+though they are ModernBERT too; unlike bekko, they set the local and global rotary bases apart.
+They run on the Apple GPU through WebGPU instead (`embed`).
 
-- nomic ModernBERT embed, through mlx-embeddings, which mean-pools as the model's config asks and
-  normalizes. Its search prefixes are the profile's (`EmbeddingModel.query_prefix`).
+Embedders (`POOLED`, `JINA_V5`), each answering `embed(texts)` and `query_embed(text)` as every
+embedder does:
+
+- An encoder or decoder pooled as its model asks (`PooledEmbedder`). Its catalogue name is its
+  repository's with `:mlx` after it, since the ONNX export of the same repository has the plain
+  name. Its prefixes are the profile's (`EmbeddingModel.query_prefix`).
 - Jina v5 text nano (retrieval): its own `model.py`, run as published, which adds its task
-  prefixes itself. CC BY-NC 4.0, non-commercial only.
+  prefixes itself. CC BY-NC 4.0, non-commercial only. The catalogue holds none today.
+
+Rerankers (`RERANKERS`): ordinary cross-encoders, one (query, text) pair a pass, run through
+mlx-embeddings. Its XLM-RoBERTa has no classification head, so one is added here (`_with_head`):
+the standard one, dense, tanh, then one logit, over the first token. It loads an MLX conversion and
+transformers' own checkpoint alike, so an XLM-RoBERTa cross-encoder needs no conversion. The
+catalogue holds none today: no reranker of it has an MLX build that matches its weights.
 
 Every repository is pinned to a revision, so the code and weights that run are the ones reviewed.
 Every load and every forward pass runs on one thread (`_on_mlx_thread`), a batch at a time.
@@ -27,28 +38,32 @@ from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from itertools import batched
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
+from haskie.indexing.onnx_models import MAX_EMBED_TOKENS, MAX_PAIR_TOKENS, Pooling, pool
+
+
+class Pin(NamedTuple):
+    """A model's revision measured, and how its token states are pooled."""
+
+    revision: str
+    pooling: Pooling
+
+
+POOLED: dict[str, Pin] = {
+    "hotchpotch/bekko-embedding-v1-a25m:mlx": Pin(
+        "44f0b8af0f487acd0ccf1a7cb7ae7a29a6dfc09c", Pooling.MEAN
+    ),
+    "intfloat/e5-base-v2:mlx": Pin("f52bf8ec8c7124536f0efb74aca902b2995e5bcd", Pooling.MEAN),
+    "codefuse-ai/F2LLM-v2-160M:mlx": Pin("4ffe22c31406fc321b65a05b15563d38275ee51f", Pooling.LAST),
+}
 # Hugging Face repository -> the revision its code and weights are read at
-RERANKERS: dict[str, str] = {
-    "soichisumi/bge-reranker-v2-m3-mlx-affine8": "512d2c5984b21da2b134c7f169a9f4176735287c",
-    "afanjul/gte-reranker-modernbert-base-mlx": "0b1cfb9141dd1452e07a328a0dec430f2324da12",
-    # not an MLX conversion: transformers' own checkpoint, loaded by `_with_head` as it stands
-    "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1": "1427fd652930e4ba29e8149678df786c240d8825",
-}
-MODERNBERT: dict[str, str] = {
-    "mlx-community/nomicai-modernbert-embed-base-bf16": "5bfbc2093cbc41d44548a8de02c0c26f801938e1",
-}
-JINA_V5: dict[str, str] = {
-    "jinaai/jina-embeddings-v5-text-nano-retrieval-mlx": "cb07521719bddd48f5647b5531358a8ca2d1b8d0",
-}
-EMBEDDERS = MODERNBERT | JINA_V5
-REVISIONS = RERANKERS | EMBEDDERS
+RERANKERS: dict[str, str] = {}
+JINA_V5: dict[str, str] = {}
 EMBED_BATCH = 16  # texts a forward pass
 
 PAIR_BATCH = 16  # pairs a forward pass: the candidates of one search in a few passes
-MAX_PAIR_TOKENS = 512  # what bge-reranker-v2-m3 was tuned at; a chunk and a query fit well inside
-MAX_EMBED_TOKENS = 1024  # a chunk with its heading path fits well inside; both models read 8K
+
 
 # MLX keeps its streams per thread: an array still lazy on one thread aborts the process when
 # another evaluates it ("There is no Stream(cpu, 1) in current thread", a C++ exception nothing
@@ -63,6 +78,11 @@ def _on_mlx_thread[T](call: Callable[..., T], /, *args: Any) -> T:
     return _MLX_THREAD.submit(call, *args).result()
 
 
+def pinned(name: str) -> bool:
+    """Whether this module loads model `name`."""
+    return name in POOLED or name in JINA_V5 or name in RERANKERS
+
+
 @functools.cache
 def available() -> bool:
     """Whether MLX and mlx-embeddings are installed here, so the models above can load at all."""
@@ -75,12 +95,12 @@ def reranker(name: str) -> "Reranker":
     return _on_mlx_thread(Reranker, path)
 
 
-def embedder(name: str) -> "ModernBertEmbedder | JinaV5Embedder":
+def embedder(name: str) -> "PooledEmbedder | JinaV5Embedder":
     """The MLX embedder `name` is, loaded (and downloaded on first use)."""
     path = _download(name)  # see `reranker`
     if name in JINA_V5:
         return _on_mlx_thread(JinaV5Embedder, path)
-    return _on_mlx_thread(ModernBertEmbedder, path)
+    return _on_mlx_thread(PooledEmbedder, path, POOLED[name].pooling)
 
 
 def _download(name: str) -> Path:
@@ -92,7 +112,13 @@ def _download(name: str) -> Path:
         )
     from huggingface_hub import snapshot_download
 
-    return Path(snapshot_download(name, revision=REVISIONS[name]))
+    revision = POOLED[name].revision if name in POOLED else (RERANKERS | JINA_V5)[name]
+    # the weights, config and tokenizer only: a repository may also hold ONNX and OpenVINO copies
+    # (bekko's is 4.0 GB for a 470 MB checkpoint)
+    files = ["*.json", "*.safetensors", "*.txt", "*.model", "*.py"]
+    return Path(
+        snapshot_download(name.removesuffix(":mlx"), revision=revision, allow_patterns=files)
+    )
 
 
 def _load(path: Path, **classes: Any) -> tuple[Any, Any]:
@@ -182,12 +208,15 @@ def _with_head(config: dict) -> tuple[Any, ...]:
     return (WithHead, *rest)
 
 
-class ModernBertEmbedder:
-    """A sentence-transformers ModernBERT converted to MLX: pooled and normalized by
-    mlx-embeddings, as its config asks."""
+class PooledEmbedder:
+    """A sentence-transformers model as transformers saves it, its token states pooled as its
+    model asks and normalized. mlx-embeddings pools a ModernBERT itself, by its config, and
+    answers no token states then: its pooled vector is taken as it comes."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, pooling: Pooling) -> None:
         self._model, self._tokenizer = _load(path)
+        self._tokenizer.padding_side = "right"  # the last real token sits at its length less one
+        self._pooling = pooling
 
     def embed(self, texts: Sequence[str]) -> Iterator[Any]:
         for batch in batched(texts, EMBED_BATCH, strict=False):
@@ -207,7 +236,10 @@ class ModernBertEmbedder:
         out = self._model(
             mx.array(encoded["input_ids"]), attention_mask=mx.array(encoded["attention_mask"])
         )
-        return np.array(out.text_embeds.astype(mx.float32))
+        if out.last_hidden_state.ndim == 2:  # pooled already, by the model's own config
+            return np.array(out.text_embeds.astype(mx.float32))
+        states = np.array(out.last_hidden_state.astype(mx.float32))
+        return pool(states, encoded["attention_mask"], self._pooling)
 
     def query_embed(self, text: str) -> Iterator[Any]:
         return self.embed([text])

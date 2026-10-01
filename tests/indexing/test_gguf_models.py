@@ -1,6 +1,6 @@
-"""The GGUF embedders, behind fastembed's shapes: where they load, how llama.cpp is set up for
-each, and one vector per text. The unit cases stand in for llama.cpp; the `network` case runs the
-real bge-small file on Metal against the same model in ONNX."""
+"""The GGUF embedders, shaped as every embedder is: where they load, how llama.cpp is set up for
+each, and one vector per text. The cases stand in for llama.cpp, and for the pins: the catalogue
+pins no GGUF file today (`gguf_models`), but the runtime stays."""
 
 import importlib.util
 import sys
@@ -13,8 +13,14 @@ import pytest
 from haskie.indexing import embed, gguf_models
 from haskie.settings import Accelerator
 
-BGE_SMALL = "ggml-org/bge-small-en-v1.5-Q8_0-GGUF"
-JINA_BASE = "ggml-org/jina-embeddings-v2-base-en-Q8_0-GGUF"
+SHORT, LONG = "test/short-GGUF", "test/long-GGUF"
+
+
+@pytest.fixture(autouse=True)
+def pins(monkeypatch) -> None:
+    """A model that reads 512 tokens and one that reads 8K."""
+    monkeypatch.setitem(gguf_models.PINS, SHORT, gguf_models.Pin("0", "short.gguf", 512))
+    monkeypatch.setitem(gguf_models.PINS, LONG, gguf_models.Pin("0", "long.gguf", 8192))
 
 
 @pytest.mark.parametrize(
@@ -45,12 +51,20 @@ class Llama:
         self.calls.append((texts, options))
         return [[0.6, 0.8] for _ in texts]
 
-    # as the generator uses it: one token a character, so a prompt's length is its tokens
-    def tokenize(self, text: bytes, add_bos: bool) -> list[int]:
-        return list(text)
+    # one token a word, a start and an end token around them, as [CLS] and [SEP] (an embedder);
+    # or, `by_char`, one token a character with none around it (the generator's prompt)
+    by_char = False
+
+    def tokenize(self, text: bytes, add_bos: bool = True) -> list[int]:
+        if self.by_char:
+            return list(text)
+        words = [7] * len(text.split())
+        return [1, *words, 2] if add_bos else words
 
     def detokenize(self, tokens: list[int]) -> bytes:
-        return bytes(tokens)
+        if self.by_char:
+            return bytes(tokens)
+        return b" ".join(b"w" for _ in tokens)
 
     def create_chat_completion(self, messages: list[dict], **options: object) -> dict:
         self.calls.append(([messages[0]["content"]], options))
@@ -69,8 +83,8 @@ def llama(monkeypatch) -> type[Llama]:
 @pytest.mark.parametrize(
     ("name", "model", "tokens"),
     [
-        ("cut at the model's own 512", BGE_SMALL, 512),
-        ("an 8K model read at 1K", JINA_BASE, gguf_models.MAX_TOKENS),
+        ("cut at the model's own 512", SHORT, 512),
+        ("an 8K model read at 1K", LONG, gguf_models.MAX_TOKENS),
     ],
 )
 def test_the_embedder_sets_llama_cpp_up_for_its_model(
@@ -85,8 +99,8 @@ def test_the_embedder_sets_llama_cpp_up_for_its_model(
     assert options["embedding"] is True
 
 
-def test_the_embedder_answers_as_fastembed_does(llama) -> None:
-    embedder = gguf_models.GgufEmbedder(BGE_SMALL)
+def test_the_embedder_answers_as_every_embedder_does(llama) -> None:
+    embedder = gguf_models.GgufEmbedder(SHORT)
 
     vectors = list(embedder.embed(["retries", "idempotency"]))
     assert [vector.tolist() for vector in vectors] == [
@@ -107,7 +121,7 @@ def test_without_llama_cpp_the_model_says_what_it_needs(monkeypatch) -> None:
     monkeypatch.setattr(gguf_models, "available", lambda: False)
 
     with pytest.raises(RuntimeError, match="llama-cpp-python, which haskie installs there"):
-        gguf_models.GgufEmbedder(BGE_SMALL)
+        gguf_models.GgufEmbedder(SHORT)
 
 
 def test_the_embed_path_refuses_a_gguf_the_settings_put_on_the_cpu(monkeypatch) -> None:
@@ -115,7 +129,7 @@ def test_the_embed_path_refuses_a_gguf_the_settings_put_on_the_cpu(monkeypatch) 
     monkeypatch.setattr(gguf_models, "GgufEmbedder", lambda name: pytest.fail("built anyway"))
 
     with pytest.raises(RuntimeError, match="a hardware setting other than cpu"):
-        embed._model(BGE_SMALL, Accelerator.CPU)
+        embed._model(SHORT, Accelerator.CPU)
 
 
 def test_the_embed_path_routes_every_gguf_name_to_llama_cpp(monkeypatch) -> None:
@@ -131,29 +145,23 @@ def test_the_embed_path_routes_every_gguf_name_to_llama_cpp(monkeypatch) -> None
     assert built == list(gguf_models.PINS)
 
 
-@pytest.mark.network
-@pytest.mark.skipif(not gguf_models.available(), reason="llama.cpp is not installed here")
-def test_the_real_file_loads_fast_and_embeds_as_onnx_does() -> None:
-    """bge-small in GGUF on Metal against the same model in ONNX on the CPU. The load is timed
-    after the download: the 10 s bar is for the app waiting on a model it already has."""
-    import time
+@pytest.mark.parametrize(
+    ("name", "words", "sent"),
+    [
+        ("a text that fits goes as it is", 500, 500),
+        ("one at the model's cut, its two own tokens included, goes as it is", 510, 510),
+        ("a longer text is cut so the model's end token fits after it", 2000, 510),
+    ],
+)
+def test_a_text_is_cut_to_keep_the_end_token(name: str, words: int, sent: int, llama) -> None:
+    """llama.cpp's own cut drops the end token with the rest, and a vector pooled without it is
+    another vector (F2LLM: cosine 0.14 to its ONNX twin)."""
+    embedder = gguf_models.GgufEmbedder(SHORT)
 
-    gguf_models._download(BGE_SMALL)  # a download is not a load
-    texts = [
-        "A background job retries a failed HTTP call, so the call has to be idempotent.",
-        "Exponential backoff with jitter spreads the retries and avoids a thundering herd.",
-        "Never trust a wall clock for ordering: hosts drift apart by milliseconds.",
-        "A transactional outbox writes the event in the same transaction as the state change.",
-    ]
+    list(embedder.embed(["word " * words]))
 
-    started = time.perf_counter()
-    gguf = gguf_models.GgufEmbedder(BGE_SMALL)
-    loaded = time.perf_counter() - started
-    on_gpu = np.array(list(gguf.embed(texts)))
-    on_cpu = np.array(list(embed._model("BAAI/bge-small-en-v1.5", Accelerator.CPU).embed(texts)))
-
-    assert loaded < 10, f"loaded in {loaded:.1f} s"
-    assert (on_gpu * on_cpu).sum(axis=1).min() > 0.999
+    ((texts, _),) = embedder._model.calls
+    assert len(texts[0].split()) == sent, name
 
 
 @pytest.mark.parametrize(
@@ -168,10 +176,11 @@ def test_the_real_file_loads_fast_and_embeds_as_onnx_does() -> None:
     ],
 )
 def test_the_generator_fits_its_prompt_to_the_context(
-    name: str, length: int, read: int, llama
+    name: str, length: int, read: int, llama, monkeypatch
 ) -> None:
     """An excerpt is bounded in characters, and digits take a token each: llama.cpp refuses a
     prompt past the context, so it is cut, keeping the instructions at its start."""
+    monkeypatch.setattr(llama, "by_char", True)
     generator = gguf_models.GgufGenerator(gguf_models.DESCRIBER)
     prompt = "Write descriptors. " + "7" * (length - 19)
 

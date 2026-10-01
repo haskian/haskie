@@ -63,7 +63,7 @@ def fast_runtime() -> None:
     `CONVERT_WORKERS = 0` extracts PDFs inline: a process pool per xdist worker costs more to
     start than the tests would save. `test_cpu_pool` is the one module that puts that back.
     ONNX Runtime's telemetry goes off as the app turns it off (`embed.onnx_runtime`): some tests
-    import fastembed without passing through the app, and a worker exiting mid-upload crashes.
+    load a model without passing through the app, and a worker exiting mid-upload crashes.
 
     The step retry intervals are not here: DBOS copies them into the decorator at import, so the
     two retry tests pay the real wait. `-n auto` absorbs it.
@@ -654,13 +654,13 @@ def words_scan(hits: "list[Hit]") -> "Scan":
     return collapse.spaces([one.text for one in hits], [None] * len(hits), None)
 
 
-async def compact_model() -> "EmbeddingModel":
-    """The "compact" profile's model as the catalogue holds it: bge-small, with the seed's own
-    thresholds."""
+async def default_model() -> "EmbeddingModel":
+    """The model of the profile a new home picks first, as the catalogue holds it: granite-97m,
+    with the seed's own thresholds."""
     from haskie.catalogue import catalogue
     from haskie.settings import UserSettings
 
-    model = await catalogue.embedding_model(UserSettings(embedding="compact"))
+    model = await catalogue.embedding_model(UserSettings(embedding="granite-97m-multilingual"))
     assert model is not None
     return model
 

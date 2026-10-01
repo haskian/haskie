@@ -8,7 +8,7 @@ import { errorText } from '../format'
 // composed from the tokens: the logo, a title, the pickers and one button.
 export function Init({ onDone }: { onDone: () => void }) {
   const [options, setOptions] = useState<Options | null>(null)
-  const [profile, setProfile] = useState<EmbeddingProfile>('compact')
+  const [profile, setProfile] = useState<EmbeddingProfile>('granite-97m-multilingual')
   const [search, setSearch] = useState<SearchSettings | null>(null) // the server's defaults, then the picks
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)

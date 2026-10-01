@@ -55,7 +55,7 @@ QUERIES = {"idempotent retries": _unit([1.0]), "sourdough starter": _unit([0.0, 
 async def _two_collections() -> None:
     """Collections `a` and `b`, one chunk each with a vector of its own, and the markdown the
     chunks were cut from, which an excerpt is read out of."""
-    compact = await catalogue.embedding_model(UserSettings(embedding="compact"))
+    compact = await catalogue.embedding_model(UserSettings(embedding="granite-97m-multilingual"))
     for name, body in BODIES.items():
         collection = await Collection.create(name)
         (chunk_,) = chunk.split(body, ChunkSettings())
@@ -100,7 +100,7 @@ def _best_cosine(question: str) -> float:
 async def test_a_search_records_its_scope_answer_and_signals(seeded_home, fixed_models) -> None:
     await save_user_settings(
         UserSettings(
-            embedding="compact",
+            embedding="granite-97m-multilingual",
             search=SearchSettings(mode=SearchMode.VECTOR, reranker=Reranker.CROSS_ENCODER),
         )
     )
@@ -117,7 +117,7 @@ async def test_a_search_records_its_scope_answer_and_signals(seeded_home, fixed_
         SearchMode.VECTOR,
         5,
     )
-    assert (logged.embedding, logged.reranker) == ("compact", DEFAULT_RERANKER)
+    assert (logged.embedding, logged.reranker) == ("granite-97m-multilingual", DEFAULT_RERANKER)
     assert (logged.result_count, logged.error) == (len(found), None)
     assert logged.duration_ms >= 0 and logged.ts <= time.time()
     (asked,) = logged.questions
@@ -146,7 +146,7 @@ async def test_an_excerpts_search_records_each_question_on_its_own(
     leaves both uncovered, yet each keeps the best score it had before the floor."""
     await save_user_settings(
         UserSettings(
-            embedding="compact",
+            embedding="granite-97m-multilingual",
             search=SearchSettings(
                 mode=SearchMode.VECTOR, reranker=Reranker.CROSS_ENCODER, min_rerank_score=0.99
             ),
@@ -209,7 +209,7 @@ async def test_a_search_cancelled_by_its_scope_is_still_written(seeded_home) -> 
 
 
 async def test_a_replay_measures_without_writing(seeded_home, fixed_models) -> None:
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     await _two_collections()
     async with log.capturing(
         log.Tool.EXPLORE, ["idempotent retries"], None, record=False
@@ -221,7 +221,7 @@ async def test_a_replay_measures_without_writing(seeded_home, fixed_models) -> N
 
 async def test_a_question_the_capture_was_not_asked_is_left_out(seeded_home, fixed_models) -> None:
     """A search the capture did not name (a probe's, say) measures nothing into it."""
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     await _two_collections()
     async with log.capturing(log.Tool.EXPLORE, ["kafka"], None, record=False) as capture:
         await flow.chunks(["a", "b"], "idempotent retries", 5)
@@ -250,7 +250,7 @@ async def test_an_invalid_session_id_fails_before_anything_is_written(seeded_hom
 async def test_prune_deletes_old_searches_with_their_questions_and_results(
     seeded_home, fixed_models
 ) -> None:
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     await _two_collections()
     for question in QUERIES:
         async with log.capturing(log.Tool.EXPLORE, [question], None) as capture:
@@ -278,10 +278,10 @@ async def test_a_borderline_question_is_listed_only_when_asked_for(
     async with db.connect() as conn:
         await conn.execute(
             update(embedding_profiles)
-            .where(embedding_profiles.c.profile == "compact")
+            .where(embedding_profiles.c.profile == "granite-97m-multilingual")
             .values(weak_match=0.5, answered_match=0.95)
         )
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     await _two_collections()
     async with log.capturing(log.Tool.EXPLORE, ["idempotent retries"], "s1") as capture:
         capture.answer(await flow.chunks(["a", "b"], "idempotent retries", 5))

@@ -15,7 +15,7 @@ const COMPACT: EmbeddingModel = {
   same_topic: 0.7,
   query_prefix: '',
   document_prefix: '',
-  matryoshka: null,
+  matryoshka: false,
 }
 const METADATA: EmbedderMetadata = {
   description: 'Small and fast; a good default (~130 MB).',

@@ -14,13 +14,19 @@ dependencies = [
     "pdf-inspector>=1.20.0",
     "pyromark>=0.9.13",
     "pypdf>=5.0.0",
-    # ONNX Runtime's CUDA build by default on Linux; it runs on the CPU where no NVIDIA GPU is. Never
-    # both builds: each ships the `onnxruntime` package, so whichever installs last overwrites the
-    # other's files, and an install that ends with the CPU build's has no CUDA at all.
-    "fastembed>=0.8.0 ; sys_platform == 'darwin'",
-    "fastembed-gpu>=0.8.0 ; sys_platform != 'darwin'",
-    # The Apple GPU on Apple Silicon: MLX rerankers and embedders (`indexing/mlx_models.py`), and
-    # the GGUF embedders on llama.cpp (`indexing/gguf_models.py`). PyPI ships llama-cpp-python as
+    # One ONNX Runtime build per platform, never two: each ships the `onnxruntime` package, so
+    # whichever installs last overwrites the other's files. Linux takes the CUDA build, which runs
+    # on the CPU where no NVIDIA GPU is; Apple Silicon the WebGPU build, which reaches its GPU
+    # through Metal (`indexing/onnx_models.py`). Nothing else may depend on `onnxruntime`, which is
+    # why haskie runs its ONNX models itself rather than through fastembed.
+    "onnxruntime-gpu>=1.27 ; sys_platform != 'darwin'",
+    "onnxruntime-webgpu>=1.27 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # Intel Macs: 1.23 is the last release with a macOS x86_64 wheel
+    "onnxruntime>=1.23,<1.24 ; sys_platform == 'darwin' and platform_machine != 'arm64'",
+    "tokenizers>=0.21",
+    "huggingface-hub>=0.30",
+    # The Apple GPU on Apple Silicon: MLX embedders and rerankers (`indexing/mlx_models.py`), and
+    # GGUF embedders on llama.cpp (`indexing/gguf_models.py`). PyPI ships llama-cpp-python as
     # source only, so installing it compiles llama.cpp with Metal (about a minute; needs the Xcode
     # command-line tools).
     "mlx-embeddings>=0.1 ; platform_machine == 'arm64' and sys_platform == 'darwin'",

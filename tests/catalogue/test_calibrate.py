@@ -24,7 +24,7 @@ from haskie.settings import (
 
 pytestmark = pytest.mark.anyio
 
-MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
+MODEL = "cross-encoder/ettin-reranker-32m-v1"
 
 
 @pytest.mark.parametrize(

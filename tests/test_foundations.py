@@ -755,7 +755,7 @@ def test_without_none(name: str, struct: msgspec.Struct, expected: dict) -> None
     ],
 )
 async def test_unreadable_settings_fall_back_to_defaults(name: str, stored: str) -> None:
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     async with db.connect() as conn:
         await conn.execute(update(tables.settings).values(json=stored))
     forget_settings()  # a direct write bypasses the process cache
@@ -769,8 +769,8 @@ async def test_unreadable_settings_fall_back_to_defaults(name: str, stored: str)
 
 @pytest.mark.anyio
 async def test_settings_problem_clears_after_a_good_load() -> None:
-    await save_user_settings(UserSettings(embedding="quality"))
-    assert await load_user_settings_or_none() == UserSettings(embedding="quality")
+    await save_user_settings(UserSettings(embedding="granite-english"))
+    assert await load_user_settings_or_none() == UserSettings(embedding="granite-english")
     assert settings_problem() is None
 
 
@@ -800,41 +800,43 @@ def _count_connects(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 async def test_user_settings_are_read_once_and_refreshed_on_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     forget_settings()
     connects = _count_connects(monkeypatch)
 
     first, second = await load_user_settings_or_none(), await load_user_settings_or_none()
 
-    assert first == second == UserSettings(embedding="compact")
+    assert first == second == UserSettings(embedding="granite-97m-multilingual")
     assert len(connects) == 1, "the second load answers from the process cache"
 
-    await save_user_settings(UserSettings(embedding="quality"))
+    await save_user_settings(UserSettings(embedding="granite-english"))
 
     assert len(connects) == 2, "the write itself connects"
-    assert await settings.load_user_settings() == UserSettings(embedding="quality")
+    assert await settings.load_user_settings() == UserSettings(embedding="granite-english")
     assert len(connects) == 2, "and refreshes the cache, so the read after it does not"
 
 
 @pytest.mark.anyio
 async def test_forgetting_the_cache_forces_a_reread() -> None:
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     async with db.connect() as conn:
         await conn.execute(
-            update(tables.settings).values(json=db.dumps(UserSettings(embedding="quality")))
+            update(tables.settings).values(json=db.dumps(UserSettings(embedding="granite-english")))
         )
 
-    assert await settings.load_user_settings() == UserSettings(embedding="compact"), "still cached"
+    assert await settings.load_user_settings() == UserSettings(
+        embedding="granite-97m-multilingual"
+    ), "still cached"
 
     forget_settings()
 
-    assert await settings.load_user_settings() == UserSettings(embedding="quality")
+    assert await settings.load_user_settings() == UserSettings(embedding="granite-english")
 
 
 @pytest.mark.anyio
 async def test_unreadable_settings_are_not_cached() -> None:
     """A broken row must stay live: the run that repairs it is seen without a second step."""
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     async with db.connect() as conn:
         await conn.execute(update(tables.settings).values(json="{not json"))
     forget_settings()
@@ -846,10 +848,10 @@ async def test_unreadable_settings_are_not_cached() -> None:
 
     async with db.connect() as conn:  # nothing was cached, so nothing has to be forgotten
         await conn.execute(
-            update(tables.settings).values(json=db.dumps(UserSettings(embedding="quality")))
+            update(tables.settings).values(json=db.dumps(UserSettings(embedding="granite-english")))
         )
 
-    assert await load_user_settings_or_none() == UserSettings(embedding="quality")
+    assert await load_user_settings_or_none() == UserSettings(embedding="granite-english")
     assert settings_problem() is None
 
 
@@ -859,10 +861,12 @@ async def test_the_missing_row_before_init_is_not_cached() -> None:
 
     async with db.connect() as conn:  # first run, straight into the row
         await conn.execute(
-            insert(tables.settings).values(id=1, json=db.dumps(UserSettings(embedding="compact")))
+            insert(tables.settings).values(
+                id=1, json=db.dumps(UserSettings(embedding="granite-97m-multilingual"))
+            )
         )
 
-    assert await load_user_settings_or_none() == UserSettings(embedding="compact")
+    assert await load_user_settings_or_none() == UserSettings(embedding="granite-97m-multilingual")
 
 
 @pytest.mark.anyio
@@ -891,8 +895,8 @@ async def test_connect_skips_ensure_home_after_the_first_success(
 async def test_the_settings_cache_ends_on_the_saved_value_under_concurrent_loads() -> None:
     """A load that misses reads the row before it publishes it, so it can still be in flight when
     a save commits. The saved row has to win: the load must not cache the row it read first."""
-    await save_user_settings(UserSettings(embedding="compact"))
-    saved = UserSettings(embedding="quality")
+    await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    saved = UserSettings(embedding="granite-english")
     loaders, loads = 8, 25
     forget_settings()  # so the first load of every task misses and reads the row
 
@@ -904,9 +908,10 @@ async def test_the_settings_cache_ends_on_the_saved_value_under_concurrent_loads
     reads = await asyncio.gather(*reading)
 
     assert [len(one) for one in reads] == [loads] * loaders, "every load returned a value"
-    assert {one for read_back in reads for one in read_back} <= {"compact", "quality"}, (
-        "every load saw a stored row, never a default"
-    )
+    assert {one for read_back in reads for one in read_back} <= {
+        "granite-97m-multilingual",
+        "granite-english",
+    }, "every load saw a stored row, never a default"
     assert settings._state == settings._Loaded(saved), "the cache ends on the saved row"
     assert await settings.load_user_settings() == saved
     forget_settings()

@@ -367,8 +367,12 @@ def _report(measured: dict[str, dict[str, list[Asked]]], model: Any, floor: floa
 def main() -> None:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     parser.add_argument("--shelf", choices=["rust-book", "haskie-docs", "all"], default="all")
-    parser.add_argument("--profile", default="compact", help="an embedding profile key")
-    parser.add_argument("--reranker", default="Xenova/ms-marco-MiniLM-L-6-v2", help="or 'none'")
+    parser.add_argument(
+        "--profile", default="granite-97m-multilingual", help="an embedding profile key"
+    )
+    parser.add_argument(
+        "--reranker", default="cross-encoder/ettin-reranker-32m-v1", help="or 'none'"
+    )
     parser.add_argument("--out", type=Path, help="write each question's measurements as JSON here")
     args = parser.parse_args()
     reranker = None if args.reranker == "none" else args.reranker

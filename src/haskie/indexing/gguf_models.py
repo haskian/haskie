@@ -1,18 +1,23 @@
 """Embedders that run on the Apple GPU through llama.cpp, from GGUF files.
 
-ONNX Runtime reaches the Apple GPU only through CoreML, which must first compile each model for
-minutes (see `embed`). llama.cpp runs a GGUF file on Metal as it loads: a model is ready in at most
-0.27 s, after a one-time Metal shader compile per machine (7.6 s, measured once, 0.1 s after).
-Measured on 128 real chunks against the same model in ONNX on the CPU (M4 Pro):
+ONNX Runtime reaches the Apple GPU through WebGPU (`embed`). llama.cpp is faster there still, 2x
+to 3x for the models pinned here (`catalogue/seed.sql`), and runs a GGUF file on Metal as it
+loads: a model is ready in at most 0.27 s, after a one-time Metal shader compile per machine (7.6
+s, measured once, 0.1 s after).
+Measured on 128 real chunks against the model's ONNX export on the CPU (M4 Pro), whose vectors
+match sentence-transformers on the original weights:
 
-- bge-small, ggml-org Q8_0: 2.8 s against 3.75 s (1.3x), worst cosine to the ONNX vectors 0.99989
-- bge-m3, ggml-org Q8_0: 4.2 s against 19.6 s (4.7x), worst cosine 0.99904
-- jina-v2-base, ggml-org Q8_0: 1.5 s against 8.1 s (5.4x), worst cosine 0.99986
-- nomic v1.5, nomic-ai f16: 1.5 s against 7.6 s (5.2x), worst cosine 1.00000; nomic's own Q8_0
-  file drifts to 0.9985, so the f16 one is pinned
+- granite-english-r2, mradermacher f16: 2.16 s against 7.89 s (3.7x), worst cosine 1.00000
+- e5-base-v2, ChristianAzinn fp16: 1.36 s against 5.50 s (4.0x), worst cosine 0.99999
+- F2LLM-v2-160M, mradermacher f16: 2.05 s against 5.37 s (2.6x), worst cosine 1.00000
 
-Only official conversions are pinned (ggml-org, and nomic-ai for its own model), each to a
-revision, so the weights that run are the ones measured. Each file carries its model's pooling,
+A file is pinned only where it matches to a worst cosine of 0.9999, each to a revision, so the
+weights that run are the ones measured: a community file counts as the ONNX export it was
+measured against. Left out: granite-97m and granite-small-english, which match but ran at half the
+CPU's speed (mykor Q8_0 and BF16, mradermacher f16), and bekko's own files, which ran 4x faster but
+drift on every text past 128 tokens, its local attention window (worst cosine 0.985 at F16). The
+rerankers' files (keisuke-miyako's gte and Ettin) were not measured to match: llama-cpp-python
+takes no (query, text) pair, and Ettin's head is its own. Each file carries its model's pooling,
 which llama.cpp applies. The files run on the CPU too, but slower than ONNX there (arctic: 27 s
 against 6 s), so they run on Metal only: `hardware.device` finds no device for them otherwise.
 
@@ -55,17 +60,14 @@ class Pin(NamedTuple):
 
 
 PINS: dict[str, Pin] = {
-    "ggml-org/bge-small-en-v1.5-Q8_0-GGUF": Pin(
-        "f2068edd9b54f2a369549ccc71f70ed273a2a801", "bge-small-en-v1.5-q8_0.gguf", 512
+    "mradermacher/granite-embedding-english-r2-GGUF": Pin(
+        "0b0294d75be1ecfaea0ed5464b7c1cd3e2c15538", "granite-embedding-english-r2.f16.gguf", 8192
     ),
-    "ggml-org/bge-m3-Q8_0-GGUF": Pin(
-        "9eba04c5d75ba5a1595e45de734d36bef4e5cb98", "bge-m3-q8_0.gguf", 8192
+    "ChristianAzinn/e5-base-v2-gguf": Pin(
+        "374d123d6f9257d6f056687cb742abe7048bed97", "e5-base-v2_fp16.gguf", 512
     ),
-    "ggml-org/jina-embeddings-v2-base-en-Q8_0-GGUF": Pin(
-        "c4e88d968641ee4fa4941e083980160867fd8bf2", "jina-embeddings-v2-base-en-q8_0.gguf", 8192
-    ),
-    "nomic-ai/nomic-embed-text-v1.5-GGUF": Pin(
-        "0188c9bf409793f810680a5a431e7b899c46104c", "nomic-embed-text-v1.5.f16.gguf", 8192
+    "mradermacher/F2LLM-v2-160M-GGUF": Pin(
+        "a1f45469b2b9b3a2d0df7150fad56f65a37b8937", "F2LLM-v2-160M.f16.gguf", 40960
     ),
 }
 DESCRIBER = "ggml-org/gemma-4-E2B-it-GGUF"  # the generator that writes descriptors (see above)
@@ -113,8 +115,8 @@ def _download(name: str) -> Path:
 
 
 class GgufEmbedder:
-    """A GGUF embedder, answering `embed(texts)` and `query_embed(text)` the way fastembed's
-    `TextEmbedding` does: one normalized vector per text, pooled as the file says."""
+    """A GGUF embedder, answering `embed(texts)` and `query_embed(text)` as every embedder does
+    (`onnx_models.Embedder`): one normalized vector per text, pooled as the file says."""
 
     def __init__(self, name: str) -> None:
         path = _download(name)  # first: it says what to install when llama.cpp is missing
@@ -132,6 +134,9 @@ class GgufEmbedder:
             n_seq_max=SEQUENCES,
             verbose=False,
         )
+        self._tokens = tokens
+        # what the model adds around a text ([CLS] and [SEP], or an end token)
+        self._specials = len(self._model.tokenize(b""))
         # one context: two calls at once would decode into the same buffers
         self._lock = threading.Lock()
 
@@ -139,12 +144,29 @@ class GgufEmbedder:
         # locked a batch at a time, so a search's query waits for one batch, not a whole part:
         # 128 bge-m3 chunks took 4.58 s in one call and 4.60 s in batches, with the same vectors
         for batch in batched(texts, SEQUENCES, strict=False):
+            fitted = [self._fit(text) for text in batch]
             with self._lock:  # llama.cpp releases the GIL while it runs (measured: 13 ms stalls)
-                vectors = self._model.embed(list(batch), normalize=True, truncate=True)
+                vectors = self._model.embed(fitted, normalize=True, truncate=True)
             yield from (np.asarray(vector, dtype=np.float32) for vector in vectors)
 
     def query_embed(self, text: str) -> Iterator[Any]:
         return self.embed([text])
+
+    def _fit(self, text: str) -> str:
+        """`text` cut to what the context holds with the model's own tokens around it. llama.cpp's
+        cut keeps the first tokens and drops the end token with the rest, and a vector pooled
+        without it is another vector (measured past the cut, against ONNX: F2LLM 0.14, e5
+        0.82). Cut here, as the ONNX loader cuts, the end token stays."""
+        content = self._model.tokenize(text.encode(), add_bos=False)
+        keep = self._tokens - self._specials
+        if len(content) <= keep:
+            return text
+        # a detokenized cut can tokenize a little longer, so it shrinks until it fits
+        while True:
+            cut = self._model.detokenize(content[:keep]).decode(errors="ignore")
+            if len(self._model.tokenize(cut.encode())) <= self._tokens:
+                return cut
+            keep -= 8
 
 
 class GgufGenerator:

@@ -48,7 +48,7 @@ from sqlalchemy import event, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from haskie import audit, db, home, ids, logs, tables
-from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
+from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import index as index_module
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection, DocumentCounts, Member, MemberStatus
@@ -74,7 +74,7 @@ from haskie.errors import (
     NotReady,
     PermanentError,
 )
-from haskie.indexing import chunk, embed, embed_cache, pipeline
+from haskie.indexing import chunk, embed, embed_cache, onnx_models, pipeline
 from haskie.indexing.chunk import Chunk, Piece, Position
 from haskie.indexing.segment import CutReason, PieceType
 from haskie.paging import Order, PageRequest
@@ -273,16 +273,20 @@ def test_docs_rejects_a_non_struct() -> None:
 async def test_user_settings_persist_in_db() -> None:
     assert await load_user_settings_or_none() is None, "not initialized yet"
     assert (await load_user_settings()).embedding == "none"
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     assert await load_user_settings_or_none() is not None
-    assert (await load_user_settings()).embedding == "compact"
+    assert (await load_user_settings()).embedding == "granite-97m-multilingual"
 
 
 @pytest.mark.anyio
 async def test_init_user_settings_creates_the_row_once() -> None:
-    assert await init_user_settings(UserSettings(embedding="compact")) is True
-    assert await init_user_settings(UserSettings(embedding="quality")) is False, "second call loses"
-    assert (await load_user_settings()).embedding == "compact", "the first write stands"
+    assert await init_user_settings(UserSettings(embedding="granite-97m-multilingual")) is True
+    assert await init_user_settings(UserSettings(embedding="granite-english")) is False, (
+        "second call loses"
+    )
+    assert (await load_user_settings()).embedding == "granite-97m-multilingual", (
+        "the first write stands"
+    )
 
 
 # --- conversion --------------------------------------------------------------------
@@ -1251,7 +1255,7 @@ def test_the_leaving_query_reads_by_index_not_every_membership() -> None:
 @pytest.mark.anyio
 async def test_reranker_overrides_lists_every_model_a_collection_chose() -> None:
     """The model downloads have to cover the overrides too, so they are read in one query."""
-    chosen = "Xenova/ms-marco-MiniLM-L-12-v2"
+    chosen = "cross-encoder/ettin-reranker-17m-v1"
     for name in ("a", "b", "c"):
         await Collection.create(name)
     await Collection("b").set_overrides(
@@ -1638,7 +1642,7 @@ async def test_deleting_a_collection_drops_it_from_every_session() -> None:
 
 # --- index -------------------------------------------------------------------------
 
-COMPACT = EmbeddingModel("BAAI/bge-small-en-v1.5", 384)
+COMPACT = EmbeddingModel("ibm-granite/granite-embedding-97m-multilingual-r2", 384)
 SAME_SIZE = EmbeddingModel("sentence-transformers/all-MiniLM-L6-v2", 384)
 VECTORS_384 = PLAIN_SCHEMA.append(pa.field("vector", pa.list_(pa.float32(), 384)))
 
@@ -3772,7 +3776,7 @@ def test_migrate_creates_the_schema_once_and_refuses_every_other_home(
 
 # The schema `tables.py` generates at this `SCHEMA_VERSION`: a SHA-256 of its DDL statements,
 # sorted, because a table's indexes are a set and come out in no fixed order.
-SCHEMA_PIN = (33, "643c66576097a2e8c11701bc16f15e3c056aad5026dcc5ca428ccfc4b2b68c39")
+SCHEMA_PIN = (34, "10ceb8cab273eccf29630a23e7510f15bc99c76fa1ea4482890a616dfe6f90c7")
 
 
 def test_a_table_change_comes_with_a_new_schema_version() -> None:
@@ -3831,10 +3835,27 @@ async def test_connect_rolls_back_a_failed_unit_of_work() -> None:
             ["CUDAExecutionProvider", "CPUExecutionProvider"],
         ),
         (
-            "apple silicon on auto: the cpu, coreml available or not",
+            "apple silicon on auto: webgpu, never coreml",
+            [
+                "CoreMLExecutionProvider",
+                "WebGpuExecutionProvider",
+                "AzureExecutionProvider",
+                "CPUExecutionProvider",
+            ],
+            "auto",
+            ["WebGpuExecutionProvider", "CPUExecutionProvider"],
+        ),
+        (
+            "apple silicon on auto without the webgpu build: the cpu",
             ["CoreMLExecutionProvider", "AzureExecutionProvider", "CPUExecutionProvider"],
             "auto",
             ["CPUExecutionProvider"],
+        ),
+        (
+            "cuda before webgpu where both are",
+            ["WebGpuExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
+            "auto",
+            ["CUDAExecutionProvider", "WebGpuExecutionProvider", "CPUExecutionProvider"],
         ),
         (
             "coreml when asked for, then cpu",
@@ -3926,35 +3947,6 @@ def test_onnx_runtime_comes_with_its_telemetry_off_once(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "length", "multiple", "expected"),
-    [
-        ("a fixed length shorter than a row: padded to the longest", 2, None, [5, 5]),
-        ("already padding to the longest: unchanged", None, None, [5, 5]),
-        ("a fixed length with a multiple: the multiple stays", 2, 4, [8, 8]),
-    ],
-)
-def test_every_batch_pads_to_its_own_longest_row(
-    name: str, length: int | None, multiple: int | None, expected: list[int]
-) -> None:
-    """On a real `tokenizers.Tokenizer`, padded as a model's `tokenizer.json` may ship it."""
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from tokenizers.pre_tokenizers import Whitespace
-
-    words = ["[PAD]", "[UNK]", "a", "job", "retries", "the", "call"]
-    tokenizer = Tokenizer(WordLevel({word: i for i, word in enumerate(words)}, unk_token="[UNK]"))
-    tokenizer.pre_tokenizer = Whitespace()
-    tokenizer.enable_padding(pad_token="[PAD]", length=length, pad_to_multiple_of=multiple)
-
-    embed.pad_to_longest(tokenizer)
-
-    rows = tokenizer.encode_batch(["a job retries the call", "a call"])
-    assert [len(row.ids) for row in rows] == expected, name
-    padding = tokenizer.padding
-    assert padding is not None and (padding["pad_token"], padding["length"]) == ("[PAD]", None)
-
-
-@pytest.mark.parametrize(
     ("name", "names", "expected"),
     [
         ("no coreml", ["CUDAExecutionProvider", "CPUExecutionProvider"], None),
@@ -3972,25 +3964,36 @@ def test_with_options_attaches_the_coreml_cache_only(name, names, expected) -> N
 
 
 CPU, CUDA = "CPUExecutionProvider", "CUDAExecutionProvider"
-MINILM = "Xenova/ms-marco-MiniLM-L-6-v2"
 ON_COREML = [embed.COREML, CPU]
+ON_WEBGPU = [onnx_models.WEBGPU, CPU]
 RERANK, EMBED = embed._cross_encoder, embed._model
-ETTIN, BGE, JINA_V3 = (
-    "cross-encoder/ettin-reranker-68m-v1",
-    "BAAI/bge-small-en-v1.5",
-    "jinaai/jina-embeddings-v3",
+GTE, ETTIN, GRANITE, F2LLM = (
+    "Alibaba-NLP/gte-reranker-modernbert-base",
+    "cross-encoder/ettin-reranker-32m-v1",
+    "ibm-granite/granite-embedding-97m-multilingual-r2",
+    "onnx-community/F2LLM-v2-160M-ONNX",
 )
+UNMEASURED = "intfloat/e5-base-v2"  # CoreML was measured to run none: the rest stand in
 
 
 @pytest.mark.parametrize(
     ("name", "build", "model", "accelerator", "available", "expected"),
     [
-        ("auto: CUDA if installed", RERANK, MINILM, "auto", [CUDA, CPU], [CUDA, CPU]),
-        ("cpu: the CPU, CUDA or not", RERANK, MINILM, "cpu", [CUDA, CPU], [CPU]),
-        ("coreml: CoreML, with its cache", RERANK, MINILM, "coreml", ON_COREML, ON_COREML),
+        ("auto: CUDA if installed", RERANK, GTE, "auto", [CUDA, CPU], [CUDA, CPU]),
+        (
+            "auto: WebGPU on Apple Silicon",
+            RERANK,
+            GTE,
+            "auto",
+            [*ON_COREML, onnx_models.WEBGPU],
+            ON_WEBGPU,
+        ),
+        ("cpu: the CPU, CUDA or not", RERANK, GTE, "cpu", [CUDA, CPU], [CPU]),
+        ("coreml: CoreML, with its cache", RERANK, GTE, "coreml", ON_COREML, ON_COREML),
         ("a headed cross-encoder the same", RERANK, ETTIN, "coreml", ON_COREML, ON_COREML),
-        ("an embedder the same", EMBED, BGE, "coreml", ON_COREML, ON_COREML),
-        ("too large for CoreML: without it", EMBED, JINA_V3, "coreml", ON_COREML, [CPU]),
+        ("an embedder the same", EMBED, GRANITE, "coreml", ON_COREML, ON_COREML),
+        ("a last-token embedder on WebGPU", EMBED, F2LLM, "auto", ON_WEBGPU, ON_WEBGPU),
+        ("not measured on CoreML: without it", EMBED, UNMEASURED, "coreml", ON_COREML, [CPU]),
     ],
 )
 def test_every_onnx_model_runs_on_the_hardware_the_settings_choose(
@@ -4004,36 +4007,16 @@ def test_every_onnx_model_runs_on_the_hardware_the_settings_choose(
 ) -> None:
     """Rerankers once ran on the CPU whatever the setting, on the claim that they score in
     milliseconds: measured, 50 candidates take 0.6 s (MiniLM-L6) to 3.3 s (bge-reranker-base)."""
-    import fastembed
-    import fastembed.rerank.cross_encoder as cross_encoder
-
-    from haskie.indexing import onnx_rerank
+    from haskie.indexing import hardware, onnx_models
 
     seen: list[list] = []
-
-    class Recorder:
-        model = None  # no ONNX model inside: nothing to pad
-
-        def __init__(self, *args: object, providers: list, **_: object) -> None:
-            seen.append(providers)
-
-        @classmethod
-        def add_custom_model(cls, **_: object) -> None:  # the registration of mxbai and the like
-            pass
-
-        @staticmethod
-        def _list_supported_models() -> list:
-            return [types.SimpleNamespace(model=model, additional_files=[])]
-
+    built = lambda model, providers: seen.append(providers)  # noqa: E731
     stand_in = types.SimpleNamespace(get_available_providers=lambda: available)
     monkeypatch.setattr(embed, "onnx_runtime", lambda: stand_in)
     monkeypatch.setattr(embed, "nvidia_loads", lambda _provider: True)  # CUDA runs here
-    monkeypatch.setattr(cross_encoder, "TextCrossEncoder", Recorder)
-    headed = lambda model, providers: seen.append(providers)  # noqa: E731
-    monkeypatch.setattr(onnx_rerank, "HeadedCrossEncoder", headed)
-    monkeypatch.setattr(fastembed, "TextEmbedding", Recorder)
-    monkeypatch.setattr(embed, "_register_custom", lambda: None)
-    monkeypatch.setattr(embed, "_register_custom_rerankers", lambda: None)
+    monkeypatch.setattr(onnx_models, "Embedder", built)
+    monkeypatch.setattr(onnx_models, "CrossEncoder", built)
+    monkeypatch.setattr(hardware, "COREML_RUNS", frozenset({GTE, ETTIN, GRANITE, F2LLM}))
     embed._build_cross_encoder.cache_clear()
     embed._build_model.cache_clear()
     try:
@@ -4053,14 +4036,8 @@ def test_every_onnx_model_runs_on_the_hardware_the_settings_choose(
         ("a model whole: its vector as it came", COMPACT, [3.0, 4.0, 0.0, 0.0]),
         (
             "a Matryoshka cut: the first values, normalized again",
-            EmbeddingModel("test/cut", 2, matryoshka=Matryoshka()),
+            EmbeddingModel("test/cut", 2, matryoshka=True),
             [0.6, 0.8],
-        ),
-        (
-            "nomic's cut: a layer norm over the whole vector first",
-            EmbeddingModel("test/cut", 2, matryoshka=Matryoshka(layer_norm=True)),
-            # centred by the mean 1.75, then the scale no longer matters: (1.25, 2.25) normalized
-            [1.25 / np.hypot(1.25, 2.25), 2.25 / np.hypot(1.25, 2.25)],
         ),
     ],
 )
@@ -4075,7 +4052,9 @@ def test_a_vector_is_stored_whole_or_cut_as_the_profile_says(
 def test_embedding_helpers_short_circuit_on_empty_input() -> None:
     """No text means no model, so neither call may download anything."""
     assert embed.embed_texts(COMPACT, []) == []
-    assert embed.rerank_scores("Xenova/ms-marco-MiniLM-L-6-v2", Accelerator.AUTO, "q", []) == []
+    assert (
+        embed.rerank_scores("cross-encoder/ettin-reranker-32m-v1", Accelerator.AUTO, "q", []) == []
+    )
 
 
 @pytest.mark.parametrize(

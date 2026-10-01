@@ -178,8 +178,8 @@ def _requested(lines: list[dict]) -> list[str]:
         ),
         (
             "an embedder is no reranker -> unprocessable",
-            "PUT", "/api/settings", {"search": {"reranker_model": "BAAI/bge-small-en-v1.5"}}, None,
-            422, "unknown reranker model: BAAI/bge-small-en-v1.5",
+            "PUT", "/api/settings", {"search": {"reranker_model": "intfloat/e5-base-v2"}}, None,
+            422, "unknown reranker model: intfloat/e5-base-v2",
         ),
         (
             "merge share past 100% -> unprocessable",
@@ -757,11 +757,11 @@ async def test_collection_reranker_override_starts_its_download(
 ) -> None:
     """Q1: saving a reranker for one collection used to change nothing but the row, so the first
     search of that collection answered "not loaded yet" for a model nothing ever fetched."""
-    from haskie.indexing import embed
+    from haskie.indexing import embed, hardware
 
     loaded: list[str] = []
     monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: loaded.append(name))
-    override = "jinaai/jina-reranker-v1-turbo-en"
+    override = "cross-encoder/ettin-reranker-150m-v1"
 
     saved = await ready.put(
         "/api/collections/notes/overrides",
@@ -780,8 +780,10 @@ async def test_collection_reranker_override_starts_its_download(
     await wait_for(f"dl:reranker:{override}")
     assert loaded == [override], "the PUT started the download"
     listed = (await ready.get("/api/status")).json()["models"]
+    here = hardware.device(override, Accelerator.AUTO)  # the CPU, or Apple Silicon by WebGPU
+    assert here is not None
     assert [(m["kind"], m["name"], m["state"], m["device"]) for m in listed] == [
-        ("reranker", override, "ready", "cpu")
+        ("reranker", override, "ready", here.value)
     ], "and /api/status reports it like any other required model, with where it runs"
 
 
@@ -810,36 +812,43 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     assert "anydoc" in options["parsers"] and "hybrid" in options["search_modes"]
     assert options["docs"]["conversion.chunk_size"]["title"] == "Chunk size (characters)"
     assert options["docs"]["search.grow_bias"]["title"] == "Growth bias"
-    assert options["embedding_profiles"]["compact"]["dims"] == 384
+    assert options["embedding_profiles"]["granite-97m-multilingual"]["dims"] == 384
     # the catalogue, read from the database: full-text only first, then the models by size
     profiles = options["embedding_profiles"]
     assert next(iter(profiles)) == "none" and profiles["none"] is None
     sizes = [model["dims"] for model in profiles.values() if model]
-    assert "compact" in profiles and sizes == sorted(sizes), "the smaller vectors first"
+    assert "granite-97m-multilingual" in profiles and sizes == sorted(sizes), (
+        "the smaller vectors first"
+    )
     metadata = options["embedding_metadata"]
     assert set(metadata) == set(await catalogue.embedders()), "every profile's, offered or not"
     assert set(profiles) - {"none"} <= set(metadata), "metadata for every offered model"
-    assert metadata["compact"] == {
-        "description": "Small and fast; a good default (~130 MB).",
-        "parameters": 33360512,
-        "context_tokens": 512,
-        "languages": "English",
-        "license": "MIT",
-        "released": "2023-09-12",
-        "model_card_url": "https://huggingface.co/BAAI/bge-small-en-v1.5",
+    assert metadata["granite-97m-multilingual"] == {
+        "description": (
+            "The best all-round small multilingual embedder: #1 on multilingual and reasoning "
+            "retrieval; a good default (~390 MB)."
+        ),
+        "parameters": 97441152,
+        "context_tokens": 32768,
+        "languages": "multilingual (200+, 52 enhanced)",
+        "license": "Apache-2.0",
+        "released": "2026-04-20",
+        "model_card_url": "https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2",
         "runtime": "onnx",
         "devices": ["cpu", "apple_silicon", "gpu"],
         "dimensions": 384,
     }
-    assert metadata["nomic-v1.5-512"]["description"] != metadata["nomic-v1.5"]["description"]
-    assert metadata["nomic-v1.5-512"]["parameters"] == metadata["nomic-v1.5"]["parameters"]
+    assert metadata["bekko-a25m-256"]["description"] != metadata["bekko-a25m"]["description"]
+    assert metadata["bekko-a25m-256"]["parameters"] == metadata["bekko-a25m"]["parameters"]
     reranker = options["reranker_metadata"][DEFAULT_RERANKER]
-    assert (reranker["parameters"], reranker["context_tokens"]) == (22714113, 512)
+    assert (reranker["parameters"], reranker["context_tokens"]) == (31883136, 8192)
     assert (reranker["runtime"], reranker["devices"]) == ("onnx", ["cpu", "apple_silicon", "gpu"])
     assert "dimensions" not in reranker, "a reranker has no vectors"
-    assert options["reranker_models"][:2] == [DEFAULT_MAP_RERANKER, DEFAULT_RERANKER], (
-        "smallest first: the map's default, then the excerpts'"
-    )
+    assert options["reranker_models"][:3] == [
+        DEFAULT_MAP_RERANKER,
+        "cross-encoder/ettin-reranker-17m-v1",
+        DEFAULT_RERANKER,
+    ], "smallest first: the map's default, then ettin-17m, then the excerpts'"
     # the vocabularies the UI renders rows with, so it never spells a status out for itself
     assert (
         options["document_statuses"][:3]
@@ -863,8 +872,8 @@ async def test_the_options_offer_mlx_models_only_where_mlx_is_installed(
     options = (await client.get("/api/options")).json()
 
     profiles = options["embedding_profiles"].values()
-    embedders = {model["name"] for model in profiles if model} & set(mlx_models.EMBEDDERS)
-    assert embedders == (set(mlx_models.EMBEDDERS) if installed else set()), name
+    embedders = {model["name"] for model in profiles if model} & set(mlx_models.POOLED)
+    assert embedders == (set(mlx_models.POOLED) if installed else set()), name
     rerankers = set(options["reranker_models"]) & mlx_rerankers
     assert rerankers == (mlx_rerankers if installed else set()), name
     assert mlx_rerankers <= set(options["reranker_metadata"]), "metadata, offered or not"
@@ -936,15 +945,18 @@ async def test_a_write_naming_a_model_the_catalogue_lacks_stores_nothing(
         (
             "the profile alone: hybrid search, reranked by the smallest cross-encoder",
             {"profile": "none"},
-            ("hybrid", "cross-encoder", "Xenova/ms-marco-MiniLM-L-6-v2"),
+            ("hybrid", "cross-encoder", "cross-encoder/ettin-reranker-32m-v1"),
         ),
         (
             "the search picked with it is stored as given, what it leaves out as no reranker",
             {
                 "profile": "none",
-                "search": {"mode": "fts", "reranker_model": "BAAI/bge-reranker-base"},
+                "search": {
+                    "mode": "fts",
+                    "reranker_model": "Alibaba-NLP/gte-reranker-modernbert-base",
+                },
             },
-            ("fts", "none", "BAAI/bge-reranker-base"),
+            ("fts", "none", "Alibaba-NLP/gte-reranker-modernbert-base"),
         ),
     ],
 )
@@ -969,7 +981,7 @@ async def test_the_first_run_starts_from_a_cross_encoder_and_then_reads_what_was
 
     assert (before["reranker"], before["reranker_model"]) == (
         "cross-encoder",
-        "Xenova/ms-marco-MiniLM-L-6-v2",
+        "cross-encoder/ettin-reranker-32m-v1",
     ), "the smallest cross-encoder, by default"
     assert after["reranker"] == "none", "the pick, once there is one"
 

@@ -16,7 +16,7 @@ from conftest import id_of, import_row
 from sqlalchemy import delete, select
 
 from haskie import db, ids
-from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
+from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.index import Row
 from haskie.document import document
 from haskie.document.document import Document, DocumentStatus
@@ -36,7 +36,7 @@ TINY = EmbeddingModel("test/tiny", 4)
 DOC_ID = ids.md5(b"")  # a base58 MD5, as a document's id is
 BASE = Params(
     document_id=DOC_ID,
-    model="BAAI/bge-small-en-v1.5",
+    model="ibm-granite/granite-embedding-97m-multilingual-r2",
     chunk_size=1200,
     chunk_merge_below=33,
     chunk_frame=True,
@@ -48,11 +48,11 @@ BASE = Params(
 # Pinned, not recomputed: the URN is the cache key, so a change to its shape must fail a test
 # rather than silently retire every entry on disk.
 BASE_URN = (
-    "document_id:TCByYo9r1su7nMQP3WHDFK;model:BAAI/bge-small-en-v1.5;chunk_size:1200;"
-    "chunk_merge_below:33;chunk_frame:true;chunker:markdown;chunk_version:1;parser:anydoc;"
-    "skip_ocr_pages:true"
+    "document_id:TCByYo9r1su7nMQP3WHDFK;model:ibm-granite/granite-embedding-97m-multilingual-r2;"
+    "chunk_size:1200;chunk_merge_below:33;chunk_frame:true;chunker:markdown;chunk_version:1;"
+    "parser:anydoc;skip_ocr_pages:true"
 )
-BASE_ID = "221aa8b37c2a718d56e11f79620b12d86d7836af3ef0df76377f344b24c7dbe3"
+BASE_ID = "fe2f9c03f6c117bfec714e501b3ce5e2c3c177d685fba77b24dc96e816cffaaf"
 
 
 def _row(text: str, vector: list[float] | None = None) -> Row:
@@ -103,7 +103,7 @@ def test_the_key_is_the_full_sha256_of_the_urn() -> None:
     ("name", "field", "value"),
     [
         ("another document", "document_id", "1" * 32),
-        ("another embedding model", "model", "BAAI/bge-large-en-v1.5"),
+        ("another embedding model", "model", "sirasagi62/granite-embedding-english-r2-ONNX"),
         ("another chunk size", "chunk_size", 900),
         ("another merge share", "chunk_merge_below", 50),
         ("no heading path prepended", "chunk_frame", False),
@@ -126,7 +126,7 @@ def test_every_field_of_params_changes_the_id(name: str, field: str, value) -> N
     ("name", "change"),
     [
         ("another document prefix", {"document_prefix": "passage: "}),
-        ("a Matryoshka cut", {"matryoshka": Matryoshka()}),
+        ("a Matryoshka cut", {"matryoshka": True}),
         ("another vector size", {"dims": 2}),
     ],
 )

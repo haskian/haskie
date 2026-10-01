@@ -42,7 +42,7 @@ class Chunker(StrEnum):  # the two pipelines of `indexing.chunk`
 
 
 class Accelerator(StrEnum):
-    AUTO = "auto"  # the best ONNX Runtime provider: CUDA where installed, else the CPU
+    AUTO = "auto"  # the best ONNX Runtime provider: CUDA, else WebGPU (Apple Silicon), else the CPU
     CPU = "cpu"
     COREML = "coreml"  # ONNX Runtime's CoreML on Apple Silicon, only when asked for (`embed`)
 
@@ -85,8 +85,9 @@ class Reranker(StrEnum):
 
 
 NO_EMBEDDING = "none"  # the embedding profile of full-text search only: no model at all
-# the smallest reranker that judges excerpts well enough, so the default costs least
-DEFAULT_RERANKER = "Xenova/ms-marco-MiniLM-L-6-v2"
+# ettin-32m: on the CPU about 3x slower than the smallest, ettin-17m, and more accurate
+# (MTEB English reranking 0.578 against 0.558)
+DEFAULT_RERANKER = "cross-encoder/ettin-reranker-32m-v1"
 # The map's reranker weighs every chunk a map scans rather than judging a few, so it is the
 # smallest that still tells a topic from a homonym. Measured on 11 questions over 10 books:
 # off-domain picks fell from 22 to 5 of 132, as with MiniLM-L-6 (4), at under half its time.
@@ -238,11 +239,11 @@ TASK_TIMEOUT = Meta(
 ACCELERATOR = Meta(
     title="Model hardware",
     description=(
-        "Device for the embedding, reranker and descriptor models. auto: CUDA on Linux with an "
-        "NVIDIA GPU, else CPU. On Apple Silicon, the MLX and GGUF models run on the GPU, and auto "
-        "runs the rest on the CPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none "
-        "is offered. coreml: run ONNX models through CoreML on Apple Silicon; today that is slower "
-        "than the CPU for them."
+        "Device for the embedding and reranker models. auto: CUDA on Linux with an NVIDIA "
+        "GPU, WebGPU on Apple Silicon, else CPU; the MLX and GGUF models run on the Apple GPU. "
+        "cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. coreml: run "
+        "ONNX models through CoreML on Apple Silicon, only those it was measured to run (none "
+        "today), the rest on the CPU."
     ),
 )
 DESCRIPTORS = Meta(
