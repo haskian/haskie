@@ -5,47 +5,42 @@ import types
 
 import pytest
 
-from haskie.indexing import embed, gguf_models, hardware, mlx_models
+from haskie.indexing import embed, gguf_models, hardware, mlx_models, onnx_models
 from haskie.indexing.hardware import Device, Runtime
-from haskie.settings import Accelerator
+from haskie.settings import DEFAULT_RERANKER, Accelerator
 
 EVERYWHERE = (Device.CPU, Device.APPLE_SILICON, Device.GPU)
+ONNX_EMBEDDER = "ibm-granite/granite-embedding-97m-multilingual-r2"
+MLX_EMBEDDER, GGUF_EMBEDDER = "intfloat/e5-base-v2:mlx", "ChristianAzinn/e5-base-v2-gguf"
+# The catalogue holds no MLX reranker and no model CoreML runs today, but the runtime and the rule
+# stay: these stand in for one of each
+MLX_RERANKER, ON_COREML = "test/tiny-reranker-mlx", "test/coreml"
+
+
+@pytest.fixture(autouse=True)
+def stand_ins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(mlx_models.RERANKERS, MLX_RERANKER, "0")
+    monkeypatch.setattr(hardware, "COREML_RUNS", frozenset({ON_COREML}))
 
 
 @pytest.mark.parametrize(
     ("name", "model", "runtime", "expected"),
     [
-        ("an ONNX embedder runs anywhere", "BAAI/bge-small-en-v1.5", Runtime.ONNX, EVERYWHERE),
         (
-            "an ONNX reranker the same",
-            "Xenova/ms-marco-MiniLM-L-6-v2",
+            "an ONNX embedder runs anywhere: Apple Silicon by WebGPU",
+            ONNX_EMBEDDER,
             Runtime.ONNX,
             EVERYWHERE,
         ),
-        (
-            "an ONNX embedder too large for CoreML skips Apple Silicon",
-            "jinaai/jina-embeddings-v3",
-            Runtime.ONNX,
-            (Device.CPU, Device.GPU),
-        ),
+        ("an ONNX reranker the same", DEFAULT_RERANKER, Runtime.ONNX, EVERYWHERE),
         (
             "an MLX embedder runs on Apple Silicon only",
-            "mlx-community/nomicai-modernbert-embed-base-bf16",
+            MLX_EMBEDDER,
             Runtime.MLX,
             (Device.APPLE_SILICON,),
         ),
-        (
-            "an MLX reranker the same",
-            "soichisumi/bge-reranker-v2-m3-mlx-affine8",
-            Runtime.MLX,
-            (Device.APPLE_SILICON,),
-        ),
-        (
-            "a GGUF embedder the same",
-            "ggml-org/bge-small-en-v1.5-Q8_0-GGUF",
-            Runtime.GGUF,
-            (Device.APPLE_SILICON,),
-        ),
+        ("an MLX reranker the same", MLX_RERANKER, Runtime.MLX, (Device.APPLE_SILICON,)),
+        ("a GGUF embedder the same", GGUF_EMBEDDER, Runtime.GGUF, (Device.APPLE_SILICON,)),
     ],
 )
 def test_where_a_model_runs(
@@ -54,10 +49,8 @@ def test_where_a_model_runs(
     assert (hardware.runtime(model), hardware.devices(model)) == (runtime, expected), name
 
 
-MLX_RERANKER = "soichisumi/bge-reranker-v2-m3-mlx-affine8"
-GGUF_EMBEDDER = "ggml-org/bge-m3-Q8_0-GGUF"
-ONNX_EMBEDDER, TOO_LARGE = "BAAI/bge-small-en-v1.5", "jinaai/jina-embeddings-v3"
 CPU, CUDA, COREML = "CPUExecutionProvider", "CUDAExecutionProvider", "CoreMLExecutionProvider"
+WEBGPU = onnx_models.WEBGPU
 
 
 @pytest.mark.parametrize(
@@ -67,14 +60,29 @@ CPU, CUDA, COREML = "CPUExecutionProvider", "CUDAExecutionProvider", "CoreMLExec
         ("ONNX on auto with CUDA: the GPU", ONNX_EMBEDDER, "auto", False, [CUDA, CPU], Device.GPU),
         ("ONNX on cpu: the CPU, CUDA or not", ONNX_EMBEDDER, "cpu", False, [CUDA, CPU], Device.CPU),
         (
-            "ONNX on coreml: Apple Silicon",
+            "ONNX on auto with WebGPU: Apple Silicon",
             ONNX_EMBEDDER,
+            "auto",
+            False,
+            [COREML, WEBGPU, CPU],
+            Device.APPLE_SILICON,
+        ),
+        (
+            "ONNX on coreml: Apple Silicon",
+            ON_COREML,
             "coreml",
             False,
             [COREML, CPU],
             Device.APPLE_SILICON,
         ),
-        ("too large for CoreML: the CPU", TOO_LARGE, "coreml", False, [COREML, CPU], Device.CPU),
+        (
+            "not measured on CoreML: the CPU",
+            ONNX_EMBEDDER,
+            "coreml",
+            False,
+            [COREML, CPU],
+            Device.CPU,
+        ),
         ("MLX installed: Apple Silicon", MLX_RERANKER, "auto", True, [CPU], Device.APPLE_SILICON),
         ("MLX not installed: nowhere", MLX_RERANKER, "auto", False, [CPU], None),
         ("MLX on cpu: nowhere, MLX has no CPU", MLX_RERANKER, "cpu", True, [CPU], None),

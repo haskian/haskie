@@ -31,7 +31,7 @@ VECTOR = (
     "1 / (3 − 2·cosine) for unit vectors, 1 at cosine 1 and 0.33 at cosine 0."
 )
 RERANKS = (
-    "The cross-encoder Xenova/ms-marco-MiniLM-L-6-v2 rescores up to 50 candidates, and the "
+    "The cross-encoder cross-encoder/ettin-reranker-32m-v1 rescores up to 50 candidates, and the "
     "sigmoid of its logit, 1 / (1 + e^−logit), replaces every score before it: 0 to 1, 0.5 at "
     "logit 0, bounded but not calibrated. It reads the query and the chunk together, so the mode "
     "only decides which candidates it reads, and a chunk scores the same in every mode that finds "

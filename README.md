@@ -98,7 +98,7 @@ retrieval decisions, so the agent needs fewer round trips and fewer tokens.
 - **Local and polite to your machine.** Your documents never leave it. Only the models download,
   once, from Hugging Face. Indexing runs in parallel within a CPU budget you set, and after a crash
   the run resumes at the step it was on.
-- **Sensible defaults, open to tuning.** The defaults are a small English embedding model, hybrid
+- **Sensible defaults, open to tuning.** The defaults are a small multilingual embedding model, hybrid
   search and 1,200-character chunks. Each collection can override the chunk and search settings.
 
 ## Status: early, and already useful
@@ -120,11 +120,12 @@ haskie install claude       # MCP server, skill, rule and SessionStart hook for 
 haskie uninstall claude     # removes all four again; documents and collections stay
 ```
 
-- **macOS (Apple Silicon):** also installs MLX and llama.cpp for the Apple GPU. llama.cpp
-  compiles during the install, so run `xcode-select --install` first.
+- **macOS (Apple Silicon):** every model runs on the Apple GPU through ONNX Runtime's WebGPU
+  plugin. MLX and llama.cpp are installed too, for the `-mlx` and `-gguf` profiles, which are
+  faster still. llama.cpp compiles during the install, so run `xcode-select --install` first.
 - **Linux:** ONNX Runtime runs on an NVIDIA GPU with CUDA 13 and cuDNN 9, else on the CPU.
-- **First run:** pick an embedding model. The default, bge-small, is English and about 130 MB.
-  Changing it later means running *Index all* in each collection.
+- **First run:** pick an embedding model. The default, granite-97m-multilingual, reads 200+
+  languages and is about 390 MB. Changing it later means running *Index all* in each collection.
 - **Smoke test:** import a file on *Documents*, add it to a collection, then ask about it on
   *Explore*.
 - **Other commands:** `haskie stop`, `haskie run --foreground` (for a supervisor),
@@ -228,7 +229,7 @@ vector and full-text (BM25) search in one table, on a columnar format built for 
 code. By default haskie fuses both by rank (reciprocal rank fusion, RRF). An optional
 cross-encoder reads the query and passage together and rescores the top candidates. Adding one
 takes the cut in failed retrievals from 49% to 67% [14]. It is off by default. Settings offers
-models from 16 million parameters up to multilingual ones.
+English models from 16 million parameters up to 150 million.
 
 **Repeats folded, passages whole.** Five books that make the same point would fill five of your
 agent's slots. Most rerankers score one passage at a time, so they cannot see repeats [18]. haskie

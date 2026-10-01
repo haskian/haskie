@@ -43,9 +43,8 @@ from haskie.collection.index import (
     span_key,
 )
 from haskie.document import document
-from haskie.indexing import embed_cache, hardware, mlx_models, models
+from haskie.indexing import embed_cache, models, onnx_models
 from haskie.indexing.embed import embed_query
-from haskie.indexing.hardware import Runtime
 from haskie.logs import get_logger
 from haskie.search import (
     aspects,
@@ -971,11 +970,9 @@ async def rerank_excerpts(
 
 async def _reads(model: str) -> int:
     """How many tokens of a pair `model` reads: what the catalogue says it takes, or less where
-    its loader cuts shorter (the MLX rerankers read `mlx_models.MAX_PAIR_TOKENS`)."""
+    its loaders cut every pair shorter (`onnx_models.MAX_PAIR_TOKENS`, which MLX reads too)."""
     context = (await catalogue.rerankers())[model].context_tokens
-    if hardware.runtime(model) == Runtime.MLX:
-        return min(context, mlx_models.MAX_PAIR_TOKENS)
-    return context
+    return min(context, onnx_models.MAX_PAIR_TOKENS)
 
 
 async def read_excerpts(groups: list[section.Group]) -> list[Excerpt]:

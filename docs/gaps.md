@@ -105,27 +105,33 @@ one.
 
 | model | answered, lowest | unanswered, highest | bars |
 | --- | --- | --- | --- |
-| compact (bge-small), best cosine | 0.751 (Rust), 0.673 (docs) | 0.763 (Rust), 0.700 (docs) | weak 0.67, borderline to 0.775 |
-| arctic-m, best cosine | 0.386 (Rust), 0.278 (docs) | 0.464 | weak 0.27, no band |
-| MiniLM-L-6, best reranker score | 0.939 (Rust), 0.091 (docs) | 0.984 | floor 0.05 |
+| granite-97m-multilingual, best cosine | 0.881 (Rust), 0.793 (docs) | 0.884 (Rust), 0.826 (docs) | weak 0.79, borderline to 0.885 |
+| ettin-32m, best reranker score | 0.99988 (Rust), 0.9991 (docs) | 0.99982 (Rust), 0.99998 (docs) | floor 0.05, uncalibrated |
+
+The findings below were first measured with models the catalogue no longer holds (bge-small,
+arctic-embed-m, MiniLM-L-6); where the current defaults were measured too, both are given.
 
 What the measurements say:
 
 - **The best cosine stays.** The mean of the top 5 (`mean5`) ranks answered over unanswered a
-  little better (AUROC 0.999 against 0.998 on the Rust book, 1.000 against 0.983 on the docs).
-  Under a bar that flags no answered question on either shelf, it catches 32 of 45 against 30 for
-  compact, but 13 against 18 for arctic-m. The top-two gap and the spread barely separate (AUROC
-  0.64 and 0.86).
+  little better (bge-small: AUROC 0.999 against 0.998 on the Rust book, 1.000 against 0.983 on
+  the docs; granite-97m: 0.999 against 0.997, and 0.967 for both). Under a bar that flags no
+  answered question on either shelf, it caught 32 of 45 against 30 for bge-small, but 13 against
+  18 for arctic-m. The top-two gap and the spread barely separate (AUROC 0.64 and 0.86).
 - **A bar does not travel between shelves, or between versions of one.** The Rust book's lowest
   answered cosine would flag 3 of 12 answered docs questions. An edit to the docs alone moved
   their lowest answered cosine from 0.698 to 0.673. The bars sit under both shelves, each read at
   its pinned commit.
-- **The band catches what the low bar misses.** For compact, 0.67 to 0.775 holds all 15 other
-  unanswered questions and 5 of 57 answered. For arctic-m the scores overlap too far: no band
-  holds the missed ones under 15% of answered, so it has none. The reranker's floor has no band
-  either: holding its 9 missed questions would flag 26% of answered.
-- **The reranker is the sharper judge** on the Rust book (AUROC 0.998, and its floor catches 36
-  of 45), weaker on the small docs shelf (0.883).
+- **The band catches what the low bar misses.** For granite-97m, 0.79 to 0.885 holds the 27
+  unanswered questions the low bar misses, with 8 of 57 answered (14%); for bge-small, 0.67 to
+  0.775 held 15 with 5 of 57. For arctic-m the scores overlapped too far: no band held the missed
+  ones under 15% of answered, so it had none.
+- **The reranker ranks best, but its floor needs calibrating.** ettin-32m ranks every answered
+  Rust book question over every unanswered one (AUROC 1.000), the docs shelf less well (0.733).
+  Its scores crowd near 1: the Rust book's unanswered questions score 0.997 on median, because
+  they sit near its topics. So at 0.05 its floor catches none of 45, where MiniLM-L-6 caught 36.
+  A floor under every answered question (0.999) would catch 39, but the floor also drops chunks
+  from every search, so it is left to `calibrate-rerankers` on borderline pairs.
 - **Missing words do not tell a wording gap from a missing document.** The idea was that a
   borderline question whose words no near miss holds (`missing_terms`) exists under other words.
   But every unanswered question has such words (45 of 45), so the rule would label 14 of 45 true

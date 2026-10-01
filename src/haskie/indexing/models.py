@@ -92,7 +92,7 @@ async def warm_model(kind: ModelKind, name: str) -> None:
     """Load one model into this process's caches. Fetches it when the disk cache is cold, so a
     call made after the record says SUCCESS is a local read.
 
-    The load itself is CPU (and, on a cold cache, a download inside fastembed), so it runs in a
+    The load itself is CPU (and, on a cold cache, a download from Hugging Face), so it runs in a
     worker thread under one slot of the CPU budget rather than on the caller's loop."""
     accelerator = (await load_user_settings()).pipeline.accelerator
     warm = {

@@ -14,7 +14,7 @@ const DEFAULTS: SearchSettings = {
   nprobes: 20,
   refine_factor: 10,
   reranker: 'none',
-  reranker_model: 'Xenova/ms-marco-MiniLM-L-6-v2',
+  reranker_model: 'cross-encoder/ettin-reranker-32m-v1',
   map_reranker_model: 'cross-encoder/ms-marco-MiniLM-L2-v2',
   rerank_with_context: false,
   min_rerank_score: 0.05,

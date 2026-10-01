@@ -40,8 +40,8 @@ from conftest import (
     await_terminal,
     batch_of,
     collection_hits,
-    compact_model,
     counted_list_workflows,
+    default_model,
     delete_collection,
     delete_document,
     doc_of,
@@ -1229,7 +1229,7 @@ async def test_ensure_embedding_fails_permanently_under_another_model(dbos, tmp_
     wanted = embed_cache.params(
         row,
         ChunkSettings(chunk_size=300),
-        EmbeddingModel("BAAI/bge-small-en-v1.5", 384),
+        EmbeddingModel("ibm-granite/granite-embedding-97m-multilingual-r2", 384),
     )
     user = await load_user_settings()
     assert await catalogue.embedding_model(user) is None, "the profile has no model"
@@ -1239,19 +1239,19 @@ async def test_ensure_embedding_fails_permanently_under_another_model(dbos, tmp_
             workflows.EMBEDDING_QUEUE, workflows.ensure_embedding, row.id, wanted
         )
 
-    with pytest.raises(PermanentError, match="embedding model changed: wanted BAAI/"):
+    with pytest.raises(PermanentError, match="embedding model changed: wanted ibm-granite/"):
         await handle.get_result(polling_interval_sec=workflows.TASK_POLL)
     assert await embed_cache.lookup(wanted) is None, "nothing was written under the wrong model"
     assert "plan" not in await _steps(handle.workflow_id), "it never reached the embed stage"
 
 
-async def _fake_compact_model(monkeypatch: pytest.MonkeyPatch, load_model) -> str:
+async def _fake_default_model(monkeypatch: pytest.MonkeyPatch, load_model) -> str:
     """Fake the compact model's download (`load_model`) and its vectors, so the test fetches
     nothing, and let a run wait 20 ms between two asks. Returns the download's workflow id."""
     monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
     monkeypatch.setattr(models, "load_model", load_model)
     monkeypatch.setattr(embed, "embed_texts", lambda m, texts: [[0.5] * m.dims for _ in texts])
-    return models._model_id(models.ModelKind.EMBEDDING, (await compact_model()).name)
+    return models._model_id(models.ModelKind.EMBEDDING, (await default_model()).name)
 
 
 def _record_embeds(monkeypatch: pytest.MonkeyPatch, before=lambda calls: None) -> list[str]:
@@ -1279,9 +1279,11 @@ async def test_an_import_waits_for_the_embedding_model_to_download(
     async def load_model(kind: str, name: str) -> None:
         assert await wait_event(release), "the test never finished the download"
 
-    await _fake_compact_model(monkeypatch, load_model)
+    await _fake_default_model(monkeypatch, load_model)
     embedded = _record_embeds(monkeypatch)
-    await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
+    await models.ensure_models(
+        await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    )
     doc = await import_row("a.md", MD, tmp_path)
     job_id = await dbos.start_import(doc)
     run = workflows.embed_id(job_id, doc.id)
@@ -1310,7 +1312,7 @@ async def test_a_batch_waits_for_the_embedding_model_to_warm(
     async def load_model(kind: str, name: str) -> None:
         pass
 
-    download = await _fake_compact_model(monkeypatch, load_model)
+    download = await _fake_default_model(monkeypatch, load_model)
 
     def restart_then_warm(calls: int) -> None:
         if calls == 1:
@@ -1319,7 +1321,9 @@ async def test_a_batch_waits_for_the_embedding_model_to_warm(
             models._mark_ready(download)  # the boot's warm-up is done
 
     embedded = _record_embeds(monkeypatch, restart_then_warm)
-    await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
+    await models.ensure_models(
+        await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    )
     await await_terminal([download])
     doc = await import_row("a.md", MD, tmp_path)
     job_id = await dbos.start_import(doc)
@@ -1343,7 +1347,7 @@ async def test_describing_waits_for_the_embedding_model_to_warm(
     async def load_model(kind: str, name: str) -> None:
         pass
 
-    download = await _fake_compact_model(monkeypatch, load_model)
+    download = await _fake_default_model(monkeypatch, load_model)
     restarted = False
     asked = 0  # asks since the "restart"
     require_ready = models.require_ready
@@ -1368,7 +1372,9 @@ async def test_describing_waits_for_the_embedding_model_to_warm(
         return found
 
     monkeypatch.setattr(pipeline, "embed_batch", embedded_then_restarted)
-    await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
+    await models.ensure_models(
+        await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    )
     await await_terminal([download])
     doc = await import_row("a.md", MD, tmp_path)
     job_id = await dbos.start_import(doc)
@@ -1394,9 +1400,11 @@ async def test_an_import_whose_embedding_model_failed_ends_in_error(
     async def load_model(kind: str, name: str) -> None:
         raise RuntimeError("no such model")
 
-    download = await _fake_compact_model(monkeypatch, load_model)
+    download = await _fake_default_model(monkeypatch, load_model)
     embedded = _record_embeds(monkeypatch)
-    await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
+    await models.ensure_models(
+        await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    )
     await await_terminal([download])
     asked: list[str] = []
     require_ready = models.require_ready
@@ -2814,7 +2822,7 @@ def test_the_names_the_operations_view_spells_out_are_the_ones_dbos_records() ->
 async def test_an_unreadable_settings_row_does_not_stop_the_boot(dbos, monkeypatch) -> None:
     """The loader already tolerates a row another build wrote, so `start()` applies defaults and
     `/api/status` reports the problem."""
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     async with db.connect() as conn:
         await conn.execute(update(settings_table).values(json='{"pipeline": {"cpu_budget": 0}}'))
     forget_settings()  # the row was written behind the loader's back, as another build would
@@ -2836,7 +2844,7 @@ async def test_settings_rejected_while_applying_fall_back_to_defaults_at_boot(
     dbos, monkeypatch, caplog
 ) -> None:
     """Whatever `apply_settings` rejects, boot continues on defaults."""
-    stored = await save_user_settings(UserSettings(embedding="compact"))
+    stored = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     applied: list[UserSettings] = []
 
     async def apply_settings(value: UserSettings) -> None:

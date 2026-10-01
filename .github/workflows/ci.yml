@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   # The wheel is pure-Python (`py3-none-any`), so no OS decides the artifact — but the native
-  # runtime deps (fastembed, lancedb) do differ per OS, so the suite runs on both.
+  # runtime deps (onnxruntime, lancedb) do differ per OS, so the suite runs on both.
   check:
     name: check + test (${{ matrix.os }})
     strategy:

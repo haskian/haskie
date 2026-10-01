@@ -400,8 +400,9 @@ questions it answers, one reranker pass a question, and the best of them is its 
 question's excerpts are then sorted by it; several keep the order their turns gave them.
 
 It runs only when every excerpt fits what the reranker reads, estimated at four characters a
-token: the catalogue's context for an ONNX reranker (jina-v1-turbo and ettin read 8,192 tokens),
-512 for the MLX ones, whose loader cuts there, and 512 for MiniLM. An excerpt cut short would be
+token: the catalogue's context, or less where the loader cuts shorter. Every reranker today reads
+512, though the models read 8,192: haskie cuts each pair there (`onnx_models.MAX_PAIR_TOKENS`).
+An excerpt cut short would be
 scored on its opening alone, beside others scored whole, so if one does not fit the chunk scores
 stand. Each search logs `search_rerank_excerpts` with whether it ran and how long it took. It is
 off until an evaluation shows it returns more answer per character than the fold.
@@ -455,9 +456,10 @@ Hybrid and full-text searches use both:
   near-duplicate line [1]). A result with fewer than 5 shingles never matches here.
 
 Cosine thresholds are set per embedding profile (`duplicate_chunk` and `duplicate_passage` in
-`catalogue/seed.sql`), because a raw cosine means different things for different models. The
-current values are placeholders, not calibrated, and the seed file names their sources. A profile
-without thresholds folds by words alone. The containment threshold is a judgement call, and the
+`catalogue/seed.sql`), because a raw cosine means different things for different models. No
+profile has them yet, so every profile folds by words alone. For granite-97m no threshold could
+work: two different neighbouring chunks of the Rust book have a median cosine of 0.951, and one
+paragraph under two heading paths scored 0.921. The containment threshold is a judgement call, and the
 code says so.
 
 A folded result becomes an `also_in` entry under the result it repeats, and `also_in` is a tree.
@@ -513,7 +515,9 @@ and it is dropped from the ranking before passages are built. The floor is `min_
 set, else the reranker's own (`reranker_calibration` in the catalogue): the average score it gives
 30 to 50 pairs a person judged borderline relevant, the way Cohere sets a relevance threshold [6].
 `mise run calibrate-rerankers` measures it on your own collections; until then every reranker starts
-at 0.05, judged on one book with MiniLM-L-6, and says so in the score lineage. A part's tag in
+at 0.05, judged on one book with the MiniLM-L-6 the catalogue once held, and says so in the score
+lineage. For Ettin it drops almost nothing: ettin-32m scores a question the shelf does not answer
+at logit 5.9 on median (`docs/gaps.md`). A part's tag in
 `aspects` then means the reranker judged the passage an answer to it. Each chunk of the passage
 scores its best part, and the passage folds those scores by `score_fold` like any passage. Without a
 reranker the scores of two parts share no scale, so `aspects` lists the parts the passage ranked

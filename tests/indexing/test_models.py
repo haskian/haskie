@@ -16,8 +16,8 @@ from conftest import (
     attach_document,
     await_terminal,
     collection_hits,
-    compact_model,
     counted_list_workflows,
+    default_model,
     import_document,
     restart_dbos,
     search_with,
@@ -105,8 +105,8 @@ async def test_model_state_decides_whether_search_may_run(
             assert await wait_event(blocked)
 
     monkeypatch.setattr(models, "load_model", load_model)
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    model_name = (await compact_model()).name
+    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    model_name = (await default_model()).name
 
     if outcome != "missing":
         await models.ensure_models(user)
@@ -138,8 +138,8 @@ async def test_ensure_models_retries_a_model_that_failed(dbos, monkeypatch) -> N
             raise RuntimeError("connection reset")
 
     monkeypatch.setattr(models, "load_model", load_model)
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    model_name = (await compact_model()).name
+    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    model_name = (await default_model()).name
 
     await models.ensure_models(user)
     await await_terminal([models._model_id(ModelKind.EMBEDDING, model_name)])
@@ -168,8 +168,8 @@ async def test_require_ready_answers_from_the_process_that_loaded_the_model(
             raise RuntimeError("connection reset")
 
     monkeypatch.setattr(models, "load_model", load_model)
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    model_name = (await compact_model()).name
+    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    model_name = (await default_model()).name
     await models.ensure_models(user)
     await await_terminal([models._model_id(ModelKind.EMBEDDING, model_name)])
     with pytest.raises(Unavailable, match="failed to load"):
@@ -196,7 +196,7 @@ async def test_embed_stage_precomputes_vectors_and_hybrid_search_uses_them(
 ) -> None:
     user = await save_user_settings(
         UserSettings(
-            embedding="compact",
+            embedding="granite-97m-multilingual",
             search=SearchSettings(reranker=Reranker.CROSS_ENCODER),
         )
     )
@@ -252,9 +252,11 @@ async def test_models_are_idempotent_and_fail_fast_when_missing(dbos, monkeypatc
     plain = UserSettings(embedding="none")
     assert await models.ensure_models(plain) == [], "nothing required for full-text only"
     with pytest.raises(NotReady, match="not loaded yet"):
-        await models.require_ready(ModelKind.EMBEDDING, "BAAI/bge-small-en-v1.5")
+        await models.require_ready(
+            ModelKind.EMBEDDING, "ibm-granite/granite-embedding-97m-multilingual-r2"
+        )
 
-    wanted = await save_user_settings(UserSettings(embedding="compact"))
+    wanted = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     (status,) = await models.ensure_models(wanted)
     assert status.state in ("loading", "ready")
     await wait_for(models._model_id(ModelKind.EMBEDDING, status.name))
@@ -275,7 +277,8 @@ async def test_models_are_idempotent_and_fail_fast_when_missing(dbos, monkeypatc
     await models.ensure_models(broken)
     with pytest.raises(HaskieError):  # the model does not exist
         await wait_for(models._model_id(ModelKind.RERANKER, "nope/x"))
-    (status,) = await models.model_statuses()
+    # a cross-encoder also loads the map's reranker, which is no part of this
+    (status,) = [one for one in await models.model_statuses() if one.name == "nope/x"]
     assert (status.kind, status.state) == ("reranker", "error") and status.error
     with pytest.raises(Unavailable, match="failed to load"):
         await models.require_ready(ModelKind.RERANKER, "nope/x")
@@ -287,9 +290,9 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
 ) -> None:
     """The index has vectors, so a hybrid query needs the model; a request must fail fast with
     503 semantics rather than block on a download."""
-    user = await save_user_settings(UserSettings(embedding="compact"))
+    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     await models.ensure_models(user)
-    await await_terminal([models._model_id(ModelKind.EMBEDDING, (await compact_model()).name)])
+    await await_terminal([models._model_id(ModelKind.EMBEDDING, (await default_model()).name)])
     collection = await Collection.create("busy")
     doc = await import_document(dbos, "g.md", MD, tmp_path)
     await attach_document(dbos, "busy", doc.name)
@@ -307,28 +310,28 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
         ("full text only", UserSettings(embedding="none"), [], []),
         (
             "an embedding profile",
-            UserSettings(embedding="compact"),
+            UserSettings(embedding="granite-97m-multilingual"),
             [],
-            [("embedding", "BAAI/bge-small-en-v1.5")],
+            [("embedding", "ibm-granite/granite-embedding-97m-multilingual-r2")],
         ),
         (
             "an embedding profile and a cross-encoder",
             UserSettings(
-                embedding="compact",
+                embedding="granite-97m-multilingual",
                 search=SearchSettings(reranker=Reranker.CROSS_ENCODER),
             ),
             [],
             [
-                ("embedding", "BAAI/bge-small-en-v1.5"),
-                ("reranker", "Xenova/ms-marco-MiniLM-L-6-v2"),
+                ("embedding", "ibm-granite/granite-embedding-97m-multilingual-r2"),
+                ("reranker", "cross-encoder/ettin-reranker-32m-v1"),
                 ("reranker", "cross-encoder/ms-marco-MiniLM-L2-v2"),
             ],
         ),
         (
             "a collection override nobody else asks for",
             UserSettings(embedding="none"),
-            ["BAAI/bge-reranker-base"],
-            [("reranker", "BAAI/bge-reranker-base")],
+            ["Alibaba-NLP/gte-reranker-modernbert-base"],
+            [("reranker", "Alibaba-NLP/gte-reranker-modernbert-base")],
         ),
         (
             "the same model at both levels is wanted once",
@@ -336,21 +339,22 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
                 embedding="none",
                 search=SearchSettings(reranker=Reranker.CROSS_ENCODER),
             ),
-            ["Xenova/ms-marco-MiniLM-L-6-v2", "BAAI/bge-reranker-base"],
+            ["cross-encoder/ettin-reranker-32m-v1", "Alibaba-NLP/gte-reranker-modernbert-base"],
             [
-                ("reranker", "Xenova/ms-marco-MiniLM-L-6-v2"),
+                ("reranker", "cross-encoder/ettin-reranker-32m-v1"),
                 ("reranker", "cross-encoder/ms-marco-MiniLM-L2-v2"),
-                ("reranker", "BAAI/bge-reranker-base"),
+                ("reranker", "Alibaba-NLP/gte-reranker-modernbert-base"),
             ],
         ),
         (
             "descriptors an llm writes",
             UserSettings(
-                embedding="compact", pipeline=PipelineSettings(descriptors=Descriptors.LLM)
+                embedding="granite-97m-multilingual",
+                pipeline=PipelineSettings(descriptors=Descriptors.LLM),
             ),
             [],
             [
-                ("embedding", "BAAI/bge-small-en-v1.5"),
+                ("embedding", "ibm-granite/granite-embedding-97m-multilingual-r2"),
                 ("describer", "ggml-org/gemma-4-E2B-it-GGUF"),
             ],
         ),
@@ -422,7 +426,7 @@ async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> 
     ever fetch it, and the first search of that collection would fail with "not loaded yet"."""
     loaded: list[str] = []
     monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: loaded.append(name))
-    override = "jinaai/jina-reranker-v1-turbo-en"
+    override = "cross-encoder/ettin-reranker-150m-v1"
     collection = await Collection.create("picky")
     # both of its models, so its map loads no default of the user's either
     await collection.set_overrides(
@@ -460,7 +464,7 @@ async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> N
     monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: None)
     user = await save_user_settings(
         UserSettings(
-            embedding="compact",
+            embedding="granite-97m-multilingual",
             search=SearchSettings(reranker=Reranker.CROSS_ENCODER),
         )
     )
@@ -472,8 +476,8 @@ async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> N
 
     downloads = (await operations.list_operations("download")).items
     assert {d.title for d in downloads} == {
-        f"embedding {(await compact_model()).name}",
-        "reranker Xenova/ms-marco-MiniLM-L-6-v2",
+        f"embedding {(await default_model()).name}",
+        "reranker cross-encoder/ettin-reranker-32m-v1",
         "reranker cross-encoder/ms-marco-MiniLM-L2-v2",
     }, "one row per required model, kind and name read out of the workflow id"
     assert {d.status for d in downloads} == {"SUCCESS"}
@@ -488,8 +492,8 @@ async def test_restart_does_not_create_a_second_download_record(dbos, monkeypatc
     """The files stay on disk and the record is durable, so a restart reuses both: one row per
     model, however often the dev server reloads."""
     monkeypatch.setattr(embed, "warm", lambda name, accelerator: None)
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    workflow_id = models._model_id(ModelKind.EMBEDDING, (await compact_model()).name)
+    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    workflow_id = models._model_id(ModelKind.EMBEDDING, (await default_model()).name)
     await models.ensure_models(user)
     await await_terminal([workflow_id])
 
@@ -525,8 +529,8 @@ async def test_a_downloaded_model_is_warmed_after_restart_before_search_uses_it(
 
     monkeypatch.setattr(models, "load_model", load_model)
     monkeypatch.setattr(embed, "warm", warm)
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    model_name = (await compact_model()).name
+    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    model_name = (await default_model()).name
     await models.ensure_models(user)
     await await_terminal([models._model_id(ModelKind.EMBEDDING, model_name)])
 

@@ -13,12 +13,12 @@ from haskie.search.log import Asked, LoggedQuestion
 from haskie.search.passage import Excerpt, Passage, PassageReference, Span
 from haskie.search.section_map import MappedSection
 
-MINILM = "Xenova/ms-marco-MiniLM-L-6-v2"
+ETTIN = "cross-encoder/ettin-reranker-32m-v1"
 BARS = Bars(
-    weak_match={"compact": 0.70, "arctic-m": 0.40},
-    answered_match={"compact": 0.775},
-    same_topic={"compact": 0.70},
-    floor={MINILM: 0.05},
+    weak_match={"granite-97m-multilingual": 0.70, "bekko-a25m": 0.40},
+    answered_match={"granite-97m-multilingual": 0.775},
+    same_topic={"granite-97m-multilingual": 0.70},
+    floor={ETTIN: 0.05},
 )
 
 # one excerpts search under the default profile and reranker, as `log.load` returns it
@@ -31,8 +31,8 @@ SEARCH = log.Logged(
     context="a Python service on Kafka",
     collections=["distributed-systems", "kafka"],
     mode=None,
-    embedding="compact",
-    reranker=MINILM,
+    embedding="granite-97m-multilingual",
+    reranker=ETTIN,
     min_rerank_score=None,
     result_limit=25,
     result_count=25,
@@ -107,7 +107,7 @@ NO_RERANK = {"reranker": None}
         ),
         (
             "a reranker the bars do not know leaves it to the cosine",
-            {"reranker": "BAAI/bge-reranker-base"},
+            {"reranker": "Alibaba-NLP/gte-reranker-modernbert-base"},
             {"best_rerank": 0.0, "best_similarity": 0.6},
             Signal.WEAK,
         ),
@@ -122,7 +122,7 @@ NO_RERANK = {"reranker": None}
         ("at the high bar is an answer", NO_RERANK, {"best_similarity": 0.775}, None),
         (
             "a profile with no high bar has no band",
-            {**NO_RERANK, "embedding": "arctic-m"},
+            {**NO_RERANK, "embedding": "bekko-a25m"},
             {"best_similarity": 0.5},
             None,
         ),
@@ -134,7 +134,7 @@ NO_RERANK = {"reranker": None}
         ),
         (
             "a profile without a bar gives no verdict",
-            {**NO_RERANK, "embedding": "gte-base"},
+            {**NO_RERANK, "embedding": "bekko-a8m"},
             {"best_similarity": 0.1},
             None,
         ),
@@ -173,9 +173,9 @@ def test_topics_group_by_vector_then_by_words() -> None:
         _gap(6, "Kafka retries", 600.0, A, session_id="s1"),
         _gap(5, "idempotent Kafka consumers", 500.0, B, session_id="s2", collections=["notes"]),
         _gap(4, "sourdough starter", 400.0, C, session_id=None),
-        _gap(3, "Sourdough, starter?", 300.0, None, embedding="gte-base"),  # words: 4's
+        _gap(3, "Sourdough, starter?", 300.0, None, embedding="bekko-a8m"),  # words: 4's
         _gap(2, "Kafka retries", 200.0, None, embedding=None),  # words: 6's
-        _gap(1, "vitamin D", 100.0, [0.0, 1.0], embedding="gte-base"),  # no bar: words only
+        _gap(1, "vitamin D", 100.0, [0.0, 1.0], embedding="bekko-a8m"),  # no bar: words only
         _gap(8, "rioja grapes", 50.0, None),
     ]
     near = {6: [_result(0, None)], 5: []}

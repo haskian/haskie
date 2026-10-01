@@ -2,7 +2,8 @@
 
 Your data lives in one home directory, `~/.haskie` by default (`--home` or `HASKIE_HOME` moves
 it). You can back it up, inspect it or delete it. Downloaded model weights are the exception:
-they sit in the fastembed and Hugging Face caches, outside the home.
+they sit in the Hugging Face cache, outside the home: the ONNX models under `haskie-onnx` in it,
+as plain files, since ONNX Runtime refuses external data behind the cache's links.
 
 ```
 ~/.haskie/

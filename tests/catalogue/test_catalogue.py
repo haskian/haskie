@@ -12,9 +12,9 @@ from sqlalchemy.exc import IntegrityError
 
 from haskie import db
 from haskie.catalogue import catalogue
-from haskie.catalogue.catalogue import DuplicateCosine, EmbeddingModel, Matryoshka
+from haskie.catalogue.catalogue import DuplicateCosine, EmbeddingModel
 from haskie.errors import InvalidInput
-from haskie.indexing import embed, gguf_models, mlx_models, onnx_rerank
+from haskie.indexing import gguf_models, mlx_models, onnx_models
 from haskie.indexing.hardware import Device, Runtime
 from haskie.settings import (
     DEFAULT_MAP_RERANKER,
@@ -31,7 +31,9 @@ from haskie.settings import (
 
 pytestmark = pytest.mark.anyio
 
-NOMIC = "nomic-ai/nomic-embed-text-v1.5"
+ON_CPU = PipelineSettings(accelerator=Accelerator.CPU)
+
+BEKKO = "hotchpotch/bekko-embedding-v1-a25m"
 
 
 async def test_every_model_says_what_it_is() -> None:
@@ -39,7 +41,7 @@ async def test_every_model_says_what_it_is() -> None:
     embedders = await catalogue.embedding_metadata()
     rerankers = await catalogue.rerankers()
 
-    assert (len(embedders), len(rerankers)) == (18, 12), "every profile and reranker of the seed"
+    assert (len(embedders), len(rerankers)) == (14, 7), "every profile and reranker of the seed"
     assert all(isinstance(one, catalogue.EmbedderMetadata) for one in embedders.values())
     assert all(isinstance(one, catalogue.RerankerMetadata) for one in rerankers.values())
     for name, metadata in [*embedders.items(), *rerankers.items()]:
@@ -47,36 +49,41 @@ async def test_every_model_says_what_it_is() -> None:
         assert all((metadata.description, metadata.languages, metadata.license)), name
         assert metadata.model_card_url.startswith("https://huggingface.co/"), name
         assert metadata.devices, f"{name}: runs somewhere"
-    assert embedders["compact"] == catalogue.EmbedderMetadata(
-        description="Small and fast; a good default (~130 MB).",
-        parameters=33360512,
-        context_tokens=512,
-        languages="English",
-        license="MIT",
-        released=date(2023, 9, 12),
-        model_card_url="https://huggingface.co/BAAI/bge-small-en-v1.5",
+    assert embedders["granite-97m-multilingual"] == catalogue.EmbedderMetadata(
+        description=(
+            "The best all-round small multilingual embedder: #1 on multilingual and reasoning "
+            "retrieval; a good default (~390 MB)."
+        ),
+        parameters=97441152,
+        context_tokens=32768,
+        languages="multilingual (200+, 52 enhanced)",
+        license="Apache-2.0",
+        released=date(2026, 4, 20),
+        model_card_url="https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2",
         runtime=Runtime.ONNX,
         devices=(Device.CPU, Device.APPLE_SILICON, Device.GPU),
         dimensions=384,
     )
     # a conversion links to and is dated by the weights it was made from
-    assert rerankers["soichisumi/bge-reranker-v2-m3-mlx-affine8"] == catalogue.RerankerMetadata(
-        description="BAAI's multilingual reranker, 8-bit (near lossless, 607 MB).",
-        parameters=567755777,
+    granite = "jrc2139/granite-embedding-reranker-english-r2-ONNX"
+    assert rerankers[granite] == catalogue.RerankerMetadata(
+        description=(
+            "IBM's reranker, trained without MS MARCO and its non-commercial license (~600 MB)."
+        ),
+        parameters=149605633,
         context_tokens=8192,
-        languages="multilingual (100+)",
+        languages="English",
         license="Apache-2.0",
-        released=date(2024, 3, 15),
-        model_card_url="https://huggingface.co/BAAI/bge-reranker-v2-m3",
-        runtime=Runtime.MLX,
-        devices=(Device.APPLE_SILICON,),
+        released=date(2025, 8, 4),
+        model_card_url="https://huggingface.co/ibm-granite/granite-embedding-reranker-english-r2",
+        runtime=Runtime.ONNX,
+        devices=(Device.CPU, Device.APPLE_SILICON, Device.GPU),
     )
 
 
 async def test_models_are_listed_smallest_first() -> None:
     """Every picker lists them in this order: embedders by vector size and, at one size, by
-    parameters; rerankers by parameters, the smallest the map's default and the next the
-    excerpts' default."""
+    parameters; rerankers by parameters, the smallest the map's default."""
     embedders = await catalogue.embedders()
     metadata = await catalogue.embedding_metadata()
     rerankers = await catalogue.rerankers()
@@ -88,42 +95,42 @@ async def test_models_are_listed_smallest_first() -> None:
     assert [one.parameters for one in rerankers.values()] == sorted(
         one.parameters for one in rerankers.values()
     )
-    assert list(rerankers)[:2] == [DEFAULT_MAP_RERANKER, DEFAULT_RERANKER], "the defaults lead"
+    assert list(rerankers)[:3] == [
+        DEFAULT_MAP_RERANKER,
+        "cross-encoder/ettin-reranker-17m-v1",
+        DEFAULT_RERANKER,
+    ], "the map's default is the smallest, the excerpts' the third, a little slower than ettin-17m"
 
 
 async def test_every_model_has_a_loader_and_every_pin_a_model() -> None:
     """The catalogue lives in the database and the loaders in code, so this keeps the two in step:
     a row nothing can load would fail its first download, and a pin without a row is dead code."""
-    from fastembed import TextEmbedding
-    from fastembed.rerank.cross_encoder import TextCrossEncoder
-
     embedders = {model.name for model in (await catalogue.embedders()).values()}
     rerankers = set(await catalogue.rerankers())
-    listed_embedders = {one["model"] for one in TextEmbedding.list_supported_models()}
-    listed_rerankers = {one["model"] for one in TextCrossEncoder.list_supported_models()}
     pinned_embedders = (
-        set(embed.CUSTOM_EMBEDDERS) | set(mlx_models.EMBEDDERS) | set(gguf_models.PINS)
+        set(onnx_models.EMBEDDERS)
+        | set(mlx_models.POOLED)
+        | set(mlx_models.JINA_V5)
+        | set(gguf_models.PINS)
     )
-    pinned_rerankers = (
-        set(embed.CUSTOM_RERANKERS) | set(onnx_rerank.REVISIONS) | set(mlx_models.RERANKERS)
-    )
+    pinned_rerankers = set(onnx_models.RERANKERS) | set(mlx_models.RERANKERS)
 
-    assert embedders - listed_embedders - pinned_embedders == set()
-    assert rerankers - listed_rerankers - pinned_rerankers == set()
-    assert pinned_embedders <= embedders and pinned_rerankers <= rerankers
+    assert (embedders, rerankers) == (pinned_embedders, pinned_rerankers)
     # a generator is no catalogue model, and no embedder pin either: one name, one runtime role
     assert set(gguf_models.GENERATORS).isdisjoint(embedders | rerankers | pinned_embedders)
     assert {gguf_models.describer(one) for one in Descriptors} - {None} == set(
         gguf_models.GENERATORS
     ), "every generator is some strategy's describer"
-    # a GGUF file holds no positions past its model's context, which the catalogue also states
+    # each loader cuts a text at the model's own context (a GGUF file holds no positions past
+    # it, a BERT none past 512), which the catalogue also states: the two must agree
     metadata = await catalogue.embedding_metadata()
     contexts = {
         model.name: metadata[profile].context_tokens
         for profile, model in (await catalogue.embedders()).items()
     }
-    assert {name: pin.tokens for name, pin in gguf_models.PINS.items()} == {
-        name: contexts[name] for name in gguf_models.PINS
+    pins = onnx_models.EMBEDDERS | mlx_models.POOLED | gguf_models.PINS
+    assert {name: pin.tokens for name, pin in pins.items()} == {
+        name: contexts[name] for name in pins
     }
 
 
@@ -173,15 +180,16 @@ def test_the_seed_replays_harmlessly(tmp_path: Path) -> None:
     finally:
         conn.close()
 
-    assert counts == [29, 18], "17 embedders and 12 rerankers, 18 profiles: once each"
+    assert counts == [20, 14], "13 embedders and 7 rerankers, 14 profiles: once each"
 
 
 _MODEL = (
     "insert into models (name, kind, description, parameters, context_tokens, languages, license, "
-    "released, model_card_url) values ('x/y', '{kind}', 'd', {parameters}, {context_tokens}, "
+    "released, model_card_url) values ('{name}', '{kind}', 'd', {parameters}, {context_tokens}, "
     "'English', 'MIT', '{released}', '{url}')"
 )
 _VALID = {
+    "name": "x/y",
     "kind": "reranker",
     "parameters": 1,
     "context_tokens": 512,
@@ -202,12 +210,12 @@ async def test_the_schema_takes_a_valid_model() -> None:
         (
             "one duplicate cosine without the other",
             "insert into embedding_profiles (profile, model, dims, duplicate_chunk) "
-            f"values ('half', '{NOMIC}', 768, 0.9)",
+            f"values ('half', '{BEKKO}', 384, 0.9)",
         ),
         (
             "full-text only is the absence of a model, not a row",
             "insert into embedding_profiles (profile, model, dims) "
-            f"values ('none', '{NOMIC}', 768)",
+            f"values ('none', '{BEKKO}', 384)",
         ),
         (
             "a model that is neither kind",
@@ -221,7 +229,7 @@ async def test_the_schema_takes_a_valid_model() -> None:
         (
             "a borderline band that ends under its start",
             "update embedding_profiles set weak_match = 0.7, answered_match = 0.6 "
-            "where profile = 'compact'",
+            "where profile = 'granite-97m-multilingual'",
         ),
     ],
 )
@@ -237,42 +245,37 @@ async def test_the_schema_refuses_a_row_the_catalogue_cannot_mean(name: str, sql
         ("full-text only has no model", UserSettings(), None),
         (
             "a profile with thresholds, on the hardware the settings choose",
-            UserSettings(
-                embedding="compact", pipeline=PipelineSettings(accelerator=Accelerator.CPU)
-            ),
+            UserSettings(embedding="granite-97m-multilingual", pipeline=ON_CPU),
             EmbeddingModel(
-                "BAAI/bge-small-en-v1.5",
+                "ibm-granite/granite-embedding-97m-multilingual-r2",
                 384,
                 accelerator=Accelerator.CPU,
-                duplicate=DuplicateCosine(chunk=0.92, passage=0.95),
-                profile="compact",
-                weak_match=0.67,
-                answered_match=0.775,
-                same_topic=0.70,
+                profile="granite-97m-multilingual",
+                weak_match=0.79,
+                answered_match=0.885,
+                same_topic=0.82,
             ),
         ),
         (
-            "a model with prefixes, cut with nomic's layer norm",
-            UserSettings(embedding="nomic-v1.5-512"),
+            "a model with prefixes",
+            UserSettings(embedding="e5-base-v2"),
             EmbeddingModel(
-                NOMIC,
-                512,
-                query_prefix="search_query: ",
-                document_prefix="search_document: ",
-                matryoshka=Matryoshka(layer_norm=True),
-                profile="nomic-v1.5-512",
-            ),
-        ),
-        (
-            "the same model whole: no cut, no thresholds",
-            UserSettings(embedding="nomic-v1.5"),
-            EmbeddingModel(
-                NOMIC,
+                "intfloat/e5-base-v2",
                 768,
-                query_prefix="search_query: ",
-                document_prefix="search_document: ",
-                profile="nomic-v1.5",
+                query_prefix="query: ",
+                document_prefix="passage: ",
+                profile="e5-base-v2",
             ),
+        ),
+        (
+            "a model cut to its first values (Matryoshka)",
+            UserSettings(embedding="bekko-a25m-256"),
+            EmbeddingModel(BEKKO, 256, matryoshka=True, profile="bekko-a25m-256"),
+        ),
+        (
+            "the same model whole: no cut",
+            UserSettings(embedding="bekko-a25m"),
+            EmbeddingModel(BEKKO, 384, profile="bekko-a25m"),
         ),
     ],
 )
@@ -290,18 +293,33 @@ async def test_a_profile_the_catalogue_lacks_does_not_resolve() -> None:
 async def test_one_model_cut_two_ways_is_two_profiles() -> None:
     metadata = await catalogue.embedding_metadata()
 
-    whole, cut = metadata["nomic-v1.5"], metadata["nomic-v1.5-512"]
-    assert cut.description.startswith("nomic v1.5 with its vectors cut to 512")
-    assert whole.description == "Long passages, open training data (~520 MB)."
-    assert (whole.dimensions, cut.dimensions) == (768, 512)
+    whole, cut = metadata["bekko-a25m"], metadata["bekko-a25m-256"]
+    assert cut.description.startswith("bekko-a25m with its vectors cut to 256")
+    assert whole.description.startswith("Small and multilingual: #1 on RTEB")
+    assert (whole.dimensions, cut.dimensions) == (384, 256)
     unshared = {"description": "", "dimensions": 0}
     assert msgspec.structs.replace(cut, **unshared) == msgspec.structs.replace(whole, **unshared), (
         "one model's facts"
     )
 
 
-MLX_RERANKER = "soichisumi/bge-reranker-v2-m3-mlx-affine8"
-ON_CPU = PipelineSettings(accelerator=Accelerator.CPU)
+# The catalogue holds no MLX reranker today, but the runtime stays: this one stands in
+MLX_RERANKER = "test/tiny-reranker-mlx"
+SHORT_RERANKER = "test/short-reranker"  # an ONNX reranker that reads less than its loader cuts to
+
+
+@pytest.fixture
+async def stand_ins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An MLX reranker and a short ONNX one, in the catalogue and pinned in code, with MLX and
+    llama.cpp installed."""
+    async with db.connect() as conn:
+        for name, tokens in [(MLX_RERANKER, 8192), (SHORT_RERANKER, 256)]:
+            values = _VALID | {"name": name, "kind": "reranker", "context_tokens": tokens}
+            await conn.exec_driver_sql(_MODEL.format_map(values))
+    monkeypatch.setitem(mlx_models.RERANKERS, MLX_RERANKER, "0")
+    monkeypatch.setitem(onnx_models.RERANKERS, SHORT_RERANKER, onnx_models.RerankerPin("0"))
+    monkeypatch.setattr(gguf_models, "available", lambda: True)
+    monkeypatch.setattr(mlx_models, "available", lambda: True)
 
 
 @pytest.mark.parametrize(
@@ -309,18 +327,19 @@ ON_CPU = PipelineSettings(accelerator=Accelerator.CPU)
     [
         (
             "an ONNX profile on the CPU runs",
-            UserSettings(embedding="compact", pipeline=ON_CPU),
+            UserSettings(embedding="granite-97m-multilingual", pipeline=ON_CPU),
             None,
         ),
         (
             "a GGUF profile on the CPU: nowhere to run",
-            UserSettings(embedding="bge-small-gguf", pipeline=ON_CPU),
-            "ggml-org/bge-small-en-v1.5-Q8_0-GGUF runs on gguf on the Apple GPU",
+            UserSettings(embedding="e5-base-v2-gguf", pipeline=ON_CPU),
+            "ChristianAzinn/e5-base-v2-gguf runs on gguf on the Apple GPU",
         ),
+        ("a GGUF profile where llama.cpp runs", UserSettings(embedding="e5-base-v2-gguf"), None),
         (
-            "a GGUF profile where llama.cpp runs",
-            UserSettings(embedding="bge-small-gguf"),
-            None,
+            "an MLX profile on the CPU: nowhere to run",
+            UserSettings(embedding="bekko-a25m-mlx", pipeline=ON_CPU),
+            "hotchpotch/bekko-embedding-v1-a25m:mlx runs on mlx on the Apple GPU",
         ),
         (
             "an MLX reranker on the CPU: nowhere to run",
@@ -354,12 +373,10 @@ ON_CPU = PipelineSettings(accelerator=Accelerator.CPU)
         ),
     ],
 )
+@pytest.mark.usefixtures("stand_ins")
 async def test_check_refuses_settings_that_leave_a_model_nowhere_to_run(
-    name: str, settings: UserSettings | CollectionOverrides, error: str | None, monkeypatch
+    name: str, settings: UserSettings | CollectionOverrides, error: str | None
 ) -> None:
-    monkeypatch.setattr(gguf_models, "available", lambda: True)
-    monkeypatch.setattr(mlx_models, "available", lambda: True)
-
     if error is None:
         assert await catalogue.check(settings) is None, name
     else:
@@ -374,7 +391,8 @@ async def test_check_refuses_settings_that_leave_a_model_nowhere_to_run(
         (
             "a known profile and reranker",
             UserSettings(
-                embedding="quality", search=SearchSettings(reranker_model="BAAI/bge-reranker-base")
+                embedding="granite-english",
+                search=SearchSettings(reranker_model="Alibaba-NLP/gte-reranker-modernbert-base"),
             ),
             None,
         ),
@@ -386,8 +404,12 @@ async def test_check_refuses_settings_that_leave_a_model_nowhere_to_run(
         ),
         (
             "an embedder named as a reranker",
-            UserSettings(search=SearchSettings(reranker_model="BAAI/bge-small-en-v1.5")),
-            "unknown reranker model: BAAI/bge-small-en-v1.5",
+            UserSettings(
+                search=SearchSettings(
+                    reranker_model="ibm-granite/granite-embedding-97m-multilingual-r2"
+                )
+            ),
+            "unknown reranker model: ibm-granite/granite-embedding-97m-multilingual-r2",
         ),
         (
             "both unknown: one message names both",
@@ -420,7 +442,7 @@ async def test_check_names_the_model_the_catalogue_lacks(
 # --- the cache name ---------------------------------------------------------------
 
 BASE = EmbeddingModel(
-    NOMIC, 768, query_prefix="search_query: ", document_prefix="search_document: "
+    "intfloat/e5-base-v2", 768, query_prefix="query: ", document_prefix="passage: "
 )
 
 
@@ -428,11 +450,10 @@ BASE = EmbeddingModel(
     ("name", "change", "moves"),
     [
         ("nothing changed", {}, False),
-        ("another document prefix", {"document_prefix": "passage: "}, True),
+        ("another document prefix", {"document_prefix": "document: "}, True),
         ("another vector size", {"dims": 512}, True),
-        ("a Matryoshka cut", {"matryoshka": Matryoshka()}, True),
-        ("the cut with a layer norm", {"matryoshka": Matryoshka(layer_norm=True)}, True),
-        ("another query prefix: queries only", {"query_prefix": "query: "}, False),
+        ("a Matryoshka cut", {"matryoshka": True}, True),
+        ("another query prefix: queries only", {"query_prefix": "search_query: "}, False),
         ("other hardware", {"accelerator": Accelerator.CPU}, False),
         ("other thresholds", {"duplicate": DuplicateCosine(0.9, 0.9)}, False),
     ],
@@ -445,14 +466,16 @@ def test_the_cache_name_moves_with_what_shapes_a_stored_vector(
     changed = msgspec.structs.replace(BASE, **change)
 
     assert (changed.cache_name != BASE.cache_name) is moves, name
-    assert changed.cache_name.startswith(f"{NOMIC}@{changed.dims}:"), "readable where it is shown"
+    assert changed.cache_name.startswith(f"{BASE.name}@{changed.dims}:"), (
+        "readable where it is shown"
+    )
 
 
 def test_a_cut_is_keyed_apart_from_the_same_size_whole() -> None:
     """Two models at one size differ in their vectors when one is a cut: the hash tells them
     apart where the readable part cannot."""
     whole = EmbeddingModel("test/tiny", 2)
-    cut = EmbeddingModel("test/tiny", 2, matryoshka=Matryoshka())
+    cut = EmbeddingModel("test/tiny", 2, matryoshka=True)
 
     assert whole.cache_name != cut.cache_name
 
@@ -460,19 +483,17 @@ def test_a_cut_is_keyed_apart_from_the_same_size_whole() -> None:
 @pytest.mark.parametrize(
     ("name", "model", "reads"),
     [
+        ("what the catalogue says a reranker takes, under its cut", SHORT_RERANKER, 256),
         (
-            "what the catalogue says an ONNX reranker takes",
-            "jinaai/jina-reranker-v1-turbo-en",
-            8192,
-        ),
-        (
-            "an MLX reranker reads what its loader cuts to",
-            "soichisumi/bge-reranker-v2-m3-mlx-affine8",
+            "an ONNX reranker reads what haskie cuts it to",
+            "Alibaba-NLP/gte-reranker-modernbert-base",
             512,
         ),
-        ("a 512-token reranker", "Xenova/ms-marco-MiniLM-L-6-v2", 512),
+        ("a headed ONNX reranker the same", DEFAULT_RERANKER, 512),
+        ("an MLX reranker reads what its loader cuts to", MLX_RERANKER, 512),
     ],
 )
+@pytest.mark.usefixtures("stand_ins")
 async def test_a_whole_excerpt_is_judged_against_what_its_reranker_reads(
     name: str, model: str, reads: int
 ) -> None:

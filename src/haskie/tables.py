@@ -265,10 +265,13 @@ embedding_profiles = Table(
     Column("description", Text),
     Column("query_prefix", Text, nullable=False, server_default=""),
     Column("document_prefix", Text, nullable=False, server_default=""),
+    # 1: the vectors are cut to `dims` (Matryoshka Representation Learning)
     Column(
-        "matryoshka_layer_norm",
+        "matryoshka",
         Integer,
-        CheckConstraint("matryoshka_layer_norm in (0, 1)"),
+        CheckConstraint("matryoshka in (0, 1)"),
+        nullable=False,
+        server_default="0",
     ),
     Column("duplicate_chunk", Float),
     Column("duplicate_passage", Float),

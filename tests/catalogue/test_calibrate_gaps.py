@@ -71,7 +71,9 @@ def test_too_few_labels_measure_nothing(
         bars(answered, unanswered)
 
 
-async def _logged(question: str, similarity: float, profile: str = "compact") -> None:
+async def _logged(
+    question: str, similarity: float, profile: str = "granite-97m-multilingual"
+) -> None:
     """One search as the log keeps it, measured without running one."""
     async with log.capturing(log.Tool.EXCERPTS, [question], None) as capture:
         log.observe_scope(None, ["notes"], log.SearchMode.VECTOR, 10)
@@ -87,10 +89,10 @@ async def test_sample_label_measure_and_write(seeded_home, tmp_path: Path) -> No
         await _logged(f"answered {n}", a)
         await _logged(f"unanswered {n}", u)
     await _logged("answered 0", 0.99)  # asked again: the newest counts
-    await _logged("another profile's", 0.1, profile="arctic-m")
+    await _logged("another profile's", 0.1, profile="bekko-a25m")
     out = tmp_path / "gap-questions.jsonl"
 
-    written = await calibrate_gaps._sample(out, "compact")
+    written = await calibrate_gaps._sample(out, "granite-97m-multilingual")
 
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     assert written == len(rows) == 20, "each question once, one profile only"
@@ -101,16 +103,16 @@ async def test_sample_label_measure_and_write(seeded_home, tmp_path: Path) -> No
         row["answered"] = row["question"].startswith("answered")
     out.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
-    measured = await calibrate_gaps._measure(out, "compact", write=True)
+    measured = await calibrate_gaps._measure(out, "granite-97m-multilingual", write=True)
 
     assert (measured.weak_match, measured.answered_match, measured.caught) == (0.703, None, 10)
     catalogue._embedders.clear()  # the process caches the catalogue, as a server would
-    compact = (await catalogue.embedders())["compact"]
+    compact = (await catalogue.embedders())["granite-97m-multilingual"]
     assert (compact.weak_match, compact.answered_match) == (0.703, None)
 
     labels = out.read_text()
     with pytest.raises(FileExistsError):
-        await calibrate_gaps._sample(out, "compact")
+        await calibrate_gaps._sample(out, "granite-97m-multilingual")
     assert out.read_text() == labels, "a second sample keeps the labels"
 
 
@@ -140,7 +142,7 @@ def test_the_command_reports_the_bars(tmp_path: Path) -> None:
         {
             "id": n,
             "question": f"q{n}",
-            "profile": "compact",
+            "profile": "granite-97m-multilingual",
             "best_similarity": s,
             "near_misses": [],
             "answered": n < 10,
@@ -151,10 +153,11 @@ def test_the_command_reports_the_bars(tmp_path: Path) -> None:
     runner = CliRunner()
 
     measured = runner.invoke(
-        calibrate_gaps.app, ["measure", "--profile", "compact", "--questions", str(out)]
+        calibrate_gaps.app,
+        ["measure", "--profile", "granite-97m-multilingual", "--questions", str(out)],
     )
     refused = runner.invoke(
-        calibrate_gaps.app, ["measure", "--profile", "arctic-m", "--questions", str(out)]
+        calibrate_gaps.app, ["measure", "--profile", "bekko-a25m", "--questions", str(out)]
     )
 
     assert measured.exit_code == 0, measured.output

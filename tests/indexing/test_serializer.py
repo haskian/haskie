@@ -33,9 +33,11 @@ DOCUMENT = Document(
 CONTEXT = Context(
     document=DOCUMENT,
     chunking=ChunkSettings(chunk_size=900),
-    # bge-small as the catalogue seeds it, with every nested struct a record can hold
+    # granite-97m with duplicate cosines, so every nested struct a record can hold is here
     embedding=EmbeddingModel(
-        "BAAI/bge-small-en-v1.5", 384, duplicate=DuplicateCosine(chunk=0.92, passage=0.95)
+        "ibm-granite/granite-embedding-97m-multilingual-r2",
+        384,
+        duplicate=DuplicateCosine(chunk=0.92, passage=0.95),
     ),
     pipeline=PipelineSettings(cpu_budget=4, batch_pages=2),
     collection=None,

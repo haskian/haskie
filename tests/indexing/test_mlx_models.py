@@ -1,4 +1,5 @@
-"""The MLX models, behind fastembed's shapes: a reranker answers one score per text, in order.
+"""The MLX models, shaped as every model is: a reranker answers one score per text, an embedder
+one vector per text, in order.
 
 No model is loaded here (up to 1.2 GB each, Apple Silicon only): the model and its tokenizer are
 stood in for by ones that answer each text's index, so the order of the scores shows.
@@ -14,6 +15,7 @@ import numpy as np
 import pytest
 
 from haskie.indexing import embed, mlx_models
+from haskie.indexing.onnx_models import Pooling
 from haskie.settings import Accelerator
 
 TEXTS = [
@@ -21,7 +23,8 @@ TEXTS = [
     "Green tea contains antioxidants called catechins that may help reduce inflammation.",
     "Le thé vert est riche en antioxydants et peut améliorer la fonction cérébrale.",
 ]
-RERANKER = "soichisumi/bge-reranker-v2-m3-mlx-affine8"
+# the catalogue pins no MLX reranker today, but the runtime stays: this one stands in
+RERANKER, EMBEDDER = "test/tiny-reranker-mlx", "intfloat/e5-base-v2:mlx"
 needs_mlx = pytest.mark.skipif(
     not mlx_models.available(), reason="MLX installs on Apple Silicon only"
 )
@@ -82,7 +85,7 @@ def test_every_reranker_answers_a_logit(
     [
         ("no texts, no scores", 0),
         ("one text, one score", 1),
-        ("past one batch, every score in the order the texts went in", mlx_models.PAIR_BATCH + 1),
+        ("past one batch, every score in the order the texts went in", mlx_models.BATCH + 1),
     ],
 )
 def test_a_reranker_answers_one_score_per_text_in_order(name: str, count: int) -> None:
@@ -124,7 +127,7 @@ def test_an_array_left_lazy_by_one_caller_evaluates_for_another() -> None:
     [
         ("no texts, no vectors", 0),
         ("one text, one vector", 1),
-        ("past one batch, every vector in order", mlx_models.EMBED_BATCH + 1),
+        ("past one batch, every vector in order", mlx_models.BATCH + 1),
     ],
 )
 def test_an_embedder_answers_one_vector_per_text(name: str, count: int) -> None:
@@ -154,25 +157,23 @@ def test_without_mlx_the_model_says_what_it_needs(monkeypatch: pytest.MonkeyPatc
         mlx_models.reranker(RERANKER)
 
 
-def test_every_mlx_model_is_routed_to_mlx(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Building a pinned MLX reranker or embedder takes the MLX path rather than fastembed's.
+def test_a_pinned_mlx_model_is_routed_to_mlx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Building a pinned MLX reranker or embedder takes the MLX path rather than ONNX's.
     That every pin is in the catalogue is `test_catalogue`'s to say."""
     built: list[str] = []
+    monkeypatch.setitem(mlx_models.RERANKERS, RERANKER, "0")
     monkeypatch.setattr(mlx_models, "reranker", lambda name: built.append(name) or name)
     monkeypatch.setattr(mlx_models, "embedder", lambda name: built.append(name) or name)
     embed._build_cross_encoder.cache_clear()
     embed._build_model.cache_clear()
-    rerankers = list(mlx_models.RERANKERS)
-    embedders = list(mlx_models.EMBEDDERS)
+    try:
+        assert embed._build_cross_encoder(RERANKER, Accelerator.AUTO) == RERANKER
+        assert embed._build_model(EMBEDDER, Accelerator.AUTO) == EMBEDDER
+    finally:
+        embed._build_cross_encoder.cache_clear()
+        embed._build_model.cache_clear()
 
-    for name in rerankers:
-        assert embed._build_cross_encoder(name, Accelerator.AUTO) == name
-    for name in embedders:
-        assert embed._build_model(name, Accelerator.AUTO) == name
-    embed._build_cross_encoder.cache_clear()
-    embed._build_model.cache_clear()
-
-    assert built == rerankers + embedders
+    assert built == [RERANKER, EMBEDDER]
 
 
 @needs_mlx
@@ -200,3 +201,68 @@ def test_xlm_roberta_gets_the_classification_head_bge_weights_load_into() -> Non
 
     assert {"classifier.dense.weight", "classifier.out_proj.weight"} <= names
     assert not any(name.startswith("pooler.") for name in names), "classification has no pooler"
+
+
+@needs_mlx
+@pytest.mark.parametrize(
+    ("name", "pooling", "states", "expected"),
+    [
+        (
+            "token states, mean-pooled over the real tokens and normalized",
+            Pooling.MEAN,
+            [[[3.0, 0.0], [5.0, 0.0]], [[0.0, 2.0], [9.0, 9.0]]],
+            [[1.0, 0.0], [0.0, 1.0]],
+        ),
+        (
+            "token states, the last real token's",
+            Pooling.LAST,
+            [[[9.0, 9.0], [0.0, 4.0]], [[3.0, 0.0], [9.0, 9.0]]],
+            [[0.0, 1.0], [1.0, 0.0]],
+        ),
+        (
+            "a model mlx-embeddings pooled already: its pooled vector as it came",
+            Pooling.MEAN,
+            [[0.0, 0.0], [0.0, 0.0]],
+            [[0.6, 0.8], [0.6, 0.8]],
+        ),
+    ],
+)
+def test_a_pooled_embedder_pools_its_token_states_as_its_model_asks(
+    name: str, pooling: Pooling, states: list, expected: list
+) -> None:
+    import mlx.core as mx
+
+    def model(input_ids: mx.array, attention_mask: mx.array) -> SimpleNamespace:
+        return SimpleNamespace(
+            last_hidden_state=mx.array(states), text_embeds=mx.array([[0.6, 0.8]] * 2)
+        )
+
+    def tokenizer(texts: list[str], **_: object) -> dict[str, np.ndarray]:
+        return {"input_ids": np.zeros((2, 2)), "attention_mask": np.array([[1, 1], [1, 0]])}
+
+    embedder = mlx_models.PooledEmbedder.__new__(mlx_models.PooledEmbedder)  # no download
+    embedder._model, embedder._tokenizer = model, tokenizer
+    embedder._pooling, embedder._tokens = pooling, 512
+
+    vectors = [vector.tolist() for vector in embedder.embed(["a", "b"])]
+
+    assert vectors == [pytest.approx(one) for one in expected], name
+
+
+def test_a_pooled_model_downloads_from_its_own_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its catalogue name is the repository's with `:mlx`; the download takes the pin's."""
+    import huggingface_hub
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(mlx_models, "available", lambda: True)
+    monkeypatch.setattr(
+        huggingface_hub,
+        "snapshot_download",
+        lambda repo, revision, allow_patterns: calls.append((repo, revision)) or "/models",
+    )
+
+    mlx_models._download(EMBEDDER)
+
+    assert calls == [("intfloat/e5-base-v2", mlx_models.POOLED[EMBEDDER].revision)]
