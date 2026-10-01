@@ -10,7 +10,7 @@ erDiagram
     COLLECTION ||--o{ MEMBERSHIP : holds
     DOCUMENT ||--o{ EMBEDDING : "is cached as"
     DOCUMENT {
-        string id "MD5 of the bytes"
+        string id "MD5 of the bytes, base58"
         string name "lowercase-kebab-case, renamable"
         string status "queued ... imported"
         string parser
@@ -39,14 +39,15 @@ An upload from the UI lands in `staging/` first, as a file and a `staging` row, 
 yet. The import then fixes the name, creates the document and moves the file into its folder. The
 folder is named after the document's id, the MD5 of its bytes. A name is stored in
 lowercase-kebab-case: accents dropped, the stem lowered, and every run of anything but a letter
-or a digit one dash, so `A_B--CC.d.f.pdf` is `a-b-cc-d-f.pdf`. The suffix is lowered too. One
-spelling per name, so `Notes.md` and `notes .md` are the same name, and the second is refused.
+or a digit turned into one dash, so `A_B--CC.d.f.pdf` is `a-b-cc-d-f.pdf`. The suffix is lowered
+too. Each name has one spelling, so `Notes.md` and `notes .md` are the same name, and the second
+is refused.
 
-A rename (`PUT /api/documents/{name}/name`, or the Info tab) changes the one `documents.name`
-column. Nothing else holds the name: the tables, folders, embedding cache and every collection's
-LanceDB rows refer to the document by its id, and a search reads the names it cites from SQLite,
-one batched query per read of the indexes. The suffix stays the original's. The search log and
-session history keep the name as it was when they were written.
+A rename (`PUT /api/documents/{name}/name`, or the Info tab) changes one column, `documents.name`.
+Nothing else holds the name: the tables, folders, embedding cache and every collection's LanceDB
+rows refer to the document by its id, and a search reads the names it cites from SQLite, one batched
+query per read of the indexes. The original suffix stays. The search log and session history keep
+the name as it was when they were written.
 
 An agent's `add_document` imports a local path directly and copies the file. When it refuses the
 path, the error names the file alone. The audit trail copies that error, and it never records the
@@ -78,10 +79,20 @@ stateDiagram-v2
 
 Any failure lands in `error`: a parser error, an OCR policy failure, or retries run out. A
 re-import runs from `queued`, `error` or `cancelled`, with the `parser` and `skip_ocr_pages` the
-document was imported with: to change either, delete it and import it again. A delete is accepted
+document was imported with. To change either, delete it and import it again. A delete is accepted
 in any state. The original suffix is kept in the name, because it decides the route:
 
-- PDFs convert page by page with pdf-inspector.
+- PDFs convert page by page with pdf-inspector. It judges a heading by its font. So a typeset
+  book comes out with its chapters and sections at one level, and each page's running header
+  ("348 Chapter 10 AGGREGATES") becomes a heading of its own. When the PDF has bookmarks of more
+  than one level, they set the headings instead (`document/bookmarks.py`). pypdf reads them once,
+  when the conversion is planned, and each batch gets them. A heading whose letters match a
+  bookmark of its page, or of the page before, takes the bookmark's depth as its level. Every
+  other heading becomes plain text. A bookmark matches once, so a running header matches none: it
+  either adds its page number to the title, or repeats a title that a heading a page before
+  already claimed. On one 657-page book, 232 of its 283 bookmarks matched, and its 748 sections
+  became 251, nested as its table of contents is. Without such bookmarks, pdf-inspector's
+  headings stand.
 - Text and HTML files are read as they are.
 - Images are stored and previewed, with no text to index.
 - Everything else converts with anydoc, or is read as raw text when the document's `parser` is
@@ -92,18 +103,18 @@ document's cached embeddings first.
 
 ## Repeats
 
-The web UI stages several files at once, and checks each new book for repeats in its own row:
+The web UI stages several files at once, and checks each new file for repeats in its own row:
 
 - **The same file.** Staging and a path import both take the MD5 of the bytes, which is the
-  document's id. Staging answers with `duplicate`: the name of the document those bytes already
-  are, or null. The row names it, and the import leaves that file out. An import of the same bytes is refused with
-  409, naming the document. A file the import refuses for another reason, such as a name already
-  taken, stays in the list with the reason, so you can rename or remove it.
+  document's id. Staging answers with `duplicate`: the name of the document those bytes already are,
+  or null. The row names it, and the import leaves that file out. An import of the same bytes is
+  refused with 409, naming the document. A file the import refuses for another reason, such as a
+  name already taken, stays in the list with the reason, so you can rename or remove it.
 - **The nearest documents.** Writing a cache entry also stores the document as one vector: the
-  mean of its unit chunk vectors, normalized. `GET /api/documents/{name}/similar` names the
-  three nearest by cosine, under the current embedding model. The
-  vector exists only once the import has embedded the document, so the UI follows the new book
-  until then. Full-text only has no vectors, so it finds no nearest documents.
+  mean of its unit chunk vectors. `GET /api/documents/{name}/similar` names the three nearest by
+  cosine, under the current embedding model. The vector exists only once the import has embedded
+  the document, so the UI follows the new file until then. A full-text-only profile has no
+  vectors, so it finds no nearest documents.
 
 ## A membership's life
 
@@ -134,12 +145,11 @@ membership `removing`, cancels its index and queues the removal on the collectio
 It answers at once: a compaction or another document's write may hold that writer for minutes.
 `removing` counts as active, so the UI keeps polling until the membership is gone. Until then, the
 old rows stay in the table, but a search leaves them out. The same holds for a document being
-deleted, in every collection. An attach or a re-index of that document is refused
-meanwhile, and its index can no longer change the status. A removal that fails leaves the
-membership in `error` with the reason, and detaching again retries it. Deleting a collection deletes
-its table and memberships, and keeps every document. Deleting a document detaches it from every
-collection first, then drops its folder and row. Memberships also go when their collection or
-document is deleted.
+deleted, in every collection. Meanwhile an attach or a re-index of that document is refused, and
+its index can no longer change the status. A removal that fails leaves the membership in `error`
+with the reason, and detaching again retries it. Deleting a collection deletes its
+table and memberships, and keeps every document. Deleting a document detaches it from every
+collection first, then drops its folder and row.
 
 Renaming a collection moves its row, its memberships, every session that chose it and its folder
 in one transaction. The index table holds no collection name, so it moves as it is. A rename is
@@ -150,9 +160,11 @@ folder it moved.
 
 ## The embedding cache
 
-The cache makes one document cheap to share between collections. Each computed embedding is one parquet file
-under the document, plus one `embeddings` row. Its id is the SHA-256 of a URN, one line, that
-names everything the rows depend on:
+The cache makes one document cheap to share between collections. Each computed embedding is one
+parquet file under the document, plus one `embeddings` row. Beside it, a second file holds the
+document's sections as that chunking cuts them, each with its id and descriptors. Every chunk
+names its own id and its sections ([storage](storage.md#sections-and-their-ids)). An embedding's
+id is the SHA-256 of a one-line URN that names everything the rows depend on:
 
 ```
 document_id:<id>;model:<model>;chunk_size:<n>;chunk_merge_below:<n>;chunk_frame:<b>;chunker:<c>;chunk_version:<v>;parser:<p>;skip_ocr_pages:<b>

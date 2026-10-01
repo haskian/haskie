@@ -7,5 +7,5 @@ set -euo pipefail
 uv run haskie stop
 uv run haskie destroy
 uv sync --reinstall-package haskie
-# in the background, as a user starts it: a clean home opens the first-run page
+# in the background, as a user starts it. A clean home opens the first-run page.
 uv run haskie run

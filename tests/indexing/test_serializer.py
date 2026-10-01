@@ -149,8 +149,8 @@ def test_a_field_added_without_a_default_fails_the_load(monkeypatch) -> None:
 
 
 def test_dbos_own_pickle_breaks_on_the_same_changes(monkeypatch) -> None:
-    """Why this serializer exists: DBOS's pickle keeps a struct by position. A field removed fails
-    the load, and a field added moves every later value into the field before it."""
+    """This serializer exists because DBOS's pickle keeps a struct by position. A field removed
+    fails the load, and a field added moves every later value into the field before it."""
     recorded = DefaultSerializer().serialize(INPUT)
 
     monkeypatch.setattr(workflows, "Context", _changed(Context, CONTEXT_FIELDS[:-1]))

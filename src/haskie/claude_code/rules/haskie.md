@@ -1,8 +1,9 @@
 Search the user's own haskie document collections before answering from memory or from the web
 whenever a question touches a topic they have collected sources on{topics}. That includes plain
 knowledge questions ("what is X", "why Y"), planning (their sources set the conventions), and any
-moment of doubt. The user chose and trusts these documents. They outrank training data, so search
-even when you think you know the answer.
+moment of doubt. The user chose these documents, so search even when you think you know the
+answer. Prefer them when the excerpts actually answer the question. When they do not, or answer
+only part of it, say so, and mark what you add from memory or the web as your own.
 
 Do not use for: the mechanics of the current codebase, refactoring, debugging business logic, or
 topics no collection covers.
@@ -13,18 +14,24 @@ topics no collection covers.
    being weighed, the decision at hand, the exact terms of art. The search is hybrid by default
    (vector and BM25), so a sentence with context beats a bare keyword. Ask "how should a background
    job retry a failed HTTP call without duplicating the side effect", not "retry".
-2. Call `search_excerpts` with this conversation's haskie session id, announced at session start.
+2. Call `search_sections` first when the question is broad or you do not yet know where the
+   sources discuss it: it maps which sections of which documents touch the topic and what each is
+   about, without their text. Then ask `search_excerpts` about what the map shows, with the
+   sections' `id`s as `section_ids` to read those alone.
+3. Call `search_excerpts` with this conversation's haskie session id, announced at session start.
    Call it again for each follow-up. When parts of the question may be answered in different
    places, pass each part as its own `q` in one call, and the background they share as `context`.
-3. Call `search_sources` when the question is which documents or collections cover a topic, or when
+4. Call `search_sources` when the question is which documents or collections cover a topic, or when
    `search_excerpts` found nothing relevant. Pass the `collections` it returns to
    `set_session_collections`, then call `search_excerpts` again. That selection scopes every later
    search in the conversation, `search_sources` included. Before a new topic, clear it: call
    `set_session_collections` with `[]`. Call `list_collections` when unsure what exists.
-4. Answer from the excerpts. Cite each by its `document`, `header` and `location`.
-5. Report the gaps. A part in `uncovered` or a word in `missing_terms` is something the sources do
-   not say. No excerpts at all means the collections do not cover the topic. Say so, then fall back
-   to the web. Never pass a web result off as one of their sources.
-6. When the excerpts came back but do not let a careful reader answer from them alone, call
-   `report_gap` with the question as you asked it, `insufficient` or `partial`, and in `missing` what
-   they lacked. The user sees it as a gap to close.
+5. Answer from the excerpts that answer the question. Cite each by its `document`, `header` and
+   `location`. An excerpt on a nearby topic is not an answer: do not stretch it to fit.
+6. Report the gaps. A part in `uncovered` or a word in `missing_terms` is something the sources do
+   not say. No excerpts at all means the collections do not cover the topic, once searched without
+   `document_ids` or `section_ids`. Say so, then fall back to the web. Never pass a web result off
+   as one of their sources.
+7. When the excerpts came back but do not let a careful reader answer from them alone, call
+   `report_gap` with the question as you asked it, `insufficient` or `partial`, and in `missing`
+   what they lacked. The user sees it as a gap to close.

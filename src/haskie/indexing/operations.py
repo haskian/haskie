@@ -2,7 +2,7 @@
 
 An **operation** is the whole of what someone asked for: import a document, index one document
 into a collection, index a whole collection, delete a collection, delete a document, maintain a
-collection, download a model. A **job** is one stage of an operation - convert, embed or index.
+collection, download a model. A **job** is one stage of an operation: convert, embed or index.
 A **task** is one micro-batch: one durable step below a job.
 
 "Workflow" is DBOS's word for the thing that runs any of them, and it stays in the modules that
@@ -87,7 +87,7 @@ CURSOR = OffsetCursor(SORT, ORDER)
 
 class _StageRun(msgspec.Struct):
     """One run of one pipeline over one document, as DBOS's history holds it: the raw row
-    `fold_operations` folds into an operation and its jobs. Internal on purpose - nothing outside
+    `fold_operations` folds into an operation and its jobs. Internal on purpose: nothing outside
     this module sees it, and no route returns it.
 
     `collection` is None for an import and an embed: both are collection-independent, and only the
@@ -171,7 +171,7 @@ class Job(msgspec.Struct):
 class Operation(msgspec.Struct):
     """One operation of any kind, in the shape the Operations view lists: what every kind has in
     common, plus the numbers only that kind has in `detail` (tasks for a document, pages for a bulk
-    index, warm for a download). Kept flat and untyped on purpose - it is a read model for a table.
+    index, warm for a download). Kept flat and untyped on purpose: it is a read model for a table.
 
     A document operation (an import, or an index of one document) lists the `jobs` it is made of,
     each with the tasks it ran."""
@@ -338,7 +338,7 @@ async def _with_origins(rows: list[Operation]) -> list[Operation]:
 
 async def list_kinds() -> list[OperationKindSummary]:
     """Every kind, in the order the Operations view shows them, with how many of each are enqueued
-    or running right now - one grouped query for all of them, not one per section."""
+    or running right now. One grouped query counts all of them, not one per section."""
     active = await sysdb.active_counts_by_name()
     counts: dict[OperationKind, int] = dict.fromkeys(KIND_ORDER, 0)
     for name, count in active.items():
@@ -548,7 +548,7 @@ async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | N
     """The numbers only this kind has. A collection operation names which of the three it is
     (`bulk`), since the kind alone does not. A bulk index also publishes its progress as a DBOS
     event, which is read without waiting: an operation that has not finished its first page yet
-    simply has none.
+    has none.
 
     Async because that read is one, even with no wait: the event lives in the system database."""
     if kind == OperationKind.DOWNLOAD:
@@ -644,11 +644,11 @@ async def _pipeline_page(
 
     The collection filter is the id's prefix, so the database cuts the window after it has
     filtered: a busy collection can no longer push a quiet one out of the page. It keeps collection
-    index runs only - an import and an embed belong to no collection.
+    index runs only; an import and an embed belong to no collection.
 
     A run that starts while the page is walked shifts the offsets behind it, so a row can repeat
-    or be skipped across a page boundary - the same trade an offset cursor over a live history
-    always makes."""
+    or be skipped across a page boundary. An offset cursor over a live history always makes that
+    trade."""
     check_page_size(page_size)
     offset = _decode_cursor(cursor, OperationKind.DOCUMENT)
     # one row more than the page: its presence is what tells us another page exists

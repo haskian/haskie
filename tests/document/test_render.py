@@ -101,9 +101,9 @@ def test_page_markers_that_note_skipped_ocr_still_split() -> None:
 
 
 def test_inline_raw_html_loses_its_tags_but_keeps_its_text() -> None:
-    """Block and inline raw HTML differ, and the difference is worth stating.
+    """Block and inline raw HTML differ.
 
-    A raw HTML *block* goes entirely — tags and the text between them. Inline raw HTML is only the
+    A raw HTML *block* goes entirely: tags and the text between them. Inline raw HTML is only the
     tags, so `<script>alert(1)</script>` inside a paragraph leaves the literal `alert(1)` as prose.
     That is inert and it is what React did before, but it means "the word alert survived" is not
     the test; "nothing executable survived" is.

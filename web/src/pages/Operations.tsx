@@ -58,7 +58,7 @@ export function Operations({ route, counts }: PageProps) {
     setTasks((current) => ({ ...current, ...Object.fromEntries(loaded) }))
   }, [active])
 
-  // no cursor bookkeeping. The backend's cursor is an offset, so asking for a wider
+  // No cursor bookkeeping. The backend's cursor is an offset, so asking for a wider
   // first page is the same request as paging into it, and one window size serves every kind.
   const load = useCallback((): Promise<void> => {
     const pageSize = Math.min(MAX_PAGE_SIZE, PAGE_SIZE * pages)

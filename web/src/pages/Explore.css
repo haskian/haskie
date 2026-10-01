@@ -1,7 +1,12 @@
 /* Page layout only; tokens and components live in design/design.css. Copied from the <style>
    block of design/explore.html. The match panel moved to design.css with the modal it is in. */
-.explore { display: grid; gap: var(--sp-6); align-content: start; }
+/* one column no wider than the page: a long unbroken token in a result cannot widen it */
+.explore { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-6); align-content: start; }
 .explore-bar { display: flex; gap: var(--sp-2); align-items: stretch; }
 .explore-aspects { display: grid; gap: var(--sp-2); }
 .aspect-label { display: flex; align-items: center; padding: 0 var(--sp-4); border-right: 1px solid var(--fog-2); color: var(--text-muted); }
 .explore-aspects > .btn { justify-self: start; }
+/* the line over the results: what came back on the left, the debug switch on the right */
+.explore-status { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); }
+/* the raw response: a path or an id has no space to wrap at, so it breaks anywhere */
+.explore-raw { overflow-wrap: anywhere; }

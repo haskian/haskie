@@ -2,13 +2,15 @@ import { describe, expect, test } from 'bun:test'
 import { FileText } from 'lucide-react'
 import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { EmbedderMetadata, Excerpt, Hit, Passage, RerankerMetadata, Source, Status } from '../api'
+import type { EmbedderMetadata, Excerpt, Hit, MappedSection, Passage, RerankerMetadata, Source, Status } from '../api'
 import { Field } from './Field'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
 import { Kv } from './Kv'
 import { MatchModal } from './MatchModal'
 import { ModelFacts } from './ModelFacts'
+import { SectionsModal } from './SectionsModal'
+import { OpenedDetail, SectionGrid } from './SectionGrid'
 import { Mark } from './Mark'
 import { markTerms } from './markTerms'
 import { Picker } from './Picker'
@@ -42,6 +44,7 @@ const HIT: Hit = {
   collection: 'A–E',
   document_id: 'a1',
   document: 'area.pdf',
+  id: 'c1', section_id: 's-soft', section_ids: ['s-doc', 's-soft'],
   source_path: 'sources/area.pdf',
   markdown_path: 'markdown/area.md',
   part: 0,
@@ -94,6 +97,7 @@ const PASSAGE: Passage = {
   document_id: 'a1',
   document: 'area.pdf',
   header: 'Lighting > Soft shadows',
+  section_id: 's-soft',
   location: 'area.pdf p.2 L41-58',
   seq_start: 4,
   seq_end: 5,
@@ -118,6 +122,7 @@ const EXCERPT: Excerpt = {
   document_id: 'a1',
   document: 'area.pdf',
   header: 'Lighting',
+  section_id: 's-soft',
   location: 'area.pdf p.2-3 L41-90',
   seq_start: 4,
   seq_end: 9,
@@ -177,6 +182,21 @@ describe('Picker', () => {
       name: 'aria-label reaches the summary and the listbox',
       element: <Picker options={options} value="*" onChange={noop} ariaLabel="Scope" />,
       contains: ['<summary aria-label="Scope">', 'role="listbox" aria-label="Scope"'],
+    },
+    {
+      name: 'a tagged option carries its tag beside its label, in the list and the summary',
+      element: (
+        <Picker
+          options={[...options, { value: 'mcp', label: 'Excerpts', tag: { text: 'MCP', title: 'An agent gets the same' } }]}
+          value="mcp"
+          onChange={noop}
+        />
+      ),
+      contains: [
+        '<span class="picker-value"><span class="picker-label"><span>Excerpts</span><span class="picker-tag" title="An agent gets the same">MCP</span></span></span>',
+        'aria-selected="true"><span class="picker-label"><span>Excerpts</span><span class="picker-tag"',
+        'aria-selected="false"><span>A–E</span>',
+      ],
     },
     {
       name: 'no options renders an empty list',
@@ -891,6 +911,86 @@ describe('SearchTook', () => {
       element: <SearchTook counts="" ms={null} steps={steps} />,
       contains: ['<p class="mono muted search-took" tabindex="0"> </p>'],
       missing: ['role="tooltip"'],
+    },
+  ])
+})
+
+const SAGAS: MappedSection = {
+  collection: 'patterns',
+  document_id: 'b1',
+  document: 'iddd.pdf',
+  header: 'Sagas > Compensation',
+  id: 's-compensation',
+  location: 'iddd.pdf p.12-14 L300-360',
+  line_start: 300,
+  line_end: 360,
+  score: 0.82,
+  depth: 2,
+  seq_start: 40,
+  seq_end: 44,
+  chars: 5210,
+  chunks: 3,
+  descriptors: ['saga', 'compensating step', 'orchestrator'],
+  markdown_file: '/Users/ada/.haskie/documents/b1/original.pdf.md',
+  related: [
+    { collection: 'patterns', document_id: 'c2', document: 'ddia.pdf', header: 'Sagas', id: 's-ddia-sagas', location: 'ddia.pdf L10-40', line_start: 10, line_end: 40, score: 0.4, similarity: 0.93 },
+    { collection: 'patterns', document_id: 'b1', document: 'iddd.pdf', header: 'Sagas > Retries', id: 's-retries', location: 'iddd.pdf L361-380', line_start: 361, line_end: 380, score: 0.3, similarity: 0.88 },
+    // the pick itself, chunked by another collection: named by that collection
+    { collection: 'patterns-text', document_id: 'b1', document: 'iddd.pdf', header: 'Sagas > Compensation', id: 's-compensation', location: 'iddd.pdf L300-358', line_start: 300, line_end: 358, score: 0.3, similarity: 0.99 },
+  ],
+}
+
+describe('SectionGrid', () => {
+  check([
+    {
+      name: 'a pick names its section, what it is about and where to read it',
+      element: <SectionGrid sections={[SAGAS]} />,
+      contains: ['iddd.pdf', 'patterns', '0.82', 'Sagas &gt; Compensation', 'descriptor">compensating step', 'descriptor">saga', 'p.12-14 L300-360', '5210 chars · 3 matched chunks'],
+    },
+    {
+      name: 'the sections it covers best, another document named, its own not',
+      element: <SectionGrid sections={[SAGAS]} />,
+      contains: ['aria-label="Related sections"', 'related-place mono muted">ddia.pdf<', '>0.93<', 'Sagas &gt; Retries</span><span class="mono muted">0.88<', 'related-place mono muted">patterns-text<', '>0.99<'],
+      missing: ['related-place mono muted">iddd.pdf', 'patterns · '],
+    },
+    {
+      name: 'the whole document, no descriptors, nothing related: one chunk',
+      element: <SectionGrid sections={[{ ...SAGAS, header: '', descriptors: [], related: [], chunks: 1 }]} />,
+      contains: ['The whole document', '1 matched chunk<'],
+      missing: ['class="descriptors', 'Related sections'],
+    },
+  ])
+})
+
+describe('OpenedDetail', () => {
+  check([
+    {
+      name: 'a pick: its score, its matched chunks, and the sections it covers with their similarity',
+      element: <OpenedDetail section={SAGAS} />,
+      contains: ['score 0.82 · 3 matched chunks', 'aria-label="Related sections"', 'Sagas &gt; Retries</span><span class="mono muted">0.88<', '>0.93<'],
+    },
+    {
+      name: 'a pick that covers nothing: no related list',
+      element: <OpenedDetail section={{ ...SAGAS, chunks: 1, related: [] }} />,
+      contains: ['score 0.82 · 1 matched chunk<'],
+      missing: ['Related sections'],
+    },
+    {
+      name: 'a related section: its score and how closely its pick covers it',
+      element: <OpenedDetail section={SAGAS.related[0]} />,
+      contains: ['score 0.40 · similarity 0.93 to its pick'],
+      missing: ['matched chunk', 'Related sections'],
+    },
+  ])
+})
+
+describe('SectionsModal', () => {
+  check([
+    { name: 'closed: nothing inside', element: <SectionsModal section={null} onClose={noop} />, contains: ['<dialog class="modal"'], missing: ['>Section<'] },
+    {
+      name: 'open: the section first, what the map said about it, then its document',
+      element: <SectionsModal section={SAGAS} onClose={noop} />,
+      contains: ['iddd.pdf', '>Section<', '>Document<', 'Sagas &gt; Compensation', '>p.12-14 L300-360<', 'class="descriptors"', 'score 0.82 · 3 matched chunks', 'Related sections'],
     },
   ])
 })

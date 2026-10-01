@@ -21,7 +21,7 @@ from haskie.collection.index import Hit
 from haskie.indexing.chunk import split
 from haskie.search import section
 from haskie.search.passage import HitRange, ranges
-from haskie.search.section import Entry, Section
+from haskie.search.section import Placement, Section
 from haskie.settings import ChunkSettings, ScoreFold
 
 HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
@@ -58,11 +58,22 @@ A near-duplicate folds under the passage it repeats, and its slot goes to the ne
 DOC = "guide.md"
 COLLECTION = "notes"
 CHUNKS = split(MARKDOWN, ChunkSettings(chunk_size=150, chunk_merge_below=0))
-OUTLINE = [
-    Entry(seq, tuple(chunk.headings), chunk.char_start, chunk.char_end)
+PLACEMENTS_OF_GUIDE = [
+    Placement(
+        seq,
+        tuple(chunk.headings),
+        chunk.char_start,
+        chunk.char_end,
+        chunk.line_start,
+        chunk.line_end,
+        None,
+        None,
+    )
     for seq, chunk in enumerate(CHUNKS, start=1)
 ]
-OUTLINES = {(COLLECTION, DOC): OUTLINE}
+PLACEMENTS = {(COLLECTION, DOC): PLACEMENTS_OF_GUIDE}
+# the lines and pages of a placement row, which the grouping never reads
+LINES = {"line_start": 1, "line_end": 1, "page_start": None, "page_end": None}
 GUIDE, STORAGE, SEARCH = ("Guide",), ("Guide", "Storage"), ("Guide", "Search")
 
 
@@ -83,8 +94,8 @@ def _text(seq: int) -> str:
     return CHUNKS[seq - 1].text
 
 
-def test_the_fixture_is_the_outline_the_docstring_names() -> None:
-    assert [entry.headings for entry in OUTLINE] == [
+def test_the_fixture_is_the_placements_the_docstring_names() -> None:
+    assert [entry.headings for entry in PLACEMENTS_OF_GUIDE] == [
         GUIDE,
         (*STORAGE, "Tables"),
         (*STORAGE, "Indexes"),
@@ -95,22 +106,25 @@ def test_the_fixture_is_the_outline_the_docstring_names() -> None:
     ]
 
 
-# --- outlines -------------------------------------------------------------------------
+# --- placements ------------------------------------------------------------------------
 
 
-def test_outlines_are_read_per_document_and_ordered_by_seq() -> None:
-    span = {"document_id": DOC}
+def test_placements_are_read_per_document_and_ordered_by_seq() -> None:
+    span = {"document_id": DOC, **LINES}
     rows = [
         ("notes", span | {"seq": 2, "headings": ["A"], "char_start": 5, "char_end": 9}),
         ("notes", span | {"seq": 1, "headings": None, "char_start": 0, "char_end": 4}),
         ("other", span | {"seq": 1, "headings": ["B"], "char_start": 0, "char_end": 3}),
     ]
 
-    found = section.outlines(rows)
+    found = section.placements(rows)
 
     assert found == {
-        ("notes", DOC): [Entry(1, (), 0, 4), Entry(2, ("A",), 5, 9)],
-        ("other", DOC): [Entry(1, ("B",), 0, 3)],
+        ("notes", DOC): [
+            Placement(1, (), 0, 4, 1, 1, None, None),
+            Placement(2, ("A",), 5, 9, 1, 1, None, None),
+        ],
+        ("other", DOC): [Placement(1, ("B",), 0, 3, 1, 1, None, None)],
     }
 
 
@@ -118,46 +132,49 @@ def test_outlines_are_read_per_document_and_ordered_by_seq() -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "outline", "seq", "max_chars", "expected"),
+    ("name", "chunks", "seq", "max_chars", "expected"),
     [
         (
             "a title over the whole document says nothing: the level below it is taken",
-            OUTLINE,
+            PLACEMENTS_OF_GUIDE,
             2,
             1000,
             Section(STORAGE, 2, 3),
         ),
         (
             "a section over the size splits one heading down",
-            OUTLINE,
+            PLACEMENTS_OF_GUIDE,
             2,
             150,
             Section((*STORAGE, "Tables"), 2, 2),
         ),
         (
             "the first level that fits, several levels down",
-            OUTLINE,
+            PLACEMENTS_OF_GUIDE,
             5,
             300,
             Section((*SEARCH, "Ranking"), 4, 6),
         ),
         (
             "the deepest heading is taken however large its section is",
-            OUTLINE,
+            PLACEMENTS_OF_GUIDE,
             5,
             50,
             Section((*SEARCH, "Ranking"), 4, 6),
         ),
         (
             "a chunk under the title alone groups in the whole document",
-            OUTLINE,
+            PLACEMENTS_OF_GUIDE,
             1,
             100,
             Section(GUIDE, 1, 7),
         ),
         (
             "a document without headings is one section",
-            [Entry(1, (), 0, 90), Entry(2, (), 92, 180)],
+            [
+                Placement(1, (), 0, 90, 1, 1, None, None),
+                Placement(2, (), 92, 180, 1, 1, None, None),
+            ],
             2,
             100,
             Section((), 1, 2),
@@ -165,16 +182,50 @@ def test_outlines_are_read_per_document_and_ordered_by_seq() -> None:
     ],
 )
 def test_a_chunk_groups_in_the_largest_section_that_fits(
-    name: str, outline: list[Entry], seq: int, max_chars: int, expected: Section
+    name: str, chunks: list[Placement], seq: int, max_chars: int, expected: Section
 ) -> None:
-    assert section.section_of(outline, seq, max_chars) == expected, name
+    assert section.section_of(chunks, seq, max_chars) == expected, name
 
 
-def test_a_chunk_its_outline_does_not_hold_is_a_broken_search() -> None:
-    """The outline is read through the table the hits came from, so it holds every chunk a hit
+# the placements a search kept to "Guide > Search" reads: its chunks alone, with their section ids
+SEARCH_IDS = {4: "ranking", 5: "ranking", 6: "ranking", 7: "folding"}
+SCOPED = [
+    msgspec.structs.replace(entry, section_ids=("doc", "guide", "search", SEARCH_IDS[entry.seq]))
+    for entry in PLACEMENTS_OF_GUIDE[3:]
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "kept", "expected"),
+    [
+        (
+            "the section kept to spans the placements and is still a section that fits",
+            frozenset({"search"}),
+            Section(SEARCH, 4, 7, "search"),
+        ),
+        (
+            "a subsection kept to: its chapter spans them all, as a title would, and is passed",
+            frozenset({"ranking", "folding"}),
+            Section((*SEARCH, "Ranking"), 4, 6, "ranking"),
+        ),
+        (
+            "kept to nothing: a run over all the placements is the whole document",
+            frozenset(),
+            Section((*SEARCH, "Ranking"), 4, 6, "ranking"),
+        ),
+    ],
+)
+def test_a_section_the_search_keeps_to_is_no_whole_document(
+    name: str, kept: frozenset[str], expected: Section
+) -> None:
+    assert section.section_of(SCOPED, 5, 1000, kept) == expected, name
+
+
+def test_a_chunk_its_placements_do_not_hold_is_a_broken_search() -> None:
+    """The placements are read through the table the hits came from, so it holds every chunk a hit
     names: a missing one is not guessed at."""
     with pytest.raises(LookupError, match="chunk 99"):
-        section.section_of(OUTLINE, 99, 1000)
+        section.section_of(PLACEMENTS_OF_GUIDE, 99, 1000)
 
 
 # --- documents ------------------------------------------------------------------------
@@ -221,9 +272,9 @@ def test_the_documents_read_hold_the_sections_a_short_range_opens() -> None:
         _range(6, doc="b.md"),
     ]
     read = section.documents(found, 2)
-    outlines = {place: OUTLINE for place in read}  # every document cut alike
+    placed = {place: PLACEMENTS_OF_GUIDE for place in read}  # every document cut alike
 
-    groups = section.group(found, outlines, 1000, 2)
+    groups = section.group(found, placed, 1000, 2)
 
     assert [(one.document_id, one.section.path) for one in groups] == [
         (DOC, STORAGE),
@@ -238,54 +289,54 @@ BEST_FIRST = [_range(4, 5.0), _range(2, 4.0), _range(6, 3.0), _range(7, 2.0), _r
 
 
 @pytest.mark.parametrize(
-    ("name", "found", "outlines", "limit", "expected"),
+    ("name", "found", "placed", "limit", "expected"),
     [
         (
             "each section takes the place of its best passage and holds every one of its own",
             BEST_FIRST,
-            OUTLINES,
+            PLACEMENTS,
             2,
             [(SEARCH, [4, 6, 7]), (STORAGE, [2, 3])],
         ),
         (
             "the slots count sections: past the limit none opens, the open ones still fill",
             BEST_FIRST,
-            OUTLINES,
+            PLACEMENTS,
             1,
             [(SEARCH, [4, 6, 7])],
         ),
         (
-            "a passage of a document whose outline was not read belongs to no kept section",
+            "a passage of a document whose placements were not read belongs to no kept section",
             [_range(4), _range(6, doc="b.md")],
-            OUTLINES,
+            PLACEMENTS,
             5,
             [(SEARCH, [4])],
         ),
         (
             "a section of passages too short to stand alone is none, and frees its slot",
             [_range(4), msgspec.structs.replace(_range(2), alone=True), _range(7)],
-            OUTLINES,
+            PLACEMENTS,
             2,
             [(SEARCH, [4, 7])],
         ),
         (
             "a short passage stays in a section another passage stands in, wherever it ranked",
             [msgspec.structs.replace(_range(6), alone=True), _range(2), _range(4)],
-            OUTLINES,
+            PLACEMENTS,
             2,
             [(SEARCH, [6, 4]), (STORAGE, [2])],
         ),
-        ("no passages, no sections", [], OUTLINES, 5, []),
+        ("no passages, no sections", [], PLACEMENTS, 5, []),
     ],
 )
 def test_passages_group_by_section_and_the_sections_take_the_slots(
     name: str,
     found: list[HitRange],
-    outlines: dict,
+    placed: dict,
     limit: int,
     expected: list[tuple[tuple[str, ...], list[int]]],
 ) -> None:
-    groups = section.group(found, outlines, 1000, limit)
+    groups = section.group(found, placed, 1000, limit)
 
     shape = [(one.section.path, [kept.seq_start for kept in one.ranges]) for one in groups]
     assert shape == expected, name

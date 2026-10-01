@@ -60,7 +60,7 @@ Timing knobs are module constants, not variables (`workflows.OPERATION_POLL`,
 
 | decision | why | details |
 | --- | --- | --- |
-| One handler serves REST and MCP (`litestar-mcp`) | One contract, one test surface. A handler marked `mcp_tool=` becomes a tool | [REST API](docs/rest-api.md) |
+| One handler serves REST and MCP (`litestar-mcp`) | One contract, one test surface. A handler marked `mcp_tool=` becomes a tool. The search tools are twins that answer with fewer fields (`api/agent.py`): what an agent reads costs tokens | [REST API](docs/rest-api.md) |
 | MCP over HTTP, not stdio | One server serves the UI, the API and every client at once. litestar-mcp speaks MCP `2026-07-28`, which replaced `initialize` with `server/discover` | [MCP](docs/mcp.md) |
 | `msgspec` for every model | Fast, strict decoding at the trust boundary. The same types generate the OpenAPI document | `api/`, `settings.py` |
 | Frontend types generated from OpenAPI | One source of truth for the contract. `check` fails on drift | [REST API](docs/rest-api.md) |

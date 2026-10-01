@@ -74,7 +74,7 @@ async def delete_collection(collection: str) -> BulkStarted:
     """Queue the deletion: every index still running for this collection is cancelled first.
 
     Accepted, not done: cancelling a busy collection and removing its index takes as long as the
-    last running step, which is no time to hold a request open. Poll the operation for the outcome.
+    last running step, too long to hold a request open. Poll the operation for the outcome.
     The documents survive; only this collection's memberships and index go.
     """
     operation_id = await workflows.start_delete_collection(collection)
@@ -139,10 +139,10 @@ async def list_collection_documents(
     """List the documents of one collection, one page at a time.
 
     Sort by name, size, status or updated_at; `status` keeps one membership state only (pending,
-    indexing, indexed, error, cancelled, removing) — how far this collection got writing the
-    document into its index, or taking it out again, which is not the document's own import
-    status. Pass the `next_cursor` of a
-    response back as `cursor` to continue; it is null on the last page.
+    indexing, indexed, error, cancelled, removing). A membership state says how far this
+    collection got writing the document into its index, or taking it out again. It is not the
+    document's own import status. Pass the `next_cursor` of a response back as `cursor` to
+    continue; it is null on the last page.
     """
     found = await Collection.get(collection)
     return await found.members_page(page, status)
@@ -188,7 +188,7 @@ async def add_document(
 async def remove_document(collection: str, document: str, session_id: SessionId = None) -> None:
     """Take one document out of this collection: its rows here go, the document stays.
 
-    Queued, not waited out: the removal runs on the collection's single writer, behind any index
+    Queued, not done: the removal runs on the collection's single writer, behind any index
     write, compaction or index build already there. The membership reads `removing` from now on
     and is gone once its rows are; poll `list_collection_documents`. A removal that fails leaves
     it in `error`; detaching again retries it.

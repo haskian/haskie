@@ -234,12 +234,12 @@ def sentences(text: str, found: list[Span]) -> list[Span]:
 
     A piece starts at its first visible character and runs to where the next one starts, so it
     carries the whitespace after it, and any page marker in it. Anything else visible between two
-    blocks - a list marker, a blockquote's `>` - opens the piece after it rather than trailing the
+    blocks (a list marker, a blockquote's `>`) opens the piece after it rather than trailing the
     one before.
 
     Every piece is numbered with its paragraph, what blank lines bound whatever the markdown
     inside it: the one boundary the author draws between two thoughts. Lines with no blank line
-    between them - list items, a sentence and the table under it - are one paragraph, and a list
+    between them (list items, a sentence and the table under it) are one paragraph, and a list
     is one whole, blank lines between its items or not.
     """
     starts: list[tuple[int, SpanKind, int, int]] = []  # (start, kind, heading level, block)
@@ -285,7 +285,7 @@ def sentences(text: str, found: list[Span]) -> list[Span]:
 def fit(text: str, pieces: list[Span], size: int) -> list[Span]:
     """Every piece longer than `size` cut into pieces that are not: a sentence that never ends,
     a table or a code block bigger than a chunk. `TextSplitter` cuts at the largest boundary that
-    fits - a line, then a word, then a character - and a cut starts past any page marker, as
+    fits (a line, then a word, then a character), and a cut starts past any page marker, as
     every piece does."""
     out: list[Span] = []
     for piece in pieces:
@@ -349,7 +349,7 @@ def pack(pieces: list[Span], size: int, short: float, end_reason: CutReason) -> 
     chunk of its own, except a short one, under `short` characters: it goes with the
     paragraph below it when the two fit one chunk, so a lead-in is embedded with what it leads
     into, and with the short ones around it otherwise (see `_merge`). Only a paragraph longer than
-    a chunk is cut: between its blocks where it can - list items, a table and the line above it -
+    a chunk is cut: between its blocks where it can (list items, a table and the line above it),
     else between sentences (see `_fill`).
 
     The headings a section opens with are no part of any chunk's text: every chunk is embedded
@@ -388,7 +388,7 @@ type Group = list[list[Span]]  # paragraphs packed together
 def _merge(paragraphs: list[list[Span]], size: int, short: float) -> list[Group]:
     """The paragraphs grouped into chunks, best effort: a run of short ones (under `short`
     characters) flows into the paragraph below it when all of them fit `size` together; a run
-    that cannot - the paragraph below is too long, or the run is full - stays a chunk of its own,
+    that cannot (the paragraph below is too long, or the run is full) stays a chunk of its own,
     or joins the chunk above it when it fits there. Every group of more than one paragraph fits
     one chunk, and a paragraph that is not short is never merged with one that is not."""
     groups: list[Group] = []
@@ -487,8 +487,8 @@ def _cut(pieces: list[Span], at: int, end_reason: CutReason) -> CutReason:
 
 def _view(text: str, block: Span) -> str:
     """The block as the sentence rules should read it, the same length as its text: its words
-    where they are, every other character a space. So a line break is a space - PDF text is
-    hard-wrapped, and the rules end a sentence at every newline - and `**`, `[`, `](url)` and a
+    where they are, every other character a space. So a line break is a space (PDF text is
+    hard-wrapped, and the rules end a sentence at every newline), and `**`, `[`, `](url)` and a
     footnote marker are not read as the punctuation they look like."""
     view = [" "] * (block.end - block.start)
     for start, end in block.words:

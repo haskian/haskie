@@ -1,15 +1,19 @@
 # MCP and Claude Code
 
 haskie serves the Model Context Protocol (MCP) at `http://127.0.0.1:8451/mcp`, over HTTP. The tools
-are the REST handlers marked `mcp_tool=`, so both surfaces share one contract. The skill that
-`haskie install claude` writes is the full tool reference for agents:
+are the REST handlers marked `mcp_tool=`, so both surfaces share one contract, with one exception.
+The three search tools (`search_excerpts`, `search_sources`, `search_sections`) are twins of
+their REST routes, under `/api/agent/` and left out of the OpenAPI document. Each runs the same
+search and answers with fewer fields (`api/agent.py`): no offsets, chunk numbers, lines or pages
+beside the `location` that names them, and no empty list or map. The web UI keeps the whole
+answer. The skill that `haskie install claude` writes is the full tool reference for agents:
 [`SKILL.md`](../src/haskie/claude_code/skills/haskie/SKILL.md).
 
 ## Tools
 
 | group | tools |
 | --- | --- |
-| search | `search_excerpts`, `search_sources`, `set_session_collections` |
+| search | `search_excerpts`, `search_sections`, `search_sources`, `set_session_collections` |
 | catalogue | `list_collections`, `get_collection`, `list_collection_documents`, `list_documents`, `get_document` |
 | write | `add_document`, `add_document_to_collection`, `remove_document_from_collection`, `describe_document` |
 | log and gaps | `list_searches`, `list_gaps`, `replay_gaps`, `review_gaps`, `report_gap` ([Gaps](gaps.md)) |
@@ -33,8 +37,8 @@ flowchart LR
 
 The files go under `~/.claude` with `--scope user` (the default), or `./.claude` of the current
 directory with `--scope project`. With `CLAUDE_CONFIG_DIR` set, the user scope follows it, as
-Claude Code does. `--url` points them at another endpoint. The hook's full command
-is the absolute path of `haskie` with `run --home <home> --host <host> --port <port> --hook`.
+Claude Code does. `--url` points them at another endpoint. The hook's full command is the
+absolute path of `haskie` with `run --home <home> --host <host> --port <port> --hook`.
 Re-installing replaces any haskie hook, including one in the older `ensure` form. The skill's
 trigger and the rule both name the home's collections, so they fire on the topics you collected.
 haskie records each directory it installed into (the `installations` table). Creating,
@@ -66,7 +70,11 @@ sequenceDiagram
         Hook-->>CC: prints "haskie is already serving ..."
     end
     Note over CC: the rule says: search the collections first
-    CC->>H: search_excerpts(q, session_id)
+    opt a broad question, or not yet known where the sources discuss it
+        CC->>H: search_sections(q, session_id)
+        H-->>CC: sections with ids and descriptors, related sections, collection cover
+    end
+    CC->>H: search_excerpts(q, session_id, section_ids?)
     H-->>CC: excerpts with header, location, spans (each with also_in), uncovered, missing_terms
     opt nothing relevant, or "which documents?"
         CC->>H: search_sources(q, session_id)

@@ -20,7 +20,7 @@ Each applies to all collections, or to one as an override. Sizes are in characte
 ## Steps
 
 `chunk.pipeline(settings)` builds the steps. Each hands its output to the next. Chunking runs once
-per part: the whole document, or `batch_pages` pages of a PDF.
+per part of the document's markdown, cut where its sections start ([Indexing](indexing.md)).
 
 ```mermaid
 flowchart TD
@@ -121,9 +121,10 @@ flowchart TD
 | `length_sentence` | between two sentences of one block | it begins at a sentence | it ends on a whole sentence |
 | `length_oversize` | inside a piece longer than a chunk | it continues a piece cut in two | it ends mid-piece |
 
-A part is one convert output file: the whole document, or `batch_pages` pages of a PDF. Each part
-is chunked on its own, so no chunk spans two parts. The headings still open at the end of one
-part carry over to the next (`chunk.open_headings`).
+A part is one slice of the document's markdown, cut where a heading starts, or at a page marker
+inside a section longer than a batch ([Indexing](indexing.md)). Each part is chunked on its own,
+so no chunk spans two parts. The headings still open at the end of one part carry over to the
+next (`chunk.open_headings`).
 
 ## Sizes
 
@@ -161,8 +162,8 @@ sections are page headers, page numbers and chapter title pages read as headings
 chunks in one home of books, none worth returning. Their headings still open the path of the chunks
 after them.
 
-The optional `frames` step (`chunk_frame`, on by default) also makes the path the chunk's
-frame. The models read every chunk of the section after it (`chunk.framed`). A path longer than
+The optional `frames` step (`chunk_frame`, on by default) also makes the path the chunk's frame. The
+models read every chunk of the section with the frame in front (`chunk.framed`). A path longer than
 half a chunk drops its outermost headings until it fits in half. A last heading that is still too
 long is cut (`chunk._shortened`). Without the step the frame is empty, and the text has the whole
 size. The `text` chunker cuts no sections at headings and never frames. It still files each chunk
@@ -185,11 +186,11 @@ toward its offsets. The context a neighbour's sentences would carry comes from t
 chunk instead. The models and the full-text index read every chunk after its heading path, for
 example `Part II > Replication > Leaders` and then the text.
 
-Context prepended to each chunk, before it is embedded and indexed for BM25, cuts retrieval
-failures (1 - recall@20) by 35%. With contextual BM25 the cut is 49%, and with a reranker on top
-67% [1]. There an LLM writes 50-100 tokens of context per chunk. Here the document's own heading
-path is the context, so it costs no model call. The source leaves chunk size, boundaries and
-overlap as tuning choices, and gives no figure for overlap.
+Context prepended to each chunk, before it is embedded and indexed for BM25, cuts retrieval failures
+(1 - recall@20) by 35%. With contextual BM25 the cut is 49%, and with a reranker on top 67% [1]. In
+that study a large language model (LLM) writes 50-100 tokens of context per chunk. Here the
+document's own heading path is the context, so it costs no model call. The source leaves chunk
+size, boundaries and overlap as tuning choices, and gives no figure for overlap.
 
 ## References
 

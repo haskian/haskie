@@ -16,6 +16,9 @@ by the `score_fold` setting (`ScoreFold`). No IO: `retrieval.py` reads the markd
 memberships and hands them in.
 """
 
+from collections.abc import Sequence
+from typing import Protocol
+
 import msgspec
 
 from haskie.collection.index import ChunkKey, Hit, Overlaps, Relation, chunk_key, location
@@ -124,11 +127,21 @@ class HitRange(msgspec.Struct):
         )
 
 
-def pages(hits: list[Hit]) -> tuple[int | None, int | None]:
-    """The pages a group of hits covers, first to last: every hit's, not only the best one's, or
-    a passage over pages 1 to 5 would be cited as page 1. None for a document without pages."""
-    starts = [hit.page_start for hit in hits if hit.page_start is not None]
-    ends = [hit.page_end for hit in hits if hit.page_end is not None]
+class Paged(Protocol):
+    """Anything that runs over pages: a hit, a chunk, a section."""
+
+    @property
+    def page_start(self) -> int | None: ...
+
+    @property
+    def page_end(self) -> int | None: ...
+
+
+def pages(spans: Sequence[Paged]) -> tuple[int | None, int | None]:
+    """The pages a group of spans covers, first to last: every span's, not only the best one's,
+    or a passage over pages 1 to 5 would be cited as page 1. None for a document without pages."""
+    starts = [one.page_start for one in spans if one.page_start is not None]
+    ends = [one.page_end for one in spans if one.page_end is not None]
     return (min(starts) if starts else None, max(ends) if ends else None)
 
 
@@ -260,6 +273,7 @@ class Span(msgspec.Struct, kw_only=True):
     spans; a `Passage` is one with its text."""
 
     header: str  # the heading path it sits under, "Part I > Chapter 2", from the best chunk
+    section_id: str  # the id of the section of that heading path, the deepest its chunks sit in
     location: str  # "doc p.3-4 L10-20", over every chunk it covers
     seq_start: int  # the chunks it covers, 1-based within the document
     seq_end: int
@@ -303,6 +317,7 @@ class Excerpt(msgspec.Struct):
     document_id: str
     document: str  # its name, what it is cited by
     header: str  # the section's heading path, "Part I > Chapter 2"; empty for a whole document
+    section_id: str  # the section's id: what a search keeps to by `section_ids`
     location: str  # "doc p.3-4 L10-20", from the first passage to the last
     seq_start: int
     seq_end: int
@@ -342,6 +357,7 @@ def _cited(hit_range: HitRange) -> dict:
     """The fields a `Span` has, out of a hit range."""
     return {
         "header": hit_range.best.header,
+        "section_id": hit_range.best.section_id,
         "location": hit_range.location,
         "seq_start": hit_range.seq_start,
         "seq_end": hit_range.seq_end,
@@ -521,9 +537,9 @@ def min_cover(doc_collections: dict[str, list[str]]) -> list[str]:
 
     What a session is narrowed to after a `search_sources`: naming every collection that holds
     any of the documents would widen the next search back out for nothing. Set cover is NP-hard,
-    so this is the standard greedy approximation - take the collection covering the most
-    uncovered documents, by name when two tie - which is within a log factor and deterministic.
-    A document no collection holds is simply left uncovered.
+    so this is the standard greedy approximation (take the collection covering the most
+    uncovered documents, by name when two tie), which is within a log factor and deterministic.
+    A document no collection holds is left uncovered.
     """
     holders: dict[str, set[str]] = {}
     for doc, names in doc_collections.items():

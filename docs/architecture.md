@@ -14,9 +14,11 @@ flowchart TB
         api["<b>api/</b><br/>one module per feature;<br/>handlers marked mcp_tool=<br/>are also MCP tools"]
         app --> api
         api --> document["<b>document/</b><br/>convert, store, render"]
-        api --> collection["<b>collection/</b><br/>membership, LanceDB index"]
-        api --> search["<b>search/</b><br/>retrieval, passages,<br/>fold repeats, sessions,<br/>search log, gaps"]
+        api --> collection["<b>collection/</b><br/>membership, LanceDB<br/>chunks"]
+        api --> search["<b>search/</b><br/>retrieval, passages,<br/>fold repeats, map of sections,<br/>sessions, search log, gaps"]
+        search --> sections["<b>sections/</b><br/>sections, their ids<br/>and descriptors"]
         api --> indexing["<b>indexing/</b><br/>DBOS pipeline: chunk,<br/>embed, cache, write"]
+        indexing --> sections
         api --> catalogue["<b>catalogue/</b><br/>models, their metadata,<br/>embedding profiles"]
     end
 

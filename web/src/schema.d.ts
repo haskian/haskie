@@ -672,6 +672,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/search/sections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** SearchSections */
+        get: operations["ApiSearchSectionsSearchSections"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/searches": {
         parameters: {
             query?: never;
@@ -883,7 +900,7 @@ export interface components {
             chunk_size: number;
             /**
              * Merge short paragraphs (% of chunk size)
-             * @description A paragraph - text between blank lines, or a whole list - shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
+             * @description A paragraph (text between blank lines, or a whole list) shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
              * @default 66
              */
             chunk_merge_below: number;
@@ -935,7 +952,7 @@ export interface components {
             chunk_size?: number | null;
             /**
              * Merge short paragraphs (% of chunk size)
-             * @description A paragraph - text between blank lines, or a whole list - shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
+             * @description A paragraph (text between blank lines, or a whole list) shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
              */
             chunk_merge_below?: number | null;
             /**
@@ -964,7 +981,7 @@ export interface components {
             chunk_size: number;
             /**
              * Merge short paragraphs (% of chunk size)
-             * @description A paragraph - text between blank lines, or a whole list - shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
+             * @description A paragraph (text between blank lines, or a whole list) shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
              * @default 66
              */
             chunk_merge_below: number;
@@ -1111,6 +1128,7 @@ export interface components {
             document_id: string;
             document: string;
             header: string;
+            section_id: string;
             location: string;
             seq_start: number;
             seq_end: number;
@@ -1144,7 +1162,7 @@ export interface components {
         FillValues: "relative" | "absolute";
         /**
          * Fusion
-         * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
+         * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
          * @default rrf
          * @enum {string}
          */
@@ -1229,6 +1247,11 @@ export interface components {
             /** @default  */
             markdown_file: string;
             also_in?: components["schemas"]["HitReference"][];
+            /** @default  */
+            id: string;
+            /** @default  */
+            section_id: string;
+            section_ids?: string[];
         };
         /** HitReference */
         HitReference: {
@@ -1363,6 +1386,8 @@ export interface components {
             result_limit?: number | null;
             /** @default 0 */
             result_count: number;
+            /** @default false */
+            scoped: boolean;
             missing_terms?: string[];
             error?: string | null;
             id: number;
@@ -1378,6 +1403,26 @@ export interface components {
             last_write_at: number | null;
             last_maintained_at: number | null;
             vector_index_rows: number;
+        };
+        /** MappedSection */
+        MappedSection: {
+            collection: string;
+            document_id: string;
+            document: string;
+            header: string;
+            id: string;
+            location: string;
+            line_start: number;
+            line_end: number;
+            score: number;
+            depth: number;
+            seq_start: number;
+            seq_end: number;
+            chars: number;
+            chunks: number;
+            descriptors: string[];
+            markdown_file: string;
+            related?: components["schemas"]["Related"][];
         };
         /** Markdown */
         Markdown: {
@@ -1546,6 +1591,7 @@ export interface components {
         /** Passage */
         Passage: {
             header: string;
+            section_id: string;
             location: string;
             seq_start: number;
             seq_end: number;
@@ -1624,7 +1670,7 @@ export interface components {
             document_parallelism: number;
             /**
              * Pages per micro-batch
-             * @description Number of PDF pages one task converts, or one task chunks and embeds. Bounds memory: at most the CPU budget x Pages per micro-batch pages are in flight. Non-PDF files are one batch.
+             * @description Number of PDF pages one task converts, or one task chunks and embeds. Bounds memory: at most the CPU budget x Pages per micro-batch pages are in flight. Non-PDF files convert as one batch, and chunk and embed in parts cut at their headings.
              * @default 10
              */
             batch_pages: number;
@@ -1688,6 +1734,19 @@ export interface components {
         QueueActivity: {
             queued: number;
             running: number;
+        };
+        /** Related */
+        Related: {
+            collection: string;
+            document_id: string;
+            document: string;
+            header: string;
+            id: string;
+            location: string;
+            line_start: number;
+            line_end: number;
+            score: number;
+            similarity: number;
         };
         /**
          * Relation
@@ -1801,7 +1860,7 @@ export interface components {
         SearchOverrides: {
             /**
              * Results
-             * @description Number of results a search returns, at most 200.
+             * @description Number of chunks or passages a search returns, at most 200. Excerpts, sources and sections have their own defaults.
              */
             limit?: number | null;
             /**
@@ -1816,7 +1875,7 @@ export interface components {
             mode?: components["schemas"]["SearchMode"] | null;
             /**
              * Fusion
-             * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
+             * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
              */
             fusion?: components["schemas"]["Fusion"] | null;
             /**
@@ -1909,7 +1968,7 @@ export interface components {
         SearchSettings: {
             /**
              * Results
-             * @description Number of results a search returns, at most 200.
+             * @description Number of chunks or passages a search returns, at most 200. Excerpts, sources and sections have their own defaults.
              * @default 25
              */
             limit: number;
@@ -2008,6 +2067,11 @@ export interface components {
              */
             max_answer_chars: number;
         };
+        /** SectionMap */
+        SectionMap: {
+            sections: components["schemas"]["MappedSection"][];
+            collections: string[];
+        };
         /** SessionCollections */
         SessionCollections: {
             collections: string[];
@@ -2063,6 +2127,7 @@ export interface components {
         /** Span */
         Span: {
             header: string;
+            section_id: string;
             location: string;
             seq_start: number;
             seq_end: number;
@@ -2118,7 +2183,7 @@ export interface components {
          * @description Which endpoint ran a search.
          * @enum {string}
          */
-        Tool: "excerpts" | "sources" | "explore" | "text";
+        Tool: "excerpts" | "sources" | "sections" | "explore" | "text";
         /** UserSettings */
         UserSettings: {
             /**
@@ -3517,6 +3582,8 @@ export interface operations {
                 session_id?: string | null;
                 collections?: string | null;
                 limit?: number | null;
+                document_ids?: string[] | null;
+                section_ids?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -3554,6 +3621,8 @@ export interface operations {
                 session_id?: string | null;
                 collections?: string | null;
                 limit?: number | null;
+                document_ids?: string[] | null;
+                section_ids?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -3605,6 +3674,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Sources"];
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
+    ApiSearchSectionsSearchSections: {
+        parameters: {
+            query: {
+                q: string;
+                session_id?: string | null;
+                collections?: string | null;
+                limit?: number | null;
+                document_ids?: string[] | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectionMap"];
                 };
             };
             /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */

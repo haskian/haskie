@@ -4,7 +4,7 @@ settings. Metadata in the DB, the index under ~/.haskie/collections/<shard>/<nam
 A collection owns nothing about a document but its membership (`collection_documents`) and the
 rows it wrote into its own table. The same document may sit in any number of collections; each
 attach is an indexing operation of its own (embed-if-missing from the document's cache, then a
-write into this collection's table), so a membership carries its own status — a document can be
+write into this collection's table), so a membership carries its own status. A document can be
 `indexed` in one collection and `error` in another at the same time. Deleting a collection drops
 its rows and its folder and touches no document.
 
@@ -14,12 +14,14 @@ Every row read, row write and file touch is awaited: the database goes through `
 """
 
 import time
+from collections.abc import Iterable
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 import anyio
 import msgspec
+import numpy as np
 from sqlalchemy import (
     ColumnElement,
     CompoundSelect,
@@ -29,6 +31,7 @@ from sqlalchemy import (
     func,
     not_,
     select,
+    tuple_,
     union,
     update,
 )
@@ -38,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from haskie import claude, db, home
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel
-from haskie.collection.index import CollectionIndex, IndexStats, forget_schema
+from haskie.collection.index import EVERYTHING, CollectionIndex, IndexStats, Scope, forget_schema
 from haskie.document import document
 from haskie.errors import Conflict, NotFound
 from haskie.paging import Page, PageRequest, count_of, keyset, resolve_sort
@@ -410,11 +413,12 @@ class Collection:
 
     @staticmethod
     async def for_search(
-        names: list[str], embedding: EmbeddingModel | None
+        names: list[str], embedding: EmbeddingModel | None, scope: Scope = EVERYTHING
     ) -> dict[str, tuple[CollectionIndex, CollectionOverrides]]:
         """The index of each of these collections, with its overrides, once each and in the order
-        given: what a search reads. Each index leaves out the documents on their way out of its
-        collection (`LEAVING`). A name with no row is absent, as in `load_overrides`.
+        given: what a search reads. Each index keeps to `scope` and leaves out the documents on
+        their way out of its collection (`LEAVING`). A name with no row is absent, as in
+        `load_overrides`.
 
         One unit of work, so the overrides and the documents leaving are read at one moment."""
         async with db.read() as conn:
@@ -422,7 +426,7 @@ class Collection:
             leaving = await _leaving(conn, list(found))
         return {
             name: (
-                Collection(name).index_with(embedding, leaving.get(name, frozenset())),
+                Collection(name).index_with(embedding, leaving.get(name, frozenset()), scope),
                 found[name],
             )
             for name in dict.fromkeys(names)
@@ -542,16 +546,57 @@ class Collection:
                 )
             )
 
+    async def set_centre(self, found: tuple[np.ndarray, int] | None, model: str) -> None:
+        """Record the sum of the collection's unit chunk vectors under `model` and how many it
+        sums (`embed_cache.corpus_sum`); None clears it."""
+        vector, rows = found if found is not None else (None, 0)
+        async with db.connect() as conn:
+            await conn.execute(
+                update(collections)
+                .where(collections.c.name == self.name)
+                .values(
+                    vector_sum=None if vector is None else vector.astype(np.float64).tobytes(),
+                    vector_rows=rows,
+                    vector_model=model if vector is not None else None,
+                )
+            )
+
+    @staticmethod
+    async def centre(names: list[str], model: str | None) -> np.ndarray | None:
+        """The mean unit chunk vector over these collections under `model`, weighed by their
+        chunks: what a search centres cosines on (`search.section_map`). None when none of them has
+        a sum under it yet, before its first maintenance or after the model changed, and without
+        a model."""
+        if model is None:
+            return None
+        async with db.read() as conn:
+            rows = await conn.execute(
+                select(collections.c.vector_sum, collections.c.vector_rows).where(
+                    collections.c.name.in_(names),
+                    collections.c.vector_model == model,
+                    collections.c.vector_sum.is_not(None),
+                )
+            )
+            found = [(np.frombuffer(raw, dtype=np.float64), count) for raw, count in rows]
+        total = sum(count for _, count in found)
+        if not total:
+            return None
+        return np.sum([vector for vector, _ in found], axis=0) / total
+
     async def index(self) -> CollectionIndex:
         return self.index_with(await catalogue.embedding_model(await load_user_settings()))
 
     def index_with(
-        self, embedding: EmbeddingModel | None, leaving: frozenset[str] = frozenset()
+        self,
+        embedding: EmbeddingModel | None,
+        leaving: frozenset[str] = frozenset(),
+        scope: Scope = EVERYTHING,
     ) -> CollectionIndex:
         """Variant without the settings read, for steps that already hold the embedding model.
-        A search passes the documents `leaving` the collection, which its reads then leave out.
-        Sync, like the `CollectionIndex` constructor it calls: opening the table is what awaits."""
-        return CollectionIndex(self.index_dir, self.name, home.HOME, embedding, leaving)
+        A search passes the documents `leaving` the collection, which its reads then leave out,
+        and the `scope` it keeps to. Sync, like the `CollectionIndex` constructor it calls:
+        opening the table is what awaits."""
+        return CollectionIndex(self.index_dir, self.name, home.HOME, embedding, leaving, scope)
 
     # --- members ---------------------------------------------------------
 
@@ -643,6 +688,30 @@ class Collection:
         index still finishing its write, or a cancel of it, must not show it as indexed or
         cancelled again. Only its removal ends that status (see `fail_removal`)."""
         await self._move_member(doc, status, error, not_(_REMOVING))
+
+    async def set_member_entry(self, doc: str, cache_id: str) -> None:
+        """Record the embedding cache entry the membership's rows are indexed from."""
+        async with db.connect() as conn:
+            await conn.execute(
+                update(collection_documents).where(self._membership(doc)).values(cache_id=cache_id)
+            )
+
+    @staticmethod
+    async def indexed_entries(places: Iterable[tuple[str, str]]) -> dict[tuple[str, str], str]:
+        """The cache entry each (collection, document id) membership is indexed from; one not
+        indexed yet, or no membership, is absent. One query for a whole search result."""
+        wanted = list(set(places))
+        if not wanted:
+            return {}
+        member = collection_documents.c
+        async with db.read() as conn:
+            rows = await conn.execute(
+                select(member.collection, member.document_id, member.cache_id).where(
+                    tuple_(member.collection, member.document_id).in_(wanted),
+                    member.cache_id.is_not(None),
+                )
+            )
+        return {(collection, doc): cache_id for collection, doc, cache_id in rows}
 
     async def cancel_index(self, doc: str) -> None:
         """Record a cancelled index as `cancelled`, but only while the membership is still being

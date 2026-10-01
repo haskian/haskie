@@ -89,7 +89,7 @@ def _hit(
     page_start: int | None = None,
     page_end: int | None = None,
 ) -> Hit:
-    """One indexed chunk of `MARKDOWN`, with the lines and the text its offsets really give."""
+    """One indexed chunk of `MARKDOWN`, with the lines and the text its offsets give."""
     char_start, char_end = span
     line_start = MARKDOWN.count("\n", 0, char_start) + 1
     line_end = MARKDOWN.count("\n", 0, char_end - 1) + 1
@@ -121,7 +121,7 @@ def _hit(
 
 
 # The four chunks of the fixture, as the splitter would leave them: 1 and 2 overlap, 3 starts
-# past the end of 2 (the splitter dropped nothing, the query simply skipped a section), 4
+# past the end of 2 (the splitter dropped nothing, the query skipped a section), 4
 # overlaps 3 again.
 OPENING = _span("# Retries", "effect happens twice.")
 BACKOFF = _span("The retry has to be idempotent", "A fixed delay buys a thundering herd\ninstead.")

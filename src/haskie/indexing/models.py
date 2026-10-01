@@ -3,14 +3,14 @@
 Downloaded and usable are two different things, and this module keeps them apart.
 
 *Downloaded* is durable: `ensure_model` has one fixed id per model (`dl:{kind}:{name}`), so it is
-idempotent, retried on failure, queryable, and it outlives the process — the files stay in the
+idempotent, retried on failure, queryable, and it outlives the process. The files stay in the
 disk cache, so a restart must not fetch them again (which is what a boot id in the id used to
 cost: one record, one download and one row in the Downloads list per process start).
 
 *Usable* is per process: a model lives in the caches of one process, so a boot that finds a
 SUCCESS record still has cold caches. `_ready` holds the ids this process has loaded,
 `ensure_models` warms the rest in a background task (a local read, no network), and
-`require_ready` — which every search calls — answers from `_ready`, not from the record alone.
+`require_ready` (which every search calls) answers from `_ready`, not from the record alone.
 
 Loading a model is CPU work, not IO, so it goes through `cpu.on_cpu`: a worker thread, under one
 slot of the CPU budget, whichever event loop asked for it.
@@ -172,7 +172,7 @@ async def _download_records(
     wanted: list[tuple[ModelKind, str]],
 ) -> dict[str, DbosWorkflowStatus]:
     """The download record of every model in `wanted`, in one query, keyed by workflow id. A
-    model nobody ever asked for simply has none. The output is loaded because DBOS carries a
+    model nobody ever asked for has none. The output is loaded because DBOS carries a
     workflow's error alongside it, and `_model_status` reports that error."""
     if not wanted:
         return {}

@@ -137,6 +137,8 @@ def signal(search: Searched, asked: LoggedQuestion, bars: Bars) -> Signal | None
     """Why `asked`, one question of `search`, is a gap, or None when it is not one."""
     if search.error is not None:
         return None
+    if search.scoped:  # what it missed may sit in the documents it kept out; only the agent knows
+        return _reported(search, asked, bars)
     return next((found for detect in DETECTORS if (found := detect(search, asked, bars))), None)
 
 

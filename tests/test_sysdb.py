@@ -80,8 +80,8 @@ async def test_operation_activity_counts_the_operation_queues_by_status(dbos, tm
     What remains is the maintenance run the collection index asked for, DELAYED on
     `operation.maintenance` until its debounce expires. That is not queued work: nobody is waiting
     on it, and it sits there for a whole `maintenance_idle_seconds`. Counting it made the indicator
-    read "1 queued" with an idle machine, while the Operations view - which counts `ACTIVE_STATUS`
-    - showed nothing.
+    read "1 queued" with an idle machine, while the Operations view (which counts `ACTIVE_STATUS`)
+    showed nothing.
     """
     from haskie import db
 

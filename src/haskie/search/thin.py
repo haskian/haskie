@@ -13,7 +13,7 @@ short passage inside a section with another passage stays in that section's exce
 range with a section end on both sides is a whole section, a short note say, not a piece of one:
 it is kept as the author wrote it.
 
-"Matches" is measured, not assumed: `retrieval.fill_thin` scores the neighbours the way it scores
+"Matches" is measured: `retrieval.fill_thin` scores the neighbours the way it scores
 the scanned hits (the reranker, the query vector, or the question's words), and values each
 around them (`fill.value`): 0 as good as the median scanned hit, 1 as good as the best. The
 floor is this search's own, so no calibrated threshold is needed. With `fill_values = absolute`

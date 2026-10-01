@@ -12,11 +12,13 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import pytest
 import structlog
 from conftest import NO_MODELS, attach_via_api, stage_and_import, wait_for, wait_import
 from litestar.testing import AsyncTestClient
 
+from haskie.api import agent
 from haskie.app import MCP_PATH
 from haskie.collection.collection import Collection
 from haskie.document import document
@@ -28,6 +30,7 @@ SESSION = "agent-1"
 TOOLS = {
     "search_excerpts",
     "search_sources",
+    "search_sections",
     "set_session_collections",
     "list_collections",
     "get_collection",
@@ -178,7 +181,7 @@ async def test_the_tools_an_agent_is_offered(client: AsyncTestClient) -> None:
             {"q": [BY_RETRY], "session_id": SESSION},
             lambda found: (
                 [one["document"] for one in found["excerpts"]] == ["retries.md"]
-                and found["excerpts"][0]["aspects"] == []
+                and "aspects" not in found["excerpts"][0]
                 and found["uncovered"] == []
             ),
         ),
@@ -202,6 +205,16 @@ async def test_the_tools_an_agent_is_offered(client: AsyncTestClient) -> None:
                 and len(found["documents"][0]["sections"]) == 1
             ),
         ),
+        (
+            "a map of the sections",
+            "search_sections",
+            {"q": BY_RETRY, "session_id": SESSION},
+            lambda found: (
+                found["sections"][0]["document"] == "retries.md"
+                and found["sections"][0]["descriptors"]
+                and found["collections"] == ["notes"]
+            ),
+        ),
     ],
 )
 async def test_every_read_tool_answers(
@@ -211,6 +224,42 @@ async def test_every_read_tool_answers(
 
     assert not error, f"{name}: {found}"
     assert expected(found), f"{name}: {found}"
+
+
+# Each tool, its arguments, its REST twin with the same arguments, and the view the tool answers
+# with (`api.agent`).
+VIEWS = [
+    ("search_excerpts", {"q": [BY_RETRY]}, "/api/search/excerpts", {"q": BY_RETRY}, agent.Answer),
+    ("search_sources", {"q": BY_RETRY}, "/api/search/sources", {"q": BY_RETRY}, agent.Sources),
+    ("search_sections", {"q": BY_RETRY}, "/api/search/sections", {"q": BY_RETRY}, agent.SectionMap),
+]
+
+
+def _fields(value: Any, at: str = "") -> set[str]:
+    """Every field of a JSON answer as a dotted path, lists flattened: `excerpts.spans.header`.
+    A map keyed by data (`aspect_scores`, by question) is one field."""
+    if isinstance(value, list):
+        return {one for item in value for one in _fields(item, at)}
+    if not isinstance(value, dict) or at.endswith("aspect_scores."):
+        return set()
+    return {one for key, item in value.items() for one in {at + key, *_fields(item, f"{at}{key}.")}}
+
+
+@pytest.mark.parametrize(("tool", "arguments", "route", "params", "view"), VIEWS)
+async def test_a_tool_answers_with_fewer_fields_than_its_route(
+    library: AsyncTestClient, tool: str, arguments: dict, route: str, params: dict, view: Any
+) -> None:
+    """The same search, fewer fields: the agent reads the view, the web UI the whole answer. The
+    offsets, chunk numbers and lines the tool leaves out are still on the route."""
+    error, found = await _call(library, tool, arguments)
+    served = (await library.get(route, params=params)).json()
+
+    assert not error, found
+    assert msgspec.convert(found, view) == agent.view(served, view), f"{tool}: the route's answer"
+    told = _fields(found)
+    assert told < _fields(served), f"{tool}: a subset of the route's fields"
+    left_out = {"seq_start", "char_start", "line_start", "page_start", "source_file"}
+    assert not left_out & {one.rsplit(".", 1)[-1] for one in told}, tool
 
 
 @pytest.mark.parametrize(
@@ -257,6 +306,12 @@ async def test_every_read_tool_answers(
         (
             "an unknown collection to search",
             "search_sources",
+            {"q": "x", "collections": "ghost"},
+            "collection not found: ghost",
+        ),
+        (
+            "an unknown collection to map",
+            "search_sections",
             {"q": "x", "collections": "ghost"},
             "collection not found: ghost",
         ),

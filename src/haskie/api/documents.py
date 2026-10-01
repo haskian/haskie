@@ -252,7 +252,7 @@ async def get_preview(document: str) -> File:
 async def get_markdown(document: str, full: bool = False) -> Stream:
     """Right pane, as NDJSON: one `head` line, then one `page` line per page of HTML.
 
-    Streamed because a full text is one lump otherwise - a 1200-page book renders to megabytes,
+    Streamed because otherwise a full text is one lump. A 1200-page book renders to megabytes,
     and the pane could show nothing until all of it had arrived and been parsed. Rendered on the
     server because the browser then inserts HTML instead of parsing markdown, and because raw HTML
     has to be dropped somewhere it cannot be forgotten (see `render`).

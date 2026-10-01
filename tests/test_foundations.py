@@ -894,7 +894,7 @@ async def test_the_settings_cache_ends_on_the_saved_value_under_concurrent_loads
     await save_user_settings(UserSettings(embedding="compact"))
     saved = UserSettings(embedding="quality")
     loaders, loads = 8, 25
-    forget_settings()  # so the first load of every task misses and really reads the row
+    forget_settings()  # so the first load of every task misses and reads the row
 
     async def read() -> list[str]:
         return [(await settings.load_user_settings()).embedding for _ in range(loads)]

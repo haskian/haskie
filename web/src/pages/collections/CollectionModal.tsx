@@ -144,8 +144,8 @@ function CollectionBody({
   )
   const shownCandidates = useMemo(() => candidates.filter((doc) => matchesText(needle, doc.name, doc.description)), [candidates, needle])
 
-  // Nothing to show until the collection answers — except why it did not, for a name that is
-  // in the hash but not in the home any more.
+  // Nothing to show until the collection answers. The one exception is why it did not answer,
+  // for a name that is in the hash but not in the home any more.
   if (info === null) return error === null ? null : <p className="muted collection-error">{error}</p>
 
   const index = info.index

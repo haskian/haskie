@@ -45,6 +45,10 @@ export type Answer = Wire<'Answer'>
 export type Source = Wire<'Source'>
 export type Sources = Wire<'Sources'>
 export type HotSection = Wire<'HotSection'>
+// A map of the sections a topic touches (`search.section_map`), each with its descriptors.
+export type SectionMap = Wire<'SectionMap'>
+export type MappedSection = Wire<'MappedSection'>
+export type RelatedSection = Wire<'Related'>
 export type Lines = Wire<'Lines'>
 export type Status = Wire<'Status'>
 export type ModelStatus = Wire<'ModelStatus'>
@@ -53,7 +57,7 @@ export type Activity = Wire<'Activity'>
 export type Operation = Wire<'Operation'>
 export type Job = Wire<'Job'>
 export type SessionSummary = Wire<'SessionSummary'>
-// Not `Wire`: `EventDetail` is the one struct whose fields really are absent on the wire
+// Not `Wire`: `EventDetail` is the one struct whose fields are absent on the wire
 // (`omit_defaults`), so completing them would promise fields no action fills.
 export type EventDetail = components['schemas']['EventDetail']
 export type SessionEvent = Omit<Wire<'SessionEvent'>, 'detail'> & { detail: EventDetail }
@@ -353,7 +357,7 @@ export const api = {
   // Asks the questions again over every collection now; nothing is recorded.
   replayGaps: (ids: number[]) => request<ReplayedGap[]>('/api/gaps/replay', json('POST', { ids })),
 
-  // The three searches Explore runs, over one scope: `collections` when given, else the session's
+  // The four searches Explore runs, over one scope: `collections` when given, else the session's
   // selection, else every collection (the backend applies that order). Each answers with the
   // steps it took, for the breakdown under the total.
   explore: <G extends Granularity>(q: string, granularity: G, scope: SearchScope = {}) =>
@@ -363,6 +367,8 @@ export const api = {
     timedRequest<Answer>(`/api/search/excerpts${pageQuery({}, { q, context, ...scopeQuery(scope) })}`),
   searchSources: (q: string, scope: SearchScope = {}) =>
     timedRequest<Sources>(`/api/search/sources${pageQuery({}, { q, ...scopeQuery(scope) })}`),
+  searchSections: (q: string, scope: SearchScope = {}) =>
+    timedRequest<SectionMap>(`/api/search/sections${pageQuery({}, { q, ...scopeQuery(scope) })}`),
 }
 
 /** Which collections a search runs over; empty means every one. */

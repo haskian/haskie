@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react'
 import type { Excerpt, Hit, Passage, Source } from '../api'
 
 /** Any shape a search result arrives in: a chunk, a passage, an excerpt, or a document. */
@@ -192,6 +193,12 @@ export function fillOf(score: number, best: number, worst: number): number {
   if (best === worst) return 1
   return MIN_FILL + (1 - MIN_FILL) * ((score - worst) / (best - worst))
 }
+
+/** The bar under a tile: `--score` is its fill (`fillOf`), not its raw score. */
+export const scoreStyle = (fill: number): CSSProperties => ({ '--score': fill }) as CSSProperties
+
+/** "1 chunk", "3 chunks". */
+export const plural = (n: number, unit: string): string => `${n} ${unit}${n === 1 ? '' : 's'}`
 
 /** The questions a result answers, each by its place in what was asked ("Q2"), with its text and
  *  how well the result matched it, formatted, when the search said. A question not asked this

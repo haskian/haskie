@@ -14,8 +14,8 @@ set -euo pipefail
 # the changelog and for a reader; it no longer takes the major digit up on its own. Every push
 # gets a version, so no version is skipped: a push of nothing but docs or chores is a patch.
 #
-# `majorfeat` without the `!` is refused rather than silently released as a patch: the author of
-# such a subject meant a major, and shipping 1.4.3 in its place is the one outcome nobody wants.
+# `majorfeat` without the `!` is refused rather than silently released as a patch. The author of
+# such a subject meant a major release.
 
 git config user.name  "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

@@ -62,7 +62,7 @@ def _embedded(
 
 
 def _heading(text: str, score: float, **fields) -> Hit:
-    """A chunk of one heading line and nothing else, as the chunker really cuts it. Only the text
+    """A chunk of one heading line and nothing else, as the chunker cuts it. Only the text
     chunker does: the markdown one reads the line as a heading and makes no chunk of a section
     without text (`segment.pack`), so a heading reaches the fold as text of its own."""
     (alone,) = chunk.split(text, ChunkSettings(chunker=Chunker.TEXT))
@@ -662,7 +662,7 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
 
     shape = [(r.hits[0].document, r.alone, [ref.document for ref in r.also_in]) for r in kept]
     assert shape == expected, name
-    # each document one section of one chunk, as `CollectionIndex.outline_rows` reads it
+    # each document one section of one chunk, as `CollectionIndex.placement_rows` reads it
     rows = [
         {
             "document_id": one.document_id,
@@ -670,13 +670,17 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
             "headings": one.headings,
             "char_start": one.char_start,
             "char_end": one.char_end,
+            "line_start": one.line_start,
+            "line_end": one.line_end,
+            "page_start": one.page_start,
+            "page_end": one.page_end,
         }
         for one in scanned
     ]
-    outlines = section.outlines(
+    placed = section.placements(
         [(one.collection, row) for one, row in zip(scanned, rows, strict=True)]
     )
-    grouped = section.group(kept, outlines, max_chars=10_000, limit=len(kept) + 1)
+    grouped = section.group(kept, placed, max_chars=10_000, limit=len(kept) + 1)
     assert [one.document_id for one in grouped] == excerpts, f"{name}: the excerpts answered with"
 
 

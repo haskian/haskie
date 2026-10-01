@@ -1,8 +1,8 @@
 import { Info } from 'lucide-react'
 import { Fragment, useEffect, useState, type ReactNode } from 'react'
-import { api, type Document, type Hit, type HotSection, type ScoreStep } from '../api'
+import { api, type Hit, type HotSection, type ScoreStep } from '../api'
 import type { Anchor } from './anchor'
-import { DocumentPanes } from './DocumentPanes'
+import { DocumentByName } from './DocumentPanes'
 import { Kv } from './Kv'
 import { Mark } from './Mark'
 import { MarkdownQuote } from './MarkdownQuote'
@@ -272,25 +272,9 @@ function askedRows(match: Match, query: string, asked?: Asked): [string, ReactNo
 
 function MatchBody({ match, query, scoring, asked }: { match: Match; query: string; scoring: ScoreStep[]; asked?: Asked }) {
   const [tab, setTab] = useState(MATCH_TAB)
-  // Fetched because the panes need the document's preview kind, which a match does not carry.
-  const [row, setRow] = useState<Document | null>(null)
   // The section picked in a source is where the document opens.
   const [picked, setPicked] = useState<Anchor | null>(null)
-  const name = match.document
   const source = isSource(match)
-
-  useEffect(() => {
-    let live = true
-    api
-      .document(name)
-      .then((fetched) => {
-        if (live) setRow(fetched)
-      })
-      .catch(() => undefined)
-    return () => {
-      live = false
-    }
-  }, [name])
 
   const jump = (section: HotSection) => {
     setPicked(sectionAnchor(section))
@@ -342,7 +326,7 @@ function MatchBody({ match, query, scoring, asked }: { match: Match; query: stri
       <div id={DOCUMENT_TAB} role="tabpanel" hidden={tab !== DOCUMENT_TAB}>
         {/* The whole document, not the preview, streamed from the moment the modal opens so it
             is already at the match when its tab is chosen. */}
-        {row !== null && <DocumentPanes doc={row.name} preview={row.preview} full anchor={picked ?? anchorOf(match)} shown={tab === DOCUMENT_TAB} />}
+        <DocumentByName name={match.document} anchor={picked ?? anchorOf(match)} shown={tab === DOCUMENT_TAB} />
       </div>
     </>
   )

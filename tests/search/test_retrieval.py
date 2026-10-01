@@ -10,17 +10,23 @@ from pathlib import Path
 from typing import Any
 
 import msgspec
+import numpy as np
 import pytest
-from conftest import hit
+from conftest import chunk_hit, hit, import_row, one_part
 
-from haskie.catalogue.catalogue import UNCALIBRATED
-from haskie.collection.index import Hit, chunk_key, location
+from haskie.catalogue.catalogue import UNCALIBRATED, EmbeddingModel
+from haskie.collection.collection import Collection, MemberStatus
+from haskie.collection.index import Hit, Row, chunk_key, location
+from haskie.document import document
+from haskie.document.document import DocumentStatus
+from haskie.indexing.chunk import split
 from haskie.indexing.segment import CutReason
 from haskie.search import probe, retrieval, section, thin
+from haskie.search.collapse import Vector
 from haskie.search.passage import Excerpt, ranges
 from haskie.search.retrieval import Plan, Pool, Scanned
 from haskie.search.thin import Filled
-from haskie.settings import FillValues, Reranker, ScoreFold, SearchSettings
+from haskie.settings import ChunkSettings, FillValues, Reranker, ScoreFold, SearchSettings
 
 HARMONIC = ScoreFold.HARMONIC  # the rule these cases were written against
 
@@ -93,7 +99,7 @@ def test_a_read_is_exactly_the_span_of_one_range(
 @pytest.mark.anyio
 async def test_the_texts_of_a_search_come_back_in_order(tmp_path: Path) -> None:
     """A search folds ranges of several documents and reads them in rank order, so the texts
-    have to line up with the ranges they were read for - not with the files they came from."""
+    have to line up with the ranges they were read for, not with the files they came from."""
     first, second = tmp_path / "one.md", tmp_path / "two.md"
     first.write_text(ASCII, encoding="utf-8")
     second.write_text(WIDE, encoding="utf-8")
@@ -514,6 +520,7 @@ def _excerpt(text: str, score: float, aspects: list[str] | None = None) -> Excer
         document_id="a.md",
         document="a.md",
         header="Retries",
+        section_id="retries",
         location="a.md L1-1",
         seq_start=1,
         seq_end=1,
@@ -676,3 +683,122 @@ def test_the_budget_cuts_the_last_sections_first() -> None:
     kept = retrieval.budget(groups, where)
 
     assert [one.document_id for one in kept] == ["a.md", "b.md"]
+
+
+SHELF = """# Sagas
+
+A saga runs compensating steps when a local step fails, one per step already done.
+
+# Saga retries
+
+A saga retries a failed local step before it runs the compensating steps of the others.
+
+# Quorums
+
+A quorum read overlaps a quorum write, so the read sees the latest acknowledged write.
+"""
+# Every chunk shares one strong common direction (the third axis), as a real model's do; what sets
+# the topics apart is small beside it until the collection's mean is taken out.
+SHELF_MODEL = EmbeddingModel("test/tiny", 4)
+SHELF_VECTORS = {
+    "Sagas": [1.0, 0.0, 3.0, 0.0],
+    "Saga retries": [1.0, 0.1, 3.0, 0.0],
+    "Quorums": [0.0, 1.0, 3.0, 0.0],
+}
+
+
+@pytest.mark.anyio
+async def test_map_sections_covers_the_scan_with_centred_vectors() -> None:
+    """The vector road through real rows: the placements read back from the table, the corpus
+    mean from the collection, the picks by facility location. The saga retries section repeats
+    the sagas one, so the map takes quorums second and lists the retries under sagas."""
+    shelf = await Collection.create("shelf")
+    doc = await import_row("shelf.md", SHELF)
+    await document.set_status(doc.id, DocumentStatus.IMPORTED)
+    await shelf.add(doc.id)
+    await shelf.set_member_status(doc.id, MemberStatus.INDEXED)
+    chunks = split(SHELF, ChunkSettings())
+    rows = [
+        Row(chunk=one, vector=SHELF_VECTORS[one.headings[0]], seq=seq)
+        for seq, one in enumerate(chunks, start=1)
+    ]
+    index = shelf.index_with(SHELF_MODEL)
+    await index.add_parts(doc.id, "documents/shelf.md", "documents/shelf.md", one_part(0, rows))
+    await shelf.set_centre((np.asarray([0.0, 0.0, 3.0, 0.0]) * 3, 3), SHELF_MODEL.cache_name)
+    await index.open()
+    scores = [0.9, 0.8, 0.3]
+    hits = [
+        chunk_hit(one, seq, score, document=doc.id, collection="shelf")
+        for seq, (one, score) in enumerate(zip(chunks, scores, strict=True), start=1)
+    ]
+    where = Plan(
+        settings=SearchSettings(),
+        indexes=[(index, SearchSettings())],
+        vector=[1.0, 0.0, 3.0, 0.0],
+        embedding=SHELF_MODEL,
+    )
+
+    found = await retrieval.map_sections(
+        Scanned(hits=hits, vectors=[row.vector for row in rows]), where, 2
+    )
+
+    assert [one.header for one in found.sections] == ["Sagas", "Quorums"]
+    sagas = found.sections[0]
+    assert [one.header for one in sagas.related] == ["Saga retries"]
+    assert sagas.related[0].similarity > 0.9, "centred, the two saga sections still agree"
+    assert (sagas.seq_start, sagas.depth, sagas.chunks) == (1, 1, 1)
+    assert sagas.descriptors == [], "no cache entry was written: the document has no sections"
+    assert found.collections == ["shelf"]
+
+
+@pytest.mark.anyio
+async def test_map_sections_names_the_collections_of_its_related_sections() -> None:
+    """The saga retries section sits in another collection, as a near copy of the sagas pick: it
+    is listed under that pick, so `collections` names its collection too, and a follow-up
+    search scoped to them still reaches it."""
+    sagas, rest = SHELF.split("# Saga retries")
+    retries_text, quorums = rest.split("# Quorums")
+    shelves = {"shelf": f"{sagas}# Quorums{quorums}", "copies": f"# Saga retries{retries_text}"}
+    placed: dict[str, tuple[Any, list[Row], str]] = {}
+    for name, text in shelves.items():
+        held = await Collection.create(name)
+        doc = await import_row(f"{name}.md", text)
+        await document.set_status(doc.id, DocumentStatus.IMPORTED)
+        await held.add(doc.id)
+        await held.set_member_status(doc.id, MemberStatus.INDEXED)
+        rows = [
+            Row(chunk=one, vector=SHELF_VECTORS[one.headings[0]], seq=seq)
+            for seq, one in enumerate(split(text, ChunkSettings()), start=1)
+        ]
+        index = held.index_with(SHELF_MODEL)
+        await index.add_parts(
+            doc.id, f"documents/{name}.md", f"documents/{name}.md", one_part(0, rows)
+        )
+        await index.open()
+        placed[name] = (index, rows, doc.id)
+    await Collection("shelf").set_centre(
+        (np.asarray([0.0, 0.0, 3.0, 0.0]) * 3, 3), SHELF_MODEL.cache_name
+    )
+    shelf_index, shelf_rows, shelf_doc = placed["shelf"]
+    copies_index, copies_rows, copies_doc = placed["copies"]
+    (retries,) = copies_rows
+    hits = [
+        chunk_hit(shelf_rows[0].chunk, 1, 0.9, document=shelf_doc, collection="shelf"),
+        chunk_hit(retries.chunk, 1, 0.8, document=copies_doc, collection="copies"),
+        chunk_hit(shelf_rows[1].chunk, 2, 0.3, document=shelf_doc, collection="shelf"),
+    ]
+    where = Plan(
+        settings=SearchSettings(),
+        indexes=[(shelf_index, SearchSettings()), (copies_index, SearchSettings())],
+        vector=[1.0, 0.0, 3.0, 0.0],
+        embedding=SHELF_MODEL,
+    )
+    vectors: list[Vector | None] = [shelf_rows[0].vector, retries.vector, shelf_rows[1].vector]
+
+    found = await retrieval.map_sections(Scanned(hits=hits, vectors=vectors), where, 2)
+
+    assert [one.header for one in found.sections] == ["Sagas", "Quorums"]
+    assert [(one.collection, one.header) for one in found.sections[0].related] == [
+        ("copies", "Saga retries")
+    ]
+    assert found.collections == ["copies", "shelf"], "the related section's collection too"
