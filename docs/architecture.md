@@ -1,7 +1,7 @@
 # Architecture
 
-haskie is one Python process. It serves a web UI, a REST API and an MCP server from the same
-Litestar app, and keeps everything under one home directory.
+haskie is one Python process. It serves a web UI, a REST API and a Model Context Protocol (MCP)
+server from the same Litestar app, and keeps everything under one home directory.
 
 ```mermaid
 flowchart TB
@@ -16,9 +16,9 @@ flowchart TB
         api --> document["<b>document/</b><br/>convert, store, render"]
         api --> collection["<b>collection/</b><br/>membership, LanceDB<br/>chunks"]
         api --> search["<b>search/</b><br/>retrieval, passages,<br/>fold repeats, map of sections,<br/>sessions, search log, gaps"]
-        search --> sections["<b>sections/</b><br/>sections, their ids<br/>and descriptors"]
         api --> indexing["<b>indexing/</b><br/>DBOS pipeline: chunk,<br/>embed, cache, write"]
-        indexing --> sections
+        search --> indexing
+        indexing --> sections["<b>sections/</b><br/>sections, their ids<br/>and descriptors"]
         api --> catalogue["<b>catalogue/</b><br/>models, their metadata,<br/>embedding profiles"]
     end
 
@@ -43,7 +43,7 @@ flowchart TB
 
 The code is packaged by feature. The HTTP layer is thin. Handlers parse the request, call the domain
 and return `msgspec.Struct`s, or a file or stream for the document views. The domain raises typed
-errors from `errors.py`, and `app.py` maps each one to its status code.
+errors from `errors.py`. Each error type carries its status code, and `app.py` answers with it.
 
 ## Startup
 
@@ -61,8 +61,8 @@ sequenceDiagram
     Server->>App: start on 127.0.0.1:8451 (default)
     App->>Home: claim_home (create folders, exclusive lock)
     Note over App,Home: any other ASGI server, or a race, stops here
-    App->>DBOS: workflows.start
-    DBOS->>Home: migrate (check schema version, WAL on a new file)
+    App->>Home: workflows.start migrates first (check schema version, WAL on a new file)
+    App->>DBOS: launch
     DBOS->>DBOS: start queues, recover unfinished workflows
     CLI->>App: /api/status: this home, the web UI there, first run done?
     Note over CLI: a first run not done opens the browser on it

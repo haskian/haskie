@@ -28,10 +28,14 @@ Each section says what it is about with its `descriptors`, fixed at indexing (`s
 They never decide what is picked.
 
 Beside the sections, the map lists the documents the search reached hardest (`documents`): every
-chunk the search read, not only its scan, folded per document by `score_fold`, best first, and
-every other document a listed section is in, so each section's document has its row. Its
-scan takes at most a share of one document's chunks (`retrieval.capped`), so the documents are
-ranked over all of it, and a document the map picked nothing from can still lead them.
+scanned chunk folded per document by `score_fold`, best first, and every other document a listed
+section is in, so each section's document has its row. A document the map picked nothing from can
+still lead them.
+
+With a reranker on, its own small model (`map_reranker_model`) scores every scanned chunk first
+and drops none: the scores are the demand weights, the section scores and the document scores.
+A section that only shares a word with the topic then counts for little. Without one, the fused
+retrieval scores stand, which weigh the chunks nearly alike.
 
 No IO here: `retrieval.map_sections` reads the chunk placements, the corpus mean, the picks'
 descriptors, the documents' descriptions and every listed document's memberships.
@@ -120,6 +124,9 @@ class SectionMap(msgspec.Struct):
     documents: list[MappedDocument]
     collections: list[str]  # the fewest that together hold every section and document above
     searched: list[str]  # the collections the search covered, in the order they were chosen
+    # the question, when its best match is under the bar its models were measured at: the map is
+    # full whatever is asked, so this says it may hold nothing on the topic (`gaps.weak_questions`)
+    uncovered: list[str] = []
 
 
 class Candidate(msgspec.Struct):

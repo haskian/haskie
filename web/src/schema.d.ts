@@ -1900,6 +1900,11 @@ export interface components {
              */
             reranker_model?: string | null;
             /**
+             * Map reranker model
+             * @description With a reranker on, the model a map of sections (search_sections) scores every chunk it scans with. It weighs how much each chunk counts toward the map and drops none, so a section that only shares a word with the topic counts for little. A map scores a few hundred chunks per search, so the default is the smallest reranker that does this well.
+             */
+            map_reranker_model?: string | null;
+            /**
              * Rerank with the shared context
              * @description When several questions share a context, the query embedding reads the context in front of each question to find candidates. Off: the reranker, which sets the final order, reads each question alone, so a context every document matches ("ddd" over a DDD book) cannot outrank what the question asks. On: the reranker reads it too.
              */
@@ -2004,6 +2009,12 @@ export interface components {
              */
             reranker_model: string;
             /**
+             * Map reranker model
+             * @description With a reranker on, the model a map of sections (search_sections) scores every chunk it scans with. It weighs how much each chunk counts toward the map and drops none, so a section that only shares a word with the topic counts for little. A map scores a few hundred chunks per search, so the default is the smallest reranker that does this well.
+             * @default cross-encoder/ms-marco-MiniLM-L2-v2
+             */
+            map_reranker_model: string;
+            /**
              * Rerank with the shared context
              * @description When several questions share a context, the query embedding reads the context in front of each question to find candidates. Off: the reranker, which sets the final order, reads each question alone, so a context every document matches ("ddd" over a DDD book) cannot outrank what the question asks. On: the reranker reads it too.
              * @default false
@@ -2059,6 +2070,7 @@ export interface components {
             documents: components["schemas"]["MappedDocument"][];
             collections: string[];
             searched: string[];
+            uncovered?: string[];
         };
         /** SessionCollections */
         SessionCollections: {

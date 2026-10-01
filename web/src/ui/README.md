@@ -32,7 +32,9 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `SearchBox` | `<SearchBox value={q} onChange={setQ} onSubmit={run} placeholder="Search" scope={<Picker … />} />` | The one search or filter box; a filter passes `onChange` alone |
 | `SearchTook` | `<SearchTook counts="12 chunks · 3 sections" ms={took} />` | The line above the results |
 | `HitGrid` | `<HitGrid results={hits} query={q} onOpen={open} />` | Chunks, passages or excerpts; one card shape |
+| `SectionGrid` | `<SectionGrid sections={found.sections} onOpen={setOpened} />` | The map's sections, one card each with its descriptors and the related sections under it |
 | `MapDocuments` | `<MapDocuments documents={found.documents} />` | The documents a map reached, best first, each a link to its page |
+| `SectionsModal` | `<SectionsModal section={opened} onClose={close} onOpen={setOpened} />` | One section of the map: what the map said about it, and its document at its heading |
 | `SearchPanel` | `<SearchPanel run={(q) => api.explore(q, 'passage', { collections: [name] })} placeholder="Search this collection" plural="passages" />` | Box, results, the search's timings and the match modal with its score lineage, for one scope |
 | `MatchModal` | `<MatchModal match={open} query={q} scoring={how} onClose={close} />` | One result, and the document it came from. A chunk shows as the models read it: its frame, its typed pieces, the cut reason on each side and its sizes. A passage shows its text. `scoring` (the `X-Score-Lineage` header) is the hint beside the score |
 | `Jobs` | `<Jobs jobs={jobs} variant="glass" stripes />` | One weighted bar per job of an operation |
@@ -43,16 +45,18 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `DocumentPanes` | `<DocumentPanes doc={name} preview={doc.preview} />` | Source pane plus streamed markdown |
 | `Skeleton` | `<Skeleton />` | The shape of a document while it loads |
 | `DescriptionBox` | `<DescriptionBox value={doc.description} placeholder="What is it about?" onSave={save} />` | Saves on blur and on unmount, only what changed |
+| `RenameForm` | `<RenameForm key={doc} name={doc} label="Document name" busy={busy} onRename={rename} />` | A name input with a Rename button; keyed by the name, so each rename starts a new draft |
 | `DropOverlay` | `<DropOverlay onFiles={upload} />` | Document-level drag listeners plus the overlay |
-| `ModelFacts` / `EmbedderFacts` | `<ModelFacts name={name} card={card} />`, `<EmbedderFacts model={model} />` | A model's facts under its picker; nothing for the full-text-only profile |
+| `ModelFacts` / `EmbedderFacts` | `<ModelFacts name={name} metadata={metadata} />`, `<EmbedderFacts model={model} metadata={metadata} />` | A model's facts under its picker; nothing for the full-text-only profile |
 | `Num` / `SearchField` | `<Num … />`, `<SearchField … />` | A number setting in the design's `.field`; one search setting, as Settings and the first run show it |
 
 ## Modules
 
 Pure helpers. No JSX, so a page may import one without pulling a component in.
 The barrel `../ui` exports the ones pages use. The rest (`piecesOf`, `frameOf`,
-`chunkSizes`, `CUT_REASONS`, `PIECE_NAMES`, `HEADING_SEP`, `headingPath`) are
-imported from `ui/match` or `ui/anchor` directly, mostly by `ui/` itself.
+`chunkSizes`, `CUT_REASONS`, `PIECE_NAMES`, `HEADING_SEP`, `headingPath`,
+`timeline`) are imported from `ui/match`, `ui/anchor` or `ui/timeline` directly,
+mostly by `ui/` itself.
 
 | Module | Usage | What it is |
 | --- | --- | --- |
@@ -61,6 +65,7 @@ imported from `ui/match` or `ui/anchor` directly, mostly by `ui/` itself.
 | `match` | `position(match)`, `headingOf(match)`, the kind guards, the `Match` type; `piecesOf`, `frameOf`, `chunkSizes`, `CUT_REASONS`, `PIECE_NAMES`; `HEADING_SEP` | Where a result sits in its document. A chunk as the chunk view draws it. The heading path separator the backend uses |
 | `anchor` | `headingPath(toc, index)` and `anchorIndex(toc, anchor)` | The heading path down to a table-of-contents entry, and the entry a result opens at |
 | `markTerms` | `markTerms(text, query)` | The list `Mark` renders |
+| `timeline` | `timeline(steps)` | A search's step timings as the server ran them, with the branches of several questions side by side, for `SearchTook` |
 | `options` | `choices`, `docFor`, `profileOptions`, `rerankerOption`, `rerankerOptions` | Setting docs and model pickers' options |
 
 Icons come from `lucide-react` and always carry `className="icon"`; the design

@@ -82,6 +82,10 @@ class Reranker(StrEnum):
 NO_EMBEDDING = "none"  # the embedding profile of full-text search only: no model at all
 # the smallest reranker in the catalogue (`catalogue.rerankers`), so the default costs least
 DEFAULT_RERANKER = "Xenova/ms-marco-MiniLM-L-6-v2"
+# The map's reranker weighs every chunk a map scans rather than judging a few, so it is the
+# smallest that still tells a topic from a homonym. Measured on 11 questions over 10 books:
+# off-domain picks fell from 22 to 5 of 132, as with MiniLM-L-6 (4), at under half its time.
+DEFAULT_MAP_RERANKER = "cross-encoder/ms-marco-MiniLM-L2-v2"
 
 
 # --- definitions ------------------------------------------------------------------
@@ -415,6 +419,15 @@ RERANKER_MODEL = Meta(
         "that needs it is refused until the download finishes."
     ),
 )
+MAP_RERANKER_MODEL = Meta(
+    title="Map reranker model",
+    description=(
+        "With a reranker on, the model a map of sections (search_sections) scores every chunk it "
+        "scans with. It weighs how much each chunk counts toward the map and drops none, so a "
+        "section that only shares a word with the topic counts for little. A map scores a few "
+        "hundred chunks per search, so the default is the smallest reranker that does this well."
+    ),
+)
 PREVIEW_WORKERS = Meta(
     title="Preview builds",
     description=(
@@ -548,6 +561,7 @@ class SearchSettings(msgspec.Struct):
     refine_factor: Annotated[int, REFINE_FACTOR] = 10
     reranker: Annotated[Reranker, RERANKER] = Reranker.NONE
     reranker_model: Annotated[str, RERANKER_MODEL] = DEFAULT_RERANKER
+    map_reranker_model: Annotated[str, MAP_RERANKER_MODEL] = DEFAULT_MAP_RERANKER
     rerank_with_context: Annotated[bool, RERANK_WITH_CONTEXT] = False
     score_fold: Annotated[ScoreFold, SCORE_FOLD] = ScoreFold.SUM
     rerank_excerpts: Annotated[bool, RERANK_EXCERPTS] = False
@@ -593,6 +607,7 @@ class SearchOverrides(msgspec.Struct):
     refine_factor: Annotated[int | None, REFINE_FACTOR] = None
     reranker: Annotated[Reranker | None, RERANKER] = None
     reranker_model: Annotated[str | None, RERANKER_MODEL] = None
+    map_reranker_model: Annotated[str | None, MAP_RERANKER_MODEL] = None
     rerank_with_context: Annotated[bool | None, RERANK_WITH_CONTEXT] = None
     score_fold: Annotated[ScoreFold | None, SCORE_FOLD] = None
     rerank_excerpts: Annotated[bool | None, RERANK_EXCERPTS] = None

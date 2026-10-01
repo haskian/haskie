@@ -36,9 +36,9 @@ An excerpts search also keeps `missing_terms`, the words of its questions no exc
 `scoped` marks a search kept to some documents or sections.
 Places are stored in preorder with their parent, so the `also_in` trees survive; an excerpt's
 places are its passages' repeats. Each keeps its citation (`header`, `location`), so the log reads
-without the document. A failed search is written with its error, then the error goes on. A search
-without a session is written too. A later page of `/api/search/text` is the same search and writes
-nothing. A malformed question is a refused request, not a search, and writes nothing.
+without the document. A failed search is written with its error, then the error is raised again.
+A search without a session is written too. A later page of `/api/search/text` is the same search
+and writes nothing. A malformed question is a refused request, not a search, and writes nothing.
 
 `GET /api/searches` reads the log back, newest first, and an agent reads it as the MCP tool
 `list_searches`; neither ever sends a query vector. A session's history reads its searches from
@@ -49,7 +49,8 @@ everything).
 ## Which questions are gaps
 
 `search/gaps.py` judges each stored question on read, so a bar measured again re-judges every
-search already stored. A question is a gap when a detector fires:
+search already stored. A question is a gap when a detector fires. The detectors run in the order
+below, and the first that fires names the signal:
 
 | signal | when |
 | --- | --- |
@@ -57,6 +58,7 @@ search already stored. A question is a gap when a detector fires:
 | `empty` | its search returned nothing |
 | `uncovered` | several questions were asked at once, and no excerpt answers this one |
 | `weak` | its best match is under the bar. A reranked search is judged by the floor it dropped chunks under: the settings' `min_rerank_score` when one is set, else the reranker's calibrated floor (`reranker_calibration`), because the reranker reads query and passage together. Otherwise the profile's `weak_match` cosine decides. No bar known: no verdict |
+| `borderline` | no reranker judged it, and its best cosine sits from `weak_match` up to `answered_match`. It may be answered. `list_gaps` leaves it out unless `signals` asks for it, and the page folds these topics away |
 
 A failed search is an error, not a gap. A search kept to some documents or sections
 (`document_ids`, `section_ids`; the row's `scoped`) is judged by `reported` alone: what it

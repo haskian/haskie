@@ -9,6 +9,7 @@ erDiagram
     DOCUMENT ||--o{ MEMBERSHIP : "is in"
     COLLECTION ||--o{ MEMBERSHIP : holds
     DOCUMENT ||--o{ EMBEDDING : "is cached as"
+    MEMBERSHIP }o--o| EMBEDDING : "indexed from"
     DOCUMENT {
         string id "MD5 of the bytes, base58"
         string name "lowercase-kebab-case, renamable"
@@ -23,6 +24,7 @@ erDiagram
     }
     MEMBERSHIP {
         string status "pending ... indexed"
+        string cache_id "the embedding its rows come from"
     }
     EMBEDDING {
         string id "sha256 of the URN"
@@ -30,8 +32,10 @@ erDiagram
     }
 ```
 
-A membership has no column pointing at an embedding. When a collection indexes a document, it
-computes the cache id from its own chunk settings and reads that entry.
+When a collection indexes a document, it computes the cache id from its own chunk settings and
+reads that entry. The membership records that id in `cache_id` before the rows are written. A
+re-import clears it with the entry. A section id names a place in one chunking, so a search reads
+a section's descriptors from the entry the membership names, not from the current chunk settings.
 
 ## A document's life
 

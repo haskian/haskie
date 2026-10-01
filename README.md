@@ -128,7 +128,8 @@ haskie uninstall claude     # removes all four again; documents and collections 
 - **Smoke test:** import a file on *Documents*, add it to a collection, then ask about it on
   *Explore*.
 - **Other commands:** `haskie stop`, `haskie run --foreground` (for a supervisor),
-  `haskie destroy`. `--port` or `HASKIE_PORT` moves the port, `--home` or `HASKIE_HOME` the data.
+  `haskie destroy`, `haskie version`. `--port` or `HASKIE_PORT` moves the port, `--home` or
+  `HASKIE_HOME` the data.
 
 ## From files to answers
 
@@ -139,9 +140,9 @@ haskie uninstall claude     # removes all four again; documents and collections 
 2. **Collections.** Create one per topic and add its documents. Give it a one-line description.
    The agent reads it to choose where to look.
 3. **Explore.** Search and see what your agent finds: *Excerpts* and *Sections*, the map of the
-   sections a topic touches and the documents that cover it. Open a section to see what the map said about it and
-   the sections it covers, and its document at its heading. Switch to *Chunks* or *Passages* to
-   see how haskie cut the documents and built each answer.
+   sections a topic touches and the documents that cover it. Open a section to see what the map
+   said about it and the sections it covers, and its document at its heading. Switch to *Chunks*
+   or *Passages* to see how haskie cut the documents and built each answer.
 
 **Operations** shows background jobs with their progress, and cancels running ones. **Sessions**
 replays each agent conversation. **Gaps** lists the questions your sources did not answer, grouped
@@ -224,22 +225,22 @@ vector and full-text (BM25) search in one table, on a columnar format built for 
 [17]. So hybrid search needs no server.
 
 **Hybrid search and reranking.** Vectors find meaning. BM25 finds exact terms, such as an error
-code. haskie fuses both by rank (reciprocal rank fusion, RRF). An optional cross-encoder reads the
-query and passage together and rescores the top candidates. Adding one takes the cut in failed
-retrievals from 49% to 67% [14]. It is off by default. Settings offers models from 23 million
-parameters up to multilingual ones.
+code. By default haskie fuses both by rank (reciprocal rank fusion, RRF). An optional
+cross-encoder reads the query and passage together and rescores the top candidates. Adding one
+takes the cut in failed retrievals from 49% to 67% [14]. It is off by default. Settings offers
+models from 23 million parameters up to multilingual ones.
 
 **Repeats folded, passages whole.** Five books that make the same point would fill five of your
 agent's slots. Most rerankers score one passage at a time, so they cannot see repeats [18]. haskie
-merges hits on neighbouring chunks, then folds repeats with leader clustering. It walks the
-results best first and compares each one only with the results already kept, by wording and, for
-models with duplicate thresholds, by vector. The best result of each group keeps its place, so the
-ranking stays intact. Diversity rerankers such as maximal marginal relevance (MMR) reorder it
-instead. Comparing only with kept results stops chains, so A close to B and B close to C never
-merges A with C. The same input always gives the same output. A repeat stays citable as an
-`also_in` entry (`duplicate`, `contained` or `equivalent`), and its slot goes to the next distinct
-result. Repeated passages do not significantly improve answer correctness, while different
-documents improve it by 17–47% [19].
+merges hits on neighbouring chunks, then folds repeats with leader clustering. It walks the results
+best first and compares each one only with the results already kept, by wording and, for models with
+duplicate thresholds, by vector. Each group keeps the place and score of its best result, so the
+ranking stays intact; a later result that holds the kept one whole takes that slot. Diversity
+rerankers such as maximal marginal relevance (MMR) reorder it instead. Comparing only with kept
+results stops chains, so A close to B and B close to C never merges A with C. The same input always
+gives the same output. A repeat stays citable as an `also_in` entry (`duplicate`, `contained` or
+`equivalent`), and its slot goes to the next distinct result. Repeated passages do not significantly
+improve answer correctness, while different documents improve it by 17–47% [19].
 
 **Async-first, with durable jobs.** Every IO is awaited, and CPU work runs in worker threads, so
 search and the UI stay responsive while the machine indexes. Imports, indexing, deletes,

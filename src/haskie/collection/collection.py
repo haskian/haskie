@@ -435,13 +435,18 @@ class Collection:
 
     @staticmethod
     async def reranker_overrides() -> list[str]:
-        """Every reranker model a collection overrides, in name order and without duplicates.
+        """Every reranker model a collection overrides, for its excerpts or its map, in name order
+        and without duplicates.
 
         One query over the `overrides` column: the model downloads have to cover the overrides too,
         and a search of that collection loads whichever model it names."""
         async with db.read() as conn:
             rows = await conn.scalars(select(collections.c.overrides).order_by(collections.c.name))
-        chosen = [_overrides(raw).search.reranker_model for raw in rows]
+        chosen = [
+            model
+            for search in (_overrides(raw).search for raw in rows)
+            for model in (search.reranker_model, search.map_reranker_model)
+        ]
         return list(dict.fromkeys(model for model in chosen if model))
 
     async def chunk_settings(self) -> ChunkSettings:

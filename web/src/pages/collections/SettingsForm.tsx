@@ -131,6 +131,15 @@ export function SettingsForm({
       (next) => setSearch('reranker_model', next),
       (item) => rerankerOption(item, options.reranker_metadata),
     ),
+    map_reranker_model: enumInput(
+      'map_reranker_model',
+      'search.map_reranker_model',
+      options.reranker_models,
+      draft.search.map_reranker_model,
+      searchDefaults.map_reranker_model,
+      (next) => setSearch('map_reranker_model', next),
+      (item) => rerankerOption(item, options.reranker_metadata),
+    ),
     rerank_with_context: searchSwitch('rerank_with_context'),
     min_rerank_score: numberInput(
       'min_rerank_score',

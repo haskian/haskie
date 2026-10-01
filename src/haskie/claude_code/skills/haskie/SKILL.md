@@ -10,8 +10,8 @@ The user chose these documents. When the excerpts actually answer a question, pr
 the web and your training data, and name the document each answer came from. When they do not,
 say so.
 
-The always-loaded rule says when to search and how to write the query. This file is the tool
-reference.
+The always-loaded rule says when to search, which search to pick and how to judge what comes
+back. This file is the tool reference.
 
 ## Session
 
@@ -28,7 +28,9 @@ fields to read, and the defaults.
 
 **`search_excerpts(q, context?, session_id?, collections?, limit?, document_ids?, section_ids?)`**
 → `excerpts`, `uncovered`, `missing_terms`, `searched` (the collections it covered). Start here,
-or with `search_sections` when the question is broad.
+or with `search_sections` when the question is broad. `uncovered` lists the parts no excerpt
+answers and any question, one alone included, whose best match is under the bar its models were
+measured at.
 
 - `limit`: sections, default 10. Ask for more only when ten do not answer.
   It never defaults to fewer than the parts.
@@ -47,15 +49,21 @@ or with `search_sections` when the question is broad.
 - open: `markdown_file` (absolute path), at the lines `location` names (`L10-20`, 1-based).
 - `missing_terms`: with a reranker on, the full-text find joins only when the reranker judges it
   an answer, and scores what the reranker gave it. Without one, its span scores 0. A missing word
-  is one the sources do not use: search again with a synonym, or say the sources lack it.
+  is one the sources do not use: search again with a synonym, or say the sources lack it. It can
+  also hold a verb of the question ("pick"); the content words are the ones that count.
 - Each place in `also_in` has `collection`, `document`, `header`, `location`, `score` (its own
   match to the query), `relation` to its parent, `similarity` (how strongly that relation holds),
-  `to_parent` and `to_root`.
+  `to_parent` and `to_root`. Different authors rarely repeat each other's sentences, so `also_in`
+  is often empty across documents: an empty one does not mean the sources disagree.
+- A follow-up search sends back sections you already read. Aim it with `section_ids` or
+  `document_ids` instead of asking the same question in other words.
 
 **`search_sections(q, session_id?, collections?, limit?, document_ids?)`** → `sections` (in pick
-order), `documents` (best first), `collections` and `searched`. A map of a topic, near topics
-included, with no text, and the documents that cover it. Fast: no reranker. `document_ids` keeps
-it to those documents.
+order), `documents` (best first), `collections`, `searched` and `uncovered` (the question, when
+the sources match it only weakly: a map is always full). A map of a topic, near topics included,
+with no text, and the documents that cover it. With a reranker on, a small one of its own
+(`map_reranker_model`) weighs every chunk and drops none. `document_ids` keeps it to those
+documents.
 
 - `limit`: sections, 1 to 40, default 15. At most two of one document while another has a section
   on the topic left.
@@ -63,7 +71,11 @@ it to those documents.
   length), `chunks` (how many of its chunks matched), `score`.
 - `descriptors`: one to five words or phrases for what the section is about, set apart from the
   other sections of its depth, and not what its `header` already says unless it has no other
-  words.
+  words. They are the sources' own vocabulary: a question asked in them finds the section.
+- Picks come by coverage, not by score, so `score` does not fall down the list. A pick can still
+  be back matter (an index, a bare "Summary" that names no chapter), and with no reranker a section
+  that shares a word with the topic but not its meaning; the fewer the documents, the more of
+  these. Judge each pick by its `header` and `descriptors`.
 - `related`: the sections the map did not pick that sit closest to this one, at most five, each
   with `id`, `header`, `location`, `score` and `similarity`. It means nearby, not repeated. A near
   copy lands here, and so can the best section on the topic. Read these headers before choosing
@@ -136,7 +148,8 @@ haskie keeps every search, so the collections can grow where they fall short.
   them which topics keep coming back; they are what to add next.
 - **`replay_gaps(ids)`**: to check whether the collections answer a gap now.
 - **`report_gap(session_id, question, verdict, missing?)`**: right after a search whose excerpts
-  do not answer the question, or answer only part of it.
+  do not answer the question, or answer only part of it. It judges the newest search of this
+  session that asked those exact words, whichever search tool ran it.
 - **`review_gaps(ids, review)`**: to resolve a gap once `replay_gaps` shows it answered, or to
   dismiss one the collections are not meant to answer.
 

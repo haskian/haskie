@@ -15,6 +15,7 @@ whether or not `web/dist` has been built. `test_static_files_*` covers the other
 
 import json
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -40,6 +41,7 @@ from haskie.indexing.segment import PieceType
 from haskie.paging import Order
 from haskie.search import aspects, flow, gaps, log
 from haskie.settings import (
+    DEFAULT_MAP_RERANKER,
     DEFAULT_RERANKER,
     Accelerator,
     ChunkSettings,
@@ -532,22 +534,119 @@ async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClie
     assert response.headers["Retry-After"] == errors.NotReady.headers["Retry-After"]
 
 
-async def test_a_map_of_sections_waits_for_no_reranker(ready: AsyncTestClient) -> None:
-    """The same collection: `search_sections` has no rerank step, so it answers while the
-    reranker is not loaded, and its log row names no reranker it never ran."""
-    notes = await Collection.get("notes")
-    await notes.set_overrides(
-        CollectionOverrides(search=SearchOverrides(reranker=Reranker.CROSS_ENCODER))
-    )
+@pytest.mark.parametrize(
+    ("name", "reranker", "logit", "expected", "uncovered"),
+    [
+        (
+            "no reranker: the fused retrieval scores stand, and no model is read",
+            None,
+            None,
+            None,
+            [],
+        ),
+        (
+            "a reranker on: the map's own model scores every chunk",
+            Reranker.CROSS_ENCODER,
+            2.0,
+            DEFAULT_MAP_RERANKER,
+            [],
+        ),
+        (
+            "a chunk it scores far under its floor still counts, and the map says it is weak",
+            Reranker.CROSS_ENCODER,
+            -9.0,
+            DEFAULT_MAP_RERANKER,
+            ["alpha"],
+        ),
+    ],
+)
+async def test_a_map_weighs_its_chunks_with_its_own_reranker(
+    ready: AsyncTestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    reranker: Reranker | None,
+    logit: float | None,
+    expected: str | None,
+    uncovered: list[str],
+) -> None:
+    """`search_sections` reranks with `map_reranker_model`, not the excerpts' model, and keeps
+    every chunk: its scores weigh the map, they do not cut it. Its log row names the model, so
+    the gaps judge the map by that model's own floor, and so does the answer's `uncovered`."""
+    from haskie.indexing import embed, models
+
+    if reranker is not None:
+        notes = await Collection.get("notes")
+        await notes.set_overrides(CollectionOverrides(search=SearchOverrides(reranker=reranker)))
+        monkeypatch.setattr(
+            models, "_ready", {models._model_id(models.ModelKind.RERANKER, DEFAULT_MAP_RERANKER)}
+        )
+    read: list[str] = []
+
+    def scores(model: str, accelerator: str, query: str, texts: list[str]) -> list[float]:
+        read.append(model)
+        return [logit or 0.0] * len(texts)
+
+    monkeypatch.setattr(embed, "rerank_scores", scores)
 
     response = await ready.get(
         "/api/search/sections", params={"q": "alpha", "collections": "notes", "session_id": "r"}
     )
 
-    assert response.status_code == 200, response.text
-    assert [one["document"] for one in response.json()["sections"]] == ["guide.md"]
+    assert response.status_code == 200, f"{name}: {response.text}"
+    (one,) = response.json()["sections"]
+    assert one["document"] == "guide.md", name
+    assert read == ([] if expected is None else [expected]), name
+    assert response.json()["uncovered"] == uncovered, name
+    if logit is not None:
+        assert one["score"] == pytest.approx(1 / (1 + math.exp(-logit))), f"{name}: the sigmoid"
     (logged,) = (await ready.get("/api/searches", params={"session_id": "r"})).json()
-    assert (logged["tool"], logged["reranker"]) == ("sections", None)
+    assert (logged["tool"], logged["reranker"]) == ("sections", expected), name
+
+
+@pytest.mark.parametrize(
+    ("name", "logit", "excerpts", "uncovered"),
+    [
+        ("judged an answer: excerpts, and nothing uncovered", 2.0, 1, []),
+        (
+            "under the reranker's floor: no excerpt, and the one question is uncovered",
+            -9.0,
+            0,
+            ["alpha"],
+        ),
+    ],
+)
+async def test_one_question_hears_when_the_sources_match_it_only_weakly(
+    ready: AsyncTestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    logit: float,
+    excerpts: int,
+    uncovered: list[str],
+) -> None:
+    """`uncovered` used to list only the parts of several questions. A single question now hears
+    the verdict the Gaps page gives as weak: its best match under the bar its models were
+    measured at. The log keeps the excerpts' own `uncovered`, so the Gaps page still says weak."""
+    from haskie.indexing import embed, models
+
+    await _converted("guide.md", MD)
+    notes = await Collection.get("notes")
+    await notes.set_overrides(
+        CollectionOverrides(search=SearchOverrides(reranker=Reranker.CROSS_ENCODER))
+    )
+    monkeypatch.setattr(
+        models, "_ready", {models._model_id(models.ModelKind.RERANKER, DEFAULT_RERANKER)}
+    )
+    monkeypatch.setattr(embed, "rerank_scores", lambda m, a, q, texts: [logit] * len(texts))
+
+    response = await ready.get(
+        "/api/search/excerpts", params={"q": "alpha", "collections": "notes", "session_id": "w"}
+    )
+
+    assert response.status_code == 200, f"{name}: {response.text}"
+    answer = response.json()
+    assert (len(answer["excerpts"]), answer["uncovered"]) == (excerpts, uncovered), name
+    (logged,) = (await ready.get("/api/searches", params={"session_id": "w"})).json()
+    assert [one["uncovered"] for one in logged["questions"]] == [False], f"{name}: the log's own"
 
 
 async def test_a_limit_at_the_scan_depth_is_searched(ready: AsyncTestClient) -> None:
@@ -715,7 +814,9 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     assert (reranker["parameters"], reranker["context_tokens"]) == (22714113, 512)
     assert (reranker["runtime"], reranker["devices"]) == ("onnx", ["cpu", "apple_silicon", "gpu"])
     assert "dimensions" not in reranker, "a reranker has no vectors"
-    assert options["reranker_models"][0] == DEFAULT_RERANKER, "the default is the smallest"
+    assert options["reranker_models"][:2] == [DEFAULT_MAP_RERANKER, DEFAULT_RERANKER], (
+        "smallest first: the map's default, then the excerpts'"
+    )
     # the vocabularies the UI renders rows with, so it never spells a status out for itself
     assert (
         options["document_statuses"][:3]

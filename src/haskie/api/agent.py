@@ -119,6 +119,7 @@ class SectionMap(msgspec.Struct):
     documents: list[MappedDocument]
     collections: list[str]
     searched: list[str]
+    uncovered: list[str]
 
 
 def view[T](found: object, as_type: type[T]) -> T:

@@ -15,6 +15,7 @@ const DEFAULTS: SearchSettings = {
   refine_factor: 10,
   reranker: 'none',
   reranker_model: 'Xenova/ms-marco-MiniLM-L-6-v2',
+  map_reranker_model: 'cross-encoder/ms-marco-MiniLM-L2-v2',
   rerank_with_context: false,
   min_rerank_score: 0.05,
   score_fold: 'sum',
@@ -40,6 +41,7 @@ const NO_OVERRIDES: SearchOverrides = {
   refine_factor: null,
   reranker: null,
   reranker_model: null,
+  map_reranker_model: null,
   rerank_with_context: null,
   min_rerank_score: null,
   score_fold: null,
@@ -95,12 +97,12 @@ describe('visibleSearchFields', () => {
     {
       name: 'a reranker adds its model, and a candidate pool even without hybrid',
       search: search({ mode: 'fts', reranker: 'cross-encoder' }),
-      expected: ['limit', 'mode', 'reranker', 'reranker_model', 'rerank_with_context', 'min_rerank_score', 'rerank_excerpts', 'candidates', 'score_fold'],
+      expected: ['limit', 'mode', 'reranker', 'reranker_model', 'map_reranker_model', 'rerank_with_context', 'min_rerank_score', 'rerank_excerpts', 'candidates', 'score_fold'],
     },
     {
       name: 'hybrid and a reranker ask for the candidate pool once',
       search: search({ reranker: 'cross-encoder' }),
-      expected: ['limit', 'mode', 'fusion', 'rrf_k', 'nprobes', 'refine_factor', 'reranker', 'reranker_model', 'rerank_with_context', 'min_rerank_score', 'rerank_excerpts', 'candidates', 'score_fold'],
+      expected: ['limit', 'mode', 'fusion', 'rrf_k', 'nprobes', 'refine_factor', 'reranker', 'reranker_model', 'map_reranker_model', 'rerank_with_context', 'min_rerank_score', 'rerank_excerpts', 'candidates', 'score_fold'],
     },
     {
       name: 'the order is the order the form renders',
@@ -115,6 +117,7 @@ describe('visibleSearchFields', () => {
         'refine_factor',
         'reranker',
         'reranker_model',
+      'map_reranker_model',
         'rerank_with_context',
         'min_rerank_score',
         'rerank_excerpts',

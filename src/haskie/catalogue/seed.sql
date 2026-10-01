@@ -39,6 +39,7 @@ values
     ('ggml-org/jina-embeddings-v2-base-en-Q8_0-GGUF', 'embedder', 'jina-v2-base on the Apple GPU through llama.cpp, 8-bit; long passages (~146 MB).', 137368320, 8192, 'English', 'Apache-2.0', '2023-09-27', 'https://huggingface.co/jinaai/jina-embeddings-v2-base-en'),
     ('nomic-ai/nomic-embed-text-v1.5-GGUF', 'embedder', 'nomic v1.5 on the Apple GPU through llama.cpp, 16-bit; long passages (~274 MB).', 136731648, 8192, 'English', 'Apache-2.0', '2024-02-10', 'https://huggingface.co/nomic-ai/nomic-embed-text-v1.5'),
     ('ggml-org/bge-m3-Q8_0-GGUF', 'embedder', 'bge-m3 on the Apple GPU through llama.cpp, 8-bit; strong multilingual retrieval (~635 MB).', 567754752, 8192, 'multilingual (100+)', 'MIT', '2024-01-27', 'https://huggingface.co/BAAI/bge-m3'),
+    ('cross-encoder/ms-marco-MiniLM-L2-v2', 'reranker', 'The smallest MiniLM: two layers, about 4x faster than L-6 for 4 points of MRR; the default for maps.', 15616257, 512, 'English', 'Apache-2.0', '2021-04-15', 'https://huggingface.co/cross-encoder/ms-marco-MiniLM-L2-v2'),
     ('Xenova/ms-marco-MiniLM-L-6-v2', 'reranker', 'Small and fast; a good first reranker.', 22714113, 512, 'English', 'Apache-2.0', '2021-04-15', 'https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2'),
     ('Xenova/ms-marco-MiniLM-L-12-v2', 'reranker', 'Twice the layers of L-6: a little better, a little slower.', 33360897, 512, 'English', 'Apache-2.0', '2021-04-15', 'https://huggingface.co/cross-encoder/ms-marco-MiniLM-L12-v2'),
     ('BAAI/bge-reranker-base', 'reranker', 'Stronger than MiniLM, and much larger.', 278044931, 512, 'English, Chinese', 'MIT', '2023-09-11', 'https://huggingface.co/BAAI/bge-reranker-base'),
@@ -106,6 +107,7 @@ values
 -- person judged borderline relevant.
 insert or ignore into reranker_calibration (model, floor, beta_a, beta_b, source)
 values
+    ('cross-encoder/ms-marco-MiniLM-L2-v2', 0.05, 1.0, 1.0, 'uncalibrated'),
     ('Xenova/ms-marco-MiniLM-L-6-v2', 0.05, 1.0, 1.0, 'uncalibrated'),
     ('Xenova/ms-marco-MiniLM-L-12-v2', 0.05, 1.0, 1.0, 'uncalibrated'),
     ('BAAI/bge-reranker-base', 0.05, 1.0, 1.0, 'uncalibrated'),

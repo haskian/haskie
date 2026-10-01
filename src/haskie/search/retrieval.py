@@ -12,7 +12,6 @@ gave, else the session's selection, else every collection.
 import asyncio
 import statistics
 import time
-from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import ExitStack
 from itertools import islice
@@ -100,6 +99,9 @@ class Plan(msgspec.Struct):
     embedding: EmbeddingModel | None  # the model every index of the search embeds with
     # how the reranker's scores read, when one is on (`catalogue.calibration`)
     calibration: RerankerCalibration | None = None
+    # False when the reranker only weighs the chunks: a map keeps every one it scanned, a section
+    # that merely shares a word with the topic counting for little rather than nothing (`rerank`)
+    drops: bool = True
     scope: Scope = EVERYTHING  # the documents and sections every read keeps to
     # the documents' names by id, filled as its reads meet them (`gather_rows`); one map shared
     # by every plan of a search
@@ -119,15 +121,16 @@ class Plan(msgspec.Struct):
 
 
 async def plan(
-    names: list[str], queries: list[str], reranks: bool = True, scope: Scope = EVERYTHING
+    names: list[str], queries: list[str], weighs: bool = False, scope: Scope = EVERYTHING
 ) -> list[Plan] | None:
     """One plan per query, or None when there is nothing left to search: the settings resolved
     and each model checked once for all of them, and each query embedded once. The plans differ
     only in their `vector`.
 
     A collection deleted since the caller chose it is skipped, so one stale name does not break
-    every search. `reranks` False plans a search with no rerank step: its settings name no
-    reranker, so it waits for none to warm and the log records none. Every read keeps to `scope`.
+    every search. `weighs` plans a map's search: with a reranker on, the map's own model
+    (`map_reranker_model`) scores every chunk it scans, and drops none (`Plan.drops`); its
+    calibrated floor still judges the search later (`gaps`). Every read keeps to `scope`.
     """
     user = await load_user_settings()
     embedding = await catalogue.embedding_model(user)
@@ -139,8 +142,10 @@ async def plan(
     if not indexes:
         return None
     settings = indexes[0][1] if len(indexes) == 1 else user.search
-    if not reranks:  # a search with no rerank step waits for no reranker, and logs none
-        settings = msgspec.structs.replace(settings, reranker=Reranker.NONE)
+    if weighs:  # the map's model, which weighs: no floor of the user's applies to it
+        settings = msgspec.structs.replace(
+            settings, reranker_model=settings.map_reranker_model, min_rerank_score=None
+        )
 
     vectors: list[list[float] | None] = [None] * len(queries)
     if embedding is not None and any(one.mode != SearchMode.FTS for _, one in indexes):
@@ -160,6 +165,7 @@ async def plan(
             vector=vector,
             embedding=embedding,
             calibration=calibrated,
+            drops=not weighs,
             scope=scope,
             document_names=document_names,
         )
@@ -344,8 +350,9 @@ async def rerank(pool: Pool, query: str, where: Plan) -> Pool:
     scored = [(key, row_score(row)) for key, row in zip(keys, rows, strict=True)]
     rescored = sorted(scored, key=lambda pair: pair[1], reverse=True)
     # the reranker's score has a scale: under the floor it judged the chunk no answer, and a
-    # search that keeps it would fill a slot, or tag a question, with it
-    kept = [(key, score) for key, score in rescored if score >= where.rerank_floor]
+    # search that keeps it would fill a slot, or tag a question, with it. A map's only weighs.
+    floor = where.rerank_floor if where.drops else 0.0
+    kept = [(key, score) for key, score in rescored if score >= floor]
     scores = sorted((score for _, score in rescored), reverse=True)
     return msgspec.structs.replace(pool, ranked=kept, rerank_scores=scores)
 
@@ -359,50 +366,16 @@ class Scanned(msgspec.Struct):
 
     hits: list[Hit]
     vectors: list[collapse.Vector | None]
-    # every hit of the ranking, the scan's and past it, when the scan is capped per document: the
-    # documents are ranked over all of it (`flow.sections`); empty otherwise
-    pooled: list[Hit] = []
 
 
-def scan(pool: Pool, limit: int, per_document: int | None = None) -> Scanned:
+def scan(pool: Pool, limit: int) -> Scanned:
     """The best `limit` of the ranking, as the `Hit`s a caller cites and opens, and their vectors
-    for `collapse` to compare them by. `per_document` caps the chunks of one document while
-    another has some left (`capped`), and keeps every hit of the ranking too (`pooled`)."""
-    capping = per_document is not None
-    every = pool.ranked if capping else pool.ranked[:limit]
-    hits = {key: index.hit(row, score) for key, score in every for index, row in [pool.rows[key]]}
-    kept = capped(pool.ranked, limit, per_document) if per_document is not None else every
+    for `collapse` to compare them by."""
+    taken = [(pool.rows[key], score) for key, score in pool.ranked[:limit]]
     return Scanned(
-        hits=[hits[key] for key, _ in kept],
-        vectors=[pool.rows[key][1].get("vector") for key, _ in kept],
-        pooled=list(hits.values()) if capping else [],
+        hits=[index.hit(row, score) for (index, row), score in taken],
+        vectors=[row.get("vector") for (_, row), _ in taken],
     )
-
-
-def capped(
-    ranked: list[tuple[ChunkKey, float]], limit: int, per_document: int
-) -> list[tuple[ChunkKey, float]]:
-    """The first `limit` of `ranked` with at most `per_document` chunks of one document, in rank
-    order: a slot one document cannot take goes to the next chunk of another. When the others run
-    out first, the chunks held back fill the rest, best first.
-
-    What keeps a scan wide once every collection is ranked as one table: one book that matches
-    throughout would otherwise take most of the scan, and every step after it reads only the scan.
-    The per-document cap of web search (two results per site), applied to the chunks a map covers
-    rather than only to its picks."""
-    taken: Counter[str] = Counter()
-    kept: list[int] = []
-    held: list[int] = []
-    for at, ((_, doc, _), _) in enumerate(ranked):
-        if len(kept) == limit:
-            break
-        if taken[doc] < per_document:
-            taken[doc] += 1
-            kept.append(at)
-        else:
-            held.append(at)
-    kept += held[: limit - len(kept)]
-    return [ranked[at] for at in sorted(kept)]
 
 
 # --- thin ranges -----------------------------------------------------------------
@@ -740,16 +713,15 @@ async def fill(
     wanted = set().union(*nears, (chunk_key(hit) for one in groups for hit in one.hits))
     rows = await _rows_at(where, wanted)
     budget = where.settings.max_answer_chars
-    # with a reranker on, a question tags only what it judged an answer (`aspects.tagged`); the
-    # fill weighs by vectors or words, so its chunks bring no tag of their own
+    # a question tags only what it judged an answer (`aspects.tagged`): what the fill adds was
+    # valued against the passages kept, not judged, so it brings no tag of its own
     settings = where.settings
-    tags = settings.reranker == Reranker.NONE
     absolute = None
-    if not tags and settings.fill_values == FillValues.ABSOLUTE:
+    if settings.reranker != Reranker.NONE and settings.fill_values == FillValues.ABSOLUTE:
         absolute = await _absolute(sorted(set().union(*nears)), rows, questions, where)
     how, bias = settings.score_fold, settings.grow_bias
     return await cpu.on_cpu(
-        _fill, groups, nears, rows, questions, reach, budget, tags, how, bias, absolute
+        _fill, groups, nears, rows, questions, reach, budget, how, bias, absolute
     )
 
 
@@ -783,7 +755,6 @@ def _fill(
     questions: list[probe.Question],
     reach: int,
     budget: int,
-    tags: bool,
     how: ScoreFold,
     bias: float,
     absolute: dict[ChunkKey, filling.Candidate] | None = None,
@@ -794,8 +765,6 @@ def _fill(
         weighed, signal = absolute, "reranker, absolute"
     else:
         weighed, signal = _weigh(held, near, rows, questions)
-    if not tags:
-        weighed = {key: msgspec.structs.replace(one, aspect=None) for key, one in weighed.items()}
     weighed = filling.biased(weighed, bias)
     found = [
         one
@@ -844,7 +813,7 @@ def _weigh(
     weighed: dict[ChunkKey, filling.Candidate] = {}
     for at, key in enumerate(near):
         best = max(range(len(questions)), key=lambda question: values[question][at])
-        weighed[key] = filling.Candidate(rows[key][0], values[best][at], questions[best].label)
+        weighed[key] = filling.Candidate(rows[key][0], values[best][at])
     return weighed, signal
 
 
@@ -879,7 +848,8 @@ async def probe_gaps(
     With a reranker on, what the search finds is judged as the ranked chunks were (`_judged`):
     scored against each question whose words are missing, dropped under the floor, tagged with
     the questions it clears it for. Without one, its BM25 score is on another scale than the
-    ranked passages', so it scores 0 and is tagged by the words it holds (`probe.tags`)."""
+    ranked passages', so it scores 0 and tags no question: holding a missing word is not an
+    answer."""
     # inline, not in a worker thread: stems are cached (`probe.stem`), see `probe.vocabulary`
     wanted = probe.missing(questions, probe.covered(groups))
     if not wanted:
@@ -904,7 +874,7 @@ async def probe_gaps(
             fresh[0],
             hits=[msgspec.structs.replace(hit, score=0.0) for hit in fresh[0].hits],
             score=0.0,
-            aspects=probe.tags(fresh[0], wanted),
+            aspects=[],
         )
     if fresh:
         (one,) = await _grouped([best], where, 1)
@@ -1074,7 +1044,7 @@ async def map_sections(scanned: Scanned, where: Plan, limit: int) -> section_map
     # the related sections too: a follow-up search scoped to `collections` has to reach them
     listed = [*picked.picks, *(at for near in picked.related.values() for at, _ in near)]
     picked_docs = {candidates[at].document_id for at in listed}
-    groups = section_map.listed(passage.top_documents(scanned.pooled or hits, how), picked_docs)
+    groups = section_map.listed(passage.top_documents(hits, how), picked_docs)
     books = {group[0].document_id for group in groups}
     described, held, about = await asyncio.gather(
         _descriptors([candidates[at] for at in picked.picks]),

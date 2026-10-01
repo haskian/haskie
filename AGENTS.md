@@ -22,8 +22,11 @@ src/haskie/
   app.py        Litestar app; cli.py the CLI; claude.py the Claude Code install
   settings.py   settings; db.py SQLite; tables.py its schema (Core); home.py ~/.haskie; cpu.py CPU;
                 ids.py document, section and chunk ids, an MD5 in base58
+  errors.py     typed errors, the contract between the domain and HTTP; paging.py cursors and sorts
+  logs.py       structured JSON logs; audit.py the audit trail; sysdb.py reads DBOS's own tables
   shutdown.py   which shutdown signals count, and how long the exit may take
-tests/          by area: flat test_*.py plus catalogue/, document/, indexing/, search/, sections/
+tests/          by area: flat test_*.py plus catalogue/, document/, indexing/, search/, sections/;
+                gapeval/ the offline evaluation of gap detection
 docs/           one page per topic, with diagrams; update it when behavior changes
 web/            React + TypeScript UI (Bun)
 design/         HTML mockups and design.css, which web/ imports

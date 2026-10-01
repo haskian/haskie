@@ -23,7 +23,7 @@ import snowballstemmer
 
 from haskie.search import thin
 from haskie.search.collapse import WORD
-from haskie.search.passage import Answer, Excerpt, HitRange
+from haskie.search.passage import Answer, Excerpt
 from haskie.search.section import Group
 
 PROBE_SCAN = 20  # hits the probe's full-text search reads: its best new passage is what it wants
@@ -79,19 +79,6 @@ def missing(questions: list[Question], covered: Iterable[str]) -> dict[str, list
 def covered(groups: list[Group]) -> list[str]:
     """What the kept sections say: their passages' text and every heading they sit under."""
     return [text for one in groups for hit in one.hits for text in (hit.text, *hit.headings)]
-
-
-def tags(hit_range: HitRange, wanted: dict[str, list[Question]]) -> list[str]:
-    """The questions whose missing words a passage the probe found holds, in the order asked."""
-    held = vocabulary(hit.text for hit in hit_range.hits)
-    labels = [
-        question.label
-        for word, questions in wanted.items()
-        if stem(word) in held
-        for question in questions
-        if question.label is not None
-    ]
-    return list(dict.fromkeys(labels))
 
 
 def placed(groups: list[Group], found: Group) -> list[Group]:

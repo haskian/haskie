@@ -16,8 +16,8 @@ and the excerpts an agent reads, which run the shared ranking once per question 
     answers    (retrieve -> merge -> rerank -> hits -> judge_thin) per question -> fold -> group
                -> budget -> probe_gaps -> fill -> quote -> rerank_excerpts
 
-The first four steps are the search every answer shares (`sections` plans no reranker, so its
-`rerank` only measures the ranking for the log); what follows is the fold that answer is made of,
+The first four steps are the search every answer shares (in `sections` the reranker, its own
+small model, weighs every chunk and drops none); what follows is the fold that answer is made of,
 and it is a step rather than something every search pays for. `chunks` folds each near-duplicate hit
 into the hit it repeats (`collapse`). `passages` and `answers` merge the chunks of one section that
 sit next to each other into one readable span, grow a span too short to stand alone by the
@@ -26,8 +26,8 @@ read only the spans they answer with. `answers` then groups the spans by the sec
 `limit` counts sections, searches once more for the words of the question no section holds
 (`probe`), adds the text around and between the passages that answers too (`fill`), and writes each
 section out as one excerpt. `sections` groups the same hits by section and picks the sections
-that cover the most of what the scan found (`section_map`),
-with no reranker: a map is wide and fast, and a quote is what the reranker is for.
+that cover the most of what the scan found (`section_map`): a map is wide, so its reranker
+weighs what the scan found rather than cutting it.
 
 Two numbers steer that. `scan` is how deep the ranking goes and is what `hits` cuts to; `limit`
 is how many answers the caller asked for and is what the last fold cuts to. Every pipeline scans
@@ -64,12 +64,6 @@ MAX_MAP = 40
 # Chunks scanned per section asked for: the map covers what
 # the scan found, so a shallow scan would map only the top of the ranking.
 SECTION_SCAN = 20
-# The map reads twice as deep as it scans: its documents are ranked over all of it, and its scan
-# takes at most `SCAN_SHARE` of its chunks from one document while another has some left, so one
-# book that matches throughout cannot fill it (`retrieval.capped`). Judgement, measured once:
-# on 11 questions over 10 books, see docs/search.md.
-SECTION_POOL = 2
-SCAN_SHARE = 0.2
 
 
 class Search(msgspec.Struct):
@@ -85,8 +79,6 @@ class Search(msgspec.Struct):
     # every question of the search as the steps after the ranking read them: each search of an
     # `answers` holds them all, and `query` is its own
     questions: list[probe.Question]
-    # the most chunks of one document the scan takes while another has some left; None for no cap
-    per_document: int | None = None
     # what its steps are timed under (`StepTime.branch`): `Q1`, `Q2` in the order the questions
     # were asked when several run side by side, None when one runs alone
     branch: str | None = None
@@ -245,7 +237,7 @@ async def rerank(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Po
 async def hits(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Scanned:
     """The ranking, as far down as this search scans, as hits."""
     state = ctx.state
-    return retrieval.scan(ctx.inputs, state.scan, state.per_document)
+    return retrieval.scan(ctx.inputs, state.scan)
 
 
 async def collapse_hits(ctx: StepContext[Search, None, retrieval.Scanned]) -> list[Hit]:
@@ -459,9 +451,8 @@ async def sections(
         query,
         wanted,
         deeper=SECTION_SCAN,
-        reranks=False,
+        weighs=True,
         scope=scope,
-        spread=True,
     )
     if state is None:
         return SectionMap(sections=[], documents=[], collections=[], searched=[])
@@ -474,14 +465,13 @@ async def _search(
     limit: int | None,
     deeper: int,
     rerank_floor: float | None = None,
-    reranks: bool = True,
+    weighs: bool = False,
     scope: Scope = EVERYTHING,
-    spread: bool = False,
 ) -> Search | None:
-    """One search, planned but not yet run, or None when nothing is left to search. `reranks`
-    False for a pipeline with no rerank step: it waits for no reranker (`retrieval.plan`)."""
+    """One search, planned but not yet run, or None when nothing is left to search. `weighs` for
+    a map: its own reranker weighs every chunk and drops none (`retrieval.plan`)."""
     asked = aspects.Questions(questions=[query])
-    found = await _searches(names, asked, limit, deeper, rerank_floor, reranks, scope, spread)
+    found = await _searches(names, asked, limit, deeper, rerank_floor, weighs, scope)
     return found[0] if found else None
 
 
@@ -491,9 +481,8 @@ async def _searches(
     limit: int | None,
     deeper: int,
     rerank_floor: float | None = None,
-    reranks: bool = True,
+    weighs: bool = False,
     scope: Scope = EVERYTHING,
-    spread: bool = False,
 ) -> list[Search] | None:
     """One search per query over the same collections, planned but not yet run, or None when
     nothing is left to search.
@@ -501,11 +490,9 @@ async def _searches(
     The only place a `Search` is built, so every bound a caller asked for is resolved here and the
     steps read numbers rather than compute them. `deeper` is how many chunks the answer this
     pipeline builds is folded from, which is what turns the caller's limit into the scan depth.
-    `spread` reads `SECTION_POOL` times deeper than the scan and caps the scan at `SCAN_SHARE` of
-    one document's chunks (a map's scan).
     """
     with _timing("plan"):
-        plans = await retrieval.plan(names, asked.framed, reranks, scope)
+        plans = await retrieval.plan(names, asked.framed, weighs, scope)
     if plans is None:
         return None
     if rerank_floor is not None:
@@ -524,7 +511,7 @@ async def _searches(
     log.observe_scope(plans[0], plans[0].names, mode, limit)
     # a pipeline that folds scans deeper than it answers, and that is what `MAX_SCAN` bounds
     scan = max(limit, min(limit * deeper, MAX_SCAN))
-    candidates = max(plans[0].settings.candidates, scan * (SECTION_POOL if spread else 1))
+    candidates = max(plans[0].settings.candidates, scan)
     questions = asked.asked([where.vector for where in plans])
     several = len(asked.questions) > 1
     return [
@@ -535,7 +522,6 @@ async def _searches(
             limit=limit,
             scan=scan,
             candidates=candidates,
-            per_document=max(1, round(scan * SCAN_SHARE)) if spread else None,
             questions=questions,
             branch=f"Q{at}" if several else None,
         )
