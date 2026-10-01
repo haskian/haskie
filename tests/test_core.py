@@ -2915,6 +2915,9 @@ async def test_describe_writes_the_descriptors_by_the_strategy_asked_for(
         return "Topic one | Topic two"
 
     monkeypatch.setattr(embed, "reply", reply)
+    on_cpu = partial(pipeline.describe, doc, cache_id, None, Descriptors.LLM, Accelerator.CPU)
+    with pytest.raises(PermanentError, match="runs on gguf on the Apple GPU"):
+        await on_cpu()  # its model would never load: no wait, an error
     describe = partial(pipeline.describe, doc, cache_id, None, Descriptors.LLM, Accelerator.AUTO)
     with pytest.raises(models.ModelLoading):
         await describe()

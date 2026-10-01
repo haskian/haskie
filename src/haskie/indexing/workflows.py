@@ -756,16 +756,12 @@ async def described_by(doc: str, cache_id: str) -> Descriptors | None:
 
 
 @retried_step
-async def try_describe(ctx: Context) -> BatchResult:
-    """Write the descriptors of the cached embedding's sections (see `pipeline.describe`). Its
-    model, the embedding model or the describer, can still be on its way, as a batch's can (see
-    `run_batch`)."""
+async def try_describe(ctx: Context, by: Descriptors) -> BatchResult:
+    """Write the descriptors of the cached embedding's sections by strategy `by` (see
+    `pipeline.describe`). Its model, the embedding model or the describer, can still be on its
+    way, as a batch's can (see `run_batch`)."""
     describing = pipeline.describe(
-        ctx.document,
-        ctx.cache_id,
-        ctx.embedding,
-        ctx.pipeline.descriptors,
-        ctx.pipeline.accelerator,
+        ctx.document, ctx.cache_id, ctx.embedding, by, ctx.pipeline.accelerator
     )
     return await _guarded(describing)
 
@@ -1083,9 +1079,7 @@ async def ensure_embedding(
         if await described_by(doc, cache_id) != by:
             # a hit too checks the model: c-TF-IDF would rerank its vectors by another model's
             ctx = ctx or await _embedding_context(doc, params)
-            asked = msgspec.structs.replace(ctx.pipeline, descriptors=by)  # not the module's name
-            describing = msgspec.structs.replace(ctx, pipeline=asked)
-            _value(await _awaiting_model(partial(try_describe, describing)))
+            _value(await _awaiting_model(partial(try_describe, ctx, by)))
         return cache_id
 
 

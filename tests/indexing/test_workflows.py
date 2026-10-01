@@ -1067,6 +1067,16 @@ async def test_an_embedding_run_describes_by_the_strategy_it_was_asked_for(
     alike = await _steps(await run(Descriptors.LLM))
     assert "load_context" not in alike and "try_describe" not in alike, alike
 
+    # a run recorded before the strategy was an argument describes by the settings
+    user = await load_user_settings()
+    await save_user_settings(msgspec.structs.replace(user, pipeline=PipelineSettings()))
+    with SetWorkflowID(f"{workflows.EMBED_PREFIX}:{row.id}:{uuid4().hex}"):
+        handle = await DBOS.enqueue_workflow_async(
+            workflows.EMBEDDING_QUEUE, workflows.ensure_embedding, row.id, params
+        )
+    assert await handle.get_result(polling_interval_sec=workflows.TASK_POLL) == cache_id
+    assert await embed_cache.described_by(row.id, cache_id) == Descriptors.C_TF_IDF
+
 
 async def test_concurrent_attaches_converge_on_one_embedding_run(
     dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

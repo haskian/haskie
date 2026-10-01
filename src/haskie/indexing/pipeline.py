@@ -48,7 +48,17 @@ from haskie.collection.index import Row
 from haskie.document import convert
 from haskie.document.bookmarks import Bookmark
 from haskie.document.document import Document
-from haskie.indexing import chunk, embed, embed_cache, gguf_models, models, parts, segment
+from haskie.errors import PermanentError
+from haskie.indexing import (
+    chunk,
+    embed,
+    embed_cache,
+    gguf_models,
+    hardware,
+    models,
+    parts,
+    segment,
+)
 from haskie.indexing.segment import CutReason, SpanKind
 from haskie.sections import build, generated
 from haskie.settings import Accelerator, ChunkSettings, Descriptors
@@ -283,8 +293,12 @@ async def describe(
     """Write the descriptors of one cached embedding's sections by strategy `by`; returns how
     many sections it described. c-TF-IDF embeds its candidates with the embedding model, and the
     llm strategy asks the describer: either fails fast when its model is not loaded, as
-    `embed_batch` does."""
+    `embed_batch` does. A describer the hardware setting leaves nowhere to run is permanent: it
+    would never load."""
     if by == Descriptors.LLM:
+        if hardware.device(gguf_models.DESCRIBER, accelerator) is None:
+            # the settings changed under a run asked for llm: its model never warms here
+            raise PermanentError(hardware.nowhere(gguf_models.DESCRIBER))
         await models.require_ready(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER)
         found = await embed_cache.inputs(doc.id, cache_id, vectors=False)
         strategy = generated.Generated(partial(embed.reply, gguf_models.DESCRIBER, accelerator))

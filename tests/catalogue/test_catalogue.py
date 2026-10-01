@@ -111,6 +111,11 @@ async def test_every_model_has_a_loader_and_every_pin_a_model() -> None:
     assert embedders - listed_embedders - pinned_embedders == set()
     assert rerankers - listed_rerankers - pinned_rerankers == set()
     assert pinned_embedders <= embedders and pinned_rerankers <= rerankers
+    # a generator is no catalogue model, and no embedder pin either: one name, one runtime role
+    assert set(gguf_models.GENERATORS).isdisjoint(embedders | rerankers | pinned_embedders)
+    assert {gguf_models.describer(one) for one in Descriptors} - {None} == set(
+        gguf_models.GENERATORS
+    ), "every generator is some strategy's describer"
     # a GGUF file holds no positions past its model's context, which the catalogue also states
     metadata = await catalogue.embedding_metadata()
     contexts = {
