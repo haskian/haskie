@@ -17,7 +17,6 @@ from haskie.errors import InvalidInput
 from haskie.indexing import gguf_models, mlx_models, onnx_models
 from haskie.indexing.hardware import Device, Runtime
 from haskie.settings import (
-    DEFAULT_MAP_RERANKER,
     DEFAULT_RERANKER,
     Accelerator,
     CollectionOverrides,
@@ -83,7 +82,7 @@ async def test_every_model_says_what_it_is() -> None:
 
 async def test_models_are_listed_smallest_first() -> None:
     """Every picker lists them in this order: embedders by vector size and, at one size, by
-    parameters; rerankers by parameters, the smallest the map's default."""
+    parameters; rerankers by parameters, MiniLM-L2 the smallest."""
     embedders = await catalogue.embedders()
     metadata = await catalogue.embedding_metadata()
     rerankers = await catalogue.rerankers()
@@ -96,10 +95,10 @@ async def test_models_are_listed_smallest_first() -> None:
         one.parameters for one in rerankers.values()
     )
     assert list(rerankers)[:3] == [
-        DEFAULT_MAP_RERANKER,
+        "cross-encoder/ms-marco-MiniLM-L2-v2",
         "cross-encoder/ettin-reranker-17m-v1",
         DEFAULT_RERANKER,
-    ], "the map's default is the smallest, the excerpts' the third, a little slower than ettin-17m"
+    ], "MiniLM-L2 is the smallest, the default the third, a little slower than ettin-17m"
 
 
 async def test_every_model_has_a_loader_and_every_pin_a_model() -> None:

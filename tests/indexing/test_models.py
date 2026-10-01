@@ -277,7 +277,6 @@ async def test_models_are_idempotent_and_fail_fast_when_missing(dbos, monkeypatc
     await models.ensure_models(broken)
     with pytest.raises(HaskieError):  # the model does not exist
         await wait_for(models._model_id(ModelKind.RERANKER, "nope/x"))
-    # a cross-encoder also loads the map's reranker, which is no part of this
     (status,) = [one for one in await models.model_statuses() if one.name == "nope/x"]
     assert (status.kind, status.state) == ("reranker", "error") and status.error
     with pytest.raises(Unavailable, match="failed to load"):
@@ -324,7 +323,6 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
             [
                 ("embedding", "ibm-granite/granite-embedding-97m-multilingual-r2"),
                 ("reranker", "cross-encoder/ettin-reranker-32m-v1"),
-                ("reranker", "cross-encoder/ms-marco-MiniLM-L2-v2"),
             ],
         ),
         (
@@ -342,7 +340,6 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
             ["cross-encoder/ettin-reranker-32m-v1", "Alibaba-NLP/gte-reranker-modernbert-base"],
             [
                 ("reranker", "cross-encoder/ettin-reranker-32m-v1"),
-                ("reranker", "cross-encoder/ms-marco-MiniLM-L2-v2"),
                 ("reranker", "Alibaba-NLP/gte-reranker-modernbert-base"),
             ],
         ),
@@ -428,14 +425,9 @@ async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> 
     monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: loaded.append(name))
     override = "cross-encoder/ettin-reranker-150m-v1"
     collection = await Collection.create("picky")
-    # both of its models, so its map loads no default of the user's either
     await collection.set_overrides(
         CollectionOverrides(
-            search=SearchOverrides(
-                reranker=Reranker.CROSS_ENCODER,
-                reranker_model=override,
-                map_reranker_model=override,
-            )
+            search=SearchOverrides(reranker=Reranker.CROSS_ENCODER, reranker_model=override)
         )
     )
     user = await save_user_settings(UserSettings(embedding="none"))
@@ -478,7 +470,6 @@ async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> N
     assert {d.title for d in downloads} == {
         f"embedding {(await default_model()).name}",
         "reranker cross-encoder/ettin-reranker-32m-v1",
-        "reranker cross-encoder/ms-marco-MiniLM-L2-v2",
     }, "one row per required model, kind and name read out of the workflow id"
     assert {d.status for d in downloads} == {"SUCCESS"}
     assert all(d.detail["warm"] for d in downloads), "loaded here, so this process can search"

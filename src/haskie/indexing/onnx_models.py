@@ -99,7 +99,7 @@ EMBEDDERS: dict[str, EmbedderPin] = {
     ),
 }
 RERANKERS: dict[str, RerankerPin] = {
-    # the map's (`settings.DEFAULT_MAP_RERANKER`); its export is the whole classifier
+    # its export is the whole classifier
     "cross-encoder/ms-marco-MiniLM-L2-v2": RerankerPin("1b5cd67b15209f24824c50370e0397743aa9b787"),
     "cross-encoder/ettin-reranker-17m-v1": RerankerPin(
         "9e4aa35321a6dd1a43ca313f500c4b4f7cfb5cc6", headed=True

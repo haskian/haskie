@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import signal
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -23,8 +24,18 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import anyio
+import httpx
 import pytest
-from conftest import claude_installed, fresh_attribute, holding, refresh_settled, until
+from conftest import (
+    NO_MODELS,
+    claude_installed,
+    fresh_attribute,
+    holding,
+    refresh_settled,
+    text_pdf,
+    until,
+    wait_import,
+)
 from sqlalchemy import select
 from typer.testing import CliRunner
 
@@ -345,23 +356,40 @@ def test_claim_home_claims_once_and_gives_the_home_back(elsewhere: Path) -> None
         assert home.LOCK_FILE.read_text().startswith("pid "), "the next one gets in"
 
 
-def test_run_exports_its_own_pid_for_the_lock(
-    elsewhere: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("flag", "serves_in_home"),
+    [
+        ("--foreground", True),  # a shell's directory may be deleted while the server lives on
+        ("--reload", False),  # uvicorn watches the working directory: the code being edited
+    ],
+)
+def test_run_exports_its_own_pid_and_serves_from_its_home(
+    flag: str,
+    serves_in_home: bool,
+    elsewhere: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`run` puts its pid in the environment before uvicorn starts, so a `--reload` worker that
-    claims the home records the reloader, not itself."""
+    claims the home records the reloader, not itself. Outside development it serves from the
+    home, so no worker process it starts reads a working directory that is gone."""
+    shell = tmp_path / "shell"
+    shell.mkdir()
+    monkeypatch.chdir(shell)  # and back to the suite's own afterwards
     seen: dict[str, str | None] = {}
 
     def serve(*_args, **_kwargs) -> None:
         seen["pid"] = os.environ.get(home.SERVER_PID_ENV)
+        seen["cwd"] = os.getcwd()
 
     monkeypatch.setattr("uvicorn.run", serve)
     monkeypatch.delenv(home.SERVER_PID_ENV, raising=False)
 
-    result = runner.invoke(cli, ["run", "--home", str(elsewhere), "--reload"])
+    result = runner.invoke(cli, ["run", "--home", str(elsewhere), flag])
 
     assert result.exit_code == 0, result.output
     assert seen["pid"] == str(os.getpid())
+    assert seen["cwd"] == str(elsewhere.resolve() if serves_in_home else shell.resolve())
 
 
 def test_run_refuses_in_one_line_when_the_home_is_taken(elsewhere: Path) -> None:
@@ -495,6 +523,59 @@ RUN_CASES = {
         held_at="http://127.0.0.1:8451",
     ),
 }
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+@pytest.mark.anyio
+async def test_a_fresh_install_serves_a_new_home_after_the_shell_it_started_from_is_gone(
+    tmp_path: Path,
+) -> None:
+    """End to end, in real processes: `run` on a home that does not exist yet starts a server, the
+    first run picks its settings, and a PDF imports through the extraction pool. The directory
+    `run` started in is deleted first, as a Claude Code session's worktree is: a server still in
+    it failed every PDF with a BrokenProcessPool, since a new worker process reads its cwd."""
+    new_home = tmp_path / "new-home"
+    session = tmp_path / "session"
+    session.mkdir()
+    url = f"http://127.0.0.1:{_free_port()}"
+    haskie = claude.own_command()
+    host, port = claude.address(url)
+    started = subprocess.run(
+        [*haskie, "run", "--home", str(new_home), "--host", host, "--port", str(port)]
+        + ["--no-browser"],
+        cwd=session,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    try:
+        assert started.returncode == 0, started.stdout + started.stderr
+        session.rmdir()
+        async with httpx.AsyncClient(base_url=url, timeout=30) as http:
+            status = (await http.get("/api/status")).json()
+            assert (status["initialized"], status["home"]) == (False, str(new_home.resolve()))
+            picked = {**NO_MODELS, "descriptors": "c-tf-idf"}
+            assert (await http.post("/api/init", json=picked)).status_code == 201
+            settings = (await http.get("/api/settings")).json()
+            assert settings["pipeline"]["descriptors"] == "c-tf-idf"
+
+            pdf = text_pdf(["Sagas keep a long transaction consistent without locks."])
+            upload = {"data": ("fresh.pdf", pdf, "application/pdf")}
+            staged = (await http.post("/api/documents/staging", files=upload)).json()
+            body = {"staging_id": staged["staging_id"]}
+            name = (await http.post("/api/documents/import", json=body)).json()["name"]
+            document = await wait_import(http, name)
+            assert document["status"] == "imported", document
+            markdown = await http.get(f"/api/documents/{name}/markdown")
+            assert markdown.status_code == 200, markdown.text
+            assert "Sagas keep a long transaction" in markdown.text
+    finally:
+        subprocess.run([*haskie, "stop", "--home", str(new_home)], timeout=60, check=False)
 
 
 @pytest.mark.parametrize("case", RUN_CASES.values(), ids=list(RUN_CASES))

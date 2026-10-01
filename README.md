@@ -126,6 +126,8 @@ haskie uninstall claude     # removes all four again; documents and collections 
 - **Linux:** ONNX Runtime runs on an NVIDIA GPU with CUDA 13 and cuDNN 9, else on the CPU.
 - **First run:** pick an embedding model. The default, granite-97m-multilingual, reads 200+
   languages and is about 390 MB. Changing it later means running *Index all* in each collection.
+  Pick the section descriptors too: c-tf-idf runs everywhere; llm (Gemma-4-E2B, 2.8 GB) writes
+  better ones on Apple Silicon.
 - **Smoke test:** import a file on *Documents*, add it to a collection, then ask about it on
   *Explore*.
 - **Other commands:** `haskie stop`, `haskie run --foreground` (for a supervisor),

@@ -127,9 +127,9 @@ async def plan(
     only in their `vector`.
 
     A collection deleted since the caller chose it is skipped, so one stale name does not break
-    every search. `weighs` plans a map's search: with a reranker on, the map's own model
-    (`map_reranker_model`) scores every chunk it scans, and drops none (`Plan.drops`); its
-    calibrated floor still judges the search later (`gaps`). Every read keeps to `scope`.
+    every search. `weighs` plans a map's search: with a reranker on, it scores every chunk it
+    scans, and drops none (`Plan.drops`); its calibrated floor still judges the search later
+    (`gaps`). Every read keeps to `scope`.
     """
     user = await load_user_settings()
     embedding = await catalogue.embedding_model(user)
@@ -141,10 +141,8 @@ async def plan(
     if not indexes:
         return None
     settings = indexes[0][1] if len(indexes) == 1 else user.search
-    if weighs:  # the map's model, which weighs: no floor of the user's applies to it
-        settings = msgspec.structs.replace(
-            settings, reranker_model=settings.map_reranker_model, min_rerank_score=None
-        )
+    if weighs:  # a map weighs every chunk: no floor of the user's applies to it
+        settings = msgspec.structs.replace(settings, min_rerank_score=None)
 
     vectors: list[list[float] | None] = [None] * len(queries)
     if embedding is not None and any(one.mode != SearchMode.FTS for _, one in indexes):
