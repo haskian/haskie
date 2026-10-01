@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.24.0 - 2026-10-01
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>one reranker for maps and search; descriptors picked at first run (#35) - (3679792) - Črtomir Majer
+
+- - -
+
 ## v0.23.0 - 2026-10-01
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>catalogue of small 2025-26 models; Apple GPU via WebGPU, MLX and GGUF (#33) - (b207873) - Črtomir Majer
