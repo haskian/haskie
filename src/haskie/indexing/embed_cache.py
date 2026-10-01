@@ -154,7 +154,6 @@ _PLAIN = pa.schema(
         ("part", pa.int32()),
         ("seq", pa.int32()),
         ("id", pa.string()),
-        ("section_id", pa.string()),
         ("section_ids", pa.list_(pa.string())),
         ("headings", pa.list_(pa.string())),
         ("frame", pa.list_(pa.string())),
@@ -186,7 +185,6 @@ def _batch(part: int, rows: list[Row], dims: int | None) -> pa.RecordBatch:
             part=part,
             seq=row.seq,
             id=row.id,
-            section_id=row.section_id,
             section_ids=row.section_ids,
         )
         for row in rows
@@ -201,7 +199,6 @@ def _rows(batch: pa.RecordBatch) -> list[Row]:
             vector=record.get("vector"),
             seq=record["seq"],
             id=record["id"],
-            section_id=record["section_id"],
             section_ids=record["section_ids"],
         )
         for record in batch.to_pylist()
@@ -229,23 +226,10 @@ _SECTIONS = pa.schema(
 )
 
 
-class _Placed(msgspec.Struct):
-    """What naming the sections reads of a chunk (`build.Spanned`): the first pass of `_merge`
-    decodes only these, and skips the vectors."""
+class _ChunkRow(msgspec.Struct):
+    """A row without its vector: what the first pass of `_merge` reads to name the sections."""
 
-    headings: list[str]
-    line_start: int
-    line_end: int
-    char_start: int
-    char_end: int
-    byte_start: int
-    byte_end: int
-    page_start: int | None = None
-    page_end: int | None = None
-
-
-class _PlacedRow(msgspec.Struct):
-    chunk: _Placed
+    chunk: Chunk
 
 
 class Merged(msgspec.Struct):
@@ -277,12 +261,15 @@ def _merge(document_id: str, parts: list[Path], target: Path, dims: int | None) 
     vector into every section that holds it, for `write` to describe them with.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
-    placed = [
-        row.chunk
-        for path in parts
-        for row in msgspec.json.decode(path.read_bytes(), type=list[_PlacedRow])
-    ]
-    found, chains = build.sections(document_id, placed)
+    # held for naming alone, not beside the second pass's vectors
+    found, chains = build.sections(
+        document_id,
+        [
+            row.chunk
+            for path in parts
+            for row in msgspec.json.decode(path.read_bytes(), type=list[_ChunkRow])
+        ],
+    )
     sums = None if dims is None else np.zeros((len(found), dims), dtype=np.float64)
     prose: list[str] = []
     count = 0
@@ -294,7 +281,6 @@ def _merge(document_id: str, parts: list[Path], target: Path, dims: int | None) 
                 count += 1
                 row.seq = count
                 row.section_ids = [found[at].id for at in chain]
-                row.section_id = row.section_ids[-1]
                 row.id = build.chunk_id(document_id, count)
                 prose.append(build.prose(row.chunk))
             writer.write_batch(_batch(part, rows, dims))

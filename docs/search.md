@@ -69,7 +69,7 @@ source row.
 | passage | neighbouring matched chunks of one section, merged | `explore?granularity=passage` |
 | excerpt | one section of a document, with every passage of it the search kept | `search_excerpts` (the Explore page too) |
 | source | one document: score, best chunk, hottest sections, collections | `search_sources` |
-| section | one section of a document: its id, where it is, its descriptors, the sections it covers; no text | `search_sections` (the Explore page too, which opens a section among its document's sections) |
+| section | one section of a document: its id, where it is, its descriptors, the sections it covers; no text | `search_sections` (the Explore page too, which opens the section with the sections it covers, and its document at its heading) |
 
 A passage is the text its chunks cover, read by their offsets, with nothing added around it.
 Chunks are cut at headings, blank lines, blocks and sentences (see [chunking](chunking.md)), so a

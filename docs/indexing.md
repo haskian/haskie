@@ -81,7 +81,9 @@ them. A section longer than that is cut at a page inside it, and a PDF without s
 - A PDF converts in batches cut at the pages its bookmarks start on, of any level. Without
   bookmarks, every `batch_pages` pages. Any other file converts as one batch.
 - Embedding cuts the assembled markdown into parts where its headings start, and a section longer
-  than a batch at its page markers (`pipeline.plan_embed`). Pages are counted by those markers, else
+  than a batch at its page markers (`pipeline.plan_embed`). A heading right behind a page marker is
+  cut ahead of the marker, and each part carries the page open where it starts, so a part cut
+  mid-page still knows its page. Pages are counted by those markers, else
   as 3,000 characters each (`PAGE_CHARS`). Markdown without page markers is cut at headings alone:
   a section longer than a batch, or a file with no headings, is one part. The cuts depend on the
   markdown alone, so the document is

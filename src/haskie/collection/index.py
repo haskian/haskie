@@ -89,7 +89,6 @@ class Row(msgspec.Struct):
     # The merge names the chunk and its sections too (`sections.build`).
     seq: int = 0
     id: str = ""  # the chunk's own id
-    section_id: str = ""  # the deepest section that holds it
     section_ids: list[str] = []  # every section that holds it, the whole document first
 
 
@@ -107,7 +106,6 @@ PLAIN_SCHEMA = pa.schema(
         ("part", pa.int32()),
         ("seq", pa.int32()),
         ("id", pa.string()),  # `Row.id`: the chunk's own id
-        ("section_id", pa.string()),  # `Row.section_id`: the deepest section that holds it
         # `Row.section_ids`: every section that holds it, the whole document first, so a search
         # filtered to a section finds the chunks of the sections under it too (`Scope`)
         ("section_ids", pa.list_(pa.string())),
@@ -504,7 +502,6 @@ class CollectionIndex:
                 part=part,
                 seq=row.seq,
                 id=row.id,
-                section_id=row.section_id,
                 section_ids=row.section_ids,
                 **{FTS_COLUMN: framed(row.chunk.frame, row.chunk.text)},
             )
@@ -770,7 +767,7 @@ class CollectionIndex:
             source_file=str(self.home / source_path) if source_path else "",
             markdown_file=str(self.home / markdown_path) if markdown_path else "",
             id=r.get("id") or "",
-            section_id=r.get("section_id") or "",
+            section_id=(r.get("section_ids") or [""])[-1],
             section_ids=r.get("section_ids") or [],
         )
 

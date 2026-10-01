@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, type Head, type Preview } from '../api'
+import { api, type Document, type Head, type Preview } from '../api'
 import { errorText } from '../format'
 import { anchorIndex, headingPath, type Anchor } from './anchor'
 import { Skeleton } from './Skeleton'
@@ -47,6 +47,27 @@ function scrollPaneTo(heading: HTMLElement): void {
 }
 
 const PANE_HEADS: Record<Preview['kind'], string> = { pdf: 'PDF', html: 'HTML', image: 'Image', text: 'Text' }
+
+/** A search result's document in the panes, open at `anchor`: fetched by name, because the panes
+ *  need its preview kind and a result does not carry it. */
+export function DocumentByName({ name, anchor, shown }: { name: string; anchor: Anchor; shown: boolean }) {
+  const [row, setRow] = useState<Document | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let live = true
+    api
+      .document(name)
+      .then((fetched) => live && setRow(fetched))
+      .catch((cause: unknown) => live && setError(errorText(cause)))
+    return () => {
+      live = false
+    }
+  }, [name])
+
+  if (error !== null) return <p className="muted">{error}</p>
+  return row === null ? null : <DocumentPanes doc={name} preview={row.preview} full anchor={anchor} shown={shown} />
+}
 
 /**
  * The two-pane document view: the original on the left, the rendered markdown on the right. The

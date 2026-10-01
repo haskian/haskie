@@ -138,8 +138,8 @@ haskie uninstall claude     # removes all four again; documents and collections 
    imported, and shows the nearest documents once done.
 2. **Collections.** Create one per topic and add its documents. Give it a one-line description.
    The agent reads it to choose where to look.
-3. **Explore.** Search and see exactly what your agent gets: *Excerpts*, *Sources* and *Sections*,
-   the map of the sections a topic touches. Open a section to see what the map said about it and
+3. **Explore.** Search and see what your agent finds: *Excerpts*, *Sources* and *Sections*, the
+   map of the sections a topic touches. Open a section to see what the map said about it and
    the sections it covers, and its document at its heading. Switch to *Chunks* or *Passages* to
    see how haskie cut the documents and built each answer.
 

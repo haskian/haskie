@@ -1860,7 +1860,7 @@ export interface components {
         SearchOverrides: {
             /**
              * Results
-             * @description Number of results a search returns, at most 200.
+             * @description Number of chunks or passages a search returns, at most 200. Excerpts, sources and sections have their own defaults.
              */
             limit?: number | null;
             /**
@@ -1968,7 +1968,7 @@ export interface components {
         SearchSettings: {
             /**
              * Results
-             * @description Number of results a search returns, at most 200.
+             * @description Number of chunks or passages a search returns, at most 200. Excerpts, sources and sections have their own defaults.
              * @default 25
              */
             limit: number;

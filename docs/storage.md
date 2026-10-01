@@ -188,9 +188,8 @@ document in order.
   sections the same ids. Each section names the one it sits in (`parent_id`).
 - A chunk's id is the MD5 of `<document id>/c/<seq>`, its 1-based place among the document's
   chunks: under other chunk settings the same `seq`, and so the same id, names other text. Each
-  chunk names the deepest section that holds it (`section_id`) and every section that does, the
-  whole document first (`section_ids`), so a search kept to a chapter finds the chunks of its
-  subsections too.
+  chunk names every section that holds it, the whole document first and its own section last
+  (`section_ids`), so a search kept to a chapter finds the chunks of its subsections too.
 - The `s` and `c` keep the two kinds apart: section 2 and chunk 2 of one document are two ids.
 
 The sections go into their own file beside the chunks (`<id>.sections.parquet`), each with its

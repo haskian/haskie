@@ -159,6 +159,8 @@ class Chunking(msgspec.Struct, frozen=True):
     # why the first chunk starts and the last one ends: the document's edge, or a part boundary
     start_reason: CutReason = CutReason.EDGE
     end_reason: CutReason = CutReason.EDGE
+    # the page open where `text` starts, by an earlier part's marker; None before any
+    page: int | None = None
 
 
 # --- the steps --------------------------------------------------------------------
@@ -282,13 +284,15 @@ def split(
     opened: Sequence[Opened] = (),
     start_reason: CutReason = CutReason.EDGE,
     end_reason: CutReason = CutReason.EDGE,
+    page: int | None = None,
 ) -> list[Chunk]:
     """`text` as chunks. The pipeline chunks a document one part at a time, so `line_offset`,
     `char_offset` and `byte_offset` count what comes before `text` in the whole document,
     `opened` holds the headings still open where it starts (see `open_headings`), and
     `start_reason` and `end_reason` say why its ends are cut: the document's own (`EDGE`), else
     where another part meets it, at a heading the later part opens with (`HEADING`) or partway
-    through a section (`PART`)."""
+    through a section (`PART`). `page` is the page open where it starts, until its first page
+    marker."""
     run = Chunking(
         text,
         settings,
@@ -298,6 +302,7 @@ def split(
         tuple(opened),
         start_reason,
         end_reason,
+        page,
     )
     value: Any = None
     for step in pipeline(settings):
@@ -384,7 +389,7 @@ def locate(run: Chunking, packed: list[Packed]) -> list[Chunk]:
 
     def page_at(pos: int) -> int | None:
         idx = bisect_right(marker_offsets, pos) - 1
-        return markers[idx][1] if idx >= 0 else None
+        return markers[idx][1] if idx >= 0 else run.page
 
     # Byte offsets are walked, not looked up: chunks tile the text in order, so the cursor
     # encodes every character once, the gap before a chunk and then the chunk itself.

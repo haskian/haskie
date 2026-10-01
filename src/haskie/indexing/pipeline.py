@@ -31,6 +31,7 @@ slot of the CPU budget is held. So a step holds a slot for its CPU work only, ne
 IO or the LanceDB commit around it.
 """
 
+import bisect
 from functools import partial
 
 import anyio
@@ -43,7 +44,6 @@ from haskie.collection.collection import Collection
 from haskie.collection.index import Row
 from haskie.document import convert
 from haskie.document.bookmarks import Bookmark
-from haskie.document.convert import PAGE_MARKER
 from haskie.document.document import Document
 from haskie.indexing import chunk, embed_cache, models, parts, segment
 from haskie.indexing.segment import CutReason, SpanKind
@@ -69,6 +69,7 @@ class Batch(msgspec.Struct):
     # embed: why the part's first chunk starts and its last one ends (`chunk.split`)
     start_reason: CutReason = CutReason.EDGE
     end_reason: CutReason = CutReason.EDGE
+    page: int | None = None  # embed: the page open where the part starts, by an earlier marker
     # convert: the PDF's bookmarks of these pages and the page before, which set its headings
     # (`convert.pdf_pages_markdown`), read once when the conversion is planned; None when the
     # document has none that do, so its converter's headings stand
@@ -158,8 +159,13 @@ async def plan_embed(doc: Document, batch_pages: int) -> list[Batch]:
 
 
 def _embed_batches(markdown: str, batch_pages: int) -> list[Batch]:
-    headings = [b.start for b in segment.blocks(markdown) if b.kind == SpanKind.HEADING]
-    markers = [found.start() for found in PAGE_MARKER.finditer(markdown)]
+    # a heading right behind its page markers is cut ahead of them, so its part knows its page
+    behind = {run.end(): run.end("before") for run in convert.MARKERS.finditer(markdown)}
+    headings = [
+        behind.get(b.start, b.start) for b in segment.blocks(markdown) if b.kind == SpanKind.HEADING
+    ]
+    found = list(convert.PAGE_MARKER.finditer(markdown))
+    markers = [one.start() for one in found]
     reach = (
         parts.pages(markers, batch_pages)
         if markers
@@ -177,6 +183,7 @@ def _embed_batches(markdown: str, batch_pages: int) -> list[Batch]:
     opened: list[chunk.Opened] = []
     for i, ((start, _), text) in enumerate(zip(ranges, texts, strict=True)):
         size = len(text.encode())
+        before = bisect.bisect_left(markers, start) - 1  # the last marker ahead of the part
         batches.append(
             Batch(
                 seq=i,
@@ -189,6 +196,7 @@ def _embed_batches(markdown: str, batch_pages: int) -> list[Batch]:
                 opened=opened,
                 start_reason=meets[i],
                 end_reason=meets[i + 1] if i + 1 < len(texts) else CutReason.EDGE,
+                page=int(found[before].group(1)) if before >= 0 else None,
             )
         )
         opened = chunk.open_headings(text, opened)
@@ -229,6 +237,7 @@ async def embed_batch(
             batch.opened,
             batch.start_reason,
             batch.end_reason,
+            batch.page,
         )
         vectors: list[list[float] | None] = [None] * len(chunks)
         if embedding is not None and chunks:

@@ -2801,6 +2801,59 @@ async def test_where_two_parts_meet_is_cut_for_what_comes_next(
 
 
 @pytest.mark.anyio
+async def test_a_heading_is_cut_ahead_of_its_page_marker() -> None:
+    """A PDF chapter starts behind the marker of its page. The cut goes ahead of the marker, so
+    the chapter's part knows its page from the first chunk, and no part holds a marker alone."""
+    doc = await import_row("g.md")
+    pages = [
+        f"<!-- page {n} -->\n\n# Chapter {n}\n\n{'Words of the chapter. ' * 4}".strip()
+        for n in (1, 2, 3)
+    ]
+    doc.markdown.write_text("\n\n".join(pages))
+
+    batches = await pipeline.plan_embed(doc, 1)
+    for batch in batches:
+        await pipeline.embed_batch(doc, batch, "cache", SMALL, None)
+
+    assert [part.strip() for part in _parts_of(doc, batches)] == pages
+    assert [(b.start_reason, b.end_reason) for b in batches] == [
+        (CutReason.EDGE, CutReason.HEADING),
+        (CutReason.HEADING, CutReason.HEADING),
+        (CutReason.HEADING, CutReason.EDGE),
+    ]
+    assert [
+        {(row.chunk.page_start, row.chunk.page_end) for row in rows}
+        for rows in _rows_of(doc, batches)
+    ] == [{(1, 1)}, {(2, 2)}, {(3, 3)}]
+
+
+@pytest.mark.anyio
+async def test_a_part_cut_mid_page_starts_on_the_page_open_there() -> None:
+    """A heading partway down a page opens a part with no marker of its own ahead of its text:
+    its chunks are on the page an earlier part's marker opened, until the part's first marker."""
+    doc = await import_row("g.md")
+    words = "Words of the chapter. " * 4
+    doc.markdown.write_text(
+        f"<!-- page 1 -->\n\n# One\n\n{words}\n\n<!-- page 2 -->\n\n{words}\n\n# Two\n\n{words}"
+        f"\n\n<!-- page 3 -->\n\n{words}"
+    )
+
+    batches = await pipeline.plan_embed(doc, 1)
+    for batch in batches:
+        await pipeline.embed_batch(doc, batch, "cache", SMALL, None)
+
+    assert [part.lstrip()[:5] for part in _parts_of(doc, batches)] == [
+        "<!-- ",
+        "<!-- ",
+        "# Two",
+        "<!-- ",
+    ], "cut at the heading on page 2, then at the marker of page 3"
+    assert [b.page for b in batches] == [None, 1, 2, 2]
+    two = _rows_of(doc, batches)[2]
+    assert {(row.chunk.page_start, row.chunk.page_end) for row in two} == {(2, 2)}
+
+
+@pytest.mark.anyio
 async def test_plan_embed_requires_a_converted_document() -> None:
     doc = await import_row("g.md")
     with pytest.raises(FileNotFoundError, match="markdown missing"):

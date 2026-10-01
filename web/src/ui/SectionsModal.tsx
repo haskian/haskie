@@ -1,8 +1,5 @@
-import { useEffect, useState } from 'react'
-import { api, type Document } from '../api'
-import { errorText } from '../format'
-import type { Anchor } from './anchor'
-import { DocumentPanes } from './DocumentPanes'
+import { useState } from 'react'
+import { DocumentByName } from './DocumentPanes'
 import { cite, lastHeading } from './match'
 import { Modal } from './Modal'
 import { Descriptors, OpenedDetail, type OpenedSection } from './SectionGrid'
@@ -36,21 +33,7 @@ export function SectionsModal({
 
 function SectionBody({ section, onOpen }: { section: OpenedSection; onOpen?: (section: OpenedSection) => void }) {
   const [tab, setTab] = useState(SECTION_TAB)
-  const [row, setRow] = useState<Document | null>(null) // the panes need the preview kind
-  const [error, setError] = useState<string | null>(null)
-  const anchor: Anchor = { heading: lastHeading(section.header) }
   const name = section.document
-
-  useEffect(() => {
-    let live = true
-    api
-      .document(name)
-      .then((fetched) => live && setRow(fetched))
-      .catch((cause: unknown) => live && setError(errorText(cause)))
-    return () => {
-      live = false
-    }
-  }, [name])
 
   return (
     <>
@@ -64,8 +47,7 @@ function SectionBody({ section, onOpen }: { section: OpenedSection; onOpen?: (se
         </div>
       </div>
       <div id={DOCUMENT_TAB} role="tabpanel" hidden={tab !== DOCUMENT_TAB}>
-        {error !== null && <p className="muted">{error}</p>}
-        {row !== null && <DocumentPanes doc={row.name} preview={row.preview} full anchor={anchor} shown={tab === DOCUMENT_TAB} />}
+        <DocumentByName name={name} anchor={{ heading: lastHeading(section.header) }} shown={tab === DOCUMENT_TAB} />
       </div>
     </>
   )

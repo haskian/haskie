@@ -241,7 +241,10 @@ ACCELERATOR = Meta(
 MAX_SCAN = 200
 LIMIT = Meta(
     title="Results",
-    description=f"Number of results a search returns, at most {MAX_SCAN}.",
+    description=(
+        f"Number of chunks or passages a search returns, at most {MAX_SCAN}. Excerpts, sources "
+        "and sections have their own defaults."
+    ),
 )
 MIN_PASSAGE_CHARS = Meta(
     title="Shortest passage (characters)",

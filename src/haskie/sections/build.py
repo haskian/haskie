@@ -26,7 +26,6 @@ No IO here: the caller passes the function that embeds.
 
 from collections.abc import Sequence
 from itertools import groupby
-from typing import Protocol
 
 import msgspec
 import numpy as np
@@ -66,29 +65,6 @@ class Section(msgspec.Struct, frozen=True):
         return HEADING_SEP.join(self.headings)
 
 
-class Spanned(Protocol):
-    """What naming the sections reads of a chunk: its heading path and where it runs."""
-
-    @property
-    def headings(self) -> list[str]: ...
-    @property
-    def line_start(self) -> int: ...
-    @property
-    def line_end(self) -> int: ...
-    @property
-    def char_start(self) -> int: ...
-    @property
-    def char_end(self) -> int: ...
-    @property
-    def byte_start(self) -> int: ...
-    @property
-    def byte_end(self) -> int: ...
-    @property
-    def page_start(self) -> int | None: ...
-    @property
-    def page_end(self) -> int | None: ...
-
-
 def runs(paths: Sequence[Sequence[str]]) -> list[tuple[tuple[str, ...], int, int]]:
     """Every section given each chunk's heading path in document order, as (path, first chunk,
     last chunk) positions into `paths`, in document order, a parent before its children."""
@@ -106,7 +82,7 @@ def runs(paths: Sequence[Sequence[str]]) -> list[tuple[tuple[str, ...], int, int
     return sorted(found, key=lambda run: (run[1], len(run[0])))
 
 
-def sections(document_id: str, chunks: Sequence[Spanned]) -> tuple[list[Section], list[list[int]]]:
+def sections(document_id: str, chunks: Sequence[Chunk]) -> tuple[list[Section], list[list[int]]]:
     """Every section of a document from its chunks in `seq` order, and for each chunk the
     positions of the sections that hold it, the whole document first and its deepest last (see
     the module)."""

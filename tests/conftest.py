@@ -745,7 +745,6 @@ async def seed_chunks(collection: str, doc: str, chunks: "list[Chunk]") -> None:
             seq=seq,
             id=build.chunk_id(row.id, seq),
             section_ids=[found[at].id for at in chain],
-            section_id=found[chain[-1]].id,
         )
         for seq, (chunk, chain) in enumerate(zip(chunks, chains, strict=True), start=1)
     ]

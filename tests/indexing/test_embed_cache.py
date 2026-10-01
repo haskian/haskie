@@ -546,7 +546,7 @@ async def test_a_write_names_every_chunk_and_section(tmp_path: Path) -> None:
     whole, book, sagas, quorums = found
     assert (whole.parent_id, book.parent_id, sagas.parent_id) == (None, whole.id, book.id)
     assert (quorums.seq_start, quorums.seq_end) == (2, 3), "numbered across the parts"
-    assert [chunk.section_id for chunk in chunks] == [sagas.id, quorums.id, quorums.id]
+    assert [chunk.section_ids[-1] for chunk in chunks] == [sagas.id, quorums.id, quorums.id]
     assert chunks[2].section_ids == [whole.id, book.id, quorums.id], "outermost first"
     assert [chunk.id for chunk in chunks] == [
         ids.md5(f"{doc.id}/c/{seq}".encode()) for seq in (1, 2, 3)

@@ -47,7 +47,7 @@ SERVER_PID_ENV = "HASKIE_SERVER_PID"
 # The layout, relative to `HOME`. Every name here is readable as a module attribute
 # (`home.DB_FILE`) and derived on access, so `use()` has one global to rebind.
 _LAYOUT: dict[str, str] = {
-    "COLLECTION_ROOT": "collections",  # a chunk and a section LanceDB index per collection
+    "COLLECTION_ROOT": "collections",  # one LanceDB index (chunks) per collection
     "DOCUMENT_ROOT": "documents",  # one folder per imported document: original, markdown, cache
     "STAGING_ROOT": "staging",  # uploads not yet imported; swept by the nightly housekeeping
     "AUDIT_DIR": "audit",
