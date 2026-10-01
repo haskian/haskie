@@ -106,6 +106,17 @@ export function SettingsForm({
   const searchSwitch = (key: SwitchField): ReactNode =>
     switchInput(key, `search.${key}`, draft.search[key], searchDefaults[key], (next) => setSearch(key, next))
 
+  const searchReranker = (key: 'reranker_model' | 'map_reranker_model'): ReactNode =>
+    enumInput(
+      key,
+      `search.${key}`,
+      options.reranker_models,
+      draft.search[key],
+      searchDefaults[key],
+      (next) => setSearch(key, next),
+      (item) => rerankerOption(item, options.reranker_metadata),
+    )
+
   const searchFields: Record<SearchField, ReactNode> = {
     limit: searchNumber('limit'),
     mode: enumInput('mode', 'search.mode', options.search_modes, draft.search.mode, searchDefaults.mode, (next) =>
@@ -122,24 +133,8 @@ export function SettingsForm({
     reranker: enumInput('reranker', 'search.reranker', options.rerankers, draft.search.reranker, searchDefaults.reranker, (next) =>
       setSearch('reranker', next as Reranker | null),
     ),
-    reranker_model: enumInput(
-      'reranker_model',
-      'search.reranker_model',
-      options.reranker_models,
-      draft.search.reranker_model,
-      searchDefaults.reranker_model,
-      (next) => setSearch('reranker_model', next),
-      (item) => rerankerOption(item, options.reranker_metadata),
-    ),
-    map_reranker_model: enumInput(
-      'map_reranker_model',
-      'search.map_reranker_model',
-      options.reranker_models,
-      draft.search.map_reranker_model,
-      searchDefaults.map_reranker_model,
-      (next) => setSearch('map_reranker_model', next),
-      (item) => rerankerOption(item, options.reranker_metadata),
-    ),
+    reranker_model: searchReranker('reranker_model'),
+    map_reranker_model: searchReranker('map_reranker_model'),
     rerank_with_context: searchSwitch('rerank_with_context'),
     min_rerank_score: numberInput(
       'min_rerank_score',

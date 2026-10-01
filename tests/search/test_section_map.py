@@ -307,9 +307,8 @@ def _documents(
     held: dict[str, list[str]] | None = None,
     about: dict[str, str] | None = None,
     sections: list[section_map.MappedSection] | None = None,
-    limit: int = 10,
 ) -> list[section_map.MappedDocument]:
-    groups = top_documents(hits, ScoreFold.SUM)[:limit]
+    groups = top_documents(hits, ScoreFold.SUM)
     return section_map.documents(groups, sections or [], held or {}, about or {}, ScoreFold.SUM)
 
 
@@ -354,29 +353,25 @@ def _other(seq: int, score: float, collection: str = "notes") -> Hit:
 
 
 @pytest.mark.parametrize(
-    ("name", "hits", "held", "limit", "expected"),
+    ("name", "hits", "held", "expected"),
     [
-        ("no hits, no documents", [], {}, 10, []),
+        ("no hits, no documents", [], {}, []),
         (
             "more matched chunks outrank one stronger chunk, by the sum",
             [_hit(1, 0.9), *(_other(seq, 0.4) for seq in (1, 2, 3))],
             {},
-            10,
             [("raft.md", ["notes"]), (DOC, ["notes"])],
         ),
-        ("the limit cuts the tail", [_hit(1, 0.9), _other(1, 0.4)], {}, 1, [(DOC, ["notes"])]),
         (
             "a document in two collections is one row naming both",
             [_hit(1, 0.9), _hit(1, 0.9, collection="archive")],
             {DOC: ["archive", "notes"]},
-            10,
             [(DOC, ["archive", "notes"])],
         ),
         (
             "a document whose memberships were not read keeps the collection that matched it",
             [_other(1, 0.9, collection="ops")],
             {DOC: ["notes"]},
-            10,
             [("raft.md", ["ops"])],
         ),
     ],
@@ -385,10 +380,9 @@ def test_documents_rank_by_every_chunk_the_search_read(
     name: str,
     hits: list[Hit],
     held: dict[str, list[str]],
-    limit: int,
     expected: list[tuple[str, list[str]]],
 ) -> None:
-    found = _documents(hits, held=held, limit=limit)
+    found = _documents(hits, held=held)
 
     assert [(one.document, one.collections) for one in found] == expected, name
 

@@ -80,7 +80,7 @@ class Reranker(StrEnum):
 
 
 NO_EMBEDDING = "none"  # the embedding profile of full-text search only: no model at all
-# the smallest reranker in the catalogue (`catalogue.rerankers`), so the default costs least
+# the smallest reranker that judges excerpts well enough, so the default costs least
 DEFAULT_RERANKER = "Xenova/ms-marco-MiniLM-L-6-v2"
 # The map's reranker weighs every chunk a map scans rather than judging a few, so it is the
 # smallest that still tells a topic from a homonym. Measured on 11 questions over 10 books:
@@ -585,6 +585,11 @@ class SearchSettings(msgspec.Struct):
         total = self.vector_weight + self.bm25_weight
         return self.vector_weight / total if total > 0 else 0.5
 
+    @property
+    def reranker_models(self) -> tuple[str, str]:
+        """Every reranker model a search may load: the excerpts' and the map's."""
+        return (self.reranker_model, self.map_reranker_model)
+
 
 def first_run_search() -> SearchSettings:
     """What a first run starts from: a cross-encoder reranks, since it orders results better than
@@ -618,6 +623,11 @@ class SearchOverrides(msgspec.Struct):
     grow_bias: Annotated[float | None, GROW_BIAS] = None
     max_section_chars: Annotated[int | None, MAX_SECTION_CHARS] = None
     max_answer_chars: Annotated[int | None, MAX_ANSWER_CHARS] = None
+
+    @property
+    def reranker_models(self) -> tuple[str | None, str | None]:
+        """The reranker models these overrides name, as `SearchSettings.reranker_models`."""
+        return (self.reranker_model, self.map_reranker_model)
 
     def __post_init__(self) -> None:
         # checked as it is decoded, before it is saved: otherwise a value no search can run with

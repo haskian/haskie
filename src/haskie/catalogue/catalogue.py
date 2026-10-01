@@ -260,7 +260,7 @@ async def unknown(conn: AsyncConnection, settings: UserSettings | CollectionOver
         conn, select(embedding_profiles.c.profile).where(embedding_profiles.c.profile == profile)
     ):
         missing.append(f"unknown embedding profile: {profile}")
-    for reranker in (settings.search.reranker_model, settings.search.map_reranker_model):
+    for reranker in settings.search.reranker_models:
         if reranker is not None and not await _exists(
             conn,
             select(models.c.name).where(models.c.name == reranker, models.c.kind == "reranker"),
@@ -293,7 +293,7 @@ async def _stranded(settings: UserSettings) -> str:
     if settings.embedding != NO_EMBEDDING:
         used.append((await embedders())[settings.embedding].name)
     if settings.search.reranker != Reranker.NONE:
-        used += [settings.search.reranker_model, settings.search.map_reranker_model]
+        used += settings.search.reranker_models
     return "; ".join(
         hardware.nowhere(name) for name in used if hardware.device(name, accelerator) is None
     )

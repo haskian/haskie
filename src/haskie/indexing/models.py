@@ -138,8 +138,7 @@ async def required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
     if embedding:
         wanted.append((ModelKind.EMBEDDING, embedding.name))
     if settings.search.reranker == Reranker.CROSS_ENCODER:
-        wanted.append((ModelKind.RERANKER, settings.search.reranker_model))
-        wanted.append((ModelKind.RERANKER, settings.search.map_reranker_model))
+        wanted.extend((ModelKind.RERANKER, name) for name in settings.search.reranker_models)
     wanted.extend((ModelKind.RERANKER, name) for name in await _collection_rerankers())
     return list(dict.fromkeys(wanted))
 

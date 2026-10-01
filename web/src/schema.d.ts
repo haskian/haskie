@@ -1340,8 +1340,8 @@ export interface components {
             relation: components["schemas"]["Relation"] | null;
             collection: string;
             document: string;
-            seq_start: number | null;
-            seq_end: number | null;
+            seq_start: number;
+            seq_end: number;
             line_start: number;
             line_end: number;
             header: string;
@@ -2160,7 +2160,7 @@ export interface components {
          * @description Which endpoint ran a search.
          * @enum {string}
          */
-        Tool: "excerpts" | "sources" | "sections" | "explore" | "text";
+        Tool: "excerpts" | "sections" | "explore" | "text";
         /** UserSettings */
         UserSettings: {
             /**

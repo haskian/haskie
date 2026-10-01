@@ -1,11 +1,12 @@
 """How a search's scores came to be, step by step, for the person reading them.
 
 The score a result carries is set and reset along the pipeline: retrieval scores each collection's
-chunks by its mode, the merge fuses collections by rank, a reranker replaces both, and passages,
-excerpts and documents fold chunk scores their own way. Two searches that differ in one setting
-give numbers on different scales, and two that differ only in what the reranker overrides give
-the same numbers. So each step that sets or changes a score says how, in words, as it runs
-(`flow`), and the answer carries that lineage beside its step timings. No IO here.
+chunks by its mode, the merge ranks each half over every collection and fuses the two, a reranker
+replaces both, and passages, excerpts and documents fold chunk scores their own way. Two searches
+that differ in one setting give numbers on different scales, and two that differ only in what the
+reranker overrides give the same numbers. So each step that sets or changes a score says how, in
+words, as it runs (`flow`), and the answer carries that lineage beside its step timings. No IO
+here.
 """
 
 from collections.abc import Callable, Sequence
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from haskie.collection.index import ChunkKey, Hit, chunk_key
 from haskie.search.passage import HitRange
+from haskie.search.retrieval import VECTOR_RANKING
 from haskie.settings import Fusion, Reranker, ScoreFold, SearchMode, SearchSettings
 
 if TYPE_CHECKING:
@@ -115,12 +117,11 @@ def _merge(state: "Search", pool: "Pool", *_: Any) -> str | None:
     collections = len(state.plan.indexes)
     if collections == 1:
         return "One collection: its scores are kept."
-    settings, rankings = state.plan.settings, list(pool.rankings.values())
-    if len(rankings) == 2:
+    settings = state.plan.settings
+    if len(pool.rankings) == 2:
         rule = _fused(settings)
-    elif rankings and rankings[0]:
-        first = rankings[0][0][0]  # one half alone: its rows hold its score
-        nearest = "_distance" in pool.rows[first][1]
+    elif any(pool.rankings.values()):  # one half alone, named by its key
+        nearest = next(iter(pool.rankings)) == VECTOR_RANKING
         rule = _retrieved(settings, SearchMode.VECTOR if nearest else SearchMode.FTS)
     else:
         return None
@@ -140,7 +141,9 @@ def _rerank(state: "Search", *_: Any) -> str | None:
         "in every mode that finds it."
     )
     floor, calibrated = state.plan.rerank_floor, state.plan.calibration
-    if floor > 0:
+    if not state.plan.drops:
+        rule = f"{rule} Its scores weigh every chunk, and none is dropped."
+    elif floor > 0:
         # where the floor came from: the settings, or the reranker's calibration and its source
         said = "set"
         if settings.min_rerank_score is None and calibrated is not None:
@@ -259,7 +262,7 @@ def _map_sections(state: "Search", *_: Any) -> str | None:
     return (
         f"A section scores {_FOLDS[state.plan.settings.score_fold]}. The order is the order the "
         "sections were picked in to cover the scan, not the order of their scores. A document "
-        "scores the same over every chunk of it the search read, the scan and past it."
+        "scores the same over every chunk of it the scan holds."
     )
 
 

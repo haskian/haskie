@@ -57,8 +57,8 @@ interface Shown extends Found {
   took: number | null // null before the first search: the line above the results stays blank
 }
 
-const NOTHING: Shown = { body: null, results: [], sections: [], documents: [], holders: [], steps: [], scoring: [], missing: [], uncovered: [], asked: [], context: '', as: 'excerpt', took: null }
 const NONE = { results: [], sections: [], documents: [], holders: [], missing: [], uncovered: [] }
+const NOTHING: Shown = { ...NONE, body: null, steps: [], scoring: [], asked: [], context: '', as: 'excerpt', took: null }
 
 /** The one request an answer takes: its own route for excerpts and sections, the
  *  explore route for chunks and passages. Excerpts take every question asked and the shared

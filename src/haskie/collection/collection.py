@@ -445,7 +445,7 @@ class Collection:
         chosen = [
             model
             for search in (_overrides(raw).search for raw in rows)
-            for model in (search.reranker_model, search.map_reranker_model)
+            for model in search.reranker_models
         ]
         return list(dict.fromkeys(model for model in chosen if model))
 

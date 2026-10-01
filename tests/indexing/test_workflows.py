@@ -2805,7 +2805,7 @@ async def test_start_registers_the_nightly_schedule(dbos) -> None:
 async def _old_and_new_search() -> None:
     """Two logged searches: one asked in 2020, one just now."""
     for question in ["old", "new"]:
-        async with log.capturing(log.Tool.SOURCES, [question], None):
+        async with log.capturing(log.Tool.SECTIONS, [question], None):
             pass
     async with db.connect() as conn:
         await conn.execute(

@@ -670,12 +670,11 @@ def test_a_shared_chunk_is_held_as_the_first_part_listed_has_it() -> None:
     assert [hit.score for hit in rebuilt.hits] == [4.0, 3.0, 2.0]
 
 
-def test_a_part_is_an_unranked_chunk_with_the_questions_it_answers() -> None:
-    found = part(TWO, ["a"])
+def test_a_part_is_an_unranked_chunk_that_answers_no_question() -> None:
+    found = part(TWO)
 
     assert [(hit.seq, hit.score) for hit in found.hits] == [(2, 0.0)]
-    assert (found.aspects, found.alone) == (["a"], False)
-    assert part(TWO).aspects == []
+    assert (found.aspects, found.alone) == ([], False)
 
 
 # --- rejoin, over many random parts ---------------------------------------------------------

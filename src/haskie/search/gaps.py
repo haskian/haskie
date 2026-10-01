@@ -129,13 +129,13 @@ def _weak(search: Searched, asked: LoggedQuestion, bars: Bars) -> Signal | None:
     return Signal.BORDERLINE if high is not None and asked.best_similarity < high else None
 
 
-async def weak_questions(search: Searched, asked: Sequence[LoggedQuestion]) -> list[str]:
+async def weak_questions(search: log.Capture) -> list[str]:
     """The questions `search` asked whose best match falls under the bar its models were measured
     at: the verdict the Gaps page gives as `weak` (`_weak`), told to the caller as it answers. A
     search finds the nearest passages even on a topic the sources never cover, so an answer can
     look full and say nothing."""
     judged = await bars({search.reranker} if search.reranker else set())
-    return [one.question for one in asked if _weak(search, one, judged) == Signal.WEAK]
+    return [one.question for one in search.asked if _weak(search, one, judged) == Signal.WEAK]
 
 
 Detector = Callable[[Searched, LoggedQuestion, Bars], Signal | None]

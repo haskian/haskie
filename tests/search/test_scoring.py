@@ -60,9 +60,11 @@ def _search(
     vector: list[float] | None = ON,
     embedding: EmbeddingModel | None = MODEL,
     calibration: RerankerCalibration | None = UNCALIBRATED,
+    drops: bool = True,
 ) -> Search:
     """A search over one collection per settings, `c0`, `c1`, …, the first settings the plan's,
-    its reranker read by `calibration` (the seed's uncalibrated floor, 0.05)."""
+    its reranker read by `calibration` (the seed's uncalibrated floor, 0.05), dropping chunks under
+    it unless it weighs them, as a map's does (`drops`)."""
     chosen = settings or (SearchSettings(),)
     indexes = [
         (CollectionIndex(Path(f"/tmp/c{n}"), f"c{n}", Path("/tmp"), embedding), one)
@@ -74,6 +76,7 @@ def _search(
         vector=vector,
         embedding=embedding,
         calibration=calibration,
+        drops=drops,
     )
     return Search(query="q", framed="q", plan=where, limit=5, scan=20, candidates=50, questions=[])
 
@@ -262,6 +265,14 @@ def test_retrieval_says_how_each_collection_scored(
             f"{RERANKS} Chunks it scores under 0.2 (set) are dropped.",
         ),
         (
+            "a map's reranker weighs every chunk, whatever its floor",
+            "rerank",
+            _search(SearchSettings(reranker=Reranker.CROSS_ENCODER), drops=False),
+            None,
+            None,
+            f"{RERANKS} Its scores weigh every chunk, and none is dropped.",
+        ),
+        (
             "a floor of 0 drops nothing, and says nothing",
             "rerank",
             _search(SearchSettings(reranker=Reranker.CROSS_ENCODER, min_rerank_score=0.0)),
@@ -437,7 +448,7 @@ def test_retrieval_says_how_each_collection_scored(
             None,
             "A section scores the sum of its matched chunks' scores. The order is the order the "
             "sections were picked in to cover the scan, not the order of their scores. A document "
-            "scores the same over every chunk of it the search read, the scan and past it.",
+            "scores the same over every chunk of it the scan holds.",
         ),
     ],
 )

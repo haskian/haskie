@@ -46,7 +46,6 @@ class Tool(StrEnum):
     """Which endpoint ran a search."""
 
     EXCERPTS = "excerpts"
-    SOURCES = "sources"  # the search_sources tool, gone: kept so older log rows still read
     SECTIONS = "sections"
     EXPLORE = "explore"
     TEXT = "text"
@@ -65,8 +64,8 @@ class LoggedResult(msgspec.Struct):
     relation: Relation | None  # how it overlaps its parent; None for a result
     collection: str
     document: str
-    seq_start: int | None  # the chunks it covers; None for a document row (an older `sources`)
-    seq_end: int | None
+    seq_start: int  # the chunks it covers
+    seq_end: int
     line_start: int
     line_end: int
     header: str
@@ -103,7 +102,7 @@ def flatten(found: Sequence[Place]) -> list[LoggedResult]:
 def _result(place: Place, position: int, parent: int | None) -> LoggedResult:
     match place:
         case Hit() | HitReference():
-            seq: tuple[int | None, int | None] = (place.seq, place.seq)
+            seq = (place.seq, place.seq)
         case Passage() | PassageReference() | Excerpt() | MappedSection():
             seq = (place.seq_start, place.seq_end)
     return LoggedResult(

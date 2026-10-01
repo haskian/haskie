@@ -160,7 +160,7 @@ async def agent_search_excerpts(
     a reranker on, a tag is its judgement: chunks it scores under the floor are dropped. Without
     one, a tag is rank, not a judgement: a vector or hybrid search finds a nearest passage for any
     question, so read the text before citing it as the answer to a part. A question in `uncovered`
-    found nothing. A question no excerpt lists found nothing at all. Write each part as a full
+    found no excerpt, or matched only weakly: treat it as unanswered. Write each part as a full
     question, not a keyword. Keep in one `q` the conditions one passage must meet together. Resolve
     an ambiguous question before searching; when you cannot ask, pass one part per reading.
 
@@ -230,7 +230,7 @@ async def _search_excerpts(
         capture.answer(found.excerpts, found.uncovered, found.missing_terms)
         # the log keeps what the excerpts left out; the caller also hears which questions the
         # sources match only weakly, which a single question has no other way to learn
-        weak = await gaps.weak_questions(capture, capture.asked)
+        weak = await gaps.weak_questions(capture)
     unanswered = set(found.uncovered) | set(weak)
     return msgspec.structs.replace(
         found, uncovered=[one for one in asked.questions if one in unanswered]
@@ -327,7 +327,7 @@ async def _search_sections(
         names = await retrieval.scope(session_id, collections)
         found = await flow.sections(names, q, limit, within)
         capture.answer(found.sections)
-        weak = await gaps.weak_questions(capture, capture.asked)
+        weak = await gaps.weak_questions(capture)
     return msgspec.structs.replace(found, uncovered=weak)
 
 

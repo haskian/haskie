@@ -192,13 +192,12 @@ def ranges(hits: list[Hit], how: ScoreFold) -> list[HitRange]:
     return sorted(found, key=lambda found: (-found.score, found.hits[0].document, found.seq_start))
 
 
-def part(hit: Hit, aspects: list[str] | None = None) -> HitRange:
+def part(hit: Hit) -> HitRange:
     """One chunk a search did not rank, as a range to `rejoin` to the ranges it sits next to: its
-    score 0, so a range it joins scores what its ranked chunks matched, and the questions it
-    answers, if any."""
+    score 0, so a range it joins scores what its ranked chunks matched, and no question tagged."""
     # a score of 0 folds to 0 under every rule
     (found,) = ranges([msgspec.structs.replace(hit, score=0.0)], ScoreFold.SUM)
-    return msgspec.structs.replace(found, aspects=aspects or [])
+    return found
 
 
 def rejoin(parts: list[HitRange], how: ScoreFold) -> list[HitRange]:

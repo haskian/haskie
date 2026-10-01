@@ -802,7 +802,7 @@ def _weigh(
     questions: list[probe.Question],
 ) -> tuple[dict[ChunkKey, filling.Candidate], str]:
     """Each chunk near a passage as a candidate: its best question's value around the passages'
-    own chunks (`_values`), and that question."""
+    own chunks (`_values`)."""
     if not near or not held:
         return {}, "none"
     values, signal = _values(
@@ -810,10 +810,10 @@ def _weigh(
         [(rows[key][0].text, rows[key][1].get("vector")) for key in near],
         [(question.asked, question.vector) for question in questions],
     )
-    weighed: dict[ChunkKey, filling.Candidate] = {}
-    for at, key in enumerate(near):
-        best = max(range(len(questions)), key=lambda question: values[question][at])
-        weighed[key] = filling.Candidate(rows[key][0], values[best][at])
+    weighed = {
+        key: filling.Candidate(rows[key][0], max(column[at] for column in values))
+        for at, key in enumerate(near)
+    }
     return weighed, signal
 
 
@@ -874,7 +874,6 @@ async def probe_gaps(
             fresh[0],
             hits=[msgspec.structs.replace(hit, score=0.0) for hit in fresh[0].hits],
             score=0.0,
-            aspects=[],
         )
     if fresh:
         (one,) = await _grouped([best], where, 1)

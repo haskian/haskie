@@ -100,7 +100,7 @@ describe('signalText', () => {
 describe('questionSub', () => {
   const cases: Array<{ name: string; value: GapQuestion; expected: string }> = [
     { name: 'a tool with a session', value: question, expected: 'weak match: cosine 0.71 · via excerpts · claude-code a3f9 · 2 h ago' },
-    { name: 'no session', value: { ...question, tool: 'sources', session_id: null }, expected: 'weak match: cosine 0.71 · via sources · no session · 2 h ago' },
+    { name: 'no session', value: { ...question, tool: 'sections', session_id: null }, expected: 'weak match: cosine 0.71 · via sections · no session · 2 h ago' },
   ]
   for (const one of cases) test(one.name, () => expect(questionSub(one.value, NOW)).toBe(one.expected))
 })

@@ -236,8 +236,7 @@ async def rerank(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Po
 
 async def hits(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Scanned:
     """The ranking, as far down as this search scans, as hits."""
-    state = ctx.state
-    return retrieval.scan(ctx.inputs, state.scan)
+    return retrieval.scan(ctx.inputs, ctx.state.scan)
 
 
 async def collapse_hits(ctx: StepContext[Search, None, retrieval.Scanned]) -> list[Hit]:

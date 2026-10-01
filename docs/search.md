@@ -135,9 +135,9 @@ Taking the last ranked section's slot instead would trade one gap for another, a
 excerpt would lose its whole answer. With a reranker on, what the search finds is judged as the
 ranked chunks are: scored against each question whose words are missing, dropped under the
 reranker's floor (see "Several questions at once"), and tagged with the questions it clears.
-Without one, it is tagged with the questions whose words it holds, and it scores 0, as the fill's
-chunks do: its BM25 score is on another scale than the ranked passages', and would sort it above
-them.
+Without one, it tags no question, since holding a missing word is not an answer. It scores 0, as
+the fill's chunks do: its BM25 score is on another scale than the ranked passages', and would sort
+it above them.
 
 `search_excerpts` answers with `excerpts`, `uncovered` and `missing_terms` (the words still missing
 after the probe). `uncovered` lists the questions no excerpt names, when several were asked, and

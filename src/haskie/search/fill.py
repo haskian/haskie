@@ -232,5 +232,5 @@ def apply(one: Group, taken: list[Candidate], how: ScoreFold) -> Group:
     kept, not judged an answer, so it cannot mark a question answered that nothing answers."""
     if not taken:
         return one
-    added = [part(chunk.hit, None) for chunk in taken]
+    added = [part(chunk.hit) for chunk in taken]
     return msgspec.structs.replace(one, ranges=rejoin([*one.ranges, *added], how))
