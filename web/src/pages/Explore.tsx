@@ -33,9 +33,9 @@ const ASKINGS: PickerOption<Asking>[] = [
 ]
 
 /** What one search brings back: its results (a map's are its `sections` and `documents`), how
- *  long each step took, and what the excerpts say they lack (only excerpts say): the words of the
- *  questions they never hold, and the questions they do not answer. A map also names the fewest
- *  collections that hold every section and document on it. */
+ *  long each step took, and what it says it lacks: the words of the questions no excerpt holds
+ *  (only excerpts say), and the questions the sources do not answer or match only weakly. A map
+ *  also names the fewest collections that hold every section and document on it. */
 interface Found {
   body: unknown // the response as the endpoint sent it, for the debug view
   results: Match[]
@@ -67,8 +67,8 @@ async function search(questions: string[], context: string, answer: Answer, wher
   const [text] = questions
   if (answer === 'section') {
     const found = await api.searchSections(text, where)
-    const { sections, documents, collections } = found.body
-    return { ...NONE, body: found.body, sections, documents, holders: collections, steps: found.steps, scoring: found.scoring }
+    const { sections, documents, collections, uncovered = [] } = found.body
+    return { ...NONE, body: found.body, sections, documents, holders: collections, steps: found.steps, scoring: found.scoring, uncovered }
   }
   if (answer === 'excerpt') {
     const found = await api.searchExcerpts(questions, where, context.trim() || undefined)

@@ -44,9 +44,11 @@ def _retrieve(state: "Search", _: None, pool: "Pool") -> str | None:
     all of them."""
     where = state.plan
     several = len(where.indexes) > 1
+    columns = _columns(pool)
     rules: dict[str, list[str]] = {}
     for index, settings in where.indexes:
-        ran = _ran(pool, index.collection, settings, where.vector is not None)
+        found = columns.get(index.collection, set())
+        ran = _ran(found, settings, where.vector is not None)
         rule = UNFUSED if several and ran == SearchMode.HYBRID else _retrieved(settings, ran)
         if where.embedding is None:
             rule = f"{rule} No embedding model, so every mode is BM25."
@@ -62,18 +64,23 @@ UNFUSED = (
 )
 
 
-def _ran(pool: "Pool", collection: str, settings: SearchSettings, embedded: bool) -> SearchMode:
-    """The search a collection ran, read off the score columns of the rows it returned: a table
+SCORE_COLUMNS = ("_relevance_score", "_distance", "_score")  # fused, vector, BM25
+
+
+def _columns(pool: "Pool") -> dict[str, set[str]]:
+    """The score columns of each collection's rows, in one pass over the pool."""
+    found: dict[str, set[str]] = {}
+    for (name, *_), (_, row) in pool.rows.items():
+        held = found.setdefault(name, set())
+        held.update(column for column in SCORE_COLUMNS if column in row)
+    return found
+
+
+def _ran(columns: set[str], settings: SearchSettings, embedded: bool) -> SearchMode:
+    """The search a collection ran, read off the score `columns` of the rows it returned: a table
     written without vectors answers any mode by full text. A hybrid one answers fused scores
     alone, or, among several collections, distances and BM25 scores. A collection that returned
     nothing kept, every span of it another's, says its settings."""
-    columns = {
-        column
-        for (name, *_), (_, row) in pool.rows.items()
-        if name == collection
-        for column in ("_relevance_score", "_distance", "_score")
-        if column in row
-    }
     if "_relevance_score" in columns or {"_distance", "_score"} <= columns:
         return SearchMode.HYBRID
     if columns:

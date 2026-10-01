@@ -535,10 +535,11 @@ async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClie
 
 
 @pytest.mark.parametrize(
-    ("name", "reranker", "logit", "expected", "uncovered"),
+    ("name", "reranker", "floor", "logit", "expected", "uncovered"),
     [
         (
             "no reranker: the fused retrieval scores stand, and no model is read",
+            None,
             None,
             None,
             None,
@@ -547,6 +548,7 @@ async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClie
         (
             "a reranker on: the map's own model scores every chunk",
             Reranker.CROSS_ENCODER,
+            None,
             2.0,
             DEFAULT_MAP_RERANKER,
             [],
@@ -554,9 +556,18 @@ async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClie
         (
             "a chunk it scores far under its floor still counts, and the map says it is weak",
             Reranker.CROSS_ENCODER,
+            None,
             -9.0,
             DEFAULT_MAP_RERANKER,
             ["alpha"],
+        ),
+        (
+            "the user's floor neither cuts a map nor judges it: 0.88 sits under 0.9",
+            Reranker.CROSS_ENCODER,
+            0.9,
+            2.0,
+            DEFAULT_MAP_RERANKER,
+            [],
         ),
     ],
 )
@@ -565,18 +576,22 @@ async def test_a_map_weighs_its_chunks_with_its_own_reranker(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
     reranker: Reranker | None,
+    floor: float | None,
     logit: float | None,
     expected: str | None,
     uncovered: list[str],
 ) -> None:
     """`search_sections` reranks with `map_reranker_model`, not the excerpts' model, and keeps
-    every chunk: its scores weigh the map, they do not cut it. Its log row names the model, so
-    the gaps judge the map by that model's own floor, and so does the answer's `uncovered`."""
+    every chunk: its scores weigh the map, they do not cut it. Its log row names the model and no
+    floor of the user's, so the gaps judge the map by that model's own floor, and so does the
+    answer's `uncovered`."""
     from haskie.indexing import embed, models
 
     if reranker is not None:
         notes = await Collection.get("notes")
-        await notes.set_overrides(CollectionOverrides(search=SearchOverrides(reranker=reranker)))
+        await notes.set_overrides(
+            CollectionOverrides(search=SearchOverrides(reranker=reranker, min_rerank_score=floor))
+        )
         monkeypatch.setattr(
             models, "_ready", {models._model_id(models.ModelKind.RERANKER, DEFAULT_MAP_RERANKER)}
         )
@@ -601,6 +616,7 @@ async def test_a_map_weighs_its_chunks_with_its_own_reranker(
         assert one["score"] == pytest.approx(1 / (1 + math.exp(-logit))), f"{name}: the sigmoid"
     (logged,) = (await ready.get("/api/searches", params={"session_id": "r"})).json()
     assert (logged["tool"], logged["reranker"]) == ("sections", expected), name
+    assert logged["min_rerank_score"] is None, f"{name}: no floor of the user's is logged"
 
 
 @pytest.mark.parametrize(
@@ -749,7 +765,14 @@ async def test_collection_reranker_override_starts_its_download(
 
     saved = await ready.put(
         "/api/collections/notes/overrides",
-        json={"search": {"reranker": "cross-encoder", "reranker_model": override}},
+        # both of its models, so its map loads no default of the user's either
+        json={
+            "search": {
+                "reranker": "cross-encoder",
+                "reranker_model": override,
+                "map_reranker_model": override,
+            }
+        },
     )
 
     assert saved.status_code == 200

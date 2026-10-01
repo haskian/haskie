@@ -351,7 +351,7 @@ async def test_required_models_follow_the_settings(
     collection_rerankers: list[str],
     expected: list,
 ) -> None:
-    async def overrides() -> list[str]:
+    async def overrides(_: UserSettings) -> list[str]:
         return collection_rerankers
 
     monkeypatch.setattr(models, "_collection_rerankers", overrides)
@@ -366,14 +366,19 @@ async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> 
     monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: loaded.append(name))
     override = "jinaai/jina-reranker-v1-turbo-en"
     collection = await Collection.create("picky")
+    # both of its models, so its map loads no default of the user's either
     await collection.set_overrides(
         CollectionOverrides(
-            search=SearchOverrides(reranker=Reranker.CROSS_ENCODER, reranker_model=override)
+            search=SearchOverrides(
+                reranker=Reranker.CROSS_ENCODER,
+                reranker_model=override,
+                map_reranker_model=override,
+            )
         )
     )
     user = await save_user_settings(UserSettings(embedding="none"))
 
-    assert await Collection.reranker_overrides() == [override]
+    assert await Collection.reranker_overrides(user.search) == [override]
     (status,) = await models.ensure_models(user)
 
     assert (status.kind, status.name) == ("reranker", override)

@@ -48,6 +48,7 @@ from haskie.paging import Page, PageRequest, count_of, keyset, resolve_sort
 from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
+    Reranker,
     SearchSettings,
     load_user_settings,
 )
@@ -434,19 +435,22 @@ class Collection:
         }
 
     @staticmethod
-    async def reranker_overrides() -> list[str]:
-        """Every reranker model a collection overrides, for its excerpts or its map, in name order
-        and without duplicates.
+    async def reranker_overrides(user: SearchSettings) -> list[str]:
+        """Every reranker model a collection's overrides make a search of it load, in name order
+        and without duplicates: each model one names, for its excerpts or its map, and both models
+        its settings resolve to against `user` when it turns the reranker on.
 
-        One query over the `overrides` column: the model downloads have to cover the overrides too,
-        and a search of that collection loads whichever model it names."""
+        One query over the `overrides` column: the model downloads have to cover the overrides too.
+        A collection that turns the reranker on while the user's settings keep it off loads the
+        user's models, which nothing else would download."""
         async with db.read() as conn:
             rows = await conn.scalars(select(collections.c.overrides).order_by(collections.c.name))
-        chosen = [
-            model
-            for search in (_overrides(raw).search for raw in rows)
-            for model in search.reranker_models
-        ]
+        chosen: list[str | None] = []
+        for search in (_overrides(raw).search for raw in rows):
+            chosen += search.reranker_models
+            resolved = search.resolve(user)
+            if resolved.reranker != Reranker.NONE:
+                chosen += resolved.reranker_models
         return list(dict.fromkeys(model for model in chosen if model))
 
     async def chunk_settings(self) -> ChunkSettings:

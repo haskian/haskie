@@ -78,6 +78,8 @@ from haskie.indexing.chunk import Chunk, Piece, Position
 from haskie.indexing.segment import CutReason, PieceType
 from haskie.paging import Order, PageRequest
 from haskie.settings import (
+    DEFAULT_MAP_RERANKER,
+    DEFAULT_RERANKER,
     Accelerator,
     Chunker,
     ChunkSettings,
@@ -1257,7 +1259,22 @@ async def test_reranker_overrides_lists_every_model_a_collection_chose() -> None
         CollectionOverrides(search=SearchOverrides(reranker_model=chosen))
     )
 
-    assert await Collection.reranker_overrides() == [chosen], "no duplicates"
+    assert await Collection.reranker_overrides(SearchSettings()) == [chosen], "no duplicates"
+
+
+@pytest.mark.anyio
+async def test_a_collection_that_turns_the_reranker_on_loads_the_users_models() -> None:
+    """With the user's reranker off, nothing else downloads the models such a collection's
+    excerpts and map resolve to."""
+    await Collection.create("reranked")
+    await Collection("reranked").set_overrides(
+        CollectionOverrides(search=SearchOverrides(reranker=Reranker.CROSS_ENCODER))
+    )
+
+    assert await Collection.reranker_overrides(SearchSettings()) == [
+        DEFAULT_RERANKER,
+        DEFAULT_MAP_RERANKER,
+    ]
 
 
 @pytest.mark.anyio
