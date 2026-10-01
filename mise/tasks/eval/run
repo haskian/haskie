@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Run eval tasks against the isolated instances. Args: [tasks|all|books|synth] [--arms a b c d e f] [--samples N] [--first-sample K] [--model ...]"
+#MISE description="Run eval tasks against the isolated instances. Args: [tasks|all|books|synth] [--arms a b c d e f g h] (default a-f) [--samples N] [--first-sample K] [--model ...]"
 set -euo pipefail
 home="${HASKIE_EVAL_HOME:-$PWD/evals/.haskie-eval}"
 api="${HASKIE_EVAL_URL:-http://127.0.0.1:8123}"

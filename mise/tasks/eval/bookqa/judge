@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="Book QA eval (by hand, calls Claude): grade every passage a run returned that has no judgment yet, into evals/bookqa/judgments.jsonl. Args: OUTCOMES... [--model M] [--dry-run]"
+set -euo pipefail
+uv run python -m evals.bookqa.judge "$@"

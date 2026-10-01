@@ -9,6 +9,12 @@ Recall@k is the share of a record's gold passages that some result in the top k 
 reciprocal rank of the first result matching any of them; nDCG@10 gives a result gain 1 when it
 matches a gold passage no higher result matched. An unanswerable record is scored apart: it has
 no passage to recall, and what counts is whether the search returned nothing (`abstained`).
+
+`judged` scores the same ranking against graded judgments instead (`qrels.py`): every passage
+returned graded on its own, so an answer the book gives outside the gold quotes counts too.
+Success@k is whether a passage stating the answer (grade 2) is in the top k; MRR the reciprocal
+rank of the first; nDCG@10 gains 2^grade - 1 against the best order of every passage judged for
+the question.
 """
 
 from __future__ import annotations
@@ -18,7 +24,7 @@ import re
 
 import msgspec
 
-from evals.bookqa import sources
+from evals.bookqa import qrels, sources
 from evals.bookqa.schema import Passage, Record
 
 K = (1, 5, 10)
@@ -110,3 +116,26 @@ def score(record: Record, results: list[Found]) -> Scores:
 def abstained(results: list[Found]) -> bool:
     """The search returned nothing: for an unanswerable question, the right answer."""
     return not results
+
+
+class Judged(msgspec.Struct):
+    success: dict[int, float]  # k -> whether a passage stating the answer is in the top k
+    mrr: float
+    ndcg: float  # @10, graded
+    judged: float  # share of the top 10 with a judgment
+
+
+def judged(outcome: Outcome, grades: qrels.Grades) -> Judged:
+    """`outcome`'s ranking scored against the graded judgments of its question."""
+    top = outcome.results[: max(K)]
+    got = [grades.get((outcome.id, qrels.key(f.document, f.text))) for f in top]
+    first = next((rank for rank, g in enumerate(got, start=1) if g == qrels.ANSWERS), None)
+    pool = sorted((g for (rid, _), g in grades.items() if rid == outcome.id), reverse=True)
+    dcg = sum((2 ** (g or 0) - 1) / math.log2(rank + 1) for rank, g in enumerate(got, start=1))
+    ideal = sum((2**g - 1) / math.log2(rank + 1) for rank, g in enumerate(pool[: max(K)], 1))
+    return Judged(
+        success={k: float(first is not None and first <= k) for k in K},
+        mrr=1 / first if first else 0.0,
+        ndcg=dcg / ideal if ideal else 0.0,
+        judged=sum(g is not None for g in got) / len(top) if top else 1.0,
+    )

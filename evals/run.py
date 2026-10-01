@@ -19,6 +19,13 @@ adds - the variable the synthetic tasks' paraphrase level is built to exercise.
 Arm F is arm B searching sibling collections chunked at 300 characters instead of the default
 1200 (`setup.SMALL_CHUNKS`). An excerpt is a chunk widened to sentence boundaries, so chunk size
 sets how much every search result puts into the agent's context - B vs F isolates that.
+
+Arms G and H drop the one unrealistic thing every haskie arm above does: tell the agent a
+collection exists. G has B's tools and a prompt with no mention of haskie, as a user's own request
+would be - it measures whether the agent reaches for the library unprompted. H is G plus a
+`UserPromptSubmit` hook (`steer.py`) that searches haskie with the prompt and puts the best few
+passages in front of the agent: steering on every prompt, with no tool call to think of making.
+G vs B is what the hint in B's prompt was worth; H vs G is what steering is.
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -62,8 +70,10 @@ HASKIE_TOOLS = (
 # Deliberately left out: `list_searches` and `list_gaps` show other sessions' searches and near
 # misses - in an eval instance, earlier runs of the same task, citing its answer. `review_gaps` and
 # `replay_gaps` curate collections; an agent answering a task has no use for them.
-ARMS = ("a", "b", "c", "d", "e", "f")
-HASKIE_ARMS = ("b", "c", "e", "f")
+ARMS = ("a", "b", "c", "d", "e", "f", "g", "h")
+HASKIE_ARMS = ("b", "c", "e", "f", "g", "h")
+DEFAULT_ARMS = ("a", "b", "c", "d", "e", "f")  # G and H run when named: `--arms g h`
+UNMENTIONED_ARMS = ("g", "h")  # haskie connected, but the prompt says nothing of it
 BOOK_TASKS = (
     "mlfq_priority",
     "reusable_barrier",
@@ -142,7 +152,7 @@ def prompt_for(task: Task, arm: str, collection: str) -> str:
         f"You are completing the {task.name} evaluation task. Work only in the current "
         "directory; do not read anything outside it.\n\n"
     )
-    if arm == "a":
+    if arm == "a" or arm in UNMENTIONED_ARMS:
         return f"{header}{task.prompt}"
     if arm == "d":
         files_note = (
@@ -165,6 +175,19 @@ def prompt_for(task: Task, arm: str, collection: str) -> str:
     return f"{header}{task.prompt}{haskie_note}"
 
 
+def hook_settings(arm: str, api: str, collection: str) -> dict | None:
+    """The settings `--settings` hands arm H: its steering hook. None for every other arm, which
+    gets no `--settings` at all. A hook loaded this way fires in print mode, beside
+    `--setting-sources project`."""
+    if arm != "h":
+        return None
+    command = (
+        f"PYTHONPATH={shlex.quote(str(ROOT.parent))} {shlex.quote(sys.executable)} -m evals.steer "
+        f"--api {shlex.quote(api)} --collection {shlex.quote(collection)}"
+    )
+    return {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": command}]}]}}
+
+
 def allowed_tools(arm: str) -> list[str]:
     return [*CODING_TOOLS, *(HASKIE_TOOLS if arm in HASKIE_ARMS else ())]
 
@@ -185,6 +208,11 @@ def run_agent(task: Task, arm: str, directory: Path, model: str, api: str, colle
         {"haskie": {"type": "http", "url": f"{api.rstrip('/')}/mcp"}} if arm in HASKIE_ARMS else {}
     )
     mcp.write_text(json.dumps({"mcpServers": servers}, indent=2) + "\n")
+    extra: list[str] = []
+    if (hooks := hook_settings(arm, api, collection)) is not None:
+        settings = directory / "settings.json"  # outside `work/`: the agent works only in there
+        settings.write_text(json.dumps(hooks, indent=2) + "\n")
+        extra = ["--settings", str(settings.resolve())]
 
     for attempt in range(1, AUTH_RETRY_ATTEMPTS + 1):
         argv = [
@@ -199,6 +227,7 @@ def run_agent(task: Task, arm: str, directory: Path, model: str, api: str, colle
             "--strict-mcp-config",
             "--mcp-config",
             str(mcp.resolve()),
+            *extra,
             "--allowedTools",
             *allowed_tools(arm),
             "--model",
@@ -377,7 +406,7 @@ def run_one(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tasks", nargs="*", help=f"task names or groups: {', '.join(GROUPS)}")
-    parser.add_argument("--arms", nargs="+", choices=list(ARMS), default=list(ARMS))
+    parser.add_argument("--arms", nargs="+", choices=list(ARMS), default=list(DEFAULT_ARMS))
     parser.add_argument("--model", default=os.environ.get("EVAL_MODEL", "sonnet"))
     parser.add_argument("--api", default=os.environ.get("HASKIE_EVAL_URL", "http://127.0.0.1:8123"))
     parser.add_argument(

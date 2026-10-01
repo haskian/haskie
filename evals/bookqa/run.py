@@ -25,7 +25,7 @@ from pathlib import Path
 import msgspec
 
 from evals import setup
-from evals.bookqa import metrics, report, schema
+from evals.bookqa import metrics, qrels, report, schema
 from evals.bookqa.metrics import Found, Outcome
 from evals.bookqa.schema import Record
 
@@ -140,7 +140,8 @@ def write(outcomes: list[Outcome], out: Path) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     lines = "".join(msgspec.json.encode(o).decode() + "\n" for o in outcomes)
     (out / "outcomes.jsonl").write_text(lines, encoding="utf-8")
-    (out / "report.md").write_text(report.render(outcomes), encoding="utf-8")
+    grades = qrels.grades(qrels.load())
+    (out / "report.md").write_text(report.render(outcomes, grades), encoding="utf-8")
     return out / "report.md"
 
 

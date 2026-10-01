@@ -1,17 +1,28 @@
 """The report of one run: answerable questions by search mode, then by mode and source and by mode
 and query type; unanswerable ones in a table of their own, since Recall@k means nothing for them.
+With graded judgments (`qrels.py`), the same groups scored against them too.
+
+Run as a module to render an existing run's report again, with the judgments as they are now:
+`python -m evals.bookqa.report evals/bookqa/reports/<run>/outcomes.jsonl`.
 """
 
 from __future__ import annotations
 
+import argparse
 import statistics
 from collections.abc import Callable
+from functools import partial
 from itertools import groupby
+from pathlib import Path
 
+import msgspec
+
+from evals.bookqa import metrics, qrels
 from evals.bookqa.metrics import K, Outcome
 
 ANSWERABLE = ["n", *(f"R@{k}" for k in K), "MRR", "nDCG@10", "doc@10", "empty", "kB", "ms p50"]
 UNANSWERABLE = ["n", "abstained", "top score", "kB", "ms p50"]
+JUDGED = ["n", *(f"S@{k}" for k in K), "MRR", "nDCG@10", "judged@10"]
 
 
 def _mean(values: list[float]) -> float:
@@ -38,6 +49,17 @@ def _unanswerable_row(group: list[Outcome]) -> list[str]:
         f"{sum(o.abstained for o in group)}/{len(group)}",
         f"{_mean(tops):.3f}" if tops else "-",
         *_cost(group),
+    ]
+
+
+def _judged_row(grades: qrels.Grades, group: list[Outcome]) -> list[str]:
+    scored = [metrics.judged(o, grades) for o in group]
+    return [
+        str(len(group)),
+        *(f"{_mean([s.success[k] for s in scored]):.2f}" for k in K),
+        f"{_mean([s.mrr for s in scored]):.2f}",
+        f"{_mean([s.ndcg for s in scored]):.2f}",
+        f"{_mean([s.judged for s in scored]):.2f}",
     ]
 
 
@@ -74,7 +96,7 @@ BY = {
 }
 
 
-def render(outcomes: list[Outcome]) -> str:
+def render(outcomes: list[Outcome], grades: qrels.Grades | None = None) -> str:
     answerable = [o for o in outcomes if o.answerable]
     unanswerable = [o for o in outcomes if not o.answerable]
     parts = [
@@ -83,6 +105,25 @@ def render(outcomes: list[Outcome]) -> str:
         "relevant document anywhere in the top 10. `empty`: no result at all. `abstained`: an "
         "unanswerable question that got no result - the right answer.",
     ]
+    if answerable and grades:
+        parts.append(
+            "Judged: every returned passage graded on its own (`qrels.py`). `S@k`: a passage "
+            "stating the answer in the top k. `judged@10`: the share of the top 10 graded - under "
+            "1.00, run `eval:bookqa:judge` on this run's outcomes."
+        )
+        parts += [
+            _table(f"Judged, {name}", fields, answerable, JUDGED, partial(_judged_row, grades))
+            for name, fields in BY.items()
+        ]
+    if unanswerable and grades:
+        ids = {o.id for o in unanswerable}
+        found = sorted({rid for (rid, _), g in grades.items() if rid in ids and g == qrels.ANSWERS})
+        if found:
+            listed = "\n".join(f"- {rid}" for rid in found)
+            parts.append(
+                "## Unanswerable, but a passage was judged to answer them\n\n"
+                f"Review these records: the book may answer them after all.\n\n{listed}"
+            )
     if answerable:
         parts += [
             _table(f"Answerable, {name}", fields, answerable, ANSWERABLE, _answerable_row)
@@ -94,3 +135,24 @@ def render(outcomes: list[Outcome]) -> str:
             for name, fields in BY.items()
         ]
     return "\n\n".join(parts) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("outcomes", type=Path, help="a run's outcomes.jsonl")
+    parser.add_argument("--judgments", type=Path, default=qrels.JUDGMENTS)
+    args = parser.parse_args(argv)
+    decoder = msgspec.json.Decoder(Outcome)
+    lines = args.outcomes.read_text(encoding="utf-8").splitlines()
+    text = render(
+        [decoder.decode(line) for line in lines if line], qrels.grades(qrels.load(args.judgments))
+    )
+    target = args.outcomes.with_name("report.md")
+    target.write_text(text, encoding="utf-8")
+    print(text)
+    print(f"written to {target}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -138,6 +138,39 @@ it drops a result, is its own calibration or the uncalibrated default (0.05) in 
 catalogue. Abstentions therefore compare fairly across models only once each is calibrated
 (`mise run calibrate-rerankers`).
 
+## Graded judgments
+
+The gold quotes say where a question was written from. A book often answers it in other places
+too; pro-git answers "which files changed in a commit" on p.50 as well as p.367. So every passage
+a run returned can be graded on its own, once, by Claude:
+
+```sh
+mise run eval:bookqa:judge -- evals/bookqa/reports/<run>/outcomes.jsonl   # calls Claude (opus)
+uv run python -m evals.bookqa.report evals/bookqa/reports/<run>/outcomes.jsonl  # re-score, free
+```
+
+The judge pools every distinct passage any mode returned in its top 10 for a question
+(TREC-style pooling). It asks Claude to grade each one against the question alone, never the
+expected answer:
+
+- **2**: states the answer, or one of the facts it needs;
+- **1**: on the topic, but states none of them;
+- **0**: not relevant.
+
+Grades land in `judgments.jsonl`, which is versioned beside the dataset. A passage is known by
+its document and text, so another mode or a later run finds its grade. Running the judge again
+grades only what is new.
+
+With judgments, reports add these metrics:
+
+- **S@1/5/10**: a grade-2 passage in the top k;
+- **MRR**: the reciprocal rank of the first grade-2 passage;
+- **graded nDCG@10**;
+- **judged@10**: the share of the top 10 that is graded. Under 1.00, judge that run.
+
+Reports also list any unanswerable question for which a passage was graded 2. Review those
+records: the book may answer them after all.
+
 ## Layout
 
 | file | what |
@@ -150,6 +183,9 @@ catalogue. Abstentions therefore compare fairly across models only once each is 
 | `run.py` | phase 2: modes, HTTP search, outcomes |
 | `metrics.py` | passage matching, Recall@k, MRR, nDCG@10, abstention |
 | `report.py` | the grouped markdown tables |
+| `judge.py`, `prompts/judge-v1.md` | graded judgments of returned passages, by Claude |
+| `qrels.py` | the judgments: storage, keys, lookup |
 | `dataset.jsonl` | the reviewed dataset: gold, versioned |
+| `judgments.jsonl` | graded judgments, versioned |
 | `candidates/` | unreviewed generations, local only: what is accepted is versioned in `dataset.jsonl` |
 | `reports/` | run output, not versioned |
