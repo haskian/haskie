@@ -3,7 +3,7 @@
 Five books making the same point would otherwise spend five slots on it. The reranker cannot see
 that: it scores one result at a time. So after the ranking, the results are walked best first and
 each one is compared only with the results already kept (leader clustering). One close enough to a
-kept result is folded into it as an `also_in` pointer - where else to cite the same point - and
+kept result is folded into it as an `also_in` pointer (where else to cite the same point), and
 the next result down takes the freed slot. Comparing only with kept results is what stops a chain:
 A close to B and B close to C never merges A with C.
 
@@ -66,7 +66,7 @@ WORD = re.compile(r"\w+")
 # shingles, runs of w words. w = 3 and the minimum are judgement: long enough that a match is
 # the same wording, short enough that one sentence has several.
 SHINGLE = 3
-MIN_SHINGLES = 5  # 7 words: under this neither measure speaks - a label, not a point
+MIN_SHINGLES = 5  # 7 words: under this neither measure speaks, as the text is a label
 # the same bar for an exact duplicate: two equal headings in two books are one label, not a point
 MIN_WORDS = SHINGLE + MIN_SHINGLES - 1
 

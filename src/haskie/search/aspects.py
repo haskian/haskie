@@ -209,7 +209,7 @@ def tagged(
     was picked with.
 
     The fold keeps one of the picks as each result and lists others under it, so every place is
-    looked up by the chunks it covers - picks never overlap, so those are unique.
+    looked up by the chunks it covers. Picks never overlap, so those are unique.
     """
     by_place = {
         _place(pick.span.hits[0].collection, pick.span.hits[0].document_id, pick.span): (

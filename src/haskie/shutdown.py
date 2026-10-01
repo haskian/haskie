@@ -65,7 +65,7 @@ def _counted(
 ) -> Callable[[int, FrameType | None], None]:
     last_counted = -math.inf
     # Python runs a handler between bytecodes, including a handler's own, so a copy that lands
-    # while this one runs nests inside it - between the check and the set below, it would count
+    # while this one runs nests inside it. Between the check and the set below, it would count
     # too. Taken without blocking: a nested signal finds it held and is a copy by definition.
     checking = threading.Lock()
 
@@ -107,9 +107,9 @@ def listening(callback: Callable[[], object]) -> Iterator[None]:
 WORKFLOW_GRACE = 10
 
 # How long the interpreter may take to exit once the main thread is done. Before it exits, Python
-# joins every non-daemon thread, and it ignores Ctrl-C while it waits. Work a shutdown abandons -
-# CPU work a request started in a worker thread, or everything when a forced shutdown skips the
-# shutdown hooks - is C code that nothing can interrupt, so it holds the process for as long as it
+# joins every non-daemon thread, and it ignores Ctrl-C while it waits. Work a shutdown abandons
+# (CPU work a request started in a worker thread, or everything when a forced shutdown skips the
+# shutdown hooks) is C code that nothing can interrupt, so it holds the process for as long as it
 # runs. Past this grace the process leaves it behind. Operations are durable: the next boot
 # recovers them.
 EXIT_GRACE = 5.0

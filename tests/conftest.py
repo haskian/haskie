@@ -144,7 +144,7 @@ def template_home(tmp_path_factory: pytest.TempPathFactory, fast_runtime: None) 
 
     The queues are the reason this is worth a fixture. DBOS's queue manager discovers queues by
     listing them from the system database once a second, so queues registered after
-    `DBOS.launch()` — which is when `apply_settings` can register them — are only served from the
+    `DBOS.launch()` (which is when `apply_settings` can register them) are only served from the
     next sweep, and the first dequeue of every test waits out that second. Rows that are in the
     file before launch are found by the first sweep instead.
 
@@ -201,7 +201,7 @@ def seeded_home(haskie_home: Path, template_home: Path, monkeypatch: pytest.Monk
 def _sweep_delayed(stop: threading.Event) -> None:
     """Promote debounced workflows whose delay has expired, at the interval everything else here
     polls at. DBOS's queue manager does exactly this on its own sweep, once a second, which is
-    longer than most of these tests take. The delay still has to have expired - only the sweep's
+    longer than most of these tests take. The delay still has to have expired. Only the sweep's
     granularity goes away, not the debounce.
 
     Runs while DBOS is up and gives up quietly otherwise: a test may be restarting it, and the
@@ -349,8 +349,8 @@ WAIT = 30.0  # generous: every wait in the suite is released by another thread, 
 
 
 async def wait_event(event: threading.Event, timeout: float = WAIT) -> bool:
-    """Wait for a `threading.Event` without blocking the caller's loop. Two loops are involved -
-    the test's and DBOS's background one - so the blocking wait goes to a worker thread."""
+    """Wait for a `threading.Event` without blocking the caller's loop. Two loops are involved
+    (the test's and DBOS's background one), so the blocking wait goes to a worker thread."""
     return await anyio.to_thread.run_sync(functools.partial(event.wait, timeout))
 
 
@@ -729,7 +729,7 @@ async def seed_chunks(collection: str, doc: str, chunks: "list[Chunk]") -> None:
     ids and sections the way a real index names them (see `embed_cache._merge`).
 
     The real write path with no embedding model, so what a test gets is what a full-text-only
-    collection holds — without paying for a pipeline run to put it there. The chunks carry real
+    collection holds, without paying for a pipeline run to put it there. The chunks carry real
     offsets into the document's markdown, which the caller builds itself.
     """
     from haskie.collection.collection import Collection

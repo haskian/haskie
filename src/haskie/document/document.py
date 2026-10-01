@@ -2,24 +2,24 @@
 
 A document is first class and belongs to no collection: it is imported once, under a name only
 `rename` changes, and any number of collections may then hold it (`collection/collection.py`). What
-a document owns lives in its folder — `original.<ext>` (the file as uploaded), `original.<ext>.md`
+a document owns lives in its folder: `original.<ext>` (the file as uploaded), `original.<ext>.md`
 (the markdown assembled from it once, at import), `parts/` (one markdown file per convert batch,
 joined into the markdown), `preview/` (built lazily on first open) and `embeddings/` (the cache
-`indexing/embed_cache.py` writes) — so deleting the folder deletes everything but the rows, and the
+`indexing/embed_cache.py` writes). Deleting the folder deletes everything but the rows, and the
 rows cascade from the document's own.
 
 Two-phase intake: `stage` writes an upload into `staging/` with a `staging` row beside it, and
-commits no document — no name is taken and no `documents` row exists yet.
-`import_staged` / `import_path` are the import: they fix the name (`safe_name`, suffix kept),
-refuse a name already taken or bytes already imported (the MD5 of the bytes is the document's
-id), create the row and move the file into its folder. Conversion happens
-once, at import, so `parser` and `skip_ocr_pages` are chosen then and stored on the row, not on a
-collection. Lifecycle: queued -> converting -> embedding -> imported, ending in error or cancelled
-instead; `deleting` while a delete runs, so nothing attaches the document meanwhile.
+commits no document. No name is taken and no `documents` row exists yet. `import_staged` /
+`import_path` are the import: they fix the name (`safe_name`, suffix kept), refuse a name already
+taken or bytes already imported (the MD5 of the bytes is the document's id), create the row and
+move the file into its folder. Conversion happens once, at import, so `parser` and
+`skip_ocr_pages` are chosen then and stored on the row, not on a collection. Lifecycle: queued ->
+converting -> embedding -> imported, ending in error or cancelled instead; `deleting` while a
+delete runs, so nothing attaches the document meanwhile.
 
 Every row read, row write and file touch is awaited: the database goes through `db.read()` or
 `db.connect()` (aiosqlite), the files through `anyio.Path` and `home`, and the one piece of CPU
-work here — the preview build — through `cpu.off_interpreter` for a PDF and `cpu.on_cpu`
+work here (the preview build) through `cpu.off_interpreter` for a PDF and `cpu.on_cpu`
 otherwise. The pure parts (paths, name cleaning, row decoding) stay sync.
 """
 

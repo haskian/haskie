@@ -87,7 +87,7 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
     storeBackground(on)
   }
 
-  // no scroll-spy. The nav marks what was last clicked, which is where the page went.
+  // No scroll-spy. The nav marks what was last clicked, which is where the page went.
   const goTo = (id: string): void => {
     setSection(id)
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })

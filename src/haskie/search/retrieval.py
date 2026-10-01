@@ -1,7 +1,7 @@
 """What each step of a search does, and the IO it takes to do it.
 
 `flow.py` says in what order the steps run and which search runs which of them; this is what
-they call. The pure folds — hits into ranges, ranges into passages, hits into documents — live in
+they call. The pure folds (hits into ranges, ranges into passages, hits into documents) live in
 `passage.py`, so what is left here is the IO: reading the collections, checking the models,
 reading the markdown a range covers.
 
@@ -477,7 +477,7 @@ def _fold_ranges(ranged: Ranged, where: Plan, limit: int | None) -> list[passage
 async def collapse_hits(scanned: Scanned, where: Plan, limit: int) -> list[Hit]:
     """The `limit` best hits, each with the near-duplicates it stands for (see `collapse`).
 
-    CPU work that grows with the square of the scan - tens of milliseconds at the default depth -
+    CPU work that grows with the square of the scan (tens of milliseconds at the default depth),
     so it runs in a worker thread rather than on the event loop the search came in on, the
     comparison spaces included.
     """
@@ -911,7 +911,7 @@ async def _texts_of(hit_ranges: list[passage.HitRange]) -> list[str]:
 
     One worker thread for the whole search and one open file per document, however many ranges
     each holds. Measured: ten ranges cost 166us in a single hop against 717us fanned out one hop
-    per document - a hop costs more than the few kilobytes it would overlap.
+    per document. A hop costs more than the few kilobytes it would overlap.
     """
     return await anyio.to_thread.run_sync(_read_texts, hit_ranges)
 
@@ -1056,8 +1056,8 @@ async def scope(session_id: str | None, collections: str | None) -> list[str]:
     """Which collections a search covers: the comma-separated `collections` if the caller named
     any, else the session's selection if it has one, else every collection.
 
-    A name nobody owns is a mistake in the request, not an empty result — unlike a session's
-    stale name, which `plan` skips, because the caller did not choose it just now.
+    A name nobody owns is a mistake in the request, not an empty result. A session's stale name
+    is different: `plan` skips it, because the caller did not choose it just now.
     """
     named = text.split_collections(collections)
     if named:

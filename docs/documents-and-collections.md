@@ -79,7 +79,7 @@ stateDiagram-v2
 
 Any failure lands in `error`: a parser error, an OCR policy failure, or retries run out. A
 re-import runs from `queued`, `error` or `cancelled`, with the `parser` and `skip_ocr_pages` the
-document was imported with: to change either, delete it and import it again. A delete is accepted
+document was imported with. To change either, delete it and import it again. A delete is accepted
 in any state. The original suffix is kept in the name, because it decides the route:
 
 - PDFs convert page by page with pdf-inspector. It judges a heading by its font. So a typeset
@@ -146,8 +146,8 @@ It answers at once: a compaction or another document's write may hold that write
 `removing` counts as active, so the UI keeps polling until the membership is gone. Until then, the
 old rows stay in the table, but a search leaves them out. The same holds for a document being
 deleted, in every collection. Meanwhile an attach or a re-index of that document is refused, and
-its index can no longer change the status. A removal that fails leaves the membership
-in `error` with the reason, and detaching again retries it. Deleting a collection deletes its
+its index can no longer change the status. A removal that fails leaves the membership in `error`
+with the reason, and detaching again retries it. Deleting a collection deletes its
 table and memberships, and keeps every document. Deleting a document detaches it from every
 collection first, then drops its folder and row.
 
@@ -162,10 +162,9 @@ folder it moved.
 
 The cache makes one document cheap to share between collections. Each computed embedding is one
 parquet file under the document, plus one `embeddings` row. Beside it, a second file holds the
-document's sections as that chunking cuts them, each with its id and descriptors; every chunk
-names its own id and its sections ([storage](storage.md#sections-and-their-ids)). An embedding's id
-is the
-SHA-256 of a one-line URN that names everything the rows depend on:
+document's sections as that chunking cuts them, each with its id and descriptors. Every chunk
+names its own id and its sections ([storage](storage.md#sections-and-their-ids)). An embedding's
+id is the SHA-256 of a one-line URN that names everything the rows depend on:
 
 ```
 document_id:<id>;model:<model>;chunk_size:<n>;chunk_merge_below:<n>;chunk_frame:<b>;chunker:<c>;chunk_version:<v>;parser:<p>;skip_ocr_pages:<b>

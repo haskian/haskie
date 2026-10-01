@@ -3,11 +3,10 @@
 haskie serves the Model Context Protocol (MCP) at `http://127.0.0.1:8451/mcp`, over HTTP. The tools
 are the REST handlers marked `mcp_tool=`, so both surfaces share one contract, with one exception.
 The three search tools (`search_excerpts`, `search_sources`, `search_sections`) are twins of
-their REST routes, under `/api/agent/` and
-left out of the OpenAPI document. Each runs the same search and answers with fewer fields
-(`api/agent.py`): no offsets, chunk numbers, lines or pages beside the `location` that names them,
-and no empty list or map. The web UI keeps the whole answer. The skill that
-`haskie install claude` writes is the full tool reference for agents:
+their REST routes, under `/api/agent/` and left out of the OpenAPI document. Each runs the same
+search and answers with fewer fields (`api/agent.py`): no offsets, chunk numbers, lines or pages
+beside the `location` that names them, and no empty list or map. The web UI keeps the whole
+answer. The skill that `haskie install claude` writes is the full tool reference for agents:
 [`SKILL.md`](../src/haskie/claude_code/skills/haskie/SKILL.md).
 
 ## Tools

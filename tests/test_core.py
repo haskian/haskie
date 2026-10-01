@@ -1225,7 +1225,7 @@ async def test_a_search_reads_one_rule_for_a_document_on_its_way_out(
 
 def test_the_leaving_query_reads_by_index_not_every_membership() -> None:
     """Almost always nothing is leaving, so finding that out must not read every membership of
-    the searched collections: each road of `LEAVING` is bound by its status index."""
+    the searched collections: each branch of `LEAVING` is bound by its status index."""
     from sqlalchemy.dialects import sqlite as sqlite_dialect
 
     from haskie.collection.collection import _leaving_query
@@ -2899,8 +2899,8 @@ async def test_convert_and_embed_write_atomically() -> None:
 @pytest.mark.anyio
 async def test_a_reconversion_starts_the_documents_outputs_over() -> None:
     """The parts and the markdown are outputs of the conversion, so `plan_convert` rebuilds them.
-    The cached embeddings were chunked from that markdown, so they go too — dropped by
-    `embed_cache.forget`, which `workflows.import_document` runs before the convert stage."""
+    The cached embeddings were chunked from that markdown, so they go too. `embed_cache.forget`
+    drops them, and `workflows.import_document` runs it before the convert stage."""
     doc = await import_row("g.md")
     await _convert(doc)
     cache_id = await _embed(doc, SMALL)
@@ -3013,8 +3013,8 @@ async def test_index_batch_group_is_idempotent() -> None:
 
 @pytest.mark.anyio
 async def test_two_collections_with_the_same_chunk_settings_share_one_cache_entry() -> None:
-    """The point of the cache: the second collection computes nothing, it reads the parquet file
-    the first one left and writes its own table from it."""
+    """With the cache, the second collection computes nothing. It reads the parquet file the first
+    one left and writes its own table from it."""
     alpha = await Collection.create("alpha")
     beta = await Collection.create("beta")
     # smaller than a section of `MD`: every heading starts a chunk anyway, so only a size below

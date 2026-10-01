@@ -127,7 +127,7 @@ CHUNK_SIZE = Meta(
 CHUNK_MERGE_BELOW = Meta(
     title="Merge short paragraphs (% of chunk size)",
     description=(
-        "A paragraph - text between blank lines, or a whole list - shorter than "
+        "A paragraph (text between blank lines, or a whole list) shorter than "
         "this share of Chunk size is merged with the paragraphs around it: into the one below "
         "when both fit one chunk, else with the short ones next to it. Longer paragraphs are "
         "chunks of their own. 0 never merges; 100 merges every paragraph that fits."
@@ -309,7 +309,7 @@ FUSION = Meta(
     title="Fusion",
     description=(
         "Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank "
-        "fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores "
+        "fusion (rank based, uses RRF k). linear: weighted sum of normalized scores "
         "using Vector weight and BM25 weight."
     ),
 )

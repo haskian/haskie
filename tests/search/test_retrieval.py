@@ -99,7 +99,7 @@ def test_a_read_is_exactly_the_span_of_one_range(
 @pytest.mark.anyio
 async def test_the_texts_of_a_search_come_back_in_order(tmp_path: Path) -> None:
     """A search folds ranges of several documents and reads them in rank order, so the texts
-    have to line up with the ranges they were read for - not with the files they came from."""
+    have to line up with the ranges they were read for, not with the files they came from."""
     first, second = tmp_path / "one.md", tmp_path / "two.md"
     first.write_text(ASCII, encoding="utf-8")
     second.write_text(WIDE, encoding="utf-8")

@@ -20,9 +20,9 @@ topic:
   frequency, as BERTopic's `ClassTfidfTransformer(bm25_weighting=True,
   reduce_frequent_words=True)` [1] does. So a chapter's terms are the ones its sibling chapters use
   less. BERTopic counts a term's uses over every class instead, against the average class size,
-  which lets a common term through: on one 657-page book on DDD, "chapter" and "design", each in
-  about 80% of its second-level sections, weighed 1.15 and 0.85 that way, and 0.20 and 0.24
-  counting the sections.
+  which lets a common term through: on one 657-page book on Domain-Driven Design, "chapter" and
+  "design", each in about 80% of its second-level sections, weighed 1.15 and 0.85 that way, and
+  0.20 and 0.24 counting the sections.
 - **The book's own words** (`widespread`). A term more than half the sections of one depth use
   says what the document is about, not what sets one section apart: it is no candidate there,
   however high a short section's few repeated words rank it. On that book, 172 of 1,996 section

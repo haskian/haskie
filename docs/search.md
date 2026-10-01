@@ -89,7 +89,7 @@ section of one document, holding every passage the search kept in it, in documen
 counts excerpts, so the passages below the cut join the sections they belong to, and a section
 that no kept passage opens takes no slot.
 
-Which section: the largest one that still reads as a quote. A passage's heading path is tried from
+The section is the largest one that still reads as a quote. A passage's heading path is tried from
 the top. A level whose section holds the whole document (a title over everything) says nothing, and
 a level whose section is longer than `max_section_chars` (12,000) is split one heading down. So a
 book groups by chapter or by section, and a short note by its title. A passage under the deepest
@@ -166,8 +166,8 @@ rank; here every chunk was scored, so none is. It costs one reranker pass a ques
 chunks near every section, and short passages grow the same way.
 
 `grow_bias` (0, from -1 to 1) says how eagerly passages grow. It is added to every value, however
-the value was reached, before the values are summed (`fill.biased`). Above 0 a weaker chunk pays
-its way, so passages grow further and more gaps fill. Below 0 only a stronger chunk does. At -1
+the value was reached, before the values are summed (`fill.biased`). Above 0 a weaker chunk is
+worth taking, so passages grow further and more gaps fill. Below 0 only a stronger chunk is. At -1
 even a chunk as good as the best is worth 0, so nothing grows. Under `fill_values = absolute` the
 bias moves dsRAG's penalty: 0.1 makes it 0.08. The same bias applies to short passages.
 
@@ -220,7 +220,8 @@ reads the map, then asks `search_excerpts` about the sections worth reading. It 
 
 1. **No reranker.** A map wants breadth and speed; the reranker's floor would drop chunks and
    narrow it, and it costs about 5 ms a pair. The search plans none, so its `rerank` step only
-   records the ranking for the search log. The scan goes 20 chunks deep per section asked for, up to 200.
+   records the ranking for the search log. The scan goes 20 chunks deep per section asked for, up
+   to 200.
 2. **Group by section.** Each scanned chunk joins the section an excerpt would quote it in
    (`section.section_of`), so a section on the map is the one `search_excerpts` returns. One span
    of one document counts once, whichever collections hold it.
@@ -230,8 +231,9 @@ reads the map, then asks `search_excerpts` about the sections worth reading. It 
    is the section that covers the most demand the picks leave uncovered, so a near copy of a pick
    adds nothing and is not picked. It stops at `limit` (15 by default, at most 40), or when no
    section covers anything new. Without an aspect list, this is the best-supported coverage
-   method in the literature we follow: in GeoRAG's ablation [9] it beat MMR and DPP by 3 to 5
-   points of exact match, and roughly matched a cross-encoder. Greedy takes under a millisecond
+   method in the literature we follow: in GeoRAG's ablation [9] it beat maximal marginal
+   relevance (MMR) and determinantal point processes (DPP) by 3 to 5 points of exact match, and
+   roughly matched a cross-encoder. Greedy takes under a millisecond
    at 200 chunks.
 4. **Centred cosines.** Facility location reads a cosine as an amount, and embedding cosines carry
    an offset that depends on the model (bge's random pairs sit near 0.3, e5's near 0.7). So the
@@ -243,7 +245,7 @@ reads the map, then asks `search_excerpts` about the sections worth reading. It 
    covers at least half the best gain left, so one long book does not fill the map (Google's site
    cap, engineering rather than measured). A section barely on the topic does not take a slot for
    the sake of variety: without that condition the cap spent slots on sections scored 0.007 beside
-   ones scored 0.15. Otherwise the cap gives way.
+   ones scored 0.15. Otherwise the cap does not apply.
 6. **Without vectors** (full text only) nothing measures how close two chunks are, so no
    embedding-based selector runs: sections go by relevance with the same cap, and a section whose
    matched words repeat a pick's (word Jaccard 0.5 or more, as the collapse uses) is related to it.
@@ -272,9 +274,9 @@ set cover as `search_sources`, ready for `set_session_collections`.
 
 `descriptors` say what each section is about. They are fixed at indexing
 ([Indexing](indexing.md#the-three-workflows)) and read by the section's id from the cache entry
-the collection indexed the document from: one to five of the section's words weighed against the other
-sections of its depth by c-TF-IDF [10], less the words more than half of them use or its header
-holds (unless nothing else is left), and reranked by meaning [11]. They never decide what is
+the collection indexed the document from: one to five of the section's words weighed against the
+other sections of its depth by c-TF-IDF [10], less the words more than half of them use or its
+header holds (unless nothing else is left), and reranked by meaning [11]. They never decide what is
 picked: in the studies we follow, clusters of the pool used as aspects gained nothing, and terms
 mined from it only re-weighted the aspects already on top.
 

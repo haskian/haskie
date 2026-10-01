@@ -202,7 +202,7 @@ async def test_write_lookup_read_round_trip(
     tmp_path: Path, name: str, dims: int | None, vector: list[float] | None
 ) -> None:
     """Three parts, the middle one empty: every part is a row group, so group `n` is always part
-    `n`, and an empty group simply yields no rows."""
+    `n`, and an empty group yields no rows."""
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
     rows = [_row("alpha lancedb", vector), _row("beta lancedb", vector)]
@@ -458,7 +458,7 @@ async def test_row_groups_of_a_missing_cache_file_raises() -> None:
 
 async def test_a_failed_merge_leaves_no_partial_cache_file(tmp_path: Path) -> None:
     """The parquet file is written through a `.tmp` and one replace, so a reader never sees a
-    half-written cache — and a failure leaves nothing to mistake for one."""
+    half-written cache. A failure leaves nothing to mistake for one."""
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
     missing = tmp_path / "scratch" / "000000.rows.json"  # never written by any embed slice

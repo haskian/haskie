@@ -40,7 +40,7 @@ export function Picker<T extends string>({
   const selected = options.find((option) => option.value === value)
 
   // A click anywhere else closes the list, as in `design.js`. The listener is on the document
-  // because the click that closes the picker usually lands on another control entirely.
+  // because the click that closes the picker usually lands on another control.
   useEffect(() => {
     const closeOnOutsideClick = (event: MouseEvent) => {
       const element = details.current

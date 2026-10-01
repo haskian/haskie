@@ -4,7 +4,7 @@ settings. Metadata in the DB, the index under ~/.haskie/collections/<shard>/<nam
 A collection owns nothing about a document but its membership (`collection_documents`) and the
 rows it wrote into its own table. The same document may sit in any number of collections; each
 attach is an indexing operation of its own (embed-if-missing from the document's cache, then a
-write into this collection's table), so a membership carries its own status — a document can be
+write into this collection's table), so a membership carries its own status. A document can be
 `indexed` in one collection and `error` in another at the same time. Deleting a collection drops
 its rows and its folder and touches no document.
 

@@ -123,8 +123,8 @@ flowchart TD
 
 A part is one slice of the document's markdown, cut where a heading starts, or at a page marker
 inside a section longer than a batch ([Indexing](indexing.md)). Each part is chunked on its own,
-so no chunk spans two parts. The headings still open at the end of one
-part carry over to the next (`chunk.open_headings`).
+so no chunk spans two parts. The headings still open at the end of one part carry over to the
+next (`chunk.open_headings`).
 
 ## Sizes
 
@@ -188,9 +188,9 @@ example `Part II > Replication > Leaders` and then the text.
 
 Context prepended to each chunk, before it is embedded and indexed for BM25, cuts retrieval failures
 (1 - recall@20) by 35%. With contextual BM25 the cut is 49%, and with a reranker on top 67% [1]. In
-that study an LLM writes 50-100 tokens of context per chunk. Here the document's own heading path is
-the context, so it costs no model call. The source leaves chunk size, boundaries and overlap as
-tuning choices, and gives no figure for overlap.
+that study a large language model (LLM) writes 50-100 tokens of context per chunk. Here the
+document's own heading path is the context, so it costs no model call. The source leaves chunk
+size, boundaries and overlap as tuning choices, and gives no figure for overlap.
 
 ## References
 

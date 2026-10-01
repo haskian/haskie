@@ -57,7 +57,7 @@ export type Activity = Wire<'Activity'>
 export type Operation = Wire<'Operation'>
 export type Job = Wire<'Job'>
 export type SessionSummary = Wire<'SessionSummary'>
-// Not `Wire`: `EventDetail` is the one struct whose fields really are absent on the wire
+// Not `Wire`: `EventDetail` is the one struct whose fields are absent on the wire
 // (`omit_defaults`), so completing them would promise fields no action fills.
 export type EventDetail = components['schemas']['EventDetail']
 export type SessionEvent = Omit<Wire<'SessionEvent'>, 'detail'> & { detail: EventDetail }

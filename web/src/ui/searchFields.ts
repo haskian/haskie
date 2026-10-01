@@ -25,7 +25,7 @@ export const SEARCH_BOUNDS: Record<NumericKeys<SearchSettings>, { min: number; m
 }
 
 /**
- * What a collection actually searches with: its own value where it overrides one, the default
+ * What a collection searches with: its own value where it overrides one, the default
  * where it does not. `0` is a value, so only `null` falls back.
  */
 export function effectiveSearch(overrides: SearchOverrides, defaults: SearchSettings): SearchSettings {
@@ -56,10 +56,11 @@ export function effectiveSearch(overrides: SearchOverrides, defaults: SearchSett
 
 /**
  * Which search fields a form shows, in order: a field is only asked for when the effective
- * settings make it do something. Fusion weights belong to a hybrid query, probes to a vector
- * one, the reranker model and whether it reads the shared context to a reranker, the candidate pool to whichever of the two reads it;
- * how chunk scores fold always, since every search reads it. How passages grow is its own
- * group (`visibleExpansionFields`).
+ * settings make it do something. Fusion weights belong to a hybrid query, and probes to a
+ * vector one. The reranker model, and whether it reads the shared context, belong to a reranker.
+ * The candidate pool belongs to whichever of the two reads it. How chunk scores fold always
+ * shows, since every search reads it. How passages grow is its own group
+ * (`visibleExpansionFields`).
  */
 export function visibleSearchFields(effective: SearchSettings): (keyof SearchSettings)[] {
   const hybrid = effective.mode === 'hybrid'

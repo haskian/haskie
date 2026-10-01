@@ -30,7 +30,7 @@ export function anchorIndex(toc: Heading[], anchor: Anchor): number | null {
   const pool = named.length > 0 ? named : indexed
   if (pool.length === 0) return null
   if (anchor.offset === undefined) return pool[0].index
-  // the toc holds byte offsets and the match a char offset. Bytes never trail chars,
+  // The toc holds byte offsets and the match a char offset. Bytes never trail chars,
   // so "byte offset <= char offset" can only pick a heading too early, never too late; the name
   // filter above makes that the same heading in practice.
   const before = pool.filter(({ heading }) => heading.offset <= anchor.offset!)

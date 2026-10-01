@@ -1,8 +1,8 @@
 """The shape of a search: what runs, in what order, for each of the five answers.
 
 Read this file for what a search does; read `retrieval.py` for what each step does with the IO it
-needs, and `passage.py` for the pure folds under them. Nothing here does work — every step is one
-line handing the state to one function and passing its answer on — so a stage can be added,
+needs, and `passage.py` for the pure folds under them. Nothing here does work. Every step is one
+line that hands the state to one function and passes its answer on, so a stage can be added,
 dropped or reordered by reading this file alone.
 
 Five pipelines over one set of steps:
@@ -361,7 +361,7 @@ def _chain[T](
     builder here rather than a branch inside a step.
     """
     builder = GraphBuilder(state_type=Search, input_type=input_type, output_type=output)
-    # `list[Any]`: a chain is heterogeneous — each step's output is the next one's input — and
+    # `list[Any]`: a chain is heterogeneous (each step's output is the next one's input), and
     # the builder checks that pairing itself when it draws the edges
     # every step is a module function; the protocol they are typed by does not promise a name
     names: list[str] = [cast(Any, step).__name__ for step in steps]

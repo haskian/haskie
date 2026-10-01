@@ -14,7 +14,7 @@ Three workflows carry a document: `import_document` (`imp:`) converts it once an
 embedding cache, `ensure_embedding` (`emb:`) computes one cached embedding per distinct
 `embed_cache.Params`, and `index_collection_document` (`idx-col:`) writes cached rows into one
 collection's table. The cache is what makes the second collection cheap, so the tests below assert
-the mechanism - how often the embed work ran, which workflow ran it - and not only the end state.
+the mechanism (how often the embed work ran, which workflow ran it) and not only the end state.
 """
 
 import os
@@ -123,7 +123,7 @@ BLOCKED_WAIT = 2.0  # how long a step that must not run is given to prove it by 
 
 
 async def _add_member(collection: Collection, doc: str) -> None:
-    """A membership whose document never finished importing - what a re-import of an attached
+    """A membership whose document never finished importing: what a re-import of an attached
     document leaves behind. `Collection.add` refuses to create one, so the row is written here."""
     now = time.time()
     async with db.connect() as conn:
@@ -177,7 +177,7 @@ async def _use(
     maintenance_documents: int = PipelineSettings().maintenance_documents,
     maintenance_idle_seconds: int = PipelineSettings().maintenance_idle_seconds,
 ) -> None:
-    """Store and apply pipeline settings, so the queues really carry the given limits.
+    """Store and apply pipeline settings, so the queues carry the given limits.
 
     `workers=n` is shorthand for "a cap of n on every stage queue", which is what a test that only
     wants room for `n` tasks per stage means: a budget of `3 * n` shared equally by the three
@@ -266,7 +266,7 @@ async def _rows_of(collection: Collection, doc: str) -> int:
 
 
 class EmbedSpy:
-    """Counts the embed work per cache id: one entry per micro-batch really chunked and embedded.
+    """Counts the embed work per cache id: one entry per micro-batch chunked and embedded.
 
     The cache is the point of the refactor, so its tests assert how often this ran rather than how
     many rows came out: a second collection with the same effective `Params` must add nothing."""
@@ -715,7 +715,7 @@ async def test_the_cpu_budget_bounds_every_stage_together(
     name: str, cpu_budget: int, dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The floor of one slot per stage puts the caps over a small budget: three stages, one slot
-    each, is three. The process-wide semaphore is what holds the line, so the tasks of all stages
+    each, is three. The process-wide semaphore makes sure the tasks of all stages
     together never exceed the budget.
 
     The counter only observes; holding work open to force an overlap would deadlock against the
@@ -824,7 +824,7 @@ async def test_document_parallelism_caps_a_single_document(
 
 async def test_one_document_creates_a_bounded_number_of_workflows(dbos, tmp_path: Path) -> None:
     """However many batches a document has, it costs one orchestrator per pipeline, one child per
-    convert and embed slice, and one index child - never one workflow per micro-batch. The
+    convert and embed slice, and one index child, never one workflow per micro-batch. The
     maintenance run the index asks for is debounced, so a burst of documents shares a single one."""
     workers = 3
     await _use(dbos, workers=workers, batch_pages=1, index_group_parts=1)
@@ -1000,7 +1000,7 @@ async def test_concurrent_attaches_converge_on_one_embedding_run(
 
     async def asked() -> bool:
         """The child enqueue is recorded under the child workflow's name, so the step log says
-        when the second index really asked for the embedding - and it asked while the first run
+        when the second index really asked for the embedding, and it asked while the first run
         was still held open, which is what makes this a race rather than a sequence."""
         return dbos_names.EMBED_WORKFLOW in await _steps(second)
 
@@ -1095,7 +1095,7 @@ async def _import_id(doc: str) -> str:
 
 async def test_reimport_reconverts_and_drops_the_stale_cache(dbos, tmp_path: Path) -> None:
     """Re-importing rewrites the markdown every cached embedding was chunked from, so the whole
-    cache of the document goes first - rows and files - and only the fresh pre-warm is left."""
+    cache of the document goes first (rows and files) and only the fresh pre-warm is left."""
     collection = await Collection.create("stale")
     await collection.set_overrides(CollectionOverrides(chunk_size=60))
     doc = await import_document(dbos, "a.md", MD, tmp_path)
@@ -1551,7 +1551,7 @@ async def test_indexing_a_document_that_is_not_imported_fails_the_membership(
     dbos, tmp_path: Path
 ) -> None:
     """The collection index reads markdown the import produces, so a member whose document never
-    finished importing fails permanently - and only the membership carries that failure."""
+    finished importing fails permanently. Only the membership carries that failure."""
     collection = await Collection.create("early")
     doc = await import_row("a.md", into=tmp_path)
     await _add_member(collection, doc.id)
@@ -1909,7 +1909,7 @@ async def test_the_removal_waits_for_the_index_write_in_flight(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:
     """F3: the detach cancels the member's index workflow, and that cancel rewrites the status row
-    and nothing else - the LanceDB write already running writes its rows anyway. The removal takes
+    and nothing else. The LanceDB write already running writes its rows anyway. The removal takes
     the collection's write lock after that write, so the rows go with the membership instead of
     outliving it."""
     await _use(dbos, workers=4, batch_pages=1, index_group_parts=1)
@@ -1979,8 +1979,8 @@ async def test_detach_answers_while_the_partition_is_held(
 ) -> None:
     """The removal runs on the collection's partition, one writer at a time, so waiting for it
     would hold the request for as long as the write ahead of it. The detach answers once the
-    removal is queued, and the membership reads `removing` - an active state, which a poll keeps
-    following - until the removal ran."""
+    removal is queued, and the membership reads `removing` (an active state, which a poll keeps
+    following) until the removal ran."""
     await _use(dbos, workers=4, batch_pages=1, index_group_parts=1)
     collection = await Collection.create("busy")
     done = await import_document(dbos, "done.md", MD, tmp_path)
@@ -2236,7 +2236,7 @@ async def test_delete_collection_workflow_cancels_and_removes(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:
     """F2: the deletion is an operation too. It cancels everything the collection has in flight, and
-    cancel is final for the status row alone - the LanceDB write already running keeps going - so
+    cancel is final for the status row alone (the LanceDB write already running keeps going), so
     it waits on the collection's write lock before it drops the rows and the folder. A write that
     outlived the cancel must not recreate either."""
     await _use(dbos, workers=4, batch_pages=1, index_group_parts=1)
@@ -2732,7 +2732,7 @@ async def test_an_unreadable_settings_row_does_not_stop_the_boot(dbos, monkeypat
 async def test_settings_rejected_while_applying_fall_back_to_defaults_at_boot(
     dbos, monkeypatch, caplog
 ) -> None:
-    """The last line of defence: whatever `apply_settings` rejects, boot continues on defaults."""
+    """Whatever `apply_settings` rejects, boot continues on defaults."""
     stored = await save_user_settings(UserSettings(embedding="compact"))
     applied: list[UserSettings] = []
 

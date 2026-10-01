@@ -305,7 +305,7 @@ def create_app() -> Litestar:
         before_send=[add_request_id],
         request_max_body_size=UPLOAD_MAX_BYTES,
         # `claim_home` first: everything after it migrates the database or launches DBOS, and a
-        # second haskie on the same home must refuse before any of that, not after.
+        # second haskie on the same home must refuse before any of that.
         on_startup=[
             home.claim_home,
             shutdown.bound_exit,

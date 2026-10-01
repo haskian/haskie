@@ -110,7 +110,7 @@ def test_run_refuses_a_home_from_before_collections(
 
 
 def test_destroy_after_a_refused_run_lets_it_start_over(elsewhere: Path) -> None:
-    """The recovery path the message prescribes has to actually work."""
+    """The recovery path the message prescribes has to work."""
     _pre_collection_home(elsewhere)
 
     assert runner.invoke(cli, ["destroy", "--home", str(elsewhere), "--yes"]).exit_code == 0
@@ -316,7 +316,7 @@ def test_claim_home_refuses_a_second_holder_and_says_who_has_it(
     elsewhere: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`flock` is per open file description, so a second claim from this process conflicts exactly
-    as a second process would - no subprocess needed to prove the guard. No database either: the
+    as a second process would. No subprocess is needed to prove the guard. No database either: the
     lock needs none, and makes the home itself."""
     home.use(elsewhere)
 

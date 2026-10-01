@@ -537,9 +537,9 @@ def min_cover(doc_collections: dict[str, list[str]]) -> list[str]:
 
     What a session is narrowed to after a `search_sources`: naming every collection that holds
     any of the documents would widen the next search back out for nothing. Set cover is NP-hard,
-    so this is the standard greedy approximation - take the collection covering the most
-    uncovered documents, by name when two tie - which is within a log factor and deterministic.
-    A document no collection holds is simply left uncovered.
+    so this is the standard greedy approximation (take the collection covering the most
+    uncovered documents, by name when two tie), which is within a log factor and deterministic.
+    A document no collection holds is left uncovered.
     """
     holders: dict[str, set[str]] = {}
     for doc, names in doc_collections.items():

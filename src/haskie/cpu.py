@@ -33,9 +33,9 @@ class SlotBudget:
 
     Holders and the size live under one condition, so a resize moves the limit against the work
     already running: from 2 to 3 under load admits one more, and from 3 to 1 admits none until
-    two holders finish. Thread-safe on purpose: two event loops take from the CPU budget -
-    Litestar's (previews, requests) and DBOS's background loop (tasks, maintenance) - and an
-    asyncio or anyio primitive belongs to exactly one of them.
+    two holders finish. Thread-safe on purpose: two event loops take from the CPU budget, Litestar's
+    (previews, requests) and DBOS's background loop (tasks, maintenance). An asyncio or anyio
+    primitive belongs to exactly one of them.
     """
 
     def __init__(self, size: int) -> None:
@@ -193,8 +193,8 @@ def _convert_pool() -> ProcessPool:
     is sized from the CPU budget, so one setting owns how much of the machine haskie takes. The
     caller holds `_pool_lock`.
 
-    pebble rather than `ProcessPoolExecutor`: when a worker dies - a parser that segfaults, a
-    page that runs the machine out of memory - the stdlib pool breaks, and every later extraction
+    pebble rather than `ProcessPoolExecutor`: when a worker dies (a parser that segfaults, a
+    page that runs the machine out of memory), the stdlib pool breaks, and every later extraction
     fails until a restart. pebble fails that one task with `ProcessExpired` and starts a new
     worker, so the documents converting beside it never notice.
     """
@@ -203,7 +203,7 @@ def _convert_pool() -> ProcessPool:
         raise shutdown.ShuttingDown("the extraction pool is shut down")
     if _pool is None:
         # forkserver, not the macOS default of spawn: a spawned child re-imports `__main__`,
-        # which under `uvicorn`/`litestar` is the console script -- the child would try to
+        # which under `uvicorn`/`litestar` is the console script, so the child would try to
         # start a second server. A forkserver child is forked from a clean, thread-free process
         # instead, so `__main__` is never re-run. Plain `fork` is no option either: it would copy
         # a process that runs threads, which is unsafe.
@@ -279,7 +279,7 @@ async def off_interpreter[T](fn: Callable[..., T], /, *args: Any) -> T:
 
     Same contract as `on_cpu`, and it falls back to `on_cpu` when the pool is off, so callers do
     not branch. `fn` and `args` cross a pickle boundary: module-level function, plain arguments.
-    The slot is held for the whole call, not just the local part, so threads and pool processes
+    The slot is held for the whole call, not only the local part, so threads and pool processes
     draw on one budget. The waiting thread blocks on a pipe, so it holds no GIL meanwhile.
     """
     if not _pool_size():

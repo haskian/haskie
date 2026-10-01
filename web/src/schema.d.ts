@@ -900,7 +900,7 @@ export interface components {
             chunk_size: number;
             /**
              * Merge short paragraphs (% of chunk size)
-             * @description A paragraph - text between blank lines, or a whole list - shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
+             * @description A paragraph (text between blank lines, or a whole list) shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
              * @default 66
              */
             chunk_merge_below: number;
@@ -952,7 +952,7 @@ export interface components {
             chunk_size?: number | null;
             /**
              * Merge short paragraphs (% of chunk size)
-             * @description A paragraph - text between blank lines, or a whole list - shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
+             * @description A paragraph (text between blank lines, or a whole list) shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
              */
             chunk_merge_below?: number | null;
             /**
@@ -981,7 +981,7 @@ export interface components {
             chunk_size: number;
             /**
              * Merge short paragraphs (% of chunk size)
-             * @description A paragraph - text between blank lines, or a whole list - shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
+             * @description A paragraph (text between blank lines, or a whole list) shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
              * @default 66
              */
             chunk_merge_below: number;
@@ -1162,7 +1162,7 @@ export interface components {
         FillValues: "relative" | "absolute";
         /**
          * Fusion
-         * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
+         * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
          * @default rrf
          * @enum {string}
          */
@@ -1875,7 +1875,7 @@ export interface components {
             mode?: components["schemas"]["SearchMode"] | null;
             /**
              * Fusion
-             * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
+             * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
              */
             fusion?: components["schemas"]["Fusion"] | null;
             /**

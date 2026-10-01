@@ -1034,7 +1034,7 @@ async def test_attach_list_and_detach_a_member(
 
 
 async def test_one_document_serves_two_collections(client: AsyncTestClient) -> None:
-    """The point of the whole model: a document is imported once and held by many collections."""
+    """A document is imported once and held by many collections."""
     await client.post("/api/init", json=NO_MODELS)
     for name in ("alpha", "beta"):
         await client.post("/api/collections", json={"name": name})
@@ -2893,7 +2893,7 @@ async def test_every_search_rejects_a_collection_nobody_owns(
 
 
 async def test_the_mcp_surface_offers_one_search_per_question(api_client: AsyncTestClient) -> None:
-    """Two tools for the two questions an agent has — what do the sources say, and which sources
+    """Two tools for the two questions an agent has: what do the sources say, and which sources
     are there. The searches the web UI drives stay REST-only, or an agent would have to choose
     between three that answer with overlapping chunks."""
     from litestar_mcp import LitestarMCP

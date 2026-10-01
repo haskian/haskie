@@ -220,9 +220,9 @@ from the headings, with no model call, and has not measured its own gain yet. Ch
 structure "largely improve[s]" retrieval-augmented generation (RAG) results [15]. Chunking by
 embedding similarity does not justify its compute cost [16].
 
-**LanceDB.** Each collection is one table on local disk. LanceDB is
-an embedded library with vector and full-text (BM25) search in one table, on a columnar format built
-for fast random reads [17]. So hybrid search needs no server.
+**LanceDB.** Each collection is one table on local disk. LanceDB is an embedded library with
+vector and full-text (BM25) search in one table, on a columnar format built for fast random reads
+[17]. So hybrid search needs no server.
 
 **Hybrid search and reranking.** Vectors find meaning. BM25 finds exact terms, such as an error
 code. haskie fuses both by rank (reciprocal rank fusion, RRF). An optional cross-encoder reads the

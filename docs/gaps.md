@@ -27,7 +27,7 @@ context variable, so no step passes it along. Two places observe what they alrea
   best scores before its floor dropped any. The best cosine and the best reranker score are the
   heads of those lists.
 
-The best cosine is measured on the vectors, not read off a score column. A hybrid query's fusion
+The best cosine is measured on the vectors, not read from a score column. A hybrid query's fusion
 keeps only a rank score, and a rank says nothing about how close the best row came.
 
 The capture is written when the search ends, in one transaction: a `searches` row, one
@@ -124,11 +124,11 @@ What the measurements say:
   either: holding its 9 missed questions would flag 26% of answered.
 - **The reranker is the sharper judge** on the Rust book (AUROC 0.998, and its floor catches 36
   of 45), weaker on the small docs shelf (0.883).
-- **Missing words do not tell a wording gap from a missing document.** The idea: a borderline
-  question whose words no near miss holds (`missing_terms`) exists under other words. But every
-  unanswered question has such words (45 of 45), so the rule would label 14 of 45 true content
-  gaps "wording", and would catch only 12 of 20 questions asked in words the docs do not use
-  (`reworded` in `tests/gapeval`). Not shipped.
+- **Missing words do not tell a wording gap from a missing document.** The idea was that a
+  borderline question whose words no near miss holds (`missing_terms`) exists under other words.
+  But every unanswered question has such words (45 of 45), so the rule would label 14 of 45 true
+  content gaps "wording", and would catch only 12 of 20 questions asked in words the docs do not
+  use (`reworded` in `tests/gapeval`). Not shipped.
 - **Shared near misses do not group topics.** Joining two gap questions by a lower cosine plus
   shared near misses joined 94% of same-topic pairs on the Rust book, against 89% by cosine alone,
   but merged 3 to 13 pairs of different topics on the docs shelf: on a small shelf, every

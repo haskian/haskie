@@ -62,7 +62,7 @@ def _embedded(
 
 
 def _heading(text: str, score: float, **fields) -> Hit:
-    """A chunk of one heading line and nothing else, as the chunker really cuts it. Only the text
+    """A chunk of one heading line and nothing else, as the chunker cuts it. Only the text
     chunker does: the markdown one reads the line as a heading and makes no chunk of a section
     without text (`segment.pack`), so a heading reaches the fold as text of its own."""
     (alone,) = chunk.split(text, ChunkSettings(chunker=Chunker.TEXT))

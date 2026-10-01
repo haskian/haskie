@@ -173,14 +173,13 @@ async def agent_search_excerpts(
     `to_parent` and `to_root` measure it against its parent and against the passage: how much
     of it is in the other (`contained`), how much of the other is in it (`contains`), how alike
     the two are (`alike`), by `words` and by `embedding`, and by `chars` within one document.
-    A place may be
-    elsewhere in the same document: check its `document` before citing it as a second source.
+    A place may be elsewhere in the same document: check its `document` before citing it as a
+    second source.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection. Run `search_sources` first when the question is which
     documents or collections cover a topic, then `set_session_collections` with the cover it
-    returns. No excerpts is an answer: the sources do not cover this, and saying so beats
-    guessing.
+    returns. No excerpts is an answer: the sources do not cover this. Say so rather than guess.
 
     Narrower still: `document_ids` keeps to these documents and `section_ids` to these sections and
     every section under them, by the ids `search_sections` and each excerpt carry (`document_id`,
@@ -253,7 +252,7 @@ async def agent_search_sources(
     throughout outranks one that answers once), `chunks` counts them, `sections`
     names the hottest headings inside it with their `location`, and `collections` says which of
     the searched collections hold it. `documents` is that list, best first; `collections` at the
-    top level is the smallest set of collections covering every document in it — pass it to
+    top level is the smallest set of collections covering every document in it. Pass it to
     `set_session_collections`, then ask `search_excerpts` for the passages themselves.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
@@ -319,14 +318,14 @@ async def agent_search_sections(
     before choosing what to read. Only `also_in` in `search_excerpts` lists repeats.
 
     `descriptors` say what each section is about: one to five words or phrases it uses more than the
-    other sections of its depth in its document, not what its `header` says unless it has no other
-    words, fixed when the document was indexed. `chars` is how long it is, `chunks` how many of its
-    chunks matched. Cite it by `header` and `location`.
+    other sections of its depth in its document. They skip what its `header` says unless it has no
+    other words, and they are fixed when the document was indexed. `chars` is how long it is,
+    `chunks` how many of its chunks matched. Cite it by `header` and `location`.
 
     Use it before `search_excerpts` to see what the sources hold on a topic and nearby, then ask
     `search_excerpts` about the sections worth reading: pass their `id`s as its `section_ids` to
-    read those alone. `collections` at the top level is the
-    smallest set of collections holding every section listed, for `set_session_collections`.
+    read those alone. `collections` at the top level is the smallest set of collections holding
+    every section listed, for `set_session_collections`.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection, and only the documents `document_ids` names, when

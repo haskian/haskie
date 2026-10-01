@@ -1,11 +1,12 @@
 """Collection index maintenance: compaction, version cleanup and index (re)build, off the write
 path.
 
-Indexing one document must stay O(document). Everything that is O(collection) — compacting the
-fragments each commit leaves behind, folding new rows into the full-text index, training the
-approximate vector index — happens here instead, once per burst of documents rather than once per
-document. `workflows.maintain_collection` debounces the runs and puts each one on the collection's
-index partition, so maintenance never writes a table while a document's index stage does.
+Indexing one document must stay O(document). Everything that is O(collection) happens here
+instead, once per burst of documents rather than once per document: compacting the fragments each
+commit leaves behind, folding new rows into the full-text index, and training the approximate
+vector index. `workflows.maintain_collection` debounces the runs and puts each one on the
+collection's index partition, so maintenance never writes a table while a document's index stage
+does.
 
 A run's state lives in the maintenance columns of the `collections` row: `pending_documents`
 (documents indexed since the last finished run), `last_write_at`, `last_maintained_at` and

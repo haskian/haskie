@@ -155,9 +155,9 @@ def pdf_pages_markdown(
 
     `marks` are the PDF's bookmarks (`pdf_bookmarks`), at least those of these pages and the page
     before them, when the document has bookmarks that set its headings: then they do, page by
-    page (`bookmarks`), since the converter judges a heading by its font and takes running
-    headers for sections, and a batch with none of its own makes all its headings text. None
-    keeps the converter's headings. The page before a batch is converted too, only to learn which
+    page (`bookmarks`). The converter judges a heading by its font and takes running headers for
+    sections. A batch with none of its own makes all its headings text. None keeps the
+    converter's headings. The page before a batch is converted too, only to learn which
     bookmarks it claims.
     """
     import pdf_inspector

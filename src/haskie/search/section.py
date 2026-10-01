@@ -169,11 +169,10 @@ def group(
     """The first `limit` sections the ranges (best first) fall in, each with every range of it.
 
     A section is placed where its best range was, and a range further down joins the section it
-    belongs to rather than taking a slot: the slots count sections. A range whose chunk the
-    `found` holds the placements of every document a range that opens a section is in (see
-    `documents`); a range of any other document belongs to no section that is kept. A section
-    whose ranges are all too short to stand alone (`HitRange.alone`) is no excerpt, and frees its
-    slot.
+    belongs to rather than taking a slot: the slots count sections. `found` holds the placements
+    of every document a range that opens a section is in (see `documents`); a range of any other
+    document belongs to no section that is kept. A section whose ranges are all too short to stand
+    alone (`HitRange.alone`) is no excerpt, and frees its slot.
     """
     placed: list[tuple[tuple[str, str, Section], HitRange]] = []
     for hit_range in hit_ranges:

@@ -144,17 +144,17 @@ when `min_rerank_score` is empty, and the beta curve `fill_values = absolute` sp
 by. The seed gives every reranker an uncalibrated floor of 0.05 and the identity curve, until
 `catalogue/calibrate.py` measures both on borderline pairs of your own collections.
 
-`documents.id` is the MD5 of the original file, in base58 like section and chunk ids (see below). The bytes
-are the document, so the same file is
-never imported twice. Every table, the LanceDB rows, the folders and the workflow ids refer to a
-document by this id. `documents.name` is what people and agents call it. The API and the tools
-address a document by name. It is unique, and stored in lowercase-kebab-case.
+`documents.id` is the MD5 of the original file, in base58 like section and chunk ids (see below).
+The bytes are the document, so the same file is never imported twice. Every table, the LanceDB
+rows, the folders and the workflow ids refer to a document by this id. `documents.name` is what
+people and agents call it. The API and the tools address a document by name. It is unique, and
+stored in lowercase-kebab-case.
 `embeddings.vector` is the document as one vector: the mean of its unit chunk vectors, not
 normalized. Its direction is what the nearest documents are found by. Its length is how tightly
-the chunks point one way, which the collection's mean needs: maintenance sums the members' means,
-each weighted by its chunk count, into `collections.vector_sum`, with the chunks it sums in
-`vector_rows` and the model in `vector_model`. A map of sections centres its cosines on that mean
-([Search](search.md#sections-a-map-of-the-shelf)).
+the chunks point one way, and the collection's mean needs it. Maintenance sums the members'
+means, each weighted by its chunk count, into `collections.vector_sum`. It keeps the number of
+chunks it sums in `vector_rows` and the model in `vector_model`. A map of sections centres its
+cosines on that mean ([Search](search.md#sections-a-map-of-the-shelf)).
 
 `searches` is the search log (`search/log.py`): one row per search, with or without a session,
 failed or not. `search_questions` holds each question it asked and what that question's ranking
@@ -167,7 +167,7 @@ Three more tables stand alone: `settings` (one row of JSON), `staging` (uploads 
 name, with the MD5 of their bytes) and `installations` (each agent configuration directory that
 `haskie install` wrote the skill and rule into, rewritten when a collection changes; see
 [MCP](mcp.md)). DBOS keeps its own workflow and queue tables in the same file. `sysdb.py` reads
-them for the Operations view, through `table()` declarations of its own: DBOS owns their schema.
+them for the Operations view, through `table()` declarations of its own. DBOS owns their schema.
 
 Every table and index is a SQLAlchemy Core `Table` in `tables.py`, the one source of the schema.
 `db.migrate` generates the DDL from it on a fresh home, and every query is a Core statement over
@@ -177,7 +177,7 @@ before `tables.py` keeps its older, unprefixed names.
 ## Sections and their ids
 
 Every section and every chunk has an id, named when a computed embedding is merged
-(`embed_cache._merge`, `sections/build.py`): the merge is the first place that sees the whole
+(`embed_cache._merge`, `sections/build.py`). The merge is the first place that sees the whole
 document in order.
 
 - Each of these ids is an MD5 written in base58 (`ids.py`), 22 characters: letters and digits
@@ -193,13 +193,14 @@ document in order.
 - The `s` and `c` keep the two kinds apart: section 2 and chunk 2 of one document are two ids.
 
 The sections go into their own file beside the chunks (`<id>.sections.parquet`), each with its
-id, parent, headings, where it runs and its descriptors, written before the entry's row, so a
-cache hit has both. Each chunking of a document keeps its own, as its section ids are its own.
-A membership names the entry its rows were indexed from (`collection_documents.cache_id`), so
-`search_sections` reads the descriptors of the sections a collection's ids name, even after its
-chunk settings change and before *Index all* re-chunks it; the collection's centre sums its
-members' entries the same way. A reconversion or a delete drops them with the cache, and the
-pointer with its entry (a foreign key, `on delete set null`) until the member is indexed again.
+id, parent, headings, where it runs and its descriptors. The file is written before the entry's
+row, so a cache hit has both. Each chunking of a document keeps its own, as its section ids are
+its own. A membership names the entry its rows were indexed from
+(`collection_documents.cache_id`). So `search_sections` reads the descriptors of the sections a
+collection's ids name, even after its chunk settings change and before *Index all* re-chunks it.
+The collection's centre sums its members' entries the same way. A reconversion or a delete drops
+them with the cache, and the pointer with its entry (a foreign key, `on delete set null`) until
+the member is indexed again.
 
 ## How each store is written
 

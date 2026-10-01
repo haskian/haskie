@@ -19,8 +19,9 @@ Each feature has one module under `src/haskie/api/`.
 | `/api/operations`, `/api/jobs` | `operations.py` | history per kind, live activity, progress, a job's tasks, cancel |
 | `/api/status`, `/api/init`, `/api/settings`, `/api/options` | `settings.py` | first-run init, user settings, and the option catalogue the UI builds its forms from |
 
-A handler marked `mcp_tool="<name>"` is also an MCP tool. The search tools are separate handlers under
-`/api/agent/`, left out of this document, that answer with fewer fields. See [MCP and Claude Code](mcp.md).
+A handler marked `mcp_tool="<name>"` is also an MCP tool. The search tools are separate handlers
+under `/api/agent/`, left out of this document, that answer with fewer fields. See
+[MCP and Claude Code](mcp.md).
 
 ## Two-phase intake
 

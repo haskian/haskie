@@ -48,11 +48,11 @@ flowchart TB
 `ensure_embedding` always runs, and looks up the cache inside. On a hit it returns at once.
 
 **Sections and ids.** The merge that publishes a computed embedding names every section of the
-document and every chunk (`embed_cache._merge`, `sections/build.py`): a section is every heading's
-run of chunks, cut by the same rule a search groups passages by, and each gets an id from its
-document and its place among its sections, and a parent. Each chunk gets an id and the sections
+document and every chunk (`embed_cache._merge`, `sections/build.py`). A section is every heading's
+run of chunks, cut by the same rule a search groups passages by. Each section gets a parent and an
+id from its document and its place among its sections. Each chunk gets an id and the sections
 that hold it ([Storage](storage.md#sections-and-their-ids)). Then `embed_cache.write` describes
-the sections and writes them into their own file beside the chunks', before the entry's row: a
+the sections and writes them into their own file beside the chunks', before the entry's row. So a
 cache hit has both. Each cache entry, so each chunking, has its own sections and descriptors.
 
 A descriptor strategy picks one to five words for each section that has any
@@ -61,12 +61,12 @@ not what a section is about. The only strategy, `ClassTfidf`, weighs the section
 against each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25 weighting: a chapter's words
 against the other chapters'. Unlike BERTopic, it counts how many sections use a term rather than how
 often the whole book does. A term more than half the sections of a depth use is the book's topic, so
-it is no descriptor there: in one book on DDD, "model", "design" and "chapter" had been descriptors
-of 31 sections, and are of none. The whole document's section keeps them. Nor is a term whose every
-word the section's header already holds: "aggregates" under `Aggregates > Rule: Design Small
-Aggregates` says nothing new. With an embedding model, each section's best 20 candidates are
-embedded, one call for the whole document, and reranked against the section's vector (the mean
-of its chunks' unit vectors, scaled to length one, never stored), as
+it is no descriptor there. In one book on Domain-Driven Design, "model", "design" and "chapter" had
+been descriptors of 31 sections, and are of none. The whole document's section keeps them. Nor is a
+term whose every word the section's header already holds: "aggregates" under `Aggregates > Rule:
+Design Small Aggregates` says nothing new. With an embedding model, each section's best 20
+candidates are embedded in one call for the whole document. They are reranked against the
+section's vector (the mean of its chunks' unit vectors, scaled to length one, never stored), as
 BERTopic's `KeyBERTInspired` does. A word or word pair that a section uses once is left out, unless
 the section is too short to have enough used twice. Most such terms are halves of a word a PDF split
 over two lines, or two words that happen to meet. Measured once on one book (1.4 MB of markdown,
@@ -76,19 +76,18 @@ over two lines, or two words that happen to meet. Measured once on one book (1.4
 is whole in one batch wherever it can be. Batches are packed greedily: a batch holds as many whole
 sections as fit `batch_pages` pages (default 10), and is cut at the last section start inside
 them. A section longer than that is cut at a page inside it, and a PDF without sections every
-`batch_pages` pages, as before. Only a PDF has pages to cut at: other files have none.
+`batch_pages` pages. Only a PDF has pages to cut at.
 
 - A PDF converts in batches cut at the pages its bookmarks start on, of any level. Without
   bookmarks, every `batch_pages` pages. Any other file converts as one batch.
 - Embedding cuts the assembled markdown into parts where its headings start, and a section longer
   than a batch at its page markers (`pipeline.plan_embed`). A heading right behind a page marker is
-  cut ahead of the marker, and each part carries the page open where it starts, so a part cut
-  mid-page still knows its page. Pages are counted by those markers, else
-  as 3,000 characters each (`PAGE_CHARS`). Markdown without page markers is cut at headings alone:
-  a section longer than a batch, or a file with no headings, is one part. The cuts depend on the
-  markdown alone, so the document is
-  chunked from the same parts under any chunk settings. On one 657-page book, 83 parts: 70 cut at a
-  heading, 12 at a page inside a long section.
+  cut ahead of the marker. Each part carries the page open where it starts, so a part cut mid-page
+  still knows its page. Pages are counted by those markers, else as 3,000 characters each
+  (`PAGE_CHARS`). Markdown without page markers is cut at headings alone: a section longer than a
+  batch, or a file with no headings, is one part. The cuts depend on the markdown alone, so the
+  document is chunked from the same parts under any chunk settings. On one 657-page book, 83
+  parts: 70 cut at a heading, 12 at a page inside a long section.
 - Indexing writes `index_group_parts` parts per batch (default 50).
 
 **Slices.** Convert and embed cut their batches into contiguous slices, at most
@@ -143,8 +142,9 @@ you need the machine back.
 
 - A **transient** failure (a busy database, for example) gets 3 attempts in total, with backoff.
 - A **permanent** failure fails at once: a file the parser cannot read, or a PDF whose pages need
-  OCR. With `skip_ocr_pages` on (the default), only a PDF where every page needs OCR fails.
-  Unsupported file types are refused at import, before any operation starts.
+  optical character recognition (OCR). With `skip_ocr_pages` on (the default), only a PDF where
+  every page needs OCR fails. Unsupported file types are refused at import, before any operation
+  starts.
 - An embedding model that is still downloading or warming up is not a failure. The embedding
   run sleeps durably until the model is ready, before it cuts any slice. A batch that still finds
   it warming, after a restart for example, sleeps the same way. Only a model that failed to load

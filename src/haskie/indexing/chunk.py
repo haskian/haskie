@@ -126,8 +126,8 @@ def record(
 ) -> dict[str, Any]:
     """One Arrow record for a chunk: its own fields, plus the columns the table adds around it.
 
-    Both tables that hold chunks build their rows here - the parquet cache (`embed_cache`) and a
-    collection's LanceDB table (`index`) - so both see the same fields. Each table's schema
+    Both tables that hold chunks build their rows here (the parquet cache, `embed_cache`, and a
+    collection's LanceDB table, `index`), so both see the same fields. Each table's schema
     (`embed_cache._PLAIN`, `index.PLAIN_SCHEMA`) drops a key it does not name, so a new field on
     `Chunk` must be added to both schemas to be stored. The record carries the pieces and the text
     joined from them, and each table's schema takes the one it stores: the cache keeps the pieces,

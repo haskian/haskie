@@ -4,12 +4,12 @@ The table holds the chunks of every document of the collection, as rows read out
 document's embedding cache (`indexing/embed_cache.py`): a document that sits in several
 collections is chunked and embedded once per distinct chunk settings and written into each
 collection's table from that cache. The table is therefore a per-collection view, never the only
-copy of anything — dropping it (`reset_for_write`) and refilling it from the cache is what
+copy of anything. Dropping it (`reset_for_write`) and refilling it from the cache is what
 "Index all" does.
 
 Every table access is awaited: LanceDB's async API (`lancedb.connect_async`, `AsyncTable`) runs on
-its own tokio runtime, so nothing here blocks the event loop that called it. The pure parts —
-Arrow encoding, scoring, row-to-`Hit` — stay sync.
+its own tokio runtime, so nothing here blocks the event loop that called it. The pure parts
+(Arrow encoding, scoring, row-to-`Hit`) stay sync.
 
 Write and read paths differ on purpose: only the index stage of a document may drop an
 outdated table (`reset_for_write`), every other write no-ops on one, and a read never creates a
@@ -235,7 +235,7 @@ class Hit(msgspec.Struct):
     end_reason: CutReason = CutReason.EDGE
     # Absolute, built by `hit` from the index's own home rather than stored: the index keeps its
     # paths home-relative so a home stays portable. These are what a tool outside the app opens or
-    # greps - `line_start`/`line_end` are lines in `markdown_file`.
+    # greps. `line_start`/`line_end` are lines in `markdown_file`.
     source_file: str = ""
     markdown_file: str = ""
     also_in: list[HitReference] = []  # the near-duplicates folded into this hit, a tree
@@ -562,8 +562,8 @@ class CollectionIndex:
         """Compact fragments, fold new rows into every index, and drop versions older than `keep`.
 
         `keep` is a grace period, not a deadline: a reader that opened the table before this call
-        keeps reading the version it opened, so pruning it out from under them must not be
-        possible. No-op when there is no table."""
+        keeps reading the version it opened, so that version must not be pruned while it reads.
+        No-op when there is no table."""
         table = await self._existing()
         if table is not None:
             await table.optimize(cleanup_older_than=keep)
@@ -628,10 +628,10 @@ class CollectionIndex:
         """Retrieval only: at most `limit` raw LanceDB rows, neither cut to `settings.limit` nor
         rescored by a cross-encoder.
 
-        `vector` is None for a lexical query; a table without a vector column
-        falls back to full text whatever the caller passed, so one collection of a session can lack
-        the embedding the others have. A hybrid query always fuses over at least
-        `settings.candidates` rows, because the fusion is only as good as its candidate pool.
+        `vector` is None for a lexical query; a table without a vector column falls back to full
+        text whatever the caller passed, so one collection of a session can lack the embedding the
+        others have. A hybrid query always fuses over at least `settings.candidates` rows, because
+        the fusion is only as good as its candidate pool.
 
         `vectors` False leaves the vector column out of a lexical read, for a caller that only
         wants the chunks: the probe for missing words (`search.retrieval.probe_gaps`).
@@ -662,8 +662,8 @@ class CollectionIndex:
     async def fts_rows(self, query: str, limit: int) -> list[dict]:
         """Lexical retrieval alone: at most `limit` BM25 rows, whatever this index could answer
         with, none of them of a document `leaving` and all of them in `scope` (see `_scoped`). `[]`
-        when it cannot answer one at all — no table, no rows, or no full-text index yet, which is
-        what a collection in the middle of its first index looks like.  LanceDB refuses a full-text
+        when it cannot answer one at all: no table, no rows, or no full-text index yet, which is
+        what a collection in the middle of its first index looks like. LanceDB refuses a full-text
         query without the index rather than scanning, so a collection still building its index
         answers nothing here, as it does in `search_rows`."""
         table = await self._readable()

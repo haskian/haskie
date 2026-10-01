@@ -1,14 +1,14 @@
 """Installing haskie into Claude Code: the MCP entry, the SessionStart hook, the skill and the rule.
 
-Everything Claude Code's own configuration looks like lives here - where its files are, the argv
-its CLI takes, the shape of a hook in its settings - so `cli` stays the way in and never a second
-way of doing the work. Failures are `HaskieError`, not Typer's: this module knows nothing about a
+Everything about Claude Code's own configuration lives here: where its files are, the argv its
+CLI takes, the shape of a hook in its settings. So `cli` stays the way in and never a second way
+of doing the work. Failures are `HaskieError`, not Typer's: this module knows nothing about a
 terminal, and a second client (or a route) must be able to call it.
 
 The MCP tool descriptions are the handler docstrings, so they say what each tool does. What they
 cannot say is when to reach for haskie at all, which search to start with, or that these documents
 are the user's own and outrank a web result. That is what a skill is for, and it is why the trigger
-line is generated from the collections a home actually holds rather than shipped as a fixed string.
+line is generated from the collections a home holds rather than shipped as a fixed string.
 
 A skill is only weighed when Claude is choosing a tool for a task. A plain knowledge question, a
 plan, or a moment of doubt does not read as a task, so the skill never fires and the answer comes
@@ -267,7 +267,7 @@ def hook_command(home_dir: Path, url: str) -> str:
 
 
 def install_hook(directory: Path, home_dir: Path, url: str) -> bool:
-    """Teach Claude Code to bring haskie up at the start of a session.
+    """Make Claude Code start haskie when a session starts.
 
     The MCP entry is HTTP, so a session that starts while nothing is serving gets no haskie tools
     at all, and nothing says why. A SessionStart hook running `haskie run` fixes that: it costs
@@ -292,7 +292,7 @@ def install_hook(directory: Path, home_dir: Path, url: str) -> bool:
 
 
 def uninstall_hook(directory: Path) -> bool:
-    """Take every haskie SessionStart hook out of the settings file, whichever home it starts,
+    """Remove every haskie SessionStart hook from the settings file, whichever home it starts,
     and leave every other hook and setting as it was. A matcher that held only haskie's goes with
     it. Returns whether there was one."""
     settings_file = settings_path(directory)
@@ -470,7 +470,7 @@ def refresh_in_background() -> None:
     the loop that asked for it.
 
     At most once: a crash between the change and the refresh loses it, and the refresh at the next
-    startup makes up for it."""
+    startup repairs it."""
     global _refresh_wanted, _refreshing
     with _refresh_lock:
         _refresh_wanted = True

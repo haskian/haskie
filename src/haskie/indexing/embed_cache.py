@@ -24,7 +24,7 @@ sees a row without a file, and a retried or a losing concurrent write is a no-op
 Two callers wanting the same missing entry are serialized above this module, by the DBOS
 deduplication of `workflows.ensure_embedding`; this module only makes the outcome idempotent.
 
-Module owns the parquet schema and the row shape it is read back into (`index.Row`), the way
+This module owns the parquet schema and the row shape it is read back into (`index.Row`), as
 `collection/index.py` owns LanceDB's; the chunk columns inside both come from `chunk.record`. One
 column is this module's own: `seq`, the row's 1-based position among the document's chunks, which
 only the merge across parts can number (see `_merge`). File writes and reads run in a worker thread:
@@ -327,9 +327,10 @@ async def write(
     p: Params, parts: list[Path], dims: int | None, embed: descriptors.Embed | None
 ) -> str:
     """Merge the scratch rows of every part into the cache file, describe its sections into their
-    own file, publish its row, then drop the scratch directory - last, so a retry before the row
-    was written still finds its input. Both files are in place before the row: a hit (`lookup`)
-    has both. `embed` embeds the descriptor candidates; None ranks them by weight alone."""
+    own file, publish its row, then drop the scratch directory. The drop comes last, so a retry
+    before the row was written still finds its input. Both files are in place before the row: a
+    hit (`lookup`) has both. `embed` embeds the descriptor candidates; None ranks them by weight
+    alone."""
     id = key(p)
     target = file_path(p.document_id, id)
     merged = await anyio.to_thread.run_sync(_merge, p.document_id, parts, target, dims)

@@ -41,7 +41,7 @@ class Describe(msgspec.Struct):
 
 # A search returns at least one result or none at all, and no more than it scans: an explicit
 # limit sets the scan depth, so above `MAX_SCAN` it would make every collection return, and the
-# reranker score, that many chunks. The bounds ride along into the schema.
+# reranker score, that many chunks. The bounds also appear in the schema.
 Limit = Annotated[int | None, Parameter(ge=1, le=MAX_SCAN)]
 
 # The documents and sections a search keeps to, by id (`ids`: `Document.id`, the section ids of

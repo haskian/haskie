@@ -297,7 +297,7 @@ def collection_lock(collection: str) -> anyio.Lock:
     `DBOS.cancel_workflows` rewrites the status row and nothing else: a step already inside its
     LanceDB write keeps running, and the index partition frees its slot as soon as the row says
     CANCELLED. So a delete or a detach that cancelled an index workflow can reach its own removal
-    while that write is still going - and the write would recreate the table folder the delete
+    while that write is still going. The write would then recreate the table folder the delete
     just took away, or put back rows the detach just removed. A queue cannot order those two; this
     lock does.
 
@@ -323,9 +323,9 @@ def stage_caps(indexing: PipelineSettings) -> dict[Stage, int]:
     """How many tasks each stage queue admits: `cpu_budget` shared out over the stage weights.
 
     Largest remainder: every stage gets the whole part of its share, and the spare slots go to the
-    stages that lost the most to rounding. So the caps add up to the budget exactly - except under
+    stages that lost the most to rounding. So the caps add up to the budget exactly, except under
     the floor of one slot per stage, which a budget below three cannot pay for. That is what
-    `cpu.cpu_slot` is for: the floors keep every stage alive, the semaphore keeps the total honest.
+    `cpu.cpu_slot` is for: the floors keep every stage alive, the semaphore caps the total.
     """
     weights: dict[Stage, int] = {
         Stage.CONVERT: indexing.converting_weight,
@@ -454,7 +454,7 @@ async def _register_schedule() -> None:
     """Put the nightly cron definition in the system database, where it outlives the process.
 
     `apply_schedules_async` is an idempotent upsert by name that keeps the schedule's id, status
-    and last fire time, so every boot may simply declare what this build wants."""
+    and last fire time, so every boot may declare what this build wants."""
     await DBOS.apply_schedules_async(
         [
             {
@@ -603,7 +603,7 @@ async def load_context(doc: str, collection: str | None) -> Context:
 
 def resolve_parallelism(indexing: PipelineSettings, stage: Stage) -> int:
     """Slices one document may be cut into for one stage: that stage's cap when the setting is 0,
-    never more - a slice occupies one slot of that stage's queue, so asking for more only queues
+    never more. A slice occupies one slot of that stage's queue, so asking for more only queues
     them."""
     cap = stage_caps(indexing)[stage]
     if indexing.document_parallelism == 0:
@@ -646,8 +646,8 @@ async def index_write(collection: str, doc: str) -> AsyncIterator[bool]:
 
     The lock alone only orders this write against a removal (see `collection_lock`); the re-check
     inside it is what the loser of that race acts on. A removal that went first took the
-    membership with it - the whole collection row for a delete (memberships cascade), this one
-    row for a detach - so a write that finds none has nothing left to write into. A membership a
+    membership with it: the whole collection row for a delete (memberships cascade), this one
+    row for a detach. So a write that finds none has nothing left to write into. A membership a
     detach marked `removing` counts as gone too: its removal is queued behind this write."""
     async with collection_lock(collection):
         yield await _member_present(collection, doc)
@@ -1341,7 +1341,7 @@ async def delete_collection_workflow(collection: str) -> None:
 
     The sweep repeats until it finds nothing: a bulk index still queueing documents can add more
     while the first sweep runs. Each sweep's cancel is final for the status row and for nothing
-    else - a step already inside its LanceDB write keeps running - so the removal below waits for
+    else (a step already inside its LanceDB write keeps running), so the removal below waits for
     the collection's write lock, which that step holds until it is done (see `collection_lock`).
 
     A maintenance run already debounced for this collection is left alone: it finds no row and
@@ -1445,7 +1445,7 @@ async def _start(
 
 
 # An import runs from a fresh document (`queued`) and from one whose import ended without its
-# markdown (`error`, `cancelled`). Any other status means a pipeline - or a delete - is writing
+# markdown (`error`, `cancelled`). Any other status means a pipeline or a delete is writing
 # the same files right now, or that the markdown is already there.
 IMPORTABLE: tuple[DocumentStatus, ...] = (
     DocumentStatus.QUEUED,
@@ -1664,8 +1664,8 @@ async def rename_collection(collection: str, name: str) -> Collection:
 
 async def cancel_operation(operation_id: str) -> None:
     """Cancel one pipeline operation and record what that left behind: an import stops the
-    document, an index stops that one membership, and an embed stops neither - it writes only the
-    cache.
+    document, an index stops that one membership, and an embed stops neither (it writes only the
+    cache).
 
     Here rather than in `operations`, which is a read model: this writes, and it reads the names it
     writes by out of the id grammar this module owns (see `pipeline_names`).

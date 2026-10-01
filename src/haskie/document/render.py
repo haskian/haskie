@@ -1,9 +1,9 @@
 """Markdown to HTML for the viewer, one page at a time, and the table of contents beside it.
 
-The browser inserts what this returns, so the one thing that matters here is that it cannot carry
-script. `pyromark.html` passes raw HTML straight through — a `<script>` in an uploaded markdown
-file would reach the page verbatim — so the raw HTML is removed before rendering, using the
-parser's own idea of what is raw HTML rather than a pattern of our own.
+The browser inserts what this returns, so it must not carry script. `pyromark.html` passes raw
+HTML straight through (a `<script>` in an uploaded markdown file would reach the page verbatim),
+so the raw HTML is removed before rendering, using the parser's own idea of what is raw HTML
+rather than a pattern of our own.
 
 That also matches what the viewer did when React rendered the markdown: `react-markdown` ignores
 raw HTML unless asked for it, so nothing that used to appear stops appearing.
@@ -120,7 +120,7 @@ def to_html(markdown: str, first_heading: int = 0) -> tuple[str, int]:
 
     `first_heading` is how many headings the document has already rendered, because a page is
     rendered on its own but its anchors have to be unique across the whole document. Raw HTML is
-    gone by the time this matches `<h1>`..`<h6>`, so the nth opening tag really is the nth heading.
+    gone by the time this matches `<h1>`..`<h6>`, so the nth opening tag is the nth heading.
     """
     html = pyromark.html(_without_raw_html(markdown), options=OPTIONS)
     counter = itertools.count(first_heading)

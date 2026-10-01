@@ -1,8 +1,8 @@
 """Search over a live index: one collection, and a session that fans out over several.
 
 Both need a real index, which the pipeline writes, so every test here takes the `dbos` fixture
-and imports its documents through it. The session tests assert the mechanism - one query
-embedding, one model check, one cross-encoder pass over the merge - and not only the end state.
+and imports its documents through it. The session tests assert the mechanism (one query
+embedding, one model check, one cross-encoder pass over the merge) and not only the end state.
 """
 
 import math

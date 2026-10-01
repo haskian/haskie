@@ -1,6 +1,6 @@
-// The background choice is one preference with two halves — what is stored, and the body
-// attribute the stylesheet keys on — so both live here: `Settings` writes it, `App` applies what a
-// previous visit stored.
+// The background choice is one preference with two halves (what is stored, and the body
+// attribute the stylesheet keys on), so both live here: `Settings` writes it, `App` applies what
+// a previous visit stored.
 const BACKGROUND_KEY = 'haskie.bg'
 const CLASSIC = 'classic'
 
