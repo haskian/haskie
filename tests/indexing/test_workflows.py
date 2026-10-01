@@ -1002,6 +1002,7 @@ async def test_a_hit_another_strategy_described_is_described_again_from_the_cach
 ) -> None:
     """A changed descriptor strategy re-describes an entry on its next index, from the cache: the
     run waits for the describer, then writes its descriptors, and embeds nothing again."""
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
     spy = _spy_embed(monkeypatch)
     monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
     doc = await import_document(dbos, "a.md", MD, tmp_path)
@@ -1044,6 +1045,7 @@ async def test_an_embedding_run_describes_by_the_strategy_it_was_asked_for(
     """The strategy is the run's argument, not the settings when it runs: a run asked for under
     llm describes by it, though the settings changed back meanwhile, and a hit described alike
     loads no context at all."""
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     row = await document.named(doc.name)
     params = embed_cache.params(row, (await load_user_settings()).conversion.chunking, None)

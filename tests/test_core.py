@@ -2900,6 +2900,8 @@ async def test_describe_writes_the_descriptors_by_the_strategy_asked_for(
     and the file says which strategy wrote what it holds."""
     from haskie.indexing import gguf_models, models
 
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+
     doc = await import_row("g.md")
     await _convert(doc)
     cache_id = await _embed(doc, SMALL)  # described by c-TF-IDF, without a model
