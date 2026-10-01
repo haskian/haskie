@@ -121,7 +121,7 @@ haskie uninstall claude     # removes all four again; documents and collections 
 ```
 
 - **macOS (Apple Silicon):** every model runs on the Apple GPU through ONNX Runtime's WebGPU
-  build. MLX and llama.cpp are installed too, for the `-mlx` and `-gguf` profiles, which are
+  plugin. MLX and llama.cpp are installed too, for the `-mlx` and `-gguf` profiles, which are
   faster still. llama.cpp compiles during the install, so run `xcode-select --install` first.
 - **Linux:** ONNX Runtime runs on an NVIDIA GPU with CUDA 13 and cuDNN 9, else on the CPU.
 - **First run:** pick an embedding model. The default, granite-97m-multilingual, reads 200+

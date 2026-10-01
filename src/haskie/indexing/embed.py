@@ -7,11 +7,11 @@ setting the same way.
 
 Hardware: ONNX Runtime execution providers. `auto` takes CUDA where it runs, else WebGPU, else
 the CPU. Linux installs ONNX Runtime's CUDA build, which runs on the CPU where no NVIDIA GPU is.
-Apple Silicon installs its WebGPU build, which reaches the GPU through Metal. Measured on 512 real
-chunks (M4 Pro, batches of 16), WebGPU against the CPU: granite-97m 5.6 s against 14.3 s, bekko-a8m
-2.0 s against 4.1 s, F2LLM-160M 16.2 s against 32.0 s, ettin-150m 23.4 s against 51.6 s, every
-vector the CPU's (worst cosine 0.99999). The MLX and GGUF profiles (`mlx_models`, `gguf_models`)
-reach the same GPU faster still, for the models they hold.
+Apple Silicon adds ONNX Runtime's WebGPU plugin (`onnxruntime-ep-webgpu`), which reaches the GPU
+through Metal. Measured on 512 real chunks (M4 Pro, batches of 16), WebGPU against the CPU:
+granite-97m 5.6 s against 14.3 s, bekko-a8m 2.0 s against 4.1 s, F2LLM-160M 16.2 s against 32.0 s,
+ettin-150m 23.4 s against 51.6 s, every vector the CPU's (worst cosine 0.99999). The MLX and GGUF
+profiles (`mlx_models`, `gguf_models`) reach the same GPU faster still, for the models they hold.
 
 CoreML runs only when the settings ask for it (`Accelerator.COREML`), and only for a model it was
 measured to run (`hardware.COREML_RUNS`): none of today's catalogue. It runs a transformer on the
@@ -61,7 +61,7 @@ PREFERENCE = (
     "TensorrtExecutionProvider",
     "CUDAExecutionProvider",
     "ROCMExecutionProvider",
-    onnx_models.WEBGPU,  # Metal on Apple Silicon, through ONNX Runtime's WebGPU build
+    onnx_models.WEBGPU,  # Metal on Apple Silicon, through ONNX Runtime's WebGPU plugin
     "CPUExecutionProvider",
 )
 
@@ -83,19 +83,9 @@ def with_options(names: list[str], model_cache: str) -> list[Provider]:
     ]
 
 
-@cache
 def onnx_runtime() -> Any:
-    """ONNX Runtime, with its telemetry off. Every path to it goes through here first: a model is
-    built on the providers this answers (`model_providers`), so it is never imported before.
-
-    Its telemetry (Microsoft's 1DS SDK) uploads usage events from a thread of its own, and a
-    process that exits mid-upload crashes in that thread: `recursive_mutex lock failed`, or a
-    segmentation fault (macOS crash reports of the test workers: 4 of 6 runs; none of 8 with it
-    off). A local app has no business sending them either."""
-    import onnxruntime
-
-    onnxruntime.disable_telemetry_events()
-    return onnxruntime
+    """ONNX Runtime, set up (`onnx_models.runtime`). Every path to it goes through there first."""
+    return onnx_models.runtime()
 
 
 @cache

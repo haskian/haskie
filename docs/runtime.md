@@ -62,9 +62,9 @@ Sync IO runs in worker threads wherever a library has no async form. The main ca
 
 ONNX Runtime holds the global interpreter lock (GIL) while it builds a session. Every request
 waits for as long as the build takes, which can be seconds. haskie runs its ONNX models itself
-(`indexing/onnx_models.py`), so it can install the ONNX Runtime build each platform needs: CUDA
-on Linux, which runs on an NVIDIA GPU or else the CPU, and WebGPU on Apple Silicon, which reaches
-its GPU through Metal at about twice the CPU's speed, with the same vectors. Some models also have
+(`indexing/onnx_models.py`) on the ONNX Runtime build each platform needs: CUDA on Linux, which
+runs on an NVIDIA GPU or else the CPU, and on Apple Silicon the standard build with the WebGPU
+plugin, which reaches its GPU through Metal at about twice the CPU's speed, with the same vectors. Some models also have
 an MLX profile (`indexing/mlx_models.py`, the `-mlx` profiles) or a GGUF one on llama.cpp
 (`indexing/gguf_models.py`, the `-gguf` profiles), faster again on that GPU. Both load a model in
 under a second and release the GIL while they compute. llama.cpp's first load on a machine also

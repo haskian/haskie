@@ -3931,19 +3931,49 @@ def test_an_nvidia_provider_whose_library_is_missing_does_not_load(tmp_path: Pat
         embed.nvidia_loads.cache_clear()
 
 
-def test_onnx_runtime_comes_with_its_telemetry_off_once(monkeypatch) -> None:
-    """Its telemetry thread crashed processes exiting mid-upload (`embed.onnx_runtime`)."""
+@pytest.mark.parametrize(
+    ("name", "plugin", "expected"),
+    [
+        ("telemetry off, once per process", False, ["off"]),
+        (
+            "and the WebGPU plugin registered where it is installed",
+            True,
+            ["off", "register webgpu /lib/webgpu.dylib"],
+        ),
+    ],
+)
+def test_onnx_runtime_comes_with_its_telemetry_off_once(
+    name: str, plugin: bool, expected: list[str], monkeypatch
+) -> None:
+    """Its telemetry thread crashed processes exiting mid-upload (`onnx_models.runtime`)."""
+    import importlib.util
+
     calls: list[str] = []
-    stand_in = types.SimpleNamespace(disable_telemetry_events=lambda: calls.append("off"))
+    stand_in = types.SimpleNamespace(
+        disable_telemetry_events=lambda: calls.append("off"),
+        register_execution_provider_library=lambda key, path: calls.append(
+            f"register {key} {path}"
+        ),
+    )
+    webgpu = types.SimpleNamespace(get_library_path=lambda: "/lib/webgpu.dylib")
     monkeypatch.setitem(sys.modules, "onnxruntime", stand_in)
-    embed.onnx_runtime.cache_clear()
+    monkeypatch.setitem(sys.modules, "onnxruntime_ep_webgpu", webgpu)
+    found = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda module: (
+            (object() if plugin else None) if module == "onnxruntime_ep_webgpu" else found(module)
+        ),
+    )
+    onnx_models.runtime.cache_clear()
     try:
         assert embed.onnx_runtime() is stand_in
         assert embed.onnx_runtime() is stand_in
     finally:
-        embed.onnx_runtime.cache_clear()
+        onnx_models.runtime.cache_clear()
 
-    assert calls == ["off"], "once per process"
+    assert calls == expected, name
 
 
 @pytest.mark.parametrize(

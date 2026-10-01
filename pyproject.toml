@@ -16,11 +16,11 @@ dependencies = [
     "pypdf>=5.0.0",
     # One ONNX Runtime build per platform, never two: each ships the `onnxruntime` package, so
     # whichever installs last overwrites the other's files. Linux takes the CUDA build, which runs
-    # on the CPU where no NVIDIA GPU is; Apple Silicon the WebGPU build, which reaches its GPU
-    # through Metal (`indexing/onnx_models.py`). Nothing else may depend on `onnxruntime`, which is
-    # why haskie runs its ONNX models itself rather than through fastembed.
-    "onnxruntime-gpu>=1.27 ; sys_platform != 'darwin'",
-    "onnxruntime-webgpu>=1.27 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # on the CPU where no NVIDIA GPU is. Apple Silicon takes the standard build with the WebGPU
+    # plugin beside it, which reaches its GPU through Metal (`indexing/onnx_models.py`).
+    "onnxruntime-gpu>=1.30 ; sys_platform != 'darwin'",
+    "onnxruntime>=1.30 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "onnxruntime-ep-webgpu>=0.4 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
     # Intel Macs: 1.23 is the last release with a macOS x86_64 wheel
     "onnxruntime>=1.23,<1.24 ; sys_platform == 'darwin' and platform_machine != 'arm64'",
     "tokenizers>=0.21",

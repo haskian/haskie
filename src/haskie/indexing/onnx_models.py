@@ -1,12 +1,15 @@
 """The ONNX models, run on ONNX Runtime directly: embedders, pooled as each model asks, and
 cross-encoders, scored by the export or by a head of its own.
 
-fastembed ran them once, but it depends on the `onnxruntime` package, and Apple Silicon needs the
-WebGPU build in its place (`pyproject.toml`): two builds of one package overwrite each other. The
-loading is little enough to own. Each model's files come at the revision pinned here, as real
-files in one directory: ONNX Runtime refuses an external-data file (`model.onnx_data`) that
-resolves outside the model's own directory, and the Hugging Face cache keeps every file as a link
-into a blob store elsewhere.
+fastembed ran them once. The loading is little enough to own, and owning it lets each model be
+pinned, padded, cut and pooled as it asks: Ettin's head, F2LLM's last-token pooling, gte's fixed
+padding. Each model's files come at the revision pinned here, as real files in one directory:
+ONNX Runtime refuses an external-data file (`model.onnx_data`) that resolves outside the model's
+own directory, and the Hugging Face cache keeps every file as a link into a blob store elsewhere.
+
+On Apple Silicon the GPU is reached through ONNX Runtime's WebGPU plugin (`onnxruntime-ep-webgpu`,
+beside the standard package), which runs on Metal. `runtime` registers it, and a session takes it
+by device.
 
 Every export was checked against sentence-transformers on the original weights: worst cosine
 0.9996 for the embedders, reranker scores within 1e-5. On the WebGPU provider each gave the
@@ -23,12 +26,14 @@ pairs).
 """
 
 import contextlib
+import importlib.util
 import json
 import math
 import struct
 import threading
 from collections.abc import Iterator, Sequence
 from enum import StrEnum
+from functools import cache
 from itertools import batched
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -135,14 +140,51 @@ def _download(repo: str, revision: str, files: Sequence[str]) -> Path:
     return target
 
 
+@cache
+def runtime() -> Any:
+    """ONNX Runtime, with its telemetry off and the WebGPU plugin registered where it is
+    installed. Every path to it goes through here first, a session included.
+
+    Its telemetry (Microsoft's 1DS SDK) uploads usage events from a thread of its own, and a
+    process that exits mid-upload crashes in that thread: `recursive_mutex lock failed`, or a
+    segmentation fault (macOS crash reports of the test workers: 4 of 6 runs; none of 8 with it
+    off). A local app has no business sending them either."""
+    import onnxruntime
+
+    onnxruntime.disable_telemetry_events()
+    if importlib.util.find_spec("onnxruntime_ep_webgpu") is not None:
+        import onnxruntime_ep_webgpu
+
+        # a plugin: its provider is listed once registered, and a session takes it by device
+        onnxruntime.register_execution_provider_library(
+            "webgpu", onnxruntime_ep_webgpu.get_library_path()
+        )
+    return onnxruntime
+
+
 class _Session:
     """One model's ONNX session and tokenizer, fed what its export asks for."""
 
     def __init__(self, path: Path, model_file: str, providers: list, tokens: int):
-        import onnxruntime
         from tokenizers import Tokenizer
 
-        self._session = onnxruntime.InferenceSession(str(path / model_file), providers=providers)
+        onnxruntime = runtime()
+        model = str(path / model_file)
+        wants_webgpu = bool(providers) and providers[0] == WEBGPU
+        devices = (
+            [one for one in onnxruntime.get_ep_devices() if one.ep_name == WEBGPU]
+            if wants_webgpu
+            else []
+        )
+        if devices:
+            # a plugin provider is taken by device: a `providers` list leaves it out unannounced
+            options = onnxruntime.SessionOptions()
+            options.log_severity_level = 3  # it warns of every node it leaves to the CPU
+            options.add_provider_for_devices(devices, {})
+            self._session = onnxruntime.InferenceSession(model, sess_options=options)
+        else:
+            others = [one for one in providers if one != WEBGPU]
+            self._session = onnxruntime.InferenceSession(model, providers=others)
         self._inputs = {one.name for one in self._session.get_inputs()}
         outputs = [one.name for one in self._session.get_outputs()]
         self._output = "last_hidden_state" if "last_hidden_state" in outputs else outputs[0]

@@ -48,6 +48,7 @@ class Session:
     ) -> None:
         self.inputs, self.outputs = inputs, outputs
         self.providers = providers or ["CPUExecutionProvider"]
+        self.options: Any = None  # what a session given its plugin device was built with
         self.feeds: list[dict[str, np.ndarray]] = []
 
     def get_providers(self) -> list[str]:
@@ -72,13 +73,40 @@ def session(monkeypatch: pytest.MonkeyPatch) -> list[Session]:
     """Every session built, in order, each declaring BERT's three inputs and token states."""
     built: list[Session] = []
 
-    def build(path: str, providers: list) -> Session:
+    def build(path: str, providers: list | None = None, sess_options: Any = None) -> Session:
         inputs = ["input_ids", "attention_mask", "token_type_ids"]
-        built.append(Session(inputs, ["last_hidden_state"], providers))
+        # a session given its plugin device runs on it first, as ONNX Runtime orders it
+        taken = [onnx_models.WEBGPU, "CPUExecutionProvider"] if sess_options else providers
+        built.append(Session(inputs, ["last_hidden_state"], taken))
+        built[-1].options = sess_options
         return built[-1]
 
     monkeypatch.setattr(onnxruntime, "InferenceSession", build)
     return built
+
+
+class Options:
+    """`onnxruntime.SessionOptions` as `_Session` sets it: the devices it was given."""
+
+    def __init__(self) -> None:
+        self.devices: list[Any] = []
+        self.log_severity_level = 2
+
+    def add_provider_for_devices(self, devices: list[Any], options: dict) -> None:
+        self.devices = devices
+
+
+def _device(ep_name: str) -> Any:
+    return type("Device", (), {"ep_name": ep_name})()
+
+
+@pytest.fixture
+def plugin(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """The WebGPU plugin registered, with one device, beside a device of another provider."""
+    devices = [_device("CPUExecutionProvider"), _device(onnx_models.WEBGPU)]
+    monkeypatch.setattr(onnxruntime, "get_ep_devices", lambda: devices, raising=False)
+    monkeypatch.setattr(onnxruntime, "SessionOptions", Options)
+    return devices
 
 
 def _unit(*ids: float) -> list[float]:
@@ -143,7 +171,9 @@ def test_a_session_is_fed_what_its_export_asks_for(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stand_in = Session(inputs, outputs)
-    monkeypatch.setattr(onnxruntime, "InferenceSession", lambda path, providers: stand_in)
+    monkeypatch.setattr(
+        onnxruntime, "InferenceSession", lambda path, providers=None, sess_options=None: stand_in
+    )
     model = onnx_models._Session(_tokenizer_file(tmp_path), "m.onnx", [], 16)
     asked: list[list[str]] = []
     run = stand_in.run
@@ -198,6 +228,38 @@ def test_a_pair_cuts_its_longer_side_first(
     assert len(words) == 9 and words[0] == "[CLS]" and words[-1] == "[SEP]", name
 
 
+@pytest.mark.parametrize(
+    ("name", "devices", "expected"),
+    [
+        ("asked for WebGPU: the plugin's device, not a providers list", True, "device"),
+        ("asked for WebGPU with no plugin device: the CPU, quietly", False, "providers"),
+    ],
+)
+def test_webgpu_is_taken_by_device(
+    name: str,
+    devices: bool,
+    expected: str,
+    tmp_path: Path,
+    session: list[Session],
+    plugin: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin provider in a `providers` list is dropped without a word (measured), so the
+    session takes it by device; where none is, it leaves WebGPU out of the list."""
+    if not devices:
+        monkeypatch.setattr(onnxruntime, "get_ep_devices", lambda: [], raising=False)
+
+    onnx_models._Session(_tokenizer_file(tmp_path), "m.onnx", [onnx_models.WEBGPU, "CPU"], 16)
+
+    (built,) = session
+    if expected == "device":
+        assert [one.ep_name for one in built.options.devices] == [onnx_models.WEBGPU], name
+        assert built.options.log_severity_level == 3, "its CPU-fallback warnings kept quiet"
+    else:
+        assert built.options is None and built.providers == ["CPU"], name
+
+
+@pytest.mark.usefixtures("plugin")
 def test_every_webgpu_session_shares_one_lock_and_a_cpu_session_takes_none(
     tmp_path: Path, session: list[Session]
 ) -> None:
@@ -274,7 +336,9 @@ def test_a_cross_encoder_answers_the_exports_logit_per_pair(
     pinned: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     stand_in = Session(["input_ids", "attention_mask"], ["logits"])
-    monkeypatch.setattr(onnxruntime, "InferenceSession", lambda path, providers: stand_in)
+    monkeypatch.setattr(
+        onnxruntime, "InferenceSession", lambda path, providers=None, sess_options=None: stand_in
+    )
     reranker = onnx_models.CrossEncoder("test/reranker", [])
 
     scores = reranker.rerank("retry", ["the call", "jitter"])
