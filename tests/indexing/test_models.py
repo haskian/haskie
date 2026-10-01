@@ -348,11 +348,12 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
         (
             "descriptors an llm writes",
             UserSettings(
-                embedding="compact", pipeline=PipelineSettings(descriptors=Descriptors.LLM)
+                embedding="granite-97m-multilingual",
+                pipeline=PipelineSettings(descriptors=Descriptors.LLM),
             ),
             [],
             [
-                ("embedding", "BAAI/bge-small-en-v1.5"),
+                ("embedding", "ibm-granite/granite-embedding-97m-multilingual-r2"),
                 ("describer", "ggml-org/gemma-4-E2B-it-GGUF"),
             ],
         ),

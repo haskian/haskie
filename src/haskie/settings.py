@@ -239,11 +239,11 @@ TASK_TIMEOUT = Meta(
 ACCELERATOR = Meta(
     title="Model hardware",
     description=(
-        "Device for the embedding and reranker models. auto: CUDA on Linux with an NVIDIA "
-        "GPU, WebGPU on Apple Silicon, else CPU; the MLX and GGUF models run on the Apple GPU. "
-        "cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. coreml: run "
-        "ONNX models through CoreML on Apple Silicon, only those it was measured to run (none "
-        "today), the rest on the CPU."
+        "Device for the embedding, reranker and descriptor models. auto: CUDA on Linux with an "
+        "NVIDIA GPU, WebGPU on Apple Silicon, else CPU; the MLX and GGUF models run on the Apple "
+        "GPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. coreml: "
+        "run ONNX models through CoreML on Apple Silicon, only those it was measured to run "
+        "(none today), the rest on the CPU."
     ),
 )
 DESCRIPTORS = Meta(

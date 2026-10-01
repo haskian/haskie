@@ -831,7 +831,7 @@ export interface components {
     schemas: {
         /**
          * Accelerator
-         * @description Device for the embedding, reranker and descriptor models. auto: CUDA on Linux with an NVIDIA GPU, else CPU. On Apple Silicon, the MLX and GGUF models run on the GPU, and auto runs the rest on the CPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. coreml: run ONNX models through CoreML on Apple Silicon; today that is slower than the CPU for them.
+         * @description Device for the embedding, reranker and descriptor models. auto: CUDA on Linux with an NVIDIA GPU, WebGPU on Apple Silicon, else CPU; the MLX and GGUF models run on the Apple GPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. coreml: run ONNX models through CoreML on Apple Silicon, only those it was measured to run (none today), the rest on the CPU.
          * @default auto
          * @enum {string}
          */
@@ -1083,7 +1083,8 @@ export interface components {
             query_prefix: string;
             /** @default  */
             document_prefix: string;
-            matryoshka?: components["schemas"]["Matryoshka"] | null;
+            /** @default false */
+            matryoshka: boolean;
         };
         /** Entry */
         Entry: {
@@ -1420,11 +1421,6 @@ export interface components {
         /** Markdown */
         Markdown: {
             markdown: string;
-        };
-        /** Matryoshka */
-        Matryoshka: {
-            /** @default false */
-            layer_norm: boolean;
         };
         /** Member */
         Member: {
@@ -2014,7 +2010,7 @@ export interface components {
             /**
              * Reranker model
              * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded as soon as it is chosen; a search that needs it is refused until the download finishes.
-             * @default Xenova/ms-marco-MiniLM-L-6-v2
+             * @default cross-encoder/ettin-reranker-32m-v1
              */
             reranker_model: string;
             /**
