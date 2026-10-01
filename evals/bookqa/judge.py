@@ -24,7 +24,7 @@ from evals.bookqa.qrels import Judgment
 from evals.bookqa.schema import Record
 
 HERE = Path(__file__).resolve().parent
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"  # v2: a 2 needs the specific fact asked for
 
 
 class JudgeError(RuntimeError):
@@ -103,6 +103,17 @@ def judge(
     return made
 
 
+def stale_split(
+    judgments: list[Judgment], regrade: set[int]
+) -> tuple[list[Judgment], list[Judgment]]:
+    """The judgments to keep, and the ones to grade again: those of a grade in `regrade` given
+    under a prompt version other than this one. A stale one stays in the file until its new grade
+    replaces it, so an interrupted pass loses nothing and grades the rest next time."""
+    stale = [j for j in judgments if j.grade in regrade and j.prompt_version != PROMPT_VERSION]
+    dropped = {(j.id, j.key) for j in stale}
+    return [j for j in judgments if (j.id, j.key) not in dropped], stale
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("outcomes", nargs="+", type=Path, help="outcomes.jsonl of one or more runs")
@@ -110,6 +121,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--judgments", type=Path, default=qrels.JUDGMENTS)
     parser.add_argument("--model", default=os.environ.get("BOOKQA_JUDGE_MODEL", "opus"))
     parser.add_argument("--dry-run", action="store_true", help="count what would be graded")
+    parser.add_argument(
+        "--regrade",
+        type=int,
+        action="append",
+        default=[],
+        metavar="GRADE",
+        help="grade again the passages given GRADE under an older prompt version (repeatable)",
+    )
     args = parser.parse_args(argv)
     records, broken = schema.load(args.dataset)
     if broken:
@@ -122,14 +141,16 @@ def main(argv: list[str] | None = None) -> int:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line
     ]
-    known = qrels.load(args.judgments)
+    known, stale = stale_split(qrels.load(args.judgments), set(args.regrade))
     made: list[Judgment] = []
     try:
         for record in records:  # one question per call, saved as it goes: a failure keeps the rest
             new = judge([record], outcomes, [*known, *made], args.model, dry_run=args.dry_run)
             if new:
                 made += new
-                args.judgments.write_text(qrels.dump([*known, *made]), encoding="utf-8")
+                regraded = {(j.id, j.key) for j in made}
+                waiting = [j for j in stale if (j.id, j.key) not in regraded]
+                args.judgments.write_text(qrels.dump([*known, *made, *waiting]), encoding="utf-8")
     except (JudgeError, generate.GenerationError) as error:
         print(f"stopped: {error}", file=sys.stderr)
         return 1

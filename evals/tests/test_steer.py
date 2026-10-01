@@ -136,11 +136,10 @@ def test_arms_g_and_h_are_told_nothing_of_haskie_but_have_its_tools(arm: str) ->
 
 
 def test_only_arm_h_gets_a_hook_and_it_runs_the_steering_module() -> None:
-    assert all(run.hook_settings(arm, "http://x", "c") is None for arm in "abcdefg")
+    assert all("hooks" not in run.agent_settings(arm, "http://x", "c") for arm in "abcdefgi")
 
-    settings = run.hook_settings("h", "http://127.0.0.1:8123", "eval-synth-s1-n500")
+    settings = run.agent_settings("h", "http://127.0.0.1:8123", "eval-synth-s1-n500")
 
-    assert settings is not None
     (entry,) = settings["hooks"]["UserPromptSubmit"]
     (hook,) = entry["hooks"]
     assert hook["type"] == "command"
@@ -173,3 +172,39 @@ def test_arm_i_gets_haskies_own_rule_and_skill_naming_the_collection_as_describe
     assert rule.read_text().startswith(claude.template("rules/haskie.md").split("{topics}")[0])
     assert "name: haskie" in skill.read_text()
     assert "haskie" not in run.prompt_for(TASK, "i", "books").lower(), "told only by the rule"
+
+
+@pytest.mark.parametrize("arm", ["a", "b", "d", "h", "i"])
+def test_every_arm_is_denied_the_answers_and_has_its_shell_sandboxed(arm: str) -> None:
+    settings = run.agent_settings(arm, "http://x", "c")
+    denied = settings["permissions"]["deny"]
+
+    assert settings["sandbox"] == {"enabled": True}, "a shell honours the denials only sandboxed"
+    for place in ("evals/tasks/**", "evals/synth/**", "evals/corpus/**", "evals/runs/**"):
+        assert any(rule.endswith(f"{place})") for rule in denied), place
+    assert any(rule.endswith("NOTES.md)") for rule in denied)
+    assert all(rule.startswith("Read(//") for rule in denied), "absolute paths in rule syntax"
+    assert not any(".haskie-eval" in rule for rule in denied), "haskie's own documents stay open"
+
+
+def test_agents_run_without_auto_memory() -> None:
+    assert run.subprocess_environment()["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+
+
+def test_an_agent_works_outside_the_home_and_its_work_comes_back_to_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs, scratch = tmp_path / "runs", tmp_path / "scratch"
+    monkeypatch.setattr(run, "RUNS", runs)
+    monkeypatch.setattr(run, "WORK_ROOT", scratch)
+    directory = runs / "sonnet" / "b" / "task" / "0"
+    directory.mkdir(parents=True)
+
+    real = run.scratch_work(directory)
+    (directory / "work" / "answers.py").write_text("X = 1\n")
+
+    assert real == scratch / "sonnet" / "b" / "task" / "0"
+    assert (directory / "work").resolve() == real.resolve(), "the agent's cwd resolves outside"
+    run.keep_work(directory)
+    assert not (directory / "work").is_symlink() and not real.exists()
+    assert (directory / "work" / "answers.py").read_text() == "X = 1\n"

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import msgspec
 
-from evals.bookqa import metrics, qrels
+from evals.bookqa import metrics, qrels, schema
 from evals.bookqa.metrics import K, Outcome
 
 ANSWERABLE = ["n", *(f"R@{k}" for k in K), "MRR", "nDCG@10", "doc@10", "empty", "kB", "ms p50"]
@@ -141,12 +141,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("outcomes", type=Path, help="a run's outcomes.jsonl")
     parser.add_argument("--judgments", type=Path, default=qrels.JUDGMENTS)
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=Path(__file__).resolve().parent / "dataset.jsonl",
+        help="score only the questions still in it: a record removed since the run drops out",
+    )
     args = parser.parse_args(argv)
     decoder = msgspec.json.Decoder(Outcome)
     lines = args.outcomes.read_text(encoding="utf-8").splitlines()
-    text = render(
-        [decoder.decode(line) for line in lines if line], qrels.grades(qrels.load(args.judgments))
-    )
+    current = {record.id for record in schema.load(args.dataset)[0]}
+    outcomes = [o for o in (decoder.decode(line) for line in lines if line) if o.id in current]
+    text = render(outcomes, qrels.grades(qrels.load(args.judgments)))
     target = args.outcomes.with_name("report.md")
     target.write_text(text, encoding="utf-8")
     print(text)

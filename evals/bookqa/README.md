@@ -161,6 +161,13 @@ Grades land in `judgments.jsonl`, which is versioned beside the dataset. A passa
 its document and text, so another mode or a later run finds its grade. Running the judge again
 grades only what is new.
 
+A new prompt version (`PROMPT_VERSION`, `prompts/judge-vN.md`) does not regrade on its own.
+`--regrade GRADE` asks again only about the passages given that grade under an older version. For
+example, `--regrade 2` re-checks every "answers it" grade against v2's stricter rule: a 2 needs
+the specific fact asked for, and a vague or caption-only passage is a 1. Re-rendering a report
+scores only the questions still in `dataset.jsonl`, so a record removed after review drops out of
+old runs too.
+
 With judgments, reports add these metrics:
 
 - **S@1/5/10**: a grade-2 passage in the top k;

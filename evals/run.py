@@ -43,12 +43,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from evals import metrics, setup, synth
+from evals import metrics, scope, setup, synth
 from evals.report import write_report
 from evals.setup import CORPUS_DIR
 
@@ -149,7 +150,41 @@ NESTED_SESSION_VARS = (
 
 
 def subprocess_environment() -> dict[str, str]:
-    return {k: v for k, v in os.environ.items() if k not in NESTED_SESSION_VARS}
+    """This environment without this session's own variables, and with Claude Code's auto memory
+    off: run from inside this repository, an agent otherwise loads the memory of whoever works
+    on it - notes about them, and how they like haskie used - into every arm alike."""
+    env = {k: v for k, v in os.environ.items() if k not in NESTED_SESSION_VARS}
+    return env | {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+
+
+# Where an agent actually works: outside the home directory, so no `CLAUDE.md` of a directory above
+# it (the user's own `~/.claude/CLAUDE.md` among them) reaches the agent. The run's own `work/`
+# links here while the agent runs, and becomes the directory itself afterwards (`keep_work`).
+WORK_ROOT = Path(
+    os.environ.get("EVAL_WORK_ROOT") or Path(tempfile.gettempdir()) / "haskie-eval-work"
+)
+
+
+def scratch_work(directory: Path) -> Path:
+    """A fresh working directory for the run at `directory`, under `WORK_ROOT`, linked from
+    `directory / "work"`. The agent's cwd resolves to it, so Claude Code reads its instructions
+    from there up, not from this repository up."""
+    real = WORK_ROOT / directory.resolve().relative_to(RUNS.resolve())
+    if real.exists():
+        shutil.rmtree(real)
+    real.mkdir(parents=True)
+    (directory / "work").symlink_to(real, target_is_directory=True)
+    return real
+
+
+def keep_work(directory: Path) -> None:
+    """Move the agent's work back under the run, in place of the link: a temp directory may be
+    gone by the time someone reads the run again."""
+    link = directory / "work"
+    if link.is_symlink():
+        real = link.resolve()
+        link.unlink()
+        shutil.move(real, link)
 
 
 def prompt_for(task: Task, arm: str, collection: str) -> str:
@@ -180,17 +215,41 @@ def prompt_for(task: Task, arm: str, collection: str) -> str:
     return f"{header}{task.prompt}{haskie_note}"
 
 
-def hook_settings(arm: str, api: str, collection: str) -> dict | None:
-    """The settings `--settings` hands arm H: its steering hook. None for every other arm, which
-    gets no `--settings` at all. A hook loaded this way fires in print mode, beside
-    `--setting-sources project`."""
-    if arm != "h":
-        return None
-    command = (
-        f"PYTHONPATH={shlex.quote(str(ROOT.parent))} {shlex.quote(sys.executable)} -m evals.steer "
-        f"--api {shlex.quote(api)} --collection {shlex.quote(collection)}"
-    )
-    return {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": command}]}]}}
+def denied_reads() -> list[str]:
+    """Permission rules for every place an agent could read an answer from rather than find it:
+    the graders and task metadata, the generated corpora, other runs, the eval's own notes and
+    results, and the Claude Code transcripts of whoever works on this repository. "Work only in
+    the current directory" is an instruction; a stuck agent greps the disk (one read a task's
+    `meta.json` and passed). haskie's own document stores stay readable: search results disclose
+    those paths, and opening one is haskie working as designed, scored by `metrics.behaviour`.
+    """
+    repo = ROOT.parent
+    config = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    project = "-" + str(repo).strip("/").replace("/", "-")  # how Claude Code names its folder
+    folders = [ROOT / "tasks", ROOT / "synth", ROOT / "corpus", ROOT / "bookqa", ROOT / "runs"]
+    folders += sorted(ROOT.glob("runs.*"))
+    files = [ROOT / "synth.py", ROOT / "results.md", repo / "NOTES.md"]
+    rules = [f"Read(/{folder}/**)" for folder in folders]
+    rules += [f"Read(/{file})" for file in files]
+    rules.append(f"Read(/{config}/projects/{project}*/**)")
+    scratch = Path("/private/tmp") / f"claude-{os.getuid()}"  # Claude Code's session scratchpads
+    rules.append(f"Read(/{scratch}/**)")
+    return rules
+
+
+def agent_settings(arm: str, api: str, collection: str) -> dict:
+    """The settings `--settings` hands every arm: the reads it is denied, with Bash sandboxed so
+    the denials hold for a shell too (`cat`, `grep -r ~`), and for arm H its steering hook. A hook
+    loaded this way fires in print mode, beside `--setting-sources project`."""
+    settings: dict = {"permissions": {"deny": denied_reads()}, "sandbox": {"enabled": True}}
+    if arm == "h":
+        command = (
+            f"PYTHONPATH={shlex.quote(str(ROOT.parent))} {shlex.quote(sys.executable)} "
+            f"-m evals.steer --api {shlex.quote(api)} --collection {shlex.quote(collection)}"
+        )
+        hook = {"type": "command", "command": command}
+        settings["hooks"] = {"UserPromptSubmit": [{"hooks": [hook]}]}
+    return settings
 
 
 def install_haskie(work: Path, api: str, collection: str) -> list[Path]:
@@ -226,20 +285,27 @@ AUTH_RETRY_ATTEMPTS = 3
 
 
 def run_agent(task: Task, arm: str, directory: Path, model: str, api: str, collection: str) -> int:
+    """The agent's run. An unprompted arm reaches haskie through `scope.Proxy`, which shows it
+    the task's collection alone: told no collection, it would otherwise search every task's."""
+    if arm not in UNMENTIONED_ARMS:
+        endpoint = f"{api.rstrip('/')}/mcp"
+        return _run_agent(task, arm, directory, model, api, collection, endpoint)
+    with scope.Proxy(api, collection) as proxy:
+        return _run_agent(task, arm, directory, model, api, collection, proxy.url)
+
+
+def _run_agent(
+    task: Task, arm: str, directory: Path, model: str, api: str, collection: str, endpoint: str
+) -> int:
     work = directory / "work"
     work.mkdir(parents=True, exist_ok=True)
     mcp = directory / "mcp.json"
-    servers = (
-        {"haskie": {"type": "http", "url": f"{api.rstrip('/')}/mcp"}} if arm in HASKIE_ARMS else {}
-    )
+    servers = {"haskie": {"type": "http", "url": endpoint}} if arm in HASKIE_ARMS else {}
     mcp.write_text(json.dumps({"mcpServers": servers}, indent=2) + "\n")
     if arm == "i":
         install_haskie(work, api, collection)
-    extra: list[str] = []
-    if (hooks := hook_settings(arm, api, collection)) is not None:
-        settings = directory / "settings.json"  # outside `work/`: the agent works only in there
-        settings.write_text(json.dumps(hooks, indent=2) + "\n")
-        extra = ["--settings", str(settings.resolve())]
+    settings = directory / "settings.json"  # outside `work/`, among the reads it is denied
+    settings.write_text(json.dumps(agent_settings(arm, api, collection), indent=2) + "\n")
 
     for attempt in range(1, AUTH_RETRY_ATTEMPTS + 1):
         argv = [
@@ -254,7 +320,8 @@ def run_agent(task: Task, arm: str, directory: Path, model: str, api: str, colle
             "--strict-mcp-config",
             "--mcp-config",
             str(mcp.resolve()),
-            *extra,
+            "--settings",
+            str(settings.resolve()),
             "--allowedTools",
             *allowed_tools(arm),
             "--model",
@@ -413,6 +480,7 @@ def run_one(
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir(parents=True)
+    scratch_work(directory)
     # A copy, not a hardlink: an agent editing a corpus file in place would otherwise rewrite the
     # shared original under every later run. Removed afterwards so 30 runs don't hold 30 copies.
     corpus = directory / "work" / "corpus"
@@ -426,6 +494,7 @@ def run_one(
     seconds = time.monotonic() - started
     if arm == "d":
         shutil.rmtree(corpus)
+    keep_work(directory)
     doc_root = home / "documents"
     return grade(task, arm, directory, returncode, doc_root, seconds, model)
 
