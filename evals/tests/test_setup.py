@@ -55,6 +55,11 @@ class FakeServer:
                 collection = path.removeprefix("/api/collections/").removesuffix("/documents")
                 self.documents[body["document"]]["in_collections"].append(collection)
                 return {}
+        if method == "PUT" and path.endswith("/description"):
+            assert body is not None, f"PUT {path} with no body"
+            collection = path.removeprefix("/api/collections/").removesuffix("/description")
+            self.collections[collection]["description"] = body["description"]
+            return {}
         if method == "PUT" and path.endswith("/overrides"):
             assert body is not None, f"PUT {path} with no body"
             collection = path.removeprefix("/api/collections/").removesuffix("/overrides")
@@ -93,12 +98,24 @@ def test_ensure_collection_creates_only_when_missing(monkeypatch) -> None:
 
 
 def test_ensure_collection_skips_the_write_when_it_already_exists(monkeypatch) -> None:
-    server = FakeServer(collections={"books": {"name": "books"}})
+    server = FakeServer(collections={"books": {"name": "books", "description": "desc"}})
     _install(monkeypatch, server)
 
     setup.ensure_collection("books", "desc", "http://x")
 
-    assert not _posts(server)
+    assert [call for call in server.calls if call[0] != "GET"] == []
+
+
+def test_ensure_collection_rewrites_a_stale_description(monkeypatch) -> None:
+    server = FakeServer(collections={"books": {"name": "books", "description": "old"}})
+    _install(monkeypatch, server)
+
+    setup.ensure_collection("books", "new", "http://x")
+
+    assert [call for call in server.calls if call[0] != "GET"] == [
+        ("PUT", "/api/collections/books/description", {"description": "new"})
+    ]
+    assert server.collections["books"]["description"] == "new"
 
 
 def test_import_all_adopts_an_existing_document_without_reimporting(

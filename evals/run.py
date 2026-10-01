@@ -26,6 +26,11 @@ would be - it measures whether the agent reaches for the library unprompted. H i
 `UserPromptSubmit` hook (`steer.py`) that searches haskie with the prompt and puts the best few
 passages in front of the agent: steering on every prompt, with no tool call to think of making.
 G vs B is what the hint in B's prompt was worth; H vs G is what steering is.
+
+Arm I is G as a user who ran `haskie install claude` has it: the rule and the skill haskie writes
+into Claude Code (`haskie.claude.render_rule`, `render_skill`), rendered for the collection the task
+searches and put in the agent's project `.claude/`. The MCP tool descriptions say what each tool
+does; the always-loaded rule says when to reach for haskie at all. I vs G is what that is worth.
 """
 
 from __future__ import annotations
@@ -70,10 +75,10 @@ HASKIE_TOOLS = (
 # Deliberately left out: `list_searches` and `list_gaps` show other sessions' searches and near
 # misses - in an eval instance, earlier runs of the same task, citing its answer. `review_gaps` and
 # `replay_gaps` curate collections; an agent answering a task has no use for them.
-ARMS = ("a", "b", "c", "d", "e", "f", "g", "h")
-HASKIE_ARMS = ("b", "c", "e", "f", "g", "h")
-DEFAULT_ARMS = ("a", "b", "c", "d", "e", "f")  # G and H run when named: `--arms g h`
-UNMENTIONED_ARMS = ("g", "h")  # haskie connected, but the prompt says nothing of it
+ARMS = ("a", "b", "c", "d", "e", "f", "g", "h", "i")
+HASKIE_ARMS = ("b", "c", "e", "f", "g", "h", "i")
+DEFAULT_ARMS = ("a", "b", "c", "d", "e", "f")  # G, H and I run when named: `--arms g h i`
+UNMENTIONED_ARMS = ("g", "h", "i")  # haskie connected, but the prompt says nothing of it
 BOOK_TASKS = (
     "mlfq_priority",
     "reusable_barrier",
@@ -188,6 +193,26 @@ def hook_settings(arm: str, api: str, collection: str) -> dict | None:
     return {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": command}]}]}}
 
 
+def install_haskie(work: Path, api: str, collection: str) -> list[Path]:
+    """Arm I's `.claude/`: haskie's rule and skill as `haskie install claude --scope project`
+    writes them, rendered by haskie's own code for `collection` as the instance describes it."""
+    from haskie import claude
+    from haskie.collection.collection import CollectionSummary, DocumentCounts
+
+    info = setup.call("GET", f"/api/collections/{collection}", api)
+    summary = CollectionSummary(collection, DocumentCounts(), 0.0, info.get("description", ""))
+    written = []
+    for relative, text in (
+        (f"rules/{claude.SKILL_NAME}.md", claude.render_rule([summary])),
+        (f"skills/{claude.SKILL_NAME}/SKILL.md", claude.render_skill([summary])),
+    ):
+        target = work / ".claude" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        written.append(target)
+    return written
+
+
 def allowed_tools(arm: str) -> list[str]:
     return [*CODING_TOOLS, *(HASKIE_TOOLS if arm in HASKIE_ARMS else ())]
 
@@ -208,6 +233,8 @@ def run_agent(task: Task, arm: str, directory: Path, model: str, api: str, colle
         {"haskie": {"type": "http", "url": f"{api.rstrip('/')}/mcp"}} if arm in HASKIE_ARMS else {}
     )
     mcp.write_text(json.dumps({"mcpServers": servers}, indent=2) + "\n")
+    if arm == "i":
+        install_haskie(work, api, collection)
     extra: list[str] = []
     if (hooks := hook_settings(arm, api, collection)) is not None:
         settings = directory / "settings.json"  # outside `work/`: the agent works only in there

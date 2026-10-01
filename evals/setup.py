@@ -29,7 +29,12 @@ CORPUS_DIR = ROOT / "corpus"  # downloaded PDFs live here, never under the proje
 DEFAULT_HOME = ROOT / ".haskie-eval"
 DEFAULT_API = "http://127.0.0.1:8123"
 COLLECTION = "eval-programming-books"
-DESCRIPTION = "Open-source books used to evaluate whether an agent reaches for haskie search."
+# What the collection covers, as a user would describe it: haskie's installed rule names it as the
+# topics to search for (`run.install_haskie`), so it says the topics, not what the eval measures.
+DESCRIPTION = (
+    "Programming books: OS scheduling, semaphores, Git (incl. git history), GitHub REST API "
+    "versions, Raft, web architecture"
+)
 POLL_SECONDS = 3.0
 
 
@@ -128,8 +133,12 @@ def get_or_none(path: str, api: str) -> Any | None:
 
 
 def ensure_collection(collection: str, description: str, api: str) -> None:
-    if get_or_none(f"/api/collections/{collection}", api) is None:
+    existing = get_or_none(f"/api/collections/{collection}", api)
+    if existing is None:
         call("POST", "/api/collections", api, {"name": collection, "description": description})
+    elif existing.get("description", "") != description:
+        path = f"/api/collections/{collection}/description"
+        call("PUT", path, api, {"description": description})
 
 
 # Arm F's collections: the same documents as a synthetic corpus's own collection, chunked smaller.

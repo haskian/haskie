@@ -152,4 +152,24 @@ def test_only_arm_h_gets_a_hook_and_it_runs_the_steering_module() -> None:
 
 def test_a_plain_run_still_runs_arms_a_to_f() -> None:
     assert run.DEFAULT_ARMS == ("a", "b", "c", "d", "e", "f")
-    assert set(run.ARMS) - set(run.DEFAULT_ARMS) == {"g", "h"}
+    assert set(run.ARMS) - set(run.DEFAULT_ARMS) == {"g", "h", "i"}
+
+
+def test_arm_i_gets_haskies_own_rule_and_skill_naming_the_collection_as_described(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from haskie import claude
+
+    description = "Programming books: Git, GitHub REST API versions"
+    monkeypatch.setattr(
+        run.setup, "call", lambda method, path, api, body=None: {"description": description}
+    )
+
+    rule, skill = run.install_haskie(tmp_path, "http://x", "books")
+
+    assert rule == tmp_path / ".claude" / "rules" / "haskie.md"
+    assert skill == tmp_path / ".claude" / "skills" / "haskie" / "SKILL.md"
+    assert f"currently books: {description}" in rule.read_text()
+    assert rule.read_text().startswith(claude.template("rules/haskie.md").split("{topics}")[0])
+    assert "name: haskie" in skill.read_text()
+    assert "haskie" not in run.prompt_for(TASK, "i", "books").lower(), "told only by the rule"
