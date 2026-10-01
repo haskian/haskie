@@ -242,8 +242,8 @@ MAX_SCAN = 200
 LIMIT = Meta(
     title="Results",
     description=(
-        f"Number of chunks or passages a search returns, at most {MAX_SCAN}. Excerpts, sources "
-        "and sections have their own defaults."
+        f"Number of chunks or passages a search returns, at most {MAX_SCAN}. Excerpts and "
+        "sections have their own defaults."
     ),
 )
 MIN_PASSAGE_CHARS = Meta(
@@ -563,6 +563,13 @@ class SearchSettings(msgspec.Struct):
         # `reranker_model` is checked against the catalogue where settings are written
         # (`catalogue.check`): the catalogue is in the database, and decoding reads none
         _check_search(self)
+
+    @property
+    def vector_share(self) -> float:
+        """The vector half's share of a linear fusion: its weight over both, half each when both
+        are 0."""
+        total = self.vector_weight + self.bm25_weight
+        return self.vector_weight / total if total > 0 else 0.5
 
 
 def first_run_search() -> SearchSettings:

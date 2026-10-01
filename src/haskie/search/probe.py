@@ -108,7 +108,7 @@ def placed(groups: list[Group], found: Group) -> list[Group]:
     return [*groups, found]
 
 
-def report(excerpts: list[Excerpt], questions: list[Question]) -> Answer:
+def report(excerpts: list[Excerpt], questions: list[Question], searched: list[str]) -> Answer:
     """The answer, with what it lacks: the questions no excerpt names, when several were asked,
     and the words of any question that no excerpt's text or headings hold."""
     text = [
@@ -125,4 +125,5 @@ def report(excerpts: list[Excerpt], questions: list[Question]) -> Answer:
             if question.label is not None and question.label not in named
         ],
         missing_terms=list(missing(questions, text)),
+        searched=searched,
     )

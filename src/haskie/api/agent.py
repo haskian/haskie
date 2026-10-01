@@ -70,43 +70,14 @@ class Answer(msgspec.Struct):
     excerpts: list[Excerpt]
     uncovered: list[str]
     missing_terms: list[str]
-
-
-class HotSection(_View):
-    header: str
-    location: str
-    score: float
-    chunks: int
-
-
-class Source(_View):
-    """One document that answers (`passage.Source`)."""
-
-    collection: str
-    document_id: str
-    document: str
-    score: float
-    chunks: int
-    header: str
-    location: str
-    text: str
-    markdown_file: str
-    description: str = ""
-    collections: list[str] = []
-    sections: list[HotSection] = []
-
-
-class Sources(msgspec.Struct):
-    documents: list[Source]
-    collections: list[str]
+    searched: list[str]
 
 
 class Related(_View):
-    """A section the map did not pick, under the pick that covers it (`section_map.Related`)."""
+    """A section the map did not pick, under the pick that covers it (`section_map.Related`):
+    its `location` names its document, and `document_id` its row in `documents`."""
 
-    collection: str
     document_id: str
-    document: str
     header: str
     id: str
     location: str
@@ -117,23 +88,37 @@ class Related(_View):
 class MappedSection(_View):
     """One section of the map (`section_map.MappedSection`)."""
 
-    collection: str
     document_id: str
-    document: str
     header: str
     id: str
     location: str
     score: float
     chars: int
     chunks: int
-    markdown_file: str
     descriptors: list[str] = []
     related: list[Related] = []
 
 
+class MappedDocument(_View):
+    """One document the map reached (`section_map.MappedDocument`)."""
+
+    document_id: str
+    document: str
+    score: float
+    chunks: int
+    sections: int
+    markdown_file: str
+    description: str = ""
+    collections: list[str] = []
+
+
 class SectionMap(msgspec.Struct):
+    """`search_sections` (`section_map.SectionMap`); every field always there, empty or not."""
+
     sections: list[MappedSection]
+    documents: list[MappedDocument]
     collections: list[str]
+    searched: list[str]
 
 
 def view[T](found: object, as_type: type[T]) -> T:

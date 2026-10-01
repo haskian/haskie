@@ -133,7 +133,7 @@ async def test_rename_at_import(
 
 
 async def test_descriptions_are_read_in_one_query(shelf: AsyncTestClient) -> None:
-    """`descriptions_of` is the batched read the shortlist uses; absent means no description. It
+    """`descriptions_of` is the batched read a map's documents use; absent means no description. It
     is a document read, not a collection one: a description belongs to the document."""
     compilers, networks = await id_of("compilers.md"), await id_of("networks.md")
     found = await document.descriptions_of({compilers, networks, "0" * 32})
@@ -149,9 +149,10 @@ async def test_results_carry_an_absolute_path_and_position(shelf: AsyncTestClien
     derived on read (`CollectionIndex.hit`) and have to exist. They point into the
     document's own folder, not into the collection that matched.
     """
-    found = (await shelf.get("/api/search/sources", params={"q": "parsing"})).json()
-    match = found["documents"][0]
-    markdown, source = Path(match["markdown_file"]), Path(match["source_file"])
+    found = (await shelf.get("/api/search/sections", params={"q": "parsing"})).json()
+    match = found["sections"][0]
+    (book,) = [one for one in found["documents"] if one["document_id"] == match["document_id"]]
+    markdown, source = Path(book["markdown_file"]), Path(book["source_file"])
 
     assert markdown.is_absolute() and source.is_absolute()
     assert markdown.is_file(), "the markdown the line numbers index into"

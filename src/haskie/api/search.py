@@ -23,7 +23,7 @@ from haskie.collection.index import Hit
 from haskie.indexing import operations
 from haskie.paging import DEFAULT_PAGE_SIZE, Page
 from haskie.search import aspects, flow, log, retrieval, session, text
-from haskie.search.passage import Answer, Passage, Sources
+from haskie.search.passage import Answer, Passage
 from haskie.search.section_map import SectionMap
 
 
@@ -177,9 +177,10 @@ async def agent_search_excerpts(
     second source.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
-    `session_id`, else every collection. Run `search_sources` first when the question is which
-    documents or collections cover a topic, then `set_session_collections` with the cover it
-    returns. No excerpts is an answer: the sources do not cover this. Say so rather than guess.
+    `session_id`, else every collection; `searched` names them. Run `search_sections` first when
+    the question is which documents or collections cover a topic, then `set_session_collections`
+    with the cover it returns. No excerpts is an answer: the sources do not cover this. Say so
+    rather than guess.
 
     Narrower still: `document_ids` keeps to these documents and `section_ids` to these sections and
     every section under them, by the ids `search_sections` and each excerpt carry (`document_id`,
@@ -224,63 +225,6 @@ async def _search_excerpts(
     return found
 
 
-@get("/api/search/sources")
-async def search_sources(
-    q: str,
-    session_id: SessionId = None,
-    collections: str | None = None,
-    limit: Limit = None,
-    sections: int | None = None,
-) -> Sources:
-    """Which documents cover a topic, and which collections to select to read them. The MCP tool
-    `search_sources` answers the same with fewer fields."""
-    return await _search_sources(q, session_id, collections, limit, sections)
-
-
-@get("/api/agent/search/sources", mcp_tool="search_sources", include_in_schema=False)
-async def agent_search_sources(
-    q: str,
-    session_id: SessionId = None,
-    collections: str | None = None,
-    limit: Limit = None,
-    sections: int | None = None,
-) -> agent.Sources:
-    """Which documents cover a topic, and which collections to select to read them.
-
-    One row per document rather than per passage: `score` folds the scores of every chunk it
-    matched, by the `score_fold` setting (by default their sum, so a document that answers
-    throughout outranks one that answers once), `chunks` counts them, `sections`
-    names the hottest headings inside it with their `location`, and `collections` says which of
-    the searched collections hold it. `documents` is that list, best first; `collections` at the
-    top level is the smallest set of collections covering every document in it. Pass it to
-    `set_session_collections`, then ask `search_excerpts` for the passages themselves.
-
-    Where it looks: the comma-separated `collections` if given, else the collections selected for
-    `session_id`, else every collection. No results is an answer: nothing here covers the topic.
-
-    Args:
-        session_id: The conversation's id; the search then shows in that session's history.
-    """
-    return agent.view(
-        await _search_sources(q, session_id, collections, limit, sections), agent.Sources
-    )
-
-
-async def _search_sources(
-    q: str,
-    session_id: SessionId = None,
-    collections: str | None = None,
-    limit: Limit = None,
-    sections: int | None = None,
-) -> Sources:
-    q = aspects.question(q)  # stripped as `report_gap` matches it
-    async with log.capturing(log.Tool.SOURCES, [q], session_id) as capture:
-        names = await retrieval.scope(session_id, collections)
-        found = await flow.sources(names, q, limit, sections)
-        capture.answer(found.documents)
-    return found
-
-
 @get("/api/search/sections")
 async def search_sections(
     q: str,
@@ -320,17 +264,27 @@ async def agent_search_sections(
     `descriptors` say what each section is about: one to five words or phrases it uses more than the
     other sections of its depth in its document. They skip what its `header` says unless it has no
     other words, and they are fixed when the document was indexed. `chars` is how long it is,
-    `chunks` how many of its chunks matched. Cite it by `header` and `location`.
+    `chunks` how many of its chunks matched. Cite it by `header` and `location`. Its `document_id`
+    names its row in `documents`.
+
+    `documents` lists, best first, the ten documents the search reached hardest, and any other
+    document a listed section is in. The ranking reads every chunk the search read, not only the
+    ones the map covers, so a document the map picked no section from can still lead. Per document:
+    its `score` (its matched chunks' scores folded by the `score_fold` setting, by default their
+    sum), `chunks` (how many matched: a sum grows with how much a document says, so read the two
+    together), `sections` (how many of the map's sections are in it), its `description`, the
+    `collections` holding it and its `markdown_file` on disk. Search a document the map picked
+    nothing from with this tool again, its id in `document_ids`.
 
     Use it before `search_excerpts` to see what the sources hold on a topic and nearby, then ask
     `search_excerpts` about the sections worth reading: pass their `id`s as its `section_ids` to
     read those alone. `collections` at the top level is the smallest set of collections holding
-    every section listed, for `set_session_collections`.
+    every section and document listed, for `set_session_collections`.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection, and only the documents `document_ids` names, when
-    given. No sections is an answer: nothing here covers the topic (within `document_ids`, when
-    given).
+    given; `searched` names the collections. No sections is an answer: nothing here covers the
+    topic (within `document_ids`, when given).
 
     Args:
         session_id: The conversation's id; the search then shows in that session's history.

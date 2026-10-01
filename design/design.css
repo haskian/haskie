@@ -259,7 +259,7 @@ body:has(.modal[open]) { overflow: hidden; }
 .chunk-piece:hover { z-index: 1; outline-color: var(--text-faint); } /* above its neighbours, whose background would paint over its outline */
 .chunk-frame { color: var(--text-muted); background: var(--line-soft); } /* the heading path the models read ahead of the text */
 .chunk-piece > .hint { white-space: normal; user-select: none; } /* the text is pre-wrap, the hint is not; copying the text leaves the hints out */
-/* a source as one block: the document once, then its hot sections indented, each a jump */
+/* a list under a head row naming what it lists: the documents a map reached, each a link */
 .sections { display: grid; gap: var(--sp-1); }
 .sections-head { display: flex; justify-content: space-between; gap: var(--sp-4); padding-bottom: var(--sp-2); border-bottom: 1px solid var(--line); font-size: var(--fs-sm); }
 .section-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: var(--sp-3); padding: var(--sp-2) 0 var(--sp-2) var(--sp-4); border-bottom: 1px solid var(--line-soft); font-size: var(--fs-sm); cursor: pointer; }

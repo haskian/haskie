@@ -14,18 +14,20 @@ topics no collection covers.
    being weighed, the decision at hand, the exact terms of art. The search is hybrid by default
    (vector and BM25), so a sentence with context beats a bare keyword. Ask "how should a background
    job retry a failed HTTP call without duplicating the side effect", not "retry".
-2. Call `search_sections` first when the question is broad or you do not yet know where the
-   sources discuss it: it maps which sections of which documents touch the topic and what each is
-   about, without their text. Then ask `search_excerpts` about what the map shows, with the
-   sections' `id`s as `section_ids` to read those alone.
+2. Call `search_sections` first when the question is broad, when you do not yet know where the
+   sources discuss it, or when the question is which documents or collections cover a topic. It
+   maps which sections of which documents touch the topic and what each is about, without their
+   text, and lists the documents the search reached hardest, each with its description. Then ask
+   `search_excerpts` about what the map shows, with the sections' `id`s as `section_ids` to read
+   those alone.
 3. Call `search_excerpts` with this conversation's haskie session id, announced at session start.
    Call it again for each follow-up. When parts of the question may be answered in different
    places, pass each part as its own `q` in one call, and the background they share as `context`.
-4. Call `search_sources` when the question is which documents or collections cover a topic, or when
-   `search_excerpts` found nothing relevant. Pass the `collections` it returns to
-   `set_session_collections`, then call `search_excerpts` again. That selection scopes every later
-   search in the conversation, `search_sources` included. Before a new topic, clear it: call
-   `set_session_collections` with `[]`. Call `list_collections` when unsure what exists.
+4. When `search_excerpts` found nothing relevant, call `search_sections`. Pass the `collections` it
+   returns to `set_session_collections`, then call `search_excerpts` again. That selection scopes
+   every later search in the conversation, and each answer's `searched` names it. Before a new
+   topic, clear it: call `set_session_collections` with `[]`. Call `list_collections` when unsure
+   what exists.
 5. Answer from the excerpts that answer the question. Cite each by its `document`, `header` and
    `location`. An excerpt on a nearby topic is not an answer: do not stretch it to fit.
 6. Report the gaps. A part in `uncovered` or a word in `missing_terms` is something the sources do

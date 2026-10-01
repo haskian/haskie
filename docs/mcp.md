@@ -2,7 +2,7 @@
 
 haskie serves the Model Context Protocol (MCP) at `http://127.0.0.1:8451/mcp`, over HTTP. The tools
 are the REST handlers marked `mcp_tool=`, so both surfaces share one contract, with one exception.
-The three search tools (`search_excerpts`, `search_sources`, `search_sections`) are twins of
+The two search tools (`search_excerpts`, `search_sections`) are twins of
 their REST routes, under `/api/agent/` and left out of the OpenAPI document. Each runs the same
 search and answers with fewer fields (`api/agent.py`): no offsets, chunk numbers, lines or pages
 beside the `location` that names them, and no empty list or map. The web UI keeps the whole
@@ -13,7 +13,7 @@ answer. The skill that `haskie install claude` writes is the full tool reference
 
 | group | tools |
 | --- | --- |
-| search | `search_excerpts`, `search_sections`, `search_sources`, `set_session_collections` |
+| search | `search_excerpts`, `search_sections`, `set_session_collections` |
 | catalogue | `list_collections`, `get_collection`, `list_collection_documents`, `list_documents`, `get_document` |
 | write | `add_document`, `add_document_to_collection`, `remove_document_from_collection`, `describe_document` |
 | log and gaps | `list_searches`, `list_gaps`, `replay_gaps`, `review_gaps`, `report_gap` ([Gaps](gaps.md)) |
@@ -70,15 +70,14 @@ sequenceDiagram
         Hook-->>CC: prints "haskie is already serving ..."
     end
     Note over CC: the rule says: search the collections first
-    opt a broad question, or not yet known where the sources discuss it
+    opt a broad question, "which documents?", or not yet known where the sources discuss it
         CC->>H: search_sections(q, session_id)
-        H-->>CC: sections with ids and descriptors, related sections, collection cover
+        H-->>CC: sections with ids and descriptors, related sections, documents, collection cover
     end
     CC->>H: search_excerpts(q, session_id, section_ids?)
     H-->>CC: excerpts with header, location, spans (each with also_in), uncovered, missing_terms
-    opt nothing relevant, or "which documents?"
-        CC->>H: search_sources(q, session_id)
-        H-->>CC: documents, sections, collection cover
+    opt nothing relevant
+        CC->>H: search_sections(q, session_id)
         CC->>H: set_session_collections(session_id, cover)
         CC->>H: search_excerpts(q, session_id)
     end

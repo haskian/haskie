@@ -126,7 +126,7 @@ class EventDetail(msgspec.Struct, omit_defaults=True):
     the generated client knows the fields: every one is optional, and an action fills the few that
     apply to it."""
 
-    # search: the tool that ran it, "explore", "excerpts", "sources", "sections" or "text"
+    # search: the tool that ran it, "explore", "excerpts", "sections" or "text" ("sources" once)
     scope: str | None = None
     hits: int | None = None  # search: how many results came back
     documents: list[str] | None = None  # search: the distinct documents among the hits, best first

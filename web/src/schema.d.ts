@@ -655,23 +655,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/search/sources": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** SearchSources */
-        get: operations["ApiSearchSourcesSearchSources"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/search/sections": {
         parameters: {
             query?: never;
@@ -872,6 +855,7 @@ export interface components {
             excerpts: components["schemas"]["Excerpt"][];
             uncovered: string[];
             missing_terms: string[];
+            searched: string[];
         };
         /** BulkProgress */
         BulkProgress: {
@@ -1270,15 +1254,6 @@ export interface components {
             to_root: components["schemas"]["Overlaps"];
             also_in?: components["schemas"]["HitReference"][];
         };
-        /** HotSection */
-        HotSection: {
-            header: string;
-            score: number;
-            chunks: number;
-            line_start: number;
-            line_end: number;
-            location: string;
-        };
         /** ImportRequest */
         ImportRequest: {
             name?: string | null;
@@ -1404,6 +1379,18 @@ export interface components {
             last_maintained_at: number | null;
             vector_index_rows: number;
         };
+        /** MappedDocument */
+        MappedDocument: {
+            document_id: string;
+            document: string;
+            description: string;
+            score: number;
+            chunks: number;
+            sections: number;
+            collections: string[];
+            markdown_file: string;
+            source_file: string;
+        };
         /** MappedSection */
         MappedSection: {
             collection: string;
@@ -1421,7 +1408,6 @@ export interface components {
             chars: number;
             chunks: number;
             descriptors: string[];
-            markdown_file: string;
             related?: components["schemas"]["Related"][];
         };
         /** Markdown */
@@ -1860,7 +1846,7 @@ export interface components {
         SearchOverrides: {
             /**
              * Results
-             * @description Number of chunks or passages a search returns, at most 200. Excerpts, sources and sections have their own defaults.
+             * @description Number of chunks or passages a search returns, at most 200. Excerpts and sections have their own defaults.
              */
             limit?: number | null;
             /**
@@ -1968,7 +1954,7 @@ export interface components {
         SearchSettings: {
             /**
              * Results
-             * @description Number of chunks or passages a search returns, at most 200. Excerpts, sources and sections have their own defaults.
+             * @description Number of chunks or passages a search returns, at most 200. Excerpts and sections have their own defaults.
              * @default 25
              */
             limit: number;
@@ -2070,7 +2056,9 @@ export interface components {
         /** SectionMap */
         SectionMap: {
             sections: components["schemas"]["MappedSection"][];
+            documents: components["schemas"]["MappedDocument"][];
             collections: string[];
+            searched: string[];
         };
         /** SessionCollections */
         SessionCollections: {
@@ -2100,29 +2088,6 @@ export interface components {
         /** Similar */
         Similar: {
             nearest: components["schemas"]["Neighbour"][];
-        };
-        /** Source */
-        Source: {
-            collection: string;
-            document_id: string;
-            document: string;
-            score: number;
-            chunks: number;
-            description: string;
-            header: string;
-            location: string;
-            text: string;
-            source_file: string;
-            markdown_file: string;
-            line_start: number;
-            line_end: number;
-            collections: string[];
-            sections: components["schemas"]["HotSection"][];
-        };
-        /** Sources */
-        Sources: {
-            documents: components["schemas"]["Source"][];
-            collections: string[];
         };
         /** Span */
         Span: {
@@ -3637,43 +3602,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Answer"];
-                };
-            };
-            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        detail: string;
-                    };
-                };
-            };
-        };
-    };
-    ApiSearchSourcesSearchSources: {
-        parameters: {
-            query: {
-                q: string;
-                session_id?: string | null;
-                collections?: string | null;
-                limit?: number | null;
-                sections?: number | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Request fulfilled, document follows */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Sources"];
                 };
             };
             /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */

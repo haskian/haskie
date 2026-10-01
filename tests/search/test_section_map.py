@@ -9,6 +9,7 @@ related to each pick, and what each is about.
     seq 4  Sagas > Orchestration
 """
 
+import msgspec
 import numpy as np
 import pytest
 from conftest import chunk_hit
@@ -16,6 +17,7 @@ from conftest import chunk_hit
 from haskie.collection.index import Hit
 from haskie.indexing.chunk import split
 from haskie.search import section_map
+from haskie.search.passage import top_documents
 from haskie.search.section import Placement
 from haskie.search.section_map import Candidate
 from haskie.settings import ChunkSettings, ScoreFold
@@ -271,7 +273,7 @@ def test_mapped_cites_each_pick_with_its_descriptors() -> None:
     }
     picked = section_map.Picked(picks=[0, 1], related={0: [(1, 0.4)], 1: []}, coverage=[], lifted=0)
 
-    first, second = section_map.mapped(hits, candidates, picked, described)
+    first, second = section_map.mapped(candidates, picked, described)
 
     assert (first.id, first.header, first.depth, first.seq_start, first.seq_end) == (
         "orchestration",
@@ -295,3 +297,123 @@ def test_by_rank_stops_at_k() -> None:
     picked = section_map.by_rank([LONG, "quorum"], candidates, 1)
 
     assert (picked.picks, picked.lifted) == ([0], 0), "the second waits for a slot never freed"
+
+
+# --- documents ------------------------------------------------------------------------
+
+
+def _documents(
+    hits: list[Hit],
+    held: dict[str, list[str]] | None = None,
+    about: dict[str, str] | None = None,
+    sections: list[section_map.MappedSection] | None = None,
+    limit: int = 10,
+) -> list[section_map.MappedDocument]:
+    groups = top_documents(hits, ScoreFold.SUM)[:limit]
+    return section_map.documents(groups, sections or [], held or {}, about or {}, ScoreFold.SUM)
+
+
+def _picked(document_id: str) -> section_map.MappedSection:
+    """A map section of `document_id`, for counting a document's picks."""
+    return section_map.MappedSection(
+        collection="notes",
+        document_id=document_id,
+        document=document_id,
+        header="Sagas",
+        id="s",
+        location=f"{document_id} L1-9",
+        line_start=1,
+        line_end=9,
+        score=1.0,
+        depth=1,
+        seq_start=1,
+        seq_end=2,
+        chars=100,
+        chunks=1,
+        descriptors=[],
+    )
+
+
+def test_a_document_is_one_row_over_every_chunk_it_matched() -> None:
+    """Its best chunk names it and its files; its score folds every matched chunk of it."""
+    hits = [_hit(3, 0.5), _hit(1, 0.4), _hit(2, 0.25)]
+
+    (one,) = _documents(hits, about={DOC: "Sagas in microservices"}, sections=[_picked(DOC)])
+
+    assert (one.document_id, one.document, one.chunks) == (DOC, DOC, 3)
+    assert one.score == pytest.approx(1.15), "the sum of its chunks' scores"
+    assert one.description == "Sagas in microservices"
+    assert one.sections == 1, "the map picked one section of it"
+    assert (one.markdown_file, one.source_file) == (hits[0].markdown_file, hits[0].source_file)
+    assert one.collections == ["notes"], "nothing looked up, so the collection that matched it"
+
+
+def _other(seq: int, score: float, collection: str = "notes") -> Hit:
+    """A chunk of another document."""
+    return chunk_hit(CHUNKS[seq - 1], seq, score, document="raft.md", collection=collection)
+
+
+@pytest.mark.parametrize(
+    ("name", "hits", "held", "limit", "expected"),
+    [
+        ("no hits, no documents", [], {}, 10, []),
+        (
+            "more matched chunks outrank one stronger chunk, by the sum",
+            [_hit(1, 0.9), *(_other(seq, 0.4) for seq in (1, 2, 3))],
+            {},
+            10,
+            [("raft.md", ["notes"]), (DOC, ["notes"])],
+        ),
+        ("the limit cuts the tail", [_hit(1, 0.9), _other(1, 0.4)], {}, 1, [(DOC, ["notes"])]),
+        (
+            "a document in two collections is one row naming both",
+            [_hit(1, 0.9), _hit(1, 0.9, collection="archive")],
+            {DOC: ["archive", "notes"]},
+            10,
+            [(DOC, ["archive", "notes"])],
+        ),
+        (
+            "a document whose memberships were not read keeps the collection that matched it",
+            [_other(1, 0.9, collection="ops")],
+            {DOC: ["notes"]},
+            10,
+            [("raft.md", ["ops"])],
+        ),
+    ],
+)
+def test_documents_rank_by_every_chunk_the_search_read(
+    name: str,
+    hits: list[Hit],
+    held: dict[str, list[str]],
+    limit: int,
+    expected: list[tuple[str, list[str]]],
+) -> None:
+    found = _documents(hits, held=held, limit=limit)
+
+    assert [(one.document, one.collections) for one in found] == expected, name
+
+
+@pytest.mark.parametrize(
+    ("name", "ranked", "mapped", "expected"),
+    [
+        ("nothing reached", 0, set(), []),
+        ("fewer than the shortlist: all of them", 3, set(), ["d0", "d1", "d2"]),
+        ("past the shortlist: cut", 12, set(), [f"d{n}" for n in range(10)]),
+        (
+            "a mapped document past the shortlist keeps its row, in its place",
+            12,
+            {"d11", "d2"},
+            [*(f"d{n}" for n in range(10)), "d11"],
+        ),
+    ],
+)
+def test_a_map_lists_its_shortlist_and_every_document_a_section_is_in(
+    name: str, ranked: int, mapped: set[str], expected: list[str]
+) -> None:
+    groups = [[_hit(1, 1.0 / (n + 1))] for n in range(ranked)]
+    for n, group in enumerate(groups):
+        group[0] = msgspec.structs.replace(group[0], document_id=f"d{n}", document=f"d{n}")
+
+    found = section_map.listed(groups, mapped)
+
+    assert [group[0].document_id for group in found] == expected, name

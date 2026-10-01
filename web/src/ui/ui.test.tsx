@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { FileText } from 'lucide-react'
 import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { EmbedderMetadata, Excerpt, Hit, MappedSection, Passage, RerankerMetadata, Source, Status } from '../api'
+import type { EmbedderMetadata, Excerpt, Hit, MappedDocument, MappedSection, Passage, RerankerMetadata, Status } from '../api'
 import { Field } from './Field'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
@@ -10,7 +10,7 @@ import { Kv } from './Kv'
 import { MatchModal } from './MatchModal'
 import { ModelFacts } from './ModelFacts'
 import { SectionsModal } from './SectionsModal'
-import { OpenedDetail, SectionGrid } from './SectionGrid'
+import { MapDocuments, OpenedDetail, SectionGrid } from './SectionGrid'
 import { Mark } from './Mark'
 import { markTerms } from './markTerms'
 import { Picker } from './Picker'
@@ -69,27 +69,6 @@ const HIT: Hit = {
   source_file: '/home/ada/.haskie/sources/area.pdf',
   markdown_file: '/home/ada/.haskie/markdown/area.md',
   also_in: [],
-}
-
-const SOURCE: Source = {
-  collection: 'P–T',
-  document_id: 'a1',
-  document: 'sun.pdf',
-  score: 0.79,
-  chunks: 6,
-  description: 'Sun position by date, time and latitude.',
-  header: 'Solar geometry > Elevation tables',
-  location: 'p. 4',
-  text: 'Sun position at 35° elevation casts a shadow 1.4× the object height.',
-  source_file: '/home/ada/.haskie/sources/sun.pdf',
-  markdown_file: '/home/ada/.haskie/markdown/sun.md',
-  line_start: 3,
-  line_end: 9,
-  collections: ['P–T', 'U–Z'],
-  sections: [
-    { header: 'Elevation tables', score: 0.79, chunks: 4, line_start: 3, line_end: 9, location: 'sun.pdf p.4 L3-9' },
-    { header: 'Elevation tables > Corrections', score: 0.31, chunks: 2, line_start: 12, line_end: 15, location: 'sun.pdf p.5 L12-15' },
-  ],
 }
 
 const PASSAGE: Passage = {
@@ -209,7 +188,7 @@ describe('Picker', () => {
 describe('Tabs', () => {
   const tabs = [
     { id: 'tab-matches', label: 'Excerpts · 6' },
-    { id: 'tab-sources', label: 'Sources · 3' },
+    { id: 'tab-sections', label: 'Sections · 3' },
   ]
   check([
     {
@@ -219,8 +198,8 @@ describe('Tabs', () => {
     },
     {
       name: 'the selected tab is the only one marked',
-      element: <Tabs tabs={tabs} selected="tab-sources" onSelect={noop} />,
-      contains: ['aria-selected="false" aria-controls="tab-matches">Excerpts · 6', 'aria-selected="true" aria-controls="tab-sources">Sources · 3'],
+      element: <Tabs tabs={tabs} selected="tab-sections" onSelect={noop} />,
+      contains: ['aria-selected="false" aria-controls="tab-matches">Excerpts · 6', 'aria-selected="true" aria-controls="tab-sections">Sections · 3'],
     },
     {
       name: 'no tabs renders an empty strip',
@@ -529,16 +508,6 @@ describe('HitGrid', () => {
       contains: ['style="--score:1"', 'style="--score:0.1"'],
     },
     {
-      name: 'a source carries the same tag head, its chunk count and its section count',
-      element: <HitGrid results={[SOURCE]} query="shadow" />,
-      contains: [
-        '<span class="kind">P–T</span><span>sun.pdf</span>',
-        'Sun position by date, time and latitude.',
-        '<span>6 chunks · 2 sections</span>',
-      ],
-      missing: ['hit-title'],
-    },
-    {
       name: 'a passage: its heading on one line, its page and lines on the next',
       element: <HitGrid results={[PASSAGE]} query="shadow" />,
       contains: ['<footer class="hit-foot"><span>Soft shadows</span><span>p. 2 · lines 41–58</span><span>chunks 4–5</span></footer>'],
@@ -552,11 +521,6 @@ describe('HitGrid', () => {
       name: 'a chunk with no heading keeps the heading line, empty',
       element: <HitGrid results={[{ ...HIT, headings: [], header: '' }]} query="shadow" />,
       contains: ['<footer class="hit-foot"><span>\u00a0</span><span>p. 2</span><span>chunk 4</span></footer>'],
-    },
-    {
-      name: 'a source without a description falls back to the matched text',
-      element: <HitGrid results={[{ ...SOURCE, description: '' }]} query="shadow" />,
-      contains: ['<mark>shadow</mark> 1.4×'],
     },
     {
       name: 'an excerpt: its section heading, its pages and lines from the first passage to the last',
@@ -604,7 +568,6 @@ describe('HitGrid', () => {
       missing: ['hit-questions'],
     },
     { name: 'no hits renders an empty grid', element: <HitGrid results={[] as Hit[]} query="" />, contains: ['<div class="hits"></div>'] },
-    { name: 'no sources renders an empty grid', element: <HitGrid results={[] as Source[]} query="" />, contains: ['<div class="hits"></div>'] },
   ])
 })
 
@@ -931,7 +894,6 @@ const SAGAS: MappedSection = {
   chars: 5210,
   chunks: 3,
   descriptors: ['saga', 'compensating step', 'orchestrator'],
-  markdown_file: '/Users/ada/.haskie/documents/b1/original.pdf.md',
   related: [
     { collection: 'patterns', document_id: 'c2', document: 'ddia.pdf', header: 'Sagas', id: 's-ddia-sagas', location: 'ddia.pdf L10-40', line_start: 10, line_end: 40, score: 0.4, similarity: 0.93 },
     { collection: 'patterns', document_id: 'b1', document: 'iddd.pdf', header: 'Sagas > Retries', id: 's-retries', location: 'iddd.pdf L361-380', line_start: 361, line_end: 380, score: 0.3, similarity: 0.88 },
@@ -959,6 +921,50 @@ describe('SectionGrid', () => {
       contains: ['The whole document', '1 matched chunk<'],
       missing: ['class="descriptors', 'Related sections'],
     },
+  ])
+})
+
+const BOOKS: MappedDocument[] = [
+  {
+    document_id: 'b1',
+    document: 'iddd.pdf',
+    description: 'Implementing Domain-Driven Design',
+    score: 4.2,
+    chunks: 38,
+    sections: 2,
+    collections: ['patterns', 'patterns-text'],
+    markdown_file: '/Users/ada/.haskie/documents/b1/original.pdf.md',
+    source_file: '/Users/ada/.haskie/documents/b1/original.pdf',
+  },
+  {
+    document_id: 'c2',
+    document: 'ddia.pdf',
+    description: '',
+    score: 0.9,
+    chunks: 1,
+    sections: 0,
+    collections: ['patterns'],
+    markdown_file: '/Users/ada/.haskie/documents/c2/original.pdf.md',
+    source_file: '/Users/ada/.haskie/documents/c2/original.pdf',
+  },
+]
+
+describe('MapDocuments', () => {
+  check([
+    {
+      name: 'each document: its score, what it is about, how much matched, its picks, its holders',
+      element: <MapDocuments documents={BOOKS} />,
+      contains: [
+        'aria-label="Documents"',
+        '2 documents',
+        'href="#/documents/iddd.pdf"',
+        '>4.20<',
+        'iddd.pdf<span class="muted"> · Implementing Domain-Driven Design</span>',
+        '38 chunks · 2 sections · patterns, patterns-text',
+        '1 chunk · 0 sections · patterns',
+      ],
+    },
+    { name: 'none: nothing at all', element: <MapDocuments documents={[]} />, contains: [], missing: ['Documents'] },
   ])
 })
 

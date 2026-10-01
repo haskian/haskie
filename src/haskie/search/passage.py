@@ -7,9 +7,9 @@ a passage.
 
 Three folds live here, all of them pure. `ranges` merges the chunks of one section that sit
 next to each other (`Hit.seq`) into one range. `quote` turns one such range and the markdown its
-offsets cover into a passage. `top_documents` and `fold_sources` answer the other question:
-which documents and which collections cover this. They fold the same hits per document instead
-of per range.
+offsets cover into a passage. `top_documents` answers the other question, which documents a
+search reached hardest: it folds the same hits per document instead of per range, and
+`min_cover` names the fewest collections that hold them.
 
 `fold` is the scoring rule all of them share: how a range's or a document's chunk scores become one,
 by the `score_fold` setting (`ScoreFold`). No IO: `retrieval.py` reads the markdown and the
@@ -346,6 +346,7 @@ class Answer(msgspec.Struct):
     uncovered: list[str]
     # the words of the questions no excerpt's text or headings hold (`probe`), in the order asked
     missing_terms: list[str]
+    searched: list[str]  # the collections the search covered, in the order they were chosen
 
 
 def span(hit_range: HitRange) -> Span:
@@ -397,145 +398,34 @@ def quote(hit_range: HitRange, text: str) -> Passage:
     )
 
 
-# --- sources ---------------------------------------------------------------------
+# --- documents -------------------------------------------------------------------
 
 
-class HotSection(msgspec.Struct):
-    """One heading of a document the query kept landing under."""
-
-    header: str
-    score: float
-    chunks: int
-    line_start: int
-    line_end: int
-    location: str
-
-
-class Source(msgspec.Struct):
-    """One document the query matched, and the best evidence that it did.
-
-    The answer to "which documents should I read", not "which passages answer this": `score`
-    folds every scanned chunk that came from it by the search's rule (`fold`), and `chunks` says
-    how many there were. The evidence fields are its best
-    chunk; `sections` and `collections` say where in the document the query landed and which of
-    the searched collections hold it.
-    """
-
-    collection: str  # the collection whose table held the best chunk; the document belongs to none
-    document_id: str
-    document: str  # its name, what it is cited by
-    score: float
-    chunks: int
-    description: str
-    header: str  # the best chunk's heading path joined, ready to cite
-    location: str
-    text: str  # the best chunk, so a caller can see why the document is on the list
-    # Where the document is on disk, so a tool outside the app can open or grep it. The lines are
-    # the best chunk's, in `markdown_file`: somewhere to start reading, not the whole match.
-    source_file: str
-    markdown_file: str
-    line_start: int
-    line_end: int
-    collections: list[str]  # every searched collection holding it, in name order
-    sections: list[HotSection]  # where in it the query landed, best first
-
-
-class Sources(msgspec.Struct):
-    """The answer to "which sources cover this": what to read, and what to narrow a session to."""
-
-    documents: list[Source]
-    collections: list[str]  # the fewest that together hold every document above
-
-
-def _document_score(hits: list[Hit], how: ScoreFold) -> float:
+def document_score(hits: list[Hit], how: ScoreFold) -> float:
     """How strongly one document matched: its chunks' scores folded by `how` (`fold`)."""
     return fold([hit.score for hit in hits], how)
 
 
-def top_documents(hits: list[Hit], limit: int, how: ScoreFold) -> list[list[Hit]]:
-    """The `limit` documents `hits` (best first) point at hardest, best first, each as the chunks
-    it was matched by, scored by `how` (`fold`).
+def top_documents(hits: list[Hit], how: ScoreFold) -> list[list[Hit]]:
+    """The documents `hits` (best first) point at, hardest first, each as the chunks it was
+    matched by, scored by `how` (`fold`).
 
-    By document name alone, not by (collection, document): a document in two collections is one
-    document to read. Cut here rather than after the rows are built, because every document that
-    survives costs a membership lookup and a description.
+    By document id alone, not by (collection, document): a document in two collections is one
+    document to read.
     """
     by_doc: dict[str, list[Hit]] = {}
     for hit in hits:
         by_doc.setdefault(hit.document_id, []).append(hit)
     ranked = sorted(
-        by_doc.values(), key=lambda group: (-_document_score(group, how), group[0].document)
+        by_doc.values(), key=lambda group: (-document_score(group, how), group[0].document)
     )
-    return ranked[:limit]
-
-
-def fold_sources(
-    groups: list[list[Hit]], memberships: dict[str, list[str]], sections: int, how: ScoreFold
-) -> Sources:
-    """Fold the kept documents (see `top_documents`) to one row each, in the order given, and
-    cover them with the fewest collections."""
-    documents = [_source(group, memberships, sections, how) for group in groups]
-    return Sources(
-        documents=documents,
-        collections=min_cover({source.document: source.collections for source in documents}),
-    )
-
-
-def _source(
-    hits: list[Hit], memberships: dict[str, list[str]], sections: int, how: ScoreFold
-) -> Source:
-    """One document's row from its matched chunks, in the order they were ranked: the first hit
-    is its best one, and the passage the row shows. `description` is left empty for the caller to
-    fill, because it lives in the metadata store and nothing here does IO."""
-    best = hits[0]
-    return Source(
-        collection=best.collection,
-        document_id=best.document_id,
-        document=best.document,
-        score=_document_score(hits, how),
-        chunks=len(hits),
-        description="",
-        header=best.header,
-        location=best.location,
-        text=best.text,
-        source_file=best.source_file,
-        markdown_file=best.markdown_file,
-        line_start=best.line_start,
-        line_end=best.line_end,
-        # a document whose memberships were not looked up is credited to the table that matched it
-        collections=memberships.get(best.document_id, [best.collection]),
-        sections=_sections(hits, sections, how),
-    )
-
-
-def _sections(hits: list[Hit], limit: int, how: ScoreFold) -> list[HotSection]:
-    """The `limit` headings of one document the query landed under hardest, scored the way the
-    document itself is. `hits` is best first, so each group's first member is its best chunk."""
-    by_header: dict[str, list[Hit]] = {}
-    for hit in hits:
-        by_header.setdefault(hit.header, []).append(hit)
-    found: list[HotSection] = []
-    for header, group in by_header.items():
-        best = group[0]
-        line_start = min(hit.line_start for hit in group)
-        line_end = max(hit.line_end for hit in group)
-        found.append(
-            HotSection(
-                header=header,
-                score=fold([hit.score for hit in group], how),
-                chunks=len(group),
-                line_start=line_start,
-                line_end=line_end,
-                location=location(best.document, *pages(group), line_start, line_end),
-            )
-        )
-    return sorted(found, key=lambda section: (-section.score, section.header))[:limit]
+    return ranked
 
 
 def min_cover(doc_collections: dict[str, list[str]]) -> list[str]:
     """The fewest collections that together hold every document, greedily and in pick order.
 
-    What a session is narrowed to after a `search_sources`: naming every collection that holds
+    What a session is narrowed to after a `search_sections`: naming every collection that holds
     any of the documents would widen the next search back out for nothing. Set cover is NP-hard,
     so this is the standard greedy approximation (take the collection covering the most
     uncovered documents, by name when two tie), which is within a log factor and deterministic.

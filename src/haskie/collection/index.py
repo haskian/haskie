@@ -304,9 +304,7 @@ def _fusion(settings: SearchSettings):
     from lancedb.rerankers import LinearCombinationReranker, RRFReranker
 
     if settings.fusion == Fusion.LINEAR:
-        total = settings.vector_weight + settings.bm25_weight
-        weight = settings.vector_weight / total if total > 0 else 0.5
-        return LinearCombinationReranker(weight=weight)
+        return LinearCombinationReranker(weight=settings.vector_share)
     return RRFReranker(K=settings.rrf_k)
 
 
@@ -624,6 +622,7 @@ class CollectionIndex:
         settings: SearchSettings,
         limit: int,
         vectors: bool = True,
+        fused: bool = True,
     ) -> list[dict]:
         """Retrieval only: at most `limit` raw LanceDB rows, neither cut to `settings.limit` nor
         rescored by a cross-encoder.
@@ -636,6 +635,11 @@ class CollectionIndex:
         `vectors` False leaves the vector column out of a lexical read, for a caller that only
         wants the chunks: the probe for missing words (`search.retrieval.probe_gaps`).
 
+        `fused` False answers a hybrid query's two halves unfused, up to `limit` rows each: the
+        nearest with their `_distance`, the best by BM25 with their `_score`. What a search of
+        several collections ranks over all of them at once (`search.retrieval.fan_out`), since one
+        query embedding makes their distances comparable.
+
         A table with rows and no full-text index yet, a collection in the middle of its first
         index, answers what it can: LanceDB refuses any full-text query without the index, so a
         lexical query finds nothing and a hybrid one falls back to its vector half.
@@ -646,9 +650,13 @@ class CollectionIndex:
         if vector is None or not await self.has_vector_column():
             return await self._lexical(table, query, limit, vectors)
         if settings.mode == SearchMode.VECTOR or not await self.has_index(FTS_COLUMN):
-            found = _tuned(await table.search(vector, query_type="vector"), settings)
-            found = self._scoped(found)
-            return _rows(await found.limit(limit).to_arrow())
+            return await self._nearest(table, vector, settings, limit)
+        if not fused:
+            near, words = await asyncio.gather(
+                self._nearest(table, vector, settings, limit),
+                self._lexical(table, query, limit, vectors),
+            )
+            return [*near, *words]
         # the async API builds a hybrid query out of its two halves instead of `query_type=hybrid`
         hybrid = table.query().nearest_to(vector).nearest_to_text(query)
         hybrid = self._scoped(hybrid)
@@ -658,6 +666,12 @@ class CollectionIndex:
             .rerank(reranker=_fusion(settings))
             .to_arrow()
         )
+
+    async def _nearest(
+        self, table: lancedb.AsyncTable, vector: list[float], settings: SearchSettings, limit: int
+    ) -> list[dict]:
+        found = self._scoped(_tuned(await table.search(vector, query_type="vector"), settings))
+        return _rows(await found.limit(limit).to_arrow())
 
     async def fts_rows(self, query: str, limit: int) -> list[dict]:
         """Lexical retrieval alone: at most `limit` BM25 rows, whatever this index could answer
@@ -880,14 +894,6 @@ def quoted(value: str) -> str:
 def _header(r: dict) -> str:
     """The header of a stored row, as `Chunk.header` builds it."""
     return HEADING_SEP.join(r["headings"] or [])
-
-
-def row_mode(r: dict) -> SearchMode:
-    """The search a row came out of, read off the score column it carries, as `row_score` reads
-    it: fused scores for hybrid, a distance for vector, BM25 for full text."""
-    if "_relevance_score" in r:
-        return SearchMode.HYBRID
-    return SearchMode.VECTOR if "_distance" in r else SearchMode.FTS
 
 
 def row_score(r: dict) -> float:

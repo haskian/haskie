@@ -27,8 +27,8 @@ counts, and how `also_in` folds repeats. This section adds what those descriptio
 fields to read, and the defaults.
 
 **`search_excerpts(q, context?, session_id?, collections?, limit?, document_ids?, section_ids?)`**
-→ `excerpts`, `uncovered`, `missing_terms`. Start here, or with `search_sections` when the
-question is broad.
+→ `excerpts`, `uncovered`, `missing_terms`, `searched` (the collections it covered). Start here,
+or with `search_sections` when the question is broad.
 
 - `limit`: sections, default 10. Ask for more only when ten do not answer.
   It never defaults to fewer than the parts.
@@ -52,23 +52,15 @@ question is broad.
   match to the query), `relation` to its parent, `similarity` (how strongly that relation holds),
   `to_parent` and `to_root`.
 
-**`search_sources(q, session_id?, collections?, limit?, sections?)`** → `documents` (best first)
-and `collections`.
-
-- `limit`: documents, 1 to 100, default 10. `sections`: headings per document, 1 to 20, default 3.
-- Per document: `document`, `description`, `score`, `chunks`, `collections`, its best chunk as
-  `text`, `header` and `location`, and `markdown_file`.
-- Each of `sections` has `header`, `score`, `chunks` and `location`.
-  Read them to know where to look in a long document.
-
 **`search_sections(q, session_id?, collections?, limit?, document_ids?)`** → `sections` (in pick
-order) and `collections`. A map of a topic, near topics included, with no text. Fast: no reranker.
-`document_ids` keeps it to those documents.
+order), `documents` (best first), `collections` and `searched`. A map of a topic, near topics
+included, with no text, and the documents that cover it. Fast: no reranker. `document_ids` keeps
+it to those documents.
 
 - `limit`: sections, 1 to 40, default 15. At most two of one document while another has a section
   on the topic left.
-- Per section: `id`, `document`, `header`, `location`, `chars` (its length), `chunks` (how many
-  of its chunks matched), `score`, `markdown_file`.
+- Per section: `id`, `document_id`, `header`, `location` (it names the document), `chars` (its
+  length), `chunks` (how many of its chunks matched), `score`.
 - `descriptors`: one to five words or phrases for what the section is about, set apart from the
   other sections of its depth, and not what its `header` already says unless it has no other
   words.
@@ -79,12 +71,18 @@ order) and `collections`. A map of a topic, near topics included, with no text. 
 - `related` differs from `also_in` in `search_excerpts`. A place in `also_in` passed a repeat
   test, so it can be skipped, or cited as another source when its `document` differs. A section
   in `related` passed no such test.
+- `documents`: the ten documents the search reached hardest, over every chunk it read, and any
+  other document a listed section is in, so every section's `document_id` has its row. Per
+  document: `document_id`, `document`, `description`, `score`, `chunks`, `sections` (how many of
+  the map's sections are in it, 0 for none), `collections` and `markdown_file`. `score` is a sum
+  by default, so read it with `chunks`. A document with 0 `sections` was reached but not mapped:
+  map it alone with its id in `document_ids`.
 - Then ask `search_excerpts` about the sections worth reading, with their `id`s as `section_ids`,
-  or open `markdown_file` at the lines.
+  or open the document's `markdown_file` at the lines a `location` names.
 
 **`set_session_collections(session_id, collections)`** → the selection now, at most 100 names. It
 replaces the previous selection; it does not add to it. It scopes every later search of the
-session, `search_sources` included. Pass `[]` to clear it before a new topic.
+session, and each answer's `searched` names it. Pass `[]` to clear it before a new topic.
 
 ## Catalogue tools
 
@@ -123,7 +121,7 @@ Every write takes `session_id`, so the change shows in the conversation's histor
   document stays imported. It answers once the removal is queued: the membership reads `removing`
   until it is gone.
 - **`describe_document(document, description)`** → the updated row. An empty description clears
-  it. `search_sources` shows the description beside each document, so write one for anything an
+  it. `search_sections` shows the description beside each document, so write one for anything an
   agent must choose between.
 - Not over MCP: creating, describing, tuning, re-indexing or deleting a collection; deleting or
   re-importing a document; operations and settings. Point the user to the web UI.

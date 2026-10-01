@@ -42,11 +42,10 @@ export type Passage = Wire<'Passage'>
 export type Excerpt = Wire<'Excerpt'>
 // What an excerpts search answers with: the excerpts, and what they leave out (`probe.report`).
 export type Answer = Wire<'Answer'>
-export type Source = Wire<'Source'>
-export type Sources = Wire<'Sources'>
-export type HotSection = Wire<'HotSection'>
-// A map of the sections a topic touches (`search.section_map`), each with its descriptors.
+// A map of the sections a topic touches (`search.section_map`), each with its descriptors, and
+// the documents the search reached hardest.
 export type SectionMap = Wire<'SectionMap'>
+export type MappedDocument = Wire<'MappedDocument'>
 export type MappedSection = Wire<'MappedSection'>
 export type RelatedSection = Wire<'Related'>
 export type Lines = Wire<'Lines'>
@@ -357,7 +356,7 @@ export const api = {
   // Asks the questions again over every collection now; nothing is recorded.
   replayGaps: (ids: number[]) => request<ReplayedGap[]>('/api/gaps/replay', json('POST', { ids })),
 
-  // The four searches Explore runs, over one scope: `collections` when given, else the session's
+  // The three searches Explore runs, over one scope: `collections` when given, else the session's
   // selection, else every collection (the backend applies that order). Each answers with the
   // steps it took, for the breakdown under the total.
   explore: <G extends Granularity>(q: string, granularity: G, scope: SearchScope = {}) =>
@@ -365,8 +364,6 @@ export const api = {
   // one question, or 2 to 5 parts of one and the background they share (`context`)
   searchExcerpts: (q: string[], scope: SearchScope = {}, context?: string) =>
     timedRequest<Answer>(`/api/search/excerpts${pageQuery({}, { q, context, ...scopeQuery(scope) })}`),
-  searchSources: (q: string, scope: SearchScope = {}) =>
-    timedRequest<Sources>(`/api/search/sources${pageQuery({}, { q, ...scopeQuery(scope) })}`),
   searchSections: (q: string, scope: SearchScope = {}) =>
     timedRequest<SectionMap>(`/api/search/sections${pageQuery({}, { q, ...scopeQuery(scope) })}`),
 }

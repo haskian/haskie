@@ -11,7 +11,7 @@ the same numbers. So each step that sets or changes a score says how, in words, 
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from haskie.collection.index import ChunkKey, Hit, chunk_key, row_mode
+from haskie.collection.index import ChunkKey, Hit, chunk_key
 from haskie.search.passage import HitRange
 from haskie.settings import Fusion, Reranker, ScoreFold, SearchMode, SearchSettings
 
@@ -37,12 +37,15 @@ type Rule = Callable[["Search", Any, Any], str | None]
 
 def _retrieve(state: "Search", _: None, pool: "Pool") -> str | None:
     """Each collection's rows scored by the search it ran (`_ran`), which is its mode unless its
-    table has no vectors. The same for every question of a search, so it is recorded once."""
+    table has no vectors. The same for every question of a search, so it is recorded once. Of
+    several collections, a hybrid one answers its two halves unfused, for the merge to fuse over
+    all of them."""
     where = state.plan
+    several = len(where.indexes) > 1
     rules: dict[str, list[str]] = {}
     for index, settings in where.indexes:
         ran = _ran(pool, index.collection, settings, where.vector is not None)
-        rule = _retrieved(settings, ran)
+        rule = UNFUSED if several and ran == SearchMode.HYBRID else _retrieved(settings, ran)
         if where.embedding is None:
             rule = f"{rule} No embedding model, so every mode is BM25."
         rules.setdefault(rule, []).append(index.collection)
@@ -51,12 +54,28 @@ def _retrieve(state: "Search", _: None, pool: "Pool") -> str | None:
     return " ".join(f"{', '.join(names)}: {rule}" for rule, names in rules.items())
 
 
+UNFUSED = (
+    "Hybrid, unfused: its nearest chunks by vector distance and its best by BM25, for the merge "
+    "to fuse over every collection at once."
+)
+
+
 def _ran(pool: "Pool", collection: str, settings: SearchSettings, embedded: bool) -> SearchMode:
-    """The search a collection ran, read off a row it returned (`index.row_mode`): a table
-    written without vectors answers any mode by full text. A collection that returned nothing
-    scored nothing, so its settings say it."""
-    for key in pool.rankings.get(collection, [])[:1]:
-        return row_mode(pool.rows[key][1])
+    """The search a collection ran, read off the score columns of the rows it returned: a table
+    written without vectors answers any mode by full text. A hybrid one answers fused scores
+    alone, or, among several collections, distances and BM25 scores. A collection that returned
+    nothing kept, every span of it another's, says its settings."""
+    columns = {
+        column
+        for (name, *_), (_, row) in pool.rows.items()
+        if name == collection
+        for column in ("_relevance_score", "_distance", "_score")
+        if column in row
+    }
+    if "_relevance_score" in columns or {"_distance", "_score"} <= columns:
+        return SearchMode.HYBRID
+    if columns:
+        return SearchMode.VECTOR if "_distance" in columns else SearchMode.FTS
     return settings.mode if embedded else SearchMode.FTS
 
 
@@ -72,32 +91,40 @@ def _retrieved(settings: SearchSettings, ran: SearchMode) -> str:
             "1 / (1 + d), d the squared L2 distance between the query and chunk embeddings: "
             "1 / (3 − 2·cosine) for unit vectors, 1 at cosine 1 and 0.33 at cosine 0."
         )
+    return f"Hybrid: {_fused(settings)}"
+
+
+def _fused(settings: SearchSettings) -> str:
+    """How the vector and BM25 halves of a hybrid search fuse, by the `fusion` setting."""
     if settings.fusion == Fusion.LINEAR:
-        total = settings.vector_weight + settings.bm25_weight
-        weight = settings.vector_weight / total if total > 0 else 0.5
+        weight = settings.vector_share
         return (
-            f"Hybrid: {weight:.2f} × vector + {1 - weight:.2f} × BM25, each min-max scaled to 0–1 "
+            f"{weight:.2f} × vector + {1 - weight:.2f} × BM25, each min-max scaled to 0–1 "
             "over the candidates, a half that missed the chunk counting 0. The best candidate of "
             "any search scores near 1."
         )
     k = settings.rrf_k
     return (
-        f"Hybrid: reciprocal rank fusion of the vector and BM25 ranks, the sum of 1 / ({k} + "
+        f"reciprocal rank fusion of the vector and BM25 ranks, the sum of 1 / ({k} + "
         f"rank) over the two, at most {2 / (k + 1):.4f}. Rank only."
     )
 
 
-def _merge(state: "Search", *_: Any) -> str | None:
-    """The fusion across collections, or none for one."""
+def _merge(state: "Search", pool: "Pool", *_: Any) -> str | None:
+    """The fusion over every collection's halves, or none for one ranking."""
     collections = len(state.plan.indexes)
     if collections == 1:
         return "One collection: its scores are kept."
-    k = state.plan.settings.rrf_k
-    return (
-        f"Reciprocal rank fusion over the {collections} collections' rankings replaces "
-        f"their scores: the sum of 1 / ({k} + rank) over the rankings a chunk is in, "
-        f"{1 / (k + 1):.4f} for first place in one. Rank only."
-    )
+    settings, rankings = state.plan.settings, list(pool.rankings.values())
+    if len(rankings) == 2:
+        rule = _fused(settings)
+    elif rankings and rankings[0]:
+        first = rankings[0][0][0]  # one half alone: its rows hold its score
+        nearest = "_distance" in pool.rows[first][1]
+        rule = _retrieved(settings, SearchMode.VECTOR if nearest else SearchMode.FTS)
+    else:
+        return None
+    return f"Over all {collections} collections at once, as one table: {rule}"
 
 
 def _rerank(state: "Search", *_: Any) -> str | None:
@@ -228,17 +255,11 @@ def _fill(state: "Search", before: list["Group"], after: list["Group"]) -> str |
     return f"{rule} Two passages it joins make one, and that one scores {fold}."
 
 
-def _shortlist(state: "Search", *_: Any) -> str | None:
-    return (
-        f"A document scores {_FOLDS[state.plan.settings.score_fold]}. Each section of it scores "
-        "the same over its own chunks."
-    )
-
-
 def _map_sections(state: "Search", *_: Any) -> str | None:
     return (
         f"A section scores {_FOLDS[state.plan.settings.score_fold]}. The order is the order the "
-        "sections were picked in to cover the scan, not the order of their scores."
+        "sections were picked in to cover the scan, not the order of their scores. A document "
+        "scores the same over every chunk of it the search read, the scan and past it."
     )
 
 
@@ -267,7 +288,6 @@ RULES: dict[str, Rule] = {
     "group": _group,
     "probe_gaps": _probe_gaps,
     "fill": _fill,
-    "shortlist": _shortlist,
     "map_sections": _map_sections,
     "rerank_excerpts": _rerank_excerpts,
 }

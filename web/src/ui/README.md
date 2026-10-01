@@ -30,10 +30,11 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `Tile` | `<Tile icon={FileText} name={doc.name} sub={doc.description} hint={doc.description} onClick={open} />` | One card in a gallery, with a hover hint |
 | `GallerySection` | `<GallerySection label="A–E" large>{tiles}</GallerySection>` | One lettered band of tiles |
 | `SearchBox` | `<SearchBox value={q} onChange={setQ} onSubmit={run} placeholder="Search" scope={<Picker … />} />` | The one search or filter box; a filter passes `onChange` alone |
-| `SearchTook` | `<SearchTook counts="12 chunks · 3 sources" ms={took} />` | The line above the results |
-| `HitGrid` | `<HitGrid results={hits} query={q} onOpen={open} />` | Chunks, passages, excerpts or sources; one card shape |
+| `SearchTook` | `<SearchTook counts="12 chunks · 3 sections" ms={took} />` | The line above the results |
+| `HitGrid` | `<HitGrid results={hits} query={q} onOpen={open} />` | Chunks, passages or excerpts; one card shape |
+| `MapDocuments` | `<MapDocuments documents={found.documents} />` | The documents a map reached, best first, each a link to its page |
 | `SearchPanel` | `<SearchPanel run={(q) => api.explore(q, 'passage', { collections: [name] })} placeholder="Search this collection" plural="passages" />` | Box, results, the search's timings and the match modal with its score lineage, for one scope |
-| `MatchModal` | `<MatchModal match={open} query={q} scoring={how} onClose={close} />` | One result, and the document it came from. A chunk shows as the models read it: its frame, its typed pieces, the cut reason on each side and its sizes. A passage shows its text, a source its hot sections. `scoring` (the `X-Score-Lineage` header) is the hint beside the score |
+| `MatchModal` | `<MatchModal match={open} query={q} scoring={how} onClose={close} />` | One result, and the document it came from. A chunk shows as the models read it: its frame, its typed pieces, the cut reason on each side and its sizes. A passage shows its text. `scoring` (the `X-Score-Lineage` header) is the hint beside the score |
 | `Jobs` | `<Jobs jobs={jobs} variant="glass" stripes />` | One weighted bar per job of an operation |
 | `Kv` | `<Kv rows={[['Status', doc.status], ['Size', bytes.format(doc.size)]]} />` | Key and value rows |
 | `Field` | `<Field label="Chunk size" help={docs['conversion.chunk_size'].description}><input className="input" /></Field>` | A labelled form control with the setting's help text |

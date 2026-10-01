@@ -70,7 +70,7 @@ Timing knobs are module constants, not variables (`workflows.OPERATION_POLL`,
 | Model catalogue in SQLite, loaders in code | A model card edit is a row, not a release. A row cannot add reviewed code, so loaders and their pinned revisions stay in `indexing/`. A test keeps the two in step | [Storage](docs/storage.md) |
 | Embedding cache keyed by everything the vectors depend on | A document is chunked and embedded once per distinct setting, however many collections share it | [Documents and collections](docs/documents-and-collections.md) |
 | Structure-Aware Chunking, no overlap | Chunks follow the author's sections and paragraphs. The heading path gives the context an overlap would | [Chunking](docs/chunking.md) |
-| Rank fusion across collections | Scores from two indexes are not comparable. Ranks are | [Search](docs/search.md) |
+| Several collections ranked as one table | Each retriever (vector, BM25) is ranked over all of them, then fused. Fusing one ranking per collection gave each an equal share of the scan | [Search](docs/search.md) |
 | Near-duplicates folded after ranking | A pointwise reranker cannot see repeats. Folding keeps the citation and frees the slot | [Search](docs/search.md) |
 | One CPU budget for all work | Indexing never takes the whole machine. The UI stays responsive | [Runtime](docs/runtime.md) |
 | Exclusive lock on the home | One home is one SQLite file and one set of queues. Two servers would take each other's work | [Architecture](docs/architecture.md) |

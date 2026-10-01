@@ -12,6 +12,7 @@ gave, else the session's selection, else every collection.
 import asyncio
 import statistics
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import ExitStack
 from itertools import islice
@@ -33,12 +34,14 @@ from haskie.collection.index import (
     Hit,
     RowKey,
     Scope,
+    SpanKey,
     chunk_key,
     cross_encode,
     first_per_span,
     gather_rows,
     logit,
     row_score,
+    span_key,
 )
 from haskie.document import document
 from haskie.indexing import embed_cache, hardware, mlx_models, models
@@ -57,9 +60,10 @@ from haskie.search import (
     thin,
 )
 from haskie.search import fill as filling
-from haskie.search.passage import Excerpt, Passage, Sources
+from haskie.search.passage import Excerpt, Passage
 from haskie.settings import (
     FillValues,
+    Fusion,
     Reranker,
     ScoreFold,
     SearchMode,
@@ -179,11 +183,19 @@ class Pool(msgspec.Struct):
     """
 
     rows: dict[ChunkKey, tuple[CollectionIndex, dict]]
-    rankings: dict[str, list[ChunkKey]]  # one per collection, in that collection's own order
+    # What retrieval found, each best first with the score it ranks by, for `merge` to make one
+    # ranking of: a collection searched alone answers one ranking, its own (LanceDB fuses a hybrid
+    # query inside); several answer one per retriever over all of them, `VECTOR_RANKING` by
+    # distance and `TEXT_RANKING` by BM25 score. The rows keep the scores they came with.
+    rankings: dict[str, list[tuple[ChunkKey, float]]]
     ranked: list[tuple[ChunkKey, float]] = []  # merged, best first
     # the reranker's scores over the pool, best first, kept before its floor drops any: how close
     # the search came is what the search log records (`log.observe_ranking`)
     rerank_scores: list[float] = []
+
+
+VECTOR_RANKING = "vector"  # every collection's nearest chunks, by distance to the query
+TEXT_RANKING = "text"  # every collection's best chunks by BM25
 
 
 async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True) -> Pool:
@@ -192,10 +204,16 @@ async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True
     A chunk counts once. The same document may be a member of several of the chosen collections,
     and each of their tables then holds the same chunk. A caller searching them wants one hit per
     chunk, not one per collection that holds it. So the first collection in the caller's order
-    that returned a chunk gets the credit, and the later copies are dropped before the ranks are
-    counted. Otherwise a document in two collections would be fused with itself and outrank an
-    equally good one that sits in a single collection. A chunk is its span of the document, not its
-    `seq`: two collections that chunk one document two ways give one `seq` other text.
+    that returned a chunk gets the credit, and the later copies are dropped. A chunk is its span of
+    the document, not its `seq`: two collections that chunk one document two ways give one `seq`
+    other text.
+
+    One collection answers its own ranking, a hybrid query fused inside LanceDB. Several answer
+    their vector and BM25 halves apart (`CollectionIndex.search_rows`), ranked over all of them at
+    once (`_ranked_halves`), for `merge` to fuse as it would one table's. Fusing one ranking per
+    collection would give each collection an equal share of the ranking whatever it holds: a
+    collection of three books took 100 of the 200 chunks a search scanned on a question none of them
+    answers.
 
     A collection that fails to answer fails the search: a silent hole in a merged ranking reads as
     "no match".
@@ -204,22 +222,53 @@ async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True
     its rows stay in the table until the removal queued for them runs.
     """
     chosen = {index.collection: settings for index, settings in where.indexes}
+    alone = len(where.indexes) == 1
 
     async def read(index: CollectionIndex) -> list[dict]:
         settings = chosen[index.collection]
         wanted = None if settings.mode == SearchMode.FTS else where.vector
         try:
-            return await index.search_rows(query, wanted, settings, candidates, vectors)
+            return await index.search_rows(
+                query, wanted, settings, candidates, vectors, fused=alone
+            )
         except Exception:
             _log.exception("session_collection_search_failed", collection=index.collection)
             raise
 
     retrieved = await gather_rows([index for index, _ in where.indexes], read, where.document_names)
-    pool = Pool(rows={}, rankings={index.collection: [] for index, _ in retrieved})
-    for index, row in first_per_span((i, r) for i, rows in retrieved for r in rows):
-        key = (index.collection, row["document_id"], row["seq"])
-        pool.rows[key] = (index, row)
-        pool.rankings[index.collection].append(key)
+    pairs = [(index, row) for index, rows in retrieved for row in rows]
+    if alone:
+        name = where.names[0]
+        pool = Pool(rows={}, rankings={name: []})
+        for index, row in first_per_span(pairs):
+            key = (index.collection, row["document_id"], row["seq"])
+            pool.rows[key] = (index, row)
+            pool.rankings[name].append((key, row_score(row)))
+        return pool
+    return _ranked_halves(pairs)
+
+
+def _ranked_halves(pairs: list[tuple[CollectionIndex, dict]]) -> Pool:
+    """Every collection's rows as one pool, one row per span, the first collection's, ranked by
+    each retriever over all of them: `VECTOR_RANKING` nearest first, `TEXT_RANKING` best BM25
+    first. A span another collection's half found too takes that half's score in its ranking, the
+    first one found; the row keeps only the scores its own collection ran (`scoring`). A
+    retriever that found nothing has no ranking."""
+    pool = Pool(rows={}, rankings={})
+    kept: dict[SpanKey, ChunkKey] = {}
+    halves: dict[str, dict[ChunkKey, float]] = {VECTOR_RANKING: {}, TEXT_RANKING: {}}
+    for index, row in pairs:
+        key = kept.setdefault(span_key(row), (index.collection, row["document_id"], row["seq"]))
+        _, held = pool.rows.setdefault(key, (index, row))
+        for name, column in ((VECTOR_RANKING, "_distance"), (TEXT_RANKING, "_score")):
+            if column in row:
+                halves[name].setdefault(key, row[column])
+                if key[0] == index.collection:  # its own other half: the row says what it ran
+                    held.setdefault(column, row[column])
+    for name, nearest in ((VECTOR_RANKING, True), (TEXT_RANKING, False)):
+        if halves[name]:
+            found = sorted(halves[name].items(), key=lambda one: one[1], reverse=not nearest)
+            pool.rankings[name] = found
     return pool
 
 
@@ -227,8 +276,7 @@ def rrf_merge[T](ranked: list[list[T]], k: int) -> list[tuple[T, float]]:
     """Reciprocal rank fusion: every item scores the sum of `1 / (k + rank)` over the rankings it
     appears in, best first. Ties keep the order of first appearance.
 
-    Pure, and the only merge that needs no calibration between the inputs: two LanceDB indexes
-    score rows on their own scale, so their ranks are comparable where their scores are not.
+    Pure, and needs no calibration between its inputs: it reads ranks, not scores.
     """
     scores: dict[T, float] = {}
     for ranking in ranked:
@@ -237,17 +285,46 @@ def rrf_merge[T](ranked: list[list[T]], k: int) -> list[tuple[T, float]]:
     return sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
 
 
-def merge(pool: Pool, rrf_k: int, candidates: int) -> Pool:
-    """One ranking out of the per-collection ones, fused by rank (see `rrf_merge`).
+def linear_merge[T](
+    near: list[tuple[T, float]], words: list[tuple[T, float]], vector_share: float
+) -> list[tuple[T, float]]:
+    """A weighted sum of the vector and BM25 halves, as LanceDB fuses one table's hybrid query
+    (`LinearCombinationReranker` after its min-max scaling): each half's scores scaled to 0-1 over
+    what it found, a distance turned into a closeness (1 - scaled), a half that missed an item
+    counting 0. `near` holds (item, distance), `words` (item, BM25 score). Best first; ties keep
+    the order of first appearance, the vector half's first."""
+    scores: dict[T, float] = {}
+    for (item, _), scaled in zip(near, _scaled([one for _, one in near]), strict=True):
+        scores[item] = vector_share * (1.0 - scaled)
+    for (item, _), scaled in zip(words, _scaled([one for _, one in words]), strict=True):
+        scores[item] = scores.get(item, 0.0) + (1.0 - vector_share) * scaled
+    return sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
 
-    A single collection keeps its own scores: there is nothing to compare them with, and fusing a
-    lone ranking with itself would only replace a real score with a rank.
+
+def _scaled(values: list[float]) -> list[float]:
+    """Min-max scaled to 0-1; all 0 when every value is the same, as LanceDB scales them."""
+    if not values:
+        return []
+    low, spread = min(values), max(values) - min(values)
+    return [(one - low) / spread if spread else 0.0 for one in values]
+
+
+def merge(pool: Pool, settings: SearchSettings, candidates: int) -> Pool:
+    """One ranking out of what retrieval found, cut to `candidates`.
+
+    One ranking keeps its own scores: a collection searched alone, or one retriever over several.
+    The two halves of a hybrid search over several collections are fused by the `fusion` setting,
+    as LanceDB fuses one table's: by rank (`rrf_merge`) or by a weighted sum (`linear_merge`).
     """
-    if len(pool.rankings) == 1:
-        keys = next(iter(pool.rankings.values()))
-        merged = [(key, row_score(pool.rows[key][1])) for key in keys]
+    if len(pool.rankings) <= 1:
+        ranking = next(iter(pool.rankings.values()), [])
+        merged = [(key, row_score(pool.rows[key][1])) for key, _ in ranking]
+    elif settings.fusion == Fusion.LINEAR:
+        near, words = pool.rankings[VECTOR_RANKING], pool.rankings[TEXT_RANKING]
+        merged = linear_merge(near, words, settings.vector_share)
     else:
-        merged = rrf_merge(list(pool.rankings.values()), rrf_k)
+        keys = [[key for key, _ in ranking] for ranking in pool.rankings.values()]
+        merged = rrf_merge(keys, settings.rrf_k)
     return msgspec.structs.replace(pool, ranked=merged[:candidates])
 
 
@@ -282,16 +359,50 @@ class Scanned(msgspec.Struct):
 
     hits: list[Hit]
     vectors: list[collapse.Vector | None]
+    # every hit of the ranking, the scan's and past it, when the scan is capped per document: the
+    # documents are ranked over all of it (`flow.sections`); empty otherwise
+    pooled: list[Hit] = []
 
 
-def scan(pool: Pool, limit: int) -> Scanned:
+def scan(pool: Pool, limit: int, per_document: int | None = None) -> Scanned:
     """The best `limit` of the ranking, as the `Hit`s a caller cites and opens, and their vectors
-    for `collapse` to compare them by."""
-    taken = [(pool.rows[key], score) for key, score in pool.ranked[:limit]]
+    for `collapse` to compare them by. `per_document` caps the chunks of one document while
+    another has some left (`capped`), and keeps every hit of the ranking too (`pooled`)."""
+    capping = per_document is not None
+    every = pool.ranked if capping else pool.ranked[:limit]
+    hits = {key: index.hit(row, score) for key, score in every for index, row in [pool.rows[key]]}
+    kept = capped(pool.ranked, limit, per_document) if per_document is not None else every
     return Scanned(
-        hits=[index.hit(row, score) for (index, row), score in taken],
-        vectors=[row.get("vector") for (_, row), _ in taken],
+        hits=[hits[key] for key, _ in kept],
+        vectors=[pool.rows[key][1].get("vector") for key, _ in kept],
+        pooled=list(hits.values()) if capping else [],
     )
+
+
+def capped(
+    ranked: list[tuple[ChunkKey, float]], limit: int, per_document: int
+) -> list[tuple[ChunkKey, float]]:
+    """The first `limit` of `ranked` with at most `per_document` chunks of one document, in rank
+    order: a slot one document cannot take goes to the next chunk of another. When the others run
+    out first, the chunks held back fill the rest, best first.
+
+    What keeps a scan wide once every collection is ranked as one table: one book that matches
+    throughout would otherwise take most of the scan, and every step after it reads only the scan.
+    The per-document cap of web search (two results per site), applied to the chunks a map covers
+    rather than only to its picks."""
+    taken: Counter[str] = Counter()
+    kept: list[int] = []
+    held: list[int] = []
+    for at, ((_, doc, _), _) in enumerate(ranked):
+        if len(kept) == limit:
+            break
+        if taken[doc] < per_document:
+            taken[doc] += 1
+            kept.append(at)
+        else:
+            held.append(at)
+    kept += held[: limit - len(kept)]
+    return [ranked[at] for at in sorted(kept)]
 
 
 # --- thin ranges -----------------------------------------------------------------
@@ -777,7 +888,7 @@ async def probe_gaps(
     depth = probe.PROBE_SCAN + len(held)  # enough rows that the best new one is among them
     lexical = msgspec.structs.replace(where, vector=None)
     found = await fan_out(lexical, " ".join(wanted), depth, vectors=False)  # it only wants chunks
-    pool = merge(found, where.settings.rrf_k, depth)
+    pool = merge(found, where.settings, depth)
     hits = [hit for hit in scan(pool, depth).hits if chunk_key(hit) not in held]
     reranked = where.settings.reranker != Reranker.NONE
     scores: dict[str, dict[ChunkKey, float]] = {}
@@ -937,40 +1048,18 @@ def _read_texts(hit_ranges: list[passage.HitRange]) -> list[str]:
         return texts
 
 
-async def shortlist(
-    hits: list[Hit], where: Plan, limit: int, sections: int, how: ScoreFold
-) -> Sources:
-    """Which documents these hits came from, one row per document, and the collections to select
-    to read them.
-
-    Its score folds every chunk it matched by `how` (`passage.fold`), `sections` says where in it
-    the answer sits, and `collections` names
-    which of the searched collections hold it, but for one it is on its way out of
-    (`Collection.holding`), where a follow-up search would not find it. `Sources.collections` is the
-    cover: the fewest collections a follow-up search has to select to reach every row.
-    """
-    # the shortlist is cut first: only a document that made it is worth a membership and a
-    # description, and both are one query for the whole of it
-    kept = passage.top_documents(hits, limit, how)
-    docs = {group[0].document_id for group in kept}
-    held, described = await asyncio.gather(
-        Collection.holding(docs, where.names), document.descriptions_of(docs)
-    )
-    found = passage.fold_sources(kept, held, sections, how)
-    document.fill_descriptions(found.documents, described)
-    return found
-
-
 async def map_sections(scanned: Scanned, where: Plan, limit: int) -> section_map.SectionMap:
     """The `limit` sections the scanned hits cover the topic with (`section_map`), each with its
-    descriptors, and the collections to select to read them.
+    descriptors, the documents every hit read points at hardest, and the collections to select to
+    read them.
 
     Reads at once the chunk placements of every document the scan reached (one query per
-    collection) and the corpus mean to centre on; then the picks' descriptors and memberships. The
-    selection runs in one worker-thread hop."""
-    hits = scanned.hits
+    collection) and the corpus mean to centre on; then, at once, the picks' descriptors, the
+    listed documents' descriptions and their memberships. The selection runs in one worker-thread
+    hop."""
+    hits, searched = scanned.hits, where.names
     if not hits:
-        return section_map.SectionMap(sections=[], collections=[])
+        return section_map.SectionMap(sections=[], documents=[], collections=[], searched=searched)
     places = {(hit.collection, hit.document_id) for hit in hits}
     vectored = all(one is not None for one in scanned.vectors)
     embedding = where.embedding if vectored else None
@@ -981,14 +1070,19 @@ async def map_sections(scanned: Scanned, where: Plan, limit: int) -> section_map
     candidates, picked = await cpu.on_cpu(
         _map, scanned, rows, centre, where.settings, limit, embedding is not None
     )
+    how = where.settings.score_fold
     # the related sections too: a follow-up search scoped to `collections` has to reach them
     listed = [*picked.picks, *(at for near in picked.related.values() for at, _ in near)]
     picked_docs = {candidates[at].document_id for at in listed}
-    described, held = await asyncio.gather(
+    groups = section_map.listed(passage.top_documents(scanned.pooled or hits, how), picked_docs)
+    books = {group[0].document_id for group in groups}
+    described, held, about = await asyncio.gather(
         _descriptors([candidates[at] for at in picked.picks]),
-        Collection.holding(picked_docs, where.names),
+        Collection.holding(books, where.names),
+        document.descriptions_of(books),
     )
-    found = section_map.mapped(hits, candidates, picked, described)
+    found = section_map.mapped(candidates, picked, described)
+    documents = section_map.documents(groups, found, held, about, how)
     _log.info(
         "search_map",
         chunks=len(hits),
@@ -1004,11 +1098,14 @@ async def map_sections(scanned: Scanned, where: Plan, limit: int) -> section_map
             {one.document for one in found if (one.collection, one.id) not in described}
         ),
     )
-    memberships = {
-        one.document_id: held.get(one.document_id, [one.collection])
-        for one in (candidates[at] for at in listed)
-    }
-    return section_map.SectionMap(sections=found, collections=passage.min_cover(memberships))
+    # every listed section's document has its row (`section_map.listed`), so its cover is theirs
+    memberships = {one.document_id: one.collections for one in documents}
+    return section_map.SectionMap(
+        sections=found,
+        documents=documents,
+        collections=passage.min_cover(memberships),
+        searched=searched,
+    )
 
 
 async def _descriptors(picks: list[section_map.Candidate]) -> dict[tuple[str, str], list[str]]:

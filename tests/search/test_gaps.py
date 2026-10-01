@@ -10,7 +10,8 @@ from haskie.collection.index import Hit, Overlap, Overlaps, Relation
 from haskie.search import gaps, log
 from haskie.search.gaps import Bars, Gap, Signal
 from haskie.search.log import Asked, LoggedQuestion
-from haskie.search.passage import Excerpt, HotSection, Passage, PassageReference, Source, Span
+from haskie.search.passage import Excerpt, Passage, PassageReference, Span
+from haskie.search.section_map import MappedSection
 
 MINILM = "Xenova/ms-marco-MiniLM-L-6-v2"
 BARS = Bars(
@@ -310,8 +311,9 @@ def test_an_answer_flattens_in_preorder_under_its_parents() -> None:
     assert capture.results[0].location == "ddia.pdf p.151-152 L4210-4231", "the citation is kept"
 
 
-def test_a_chunk_and_a_document_row_flatten_with_their_own_spans() -> None:
-    """A chunk covers one `seq`; a document row (`search_sources`) covers none."""
+def test_a_chunk_and_a_mapped_section_flatten_with_their_own_spans() -> None:
+    """A chunk covers one `seq`; a section of the map covers its first chunk to its last, and has
+    no places folded into it."""
     hit = Hit(
         collection="books",
         document_id="ddia.pdf",
@@ -335,29 +337,30 @@ def test_a_chunk_and_a_document_row_flatten_with_their_own_spans() -> None:
         text="Every write goes to the leader.",
         score=0.4,
     )
-    source = Source(
+    mapped = MappedSection(
         collection="books",
         document_id="raft.pdf",
         document="raft.pdf",
-        score=0.2,
-        chunks=4,
-        description="The Raft paper.",
         header="Leader election",
-        location="raft.pdf p.5 L120-140",
-        text="A server remains in follower state as long as it receives valid RPCs.",
-        source_file="/home/documents/raft.pdf",
-        markdown_file="/home/documents/raft.pdf.md",
+        id="s1",
+        location="raft.pdf p.5-6 L120-160",
         line_start=120,
-        line_end=140,
-        collections=["books"],
-        sections=[HotSection("Leader election", 0.2, 4, 120, 160, "raft.pdf p.5-6 L120-160")],
+        line_end=160,
+        score=0.2,
+        depth=1,
+        seq_start=9,
+        seq_end=12,
+        chars=4_800,
+        chunks=4,
+        descriptors=["election timeout"],
+        related=[],
     )
 
     (chunk,) = log.flatten([hit])
-    (row,) = log.flatten([source])
+    (row,) = log.flatten([mapped])
 
     assert (chunk.seq_start, chunk.seq_end, chunk.score) == (41, 41, 0.4)
-    assert (row.seq_start, row.seq_end, row.document) == (None, None, "raft.pdf")
+    assert (row.seq_start, row.seq_end, row.document) == (9, 12, "raft.pdf")
 
 
 def _span(seq: tuple[int, int], also_in: list[PassageReference]) -> Span:

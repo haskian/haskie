@@ -3042,12 +3042,13 @@ async def test_two_collections_with_the_same_chunk_settings_share_one_cache_entr
 
 # --- sessions and cross-collection search --------------------------------------------
 #
-# `CollectionIndex` answers retrieval (`search_rows`) and row-to-Hit (`hit`); the search embeds the
-# query once (`retrieval.plan`), fans out and rescores once.
-# `retrieval.rrf_merge` fuses the per-collection rankings by rank, because two indexes do not
-# score on the same scale. `search.text.merge` merges raw BM25 scores instead: one lexical scorer
-# with the same tokenizer answers in every collection. Both count a passage once, because one
-# document may be a member of several of the collections being searched.
+# `CollectionIndex` answers retrieval (`search_rows`, fused or as its two halves) and row-to-Hit
+# (`hit`); the search embeds the query once (`retrieval.plan`), fans out and
+# rescores once. Over several collections `retrieval.fan_out` ranks each half over all of them
+# and `retrieval.merge` fuses the two, as LanceDB fuses one table's. `search.text.merge` merges raw
+# BM25 scores too: one lexical scorer with the same tokenizer answers in every collection. Both
+# count a passage once, because one document may be a member of several of the collections being
+# searched.
 
 # How long one collection of a fan-out may wait for the other before the test calls it sequential.
 CONCURRENT_SEARCH_SECONDS = 5.0
@@ -3147,7 +3148,7 @@ async def test_session_search_reads_its_collections_concurrently(monkeypatch) ->
     await session.set_collections("s1", ["a", "b"])
     arrived = {"a": asyncio.Event(), "b": asyncio.Event()}
 
-    async def paired(self, query, vector, settings_, limit, vectors=True) -> list[dict]:
+    async def paired(self, query, vector, settings_, limit, vectors=True, fused=True) -> list[dict]:
         arrived[self.collection].set()
         other = arrived["b" if self.collection == "a" else "a"]
         await asyncio.wait_for(other.wait(), CONCURRENT_SEARCH_SECONDS)
@@ -3238,8 +3239,101 @@ async def test_fan_out_counts_a_span_once_across_collections_that_chunk_it_two_w
         ("alpha", "shared.md", 3),
         ("beta", "shared.md", 1),
     }
-    assert pool.rankings["beta"] == [("beta", "shared.md", 1)], "only what alpha did not return"
+    assert set(pool.rankings) == {retrieval.TEXT_RANKING}, "no embedding: the BM25 half alone"
+    ranked = sorted(key for key, _ in pool.rankings[retrieval.TEXT_RANKING])
+    assert ranked == sorted(pool.rows), "one ranking of all"
     assert pool.rows[("beta", "shared.md", 1)][1]["text"] == "\n".join(texts[:2])
+
+
+@pytest.mark.parametrize(
+    ("name", "first", "rankings", "answered"),
+    [
+        (
+            "hybrid: each collection answers both halves, ranked over both",
+            ("hybrid", True, True, False),
+            {"vector", "text"},
+            {"_distance", "_score"},
+        ),
+        (
+            "vector mode: no BM25 half from it",
+            ("vector", True, True, False),
+            {"vector", "text"},
+            {"_distance"},
+        ),
+        (
+            "vector mode, its spans shared: no BM25 half, though its rows took the other's",
+            ("vector", True, True, True),
+            {"vector", "text"},
+            {"_distance"},
+        ),
+        (
+            "a table written without vectors answers by full text in any mode",
+            ("vector", False, True, False),
+            {"vector", "text"},
+            {"_score"},
+        ),
+        (
+            "no full-text index yet: the vector half alone",
+            ("hybrid", True, False, False),
+            {"vector", "text"},
+            {"_distance"},
+        ),
+    ],
+)
+@pytest.mark.anyio
+async def test_fan_out_reads_each_collections_halves_as_its_mode_and_table_allow(
+    tmp_path: Path,
+    name: str,
+    first: tuple[str, bool, bool, bool],
+    rankings: set[str],
+    answered: set[str],
+) -> None:
+    """Several collections answer their vector and BM25 halves apart, for the merge to rank each
+    over all of them. `first` is (mode, has vectors, has its full-text index, shares its spans
+    with the second) of the collection under test; the second is a plain hybrid one, so both
+    rankings always exist. A span both found ranks in a half by the score whichever found it
+    there, and its row keeps only the scores its own collection ran."""
+    from haskie.search import retrieval
+
+    mode, vectored, indexed, shared = first
+    alpha = CollectionIndex(tmp_path / "alpha", "alpha", tmp_path, TINY if vectored else None)
+    beta = CollectionIndex(tmp_path / "beta", "beta", tmp_path, TINY)
+    alpha_rows = [
+        _row(f"alpha lancedb row{i}", _vector(i) if vectored else None, i, i * 100) for i in (1, 2)
+    ]
+    await alpha.add_parts("a.md", "documents/a.md", "documents/a.md.md", _aparts([(0, alpha_rows)]))
+    other = "a.md" if shared else "b.md"
+    said = "alpha" if shared else "beta"  # a shared span is the same text at the same offsets
+    beta_rows = [_row(f"{said} lancedb row{i}", _vector(i + 10), i, i * 100) for i in (1, 2)]
+    await beta.add_parts(
+        other, f"documents/{other}", f"documents/{other}.md", _aparts([(0, beta_rows)])
+    )
+    if indexed:
+        await alpha.finish()
+    await beta.finish()
+    settings = SearchSettings(mode=SearchMode(mode))
+    where = retrieval.Plan(
+        settings=SearchSettings(),
+        indexes=[(alpha, settings), (beta, SearchSettings())],
+        vector=_vector(1),
+        embedding=TINY,
+    )
+
+    pool = await retrieval.fan_out(where, "lancedb", 10)
+
+    def columns(collection: str) -> set[str]:
+        held = [row for (name, *_), (_, row) in pool.rows.items() if name == collection]
+        return {one for row in held for one in ("_distance", "_score") if one in row}
+
+    assert set(pool.rankings) == rankings, name
+    assert columns("alpha") == answered, f"{name}: its rows keep the scores it ran"
+    holders = {"alpha"} if shared else {"alpha", "beta"}
+    assert {key[0] for key in pool.rows} == holders, f"{name}: a shared span counts once"
+    if shared:
+        texts = {key for key, _ in pool.rankings["text"]}
+        assert texts == set(pool.rows), f"{name}: its spans rank by beta's BM25 score"
+    else:
+        assert columns("beta") == {"_distance", "_score"}, name
 
 
 @pytest.mark.parametrize(
@@ -3266,6 +3360,130 @@ def test_rrf_merge_orders_by_rank_and_sums_duplicates(
     from haskie.search import retrieval
 
     merged = retrieval.rrf_merge(ranked, k=60)
+
+    assert [item for item, _ in merged] == [item for item, _ in expected], name
+    assert [score for _, score in merged] == pytest.approx([s for _, s in expected]), name
+
+
+def _half(collection: str, score: str, found: list[tuple[str, int, float]]) -> list[tuple]:
+    """What one half of one collection returned: (index, row) pairs, each row of document `doc`
+    chunk `seq` at its own span, scored `value` in the column `score` (`_distance` or
+    `_score`)."""
+    index = CollectionIndex(Path("/nowhere") / collection, collection, Path("/nowhere"), None)
+    return [
+        (
+            index,
+            {"document_id": doc, "seq": seq, "char_start": seq * 10, "char_end": seq * 10 + 9}
+            | {score: value},
+        )
+        for doc, seq, value in found
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "fusion", "pairs", "expected"),
+    [
+        (
+            "the closer collection takes the top, not one slot each",
+            Fusion.RRF,
+            [
+                *_half("small", "_distance", [("asyncio.md", 1, 0.9), ("asyncio.md", 2, 1.0)]),
+                *_half("big", "_distance", [("raft.md", 1, 0.2), ("raft.md", 2, 0.3)]),
+            ],
+            [
+                ("big", "raft.md", 1),
+                ("big", "raft.md", 2),
+                ("small", "asyncio.md", 1),
+                ("small", "asyncio.md", 2),
+            ],
+        ),
+        (
+            "a chunk both halves found beats one only the closer half found",
+            Fusion.RRF,
+            [
+                *_half("a", "_distance", [("d.md", 1, 0.1), ("d.md", 2, 0.2)]),
+                *_half("b", "_score", [("e.md", 5, 3.0)]),
+                *_half("a", "_score", [("d.md", 2, 2.0)]),
+            ],
+            [("a", "d.md", 2), ("a", "d.md", 1), ("b", "e.md", 5)],
+        ),
+        (
+            "a span two collections return is one row, credited to the first",
+            Fusion.RRF,
+            [
+                *_half("a", "_distance", [("d.md", 1, 0.5)]),
+                *_half("b", "_distance", [("d.md", 1, 0.5), ("d.md", 2, 0.6)]),
+            ],
+            [("a", "d.md", 1), ("b", "d.md", 2)],
+        ),
+        (
+            "one half alone keeps its order and its own scores",
+            Fusion.RRF,
+            [*_half("a", "_score", [("d.md", 1, 1.0)]), *_half("b", "_score", [("e.md", 1, 4.0)])],
+            [("b", "e.md", 1), ("a", "d.md", 1)],
+        ),
+        (
+            "linear: the weighted sum over both halves, scaled over all collections",
+            Fusion.LINEAR,
+            [
+                *_half("a", "_distance", [("d.md", 1, 0.1), ("d.md", 2, 0.9)]),
+                *_half("b", "_score", [("d.md", 2, 1.0), ("e.md", 1, 5.0)]),
+            ],
+            [("a", "d.md", 1), ("b", "e.md", 1), ("a", "d.md", 2)],
+        ),
+        ("nothing found", Fusion.RRF, [], []),
+    ],
+)
+def test_merge_ranks_every_collection_as_one_table(
+    name: str, fusion: Fusion, pairs: list[tuple], expected: list[tuple[str, str, int]]
+) -> None:
+    """Several collections are ranked per retriever over all of them, then fused: fusing one
+    ranking per collection gave each collection's first chunk the same score, however far it
+    was from the query."""
+    from haskie.search import retrieval
+
+    pool = retrieval.merge(retrieval._ranked_halves(pairs), SearchSettings(fusion=fusion), 10)
+
+    assert [key for key, _ in pool.ranked] == expected, name
+
+
+@pytest.mark.parametrize(
+    ("name", "near", "words", "share", "expected"),
+    [
+        ("nothing to merge", [], [], 0.7, []),
+        (
+            "each half scaled to 0-1, a distance turned into a closeness",
+            [("a", 0.2), ("b", 0.6)],
+            [("b", 8.0), ("a", 4.0)],
+            0.5,
+            [("a", 0.5), ("b", 0.5)],
+        ),
+        (
+            "a half that missed an item counts 0",
+            [("a", 0.2), ("c", 0.4)],
+            [("b", 3.0), ("c", 1.0)],
+            0.7,
+            [("a", 0.7), ("b", 0.3), ("c", 0.0)],
+        ),
+        (
+            "equal distances all count as the closest, as LanceDB scales them",
+            [("a", 0.4), ("b", 0.4)],
+            [],
+            1.0,
+            [("a", 1.0), ("b", 1.0)],
+        ),
+    ],
+)
+def test_linear_merge_weighs_the_two_halves(
+    name: str,
+    near: list[tuple[str, float]],
+    words: list[tuple[str, float]],
+    share: float,
+    expected: list[tuple[str, float]],
+) -> None:
+    from haskie.search import retrieval
+
+    merged = retrieval.linear_merge(near, words, share)
 
     assert [item for item, _ in merged] == [item for item, _ in expected], name
     assert [score for _, score in merged] == pytest.approx([s for _, s in expected]), name

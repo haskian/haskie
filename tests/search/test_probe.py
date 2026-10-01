@@ -265,17 +265,18 @@ def test_the_answer_reports_what_it_lacks(
     uncovered: list[str],
     missing: list[str],
 ) -> None:
-    answer = probe.report(excerpts, questions)
+    answer = probe.report(excerpts, questions, ["ops"])
 
-    assert answer.excerpts == excerpts
+    assert (answer.excerpts, answer.searched) == (excerpts, ["ops"])
     assert (answer.uncovered, answer.missing_terms) == (uncovered, missing), name
 
 
 def test_an_answer_is_the_wire_shape_the_tool_returns() -> None:
-    answer = probe.report([], [ALONE])
+    answer = probe.report([], [ALONE], [])
 
     assert msgspec.to_builtins(answer) == {
         "excerpts": [],
         "uncovered": [],
         "missing_terms": ["ledger", "reconciled"],
+        "searched": [],
     }

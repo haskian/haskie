@@ -802,3 +802,49 @@ async def test_map_sections_names_the_collections_of_its_related_sections() -> N
         ("copies", "Saga retries")
     ]
     assert found.collections == ["copies", "shelf"], "the related section's collection too"
+
+
+def _ranked(*docs: str) -> list[tuple[tuple[str, str, int], float]]:
+    """A ranking, best first: one chunk per entry, of the document named, scored by its rank."""
+    return [(("c", doc, at), 1.0 / at) for at, doc in enumerate(docs, start=1)]
+
+
+@pytest.mark.parametrize(
+    ("name", "ranked", "limit", "per_document", "expected"),
+    [
+        ("nothing ranked", [], 5, 2, []),
+        (
+            "one document's chunks past the cap give their slots to the next of another",
+            _ranked("big", "big", "big", "small", "big", "other"),
+            4,
+            2,
+            [1, 2, 4, 6],
+        ),
+        (
+            "the others run out first: the held back fill the rest, best first",
+            _ranked("big", "big", "big", "small", "big"),
+            4,
+            2,
+            [1, 2, 3, 4],
+        ),
+        ("under the cap nothing changes", _ranked("a", "b", "a", "c"), 3, 2, [1, 2, 3]),
+        (
+            "what fills in keeps its place in the ranking",
+            _ranked("a", "a", "b", "a", "c"),
+            4,
+            1,
+            [1, 2, 3, 5],
+        ),
+    ],
+)
+def test_the_scan_takes_at_most_its_share_of_one_document(
+    name: str,
+    ranked: list[tuple[tuple[str, str, int], float]],
+    limit: int,
+    per_document: int,
+    expected: list[int],
+) -> None:
+    """`expected` names the kept chunks by their rank."""
+    kept = retrieval.capped(ranked, limit, per_document)
+
+    assert [seq for (_, _, seq), _ in kept] == expected, name

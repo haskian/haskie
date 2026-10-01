@@ -1,11 +1,8 @@
 import { Mark } from './Mark'
-import { alsoDocuments, alsoOf, everyPlace, fillOf, headingOf, isExcerpt, isSource, placeOf, plural, questionLabels, scoreStyle, type Match } from './match'
+import { alsoDocuments, alsoOf, everyPlace, fillOf, headingOf, isExcerpt, placeOf, questionLabels, scoreStyle, type Match } from './match'
 
-// A source shows what the document is about when it has a description; a chunk or passage shows
-// the text that matched. Under it, one line each: the heading it sits under, where to read it (or
-// the size of the evidence), and for a chunk or passage the chunks it is made of and how many
-// other places say the same.
-const textOf = (match: Match): string => (isSource(match) ? match.description || match.text : match.text)
+// A result shows the text that matched. Under it, one line each: the heading it sits under, where
+// to read it, and the chunks it is made of and how many other places say the same.
 // How many other places say the same, and how many other documents they are in: "also in 4 / 2".
 const alsoIn = (match: Match): string => {
   const places = everyPlace(alsoOf(match)).length
@@ -13,8 +10,7 @@ const alsoIn = (match: Match): string => {
 }
 const EMPTY = '\u00a0' // an empty line keeps its height, so every tile of a grid stays level
 const linesOf = (match: Match): string[] => {
-  const heading = headingOf(match) || (isSource(match) ? '' : match.header) || EMPTY
-  if (isSource(match)) return [heading, `${plural(match.chunks, 'chunk')} · ${plural(match.sections.length, 'section')}`]
+  const heading = headingOf(match) || match.header || EMPTY
   const [where, chunks] = placeOf(match)
   return [heading, where || EMPTY, `${chunks}${alsoIn(match)}`]
 }
@@ -26,10 +22,10 @@ export function questionScoreMeaning(label: string, reranked: boolean): string {
     : `This excerpt's best chunk's score in ${label}'s own search: on that search's scale, so not comparable with another question's.`
 }
 
-const keyOf = (match: Match): string =>
-  isSource(match) ? `${match.collection}:${match.document}` : `${match.collection}:${match.document}:${match.char_start}` // offsets are unique in a document
+// offsets are unique in a document
+const keyOf = (match: Match): string => `${match.collection}:${match.document}:${match.char_start}`
 
-/** The result grid, in any of its shapes: chunks, passages or excerpts that matched, or sources.
+/** The result grid, in any of its shapes: chunks, passages or excerpts that matched.
  *  With several `questions` asked, an excerpt names the ones it answers, a tag each with how well
  *  it matched that question ("Q1 0.84"), at the bottom of its tile. */
 export function HitGrid<T extends Match>({
@@ -61,7 +57,7 @@ export function HitGrid<T extends Match>({
           </header>
           <div className="hit-body">
             <p className="hit-text">
-              <Mark text={textOf(match)} query={query} />
+              <Mark text={match.text} query={query} />
             </p>
             <footer className="hit-foot">
               {linesOf(match).map((line, index) => (
