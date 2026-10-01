@@ -45,6 +45,17 @@ class Llama:
         self.calls.append((texts, options))
         return [[0.6, 0.8] for _ in texts]
 
+    # as the generator uses it: one token a character, so a prompt's length is its tokens
+    def tokenize(self, text: bytes, add_bos: bool) -> list[int]:
+        return list(text)
+
+    def detokenize(self, tokens: list[int]) -> bytes:
+        return bytes(tokens)
+
+    def create_chat_completion(self, messages: list[dict], **options: object) -> dict:
+        self.calls.append(([messages[0]["content"]], options))
+        return {"choices": [{"message": {"content": "Topic one | Topic two"}}]}
+
 
 @pytest.fixture
 def llama(monkeypatch) -> type[Llama]:
@@ -143,3 +154,31 @@ def test_the_real_file_loads_fast_and_embeds_as_onnx_does() -> None:
 
     assert loaded < 10, f"loaded in {loaded:.1f} s"
     assert (on_gpu * on_cpu).sum(axis=1).min() > 0.999
+
+
+@pytest.mark.parametrize(
+    ("name", "length", "read"),
+    [
+        ("a prompt that fits is read whole", 1000, 1000),
+        (
+            "a longer one is cut at its end to what the context holds beside the reply",
+            9000,
+            gguf_models.GENERATOR_TOKENS - gguf_models.CHAT_TOKENS - 60,
+        ),
+    ],
+)
+def test_the_generator_fits_its_prompt_to_the_context(
+    name: str, length: int, read: int, llama
+) -> None:
+    """An excerpt is bounded in characters, and digits take a token each: llama.cpp refuses a
+    prompt past the context, so it is cut, keeping the instructions at its start."""
+    generator = gguf_models.GgufGenerator(gguf_models.DESCRIBER)
+    prompt = "Write descriptors. " + "7" * (length - 19)
+
+    assert generator.reply(prompt, 60) == "Topic one | Topic two", name
+
+    (options,) = llama.built
+    assert (options["n_ctx"], options["n_gpu_layers"]) == (gguf_models.GENERATOR_TOKENS, -1)
+    ((sent,), asked) = generator._model.calls[0]
+    assert (len(sent), sent.startswith("Write descriptors.")) == (read, True), name
+    assert (asked["max_tokens"], asked["temperature"]) == (60, 0), "greedy"

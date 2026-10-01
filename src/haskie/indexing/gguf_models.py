@@ -20,6 +20,12 @@ llama.cpp computes attention over a whole micro-batch, every token against every
 larger micro-batch costs more: 512 tokens ran fastest, 1024 cost 12% more, 8192 was 17x slower.
 So texts are read at up to `MAX_TOKENS`, as the MLX embedders read theirs.
 
+One GGUF file is a generator, not an embedder: Gemma-4-E2B-it (`DESCRIBER`), which writes a
+section's descriptors when the settings ask for them (`sections.generated`). Its ggml-org Q4_0 file
+was judged blind on 200 book sections against the Q8_0 file and the mlx-community 4-bit build:
+4.04, 4.01 and 3.86 of 5, against 2.13 for c-TF-IDF, at 0.51 s a section on an M4 Pro (0.57 s
+for Q8_0). It is 2.8 GB.
+
 The `gguf` extra installs llama-cpp-python on Apple Silicon only. PyPI ships it as source, so the
 install compiles llama.cpp with Metal: about 30 s, with the Xcode command-line tools and cmake.
 """
@@ -33,6 +39,8 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
+
+from haskie.settings import Descriptors
 
 MAX_TOKENS = 1024  # the longest text read, in tokens: see the module docstring
 SEQUENCES = 64  # texts one micro-batch holds, as many as fit its tokens
@@ -60,6 +68,26 @@ PINS: dict[str, Pin] = {
         "0188c9bf409793f810680a5a431e7b899c46104c", "nomic-embed-text-v1.5.f16.gguf", 8192
     ),
 }
+DESCRIBER = "ggml-org/gemma-4-E2B-it-GGUF"  # the generator that writes descriptors (see above)
+GENERATORS: dict[str, Pin] = {
+    DESCRIBER: Pin("b4243c156154b6dca9324415f8c7ccc098b4aed1", "gemma-4-E2B-it-Q4_0.gguf", 131072),
+}
+
+
+def describer(by: Descriptors) -> str | None:
+    """The model strategy `by` writes its descriptors with; None for one that needs no model."""
+    return DESCRIBER if by == Descriptors.LLM else None
+
+
+# what one prompt and its reply take: a section's excerpt is at most `generated.EXCERPT_CHARS`,
+# about 1,500 tokens of prose; a longer prompt is cut to fit (`GgufGenerator.reply`)
+GENERATOR_TOKENS = 4096
+CHAT_TOKENS = 32  # what the chat template wraps a prompt in (Gemma's takes 10)
+
+
+def pin(name: str) -> Pin | None:
+    """The pinned file of GGUF model `name`, an embedder or a generator; None for any other."""
+    return PINS.get(name) or GENERATORS.get(name)
 
 
 @functools.cache
@@ -79,8 +107,9 @@ def _download(name: str) -> Path:
         )
     from huggingface_hub import hf_hub_download
 
-    pin = PINS[name]
-    return Path(hf_hub_download(name, pin.file, revision=pin.revision))
+    found = pin(name)
+    assert found is not None, f"{name} is no GGUF model"
+    return Path(hf_hub_download(name, found.file, revision=found.revision))
 
 
 class GgufEmbedder:
@@ -116,3 +145,32 @@ class GgufEmbedder:
 
     def query_embed(self, text: str) -> Iterator[Any]:
         return self.embed([text])
+
+
+class GgufGenerator:
+    """A GGUF chat model, answering one prompt at a time with its greedy reply."""
+
+    def __init__(self, name: str) -> None:
+        path = _download(name)
+        from llama_cpp import Llama
+
+        self._model = Llama(
+            model_path=str(path), n_gpu_layers=-1, n_ctx=GENERATOR_TOKENS, verbose=False
+        )
+        self._lock = threading.Lock()  # one context, as `GgufEmbedder`'s
+
+    def reply(self, prompt: str, max_tokens: int) -> str:
+        """The greedy reply to `prompt`, cut at its end to what the context holds beside the
+        reply: an excerpt is bounded in characters, and digits or symbols take a token each (6,000
+        characters of numbers measured 5,672 tokens), which llama.cpp refuses past the context."""
+        room = GENERATOR_TOKENS - CHAT_TOKENS - max_tokens
+        with self._lock:
+            tokens = self._model.tokenize(prompt.encode(), add_bos=False)
+            if len(tokens) > room:
+                prompt = self._model.detokenize(tokens[:room]).decode(errors="ignore")
+            answer = self._model.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=0,  # greedy: a section described twice is described alike
+            )
+        return answer["choices"][0]["message"]["content"] or ""

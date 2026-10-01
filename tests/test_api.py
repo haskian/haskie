@@ -878,7 +878,7 @@ async def test_the_options_offer_mlx_models_only_where_mlx_is_installed(
         ("the settings ask for the CPU, which llama.cpp is not run on", True, "cpu", False),
     ],
 )
-async def test_the_options_offer_gguf_profiles_only_where_they_run(
+async def test_the_options_offer_gguf_models_only_where_they_run(
     client: AsyncTestClient,
     monkeypatch: pytest.MonkeyPatch,
     name: str,
@@ -897,6 +897,8 @@ async def test_the_options_offer_gguf_profiles_only_where_they_run(
     offered = set(options["embedding_profiles"]) & gguf
     assert offered == (gguf if offer else set()), name
     assert gguf <= set(options["embedding_metadata"]), "metadata, offered or not"
+    # the llm descriptors' describer is a GGUF model too
+    assert options["descriptors"] == (["c-tf-idf", "llm"] if offer else ["c-tf-idf"]), name
 
 
 @pytest.mark.parametrize(

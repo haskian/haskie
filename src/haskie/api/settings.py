@@ -9,12 +9,13 @@ from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbedderMetadata, EmbeddingModel, RerankerMetadata
 from haskie.document.document import ACTIVE_DOCUMENT_STATUSES, DOCUMENT_STATUSES, DocumentStatus
 from haskie.errors import Conflict
-from haskie.indexing import hardware, models, workflows
+from haskie.indexing import gguf_models, hardware, models, workflows
 from haskie.indexing.dbos_names import ACTIVE_STATUS, RunStatus
 from haskie.settings import (
     NO_EMBEDDING,
     Accelerator,
     Chunker,
+    Descriptors,
     FieldDoc,
     FillValues,
     Fusion,
@@ -61,6 +62,7 @@ class Options(msgspec.Struct):
     parsers: tuple[Parser, ...]
     chunkers: tuple[Chunker, ...]
     accelerators: tuple[Accelerator, ...]
+    descriptors: tuple[Descriptors, ...]  # llm only where its model runs (`hardware.device`)
     search_modes: tuple[SearchMode, ...]
     fusions: tuple[Fusion, ...]
     score_folds: tuple[ScoreFold, ...]
@@ -150,6 +152,12 @@ async def get_options() -> Options:
         parsers=tuple(Parser),
         chunkers=tuple(Chunker),
         accelerators=tuple(Accelerator),
+        descriptors=tuple(
+            one
+            for one in Descriptors
+            if (describer := gguf_models.describer(one)) is None
+            or hardware.device(describer, accelerator) is not None
+        ),
         search_modes=tuple(SearchMode),
         fusions=tuple(Fusion),
         score_folds=tuple(ScoreFold),

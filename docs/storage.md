@@ -193,7 +193,8 @@ document in order.
 
 The sections go into their own file beside the chunks (`<id>.sections.parquet`), each with its
 id, parent, headings, where it runs and its descriptors. The file is written before the entry's
-row, so a cache hit has both. Each chunking of a document keeps its own, as its section ids are
+row, so a cache hit has both. Its schema metadata names the strategy that wrote the descriptors
+(`descriptors`); a file the merge just wrote has none, until the describe step rewrites it. Each chunking of a document keeps its own, as its section ids are
 its own. A membership names the entry its rows were indexed from
 (`collection_documents.cache_id`). So `search_sections` reads the descriptors of the sections a
 collection's ids name, even after its chunk settings change and before *Index all* re-chunks it.

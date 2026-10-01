@@ -274,12 +274,11 @@ async def agent_search_sections(
     sits close to, and that one may be the best section on the topic. Read the `related` headers
     before choosing what to read. Only `also_in` in `search_excerpts` lists repeats.
 
-    `descriptors` say what each section is about: one to five words or phrases it uses more than the
-    other sections of its depth in its document. They skip what its `header` says unless it has no
-    other words, and they are fixed when the document was indexed. They are the sources' own
-    vocabulary: a question asked in them finds the section. `chars` is how long it is, `chunks`
-    how many of its chunks matched. Cite it by `header` and `location`. Its `document_id` names its
-    row in `documents`.
+    `descriptors` say what each section is about: one to five words or phrases that skip what its
+    `header` says unless they have no other words. They are written when a document is indexed,
+    by the strategy the settings then name (`pipeline.descriptors`), and shared by every
+    collection that chunks it alike. `chars` is how long it is, `chunks` how many of its chunks
+    matched. Cite it by `header` and `location`. Its `document_id` names its row in `documents`.
 
     A pick can still be back matter (an index, a bare "Summary"), and with no reranker a section
     that only shares a word with the topic, more often the fewer the documents. Judge each pick by

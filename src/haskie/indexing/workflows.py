@@ -17,8 +17,9 @@ Layout:
   attaching to one is then free). Ends at document status `imported`; no collection is touched.
 - `ensure_embedding` per (document, `embed_cache.Params`), on `operation.embedding`, deduplicated
   by the cache id: whoever asks for a missing embedding first computes it, everyone else asking for
-  the same one meanwhile waits on that run. A hit in the cache returns at once. This is the only
-  place chunks and vectors are computed.
+  the same one meanwhile waits on that run. This is the only place chunks and vectors are
+  computed, and section descriptors written: a step after the embed (`try_describe`), and the only
+  work a hit in the cache does, when another descriptor strategy wrote it than the one asked for.
 - `index_collection_document` per (collection, document), on `operation.indexing`: ensures the
   embedding the collection's chunk settings call for, then writes it from the cache into the
   collection's table. Moves the membership's status, never the document's.
@@ -128,7 +129,13 @@ from haskie.indexing.dbos_names import (
 )
 from haskie.indexing.pipeline import Batch
 from haskie.search import log
-from haskie.settings import ChunkSettings, PipelineSettings, UserSettings, load_user_settings
+from haskie.settings import (
+    ChunkSettings,
+    Descriptors,
+    PipelineSettings,
+    UserSettings,
+    load_user_settings,
+)
 
 _log = logs.get_logger(__name__)
 
@@ -738,10 +745,29 @@ async def forget_embeddings(doc: str) -> None:
 
 @retried_step
 async def try_finalize_embed(params: embed_cache.Params, ctx: Context, count: int) -> BatchResult:
-    """Merge the rows of every part into the cache file and publish it (see `embed_cache`).
-    Describing the sections embeds with the model, which a restart can find still warming, as a
-    batch can (see `run_batch`)."""
-    return await _guarded(pipeline.finalize_embed(ctx.document, params, ctx.embedding, count))
+    """Merge the rows of every part into the cache file and publish it (see `embed_cache`)."""
+    dims = ctx.embedding.dims if ctx.embedding else None
+    return await _guarded(pipeline.finalize_embed(ctx.document, params, dims, count))
+
+
+@retried_step
+async def described_by(doc: str, cache_id: str) -> Descriptors | None:
+    return await embed_cache.described_by(doc, cache_id)
+
+
+@retried_step
+async def try_describe(ctx: Context) -> BatchResult:
+    """Write the descriptors of the cached embedding's sections (see `pipeline.describe`). Its
+    model, the embedding model or the describer, can still be on its way, as a batch's can (see
+    `run_batch`)."""
+    describing = pipeline.describe(
+        ctx.document,
+        ctx.cache_id,
+        ctx.embedding,
+        ctx.pipeline.descriptors,
+        ctx.pipeline.accelerator,
+    )
+    return await _guarded(describing)
 
 
 @retried_step
@@ -939,9 +965,12 @@ async def _stage(stage: Stage, ctx: Context) -> list[int]:
 
 async def _ensure_embedding(ctx: Context) -> str:
     """The cache id of the embedding `ctx` calls for, computing it through `ensure_embedding`
-    when it is missing. Deduplicated by the cache id: two callers wanting the same embedding at
-    once share one run instead of computing it twice (and racing on the write). The child id is
-    derived from this workflow's, so a replay re-attaches to the run it already started.
+    when it is missing, and describing its sections by the strategy `ctx` names. Deduplicated by
+    the cache id: two callers wanting the same embedding at once share one run instead of
+    computing it twice (and racing on its scratch files and the write). So a caller that joins a
+    run asked for by another strategy, as the setting changed between the two asks, gets that
+    strategy's descriptors, until the next index describes them again. The child id is derived
+    from this workflow's, so a replay re-attaches to the run it already started.
 
     A shared run is the child of whoever asked first, so cancelling that caller cascades into it,
     and every other caller would fail with it. A caller waiting on someone else's run therefore
@@ -950,6 +979,7 @@ async def _ensure_embedding(ctx: Context) -> str:
     caller that was cancelled itself stops at that ask, which DBOS refuses from a cancelled
     workflow. A cancel of its own run is final."""
     params = embed_cache.params(ctx.document, ctx.chunking, ctx.embedding)
+    by = ctx.pipeline.descriptors
     own = embed_id(DBOS.workflow_id or "", ctx.document.id)
     while True:
         with (
@@ -959,7 +989,7 @@ async def _ensure_embedding(ctx: Context) -> str:
             ),
         ):
             handle = await DBOS.enqueue_workflow_async(
-                EMBEDDING_QUEUE, ensure_embedding, ctx.document.id, params
+                EMBEDDING_QUEUE, ensure_embedding, ctx.document.id, params, by
             )
         try:
             return await handle.get_result(polling_interval_sec=TASK_POLL)
@@ -1021,34 +1051,55 @@ async def import_document(doc: str) -> DocumentStatus:
 
 
 @DBOS.workflow(name=EMBED_WORKFLOW)
-async def ensure_embedding(doc: str, params: embed_cache.Params) -> str:
-    """One cached embedding of one document, with its sections, computed when missing; returns
-    its cache id.
+async def ensure_embedding(
+    doc: str, params: embed_cache.Params, by: Descriptors | None = None
+) -> str:
+    """One cached embedding of one document, with its sections, computed when missing, and their
+    descriptors by strategy `by`, written by a step of their own when missing or written by
+    another strategy; returns its cache id. `by` is None in a run recorded before it was an
+    argument, which describes by the settings.
 
     The chunk settings come from `params`, not from any collection: the collection's settings may
     change between the enqueue and the run, and what was asked for is what the id names. The
     embedding model is the global one, so a model changed meanwhile fails the run, and the parent
-    with it: a reindex asks again under the new model."""
+    with it: a reindex asks again under the new model. A hit loads no context unless it is
+    described again."""
     with logs.bound(workflow_id=DBOS.workflow_id, document_id=doc):
-        found = await cache_lookup(params)
-        if found is not None:
-            return found
-        ctx = await load_context(doc, None)
-        current = embed_cache.model_of(ctx.embedding)
-        if current != params.model:
-            raise PermanentError(f"embedding model changed: wanted {params.model}, have {current}")
-        ctx = msgspec.structs.replace(
-            ctx,
-            chunking=ChunkSettings.of(params),
-            cache_id=embed_cache.key(params),
-        )
-        if ctx.embedding is not None:
-            # here rather than in the slices: a download takes minutes, and a slice waiting it out
-            # would hold a slot of `task.embedding` and run into its own timeout
-            _value(await _awaiting_model(partial(embedding_ready, ctx.embedding)))
-        count = len(await _stage(Stage.EMBED, ctx))
-        _value(await _awaiting_model(partial(try_finalize_embed, params, ctx, count)))
-        return ctx.cache_id
+        cache_id = embed_cache.key(params)
+        ctx: Context | None = None
+        if await cache_lookup(params) is None:
+            ctx = await _embedding_context(doc, params)
+            if ctx.embedding is not None:
+                # here rather than in the slices: a download takes minutes, and a slice waiting
+                # it out would hold a slot of `task.embedding` and run into its own timeout
+                _value(await _awaiting_model(partial(embedding_ready, ctx.embedding)))
+            count = len(await _stage(Stage.EMBED, ctx))
+            # the merge needs no model now, but a run recorded by a build whose merge did can
+            # resume under this one, its sleeps and retries in its step log (`adopt_orphans`)
+            _value(await _awaiting_model(partial(try_finalize_embed, params, ctx, count)))
+        if by is None:
+            ctx = ctx or await _embedding_context(doc, params)
+            by = ctx.pipeline.descriptors
+        if await described_by(doc, cache_id) != by:
+            # a hit too checks the model: c-TF-IDF would rerank its vectors by another model's
+            ctx = ctx or await _embedding_context(doc, params)
+            asked = msgspec.structs.replace(ctx.pipeline, descriptors=by)  # not the module's name
+            describing = msgspec.structs.replace(ctx, pipeline=asked)
+            _value(await _awaiting_model(partial(try_describe, describing)))
+        return cache_id
+
+
+async def _embedding_context(doc: str, params: embed_cache.Params) -> Context:
+    """The context an embedding run computes or describes under: the settings now, with the chunk
+    settings and the cache id `params` name. A model changed since `params` were asked for fails
+    the run, and its parent with it."""
+    ctx = await load_context(doc, None)
+    current = embed_cache.model_of(ctx.embedding)
+    if current != params.model:
+        raise PermanentError(f"embedding model changed: wanted {params.model}, have {current}")
+    return msgspec.structs.replace(
+        ctx, chunking=ChunkSettings.of(params), cache_id=embed_cache.key(params)
+    )
 
 
 @DBOS.workflow(name=COLLECTION_DOCUMENT_WORKFLOW)
@@ -1286,7 +1337,8 @@ async def enqueue_page(collection: str, after: str | None, bulk_id: str) -> Bulk
 @DBOS.workflow(name=INDEX_COLLECTION_WORKFLOW)
 async def index_collection_workflow(collection: str) -> BulkResult:
     """(Re)index every member of one collection, one durable page of enqueues at a time. Cheap
-    for a member whose embedding is cached: the embed is skipped and only the table is written."""
+    for a member whose embedding is cached: the embed is skipped and only the table is written,
+    and the sections are described again when another strategy described them."""
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection):
         bulk_id = DBOS.workflow_id or ""
         total = await count_members(collection)

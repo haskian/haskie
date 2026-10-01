@@ -327,6 +327,27 @@ def warm_reranker(name: str, accelerator: Accelerator) -> None:
     _cross_encoder(name, accelerator)
 
 
+def warm_generator(name: str, accelerator: Accelerator) -> None:
+    _generator(name, accelerator)
+
+
+def _generator(name: str, accelerator: Accelerator) -> gguf_models.GgufGenerator:
+    _check_runs(name, accelerator)
+    with _MODEL_LOCK:
+        return _build_generator(name)
+
+
+@cache
+def _build_generator(name: str) -> gguf_models.GgufGenerator:
+    """One per process: loading it is the warm-up (`models`)."""
+    return gguf_models.GgufGenerator(name)
+
+
+def reply(name: str, accelerator: Accelerator, prompt: str, max_tokens: int) -> str:
+    """The generator's greedy reply to one prompt (`gguf_models.GgufGenerator`)."""
+    return _generator(name, accelerator).reply(prompt, max_tokens)
+
+
 def rerank_scores(
     model_name: str, accelerator: Accelerator, query: str, texts: list[str]
 ) -> list[float]:

@@ -15,8 +15,9 @@ src/haskie/
   indexing/     DBOS pipeline: chunk, embed, cache, index; model lifecycle
   search/       retrieval, passages, near-duplicate folding, the map of sections, sessions,
                 the search log, gaps
-  sections/     every document's sections as a tree, with their ids and descriptors: named and
-                described at the cache merge, kept in the embedding cache
+  sections/     every document's sections as a tree, with their ids and descriptors: named at
+                the cache merge, described by a step after it (c-TF-IDF or an LLM), kept in
+                the embedding cache
   catalogue/    models and embedding profiles, seeded into SQLite; loaders stay in indexing/
   claude_code/  skill and rule files installed into Claude Code
   app.py        Litestar app; cli.py the CLI; claude.py the Claude Code install

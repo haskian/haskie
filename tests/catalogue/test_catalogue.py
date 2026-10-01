@@ -21,6 +21,7 @@ from haskie.settings import (
     DEFAULT_RERANKER,
     Accelerator,
     CollectionOverrides,
+    Descriptors,
     PipelineSettings,
     Reranker,
     SearchOverrides,
@@ -327,6 +328,18 @@ ON_CPU = PipelineSettings(accelerator=Accelerator.CPU)
         (
             "the same reranker switched off: nothing uses it",
             UserSettings(search=SearchSettings(reranker_model=MLX_RERANKER), pipeline=ON_CPU),
+            None,
+        ),
+        (
+            "descriptors an llm writes, on the CPU: its describer has nowhere to run",
+            UserSettings(
+                pipeline=PipelineSettings(accelerator=Accelerator.CPU, descriptors=Descriptors.LLM)
+            ),
+            "ggml-org/gemma-4-E2B-it-GGUF runs on gguf on the Apple GPU",
+        ),
+        (
+            "descriptors an llm writes, where llama.cpp runs",
+            UserSettings(pipeline=PipelineSettings(descriptors=Descriptors.LLM)),
             None,
         ),
         (

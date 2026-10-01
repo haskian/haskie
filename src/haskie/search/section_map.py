@@ -98,7 +98,7 @@ class MappedSection(Placed, kw_only=True):
     seq_end: int
     chars: int  # how long it is: what reading it with `search_excerpts` costs at most
     chunks: int  # how many of its chunks the search matched
-    descriptors: list[str]  # what it is about, against the other sections of its depth
+    descriptors: list[str]  # what it is about (`pipeline.descriptors`)
     related: list[Related] = []
 
 

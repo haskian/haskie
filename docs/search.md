@@ -306,11 +306,13 @@ for `set_session_collections`.
 
 `descriptors` say what each section is about. They are fixed at indexing
 ([Indexing](indexing.md#the-three-workflows)) and read by the section's id from the cache entry
-the collection indexed the document from: one to five of the section's terms (a word, or two words
-side by side) weighed against the other sections of its depth by c-TF-IDF [10], less the terms more
-than half of them use or its header holds (unless nothing else is left), and reranked by meaning
-[11]. They never decide what is picked: in the studies we follow, clusters of the pool used as
-aspects gained nothing, and terms mined from it only re-weighted the aspects already on top.
+the collection indexed the document from: by default one to five of the section's terms (a word,
+or two words side by side) weighed against the other sections of its depth by c-TF-IDF [10], less
+the terms more than half of them use or its header holds (unless nothing else is left), and
+reranked by meaning [11]; under the llm setting, up to five topics a small language model names
+after reading the section. They never decide what is picked: in the studies we follow, clusters
+of the pool used as aspects gained nothing, and terms mined from it only re-weighted the aspects
+already on top.
 
 Measured on three books (1.9 MB of markdown, bge-small), eight questions: the whole search took
 35 to 50 ms warm, `map_sections` 12 to 17 ms of it. Against the top sections by relevance on the

@@ -37,6 +37,7 @@ flowchart TB
     end
     subgraph ensure_embedding
         chunk["cache hit, or chunk + embed<br/>slices (task.embedding)"] --> parquet[("chunks and sections<br/>in cache, with ids")]
+        parquet --> describe["describe the sections,<br/>unless the settings'<br/>strategy already did"]
     end
     subgraph index_collection_document
         need["ensure_embedding<br/>for this collection's settings"] --> rows["write chunk rows;<br/>build the FTS index if the<br/>table has none (task.indexing)"]
@@ -45,33 +46,49 @@ flowchart TB
     need -.waits on.-> chunk
 ```
 
-`ensure_embedding` always runs, and looks up the cache inside. On a hit it returns at once.
+`ensure_embedding` always runs, and looks up the cache inside. On a hit it computes nothing, and
+returns at once unless the sections were described by another strategy than the settings name.
 
 **Sections and ids.** The merge that publishes a computed embedding names every section of the
 document and every chunk (`embed_cache._merge`, `sections/build.py`). A section is every heading's
 run of chunks, cut by the same rule a search groups passages by. Each section gets a parent and an
 id from its document and its place among its sections. Each chunk gets an id and the sections
-that hold it ([Storage](storage.md#sections-and-their-ids)). Then `embed_cache.write` describes
-the sections and writes them into their own file beside the chunks', before the entry's row. So a
-cache hit has both. Each cache entry, so each chunking, has its own sections and descriptors.
+that hold it ([Storage](storage.md#sections-and-their-ids)). `embed_cache.write` writes the
+sections into their own file beside the chunks', before the entry's row. So a cache hit has both.
+Each cache entry, so each chunking, has its own sections and descriptors.
 
-A descriptor strategy picks up to five terms, each a word or a word pair, for each section that
-has any (`descriptors.Strategy`). It reads prose only: code blocks and tables name identifiers and
-values, not what a section is about. The only strategy, `ClassTfidf`, weighs the sections of one
-depth against each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25 weighting: a
-chapter's words against the other chapters'. Unlike BERTopic, it counts how many sections use a
-term rather than how often the whole book does. A term more than half the sections of a depth use
-is the book's topic, so it is no descriptor there. In one book on Domain-Driven Design, "model",
-"design" and "chapter" had been descriptors of 31 sections, and are of none. The whole document's
-section keeps them. Nor is a term whose every word the section's header already holds:
-"aggregates" under `Aggregates > Rule: Design Small Aggregates` says nothing new. With an
-embedding model, each section's best 20 candidates are embedded in one call for the whole
-document. They are reranked against the section's vector (the mean of its chunks' unit vectors,
-scaled to length one, never stored), as BERTopic's `KeyBERTInspired` does. A word or word pair
-that a section uses once is left out, unless the section is too short to have enough used twice.
-Most such terms are halves of a word a PDF split over two lines, or two words that happen to meet.
-Measured once on one book (1.4 MB of markdown, 1,776 chunks, bge-small, on the dev machine): the
-descriptors took 2.4 s, the chunk embeddings 50 s.
+**Descriptors.** A step of its own after the merge, `try_describe`, writes up to five descriptors
+for each section that has prose (`pipeline.describe`), by the strategy the settings name
+(`pipeline.descriptors`). It reads both files back, so describing again costs no embedding. The
+sections file's metadata names the strategy that wrote it. A cache hit whose strategy differs from
+the settings' is described again, so *Index all* applies a changed setting to a whole collection.
+Every strategy reads prose only: code blocks and tables name identifiers and values, not what a
+section is about.
+
+- **llm.** Gemma-4-E2B (ggml-org's Q4_0 GGUF, 2.8 GB, on llama.cpp on the Apple GPU) reads each
+  section's heading path and up to 6,000 characters of its prose, and names up to five topics
+  (`sections/generated.py`). A longer section is read as six of its chunks, spread from its first to
+  its last. A phrase whose every word the heading path holds is dropped, as c-TF-IDF drops such
+  terms, unless nothing else is left: asking the model to avoid the heading's words made it leave
+  out the main topic. A blind judge scored it 4.04 of 5 on 200 sections of four technical books,
+  against 2.13 for c-TF-IDF, at 0.51 s a section on an M4 Pro. Its model downloads like the others,
+  as a `describer`, and the step waits for it.
+- **c-tf-idf**, the default, runs everywhere. `ClassTfidf` weighs the sections of one depth against
+  each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25 weighting: a chapter's words
+  against the other chapters'. Unlike BERTopic, it counts how many sections use a term rather than
+  how often the whole book does. A term more than half the sections of a depth use is the book's
+  topic, so it is no descriptor there. In one book on Domain-Driven Design, "model", "design" and
+  "chapter" had been descriptors of 31 sections, and are of none. The whole document's section keeps
+  them. Nor is a term whose every word the section's header already holds: "aggregates" under
+  `Aggregates > Rule: Design Small Aggregates` says nothing new. With an embedding model, each
+  section's best 20 candidates are embedded in one call for the whole document. They are reranked
+  against the section's vector (the mean of its chunks' unit vectors, scaled to length one, never
+  stored), as BERTopic's `KeyBERTInspired` does. Each descriptor is a word or a word pair. One a
+  section uses once is left out, unless the section is too short to have enough used twice. Most
+  such terms are halves of a word a PDF split over two lines, or two words that happen to meet.
+  Measured once on one book (1.4 MB of markdown, 1,776 chunks, bge-small, on the dev machine): the
+  descriptors took 2.4 s, the chunk embeddings 50 s. In technical books it often picks code
+  identifiers and names, which the judge scored low.
 
 **Batches.** Work is cut where the document's sections start (`indexing/parts.py`), so a section
 is whole in one batch wherever it can be. Batches are packed greedily: a batch holds as many whole

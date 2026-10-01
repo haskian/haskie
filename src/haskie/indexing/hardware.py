@@ -29,7 +29,7 @@ COREML_TOO_LARGE = frozenset({"jinaai/jina-embeddings-v3"})
 def runtime(name: str) -> Runtime:
     if name in mlx_models.REVISIONS:
         return Runtime.MLX
-    return Runtime.GGUF if name in gguf_models.PINS else Runtime.ONNX
+    return Runtime.GGUF if gguf_models.pin(name) else Runtime.ONNX
 
 
 def device(name: str, accelerator: Accelerator) -> Device | None:

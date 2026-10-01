@@ -19,6 +19,7 @@ import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 
 import anyio
@@ -85,6 +86,7 @@ from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
     ConversionSettings,
+    Descriptors,
     Fusion,
     Parser,
     PipelineSettings,
@@ -1555,7 +1557,7 @@ async def test_one_document_sits_in_two_collections_and_a_detach_leaves_both_alo
     rows = home.HOME / "rows" / "000000.rows.json"
     rows.parent.mkdir(parents=True, exist_ok=True)
     rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0], seq=1)]))
-    cache_id = await embed_cache.write(params, [rows], None, None)
+    cache_id = await embed_cache.write(params, [rows], None)
 
     assert await document.collections_of(doc.id) == ["alpha", "beta"]
 
@@ -1590,7 +1592,7 @@ async def test_deleting_a_document_takes_every_membership_and_cache_row_with_it(
     rows = home.HOME / "rows" / "000000.rows.json"
     rows.parent.mkdir(parents=True, exist_ok=True)
     rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0], seq=1)]))
-    await embed_cache.write(params, [rows], None, None)
+    await embed_cache.write(params, [rows], None)
 
     await document.remove_files(doc.id)
     await document.remove_row(doc.id)
@@ -2677,7 +2679,8 @@ async def _embed(
     batches = await pipeline.plan_embed(doc, batch_pages)
     for batch in batches:
         await pipeline.embed_batch(doc, batch, cache_id, chunking, embedding)
-    await pipeline.finalize_embed(doc, params, embedding, len(batches))
+    await pipeline.finalize_embed(doc, params, embedding.dims if embedding else None, len(batches))
+    await pipeline.describe(doc, cache_id, embedding, Descriptors.C_TF_IDF, Accelerator.AUTO)
     return cache_id
 
 
@@ -2886,6 +2889,47 @@ async def test_finalize_embed_requires_the_rows_of_every_part() -> None:
     with pytest.raises(FileNotFoundError):
         await pipeline.finalize_embed(doc, params, None, 1)
     assert await embed_cache.lookup(params) is None, "and nothing was published"
+
+
+@pytest.mark.anyio
+async def test_describe_writes_the_descriptors_by_the_strategy_asked_for(
+    dbos, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """c-TF-IDF needs no model without an embedding one; the llm strategy waits for its describer
+    (`ModelLoading`, which a workflow sleeps out) and then asks it once per section with prose,
+    and the file says which strategy wrote what it holds."""
+    from haskie.indexing import gguf_models, models
+
+    doc = await import_row("g.md")
+    await _convert(doc)
+    cache_id = await _embed(doc, SMALL)  # described by c-TF-IDF, without a model
+    assert await embed_cache.described_by(doc.id, cache_id) == Descriptors.C_TF_IDF
+    by_weight = await embed_cache.read_sections(doc.id, cache_id)
+    assert any(one.descriptors for one in by_weight)
+
+    prompts: list[str] = []
+
+    def reply(name: str, accelerator: Accelerator, prompt: str, max_tokens: int) -> str:
+        assert (name, accelerator) == (gguf_models.DESCRIBER, Accelerator.AUTO)
+        prompts.append(prompt)
+        return "Topic one | Topic two"
+
+    monkeypatch.setattr(embed, "reply", reply)
+    describe = partial(pipeline.describe, doc, cache_id, None, Descriptors.LLM, Accelerator.AUTO)
+    with pytest.raises(models.ModelLoading):
+        await describe()
+    assert prompts == [] and await embed_cache.described_by(doc.id, cache_id) == (
+        Descriptors.C_TF_IDF
+    ), "nothing asked, nothing written"
+
+    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER))
+    count = await describe()
+
+    described = await embed_cache.read_sections(doc.id, cache_id)
+    assert count == len(described) == len(by_weight)
+    assert await embed_cache.described_by(doc.id, cache_id) == Descriptors.LLM
+    assert len(prompts) == sum(bool(one.descriptors) for one in described) > 0
+    assert {tuple(one.descriptors) for one in described} <= {("Topic one", "Topic two"), ()}
 
 
 @pytest.mark.anyio

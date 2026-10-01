@@ -14,24 +14,25 @@ cut by heading paths alone, so other chunk settings mostly give the same section
 while a chunk's `seq` names another text under other settings. The `s` and `c` keep the two kinds
 apart, so section 2 and chunk 2 of one document are two ids.
 
-Sections are named, and described, once per cached embedding (`embed_cache.write`), which sees
-the whole document in order. Descriptors: a `descriptors.Strategy` picks them,
-`descriptors.CLASS_TFIDF` unless the caller names another. The strategy reads each chunk's prose
-only (`prose`): code blocks and tables name things (identifiers, column headers, values) rather
-than say what a section is about. With a model it reranks against each section's vector: the mean
-of its chunks' unit vectors, scaled to length one, so a long chunk weighs no more than a short one.
+Sections are named once per cached embedding (`embed_cache.write`), which sees the whole document
+in order, and described by a step after it (`pipeline.describe`). Descriptors: a
+`descriptors.Strategy` picks them, `descriptors.CLASS_TFIDF` unless the caller names another. The
+strategy reads each chunk's prose only (`prose`): code blocks and tables name things (identifiers,
+column headers, values) rather than say what a section is about. c-TF-IDF with a model reranks
+against each section's vector: the mean of its chunks' unit vectors, scaled to length one, so a
+long chunk weighs no more than a short one.
 
 No IO here: the caller passes the function that embeds.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from itertools import groupby
 
 import msgspec
 import numpy as np
 
 from haskie import ids
-from haskie.indexing.chunk import HEADING_SEP, Chunk
+from haskie.indexing.chunk import HEADING_SEP, Chunk, Piece
 from haskie.indexing.segment import PieceType
 from haskie.search.passage import pages
 from haskie.sections import descriptors
@@ -148,10 +149,10 @@ def describe(
 NOT_PROSE = frozenset({PieceType.CODE, PieceType.TABLE})
 
 
-def prose(chunk: Chunk) -> str:
-    """The chunk's text without its code blocks and tables, each left as a blank line, so no
-    pair of words spans one (`descriptors.terms`)."""
-    return "".join("\n\n" if piece.type in NOT_PROSE else piece.text for piece in chunk.pieces)
+def prose(pieces: Iterable[Piece]) -> str:
+    """A chunk's text, from its pieces, without its code blocks and tables, each left as a blank
+    line, so no pair of words spans one (`descriptors.terms`)."""
+    return "".join("\n\n" if piece.type in NOT_PROSE else piece.text for piece in pieces)
 
 
 def _hashed(text: str) -> str:
