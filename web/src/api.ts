@@ -45,12 +45,10 @@ export type Answer = Wire<'Answer'>
 export type Source = Wire<'Source'>
 export type Sources = Wire<'Sources'>
 export type HotSection = Wire<'HotSection'>
-// A map of the sections a topic touches (`search.overview`), and one document's table of contents
-// with each section's keywords (`outline.build`).
+// A map of the sections a topic touches (`search.section_map`), each with its descriptors.
 export type SectionMap = Wire<'SectionMap'>
 export type MappedSection = Wire<'MappedSection'>
 export type RelatedSection = Wire<'Related'>
-export type OutlineSection = Wire<'OutlineSection'>
 export type Lines = Wire<'Lines'>
 export type Status = Wire<'Status'>
 export type ModelStatus = Wire<'ModelStatus'>
@@ -321,7 +319,6 @@ export const api = {
   documentCollections: (doc: string) => request<string[]>(`${documentPath(doc)}/collections`),
   documentEmbeddings: (doc: string) => request<EmbeddingEntry[]>(`${documentPath(doc)}/embeddings`),
   similarDocuments: (doc: string) => request<Similar>(`${documentPath(doc)}/similar`),
-  outline: (doc: string) => request<OutlineSection[]>(`${documentPath(doc)}/outline`),
   renameDocument: (doc: string, to: string) => request<ImportedDocument>(`${documentPath(doc)}/name`, json('PUT', { name: to })),
   describeDocument: (doc: string, description: string) =>
     request<ImportedDocument>(`${documentPath(doc)}/description`, json('PUT', { description })),

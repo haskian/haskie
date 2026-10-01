@@ -2,7 +2,7 @@ import { Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, MAX_PAGE_SIZE, type CollectionSummary, type Granularity, type MappedSection, type ScoreStep, type SearchScope, type SessionSummary, type StepTiming } from '../api'
 import type { PageProps } from '../App'
-import { HitGrid, MatchModal, OutlineModal, Picker, SearchBox, SearchTook, SectionGrid, Shell, type Match, type OpenedSection, type PickerOption } from '../ui'
+import { HitGrid, MatchModal, SectionsModal, Picker, SearchBox, SearchTook, SectionGrid, Shell, Toggle, type Match, type OpenedSection, type PickerOption } from '../ui'
 import './Explore.css'
 import { MAX_ASPECTS, questionsOf } from './explore/questions'
 import { ALL_SCOPE, parseScope, scopeParams, SESSION_PREFIX } from './explore/scope'
@@ -38,6 +38,7 @@ const ASKINGS: PickerOption<Asking>[] = [
  *  never hold, and the questions they do not answer. A map also names the fewest collections
  *  that hold every section on it. */
 interface Found {
+  body: unknown // the response as the endpoint sent it, for the debug view
   results: Match[]
   sections: MappedSection[]
   holders: string[]
@@ -56,7 +57,7 @@ interface Shown extends Found {
   took: number | null // null before the first search: the line above the results stays blank
 }
 
-const NOTHING: Shown = { results: [], sections: [], holders: [], steps: [], scoring: [], missing: [], uncovered: [], asked: [], context: '', as: 'excerpt', took: null }
+const NOTHING: Shown = { body: null, results: [], sections: [], holders: [], steps: [], scoring: [], missing: [], uncovered: [], asked: [], context: '', as: 'excerpt', took: null }
 const NONE = { results: [], sections: [], holders: [], missing: [], uncovered: [] }
 
 /** The one request an answer takes: its own route for excerpts, documents and sections, the
@@ -66,19 +67,19 @@ async function search(questions: string[], context: string, answer: Answer, wher
   const [text] = questions
   if (answer === 'section') {
     const found = await api.searchSections(text, where)
-    return { ...NONE, sections: found.body.sections, holders: found.body.collections, steps: found.steps, scoring: found.scoring }
+    return { ...NONE, body: found.body, sections: found.body.sections, holders: found.body.collections, steps: found.steps, scoring: found.scoring }
   }
   if (answer === 'source') {
     const found = await api.searchSources(text, where)
-    return { ...NONE, results: found.body.documents, steps: found.steps, scoring: found.scoring }
+    return { ...NONE, body: found.body, results: found.body.documents, steps: found.steps, scoring: found.scoring }
   }
   if (answer === 'excerpt') {
     const found = await api.searchExcerpts(questions, where, context.trim() || undefined)
     const { excerpts, missing_terms, uncovered } = found.body
-    return { ...NONE, results: excerpts, steps: found.steps, scoring: found.scoring, missing: missing_terms, uncovered }
+    return { ...NONE, body: found.body, results: excerpts, steps: found.steps, scoring: found.scoring, missing: missing_terms, uncovered }
   }
   const found = await api.explore(text, answer, where)
-  return { ...NONE, results: found.body, steps: found.steps, scoring: found.scoring }
+  return { ...NONE, body: found.body, results: found.body, steps: found.steps, scoring: found.scoring }
 }
 
 /** Search across collections, answering at the granularity the picker names: matches, or the
@@ -94,8 +95,9 @@ export function Explore({ route, counts }: PageProps) {
   const [shown, setShown] = useState<Shown>(NOTHING)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState<Match | null>(null)
-  const [outlined, setOutlined] = useState<OpenedSection | null>(null)
+  const [opened, setOpened] = useState<OpenedSection | null>(null)
   const [busy, setBusy] = useState(false)
+  const [debug, setDebug] = useState(false) // the raw response in place of the results
 
   useEffect(() => {
     Promise.all([api.collections({ page_size: MAX_PAGE_SIZE }), api.sessions()])
@@ -210,12 +212,17 @@ export function Explore({ route, counts }: PageProps) {
           />
         )}
         {error !== null && <p className="muted">{error}</p>}
-        <SearchTook counts={`${shown.as === 'section' ? shown.sections.length : shown.results.length} ${answerOf(shown.as).plural}`} ms={shown.took} steps={shown.steps} />
+        <div className="explore-status">
+          <SearchTook counts={`${shown.as === 'section' ? shown.sections.length : shown.results.length} ${answerOf(shown.as).plural}`} ms={shown.took} steps={shown.steps} />
+          <Toggle label="Debug" checked={debug} onChange={setDebug} />
+        </div>
         {shown.missing.length > 0 && <p className="muted">No excerpt says: {shown.missing.join(', ')}</p>}
         {shown.uncovered.length > 0 && <p className="muted">Unanswered: {shown.uncovered.join(' · ')}</p>}
         {shown.holders.length > 0 && <p className="muted">Held by: {shown.holders.join(', ')}</p>}
-        {shown.as === 'section' ? (
-          <SectionGrid sections={shown.sections} onOpen={setOutlined} />
+        {debug ? (
+          shown.body !== null && <pre className="md explore-raw">{JSON.stringify(shown.body, null, 2)}</pre>
+        ) : shown.as === 'section' ? (
+          <SectionGrid sections={shown.sections} onOpen={setOpened} />
         ) : (
           <HitGrid
             results={shown.results}
@@ -226,7 +233,7 @@ export function Explore({ route, counts }: PageProps) {
           />
         )}
       </div>
-      <OutlineModal section={outlined} onClose={() => setOutlined(null)} />
+      <SectionsModal section={opened} onClose={() => setOpened(null)} onOpen={setOpened} />
       <MatchModal match={open} query={shown.asked[0] ?? ''} scoring={shown.scoring} asked={{ questions: shown.asked, context: shown.context }} onClose={() => setOpen(null)} />
     </Shell>
   )

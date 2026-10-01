@@ -227,23 +227,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/documents/{document}/outline": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** DocumentOutline */
-        get: operations["ApiDocumentsOutlineDocumentOutline"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/documents/{document}/source": {
         parameters: {
             query?: never;
@@ -1145,6 +1128,7 @@ export interface components {
             document_id: string;
             document: string;
             header: string;
+            section_id: string;
             location: string;
             seq_start: number;
             seq_end: number;
@@ -1263,6 +1247,11 @@ export interface components {
             /** @default  */
             markdown_file: string;
             also_in?: components["schemas"]["HitReference"][];
+            /** @default  */
+            id: string;
+            /** @default  */
+            section_id: string;
+            section_ids?: string[];
         };
         /** HitReference */
         HitReference: {
@@ -1397,6 +1386,8 @@ export interface components {
             result_limit?: number | null;
             /** @default 0 */
             result_count: number;
+            /** @default false */
+            scoped: boolean;
             missing_terms?: string[];
             error?: string | null;
             id: number;
@@ -1419,6 +1410,7 @@ export interface components {
             document_id: string;
             document: string;
             header: string;
+            id: string;
             location: string;
             line_start: number;
             line_end: number;
@@ -1428,8 +1420,7 @@ export interface components {
             seq_end: number;
             chars: number;
             chunks: number;
-            keywords: string[];
-            distinct: string[];
+            descriptors: string[];
             markdown_file: string;
             related?: components["schemas"]["Related"][];
         };
@@ -1547,16 +1538,6 @@ export interface components {
          * @enum {string}
          */
         Order: "asc" | "desc";
-        /** OutlineSection */
-        OutlineSection: {
-            header: string;
-            depth: number;
-            location: string;
-            line_start: number;
-            line_end: number;
-            chars: number;
-            keywords: string[];
-        };
         /** Overlap */
         Overlap: {
             contained: number;
@@ -1610,6 +1591,7 @@ export interface components {
         /** Passage */
         Passage: {
             header: string;
+            section_id: string;
             location: string;
             seq_start: number;
             seq_end: number;
@@ -1688,7 +1670,7 @@ export interface components {
             document_parallelism: number;
             /**
              * Pages per micro-batch
-             * @description Number of PDF pages one task converts, or one task chunks and embeds. Bounds memory: at most the CPU budget x Pages per micro-batch pages are in flight. Non-PDF files are one batch.
+             * @description Number of PDF pages one task converts, or one task chunks and embeds. Bounds memory: at most the CPU budget x Pages per micro-batch pages are in flight. Non-PDF files convert as one batch, and chunk and embed in parts cut at their headings.
              * @default 10
              */
             batch_pages: number;
@@ -1759,6 +1741,7 @@ export interface components {
             document_id: string;
             document: string;
             header: string;
+            id: string;
             location: string;
             line_start: number;
             line_end: number;
@@ -2144,6 +2127,7 @@ export interface components {
         /** Span */
         Span: {
             header: string;
+            section_id: string;
             location: string;
             seq_start: number;
             seq_end: number;
@@ -2690,39 +2674,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Similar"];
-                };
-            };
-            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        detail: string;
-                    };
-                };
-            };
-        };
-    };
-    ApiDocumentsOutlineDocumentOutline: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                document: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Request fulfilled, document follows */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OutlineSection"][];
                 };
             };
             /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
@@ -3631,6 +3582,8 @@ export interface operations {
                 session_id?: string | null;
                 collections?: string | null;
                 limit?: number | null;
+                document_ids?: string[] | null;
+                section_ids?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -3668,6 +3621,8 @@ export interface operations {
                 session_id?: string | null;
                 collections?: string | null;
                 limit?: number | null;
+                document_ids?: string[] | null;
+                section_ids?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -3741,6 +3696,7 @@ export interface operations {
                 session_id?: string | null;
                 collections?: string | null;
                 limit?: number | null;
+                document_ids?: string[] | null;
             };
             header?: never;
             path?: never;

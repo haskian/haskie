@@ -33,8 +33,8 @@ from sqlalchemy import delete, func, insert, select
 from haskie import audit, db, home
 from haskie.collection.index import Hit, HitReference, Relation
 from haskie.search import collapse, session
-from haskie.search.overview import MappedSection
 from haskie.search.passage import Excerpt, Passage, PassageReference, Source
+from haskie.search.section_map import MappedSection
 from haskie.settings import Reranker, SearchMode
 from haskie.tables import search_questions, search_results, searches
 
@@ -183,6 +183,7 @@ class Searched(msgspec.Struct, kw_only=True):
     min_rerank_score: float | None = None
     result_limit: int | None = None
     result_count: int = 0  # the results the caller got, without the places folded into them
+    scoped: bool = False  # kept to some documents or sections: a miss says nothing of the rest
     missing_terms: list[str] = []  # the words of its questions no excerpt held; excerpts only
     error: str | None = None  # why it failed; a failed search returned nothing
 
@@ -263,6 +264,7 @@ def observe_scope(
     capture.result_limit = limit
     if where is None:
         return
+    capture.scoped = where.scope.narrows
     if where.vector is not None and where.embedding is not None:
         capture.embedding = where.embedding.profile or None
     if where.settings.reranker != Reranker.NONE:

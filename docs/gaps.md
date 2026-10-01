@@ -33,6 +33,7 @@ keeps only a rank score, and a rank says nothing about how close the best row ca
 The capture is written when the search ends, in one transaction: a `searches` row, one
 `search_questions` row per question asked, and one `search_results` row per place returned.
 An excerpts search also keeps `missing_terms`, the words of its questions no excerpt held.
+`scoped` marks a search kept to some documents or sections.
 Places are stored in preorder with their parent, so the `also_in` trees survive; an excerpt's
 places are its passages' repeats. Each keeps its citation (`header`, `location`), so the log reads
 without the document. A failed search is written with its error, then the error goes on. A search
@@ -57,7 +58,9 @@ search already stored. A question is a gap when a detector fires:
 | `uncovered` | several questions were asked at once, and no excerpt answers this one |
 | `weak` | its best match is under the bar. A reranked search is judged by the floor it dropped chunks under: the settings' `min_rerank_score` when one is set, else the reranker's calibrated floor (`reranker_calibration`), because the reranker reads query and passage together. Otherwise the profile's `weak_match` cosine decides. No bar known: no verdict |
 
-A failed search is an error, not a gap. A new signal is one `Signal` member and one detector
+A failed search is an error, not a gap. A search kept to some documents or sections
+(`document_ids`, `section_ids`; the row's `scoped`) is judged by `reported` alone: what it
+missed may sit in the documents it kept out. A new signal is one `Signal` member and one detector
 function.
 
 `report_gap` takes the session, the question as asked and a verdict, `insufficient` or `partial`,

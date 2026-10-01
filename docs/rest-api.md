@@ -11,15 +11,16 @@ Each feature has one module under `src/haskie/api/`.
 
 | prefix | module | covers |
 | --- | --- | --- |
-| `/api/documents` | `documents.py` | two-phase intake (`staging`, then `import`), re-import, listing, one document, rename, delete, its collections, embeddings, similar documents and outline, source, preview, markdown and line views, description, `render` (a search result's markdown as HTML) |
+| `/api/documents` | `documents.py` | two-phase intake (`staging`, then `import`), re-import, listing, one document, rename, delete, its collections, embeddings, similar documents and sections, source, preview, markdown and line views, description, `render` (a search result's markdown as HTML) |
 | `/api/collections` | `collections.py` | listing, create, rename, delete, overrides, description, members, attach, detach, re-index |
-| `/api/search` | `search.py` | `excerpts`, `sources`, `sections`, `explore` (chunk or passage; one collection is `collections=<name>`), `text` (BM25 only, no model) |
+| `/api/search` | `search.py` | `excerpts`, `sources`, `sections`, `explore` (chunk or passage; one collection is `collections=<name>`); `excerpts`, `sections` and `explore` keep to `document_ids`, and all but `sections` to `section_ids`, `text` (BM25 only, no model) |
 | `/api/sessions`, `/api/insights`, `/api/searches` | `search.py` | session selection and history, searches and indexed chunks as raw points, the search log |
 | `/api/gaps` | `gaps.py` | questions that found no answer, grouped by topic; review (dismiss, resolve, reopen); replay against the collections as they are now |
 | `/api/operations`, `/api/jobs` | `operations.py` | history per kind, live activity, progress, a job's tasks, cancel |
 | `/api/status`, `/api/init`, `/api/settings`, `/api/options` | `settings.py` | first-run init, user settings, and the option catalogue the UI builds its forms from |
 
-A handler marked `mcp_tool="<name>"` is also an MCP tool. See [MCP and Claude Code](mcp.md).
+A handler marked `mcp_tool="<name>"` is also an MCP tool. The search tools are separate handlers under
+`/api/agent/`, left out of this document, that answer with fewer fields. See [MCP and Claude Code](mcp.md).
 
 ## Two-phase intake
 

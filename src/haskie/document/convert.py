@@ -103,17 +103,28 @@ def to_markdown(path: Path, parser: Parser) -> str:
         raise _conversion_error(path, exc) from exc
 
 
-def pdf_outline(path: Path) -> tuple[int, list["Bookmark"] | None]:
-    """How many pages the PDF has, and the bookmarks that set its headings (`bookmarks.read`),
-    None when it has none that do, in one read of the file: a conversion plans its batches by
-    both."""
+class PdfBookmarks(msgspec.Struct, frozen=True):
+    """What a conversion plans its batches of a PDF by, read in one pass over the file."""
+
+    pages: int
+    # the bookmarks that set its headings (`bookmarks.read`), None when it has none that do
+    headings: list["Bookmark"] | None
+    starts: list[int]  # the 0-based page every section starts on, one per bookmark of any level
+
+
+def pdf_bookmarks(path: Path) -> PdfBookmarks:
+    """How many pages the PDF has, the bookmarks that set its headings, and where its sections
+    start."""
     from pypdf import PdfReader
 
     from haskie.document import bookmarks
 
     try:
         reader = PdfReader(str(path))
-        return len(reader.pages), bookmarks.read(reader)
+        every = bookmarks.every(reader)
+        headings = bookmarks.headed(every)
+        starts = sorted({mark.page - 1 for mark in every})
+        return PdfBookmarks(pages=len(reader.pages), headings=headings, starts=starts)
     except Exception as exc:
         raise _conversion_error(path, exc) from exc
 
@@ -142,7 +153,7 @@ def pdf_pages_markdown(
     With skip_ocr_pages those pages become a marker comment; otherwise their (empty) text stays.
     Policy decisions (fail or not) belong to check_ocr_policy over the whole document.
 
-    `marks` are the PDF's bookmarks (`pdf_outline`), at least those of these pages and the page
+    `marks` are the PDF's bookmarks (`pdf_bookmarks`), at least those of these pages and the page
     before them, when the document has bookmarks that set its headings: then they do, page by
     page (`bookmarks`), since the converter judges a heading by its font and takes running
     headers for sections, and a batch with none of its own makes all its headings text. None

@@ -46,7 +46,7 @@ from conftest import (
 from sqlalchemy import event, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
-from haskie import audit, db, home, logs, tables
+from haskie import audit, db, home, ids, logs, tables
 from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
 from haskie.collection import index as index_module
 from haskie.collection import maintenance
@@ -402,11 +402,11 @@ def test_build_preview_of_a_corrupt_pdf_raises_conversion_error(tmp_path: Path) 
         convert.build_preview(bad, tmp_path / "p", Parser.ANYDOC)
 
 
-def test_pdf_outline_of_a_corrupt_file_raises_conversion_error(tmp_path: Path) -> None:
+def test_pdf_bookmarks_of_a_corrupt_file_raises_conversion_error(tmp_path: Path) -> None:
     bad = tmp_path / "broken.pdf"
     bad.write_bytes(b"not a pdf at all")
     with pytest.raises(PermanentError, match="broken.pdf"):
-        convert.pdf_outline(bad)
+        convert.pdf_bookmarks(bad)
 
 
 # --- documents: staging and import -------------------------------------------------
@@ -510,7 +510,7 @@ async def test_the_bytes_are_the_document_whichever_way_they_came_in(tmp_path: P
     """A document's id is the MD5 of its bytes, taken at staging and at a path import alike. The
     same bytes again are refused under any name, naming the document they already are; staging
     them says so first. Other bytes are another document."""
-    md5 = hashlib.md5(MD.encode()).hexdigest()
+    md5 = ids.md5(MD.encode())
     first = await document.stage("guide.md", MD.encode())
     assert first.duplicate is None, "nothing imported yet"
     staged = await document.import_staged(first.staging_id)
@@ -1538,7 +1538,7 @@ async def test_one_document_sits_in_two_collections_and_a_detach_leaves_both_alo
     rows = home.HOME / "rows" / "000000.rows.json"
     rows.parent.mkdir(parents=True, exist_ok=True)
     rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0], seq=1)]))
-    cache_id = await embed_cache.write(params, [rows], None)
+    cache_id = await embed_cache.write(params, [rows], None, None)
 
     assert await document.collections_of(doc.id) == ["alpha", "beta"]
 
@@ -1573,7 +1573,7 @@ async def test_deleting_a_document_takes_every_membership_and_cache_row_with_it(
     rows = home.HOME / "rows" / "000000.rows.json"
     rows.parent.mkdir(parents=True, exist_ok=True)
     rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0], seq=1)]))
-    await embed_cache.write(params, [rows], None)
+    await embed_cache.write(params, [rows], None, None)
 
     await document.remove_files(doc.id)
     await document.remove_row(doc.id)
@@ -2650,13 +2650,18 @@ async def _convert(doc: Document, batch_pages: int = 10) -> list[pipeline.Batch]
 
 
 async def _embed(
-    doc: Document, chunking: ChunkSettings, embedding: EmbeddingModel | None = None
+    doc: Document,
+    chunking: ChunkSettings,
+    embedding: EmbeddingModel | None = None,
+    batch_pages: int = 10,
 ) -> str:
     params = embed_cache.params(doc, chunking, embedding)
     cache_id = embed_cache.key(params)
-    for batch in await pipeline.plan_embed(doc):
+    batches = await pipeline.plan_embed(doc, batch_pages)
+    for batch in batches:
         await pipeline.embed_batch(doc, batch, cache_id, chunking, embedding)
-    return await pipeline.finalize_embed(doc, params, embedding)
+    await pipeline.finalize_embed(doc, params, embedding, len(batches))
+    return cache_id
 
 
 async def _index(
@@ -2673,37 +2678,92 @@ async def _index(
     return written
 
 
+def _parts_of(doc: Document, batches: list[pipeline.Batch]) -> list[str]:
+    markdown = doc.markdown.read_bytes()
+    return [markdown[b.byte_offset : b.byte_end].decode() for b in batches]
+
+
+def _rows_of(doc: Document, batches: list[pipeline.Batch]) -> list[list[Row]]:
+    """The rows each embed batch wrote, a list per batch."""
+    return [
+        msgspec.json.decode(
+            embed_cache.rows_path(doc.id, "cache", batch.seq).read_bytes(), type=list[Row]
+        )
+        for batch in batches
+    ]
+
+
 @pytest.mark.anyio
-async def test_a_part_is_embedded_under_the_headings_an_earlier_part_opened() -> None:
-    """A PDF converts ten pages a part: a chapter opened in one part still frames the chunks
-    of the next, both in the chunk's headings and in what the model embeds. Where the two parts
-    meet is a part boundary, not the document's edge: the section goes on across it."""
+async def test_the_markdown_is_cut_where_its_sections_start_and_packed_up_to_a_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sections go whole into a part, as many as fit a batch of pages; a part never ends inside
+    one while a heading is there to end it at, and the parts tile the markdown."""
+    monkeypatch.setattr(pipeline, "PAGE_CHARS", 60)
     doc = await import_row("g.md")
-    parts = ["# Replication\n\n## Leaders\n\nOne leader takes writes.", "Followers apply the log."]
-    doc.parts_dir.mkdir(parents=True, exist_ok=True)
-    for seq, text in enumerate(parts):
-        doc.part_path(seq).write_text(text)
-    doc.markdown.write_text(pipeline.JOINER.join(parts))
+    sections = [f"# Chapter {n}\n\n{'Words of the chapter. ' * 2}\n\n" for n in range(5)]
+    doc.markdown.write_text("".join(sections))
 
-    batches = await pipeline.plan_embed(doc)
+    batches = await pipeline.plan_embed(doc, 2)
 
-    assert [[text for _, text in b.opened] for b in batches] == [[], ["Replication", "Leaders"]]
+    assert _parts_of(doc, batches) == [
+        sections[0] + sections[1],
+        sections[2] + sections[3],
+        sections[4],
+    ], "two sections a part: a third would not fit 120 characters"
     assert [(b.start_reason, b.end_reason) for b in batches] == [
-        (CutReason.EDGE, CutReason.PART),
+        (CutReason.EDGE, CutReason.HEADING),
+        (CutReason.HEADING, CutReason.HEADING),
+        (CutReason.HEADING, CutReason.EDGE),
+    ]
+    assert [b.char_offset for b in batches] == [0, len(sections[0]) * 2, len(sections[0]) * 4]
+
+
+@pytest.mark.anyio
+async def test_a_part_is_embedded_under_the_headings_an_earlier_part_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A section longer than a batch is cut at a page marker inside it: a chapter opened in one
+    part still frames the chunks of the next, both in the chunk's headings and in what the model
+    embeds. Where the two parts meet is a part boundary, not the document's edge: the section
+    goes on across it."""
+    monkeypatch.setattr(pipeline, "PAGE_CHARS", 100)
+    doc = await import_row("g.md")
+    long = "One leader takes writes. " * 6
+    markdown = (
+        f"# Replication\n\n## Leaders\n\n{long}\n\n<!-- page 2 -->\n\nFollowers apply the log."
+    )
+    doc.markdown.write_text(markdown)
+
+    batches = await pipeline.plan_embed(doc, 1)
+
+    assert _parts_of(doc, batches) == [
+        "# Replication\n\n",
+        f"## Leaders\n\n{long}\n\n",
+        "<!-- page 2 -->\n\nFollowers apply the log.",
+    ], "at the one heading inside the batch, then at the page marker inside the long section"
+    assert [[text for _, text in b.opened] for b in batches] == [
+        [],
+        ["Replication"],
+        ["Replication", "Leaders"],
+    ]
+    assert [(b.start_reason, b.end_reason) for b in batches] == [
+        (CutReason.EDGE, CutReason.HEADING),
+        (CutReason.HEADING, CutReason.PART),
         (CutReason.PART, CutReason.EDGE),
     ]
     for batch in batches:
         await pipeline.embed_batch(doc, batch, "cache", SMALL, None)
-    first, rows = (
-        msgspec.json.decode(
-            embed_cache.rows_path(doc.id, "cache", seq).read_bytes(), type=list[Row]
-        )
-        for seq in (0, 1)
+    _, leaders, followers = _rows_of(doc, batches)
+    assert {tuple(row.chunk.headings) for row in [*leaders, *followers]} == {
+        ("Replication", "Leaders")
+    }
+    assert followers[0].chunk.char_start == markdown.index("Followers"), "offsets into the file"
+    assert (leaders[0].chunk.start_reason, leaders[-1].chunk.end_reason) == (
+        CutReason.HEADING,
+        CutReason.PART,
     )
-    assert [row.chunk.headings for row in rows] == [["Replication", "Leaders"]]
-    assert rows[0].chunk.char_start == len(parts[0]) + len(pipeline.JOINER)
-    reasons = [(row.chunk.start_reason, row.chunk.end_reason) for row in [*first, *rows]]
-    assert reasons == [(CutReason.EDGE, CutReason.PART), (CutReason.PART, CutReason.EDGE)]
+    assert followers[0].chunk.start_reason == CutReason.PART
 
 
 @pytest.mark.anyio
@@ -2713,47 +2773,38 @@ async def test_a_part_is_embedded_under_the_headings_an_earlier_part_opened() ->
         ("text goes on: the section crosses the boundary", "More of it.", CutReason.PART),
         (
             "the next part opens with a heading, behind its page marker: the section ends",
-            "<!-- page 11 -->\n\n# Chapter 4\n\nMore.",
+            "# Chapter 4\n\nMore.",
             CutReason.HEADING,
         ),
     ],
 )
 async def test_where_two_parts_meet_is_cut_for_what_comes_next(
-    name: str, second: str, meets: CutReason
+    name: str, second: str, meets: CutReason, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A PDF chapter often starts on a new page, so a part often opens with its heading. The cut
-    between the two parts is then a heading on both sides, and a short section just before it is
-    whole: nothing grows across the heading."""
+    """A PDF chapter often starts on a new page, so a part cut at a page marker often opens with
+    its heading. The cut between the two parts is then a heading on both sides, and a short
+    section just before it is whole: nothing grows across the heading."""
+    monkeypatch.setattr(pipeline, "PAGE_CHARS", 50)
     doc = await import_row("g.md")
-    parts = ["# Chapter 3\n\nA short note.", second]
-    doc.parts_dir.mkdir(parents=True, exist_ok=True)
-    for seq, text in enumerate(parts):
-        doc.part_path(seq).write_text(text)
-    doc.markdown.write_text(pipeline.JOINER.join(parts))
+    doc.markdown.write_text(f"# Chapter 3\n\n{'A long note. ' * 6}\n\n<!-- page 11 -->\n\n{second}")
 
-    batches = await pipeline.plan_embed(doc)
+    batches = await pipeline.plan_embed(doc, 1)
     for batch in batches:
         await pipeline.embed_batch(doc, batch, "cache", SMALL, None)
-    rows = [
-        row
-        for seq in (0, 1)
-        for row in msgspec.json.decode(
-            embed_cache.rows_path(doc.id, "cache", seq).read_bytes(), type=list[Row]
-        )
-    ]
+    before, after = _rows_of(doc, batches)
 
     assert [(b.start_reason, b.end_reason) for b in batches] == [
         (CutReason.EDGE, meets),
         (meets, CutReason.EDGE),
     ], name
-    assert (rows[0].chunk.end_reason, rows[1].chunk.start_reason) == (meets, meets), name
+    assert (before[-1].chunk.end_reason, after[0].chunk.start_reason) == (meets, meets), name
 
 
 @pytest.mark.anyio
 async def test_plan_embed_requires_a_converted_document() -> None:
     doc = await import_row("g.md")
-    with pytest.raises(FileNotFoundError, match="markdown parts missing"):
-        await pipeline.plan_embed(doc)
+    with pytest.raises(FileNotFoundError, match="markdown missing"):
+        await pipeline.plan_embed(doc, 10)
 
 
 @pytest.mark.anyio
@@ -2763,7 +2814,7 @@ async def test_finalize_embed_requires_the_rows_of_every_part() -> None:
 
     params = embed_cache.params(doc, ChunkSettings(), None)
     with pytest.raises(FileNotFoundError):
-        await pipeline.finalize_embed(doc, params, None)
+        await pipeline.finalize_embed(doc, params, None, 1)
     assert await embed_cache.lookup(params) is None, "and nothing was published"
 
 
@@ -2782,11 +2833,12 @@ async def test_convert_and_embed_write_atomically() -> None:
     assert await pipeline.convert_batch(doc, batch) == 0, "no OCR pages in markdown"
     await pipeline.finalize_convert(doc, [batch], 0)
     params = embed_cache.params(doc, SMALL, None)
-    chunks = await pipeline.embed_batch(doc, batch, embed_cache.key(params), SMALL, None)
+    (part,) = await pipeline.plan_embed(doc, 10)
+    chunks = await pipeline.embed_batch(doc, part, embed_cache.key(params), SMALL, None)
 
     assert chunks == len(chunk.split(MD, SMALL))
     assert doc.markdown.read_text() == MD
-    assert doc.part_path(0).read_text() == MD, "the part stays: it is the re-chunking input"
+    assert doc.part_path(0).read_text() == MD, "the convert part stays"
     assert list(doc.parts_dir.glob("*.tmp")) == [], "no temp file left behind"
     assert not doc.markdown.with_name(doc.markdown.name + ".tmp").exists()
 
@@ -2808,6 +2860,35 @@ async def test_a_reconversion_starts_the_documents_outputs_over() -> None:
     assert list(doc.parts_dir.iterdir()) == [], "and so are the parts"
     assert not doc.embeddings_dir.exists(), "no cache file survives a reconversion"
     assert await embed_cache.entries(doc.id) == [], "and no cache row either"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "marks", "expected"),
+    [
+        ("no bookmarks: every four pages", [], [(0, 4), (4, 6)]),
+        ("a chapter starting on page 4 ends the batch before it", [0, 3], [(0, 3), (3, 6)]),
+        ("short chapters packed, as many as fit four pages", [0, 1, 2, 5], [(0, 2), (2, 6)]),
+    ],
+)
+async def test_a_pdf_converts_in_batches_cut_where_its_bookmarks_start(
+    name: str, marks: list[int], expected: list[tuple[int, int]], tmp_path: Path
+) -> None:
+    """At most four pages a batch, each ending where the last section starting inside it does."""
+    from pypdf import PdfWriter
+
+    plain = tmp_path / "plain.pdf"
+    plain.write_bytes(text_pdf([f"page {n}" for n in range(6)]))
+    writer = PdfWriter(clone_from=str(plain))
+    for page in marks:
+        writer.add_outline_item(f"Chapter {page}", page)
+    writer.write(tmp_path / "book.pdf")
+    doc = await import_row("book.pdf", (tmp_path / "book.pdf").read_bytes())
+
+    batches = await pipeline.plan_convert(doc, 4)
+
+    assert [(b.start, b.end) for b in batches] == expected, name
+    assert [b.seq for b in batches] == list(range(len(expected)))
 
 
 @pytest.mark.anyio
@@ -2839,6 +2920,16 @@ async def test_the_pipeline_indexes_a_markdown_document_into_a_collection() -> N
     assert hit.source_file == str(doc.original), "the hit points at the document's own files"
     assert hit.markdown_file == str(doc.markdown)
     assert Path(hit.markdown_file).read_text() == MD
+    sections = await embed_cache.read_sections(doc.id, cache_id)
+    by_header = {one.header: one for one in sections}
+    assert list(by_header) == ["", "Title", "Title > Alpha", "Title > Beta"], "in document order"
+    assert by_header["Title > Alpha"].parent_id == by_header["Title"].id
+    assert hit.section_id == by_header["Title > Alpha"].id, "the chunk names its section"
+    assert hit.section_ids == [by_header[one].id for one in ("", "Title", "Title > Alpha")]
+    assert hit.id == ids.md5(f"{doc.id}/c/{hit.seq}".encode()), "the chunk's document and seq"
+    assert [one.id for one in sections] == [
+        ids.md5(f"{doc.id}/s/{position}".encode()) for position in range(len(sections))
+    ], "each section's document and place among its sections"
 
 
 @pytest.mark.anyio
@@ -2848,9 +2939,9 @@ async def test_index_batch_group_is_idempotent() -> None:
     collection = await Collection.create("groups")
     doc = await import_row("p.pdf", text_pdf(["alpha one", "beta two", "gamma three"]))
     await _convert(doc, batch_pages=1)
-    cache_id = await _embed(doc, SMALL)
+    cache_id = await _embed(doc, SMALL, batch_pages=1)
 
-    assert await embed_cache.row_groups(doc.id, cache_id) == 3, "one group per converted part"
+    assert await embed_cache.row_groups(doc.id, cache_id) == 3, "one group per embed part"
     assert [(b.seq, b.start, b.end) for b in await pipeline.plan_index(doc, cache_id, 2)] == [
         (0, 0, 2),
         (1, 2, 3),
@@ -3344,7 +3435,7 @@ def test_migrate_creates_the_schema_once_and_refuses_every_other_home(
 
 # The schema `tables.py` generates at this `SCHEMA_VERSION`: a SHA-256 of its DDL statements,
 # sorted, because a table's indexes are a set and come out in no fixed order.
-SCHEMA_PIN = (27, "bca3558ab82f080b116aa6f72af5200eb191aef8dc6e84387a9e22818967b4d9")
+SCHEMA_PIN = (32, "643c66576097a2e8c11701bc16f15e3c056aad5026dcc5ca428ccfc4b2b68c39")
 
 
 def test_a_table_change_comes_with_a_new_schema_version() -> None:

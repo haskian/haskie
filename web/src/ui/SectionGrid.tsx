@@ -1,22 +1,20 @@
-import type { CSSProperties } from 'react'
 import type { MappedSection, RelatedSection } from '../api'
-import { cite, fillOf } from './match'
-import { keywordsOf } from './sections'
+import { cite, fillOf, plural, scoreStyle } from './match'
 
-// `--score` drives the bar under a tile, as in `HitGrid`: its place among the others.
-const scoreStyle = (fill: number): CSSProperties => ({ '--score': fill }) as CSSProperties
-const count = (n: number, unit: string): string => `${n} ${unit}${n === 1 ? '' : 's'}`
 // Where a related section is, as far as it differs from its pick: the same section of the same
 // document, chunked by another collection, names that collection.
 const placeOf = (near: RelatedSection, pick: MappedSection): string =>
   [near.document !== pick.document && near.document, near.collection !== pick.collection && near.collection].filter(Boolean).join(' · ')
 
-/** A section of the map, or one listed under it, opened: its document's outline, at the section. */
-export type OpenedSection = Pick<MappedSection | RelatedSection, 'document' | 'header' | 'line_start' | 'line_end'>
+/** A section of the map, or one listed under it, opened: its document's sections, at this one,
+ *  with what the map said about it. */
+export type OpenedSection = MappedSection | RelatedSection
 
-/** The map of sections a topic touches: a tile each, naming the section and what it is about,
- *  the words that set it apart marked first. Under it, the sections it covers best, which the
- *  map did not pick again. A tile, or a section under it, opens its document's outline. */
+const isPick = (section: OpenedSection): section is MappedSection => 'related' in section
+
+/** The map of sections a topic touches: a tile each, naming the section and what it is about.
+ *  Under it, the sections it covers best, which the map did not pick again. A tile, or a section
+ *  under it, opens its document's sections. */
 export function SectionGrid({ sections, onOpen }: { sections: MappedSection[]; onOpen?: (section: OpenedSection) => void }) {
   const scores = sections.map((section) => section.score)
   const best = Math.max(...scores)
@@ -39,40 +37,70 @@ export function SectionGrid({ sections, onOpen }: { sections: MappedSection[]; o
           </header>
           <div className="hit-body">
             <p className="section-heading">{section.header || 'The whole document'}</p>
-            {section.keywords.length > 0 && (
-              <div className="keywords">
-                {keywordsOf(section).map(({ word, distinct }) => (
-                  <span key={word} className={distinct ? 'keyword distinct' : 'keyword'}>
-                    {word}
-                  </span>
-                ))}
-              </div>
-            )}
+            <Descriptors words={section.descriptors} />
             <footer className="hit-foot">
               <span>{cite(section.location, section.document) || ' '}</span>
               <span>
-                {count(section.chars, 'char')} · {count(section.chunks, 'matched chunk')}
+                {plural(section.chars, 'char')} · {plural(section.chunks, 'matched chunk')}
               </span>
             </footer>
-            {(section.related ?? []).length > 0 && (
-              <ul className="related" aria-label="Related sections">
-                {(section.related ?? []).map((near) => (
-                  <li
-                    key={`${near.collection}:${near.document_id}:${near.line_start}`}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      onOpen?.(near)
-                    }}
-                  >
-                    <span className="related-title">{near.header || near.document}</span>
-                    {placeOf(near, section) && <span className="related-place mono muted">{placeOf(near, section)}</span>}
-                    <span className="mono muted">{near.similarity.toFixed(2)}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
+            <Related pick={section} onOpen={onOpen} />
           </div>
         </article>
+      ))}
+    </div>
+  )
+}
+
+/** The sections a pick covers best, which the map did not pick again, each with how closely the
+ *  pick covers it; nothing when there are none. A row opens that section. */
+function Related({ pick, onOpen }: { pick: MappedSection; onOpen?: (section: OpenedSection) => void }) {
+  const related = pick.related ?? []
+  if (related.length === 0) return null
+  return (
+    <ul className="related" aria-label="Related sections">
+      {related.map((near) => (
+        <li
+          key={`${near.collection}:${near.document_id}:${near.line_start}`}
+          onClick={(event) => {
+            event.stopPropagation()
+            onOpen?.(near)
+          }}
+        >
+          <span className="related-title">{near.header || near.document}</span>
+          {placeOf(near, pick) && <span className="related-place mono muted">{placeOf(near, pick)}</span>}
+          <span className="mono muted">{near.similarity.toFixed(2)}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/** What the map said about the opened section, under its row in the document's sections: for a
+ *  pick, its score, how many of its chunks matched and the sections it covers; for a section
+ *  listed under a pick, its score and how closely that pick covers it. */
+export function OpenedDetail({ section, onOpen }: { section: OpenedSection; onOpen?: (section: OpenedSection) => void }) {
+  return (
+    <div className="opened-detail">
+      <span className="mono">
+        {isPick(section)
+          ? `score ${section.score.toFixed(2)} · ${plural(section.chunks, 'matched chunk')}`
+          : `score ${section.score.toFixed(2)} · similarity ${section.similarity.toFixed(2)} to its pick`}
+      </span>
+      {isPick(section) && <Related pick={section} onOpen={onOpen} />}
+    </div>
+  )
+}
+
+/** What a section is about, one chip per descriptor; nothing when it has none. */
+export function Descriptors({ words }: { words: string[] }) {
+  if (words.length === 0) return null
+  return (
+    <div className="descriptors">
+      {words.map((word) => (
+        <span key={word} className="descriptor">
+          {word}
+        </span>
       ))}
     </div>
   )

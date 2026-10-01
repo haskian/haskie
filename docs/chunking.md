@@ -20,7 +20,7 @@ Each applies to all collections, or to one as an override. Sizes are in characte
 ## Steps
 
 `chunk.pipeline(settings)` builds the steps. Each hands its output to the next. Chunking runs once
-per part: the whole document, or `batch_pages` pages of a PDF.
+per part of the document's markdown, cut where its sections start ([Indexing](indexing.md)).
 
 ```mermaid
 flowchart TD
@@ -121,8 +121,9 @@ flowchart TD
 | `length_sentence` | between two sentences of one block | it begins at a sentence | it ends on a whole sentence |
 | `length_oversize` | inside a piece longer than a chunk | it continues a piece cut in two | it ends mid-piece |
 
-A part is one convert output file: the whole document, or `batch_pages` pages of a PDF. Each part
-is chunked on its own, so no chunk spans two parts. The headings still open at the end of one
+A part is one slice of the document's markdown, cut where a heading starts, or at a page marker
+inside a section longer than a batch ([Indexing](indexing.md)). Each part is chunked on its own,
+so no chunk spans two parts. The headings still open at the end of one
 part carry over to the next (`chunk.open_headings`).
 
 ## Sizes

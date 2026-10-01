@@ -1,9 +1,5 @@
-import type { CSSProperties } from 'react'
 import { Mark } from './Mark'
-import { alsoDocuments, alsoOf, everyPlace, fillOf, headingOf, isExcerpt, isSource, placeOf, questionLabels, type Match } from './match'
-
-// `--score` drives the bar under a tile: the result's place among the others, not its raw score.
-const scoreStyle = (fill: number): CSSProperties => ({ '--score': fill }) as CSSProperties
+import { alsoDocuments, alsoOf, everyPlace, fillOf, headingOf, isExcerpt, isSource, placeOf, plural, questionLabels, scoreStyle, type Match } from './match'
 
 // A source shows what the document is about when it has a description; a chunk or passage shows
 // the text that matched. Under it, one line each: the heading it sits under, where to read it (or
@@ -15,11 +11,10 @@ const alsoIn = (match: Match): string => {
   const places = everyPlace(alsoOf(match)).length
   return places > 0 ? ` · also in ${places} / ${alsoDocuments(match)}` : ''
 }
-const count = (n: number, unit: string): string => `${n} ${unit}${n === 1 ? '' : 's'}`
 const EMPTY = '\u00a0' // an empty line keeps its height, so every tile of a grid stays level
 const linesOf = (match: Match): string[] => {
   const heading = headingOf(match) || (isSource(match) ? '' : match.header) || EMPTY
-  if (isSource(match)) return [heading, `${count(match.chunks, 'chunk')} · ${count(match.sections.length, 'section')}`]
+  if (isSource(match)) return [heading, `${plural(match.chunks, 'chunk')} · ${plural(match.sections.length, 'section')}`]
   const [where, chunks] = placeOf(match)
   return [heading, where || EMPTY, `${chunks}${alsoIn(match)}`]
 }

@@ -187,8 +187,8 @@ BATCH_PAGES = Meta(
     title="Pages per micro-batch",
     description=(
         "Number of PDF pages one task converts, or one task chunks and embeds. Bounds memory: at "
-        "most the CPU budget x Pages per micro-batch pages are in flight. Non-PDF files are "
-        "one batch."
+        "most the CPU budget x Pages per micro-batch pages are in flight. Non-PDF files convert "
+        "as one batch, and chunk and embed in parts cut at their headings."
     ),
 )
 INDEX_GROUP_PARTS = Meta(

@@ -36,10 +36,10 @@ flowchart TB
         conv["convert slices<br/>(task.converting)"] --> warm["ensure_embedding<br/>for default settings"]
     end
     subgraph ensure_embedding
-        chunk["cache hit, or chunk + embed<br/>slices (task.embedding)"] --> parquet[("parquet in cache")]
+        chunk["cache hit, or chunk + embed<br/>slices (task.embedding)"] --> parquet[("chunks and sections<br/>in cache, with ids")]
     end
     subgraph index_collection_document
-        need["ensure_embedding<br/>for this collection's settings"] --> rows["write rows; build the FTS index<br/>if the table has none (task.indexing)"]
+        need["ensure_embedding<br/>for this collection's settings"] --> rows["write chunk rows;<br/>build the FTS index if the<br/>table has none (task.indexing)"]
     end
     warm -.waits on.-> chunk
     need -.waits on.-> chunk
@@ -47,29 +47,47 @@ flowchart TB
 
 `ensure_embedding` always runs, and looks up the cache inside. On a hit it returns at once.
 
-**The outline.** When a document has no outline under the model, `ensure_embedding` builds one
-from the cache file it found or computed (`outline/build.py`, `outline/store.py`). That is the
-import's file, under the default chunk settings, unless the model changed since. The outline
-lists every heading's section, cut by the same rule a search groups passages by. Each section gets
-the words that say what it is about and, with an embedding model, a vector: the mean of its unit
-chunk vectors. The outline goes into `outline.json` beside the markdown and into the outline
-index across every collection ([Storage](storage.md#the-outline)). One document's outline is
-built by one run at a time. Two collections with other chunk settings both reach it after a
-model change: the second run waits, then finds it built.
+**Sections and ids.** The merge that publishes a computed embedding names every section of the
+document and every chunk (`embed_cache._merge`, `sections/build.py`): a section is every heading's
+run of chunks, cut by the same rule a search groups passages by, and each gets an id from its
+document and its place among its sections, and a parent. Each chunk gets an id and the sections
+that hold it ([Storage](storage.md#sections-and-their-ids)). Then `embed_cache.write` describes
+the sections and writes them into their own file beside the chunks', before the entry's row: a
+cache hit has both. Each cache entry, so each chunking, has its own sections and descriptors.
 
-A keyword strategy picks the words (`keywords.Strategy`). The only one, `ClassTfidf`, weighs the
-sections of one depth against each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25
-weighting: a chapter's words against the other chapters'. With an embedding model, each
-section's best 20 candidates are embedded, one call for the whole document, and reranked against
-the mean of its chunk vectors, as BERTopic's `KeyBERTInspired` does. A word or word pair that a
-section uses once is left out, unless the section is too short to have enough used twice. Most
-such terms are halves of a word a PDF split over two lines, or two words that happen to meet.
-Measured once on one book (1.4 MB of markdown, 1,776 chunks, bge-small, on the dev machine): the
-outline took 2.4 s, the chunk embeddings 50 s.
+A descriptor strategy picks one to five words for each section that has any
+(`descriptors.Strategy`). It reads prose only: code blocks and tables name identifiers and values,
+not what a section is about. The only strategy, `ClassTfidf`, weighs the sections of one depth
+against each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25 weighting: a chapter's words
+against the other chapters'. Unlike BERTopic, it counts how many sections use a term rather than how
+often the whole book does. A term more than half the sections of a depth use is the book's topic, so
+it is no descriptor there: in one book on DDD, "model", "design" and "chapter" had been descriptors
+of 31 sections, and are of none. The whole document's section keeps them. Nor is a term whose every
+word the section's header already holds: "aggregates" under `Aggregates > Rule: Design Small
+Aggregates` says nothing new. With an embedding model, each section's best 20 candidates are
+embedded, one call for the whole document, and reranked against the section's vector (the mean
+of its chunks' unit vectors, scaled to length one, never stored), as
+BERTopic's `KeyBERTInspired` does. A word or word pair that a section uses once is left out, unless
+the section is too short to have enough used twice. Most such terms are halves of a word a PDF split
+over two lines, or two words that happen to meet. Measured once on one book (1.4 MB of markdown,
+1,776 chunks, bge-small, on the dev machine): the descriptors took 2.4 s, the chunk embeddings 50 s.
 
-**Batches.** A PDF converts in batches of `batch_pages` pages (default 10). Any other file
-converts as one batch. Embedding runs one batch per converted part. Indexing writes
-`index_group_parts` parts per batch (default 50).
+**Batches.** Work is cut where the document's sections start (`indexing/parts.py`), so a section
+is whole in one batch wherever it can be. Batches are packed greedily: a batch holds as many whole
+sections as fit `batch_pages` pages (default 10), and is cut at the last section start inside
+them. A section longer than that is cut at a page inside it, and a PDF without sections every
+`batch_pages` pages, as before. Only a PDF has pages to cut at: other files have none.
+
+- A PDF converts in batches cut at the pages its bookmarks start on, of any level. Without
+  bookmarks, every `batch_pages` pages. Any other file converts as one batch.
+- Embedding cuts the assembled markdown into parts where its headings start, and a section longer
+  than a batch at its page markers (`pipeline.plan_embed`). Pages are counted by those markers, else
+  as 3,000 characters each (`PAGE_CHARS`). Markdown without page markers is cut at headings alone:
+  a section longer than a batch, or a file with no headings, is one part. The cuts depend on the
+  markdown alone, so the document is
+  chunked from the same parts under any chunk settings. On one 657-page book, 83 parts: 70 cut at a
+  heading, 12 at a page inside a long section.
+- Indexing writes `index_group_parts` parts per batch (default 50).
 
 **Slices.** Convert and embed cut their batches into contiguous slices, at most
 `document_parallelism` of them and never more than the stage's share of the CPU budget (0 means

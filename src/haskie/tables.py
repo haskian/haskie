@@ -52,7 +52,7 @@ collections = Table(
     Column("vector_index_rows", Integer, nullable=False, server_default=ZERO),
     # the sum of the unit chunk vectors of its indexed documents under `vector_model`, and how
     # many chunks it sums (`embed_cache.corpus_sum`), set by maintenance: what a search centres
-    # cosines on before it weighs them (`search.overview`)
+    # cosines on before it weighs them (`search.section_map`)
     Column("vector_sum", LargeBinary),
     Column("vector_rows", Integer, nullable=False, server_default=ZERO),
     Column("vector_model", Text),
@@ -100,6 +100,9 @@ collection_documents = Table(
     Column("error", Text),
     Column("added_at", Float, nullable=False, server_default=ZERO),
     Column("updated_at", Float, nullable=False, server_default=ZERO),
+    # the embedding cache entry its rows are indexed from, None until indexed or once the entry is
+    # forgotten: its section ids are that entry's, whatever the chunk settings say by now
+    Column("cache_id", Text, ForeignKey("embeddings.id", ondelete="SET NULL")),
     Index("idx_collection_documents_document_id", "document_id"),
     Index("idx_collection_documents_status", "collection", "status", "document_id"),
 )
@@ -177,6 +180,8 @@ searches = Table(
     Column("min_rerank_score", Float),  # the settings' floor in place of the reranker's own
     Column("result_limit", Integer),
     Column("result_count", Integer, nullable=False, server_default=ZERO),
+    # kept to some documents or sections (`document_ids`, `section_ids`): a miss is no gap
+    Column("scoped", Integer, nullable=False, server_default=ZERO),
     Column("duration_ms", Integer, nullable=False, server_default=ZERO),
     Column("error", Text),
     # the words of its questions no excerpt held (`Answer.missing_terms`), JSON; excerpts only

@@ -55,19 +55,30 @@ type Pages = Mapping[int, list[Bookmark]]  # the bookmarks each 1-based page hol
 
 def read(reader: "PdfReader") -> list[Bookmark] | None:
     """The bookmarks that set the PDF's headings, in document order: None when it has none, one
-    level of them only, or an outline that cannot be read, since a broken outline is no reason to
-    fail a conversion that does not need it."""
+    level of them only, or bookmarks that cannot be read."""
+    return headed(every(reader))
+
+
+def headed(found: list[Bookmark]) -> list[Bookmark] | None:
+    """The bookmarks, when they set headings: None when they are of one level only, or none."""
+    return found if len({mark.level for mark in found}) > 1 else None
+
+
+def every(reader: "PdfReader") -> list[Bookmark]:
+    """Every bookmark of the PDF, in document order, of any level: where its sections start. Nothing
+    of bookmarks that cannot be read, since broken bookmarks are no reason to fail a conversion
+    that does not need it."""
     found: list[Bookmark] = []
     try:
         _walk(reader, reader.outline, 1, found)
     except Exception:
-        return None
-    return found if len({mark.level for mark in found}) > 1 else None
+        return []
+    return found
 
 
 def _walk(reader: "PdfReader", items: list, level: int, found: list[Bookmark]) -> None:
-    """Every entry of an outline, a nested list in pypdf: a list after an entry holds its
-    children. An entry that points nowhere in the file (an external link) is skipped."""
+    """Every bookmark of a PDF, a nested list in pypdf (`reader.outline`): a list after an entry
+    holds its children. An entry that points nowhere in the file (an external link) is skipped."""
     for item in items:
         if isinstance(item, list):
             _walk(reader, item, level + 1, found)

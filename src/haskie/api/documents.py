@@ -22,13 +22,11 @@ from litestar.response import File, Stream
 from haskie import audit, cpu, logs
 from haskie.api.common import PAGED, BulkStarted, Describe, Rename, SessionId
 from haskie.catalogue import catalogue
-from haskie.collection.index import location
 from haskie.document import convert, render
 from haskie.document import document as documents
 from haskie.document.document import Document, DocumentStatus, ImportOptions, Staged
 from haskie.errors import InvalidInput, NotFound
 from haskie.indexing import embed_cache, workflows
-from haskie.outline import store
 from haskie.paging import Page, PageRequest, one_of
 from haskie.search import session
 from haskie.settings import load_user_settings
@@ -49,18 +47,6 @@ class Similar(msgspec.Struct):
 
 
 NEAREST = 3  # enough to spot a second edition, few enough to read at a glance
-
-
-class OutlineSection(msgspec.Struct):
-    """One section of a document's outline, and what it is about."""
-
-    header: str  # its heading path, ready to cite; empty for the whole document
-    depth: int  # how many headings deep: 0 for the whole document
-    location: str
-    line_start: int
-    line_end: int
-    chars: int  # how long it is: what reading it costs at most
-    keywords: list[str]  # what it is about, against the other sections of its depth
 
 
 class Head(msgspec.Struct):
@@ -215,35 +201,6 @@ async def similar_documents(document: str) -> Similar:
     model = await catalogue.embedding_model(await load_user_settings())
     nearest = [] if model is None else await embed_cache.nearest(row.id, model.cache_name, NEAREST)
     return Similar(nearest=nearest)
-
-
-@get("/api/documents/{document:str}/outline", mcp_tool="document_outline")
-async def document_outline(document: str) -> list[OutlineSection]:
-    """A document's table of contents, each section with the words that say what it is about.
-
-    Every section in document order, a parent before its children: first the whole document
-    (`depth` 0), then each heading's section at its depth. `keywords` are the words a section uses
-    more than the other sections of its depth, a chapter against the other chapters, best first,
-    and those closest in meaning to the section when there is an embedding model. Cite a section
-    by its `header` and `location`; ask `search_excerpts` for its text. Empty until the document
-    is imported.
-    """
-    row = await documents.named(document)
-    nodes = (await store.read([row.id])).get(row.id, [])
-    return [
-        OutlineSection(
-            header=node.header,
-            depth=node.depth,
-            location=location(
-                row.name, node.page_start, node.page_end, node.line_start, node.line_end
-            ),
-            line_start=node.line_start,
-            line_end=node.line_end,
-            chars=node.char_end - node.char_start,
-            keywords=list(node.keywords),
-        )
-        for node in nodes
-    ]
 
 
 # A document's own bytes are served on haskie's origin, where an HTML or SVG file would run its

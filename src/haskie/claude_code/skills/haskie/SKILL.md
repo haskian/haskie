@@ -6,8 +6,9 @@ description: >-
 
 # haskie: the user's own sources
 
-The user chose and trusts these documents. Where they cover a topic, they outrank the web and
-your training data. Answer from them, and name the document each answer came from.
+The user chose these documents. When the excerpts actually answer a question, prefer them over
+the web and your training data, and name the document each answer came from. When they do not,
+say so.
 
 The always-loaded rule says when to search and how to write the query. This file is the tool
 reference.
@@ -25,51 +26,61 @@ Each search tool's description says where it looks, how to split and word `q`, w
 counts, and how `also_in` folds repeats. This section adds what those descriptions leave out: the
 fields to read, and the defaults.
 
-**`search_excerpts(q, context?, session_id?, collections?, limit?)`** → `excerpts`, `uncovered`,
-`missing_terms`. Start here, or with `search_sections` when the question is broad.
+**`search_excerpts(q, context?, session_id?, collections?, limit?, document_ids?, section_ids?)`**
+→ `excerpts`, `uncovered`, `missing_terms`. Start here, or with `search_sections` when the
+question is broad.
 
-- `limit` defaults to the collection's setting when one collection is searched, else the user's.
+- `limit`: sections, default 10. Ask for more only when ten do not answer.
   It never defaults to fewer than the parts.
 - A passage is matching chunks that sit next to each other. A result held by several collections
   in scope comes back once.
+- `document_ids` keeps to these documents, `section_ids` to these sections and every section
+  under them, at most 100 of each: the `document_id` of any result or the `id` of a document
+  row, the `id` of a section from `search_sections`, the `section_id` of an excerpt or span.
+  Use it to read the sections a map pointed at, or to ask a follow-up of one document.
 - cite: `document`, `header` ("parent > … > heading") and `location` ("doc p.3-4 L10-20", first
-  passage to last).
+  passage to last). `section_id` names the excerpt's section.
 - read: `score` is the best passage's. `collection` is whose index matched.
-- `spans`: one per passage, in document order, each with `header`, `location`, `score`, `aspects`,
-  `aspect_scores`, `also_in`, `line_start`/`line_end`, `char_start`/`char_end`,
-  `page_start`/`page_end` and `seq_start`/`seq_end`. `aspects` is empty for one question.
-- open: `markdown_file` and `source_file` (absolute paths), `line_start`/`line_end` (1-based, in
-  `markdown_file`), `char_start`/`char_end` (0-based), `page_start`/`page_end` (PDF only, else
-  null), `seq_start`/`seq_end` (chunk positions in the document).
+- `spans`: one per passage, in document order, each with `header`, `section_id`, `location`,
+  `score`, and when there are any `aspects`, `aspect_scores` and `also_in`. An empty list or map
+  is left out of every answer: no `aspects` for one question.
+- open: `markdown_file` (absolute path), at the lines `location` names (`L10-20`, 1-based).
 - `missing_terms`: with a reranker on, the full-text find joins only when the reranker judges it
   an answer, and scores what the reranker gave it. Without one, its span scores 0. A missing word
   is one the sources do not use: search again with a synonym, or say the sources lack it.
-- Each place in `also_in` has `collection`, `document`, `header`, `location`,
-  `line_start`/`line_end`, `seq_start`/`seq_end`, `score` (its own match to the query), `relation`
-  to its parent and `similarity` (how strongly that relation holds).
+- Each place in `also_in` has `collection`, `document`, `header`, `location`, `score` (its own
+  match to the query), `relation` to its parent, `similarity` (how strongly that relation holds),
+  `to_parent` and `to_root`.
 
 **`search_sources(q, session_id?, collections?, limit?, sections?)`** → `documents` (best first)
 and `collections`.
 
 - `limit`: documents, 1 to 100, default 10. `sections`: headings per document, 1 to 20, default 3.
 - Per document: `document`, `description`, `score`, `chunks`, `collections`, its best chunk as
-  `text`, `header`, `location` and `line_start`/`line_end`, and `markdown_file`/`source_file`.
-- Each of `sections` has `header`, `score`, `chunks`, `location` and `line_start`/`line_end`.
+  `text`, `header` and `location`, and `markdown_file`.
+- Each of `sections` has `header`, `score`, `chunks` and `location`.
   Read them to know where to look in a long document.
 
-**`search_sections(q, session_id?, collections?, limit?)`** → `sections` (in pick order) and
-`collections`. A map of a topic, near topics included, with no text. Fast: no reranker.
+**`search_sections(q, session_id?, collections?, limit?, document_ids?)`** → `sections` (in pick
+order) and `collections`. A map of a topic, near topics included, with no text. Fast: no reranker.
+`document_ids` keeps it to those documents.
 
-- `limit`: sections, 1 to 40, default 12. At most two of one document while another has a section
+- `limit`: sections, 1 to 40, default 15. At most two of one document while another has a section
   on the topic left.
-- Per section: `document`, `header`, `depth`, `location`, `line_start`/`line_end`,
-  `seq_start`/`seq_end`, `chars` (its length), `chunks` (how many of its chunks matched), `score`,
-  `markdown_file`.
-- `keywords`: what the section is about, against the other sections of its depth. `distinct`: the few of
-  them that set it apart from the other sections on this map.
-- `related`: sections left out because this one covers them, each with `header`, `location`,
-  `score` and `similarity`. A near copy of the section lands here.
-- Then ask `search_excerpts` about the sections worth reading, or open `markdown_file` at the lines.
+- Per section: `id`, `document`, `header`, `location`, `chars` (its length), `chunks` (how many
+  of its chunks matched), `score`, `markdown_file`.
+- `descriptors`: one to five words or phrases for what the section is about, set apart from the
+  other sections of its depth, and not what its `header` already says unless it has no other
+  words.
+- `related`: the sections the map did not pick that sit closest to this one, at most five, each
+  with `id`, `header`, `location`, `score` and `similarity`. It means nearby, not repeated. A near
+  copy lands here, and so can the best section on the topic. Read these headers before choosing
+  what to read.
+- `related` differs from `also_in` in `search_excerpts`. A place in `also_in` passed a repeat
+  test, so it can be skipped, or cited as another source when its `document` differs. A section
+  in `related` passed no such test.
+- Then ask `search_excerpts` about the sections worth reading, with their `id`s as `section_ids`,
+  or open `markdown_file` at the lines.
 
 **`set_session_collections(session_id, collections)`** → the selection now, at most 100 names. It
 replaces the previous selection; it does not add to it. It scopes every later search of the
@@ -94,10 +105,7 @@ Paged tools take `page_size` (default 100, at most 1000), `cursor`, `sort` and `
   `collections`: how many hold it. `status` is one of `queued`, `converting`, `embedding`,
   `imported`, `error`, `cancelled`, `deleting`.
 - **`get_document(document)`** → one such row.
-- **`document_outline(document)`** → its table of contents in document order: each section's
-  `header`, `depth` (0 is the whole document), `location`, `line_start`/`line_end`, `chars` and
-  `keywords`. Empty until the document is imported.
-- A document row: `name`, `suffix`, `size`, `status`, `error`, `preview`, `parser`,
+- A document row: `id`, `name`, `suffix`, `size`, `status`, `error`, `preview`, `parser`,
   `skip_ocr_pages`, `description`, `created_at`, `updated_at`.
 
 ## Write tools

@@ -662,7 +662,7 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
 
     shape = [(r.hits[0].document, r.alone, [ref.document for ref in r.also_in]) for r in kept]
     assert shape == expected, name
-    # each document one section of one chunk, as `CollectionIndex.outline_rows` reads it
+    # each document one section of one chunk, as `CollectionIndex.placement_rows` reads it
     rows = [
         {
             "document_id": one.document_id,
@@ -677,10 +677,10 @@ def test_a_range_too_short_to_stand_alone_leads_no_fold(
         }
         for one in scanned
     ]
-    outlines = section.outlines(
+    placed = section.placements(
         [(one.collection, row) for one, row in zip(scanned, rows, strict=True)]
     )
-    grouped = section.group(kept, outlines, max_chars=10_000, limit=len(kept) + 1)
+    grouped = section.group(kept, placed, max_chars=10_000, limit=len(kept) + 1)
     assert [one.document_id for one in grouped] == excerpts, f"{name}: the excerpts answered with"
 
 

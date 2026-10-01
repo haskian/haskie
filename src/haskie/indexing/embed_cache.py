@@ -1,12 +1,13 @@
-"""The embedding cache: one parquet file per (document, chunk settings, embedding model), keyed
-by a canonical URN, plus the `embeddings` row that makes it visible.
+"""The embedding cache: per (document, chunk settings, embedding model), a file of its chunks and
+one of its sections, keyed by a canonical URN, plus the `embeddings` row that makes it visible.
 
 Chunking and embedding a document is the expensive part of indexing, and it depends on nothing a
 collection owns except its chunk settings. So it is computed once per distinct `Params` and kept
-with the document (`documents/<shard>/<doc id>/embeddings/<id>.parquet`): a collection that attaches
-the document reads the rows back out of the cache into its own LanceDB table (`pipeline.index_*`)
-and computes nothing when the file already exists. The parquet file has one row group per
-convert part, in part order, so the index stage can stream it a group at a time.
+with the document (`documents/<shard>/<doc id>/embeddings/<id>.chunks.parquet`, `file_path`, and
+`<id>.sections.parquet`, `sections_path`): a collection that attaches the document reads the rows
+back out of the cache into its own LanceDB table (`pipeline.index_*`) and computes nothing when the
+file already exists. The chunks' file has one row group per embed part (`pipeline.plan_embed`), in
+part order, so the index stage can stream it a group at a time.
 
 `Params` is the whole key. Its fields are always serialized in the same order (`urn`), so the same
 inputs hash to the same id. The model is keyed by `EmbeddingModel.cache_name`: its name, its
@@ -29,13 +30,12 @@ column is this module's own: `seq`, the row's 1-based position among the documen
 only the merge across parts can number (see `_merge`). File writes and reads run in a worker thread:
 pyarrow is sync.
 
-The document's outline (`outline.build`, `outline.store`) is built from one entry's file
-(`build_outline`); which entry, `workflows.ensure_embedding` decides.
+Each entry also keeps its document's sections, named and described at the merge
+(`sections_path`, `sections.build`).
 """
 
 import hashlib
 import time
-import weakref
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -51,12 +51,12 @@ from sqlalchemy.dialects.sqlite import insert
 from haskie import cpu, db, home
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.collection import MemberStatus
-from haskie.collection.index import Row, vector_field, vector_matrix
+from haskie.collection.index import Row, vector_field
 from haskie.document import document
 from haskie.indexing import chunk
 from haskie.indexing.chunk import CHUNK_VERSION, Chunk
-from haskie.outline import build, keywords, store
 from haskie.search import collapse
+from haskie.sections import build, descriptors
 from haskie.settings import Chunker, ChunkSettings, Parser
 from haskie.tables import collection_documents, documents, embeddings
 
@@ -92,13 +92,18 @@ class Entry(Params, frozen=True):
 ENTRY_COLUMNS = db.columns_of(embeddings, Entry)
 
 
+def model_of(embedding: EmbeddingModel | None) -> str:
+    """What the cache keys a model by (`Params.model`)."""
+    return embedding.cache_name if embedding else NO_MODEL
+
+
 def params(
     doc: document.Document, chunking: ChunkSettings, embedding: EmbeddingModel | None
 ) -> Params:
     """The key of one document under one collection's chunk settings and the global model."""
     return Params(
         document_id=doc.id,
-        model=embedding.cache_name if embedding else NO_MODEL,
+        model=model_of(embedding),
         chunk_version=CHUNK_VERSION,
         parser=doc.parser,
         skip_ocr_pages=doc.skip_ocr_pages,
@@ -108,7 +113,7 @@ def params(
 
 def urn(p: Params) -> str:
     """Canonical form: `name:value` per field in declaration order, so equal params always give
-    equal text. `document_id` is safe inside it: an MD5 is hex."""
+    equal text. `document_id` is safe inside it: an id is base58 letters and digits (`ids`)."""
     return ";".join(
         f"{name}:{str(value).lower() if isinstance(value, bool) else value}"
         for name, value in msgspec.structs.asdict(p).items()
@@ -123,7 +128,7 @@ def key(p: Params) -> str:
 
 
 def file_path(doc: str, id: str) -> Path:
-    return document.embeddings_dir(doc) / f"{id}.parquet"
+    return document.embeddings_dir(doc) / f"{id}.chunks.parquet"
 
 
 def scratch_dir(doc: str, id: str) -> Path:
@@ -137,12 +142,20 @@ def rows_path(doc: str, id: str, seq: int) -> Path:
     return scratch_dir(doc, id) / f"{home.part_name(seq)}.rows.json"
 
 
+def sections_path(doc: str, id: str) -> Path:
+    """The sections of one cached embedding, beside its chunks (`sections.build`)."""
+    return document.embeddings_dir(doc) / f"{id}.sections.parquet"
+
+
 # --- parquet -------------------------------------------------------------------
 
 _PLAIN = pa.schema(
     [
         ("part", pa.int32()),
         ("seq", pa.int32()),
+        ("id", pa.string()),
+        ("section_id", pa.string()),
+        ("section_ids", pa.list_(pa.string())),
         ("headings", pa.list_(pa.string())),
         ("frame", pa.list_(pa.string())),
         ("pieces", pa.list_(pa.struct([("type", pa.string()), ("text", pa.string())]))),
@@ -161,53 +174,141 @@ _PLAIN = pa.schema(
 
 
 def _schema(dims: int | None) -> pa.Schema:
-    if dims is None:
-        return _PLAIN
-    return _PLAIN.append(vector_field(dims))
+    return _PLAIN if dims is None else _PLAIN.append(vector_field(dims))
 
 
 def _batch(part: int, rows: list[Row], dims: int | None) -> pa.RecordBatch:
-    records = [chunk.record(row.chunk, row.vector, dims, part=part, seq=row.seq) for row in rows]
+    records = [
+        chunk.record(
+            row.chunk,
+            row.vector,
+            dims,
+            part=part,
+            seq=row.seq,
+            id=row.id,
+            section_id=row.section_id,
+            section_ids=row.section_ids,
+        )
+        for row in rows
+    ]
     return pa.RecordBatch.from_pylist(records, schema=_schema(dims))
 
 
 def _rows(batch: pa.RecordBatch) -> list[Row]:
     return [
-        Row(chunk=msgspec.convert(record, Chunk), vector=record.get("vector"), seq=record["seq"])
+        Row(
+            chunk=msgspec.convert(record, Chunk),
+            vector=record.get("vector"),
+            seq=record["seq"],
+            id=record["id"],
+            section_id=record["section_id"],
+            section_ids=record["section_ids"],
+        )
         for record in batch.to_pylist()
     ]
 
 
+# a section's columns, as `build.Section` names them
+_SECTIONS = pa.schema(
+    [
+        ("id", pa.string()),
+        ("parent_id", pa.string()),  # None for the whole document
+        ("headings", pa.list_(pa.string())),
+        ("seq_start", pa.int32()),
+        ("seq_end", pa.int32()),
+        ("line_start", pa.int32()),
+        ("line_end", pa.int32()),
+        ("char_start", pa.int32()),
+        ("char_end", pa.int32()),
+        ("byte_start", pa.int32()),
+        ("byte_end", pa.int32()),
+        ("page_start", pa.int32()),
+        ("page_end", pa.int32()),
+        ("descriptors", pa.list_(pa.string())),
+    ]
+)
+
+
+class _Placed(msgspec.Struct):
+    """What naming the sections reads of a chunk (`build.Spanned`): the first pass of `_merge`
+    decodes only these, and skips the vectors."""
+
+    headings: list[str]
+    line_start: int
+    line_end: int
+    char_start: int
+    char_end: int
+    byte_start: int
+    byte_end: int
+    page_start: int | None = None
+    page_end: int | None = None
+
+
+class _PlacedRow(msgspec.Struct):
+    chunk: _Placed
+
+
 class Merged(msgspec.Struct):
-    """What `_merge` wrote: its size, its rows, and the sum of their unit vectors."""
+    """What `_merge` wrote, and what describing the sections reads: the chunks' prose, and the
+    sum of the unit vectors each section holds."""
 
     bytes: int
     rows: int
-    summed: np.ndarray | None  # None without an embedding model
+    sections: list[build.Section]  # without descriptors yet
+    prose: list[str]  # each chunk's (`build.prose`), in `seq` order
+    sums: np.ndarray | None  # a row per section; None without an embedding model
+
+    @property
+    def summed(self) -> np.ndarray | None:
+        """The sum of every chunk's unit vector: the whole document's section holds them all."""
+        return None if self.sums is None or not self.sections else self.sums[0]
 
 
-def _merge(parts: list[Path], target: Path, dims: int | None) -> Merged:
+def _merge(document_id: str, parts: list[Path], target: Path, dims: int | None) -> Merged:
     """Stream every `rows.json` into `target` as one row group each, through a `.tmp` and one
     replace, so a reader never sees a partial file. An empty part still gets a row group, so group
     `n` is always part `n` (an empty group is skipped on read).
 
-    This is also where `Row.seq` is filled in: the parts are chunked in parallel and each one
-    numbers its chunks from zero, so the merge is the first place that sees the whole document
-    in order. And where the document vector is summed, since every row passes through here once.
+    This is where the chunks are numbered (`Row.seq`) and named, and their sections too: the parts
+    are chunked in parallel and each one numbers its chunks from zero, so the merge is the first
+    place that sees the whole document in order. Two passes, so no more than one part's vectors
+    are held at once: the first reads where every chunk runs and names the sections
+    (`build.sections`), the second writes each chunk with its id and sections, and sums its unit
+    vector into every section that holds it, for `write` to describe them with.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
+    placed = [
+        row.chunk
+        for path in parts
+        for row in msgspec.json.decode(path.read_bytes(), type=list[_PlacedRow])
+    ]
+    found, chains = build.sections(document_id, placed)
+    sums = None if dims is None else np.zeros((len(found), dims), dtype=np.float64)
+    prose: list[str] = []
     count = 0
-    summed = None if dims is None else np.zeros(dims, dtype=np.float64)
     with home.atomic_replace(target) as tmp, pq.ParquetWriter(tmp, _schema(dims)) as writer:
         for part, path in enumerate(parts):
             rows = msgspec.json.decode(path.read_bytes(), type=list[Row])
-            for seq, row in enumerate(rows, count + 1):
-                row.seq = seq
+            for row in rows:
+                chain = chains[count]
+                count += 1
+                row.seq = count
+                row.section_ids = [found[at].id for at in chain]
+                row.section_id = row.section_ids[-1]
+                row.id = build.chunk_id(document_id, count)
+                prose.append(build.prose(row.chunk))
             writer.write_batch(_batch(part, rows, dims))
-            if summed is not None and rows:  # `_batch` has refused a row without a vector by now
-                summed += collapse.unit_rows([row.vector for row in rows]).sum(axis=0)
-            count += len(rows)
-    return Merged(bytes=target.stat().st_size, rows=count, summed=summed)
+            if sums is not None and rows:  # `_batch` has refused a row without a vector by now
+                units = collapse.unit_rows([row.vector for row in rows])
+                for row, unit in zip(rows, units, strict=True):
+                    sums[chains[row.seq - 1]] += unit
+    return Merged(bytes=target.stat().st_size, rows=count, sections=found, prose=prose, sums=sums)
+
+
+def _write_sections(path: Path, found: list[build.Section]) -> None:
+    table = pa.Table.from_pylist([msgspec.to_builtins(one) for one in found], schema=_SECTIONS)
+    with home.atomic_replace(path) as tmp:
+        pq.write_table(table, tmp)
 
 
 def _document_vector(merged: Merged) -> bytes | None:
@@ -236,12 +337,20 @@ async def lookup(p: Params) -> str | None:
     return id
 
 
-async def write(p: Params, parts: list[Path], dims: int | None) -> str:
-    """Merge the scratch rows of every part into the cache file, publish its row, then drop the
-    scratch directory - last, so a retry before the row was written still finds its input."""
+async def write(
+    p: Params, parts: list[Path], dims: int | None, embed: descriptors.Embed | None
+) -> str:
+    """Merge the scratch rows of every part into the cache file, describe its sections into their
+    own file, publish its row, then drop the scratch directory - last, so a retry before the row
+    was written still finds its input. Both files are in place before the row: a hit (`lookup`)
+    has both. `embed` embeds the descriptor candidates; None ranks them by weight alone."""
     id = key(p)
     target = file_path(p.document_id, id)
-    merged = await anyio.to_thread.run_sync(_merge, parts, target, dims)
+    merged = await anyio.to_thread.run_sync(_merge, p.document_id, parts, target, dims)
+    # the mean of a section's unit vectors scaled to length one, which the sum is too
+    vectors = None if merged.sums is None else collapse.unit_rows(merged.sums)
+    described = await cpu.on_cpu(build.describe, merged.sections, merged.prose, vectors, embed)
+    await anyio.to_thread.run_sync(_write_sections, sections_path(p.document_id, id), described)
     entry = Entry(
         **msgspec.structs.asdict(p),
         id=id,
@@ -260,37 +369,17 @@ async def write(p: Params, parts: list[Path], dims: int | None) -> str:
     return id
 
 
-# One build of a document's outline at a time: two collections that chunk it apart embed it at
-# once after a model change, and each run sees no outline. Unserialized, both would embed its
-# keyword candidates, and their two writes could leave the file from one chunking and the index
-# rows from the other. Every workflow step runs on DBOS's one loop, so a lock per document holds.
-# Weak values: a lock lives while a run holds or awaits it, and its entry goes with the last one.
-_outline_locks: weakref.WeakValueDictionary[str, anyio.Lock] = weakref.WeakValueDictionary()
+def _read_sections(path: Path) -> list[build.Section]:
+    return msgspec.convert(pq.read_table(path).to_pylist(), list[build.Section])
 
 
-async def build_outline(p: Params, embed: keywords.Embed | None) -> None:
-    """Build the document's outline from the cache file of `p` and save it under `p`'s model,
-    unless it has one under that model by now: `embed` embeds its keyword candidates; None ranks
-    them by weight alone."""
-    # setdefault, with no await in between, so two runs of one document take the same lock
-    async with _outline_locks.setdefault(p.document_id, anyio.Lock()):
-        if await store.current(p.document_id, p.model):
-            return  # the run it waited on built it, or a retry of this one did
-        path = file_path(p.document_id, key(p))
-        chunks, vectors = await anyio.to_thread.run_sync(_read_all, path)
-        nodes, pooled = await cpu.on_cpu(build.describe, chunks, vectors, embed)
-        await store.save(p.document_id, store.Outline(model=p.model, nodes=nodes), pooled)
-
-
-def _read_all(path: Path) -> tuple[list[Row], np.ndarray | None]:
-    """Every chunk of a cache file in `seq` order, without its vector, and the vectors as one
-    matrix: a float list per row would take four times the memory."""
-    table = pq.read_table(path)
-    plain = table.drop_columns(["vector"]) if "vector" in table.column_names else table
-    chunks = [row for batch in plain.to_batches() for row in _rows(batch)]
-    if plain is table:
-        return chunks, None
-    return chunks, vector_matrix(table.column("vector"))
+async def read_sections(doc: str, id: str) -> list[build.Section]:
+    """The sections of one cached embedding, in document order, each with its descriptors; none
+    once the entry is forgotten (a reconversion), which a search can meet midway."""
+    try:
+        return await anyio.to_thread.run_sync(_read_sections, sections_path(doc, id))
+    except FileNotFoundError:
+        return []
 
 
 def _num_row_groups(path: Path) -> int:
@@ -328,32 +417,30 @@ async def read(doc: str, id: str, start: int, end: int) -> AsyncIterator[tuple[i
 
 async def corpus_sum(collection: str, model: str) -> tuple[np.ndarray, int] | None:
     """The sum of the unit chunk vectors of a collection's indexed documents under `model`, and
-    how many chunks it sums, each document by its newest entry; None without one. What a search
-    centres its vectors on (`search.overview`), built from the document means rather than the
-    collection's table: one row per document, not one per chunk."""
+    how many chunks it sums, each document by the entry its rows were indexed from; None without
+    one. What a search centres its vectors on (`search.section_map`), built from the document
+    means rather than the collection's table: one row per document, not one per chunk."""
     async with db.read() as conn:
-        rows = await conn.execute(
-            select(embeddings.c.document_id, embeddings.c.vector, embeddings.c.rows)
-            .join_from(
-                embeddings,
-                collection_documents,
-                embeddings.c.document_id == collection_documents.c.document_id,
+        found = (
+            await conn.execute(
+                select(embeddings.c.vector, embeddings.c.rows)
+                .join_from(
+                    embeddings,
+                    collection_documents,
+                    embeddings.c.id == collection_documents.c.cache_id,
+                )
+                .where(
+                    collection_documents.c.collection == collection,
+                    collection_documents.c.status == MemberStatus.INDEXED,
+                    embeddings.c.model == model,
+                    embeddings.c.vector.is_not(None),
+                )
             )
-            .where(
-                collection_documents.c.collection == collection,
-                collection_documents.c.status == MemberStatus.INDEXED,
-                embeddings.c.model == model,
-                embeddings.c.vector.is_not(None),
-            )
-            .order_by(embeddings.c.created_at.desc())
-        )
-        newest: dict[str, tuple[bytes, int]] = {}
-        for name, vector, count in rows:
-            newest.setdefault(name, (vector, count))
-    if not newest:
+        ).all()
+    if not found:
         return None
-    means = [np.frombuffer(vector, dtype=np.float32) for vector, _ in newest.values()]
-    counts = np.asarray([count for _, count in newest.values()], dtype=np.float64)
+    means = [np.frombuffer(vector, dtype=np.float32) for vector, _ in found]
+    counts = np.asarray([count for _, count in found], dtype=np.float64)
     return (np.asarray(means, dtype=np.float64) * counts[:, None]).sum(axis=0), int(counts.sum())
 
 

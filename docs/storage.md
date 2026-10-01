@@ -15,16 +15,14 @@ they sit in the fastembed and Hugging Face caches, outside the home.
   documents/<sh>/<id>/
     original.<ext>        the file as imported
     original.<ext>.md     the full conversion
-    parts/NNNNNN.md       one per batch of PDF pages (one part for other files); every
-                          collection re-chunks from these
-    outline.json          the outline: every section, where it runs, its keywords
+    parts/NNNNNN.md       one per convert batch of PDF pages (one part for other files),
+                          joined into the full conversion
     preview/              the preview source and its markdown
-    embeddings/<id>.parquet   one per chunk settings and model
-    embeddings/<id>.tmp/      partial results while an embedding is computed
-  collections/<sh>/<name>/index/   the LanceDB table "chunks"
-  outlines/               LanceDB, one "nodes-<model>" table per embedding model (its
-                          `cache_name`, `/@:` as `_`): every document's outline, with
-                          vectors; "nodes-none", without vectors, for full-text search
+    embeddings/<id>.chunks.parquet     the chunks, one file per chunk settings and model
+    embeddings/<id>.sections.parquet   their sections: ids, where each runs, descriptors
+    embeddings/<id>.tmp/               partial results while an embedding is computed
+  collections/<sh>/<name>/
+    index/                the LanceDB table "chunks"
   cache/models/           compiled CoreML models
   audit/                  one JSON line per action
 ```
@@ -67,6 +65,7 @@ erDiagram
         text collection PK
         text document_id PK
         text status
+        text cache_id
     }
     embeddings {
         text id PK
@@ -145,7 +144,8 @@ when `min_rerank_score` is empty, and the beta curve `fill_values = absolute` sp
 by. The seed gives every reranker an uncalibrated floor of 0.05 and the identity curve, until
 `catalogue/calibrate.py` measures both on borderline pairs of your own collections.
 
-`documents.id` is the MD5 of the original file. The bytes are the document, so the same file is
+`documents.id` is the MD5 of the original file, in base58 like section and chunk ids (see below). The bytes
+are the document, so the same file is
 never imported twice. Every table, the LanceDB rows, the folders and the workflow ids refer to a
 document by this id. `documents.name` is what people and agents call it. The API and the tools
 address a document by name. It is unique, and stored in lowercase-kebab-case.
@@ -174,31 +174,40 @@ Every table and index is a SQLAlchemy Core `Table` in `tables.py`, the one sourc
 the same tables, so a column name is written once. Index names start with `idx_`. A home created
 before `tables.py` keeps its older, unprefixed names.
 
-## The outline
+## Sections and their ids
 
-Each document has one outline, whichever collections hold it (`outline/`). It is kept twice:
+Every section and every chunk has an id, named when a computed embedding is merged
+(`embed_cache._merge`, `sections/build.py`): the merge is the first place that sees the whole
+document in order.
 
-- **`outline.json`**, beside the markdown: every section in document order, where it runs, by the
-  fields a chunk names its span with (`headings`, lines, chars, bytes, pages), and its keywords
-  with how often it uses each. It names the embedding model it was built under. `document_outline`
-  and `search_sections` read it.
-- **`outlines/`**, one LanceDB table per embedding model, across every collection: the same nodes,
-  one row each, keyed by `document_id` and `position`, each with its vector when there is a model.
-  The vector is the mean of the section's unit chunk vectors, scaled to length one. A model change
-  drops no table, so a document's rows wait for the model to change back. Every boot and the nightly
-  run compact them.
+- Each of these ids is an MD5 written in base58 (`ids.py`), 22 characters: letters and digits
+  without `0`, `O`, `I` and `l`, padded with `1`, the zero digit.
+- A section is a run of chunks under one heading path, the whole document first. Its id is the
+  MD5 of `<document id>/s/<position>`, its place among the document's sections, 0 for the whole
+  document. Sections are cut by heading paths alone, so other chunk settings mostly give the same
+  sections the same ids. Each section names the one it sits in (`parent_id`).
+- A chunk's id is the MD5 of `<document id>/c/<seq>`, its 1-based place among the document's
+  chunks: under other chunk settings the same `seq`, and so the same id, names other text. Each
+  chunk names the deepest section that holds it (`section_id`) and every section that does, the
+  whole document first (`section_ids`), so a search kept to a chapter finds the chunks of its
+  subsections too.
+- The `s` and `c` keep the two kinds apart: section 2 and chunk 2 of one document are two ids.
 
-`ensure_embedding` builds it from the first cache entry it finds or computes while the document
-has no outline under the model. That is the import's, under the default chunk settings, unless
-the model changed since: then it is whichever entry the document gets first under the new
-model, or an old one when the model changed back. A reconversion or a delete drops both.
+The sections go into their own file beside the chunks (`<id>.sections.parquet`), each with its
+id, parent, headings, where it runs and its descriptors, written before the entry's row, so a
+cache hit has both. Each chunking of a document keeps its own, as its section ids are its own.
+A membership names the entry its rows were indexed from (`collection_documents.cache_id`), so
+`search_sections` reads the descriptors of the sections a collection's ids name, even after its
+chunk settings change and before *Index all* re-chunks it; the collection's centre sums its
+members' entries the same way. A reconversion or a delete drops them with the cache, and the
+pointer with its entry (a foreign key, `on delete set null`) until the member is indexed again.
 
 ## How each store is written
 
 | store | how it is written | why |
 | --- | --- | --- |
 | SQLite | app code through SQLAlchemy Core on `aiosqlite`, one connection per unit of work (`NullPool`); DBOS through its own connections; WAL mode | a unit of work is one transaction. A unit that writes (`db.connect`) takes the write lock at its start (`begin immediate`), so a check it reads still holds when it writes. Writers that meet, and DBOS's writers, wait on the busy timeout, then fail with "database is locked". A unit that only reads (`db.read`) takes no lock: a deferred transaction reads one snapshot, waits for no writer, and refuses any write (`query_only`) |
-| LanceDB | async API. A collection's table: one writer per collection (`task.indexing`). An outline table: one `merge_insert` per document, from any embedding run, one run per document at a time | one writer per table keeps commits simple. An outline write touches one document's rows, and LanceDB retries commits that conflict |
+| LanceDB | async API; a collection's table: one writer per collection (`task.indexing`) | one writer per table keeps commits simple |
 | small files | `home.atomic_write`: a temp file, flushed to disk, then `os.replace` | a crash or a power cut leaves the old file or the new one, never half |
 | imported originals | moved or copied into place | removed again if the import raises |
 
@@ -211,6 +220,6 @@ refused at startup, with a message that says so. The fix is `haskie destroy` and
 A collection's LanceDB table records the embedding its vectors were made by (the `cache_name`, in
 its schema metadata). A table of another embedding, or one from before the record, is outdated:
 the collection shows it, and *Index all* rebuilds it from the embedding cache. No re-import is
-needed. The outline index needs no such record: each model has its own table.
+needed.
 
 Code: `tables.py`, `db.py`, `catalogue/catalogue.py`, `catalogue/seed.sql`, `home.py`, `sysdb.py`.

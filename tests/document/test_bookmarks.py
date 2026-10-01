@@ -178,14 +178,14 @@ BOOK: list[str | None | list[tuple[int, str]]] = [
 ]
 
 
-def _book(tmp_path: Path, outline: list[tuple[str, int, int]]) -> Path:
+def _book(tmp_path: Path, marks: list[tuple[str, int, int]]) -> Path:
     """`BOOK` with bookmarks of (title, 0-based page, parent position or -1)."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     plain = tmp_path / "plain.pdf"
     plain.write_bytes(text_pdf(BOOK))
     writer = PdfWriter(clone_from=str(plain))
     added = []
-    for title, page, parent in outline:
+    for title, page, parent in marks:
         added.append(
             writer.add_outline_item(title, page, parent=added[parent] if parent >= 0 else None)
         )
@@ -195,7 +195,7 @@ def _book(tmp_path: Path, outline: list[tuple[str, int, int]]) -> Path:
 
 
 @pytest.mark.parametrize(
-    ("name", "outline", "expected"),
+    ("name", "marks", "expected"),
     [
         (
             "nested bookmarks set the levels",
@@ -215,14 +215,14 @@ def _book(tmp_path: Path, outline: list[tuple[str, int, int]]) -> Path:
     ],
 )
 def test_the_conversion_routes_by_the_bookmarks(
-    tmp_path: Path, name: str, outline: list[tuple[str, int, int]], expected: list[str]
+    tmp_path: Path, name: str, marks: list[tuple[str, int, int]], expected: list[str]
 ) -> None:
-    path = _book(tmp_path, outline)
-    total, marks = convert.pdf_outline(path)
+    path = _book(tmp_path, marks)
+    found = convert.pdf_bookmarks(path)
 
-    markdown, ocr_pages, count = convert.pdf_pages_markdown(path, marks=marks)
+    markdown, ocr_pages, count = convert.pdf_pages_markdown(path, marks=found.headings)
 
-    assert (total, ocr_pages, count) == (2, [], 2), name
+    assert (found.pages, ocr_pages, count) == (2, [], 2), name
     assert _lines(markdown) == expected, name
     assert "12 Chapter 1 SAGAS" in markdown, f"{name}: the running header's text stays"
 
@@ -237,7 +237,7 @@ def test_a_batch_learns_what_the_page_before_it_claimed(tmp_path: Path) -> None:
     writer.add_outline_item("Other", 1, parent=writer.add_outline_item("Sagas", 0))
     path = tmp_path / "book.pdf"
     writer.write(path)
-    _, marks = convert.pdf_outline(path)
+    marks = convert.pdf_bookmarks(path).headings
 
     first, _, _ = convert.pdf_pages_markdown(path, [0], marks=marks)
     second, _, count = convert.pdf_pages_markdown(path, [1], marks=marks)
@@ -259,27 +259,35 @@ def test_a_batch_without_bookmarks_of_its_own_makes_its_headings_text(tmp_path: 
     assert _lines(kept) == ["# Orchestration"]
 
 
-def test_pdf_outline_counts_the_pages_and_reads_the_nested_bookmarks(tmp_path: Path) -> None:
+def test_pdf_bookmarks_counts_the_pages_and_reads_the_bookmarks(tmp_path: Path) -> None:
+    """Nested bookmarks set the headings; any bookmark, of one level or many, starts a section
+    a conversion may cut its batches at."""
     path = _book(tmp_path, [("1 Sagas", 0, -1), ("Orchestration", 1, 0)])
     flat = _book(tmp_path / "flat", [("1 Sagas", 0, -1), ("Orchestration", 1, -1)])
+    bare = _book(tmp_path / "bare", [])
 
-    assert convert.pdf_outline(flat) == (2, None), "one level sets no heading"
-    assert convert.pdf_outline(path) == (
+    assert convert.pdf_bookmarks(flat) == convert.PdfBookmarks(2, None, [0, 1]), (
+        "one level sets no heading, but its sections still start somewhere"
+    )
+    assert convert.pdf_bookmarks(path) == convert.PdfBookmarks(
         2,
         [
             Bookmark(level=1, title="1 Sagas", page=1),
             Bookmark(level=2, title="Orchestration", page=2),
         ],
+        [0, 1],
     )
+    assert convert.pdf_bookmarks(bare) == convert.PdfBookmarks(2, None, [])
 
 
-def test_an_outline_that_cannot_be_read_is_no_bookmarks() -> None:
+def test_bookmarks_that_cannot_be_read_are_none() -> None:
     class Broken:
         @property
         def outline(self) -> list:
-            raise ValueError("broken outline")
+            raise ValueError("broken bookmarks")
 
     assert bookmarks.read(Broken()) is None  # ty: ignore[invalid-argument-type]
+    assert bookmarks.every(Broken()) == []  # ty: ignore[invalid-argument-type]
 
 
 def test_the_preview_sets_its_headings_by_the_bookmarks(tmp_path: Path) -> None:

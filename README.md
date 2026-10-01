@@ -75,8 +75,10 @@ shows where every answer came from.
 haskie is a fast, transparent, easy-to-manage library of the sources you trust. It steers your AI
 agents with your taste instead of the internet's average. Over MCP it aims to give the agent
 relevant evidence from several sources, with no repeats, and every piece says where it came from
-so the agent can dig deeper. The agent keeps the reasoning. haskie makes the small retrieval
-decisions, so the agent needs fewer round trips and fewer tokens.
+so the agent can dig deeper. Its tools follow how people learn. The agent first goes wide, with a
+diverse map of which sections of which documents touch a topic. Then it goes deep, with focused
+excerpts from the sections worth reading. The agent keeps the reasoning. haskie makes the small
+retrieval decisions, so the agent needs fewer round trips and fewer tokens.
 
 ## What that means in practice
 
@@ -101,19 +103,8 @@ decisions, so the agent needs fewer round trips and fewer tokens.
 
 ## Status: early, and already useful
 
-haskie is young, with much still to add, but it already covers the whole path from import to
-cited answers in Claude Code. Not there yet:
+haskie covers the whole path from import to cited answers in Claude Code. Not there yet:
 
-- **More retrieval decisions made for the agent.** Today haskie merges neighbouring hits, grows
-  or drops passages too short to stand alone, folds repeats, groups passages by section, fills in
-  the text around and between them when it answers too, and searches again for question words
-  that no excerpt holds. Next on the list, each one a round trip the agent would otherwise spend:
-  - **Trimming** the sentences of a passage that do not answer. Today an excerpt keeps
-    every passage whole.
-  - **Cross-document merging**, so complementary passages from several documents arrive as one
-    answer with every source cited. Today only repeats are folded.
-  - **Distillation** of the results into a short, cited brief, for questions where the agent
-    needs the gist more than the quotes.
 - **OCR.** Scanned pages and images are stored but not searchable.
 - **Other MCP clients.** Any MCP client can use the tools over HTTP. Only Claude Code has a
   one-command setup.
@@ -147,10 +138,10 @@ haskie uninstall claude     # removes all four again; documents and collections 
    imported, and shows the nearest documents once done.
 2. **Collections.** Create one per topic and add its documents. Give it a one-line description.
    The agent reads it to choose where to look.
-3. **Explore.** Search and see exactly what your agent gets: *Excerpts*, *Sources* and
-   *Sections*, the map of the sections a topic touches. Open a section to see its document's
-   outline, each section with its keywords. Switch to *Chunks* or *Passages* to see how haskie cut
-   the documents and built each answer.
+3. **Explore.** Search and see exactly what your agent gets: *Excerpts*, *Sources* and *Sections*,
+   the map of the sections a topic touches. Open a section to see what the map said about it and
+   the sections it covers, and its document at its heading. Switch to *Chunks* or *Passages* to
+   see how haskie cut the documents and built each answer.
 
 **Operations** shows background jobs with their progress, and cancels running ones. **Sessions**
 replays each agent conversation. **Gaps** lists the questions your sources did not answer, grouped
@@ -189,12 +180,12 @@ change a document or collection take a `session_id`, so Sessions can replay the 
 
 | tool | what it does |
 | --- | --- |
-| `search_excerpts` | **The main search.** Passages ready to quote, best first (in turns for several parts), each with `header` and `location`. Repeats fold into `also_in`. Takes up to 5 parts of one question, and tags each excerpt with the parts it answers |
+| `search_excerpts` | **The main search.** Passages ready to quote, best first (in turns for several parts), each with `header` and `location`. Repeats fold into `also_in`. Takes up to 5 parts of one question, and tags each excerpt with the parts it answers. `document_ids` and `section_ids` keep it to those documents and sections |
 | `search_sources` | Which documents and collections cover a topic. One row per document, with its best sections |
-| `search_sections` | A map of a topic: which sections of which documents touch it, near topics included, each with its keywords and no text. Fast, for orientation before `search_excerpts` |
+| `search_sections` | A map of a topic: which sections of which documents touch it, near topics included, each with its descriptors and no text. Fast, for orientation before `search_excerpts`. Each section has an `id` to pass on as `section_ids` |
 | `set_session_collections` | Limits the rest of the conversation to the collections `search_sources` suggested |
 | `list_collections`, `get_collection`, `list_collection_documents` | Browse collections and their descriptions |
-| `list_documents`, `get_document`, `document_outline` | Browse documents, and read one's table of contents with each section's keywords |
+| `list_documents`, `get_document` | Browse documents |
 | `add_document` | Import a local file by path |
 | `add_document_to_collection`, `remove_document_from_collection` | Attach or detach a document |
 | `describe_document` | Set what a document is about. `search_sources` shows it |
@@ -229,9 +220,9 @@ from the headings, with no model call, and has not measured its own gain yet. Ch
 structure "largely improve[s]" retrieval-augmented generation (RAG) results [15]. Chunking by
 embedding similarity does not justify its compute cost [16].
 
-**LanceDB.** Each collection is one table on local disk. LanceDB is an embedded library with
-vector and full-text (BM25) search in one table, on a columnar format built for fast random reads
-[17]. So hybrid search needs no server.
+**LanceDB.** Each collection is one table on local disk. LanceDB is
+an embedded library with vector and full-text (BM25) search in one table, on a columnar format built
+for fast random reads [17]. So hybrid search needs no server.
 
 **Hybrid search and reranking.** Vectors find meaning. BM25 finds exact terms, such as an error
 code. haskie fuses both by rank (reciprocal rank fusion, RRF). An optional cross-encoder reads the

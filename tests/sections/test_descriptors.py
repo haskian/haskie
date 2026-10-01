@@ -1,12 +1,13 @@
-"""The word statistics an outline and a map of sections share: which words are terms, how a term
-weighs in one section against the others, and which candidates a section keeps."""
+"""The word statistics descriptors are picked by: which words are terms, how a term weighs in
+one section against the others, and which candidates a section keeps."""
 
+import math
 from collections import Counter
 
 import numpy as np
 import pytest
 
-from haskie.outline import keywords
+from haskie.sections import descriptors
 
 # A paragraph of a real book, as the PDF converter writes it: emphasis marks, a word hyphenated
 # over a line end, a table row, a number and a URL.
@@ -18,7 +19,7 @@ PARAGRAPH = (
 
 
 def _keys(text: str) -> list[str]:
-    return [key for key, _ in keywords.terms(text)]
+    return [key for key, _ in descriptors.terms(text)]
 
 
 @pytest.mark.parametrize(
@@ -56,13 +57,13 @@ def test_terms(name: str, text: str, expected: list[str]) -> None:
 
 
 def test_counted_and_shown_keep_the_form_written_most() -> None:
-    forms: Counter[keywords.Term] = Counter()
-    counts = keywords.counted(keywords.terms(PARAGRAPH), forms)
+    forms: Counter[descriptors.Term] = Counter()
+    counts = descriptors.counted(descriptors.terms(PARAGRAPH), forms)
 
     assert counts["aggreg"] == 5, "every form of the word, the URL's included"
     assert counts["aggreg root"] == 2
     assert "root aggreg" not in counts, "'root of the aggregate' is no pair"
-    assert keywords.shown(["aggreg", "aggreg root", "consist"], forms) == {
+    assert descriptors.shown(["aggreg", "aggreg root", "consist"], forms) == {
         "aggreg": "aggregate",
         "aggreg root": "aggregate root",
         "consist": "consistency",
@@ -70,14 +71,10 @@ def test_counted_and_shown_keep_the_form_written_most() -> None:
 
 
 def test_shown_breaks_a_tie_by_the_form_seen_first() -> None:
-    forms: Counter[keywords.Term] = Counter()
-    keywords.counted(keywords.terms("Saga saga"), forms)
+    forms: Counter[descriptors.Term] = Counter()
+    descriptors.counted(descriptors.terms("Saga saga"), forms)
 
-    assert keywords.shown(["saga"], forms) == {"saga": "Saga"}
-
-
-def test_key_of_a_written_form_is_the_key_terms_give_it() -> None:
-    assert keywords.key_of("Aggregate Roots") == "aggreg root"
+    assert descriptors.shown(["saga"], forms) == {"saga": "Saga"}
 
 
 @pytest.mark.parametrize(
@@ -104,7 +101,7 @@ def test_key_of_a_written_form_is_the_key_terms_give_it() -> None:
     ],
 )
 def test_frequent(name: str, counts: Counter[str], enough: int, expected: set[str]) -> None:
-    assert keywords.frequent(counts, enough) == expected, name
+    assert descriptors.frequent(counts, enough) == expected, name
 
 
 def test_ctfidf_ranks_a_term_one_class_uses_above_one_every_class_uses() -> None:
@@ -115,11 +112,25 @@ def test_ctfidf_ranks_a_term_one_class_uses_above_one_every_class_uses() -> None
         Counter({"data": 4, "partit": 4}),
     ]
 
-    first, second, _ = keywords.ctfidf(chapters)
+    first, second, _ = descriptors.ctfidf(chapters)
 
     assert first["saga"] > first["data"], "the chapter's own word outranks the shared one"
     assert second["replica"] > second["data"]
     assert first["data"] == pytest.approx(second["data"]), "the shared word weighs the same"
+
+
+def test_ctfidf_sinks_a_term_most_sections_use_below_one_few_use_however_often() -> None:
+    """Ten sections of 100 terms. "design" is used once in eight of them, 8 uses in all; "saga"
+    once in the first and 39 times in the second, 40 in all. How many sections use a term
+    decides, not its uses: counting uses against the class size, as BERTopic does, would give
+    "design" an inverse frequency of 2.5 and "saga" 0.9, and rank "design" first here."""
+    sections = [Counter({"design": 1, "saga": 1, "filler": 98})]
+    sections += [Counter({"saga": 39, "filler": 61})]
+    sections += [Counter({"design": 1, f"topic{n}": 99}) for n in range(6)]
+    sections += [Counter({"design": 1, "other": 99}), Counter({"other": 100})]
+    first = descriptors.ctfidf(sections)[0]
+    assert first["saga"] > first["design"], "a term two sections use outranks one eight use"
+    assert first["design"] == pytest.approx(math.sqrt(1 / 100) * math.log(1 + 2.5 / 8.5))
 
 
 @pytest.mark.parametrize(
@@ -131,7 +142,7 @@ def test_ctfidf_ranks_a_term_one_class_uses_above_one_every_class_uses() -> None
     ],
 )
 def test_ctfidf_edges(name: str, classes: list[Counter[str]], expected: list[dict]) -> None:
-    found = keywords.ctfidf(classes)
+    found = descriptors.ctfidf(classes)
 
     assert [set(one) for one in found] == [set(one) for one in expected], name
     assert all(np.isfinite(weight) for one in found for weight in one.values()), name
@@ -157,7 +168,7 @@ def test_ctfidf_edges(name: str, classes: list[Counter[str]], expected: list[dic
     ],
 )
 def test_best(name: str, weights: dict[str, float], k: int, expected: list[str]) -> None:
-    assert keywords.best(weights, k) == expected, name
+    assert descriptors.best(weights, k) == expected, name
 
 
 def _unit(*rows: list[float]) -> np.ndarray:
@@ -182,4 +193,92 @@ BOTH = _unit([1.0, 1.0])[0]  # a section about two topics at once
     ],
 )
 def test_rerank(name: str, candidates: np.ndarray, k: int, expected: list[int]) -> None:
-    assert keywords.rerank(candidates, BOTH, k) == expected, name
+    assert descriptors.rerank(candidates, BOTH, k) == expected, name
+
+
+@pytest.mark.parametrize(
+    ("name", "classes", "expected"),
+    [
+        ("no class: nothing widespread", [], set()),
+        ("one class alone: nothing to be set apart from", [Counter({"saga": 3})], set()),
+        (
+            "two classes: a term both use is widespread",
+            [Counter({"saga": 1, "step": 2}), Counter({"saga": 5, "log": 1})],
+            {"saga"},
+        ),
+        (
+            "half is not more than half",
+            [Counter({"saga": 1}), Counter({"saga": 1}), Counter({"log": 1}), Counter({"step": 1})],
+            set(),
+        ),
+        (
+            "three of four is",
+            [Counter({"saga": 1}), Counter({"saga": 1}), Counter({"saga": 1}), Counter({"log": 1})],
+            {"saga"},
+        ),
+    ],
+)
+def test_widespread(name: str, classes: list[Counter[str]], expected: set[str]) -> None:
+    assert descriptors.widespread(classes) == expected, name
+
+
+def test_a_term_most_sections_use_is_no_descriptor_even_where_a_short_section_repeats_it() -> None:
+    """Four chapters all say "domain"; the short second one says it three times and little else
+    twice. Its descriptors are its own words; the whole document, one class, still lists
+    "domain"."""
+    texts = [
+        "domain, saga, compensation. saga, compensation.",
+        "domain, ledger. domain, ledger. domain.",
+        "domain, replica, quorum. replica, quorum.",
+        "domain, partition, hashing. partition, hashing.",
+    ]
+    runs = [descriptors.Run((), 0, 3)] + [descriptors.Run((f"Ch{n}",), n, n) for n in range(4)]
+    whole, _, second, *_ = descriptors.ClassTfidf().pick(texts, runs, None, None)
+    assert "domain" in whole, "the document's own topic names the document"
+    assert list(second) == ["ledger"], "the short chapter keeps only its own word"
+
+
+@pytest.mark.parametrize(
+    ("name", "headings", "expected"),
+    [
+        ("the whole document: no heading", (), set()),
+        ("each word by its stem", ("Sagas",), {"saga"}),
+        (
+            "the whole path, stopwords and short words aside, pairs not words",
+            ("Part I", "Rule: Design Small Aggregates"),
+            {"part", "rule", "design", "small", "aggreg"},
+        ),
+    ],
+)
+def test_said(name: str, headings: tuple[str, ...], expected: set[str]) -> None:
+    assert descriptors.said(headings) == expected, name
+
+
+def test_a_term_the_header_already_says_is_no_descriptor() -> None:
+    """Two sections under "Aggregates": the header's words, and a pair of them, are no descriptor of
+    either; the word a pair adds to them still is, alone or in the pair."""
+    texts = [
+        "aggregates, separate aggregates. aggregates, separate aggregates. invariants, invariants.",
+        "aggregates, rules. aggregates, rules. transactions, transactions.",
+    ]
+    runs = [descriptors.Run(("Aggregates", "Small Aggregates"), 0, 0)]
+    runs += [descriptors.Run(("Aggregates", "Rules"), 1, 1)]
+    small, rules = descriptors.ClassTfidf().pick(texts, runs, None, None)
+    assert "aggregates" not in small and "aggregates" not in rules, "the path's words"
+    assert "rules" not in rules, "the section's own heading"
+    assert any("separate" in descriptor for descriptor in small), "a pair adds a word of its own"
+    assert "invariants" in small and "transactions" in rules
+
+
+def test_a_section_with_words_gets_one_to_five_descriptors() -> None:
+    """The first section says only what its header says: it still gets its best word. The second
+    repeats seven words of its own: it gets five."""
+    texts = [
+        "sagas, saga.",
+        "ledger, quorum, replica, leader, follower, partition, hashing. "
+        "ledger, quorum, replica, leader, follower, partition, hashing.",
+    ]
+    runs = [descriptors.Run(("Sagas",), 0, 0), descriptors.Run(("Storage",), 1, 1)]
+    sagas, storage = descriptors.ClassTfidf().pick(texts, runs, None, None)
+    assert list(sagas) == ["sagas"], "one descriptor, though its header says it"
+    assert len(storage) == descriptors.DESCRIPTORS == 5

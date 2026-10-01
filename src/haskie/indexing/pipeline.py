@@ -1,17 +1,20 @@
-"""Convert, embed and index steps as micro-batches of `batch_pages` pages, so memory stays bounded.
+"""Convert, embed and index steps as micro-batches cut by sections, so memory stays bounded.
 
-Three stages, each a set of independent, idempotent steps, and each with its own owner:
+Three stages, each a set of independent, idempotent steps, and each with its own owner. Work is
+cut where the document's sections start, packed up to `batch_pages` pages a batch, and at pages
+where a section is longer, when there are pages to cut at (`parts.cuts`):
 
 - convert (once per document, at import) -> `parts/NNNNNN.md`: pages [start, end) of the PDF,
-  or the whole file for anything else. `finalize_convert` assembles them into `original.<ext>.md`.
-  The parts stay for the life of the document: chunking runs per part with the part's line and
-  char offsets, and a PDF's page-batch boundaries decide where the parts fall, so a collection that
-  chunks the document with other settings later must re-chunk from the same boundaries or its
-  offsets would not match the assembled markdown.
-- embed (once per distinct `embed_cache.Params`) -> `embeddings/<id>.tmp/NNNNNN.rows.json`:
-  chunks of one part with their vectors (CPU/GPU heavy; runs in parallel). `finalize_embed`
-  merges every part into the one parquet cache file and publishes it (`embed_cache.write`),
-  which also drops the scratch files. Skipped entirely when `embed_cache.lookup` finds the file.
+  cut where its bookmarks start, or the whole file for anything else. `finalize_convert`
+  assembles them into `original.<ext>.md`.
+- embed (once per distinct `embed_cache.Params`) -> `embeddings/<id>.tmp/NNNNNN.rows.json`: chunks
+  of one part of the assembled markdown with their vectors (CPU/GPU heavy; runs in parallel). A part
+  is cut where a heading starts, else at a page marker inside a section longer than a batch;
+  markdown without page markers is cut at headings alone (`plan_embed`). The cut depends on the
+  markdown alone, so every collection that chunks the document, with any settings, chunks it from
+  the same parts. `finalize_embed` merges every part into the one parquet cache file, numbering the
+  chunks and naming and describing their sections, and publishes it (`embed_cache.write`), which
+  also drops the scratch files. Skipped entirely when `embed_cache.lookup` finds the file.
 - index (once per collection the document is attached to) -> rows of `index_group_parts`
   consecutive parts read out of the cache file and written to that collection's LanceDB table in
   one commit (fast; one writer per collection). `prepare_index` clears the document's older rows
@@ -29,7 +32,6 @@ IO or the LanceDB commit around it.
 """
 
 from functools import partial
-from pathlib import Path
 
 import anyio
 import anyio.to_thread
@@ -41,13 +43,17 @@ from haskie.collection.collection import Collection
 from haskie.collection.index import Row
 from haskie.document import convert
 from haskie.document.bookmarks import Bookmark
+from haskie.document.convert import PAGE_MARKER
 from haskie.document.document import Document
-from haskie.indexing import chunk, embed_cache, models
-from haskie.indexing.segment import CutReason
-from haskie.outline import keywords
+from haskie.indexing import chunk, embed_cache, models, parts, segment
+from haskie.indexing.segment import CutReason, SpanKind
+from haskie.sections import descriptors
 from haskie.settings import ChunkSettings
 
-JOINER = "\n\n"  # between parts in the assembled markdown
+JOINER = "\n\n"  # between convert parts in the assembled markdown
+# About one printed page of markdown: what a page is where the text has no page markers to count
+# (`plan_embed`). Judgement: one 657-page book held about 2,100 characters a page.
+PAGE_CHARS = 3_000
 
 
 class Batch(msgspec.Struct):
@@ -57,6 +63,7 @@ class Batch(msgspec.Struct):
     line_offset: int = 0  # embed: lines / chars / bytes preceding this part in the assembled file
     char_offset: int = 0
     byte_offset: int = 0
+    byte_end: int = 0  # embed: where the part ends in the assembled file, exclusive
     # embed: the headings still open where this part starts, opened in an earlier one
     opened: list[chunk.Opened] = []
     # embed: why the part's first chunk starts and its last one ends (`chunk.split`)
@@ -72,7 +79,9 @@ class Batch(msgspec.Struct):
 
 
 async def plan_convert(doc: Document, batch_pages: int) -> list[Batch]:
-    """One batch per `batch_pages` pages of a PDF, one for anything else. Starts the parts and
+    """A PDF's pages cut where its bookmarks start, at most `batch_pages` a batch unless one
+    section is longer, and every `batch_pages` pages without bookmarks; one batch for anything
+    else, which its converter reads whole. Starts the parts and
     the assembled markdown over: they are outputs of this conversion. The cached embeddings are
     outputs of it too, rows included, so `workflows.import_document` drops them through
     `embed_cache.forget` before this runs."""
@@ -82,16 +91,19 @@ async def plan_convert(doc: Document, batch_pages: int) -> list[Batch]:
     await anyio.Path(doc.parts_dir).mkdir(parents=True, exist_ok=True)
     if source.suffix.lower() != ".pdf":
         return [Batch(seq=0, start=0, end=1)]  # anydoc/plain convert whole files in one go
-    total, marks = await cpu.off_interpreter(convert.pdf_outline, source)
+    found = await cpu.off_interpreter(convert.pdf_bookmarks, source)
+    marks = found.headings
     return [
         Batch(
             seq=seq,
             start=start,
-            end=(end := min(start + batch_pages, total)),
+            end=end,
             # 1-based pages start..end: the batch's own, and the one before it
             bookmarks=None if marks is None else [m for m in marks if start <= m.page <= end],
         )
-        for seq, start in enumerate(range(0, total, batch_pages))
+        for seq, (start, end) in enumerate(
+            parts.cuts(found.pages, found.starts, lambda start: start + batch_pages)
+        )
     ]
 
 
@@ -131,50 +143,65 @@ async def finalize_convert(doc: Document, batches: list[Batch], ocr_total: int) 
 # --- embed ------------------------------------------------------------------------
 
 
-async def _parts(doc: Document) -> list[Path]:
-    parts_dir, markdown = doc.parts_dir, doc.markdown
+async def plan_embed(doc: Document, batch_pages: int) -> list[Batch]:
+    """The assembled markdown cut into parts where its headings start, packed up to `batch_pages`
+    pages a part, and a section longer than that at its page markers (`parts.cuts`). Pages are
+    counted by the markers the converter writes, else by `PAGE_CHARS` characters each. Each part
+    carries its offsets inside the file, the headings still open where it starts, and why its first
+    chunk starts and its last one ends: the document's edge, a heading the next part opens with, or
+    a section going on (`PART`)."""
+    try:
+        markdown = await anyio.Path(doc.markdown).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"markdown missing, convert first: {doc.name}") from None
+    return await cpu.on_cpu(_embed_batches, markdown, batch_pages)
 
-    def listing() -> list[Path]:
-        return sorted(p for p in parts_dir.glob("*.md") if p.stem.isdigit())
 
-    parts = await anyio.to_thread.run_sync(listing)  # `glob` has no async form
-    if not parts or not await anyio.Path(markdown).exists():
-        raise FileNotFoundError(f"markdown parts missing, convert first: {doc.name}")
-    return parts
-
-
-async def plan_embed(doc: Document) -> list[Batch]:
-    """One batch per part, carrying the part's offsets inside the assembled file, the headings
-    still open where it starts (one pass), and why its first chunk starts and its last one ends:
-    the document's edge, a heading the next part opens with, or a section going on (`PART`)."""
-    texts = [await anyio.Path(part).read_text(encoding="utf-8") for part in await _parts(doc)]
-    headed = await cpu.on_cpu(lambda: [chunk.opens_with_heading(text) for text in texts])
+def _embed_batches(markdown: str, batch_pages: int) -> list[Batch]:
+    headings = [b.start for b in segment.blocks(markdown) if b.kind == SpanKind.HEADING]
+    markers = [found.start() for found in PAGE_MARKER.finditer(markdown)]
+    reach = (
+        parts.pages(markers, batch_pages)
+        if markers
+        else lambda start: start + batch_pages * PAGE_CHARS
+    )
+    ranges = parts.cuts(len(markdown), headings, reach, markers)
+    texts = [markdown[start:end] for start, end in ranges]
     # why a part's start is cut, where the one before it meets it; the first starts the document
     meets = [CutReason.EDGE] + [
-        CutReason.HEADING if heading else CutReason.PART for heading in headed[1:]
+        CutReason.HEADING if chunk.opens_with_heading(text) else CutReason.PART
+        for text in texts[1:]
     ]
     batches: list[Batch] = []
-    line_offset = char_offset = byte_offset = 0
+    line_offset = byte_offset = 0
     opened: list[chunk.Opened] = []
-    for i, text in enumerate(texts):
+    for i, ((start, _), text) in enumerate(zip(ranges, texts, strict=True)):
+        size = len(text.encode())
         batches.append(
             Batch(
                 seq=i,
                 start=i,
                 end=i + 1,
                 line_offset=line_offset,
-                char_offset=char_offset,
+                char_offset=start,
                 byte_offset=byte_offset,
+                byte_end=byte_offset + size,
                 opened=opened,
                 start_reason=meets[i],
                 end_reason=meets[i + 1] if i + 1 < len(texts) else CutReason.EDGE,
             )
         )
-        opened = await cpu.on_cpu(chunk.open_headings, text, opened)  # a parse: off the loop
-        line_offset += text.count("\n") + JOINER.count("\n")
-        char_offset += len(text) + len(JOINER)
-        byte_offset += len(text.encode()) + len(JOINER.encode())
+        opened = chunk.open_headings(text, opened)
+        line_offset += text.count("\n")
+        byte_offset += size
     return batches
+
+
+async def _part_text(doc: Document, batch: Batch) -> str:
+    """The part of the assembled markdown one embed batch chunks: its bytes, read alone."""
+    async with await anyio.open_file(doc.markdown, "rb") as file:
+        await file.seek(batch.byte_offset)
+        return (await file.read(batch.byte_end - batch.byte_offset)).decode("utf-8")
 
 
 async def embed_batch(
@@ -186,7 +213,7 @@ async def embed_batch(
 ) -> int:
     """Chunk one part, embed the chunks, write the part's scratch `rows.json` under the cache
     id being computed; returns the chunk count."""
-    text = await anyio.Path(doc.part_path(batch.seq)).read_text(encoding="utf-8")
+    text = await _part_text(doc, batch)
     if embedding is not None:
         # before the CPU work rather than between chunking and embedding, so both share one slot;
         # fail fast, not a stalled worker
@@ -219,27 +246,21 @@ async def embed_batch(
 
 
 async def finalize_embed(
-    doc: Document, params: embed_cache.Params, embedding: EmbeddingModel | None
-) -> str:
-    """Publish one computed embedding and return its cache id.
+    doc: Document, params: embed_cache.Params, embedding: EmbeddingModel | None, count: int
+) -> None:
+    """Publish one computed embedding of `count` parts, its sections described, under
+    `embed_cache.key(params)`. The model embeds the descriptor candidates: it fails fast when not
+    loaded, as `embed_batch` does.
 
     A part whose rows were never written raises `FileNotFoundError` out of the merge, which
     leaves no partial cache file behind (see `embed_cache._merge`)."""
     cache_id = embed_cache.key(params)
-    count = len(await _parts(doc))
     paths = [embed_cache.rows_path(doc.id, cache_id, part) for part in range(count)]
-    return await embed_cache.write(params, paths, embedding.dims if embedding else None)
-
-
-async def build_outline(params: embed_cache.Params, embedding: EmbeddingModel | None) -> None:
-    """Build the document's outline from the cache entry of `params` (`embed_cache`), embedding
-    its keyword candidates with the model. Fails fast on a model not loaded, as `embed_batch`
-    does."""
-    embed: keywords.Embed | None = None
+    embed: descriptors.Embed | None = None
     if embedding is not None:
         await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
         embed = partial(_embed, embedding)
-    await embed_cache.build_outline(params, embed)
+    await embed_cache.write(params, paths, embedding.dims if embedding else None, embed)
 
 
 def _embed(embedding: EmbeddingModel, texts: list[str]) -> list[list[float]]:
@@ -263,14 +284,16 @@ async def plan_index(doc: Document, cache_id: str, group_parts: int) -> list[Bat
 
 
 async def prepare_index(
-    collection: Collection, doc: Document, embedding: EmbeddingModel | None
+    collection: Collection, doc: Document, embedding: EmbeddingModel | None, cache_id: str
 ) -> None:
     """Make the collection's table ready to take one document's rows again: recreate a table an
-    older build or another embedding left behind, then drop the rows the document already has
-    there (a previous attach, possibly under other chunk settings)."""
+    older build or another embedding left behind, drop the rows the document already has there
+    (a previous attach, possibly under other chunk settings), and name the cache entry the new
+    rows come from, so a reader of their sections finds the ones their ids name."""
     index = collection.index_with(embedding)
     await index.reset_for_write()
     await index.delete_document(doc.id)
+    await collection.set_member_entry(doc.id, cache_id)
 
 
 async def index_batch(

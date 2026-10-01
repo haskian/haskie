@@ -28,7 +28,6 @@ from uuid import uuid4
 
 import anyio
 import anyio.to_thread
-import lancedb
 import msgspec
 import pytest
 from conftest import (
@@ -72,7 +71,7 @@ from haskie.collection import maintenance
 from haskie.collection.collection import Collection
 from haskie.collection.index import CollectionIndex
 from haskie.document import convert, document
-from haskie.document.document import DocumentStatus
+from haskie.document.document import Document, DocumentStatus
 from haskie.errors import (
     Conflict,
     InvalidInput,
@@ -91,7 +90,6 @@ from haskie.indexing import (
 )
 from haskie.indexing.pipeline import Batch
 from haskie.indexing.workflows import Stage
-from haskie.outline import store as outline_store
 from haskie.paging import Order
 from haskie.search import log
 from haskie.settings import (
@@ -108,6 +106,17 @@ from haskie.tables import collection_documents, searches, staging
 from haskie.tables import settings as settings_table
 
 pytestmark = pytest.mark.anyio
+
+
+def _cache_files(doc: Document) -> set[str]:
+    """The files of every cached embedding of the document."""
+    return {p.name for p in doc.embeddings_dir.glob("*.parquet")}
+
+
+def _files_of(cache_id: str) -> set[str]:
+    """One cached embedding's files: its chunks, and its sections beside them."""
+    return {f"{cache_id}.chunks.parquet", f"{cache_id}.sections.parquet"}
+
 
 GHOST_ID = "0" * 32  # the id of no document
 BLOCKED_WAIT = 2.0  # how long a step that must not run is given to prove it by not running
@@ -891,7 +900,7 @@ async def test_parts_stay_and_only_the_scratch_rows_are_consumed(dbos, tmp_path:
     (entry,) = await embed_cache.entries(doc.id)
     assert sorted(p.name for p in doc.parts_dir.glob("*.md")) == ["000000.md", "000001.md"]
     assert not embed_cache.scratch_dir(doc.id, entry.id).exists(), "scratch rows are consumed"
-    assert [p.name for p in doc.embeddings_dir.glob("*.parquet")] == [f"{entry.id}.parquet"]
+    assert _cache_files(doc) == _files_of(entry.id)
     assert "alpha one" in doc.markdown.read_text()
 
 
@@ -917,7 +926,7 @@ async def test_two_collections_with_the_same_params_embed_once(
     assert sum(spy.calls.values()) == 1, "and neither attach recomputed it"
     (entry,) = await embed_cache.entries(doc.id)
     assert list(spy.calls) == [entry.id], "the one computation is the one cached row"
-    assert [p.name for p in doc.embeddings_dir.glob("*.parquet")] == [f"{entry.id}.parquet"]
+    assert _cache_files(doc) == _files_of(entry.id)
     assert (await collection_hits("left", "lancedb"))[0].collection == "left"
     assert (await collection_hits("right", "lancedb"))[0].collection == "right"
     assert sorted(await document.collections_of(doc.id)) == ["left", "right"]
@@ -942,9 +951,7 @@ async def test_two_collections_with_different_chunk_size_get_their_own_cache(
     default = (await load_user_settings()).conversion.chunk_size
     assert sorted(entries) == sorted({default, 20}), "one cache row per distinct chunk size"
     assert len({entry.id for entry in entries.values()}) == 2, "distinct ids, so no collision"
-    assert {p.name for p in doc.embeddings_dir.glob("*.parquet")} == {
-        f"{entry.id}.parquet" for entry in entries.values()
-    }
+    assert _cache_files(doc) == {name for one in entries.values() for name in _files_of(one.id)}
     assert spy.calls == Counter({entries[default].id: 1, entries[20].id: 1}), "one run each"
     assert entries[20].rows > entries[default].rows, "smaller chunks, more of them"
     assert (await collection_hits("wide", "lancedb"))[0].document == doc.name
@@ -969,7 +976,7 @@ async def test_reindexing_with_unchanged_settings_hits_the_cache(
     embedding = workflows.embed_id(job_id, doc.id)
     steps = await _steps(embedding)
     assert "cache_lookup" in steps, f"the run never looked the cache up: {steps}"
-    assert "plan" not in steps and "finalize_embed" not in steps, "it returned on the hit"
+    assert "plan" not in steps and "try_finalize_embed" not in steps, "it returned on the hit"
     assert len(await embed_cache.entries(doc.id)) == 1
 
 
@@ -1092,26 +1099,18 @@ async def test_reimport_reconverts_and_drops_the_stale_cache(dbos, tmp_path: Pat
     collection = await Collection.create("stale")
     await collection.set_overrides(CollectionOverrides(chunk_size=60))
     doc = await import_document(dbos, "a.md", MD, tmp_path)
-    imported = outline_store.path(doc.id).read_bytes()
     await attach_document(dbos, "stale", doc.name)
-    assert outline_store.path(doc.id).read_bytes() == imported, (
-        "another chunking under the model leaves the import's outline alone"
-    )
     before = await embed_cache.entries(doc.id)
     assert len(before) == 2, "the import's default params and the collection's"
-    assert len(list(doc.embeddings_dir.glob("*.parquet"))) == 2
+    assert _cache_files(doc) == _files_of(before[0].id) | _files_of(before[1].id)
     await document.set_status(doc.id, DocumentStatus.ERROR, "boom")
-    # an outline current under the model but empty: only a forgotten one is built again
-    emptied = outline_store.Outline(model=embed_cache.NO_MODEL, nodes=[])
-    await outline_store.save(doc.id, emptied, None)
 
     assert await wait_for(await dbos.start_import(await document.get(doc.id))) == "imported"
-    assert (await outline_store.read([doc.id]))[doc.id], "the outline is built again"
 
     after = await embed_cache.entries(doc.id)
     default = (await load_user_settings()).conversion.chunk_size
     assert [e.chunk_size for e in after] == [default], "only the fresh pre-warm is left"
-    assert [p.name for p in doc.embeddings_dir.glob("*.parquet")] == [f"{after[0].id}.parquet"]
+    assert _cache_files(doc) == _files_of(after[0].id)
     assert (await document.named(doc.name)).status == "imported"
     assert (
         await embed_cache.lookup(
@@ -1119,30 +1118,6 @@ async def test_reimport_reconverts_and_drops_the_stale_cache(dbos, tmp_path: Pat
         )
         is None
     ), "the collection's entry is a miss until it is indexed again"
-
-
-async def test_a_hit_builds_an_outline_left_under_another_model(dbos, tmp_path: Path) -> None:
-    """The model changed and changed back: the hit returns its entry, and the outline the other
-    model left is built again from the entry's file. A current one returns at once."""
-    doc = await import_document(dbos, "a.md", MD, tmp_path)
-    row = await document.get(doc.id)
-    params = embed_cache.params(row, (await load_user_settings()).conversion.chunking, None)
-    cache_id = embed_cache.key(params)
-    built = (await outline_store.read([doc.id]))[doc.id]
-    await outline_store.save(doc.id, outline_store.Outline(model="other/model:8", nodes=[]), None)
-
-    async def ensure() -> str:
-        with SetWorkflowID(f"{workflows.EMBED_PREFIX}:{row.id}:{uuid4().hex}"):
-            handle = await DBOS.enqueue_workflow_async(
-                workflows.EMBEDDING_QUEUE, workflows.ensure_embedding, row.id, params
-            )
-        return await handle.get_result(polling_interval_sec=workflows.TASK_POLL)
-
-    assert await ensure() == cache_id, "the hit's entry, not a new one"
-    assert await outline_store.current(doc.id, params.model)
-    assert (await outline_store.read([doc.id]))[doc.id] == built
-    assert [entry.id for entry in await embed_cache.entries(doc.id)] == [cache_id]
-    assert await ensure() == cache_id, "current: the hit returns at once"
 
 
 async def test_ensure_embedding_fails_permanently_under_another_model(dbos, tmp_path: Path) -> None:
@@ -1254,6 +1229,56 @@ async def test_a_batch_waits_for_the_embedding_model_to_warm(
     assert "DBOS.sleep" not in await _steps(run), "the model was ready when the run asked"
     assert await _steps(f"{run}:{Stage.EMBED}:0") == ["try_batch", "DBOS.sleep", "try_batch"]
     assert embedded == [doc.name, doc.name], "the batch waited, then ran again"
+    assert await embed_cache.entries(doc.id), "the embedding is cached"
+
+
+async def test_the_merge_waits_for_the_embedding_model_to_warm(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The merge embeds the descriptor candidates. A restart after the last slice reaches it
+    before the boot warmed the model again: the run sleeps durably until the model is warm,
+    rather than spending the merge step's few retries and failing the import."""
+
+    async def load_model(kind: str, name: str) -> None:
+        pass
+
+    download = await _fake_compact_model(monkeypatch, load_model)
+    restarted = False
+    asked = 0  # asks since the "restart"
+    require_ready = models.require_ready
+
+    async def ready(kind: models.ModelKind, name: str) -> None:
+        nonlocal restarted, asked
+        if restarted:
+            asked += 1
+            if asked > workflows.RETRY_ATTEMPTS:  # more asks than the merge step alone makes
+                models._mark_ready(download)  # the boot's warm-up is done
+                restarted = False
+        await require_ready(kind, name)
+
+    monkeypatch.setattr(models, "require_ready", ready)
+    real = pipeline.embed_batch
+
+    async def embedded_then_restarted(*args) -> int:
+        nonlocal restarted
+        found = await real(*args)
+        models._ready.discard(download)  # what a restart after the last slice does to the caches
+        restarted = True
+        return found
+
+    monkeypatch.setattr(pipeline, "embed_batch", embedded_then_restarted)
+    await models.ensure_models(await save_user_settings(UserSettings(embedding="compact")))
+    await await_terminal([download])
+    doc = await import_row("a.md", MD, tmp_path)
+    job_id = await dbos.start_import(doc)
+    run = workflows.embed_id(job_id, doc.id)
+
+    assert await wait_for(job_id) == "imported"
+    steps = await _steps(run)
+    merge = steps.index("try_finalize_embed")
+    assert steps[merge : merge + 3] == ["try_finalize_embed", "DBOS.sleep", "try_finalize_embed"], (
+        "the merge found the model warming, slept, and ran again"
+    )
     assert await embed_cache.entries(doc.id), "the embedding is cached"
 
 
@@ -1778,11 +1803,6 @@ async def test_delete_document_clears_every_collection_it_is_in(dbos, tmp_path: 
     assert await document_names() == [other.name]
     assert not document.root(doc.id).exists()
     assert await embed_cache.entries(doc.id) == [], "the cache rows cascade with the document"
-    conn = await lancedb.connect_async(str(home.OUTLINE_ROOT))
-    nodes = await conn.open_table(outline_store.table_name(embed_cache.NO_MODEL))
-    assert {row["document_id"] for row in await nodes.query().to_list()} == {other.id}, (
-        "the outline index lives outside the folder: its rows go too"
-    )
     for name in ("left", "right"):
         assert await Collection(name).member_ids() == ([other.id] if name == "left" else []), name
         assert {
@@ -2831,19 +2851,11 @@ async def test_daily_maintenance_prunes_the_audit_trail_and_the_search_log(
     today.write_text("{}\n")
     await _old_and_new_search()
 
-    for doc in ("a.md", "b.md", "c.md"):  # one fragment per outline written
-        outline_store.document.root(doc).mkdir(parents=True)
-        await outline_store.save(doc, outline_store.Outline(model="none", nodes=[]), None)
-
     await workflows.daily_maintenance(datetime.now(UTC), None)
 
     assert not old.exists()
     assert today.exists()
     assert await _logged_questions() == kept
-    conn = await lancedb.connect_async(str(home.OUTLINE_ROOT))
-    table = await conn.open_table(outline_store.table_name("none"))
-    stats: dict = await table.stats()  # ty: ignore[invalid-assignment]  (a dict at runtime)
-    assert stats["fragment_stats"]["num_fragments"] <= 1, "compacted"
 
 
 async def test_daily_maintenance_purges_the_history_past_the_retention(

@@ -60,12 +60,12 @@ Timing knobs are module constants, not variables (`workflows.OPERATION_POLL`,
 
 | decision | why | details |
 | --- | --- | --- |
-| One handler serves REST and MCP (`litestar-mcp`) | One contract, one test surface. A handler marked `mcp_tool=` becomes a tool | [REST API](docs/rest-api.md) |
+| One handler serves REST and MCP (`litestar-mcp`) | One contract, one test surface. A handler marked `mcp_tool=` becomes a tool. The search tools are twins that answer with fewer fields (`api/agent.py`): what an agent reads costs tokens | [REST API](docs/rest-api.md) |
 | MCP over HTTP, not stdio | One server serves the UI, the API and every client at once. litestar-mcp speaks MCP `2026-07-28`, which replaced `initialize` with `server/discover` | [MCP](docs/mcp.md) |
 | `msgspec` for every model | Fast, strict decoding at the trust boundary. The same types generate the OpenAPI document | `api/`, `settings.py` |
 | Frontend types generated from OpenAPI | One source of truth for the contract. `check` fails on drift | [REST API](docs/rest-api.md) |
 | SQLite in WAL mode, through SQLAlchemy Core on `aiosqlite` | A single-user app needs no database server. One connection per unit of work, so none is ever shared. Core tables are the one source of the schema: the DDL is generated from them, and queries name columns through them | [Storage](docs/storage.md) |
-| LanceDB, one table per collection, one outline table per embedding model | Embedded, on local disk, vector and full-text search in one table. One writer per collection keeps writes simple | [Storage](docs/storage.md) |
+| LanceDB, one table per collection | Embedded, on local disk, vector and full-text search in one table. One writer per collection keeps writes simple | [Storage](docs/storage.md) |
 | DBOS on the same SQLite file | Durable, resumable, cancellable work with no broker or extra server | [Indexing](docs/indexing.md) |
 | Model catalogue in SQLite, loaders in code | A model card edit is a row, not a release. A row cannot add reviewed code, so loaders and their pinned revisions stay in `indexing/`. A test keeps the two in step | [Storage](docs/storage.md) |
 | Embedding cache keyed by everything the vectors depend on | A document is chunked and embedded once per distinct setting, however many collections share it | [Documents and collections](docs/documents-and-collections.md) |

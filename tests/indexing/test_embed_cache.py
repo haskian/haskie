@@ -9,15 +9,13 @@ import hashlib
 import itertools
 from pathlib import Path
 
-import anyio
-import lancedb
 import msgspec
 import numpy as np
 import pytest
 from conftest import id_of, import_row
 from sqlalchemy import delete, select
 
-from haskie import db, home
+from haskie import db, ids
 from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
 from haskie.collection.index import Row
 from haskie.document import document
@@ -26,7 +24,6 @@ from haskie.indexing import embed_cache
 from haskie.indexing.chunk import CHUNK_VERSION, Chunk, Piece
 from haskie.indexing.embed_cache import NO_MODEL, Params
 from haskie.indexing.segment import PieceType
-from haskie.outline import store
 from haskie.settings import Chunker, ChunkSettings, Parser
 from haskie.tables import embeddings
 
@@ -36,7 +33,7 @@ DOC = "guide.md"
 BODY = "# Title\n\nbody about lancedb\n"
 TINY = EmbeddingModel("test/tiny", 4)
 
-DOC_ID = "d41d8cd98f00b204e9800998ecf8427e"  # an MD5, as a document's id is
+DOC_ID = ids.md5(b"")  # a base58 MD5, as a document's id is
 BASE = Params(
     document_id=DOC_ID,
     model="BAAI/bge-small-en-v1.5",
@@ -51,11 +48,11 @@ BASE = Params(
 # Pinned, not recomputed: the URN is the cache key, so a change to its shape must fail a test
 # rather than silently retire every entry on disk.
 BASE_URN = (
-    "document_id:d41d8cd98f00b204e9800998ecf8427e;model:BAAI/bge-small-en-v1.5;chunk_size:1200;"
+    "document_id:TCByYo9r1su7nMQP3WHDFK;model:BAAI/bge-small-en-v1.5;chunk_size:1200;"
     "chunk_merge_below:33;chunk_frame:true;chunker:markdown;chunk_version:1;parser:anydoc;"
     "skip_ocr_pages:true"
 )
-BASE_ID = "16c5d8b180e8c8967c03684ea4f881a0632d4186f11aa20c1fc1cec8687dffcc"
+BASE_ID = "221aa8b37c2a718d56e11f79620b12d86d7836af3ef0df76377f344b24c7dbe3"
 
 
 def _row(text: str, vector: list[float] | None = None) -> Row:
@@ -185,7 +182,7 @@ def test_params_reads_the_document_and_the_collections_chunk_settings(
 
 def test_paths_are_derived_from_the_document_and_the_id() -> None:
     root = document.root(DOC)
-    assert embed_cache.file_path(DOC, BASE_ID) == root / "embeddings" / f"{BASE_ID}.parquet"
+    assert embed_cache.file_path(DOC, BASE_ID) == root / "embeddings" / f"{BASE_ID}.chunks.parquet"
     assert embed_cache.scratch_dir(DOC, BASE_ID) == root / "embeddings" / f"{BASE_ID}.tmp"
     assert embed_cache.rows_path(DOC, BASE_ID, 7).name == "000007.rows.json"
     assert embed_cache.rows_path(DOC, BASE_ID, 7).parent == embed_cache.scratch_dir(DOC, BASE_ID)
@@ -213,7 +210,7 @@ async def test_write_lookup_read_round_trip(
 
     assert await embed_cache.lookup(params) is None, f"{name}: nothing cached yet"
 
-    cache_id = await embed_cache.write(params, parts, dims)
+    cache_id = await embed_cache.write(params, parts, dims, None)
 
     assert cache_id == embed_cache.key(params), name
     assert await embed_cache.lookup(params) == cache_id, name
@@ -254,7 +251,7 @@ async def test_seq_numbers_the_whole_document_across_its_parts(tmp_path: Path) -
     assert all(row.seq == 0 for group in groups for row in group), "unnumbered going in"
     parts = _parts(tmp_path / "scratch", groups)
 
-    cache_id = await embed_cache.write(params, parts, None)
+    cache_id = await embed_cache.write(params, parts, None, None)
 
     read = [group async for group in embed_cache.read(doc.id, cache_id, 0, 4)]
 
@@ -273,7 +270,7 @@ async def test_read_of_a_range_returns_only_that_range(tmp_path: Path) -> None:
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
     parts = _parts(tmp_path / "scratch", [[_row(f"part {i}")] for i in range(4)])
-    cache_id = await embed_cache.write(params, parts, None)
+    cache_id = await embed_cache.write(params, parts, None, None)
 
     read = [part async for part, _ in embed_cache.read(doc.id, cache_id, 1, 3)]
 
@@ -291,7 +288,7 @@ async def test_write_consumes_the_scratch_directory_of_the_computation(tmp_path:
     parts = _parts(embed_cache.scratch_dir(doc.id, cache_id), [[_row("alpha")]])
     assert all(path.exists() for path in parts)
 
-    await embed_cache.write(params, parts, None)
+    await embed_cache.write(params, parts, None, None)
 
     assert not embed_cache.scratch_dir(doc.id, cache_id).exists(), "the scratch files are gone"
     assert embed_cache.file_path(doc.id, cache_id).is_file(), "the cache file is not"
@@ -303,9 +300,9 @@ async def test_a_second_write_of_the_same_params_is_a_no_op_row(tmp_path: Path) 
     params = msgspec.structs.replace(BASE, document_id=doc.id)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
 
-    first = await embed_cache.write(params, parts, None)
+    first = await embed_cache.write(params, parts, None, None)
     (before,) = await embed_cache.entries(doc.id)
-    again = await embed_cache.write(params, parts, None)
+    again = await embed_cache.write(params, parts, None, None)
 
     assert again == first, "the same params, so the same id"
     entries = await embed_cache.entries(doc.id)
@@ -353,7 +350,7 @@ async def test_write_stores_the_document_vector(
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
 
-    await embed_cache.write(params, _parts(tmp_path / "scratch", groups), dims)
+    await embed_cache.write(params, _parts(tmp_path / "scratch", groups), dims, None)
 
     stored = await _vector_of(doc.id)
     if expected is None:
@@ -370,7 +367,7 @@ async def _embedded(
         BASE, document_id=await id_of(name), model=model, chunk_size=size
     )
     parts = _parts(tmp_path / f"{name}-{model}-{size}", [[_row(name, vector)]])
-    await embed_cache.write(params, parts, len(vector))
+    await embed_cache.write(params, parts, len(vector), None)
 
 
 async def test_nearest_ranks_imported_documents_by_their_newest_vector(tmp_path: Path) -> None:
@@ -416,8 +413,8 @@ async def test_entries_lists_every_cache_of_one_document_newest_first(
         msgspec.structs.replace(BASE, document_id=doc.id, chunk_size=size)
         for size in (400, 800, 1200)
     ]
-    written = [await embed_cache.write(params, parts, None) for params in wanted]
-    await embed_cache.write(msgspec.structs.replace(BASE, document_id=other.id), parts, None)
+    written = [await embed_cache.write(params, parts, None, None) for params in wanted]
+    await embed_cache.write(msgspec.structs.replace(BASE, document_id=other.id), parts, None, None)
 
     entries = await embed_cache.entries(doc.id)
 
@@ -443,7 +440,7 @@ async def test_lookup_answers_a_hit_only_when_the_row_and_the_file_agree(
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
-    cache_id = await embed_cache.write(params, parts, None)
+    cache_id = await embed_cache.write(params, parts, None, None)
     if not keep_row:
         async with db.connect() as conn:
             await conn.execute(delete(embeddings).where(embeddings.c.id == cache_id))
@@ -467,7 +464,7 @@ async def test_a_failed_merge_leaves_no_partial_cache_file(tmp_path: Path) -> No
     missing = tmp_path / "scratch" / "000000.rows.json"  # never written by any embed slice
 
     with pytest.raises(FileNotFoundError):
-        await embed_cache.write(params, [missing], None)
+        await embed_cache.write(params, [missing], None, None)
 
     directory = doc.embeddings_dir
     assert list(directory.glob("*.parquet.tmp")) == [], "the temp file is removed by the failure"
@@ -482,7 +479,7 @@ async def test_writing_vectors_the_rows_do_not_carry_is_refused(tmp_path: Path) 
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])  # no vector on the row
 
     with pytest.raises(ValueError, match="carries no vector"):
-        await embed_cache.write(params, parts, 4)
+        await embed_cache.write(params, parts, 4, None)
 
     assert await embed_cache.lookup(params) is None
 
@@ -492,7 +489,7 @@ async def test_the_cache_row_goes_when_the_document_does(tmp_path: Path) -> None
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
-    await embed_cache.write(params, parts, None)
+    await embed_cache.write(params, parts, None, None)
     assert len(await embed_cache.entries(doc.id)) == 1
 
     await document.remove_row(doc.id)
@@ -500,7 +497,7 @@ async def test_the_cache_row_goes_when_the_document_does(tmp_path: Path) -> None
     assert await embed_cache.entries(doc.id) == []
 
 
-# --- the outline built from an entry --------------------------------------------------
+# --- the sections of an entry -------------------------------------------------------
 
 
 def _headed(text: str, heading: str, vector: list[float] | None = None) -> Row:
@@ -528,79 +525,112 @@ def _book() -> list[Row]:
     ]
 
 
-async def _index(model: str = BASE.model):
-    conn = await lancedb.connect_async(str(home.OUTLINE_ROOT))
-    return await conn.open_table(store.table_name(model))
-
-
-async def test_build_outline_reads_the_entrys_file(tmp_path: Path) -> None:
-    """Its nodes go beside the markdown and into the outline index, with their vectors; the
-    keyword candidates are embedded in one call for the whole document."""
+async def test_a_write_names_every_chunk_and_section(tmp_path: Path) -> None:
+    """The merge sees the whole document in order: each chunk gets its id, the deepest section
+    that holds it and every section that does, and the sections go into a file beside the
+    chunks'."""
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
-    await embed_cache.write(params, _parts(tmp_path / "scratch", [_book()]), 4)
-    assert await store.read([doc.id]) == {}, "the write alone builds no outline"
+    rows = [
+        *_book(),
+        _headed("A quorum read, once more: the quorum overlaps.", "Quorums", [0.0, 3.0, 0.0, 0.0]),
+    ]
+    cache_id = await embed_cache.write(
+        params, _parts(tmp_path / "scratch", [rows[:1], rows[1:]]), 4, None
+    )
+
+    found = await embed_cache.read_sections(doc.id, cache_id)
+    chunks = [row async for _, part in embed_cache.read(doc.id, cache_id, 0, 2) for row in part]
+
+    assert [one.header for one in found] == ["", "Book", "Book > Sagas", "Book > Quorums"]
+    whole, book, sagas, quorums = found
+    assert (whole.parent_id, book.parent_id, sagas.parent_id) == (None, whole.id, book.id)
+    assert (quorums.seq_start, quorums.seq_end) == (2, 3), "numbered across the parts"
+    assert [chunk.section_id for chunk in chunks] == [sagas.id, quorums.id, quorums.id]
+    assert chunks[2].section_ids == [whole.id, book.id, quorums.id], "outermost first"
+    assert [chunk.id for chunk in chunks] == [
+        ids.md5(f"{doc.id}/c/{seq}".encode()) for seq in (1, 2, 3)
+    ]
+    assert embed_cache.sections_path(doc.id, cache_id).parent == doc.embeddings_dir
+
+
+def test_the_merge_sums_each_sections_unit_vectors(tmp_path: Path) -> None:
+    """What the descriptors rerank against: every chunk's unit vector summed into each section
+    that holds it, so a long chunk weighs no more than a short one."""
+    rows = [
+        *_book(),
+        _headed("A quorum read, once more: the quorum overlaps.", "Quorums", [0.0, 3.0, 0.0, 0.0]),
+    ]
+    parts = _parts(tmp_path / "scratch", [rows])
+
+    merged = embed_cache._merge("doc", parts, tmp_path / "out.parquet", 4)
+
+    assert merged.sums is not None and merged.sums.shape == (4, 4)
+    assert merged.sums[3] == pytest.approx([0.0, 2.0, 0.0, 0.0]), "unit vectors, then the sum"
+    assert merged.summed == pytest.approx([1.0, 2.0, 0.0, 0.0]), "the whole document's"
+    assert [text.startswith("A ") for text in merged.prose] == [True, True, True]
+
+
+async def test_a_write_describes_every_section(tmp_path: Path) -> None:
+    """The descriptor candidates of the whole document are embedded in one call, and each
+    section keeps its own words, not its header's."""
+    doc = await import_row(DOC, BODY)
+    params = msgspec.structs.replace(BASE, document_id=doc.id)
     calls: list[list[str]] = []
 
     def embed(texts: list[str]) -> list[list[float]]:
         calls.append(texts)
         return [[1.0, 0.0, 0.0, 0.0] if "saga" in text else [0.0, 1.0, 0.0, 0.0] for text in texts]
 
-    await embed_cache.build_outline(params, embed)
+    cache_id = await embed_cache.write(params, _parts(tmp_path / "scratch", [_book()]), 4, embed)
 
-    assert await store.current(doc.id, params.model)
-    nodes = (await store.read([doc.id]))[doc.id]
-    assert [node.header for node in nodes] == ["", "Book", "Book > Sagas", "Book > Quorums"]
-    assert store.path(doc.id).parent == doc.markdown.parent, "beside the markdown"
-    sagas = nodes[2]
-    assert sagas.keywords["saga"] == 3, "each keyword with how often the section uses it"
-    assert not {"quorum", "majority", "replica"} & set(sagas.keywords), "its own words only"
+    sagas = (await embed_cache.read_sections(doc.id, cache_id))[2]
+    assert sagas.header == "Book > Sagas"
+    assert "step" in sagas.descriptors
+    assert "saga" not in sagas.descriptors, "its header says it"
+    assert not {"quorum", "majority", "replica"} & set(sagas.descriptors), "its own words only"
     assert (sagas.line_start, sagas.page_start, sagas.page_end) == (1, 2, 3)
     assert len(calls) == 1, "one embedding call per document"
-    rows = await (await _index()).query().where(f"document_id = '{doc.id}'").to_list()
-    by_position = {row["position"]: row for row in rows}
-    assert sorted(by_position) == [0, 1, 2, 3]
-    assert by_position[2]["headings"] == ["Book", "Sagas"]
-    assert list(by_position[2]["vector"]) == [1.0, 0.0, 0.0, 0.0], "the node's unit vector"
-    assert by_position[2]["keywords"][0] == {"keyword": next(iter(sagas.keywords)), "uses": 3}
 
 
-async def test_two_chunkings_building_at_once_build_one_outline(tmp_path: Path) -> None:
-    """After a model change two collections that chunk one document apart embed it at once, and
-    each run sees no outline: the second waits for the first, finds its outline and builds
-    nothing, so the file and the index rows come from one chunking."""
+async def test_each_chunking_keeps_its_own_sections(tmp_path: Path) -> None:
+    """Section ids are places in one chunking: two entries of one document, chunked apart, each
+    keep the sections their chunks name."""
     doc = await import_row(DOC, BODY)
     first = msgspec.structs.replace(BASE, document_id=doc.id)
     second = msgspec.structs.replace(first, chunk_size=400)
-    await embed_cache.write(first, _parts(tmp_path / "one", [_book()]), 4)
-    await embed_cache.write(second, _parts(tmp_path / "two", [_book()[:1]]), 4)
-    calls: list[list[str]] = []
+    one = await embed_cache.write(first, _parts(tmp_path / "one", [_book()]), 4, None)
+    two = await embed_cache.write(second, _parts(tmp_path / "two", [_book()[:1]]), 4, None)
 
-    def embed(texts: list[str]) -> list[list[float]]:
-        calls.append(texts)
-        return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
-
-    async with anyio.create_task_group() as group:
-        group.start_soon(embed_cache.build_outline, first, embed)
-        group.start_soon(embed_cache.build_outline, second, embed)
-
-    assert len(calls) == 1, "one build: the other found it built"
-    nodes = (await store.read([doc.id]))[doc.id]
-    rows = await (await _index()).query().where(f"document_id = '{doc.id}'").to_list()
-    assert len(rows) == len(nodes), "the file and the index rows from one chunking"
-    assert len(embed_cache._outline_locks) == 0, "no lock is left behind"
+    assert len(await embed_cache.read_sections(doc.id, one)) == 4
+    assert [one.header for one in await embed_cache.read_sections(doc.id, two)] == [
+        "",
+        "Book",
+        "Book > Sagas",
+    ]
 
 
-async def test_build_outline_of_an_entry_without_vectors(tmp_path: Path) -> None:
+async def test_a_write_without_a_model_describes_by_weight(tmp_path: Path) -> None:
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id, model=NO_MODEL)
     rows = [_headed(SAGAS_TEXT, "Sagas"), _headed(QUORUMS_TEXT, "Quorums")]
-    await embed_cache.write(params, _parts(tmp_path / "scratch", [rows]), None)
 
-    await embed_cache.build_outline(params, None)
+    cache_id = await embed_cache.write(params, _parts(tmp_path / "scratch", [rows]), None, None)
 
-    assert len((await store.read([doc.id]))[doc.id]) == 4
-    assert "vector" not in (await (await _index(NO_MODEL)).schema()).names, "no model: no vectors"
+    found = await embed_cache.read_sections(doc.id, cache_id)
+    assert len(found) == 4 and "majority" in found[3].descriptors
+
+
+async def test_a_forgotten_entry_has_no_sections(tmp_path: Path) -> None:
+    """A reconversion forgets the cache while a search may still name the entry: its sections
+    read as none, not as an error."""
+    doc = await import_row(DOC, BODY)
+    params = msgspec.structs.replace(BASE, document_id=doc.id)
+    cache_id = await embed_cache.write(params, _parts(tmp_path / "one", [_book()]), 4, None)
+
+    await embed_cache.forget(doc.id)
+
+    assert await embed_cache.read_sections(doc.id, cache_id) == []
 
 
 async def test_corpus_sum_adds_the_indexed_members_by_their_chunks(tmp_path: Path) -> None:
@@ -617,8 +647,9 @@ async def test_corpus_sum_adds_the_indexed_members_by_their_chunks(tmp_path: Pat
         await document.set_status(doc.id, DocumentStatus.IMPORTED)
         params = msgspec.structs.replace(BASE, document_id=doc.id, model=TINY.cache_name)
         rows = [_row(name, vector) for vector in vectors]
-        await embed_cache.write(params, _parts(tmp_path / name, [rows]), 4)
+        cache_id = await embed_cache.write(params, _parts(tmp_path / name, [rows]), 4, None)
         await notes.add(doc.id)
+        await notes.set_member_entry(doc.id, cache_id)
         if name != "pending.md":
             await notes.set_member_status(doc.id, MemberStatus.INDEXED)
 

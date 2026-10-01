@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from urllib.parse import unquote
 
-import lancedb
+import msgspec
 import pytest
 import structlog
 from conftest import id_of
@@ -28,7 +28,7 @@ from litestar.testing import AsyncTestClient, RequestFactory
 from sqlalchemy import update
 
 from haskie import app as app_module
-from haskie import audit, claude, db, errors, home, logs
+from haskie import audit, claude, db, errors, home, ids, logs
 from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection, MemberStatus
 from haskie.collection.index import CollectionIndex
@@ -37,9 +37,8 @@ from haskie.document.document import DocumentStatus
 from haskie.indexing import embed_cache, gguf_models, mlx_models
 from haskie.indexing.chunk import Chunk, Piece, split
 from haskie.indexing.segment import PieceType
-from haskie.outline import store
 from haskie.paging import Order
-from haskie.search import gaps, log
+from haskie.search import aspects, flow, gaps, log
 from haskie.settings import (
     DEFAULT_RERANKER,
     Accelerator,
@@ -1622,7 +1621,7 @@ async def test_every_search_is_logged_with_what_it_returned(ready: AsyncTestClie
     assert all(one.error is None for one in logged[1:])
     assert all(one.collections == ["notes"] and one.mode == "fts" for one in logged[1:])
     assert {one.actor for one in logged} == {"web"}
-    assert logged[-1].result_limit == 25, "the user default, resolved"
+    assert logged[-1].result_limit == flow.DEFAULT_EXCERPTS, "the excerpts' default, resolved"
     (result,) = (await log.top_results([logged[-1].id], 5))[logged[-1].id]
     assert (result.document, result.parent) == ("guide.md", None)
     history = (await ready.get("/api/sessions/s3/history")).json()
@@ -2516,20 +2515,25 @@ async def test_questions_a_search_cannot_run_are_refused_before_it_runs(
     assert message in response.text, name
 
 
-async def test_a_default_limit_below_the_questions_gives_each_a_slot(
+async def test_excerpts_default_to_ten_whatever_the_collections_limit(
     client: AsyncTestClient,
 ) -> None:
-    """The collection's own limit is below the questions asked: a caller who set no limit, as
-    Explore and an agent do, gets a slot for each question rather than a refusal."""
+    """A caller who set no limit, as Explore and an agent do, gets `DEFAULT_EXCERPTS`: the
+    collection's own `limit`, here below the questions asked, is for chunks and passages. Ten is
+    above the most questions one call may ask, so each still gets a slot."""
+    assert flow.DEFAULT_EXCERPTS >= aspects.MAX_QUESTIONS
     await _notes_on_aggregates(client)
     await client.put("/api/collections/ddd/overrides", json={"search": {"limit": 1}})
 
     response = await client.get(
-        "/api/search/excerpts", params={"q": [BY_IDENTITY, BY_EVENT], "collections": "ddd"}
+        "/api/search/excerpts",
+        params={"q": [BY_IDENTITY, BY_EVENT], "collections": "ddd", "session_id": "ten"},
     )
 
     assert response.status_code == 200, response.text
     assert len(response.json()["excerpts"]) >= 2, "one slot per question at least"
+    (logged,) = (await client.get("/api/searches", params={"session_id": "ten"})).json()
+    assert logged["result_limit"] == flow.DEFAULT_EXCERPTS
 
 
 async def test_the_mcp_tool_takes_one_question_or_several(api_client: AsyncTestClient) -> None:
@@ -2650,8 +2654,8 @@ async def test_sections_map_a_topic_with_what_each_section_is_about(
     client: AsyncTestClient,
 ) -> None:
     """Full text only: sections by relevance, at most two of one document while another has
-    some left, each with its outline's keywords and the few of them that set it apart, cited by
-    header and location, and the collections to select."""
+    some left, each with its descriptors, cited by header and location, and the
+    collections to select."""
     await _saga_shelf(client)
 
     response = await client.get(
@@ -2671,8 +2675,9 @@ async def test_sections_map_a_topic_with_what_each_section_is_about(
     sagas = next(one for one in found["sections"] if one["document"] == "book.md")
     assert sagas["depth"] == 1 and sagas["location"].startswith("book.md L")
     assert sagas["chars"] > 0 and sagas["chunks"] >= 1
-    assert "saga" in sagas["keywords"], "its outline's keywords, against the other chapter"
-    assert sagas["distinct"] and set(sagas["distinct"]) <= set(sagas["keywords"])
+    assert "compensating" in sagas["descriptors"], "its own, against the other chapter"
+    assert "saga" not in sagas["descriptors"], "not what its header says"
+    assert "distinct" not in sagas
 
     searches = (await client.get("/api/searches", params={"session_id": "m1"})).json()
     (logged,) = searches
@@ -2680,12 +2685,21 @@ async def test_sections_map_a_topic_with_what_each_section_is_about(
     assert {one["header"] for one in logged["results"]} == {header for _, header in headers}
 
 
-async def test_two_chunkings_of_one_book_share_its_one_outline(client: AsyncTestClient) -> None:
-    """One book in two collections chunked two ways, `text` one indexed last: the outline is the
-    document's, built once, so each collection's sections find their keywords in it."""
+async def _sections_of(document: str, collection: str) -> list[dict]:
+    """The sections of `document` as `collection` indexed it, each with its header: what a
+    search of that collection names by id. None where it holds no such document."""
+    doc = await id_of(document)
+    entry = (await Collection.indexed_entries([(collection, doc)])).get((collection, doc))
+    found = [] if entry is None else await embed_cache.read_sections(doc, entry)
+    return [msgspec.to_builtins(one) | {"header": one.header} for one in found]
+
+
+async def test_each_chunking_names_and_describes_its_own_sections(client: AsyncTestClient) -> None:
+    """One book in two collections chunked two ways: each collection's sections, ids and
+    descriptors come from its own chunking, in the map and in the document's sections alike."""
     await _saga_shelf(client)
     await client.post("/api/collections", json={"name": "raw"})
-    await client.put("/api/collections/raw/overrides", json={"chunker": "text", "chunk_size": 120})
+    await client.put("/api/collections/raw/overrides", json={"chunker": "text", "chunk_size": 300})
     await attach_via_api(client, "raw", "book.md")
 
     for name in ("notes", "raw"):
@@ -2693,16 +2707,118 @@ async def test_two_chunkings_of_one_book_share_its_one_outline(client: AsyncTest
             "/api/search/sections", params={"q": "saga compensation", "collections": name}
         )
         book = next(one for one in found.json()["sections"] if one["document"] == "book.md")
-        assert book["keywords"], f"{name}: its section found in the document's outline"
-    outline = await client.get("/api/documents/book.md/outline")
-    assert outline.status_code == 200 and outline.json()
-    book = await id_of("book.md")
-    assert store.path(book).is_file(), "beside the markdown"
-    conn = await lancedb.connect_async(str(home.OUTLINE_ROOT))
-    table = await conn.open_table(store.table_name(embed_cache.NO_MODEL))
-    assert await table.count_rows(f"document_id = '{book}'") == len(outline.json()), (
-        "one set of nodes across both collections"
+        by_id = {one["id"]: one for one in await _sections_of("book.md", name)}
+        assert by_id[book["id"]]["header"] == book["header"], f"{name}: the id names its section"
+        assert book["descriptors"] == by_id[book["id"]]["descriptors"], name
+        assert book["descriptors"], f"{name}: described"
+    notes, raw = [
+        {one["id"]: one["header"] for one in await _sections_of("book.md", name)}
+        for name in ("notes", "raw")
+    ]
+    assert any(raw.get(id) not in (None, header) for id, header in notes.items()), (
+        "the text chunking puts another section at one of the same places"
     )
+
+    # new chunk settings, not indexed yet: the rows, and so the sections, are still the old ones
+    await client.put("/api/collections/raw/overrides", json={"chunker": "text", "chunk_size": 500})
+    kept = {one["id"]: one["header"] for one in await _sections_of("book.md", "raw")}
+    assert kept == raw, "the entry the rows were indexed from, not today's settings"
+    found = await client.get(
+        "/api/search/sections", params={"q": "saga compensation", "collections": "raw"}
+    )
+    book = next(one for one in found.json()["sections"] if one["document"] == "book.md")
+    assert book["descriptors"], "still described from the entry the collection indexed"
+    assert await _sections_of("note.md", "raw") == [], "a document raw does not hold"
+
+
+async def test_a_search_keeps_to_the_documents_and_sections_it_is_given(
+    client: AsyncTestClient,
+) -> None:
+    """Every search that takes a scope answers from inside it alone: `document_ids` by document,
+    `section_ids` by a section and the sections under it, and the two together by what both
+    allow. The ids are the ones the document's sections and the answers carry."""
+    await _saga_shelf(client)
+    book, note = await id_of("book.md"), await id_of("note.md")
+    listed = await _sections_of("book.md", "notes")
+    by_header = {one["header"]: one["id"] for one in listed}
+    sagas, orchestration = by_header["Sagas"], by_header["Sagas > Orchestration"]
+    question = {"q": "saga compensation step", "limit": 10}
+
+    async def excerpts(**scope) -> list[dict]:
+        found = await client.get("/api/search/excerpts", params={**question, **scope})
+        assert found.status_code == 200, found.text
+        return found.json()["excerpts"]
+
+    async def explore(granularity: str, **scope) -> list[dict]:
+        found = await client.get(
+            "/api/search/explore", params={**question, "granularity": granularity, **scope}
+        )
+        assert found.status_code == 200, found.text
+        return found.json()
+
+    everything = await excerpts()
+    assert {one["document"] for one in everything} == {"book.md", "note.md"}
+    assert all(ids.ID.fullmatch(one["section_id"]) for one in everything), "each names its section"
+    assert {one["document"] for one in await excerpts(document_ids=[note])} == {"note.md"}
+    chapter = await excerpts(section_ids=[sagas])
+    assert [(one["document"], one["header"]) for one in chapter] == [("book.md", "Sagas")], (
+        "the chapter kept to is one excerpt, as it is unscoped"
+    )
+    assert all(span["header"].startswith("Sagas") for one in chapter for span in one["spans"]), (
+        "a chapter holds its subsections"
+    )
+    within = await excerpts(section_ids=[orchestration])
+    assert [span["section_id"] for one in within for span in one["spans"]] == [orchestration], (
+        "the text an excerpt adds around a passage stays inside the section too"
+    )
+    assert await excerpts(document_ids=[note], section_ids=[sagas]) == [], "what both allow"
+
+    chunks = await explore("chunk", section_ids=[sagas])
+    assert chunks and all(sagas in hit["section_ids"] for hit in chunks)
+    passages = await explore("passage", document_ids=[book])
+    assert passages and {one["document"] for one in passages} == {"book.md"}
+    assert all(one["section_id"] in by_header.values() for one in passages)
+
+    mapped = await client.get(
+        "/api/search/sections", params={"q": "saga compensation", "document_ids": [note]}
+    )
+    assert {one["document"] for one in mapped.json()["sections"]} == {"note.md"}
+    (saga_notes,) = mapped.json()["sections"]
+    note_sections = await _sections_of("note.md", "notes")
+    assert saga_notes["id"] in {one["id"] for one in note_sections}
+
+    logged = (await client.get("/api/searches")).json()
+    assert [one["scoped"] for one in logged if one["tool"] == "excerpts"] == [True] * 4 + [False]
+    assert not [
+        asked
+        for topic in (await client.get("/api/gaps")).json()
+        for asked in topic["questions"]
+        if asked["signal"] == "empty"
+    ], "the search both scopes left empty is no gap: other documents answer it"
+
+
+@pytest.mark.parametrize(
+    ("name", "path", "params"),
+    [
+        ("a document name is no id", "/api/search/excerpts", {"document_ids": ["book.md"]}),
+        ("a hex MD5 is no base58 id", "/api/search/explore", {"section_ids": ["0" * 32]}),
+        ("too short", "/api/search/sections", {"document_ids": ["abc"]}),
+        ("0 is not a base58 digit", "/api/search/sections", {"document_ids": ["0" * 22]}),
+        (
+            "more than a search may keep to",
+            "/api/search/excerpts",
+            {"section_ids": ["a" * 22] * 101},
+        ),
+    ],
+)
+async def test_a_scope_of_what_is_no_id_is_refused(
+    client: AsyncTestClient, name: str, path: str, params: dict
+) -> None:
+    await _saga_shelf(client)
+
+    found = await client.get(path, params={"q": "saga", **params})
+
+    assert found.status_code == 422, f"{name}: {found.text}"
 
 
 async def test_sections_bound_their_limit(client: AsyncTestClient) -> None:
@@ -2714,34 +2830,9 @@ async def test_sections_bound_their_limit(client: AsyncTestClient) -> None:
     assert too_many.status_code == 422 and "limit must be 1..40, got 41" in too_many.text
     nothing = await client.get("/api/search/sections", params={"q": "zeppelin"})
     assert nothing.json() == {"sections": [], "collections": []}, "no section is an answer"
-
-
-async def test_a_documents_outline_is_its_table_of_contents_with_keywords(
-    client: AsyncTestClient, tmp_path: Path
-) -> None:
-    await _saga_shelf(client)
-    (tmp_path / "queued.md").write_text("# Queued\n\nnever imported\n")
-    await document.import_path(str(tmp_path / "queued.md"))
-
-    response = await client.get("/api/documents/book.md/outline")
-
-    assert response.status_code == 200, response.text
-    outline = response.json()
-    assert [(one["depth"], one["header"]) for one in outline] == [
-        (0, ""),
-        (1, "Sagas"),
-        (2, "Sagas > Choreography"),
-        (2, "Sagas > Orchestration"),
-        (1, "Replication"),
-        (2, "Replication > Leaders"),
-    ]
-    replication = outline[4]
-    assert "replication" in replication["keywords"] and "saga" not in replication["keywords"]
-    assert replication["location"].startswith("book.md L") and replication["chars"] > 0
-    queued = await client.get("/api/documents/queued.md/outline")
-    assert queued.status_code == 200 and queued.json() == [], "not imported: no outline yet"
-    missing = await client.get("/api/documents/ghost.md/outline")
-    assert missing.status_code == 404
+    await client.get("/api/search/sections", params={"q": "saga", "session_id": "map"})
+    (logged,) = (await client.get("/api/searches", params={"session_id": "map"})).json()
+    assert logged["result_limit"] == flow.DEFAULT_MAP == 15, "no limit: a map of fifteen"
 
 
 async def _scoped_collections(client: AsyncTestClient) -> None:

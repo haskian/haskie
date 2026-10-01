@@ -1,12 +1,12 @@
 """Documents: one row in `documents`, one folder under ~/.haskie/documents/<shard>/<id>/.
 
 A document is first class and belongs to no collection: it is imported once, under a name only
-`rename` changes, and any number of collections may then hold it (`collection/collection.py`).
-What a document owns lives in its folder — `original.<ext>` (the file as uploaded),
-`original.<ext>.md` (the markdown assembled from it once, at import), `parts/` (one markdown file
-per part, which every collection re-chunks from), `preview/` (built lazily on first open) and
-`embeddings/` (the cache `indexing/embed_cache.py` writes) — so deleting the folder deletes
-everything but the rows, and the rows cascade from the document's own.
+`rename` changes, and any number of collections may then hold it (`collection/collection.py`). What
+a document owns lives in its folder — `original.<ext>` (the file as uploaded), `original.<ext>.md`
+(the markdown assembled from it once, at import), `parts/` (one markdown file per convert batch,
+joined into the markdown), `preview/` (built lazily on first open) and `embeddings/` (the cache
+`indexing/embed_cache.py` writes) — so deleting the folder deletes everything but the rows, and the
+rows cascade from the document's own.
 
 Two-phase intake: `stage` writes an upload into `staging/` with a `staging` row beside it, and
 commits no document — no name is taken and no `documents` row exists yet.
@@ -23,7 +23,6 @@ work here — the preview build — through `cpu.off_interpreter` for a PDF and 
 otherwise. The pure parts (paths, name cleaning, row decoding) stay sync.
 """
 
-import hashlib
 import re
 import shutil
 import time
@@ -42,7 +41,7 @@ from sqlalchemy import ColumnElement, Row, delete, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.exc import IntegrityError
 
-from haskie import cpu, db, home
+from haskie import cpu, db, home, ids
 from haskie.document import convert
 from haskie.errors import Conflict, InvalidInput, NotFound, NotReady, PermanentError
 from haskie.paging import Page, PageRequest, count_of, keyset, resolve_sort
@@ -92,7 +91,7 @@ class Document(msgspec.Struct):
     The path properties are sync and IO-free: everything a document owns is derived from the
     two immutable columns, so a pipeline step that holds the row holds every path it needs."""
 
-    id: str  # the MD5 of the original file's bytes: what every table and index refers to it by
+    id: str  # the MD5 of the original file's bytes in base58 (`ids`): what everything refers to
     name: str  # what people and agents call it: unique, in lowercase-kebab-case (`stored_name`)
     suffix: str  # of the original file, lower-case, with the dot: ".pdf"
     size: int
@@ -123,8 +122,7 @@ class Document(msgspec.Struct):
 
     @property
     def parts_dir(self) -> Path:
-        """One markdown file per part. Durable, not scratch: a collection that chunks the
-        document differently re-chunks from the same part boundaries (see `pipeline`)."""
+        """One markdown file per convert batch, joined into the markdown (see `pipeline`)."""
         return self.root / "parts"
 
     @property
@@ -181,13 +179,6 @@ class Staged(msgspec.Struct):
     size: int
     # the document these exact bytes already are, by name: importing them again is refused
     duplicate: str | None
-
-
-def _md5_of_file(path: Path) -> str:
-    """A document's id: a fingerprint that makes the same file the same document, not a
-    security check. Streamed, since an import may be as large as the upload cap."""
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, lambda: hashlib.md5(usedforsecurity=False)).hexdigest()
 
 
 async def identical(id: str) -> str | None:
@@ -287,7 +278,7 @@ async def stage(filename: str, content: bytes) -> Staged:
     await anyio.Path(home.STAGING_ROOT).mkdir(parents=True, exist_ok=True, mode=home.DIR_MODE)
     await home.atomic_write(home.STAGING_ROOT / staging_id, content)
     # hashed once, here, and carried to the import in the row
-    md5 = await anyio.to_thread.run_sync(_md5_of_file, home.STAGING_ROOT / staging_id)
+    md5 = await anyio.to_thread.run_sync(ids.md5_of_file, home.STAGING_ROOT / staging_id)
     async with db.connect() as conn:
         await conn.execute(
             insert(staging).values(
@@ -452,7 +443,7 @@ async def import_path(path: str, options: ImportOptions | None = None) -> Docume
         size = (await anyio.Path(source).stat()).st_size
         if size > UPLOAD_MAX_BYTES:
             raise InvalidInput(f"file larger than {UPLOAD_MAX_BYTES} bytes: {size}")
-        md5 = await anyio.to_thread.run_sync(_md5_of_file, source)
+        md5 = await anyio.to_thread.run_sync(ids.md5_of_file, source)
     document = await _create(final, size, md5, options)
     with _reading(source):
         return await _place(document, source, shutil.copyfile)

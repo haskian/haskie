@@ -128,7 +128,7 @@ class HitRange(msgspec.Struct):
 
 
 class Paged(Protocol):
-    """Anything that runs over pages: a hit, a chunk, an outline entry."""
+    """Anything that runs over pages: a hit, a chunk, a section."""
 
     @property
     def page_start(self) -> int | None: ...
@@ -273,6 +273,7 @@ class Span(msgspec.Struct, kw_only=True):
     spans; a `Passage` is one with its text."""
 
     header: str  # the heading path it sits under, "Part I > Chapter 2", from the best chunk
+    section_id: str  # the id of the section of that heading path, the deepest its chunks sit in
     location: str  # "doc p.3-4 L10-20", over every chunk it covers
     seq_start: int  # the chunks it covers, 1-based within the document
     seq_end: int
@@ -316,6 +317,7 @@ class Excerpt(msgspec.Struct):
     document_id: str
     document: str  # its name, what it is cited by
     header: str  # the section's heading path, "Part I > Chapter 2"; empty for a whole document
+    section_id: str  # the section's id: what a search keeps to by `section_ids`
     location: str  # "doc p.3-4 L10-20", from the first passage to the last
     seq_start: int
     seq_end: int
@@ -355,6 +357,7 @@ def _cited(hit_range: HitRange) -> dict:
     """The fields a `Span` has, out of a hit range."""
     return {
         "header": hit_range.best.header,
+        "section_id": hit_range.best.section_id,
         "location": hit_range.location,
         "seq_start": hit_range.seq_start,
         "seq_end": hit_range.seq_end,

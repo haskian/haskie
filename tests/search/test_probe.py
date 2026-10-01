@@ -194,6 +194,7 @@ def test_the_probed_section_joins_the_section_it_is_part_of_else_comes_after() -
 def _excerpt(text: str, aspects: list[str], header: str = "Shop") -> Excerpt:
     span = Span(
         header=f"{header} > Stock",
+        section_id="stock",
         location="a.md L1-1",
         seq_start=1,
         seq_end=1,
@@ -211,6 +212,7 @@ def _excerpt(text: str, aspects: list[str], header: str = "Shop") -> Excerpt:
         document_id="a.md",
         document="a.md",
         header=header,
+        section_id=header.lower(),
         location="a.md L1-1",
         seq_start=1,
         seq_end=1,

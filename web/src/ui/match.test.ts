@@ -23,6 +23,7 @@ const CHUNK: Hit = {
   collection: 'A–E',
   document_id: 'a1',
   document: 'area-lights.pdf',
+  id: 'c1', section_id: 's-soft', section_ids: ['s-doc', 's-soft'],
   source_path: 'documents/area-lights.pdf',
   markdown_path: 'markdown/area-lights.md',
   part: 0,
@@ -255,6 +256,7 @@ describe('excerpts', () => {
   })
   const span = (also_in: Passage['also_in']): Excerpt['spans'][number] => ({
     header: 'Guide > Retries',
+    section_id: 's-retries',
     location: 'guide.md L5-7',
     seq_start: 1,
     seq_end: 2,
@@ -274,6 +276,7 @@ describe('excerpts', () => {
     document_id: 'a1',
     document: 'guide.md',
     header: 'Guide',
+    section_id: 's-retries',
     location: 'guide.md L5-20',
     seq_start: 1,
     seq_end: 6,

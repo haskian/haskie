@@ -5,6 +5,7 @@ import msgspec
 import numpy as np
 import pytest
 
+from haskie import ids
 from haskie.collection.index import Hit, Overlap, Overlaps, Relation
 from haskie.search import gaps, log
 from haskie.search.gaps import Bars, Gap, Signal
@@ -71,6 +72,18 @@ NO_RERANK = {"reranker": None}
             None,
         ),
         ("no excerpt answers it", {}, {"uncovered": True}, Signal.UNCOVERED),
+        (
+            "a scoped search that missed is no gap: the rest of the shelf may answer",
+            {"scoped": True, "result_count": 0},
+            {"uncovered": True, "best_rerank": 0.01, "best_similarity": 0.1},
+            None,
+        ),
+        (
+            "the agent's verdict stands on a scoped search",
+            {"scoped": True, "result_count": 0},
+            {"agent_verdict": "insufficient"},
+            Signal.REPORTED,
+        ),
         ("the reranker's best under its floor", {}, {"best_rerank": 0.04}, Signal.WEAK),
         ("exactly at the floor is an answer", {}, {"best_rerank": 0.05}, None),
         (
@@ -227,6 +240,7 @@ def _passage(document: str, seq: tuple[int, int], also_in: list[PassageReference
         document_id=document,
         document=document,
         header="Part II > Replication > Leaders and Followers",
+        section_id="leaders",
         location=f"{document} p.151-152 L4210-4231",
         seq_start=seq[0],
         seq_end=seq[1],
@@ -363,6 +377,7 @@ def test_an_excerpt_flattens_its_passages_repeats_under_itself() -> None:
         document_id="ddia.pdf",
         document="ddia.pdf",
         header="Part II > Replication",
+        section_id=ids.md5(b"doc/s/1"),
         location="ddia.pdf p.151-153 L4210-4290",
         seq_start=3,
         seq_end=8,

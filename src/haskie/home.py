@@ -47,17 +47,15 @@ SERVER_PID_ENV = "HASKIE_SERVER_PID"
 # The layout, relative to `HOME`. Every name here is readable as a module attribute
 # (`home.DB_FILE`) and derived on access, so `use()` has one global to rebind.
 _LAYOUT: dict[str, str] = {
-    "COLLECTION_ROOT": "collections",  # one LanceDB index per collection
+    "COLLECTION_ROOT": "collections",  # a chunk and a section LanceDB index per collection
     "DOCUMENT_ROOT": "documents",  # one folder per imported document: original, markdown, cache
-    "OUTLINE_ROOT": "outlines",  # one LanceDB index of every document's outline nodes
     "STAGING_ROOT": "staging",  # uploads not yet imported; swept by the nightly housekeeping
     "AUDIT_DIR": "audit",
     "DB_FILE": "haskie.db",
     "MODEL_CACHE": "cache/models",  # compiled CoreML models; ONNX Runtime (ORT) makes it
     "LOCK_FILE": "haskie.lock",  # one running haskie per home (see `claim_home`)
 }
-# the directories; the rest are files
-_MADE = ("COLLECTION_ROOT", "DOCUMENT_ROOT", "OUTLINE_ROOT", "STAGING_ROOT", "AUDIT_DIR")
+_MADE = ("COLLECTION_ROOT", "DOCUMENT_ROOT", "STAGING_ROOT", "AUDIT_DIR")  # the rest are files
 
 DIR_MODE = 0o700  # documents and the audit trail are private to the user running the app
 PART_DIGITS = 6  # width of a part number; four would cap a document at 10k parts

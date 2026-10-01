@@ -10,7 +10,7 @@ erDiagram
     COLLECTION ||--o{ MEMBERSHIP : holds
     DOCUMENT ||--o{ EMBEDDING : "is cached as"
     DOCUMENT {
-        string id "MD5 of the bytes"
+        string id "MD5 of the bytes, base58"
         string name "lowercase-kebab-case, renamable"
         string status "queued ... imported"
         string parser
@@ -161,9 +161,11 @@ folder it moved.
 ## The embedding cache
 
 The cache makes one document cheap to share between collections. Each computed embedding is one
-parquet file under the document, plus one `embeddings` row. The document's outline is built from
-the first one under a model (`outline/build.py`, see [storage](storage.md#the-outline)). An
-embedding's id is the SHA-256 of a one-line URN that names everything the rows depend on:
+parquet file under the document, plus one `embeddings` row. Beside it, a second file holds the
+document's sections as that chunking cuts them, each with its id and descriptors; every chunk
+names its own id and its sections ([storage](storage.md#sections-and-their-ids)). An embedding's id
+is the
+SHA-256 of a one-line URN that names everything the rows depend on:
 
 ```
 document_id:<id>;model:<model>;chunk_size:<n>;chunk_merge_below:<n>;chunk_frame:<b>;chunker:<c>;chunk_version:<v>;parser:<p>;skip_ocr_pages:<b>

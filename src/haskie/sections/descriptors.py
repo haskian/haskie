@@ -1,7 +1,8 @@
 """The words that say what a section is about, and what sets it apart from the sections beside it.
 
-An outline picks each section's keywords through a `Strategy`. `ClassTfidf` is the one there is,
-three steps, each the one BERTopic describes for a topic, with a section in place of a topic:
+Each section's descriptors are picked through a `Strategy`. `ClassTfidf` is the one there is,
+four steps, three of them the ones BERTopic describes for a topic, with a section in place of a
+topic:
 
 - **Terms.** A text's words, lowercase, three letters or more, no stopwords, counted by their
   stem (`probe.stem`, the Snowball stemmer LanceDB's full-text index uses), and every pair of
@@ -15,19 +16,31 @@ three steps, each the one BERTopic describes for a topic, with a section in plac
   keeps them all as candidates. A word split by a hyphen at a line end is joined first
   ("pro-/cessing"). Each term keeps the form it is written in most often, for display.
 - **c-TF-IDF** (`ctfidf`). Each section is one class; a term weighs how often the section uses
-  it against how often every class does, with BM25's inverse frequency and the square root of the
-  frequency, BERTopic's `ClassTfidfTransformer(bm25_weighting=True, reduce_frequent_words=True)`
-  [1]. So a chapter's terms are the ones its sibling chapters use less.
+  it against how many classes use it, with BM25's inverse frequency and the square root of the
+  frequency, as BERTopic's `ClassTfidfTransformer(bm25_weighting=True,
+  reduce_frequent_words=True)` [1] does. So a chapter's terms are the ones its sibling chapters use
+  less. BERTopic counts a term's uses over every class instead, against the average class size,
+  which lets a common term through: on one 657-page book on DDD, "chapter" and "design", each in
+  about 80% of its second-level sections, weighed 1.15 and 0.85 that way, and 0.20 and 0.24
+  counting the sections.
+- **The book's own words** (`widespread`). A term more than half the sections of one depth use
+  says what the document is about, not what sets one section apart: it is no candidate there,
+  however high a short section's few repeated words rank it. On that book, 172 of 1,996 section
+  descriptors were such terms ("model" in 15 sections, "aggregate" alone in 11), and a lower weight
+  alone left 103: a short section's candidates are the few words it repeats, and the rerank
+  below reads meaning, not weight. Leaving them out leaves 6, and no section without descriptors.
+  A pair keeps the word ("separate Aggregates"), and the whole document, one class, keeps them all.
+  Nor is a term whose every word the section's header holds (`said`): "Aggregates" says nothing
+  under "Aggregates > Rule: Design Small Aggregates". On that book 295 descriptors were such terms.
 - **Rerank** (`rerank`). The best terms by that weight are the candidates; each is embedded, and
   the ones closest to the section's own vector win, one at a time, each against the ones already
   taken (maximal marginal relevance), so "aggregate" and "aggregates" do not both take a slot.
   BERTopic's `KeyBERTInspired` and `MaximalMarginalRelevance` [2].
 
 MMR here picks words, not passages: which results a search returns is decided elsewhere
-(`search/overview.py`), where the research this repository follows ranks MMR the weakest method.
+(`search/section_map.py`), where the research this repository follows ranks MMR the weakest method.
 
-The strategies share the term statistics below, which the search's map of sections
-(`search/overview.py`) reuses to set its picks apart. No IO here.
+No IO here.
 
 [1] https://maartengr.github.io/BERTopic/getting_started/ctfidf/ctfidf.html
 [2] https://maartengr.github.io/BERTopic/getting_started/representation/representation.html
@@ -115,11 +128,6 @@ def shown(keys: Iterable[str], forms: Counter[Term]) -> dict[str, str]:
     return {key: form for key, (_, form) in best.items()}
 
 
-def key_of(written: str) -> str:
-    """A term's key from the form it is written in: its words' stems, as `terms` keys it."""
-    return " ".join(stem(word) for word in written.lower().split())
-
-
 def summed(counts: Iterable[Counter[str]]) -> Counter[str]:
     """The counts added up, in place into one: `sum(counts, Counter())` copies the running total
     at every step, quadratic in the counts of a long chapter."""
@@ -136,22 +144,32 @@ def frequent(counts: Counter[str], enough: int) -> set[str]:
     return kept if sum(" " not in key for key in kept) >= enough else set(counts)
 
 
+MAX_SHARE = 0.5  # judgement, not measured: more than half the sections is the whole document
+
+
+def widespread(classes: Sequence[Counter[str]]) -> set[str]:
+    """The terms more than `MAX_SHARE` of the classes use: what the document is about, not what
+    sets one section apart. None when there is one class, which has nothing to be set apart from."""
+    if len(classes) < 2:
+        return set()
+    spread = Counter(term for one in classes for term in one)
+    return {term for term, used in spread.items() if used > MAX_SHARE * len(classes)}
+
+
 def ctfidf(classes: Sequence[Counter[str]]) -> list[dict[str, float]]:
     """Each class's terms weighed against every class's (see the module):
-    `sqrt(tf / |c|) * log(1 + (A - f + 0.5) / (f + 0.5))`, where `tf` is the term's count in the
-    class, `|c|` the class's count of terms, `f` the term's count over every class, and `A` the
-    average class size. One class alone is weighed against itself, so a term it uses on every line
-    sinks and the rest rank by how often they occur."""
-    total = summed(classes)
-    sizes = [one.total() for one in classes]
-    average = sum(sizes) / len(classes) if classes else 0.0
+    `sqrt(tf / |c|) * log(1 + (N - n + 0.5) / (n + 0.5))`, where `tf` is the term's count in the
+    class, `|c|` the class's count of terms, `N` the number of classes and `n` how many of them use
+    the term. One class alone weighs every term alike, so its terms rank by how often it uses
+    them: the whole document's are what the document is about."""
+    spread = Counter(term for one in classes for term in one)
     return [
         {
-            term: math.sqrt(count / size)
-            * math.log(1 + (average - total[term] + 0.5) / (total[term] + 0.5))
+            term: math.sqrt(count / one.total())
+            * math.log(1 + (len(classes) - spread[term] + 0.5) / (spread[term] + 0.5))
             for term, count in one.items()
         }
-        for one, size in zip(classes, sizes, strict=True)
+        for one in classes
     ]
 
 
@@ -192,23 +210,34 @@ def rerank(candidates: np.ndarray, section: np.ndarray, k: int) -> list[int]:
 
 # --- strategies ---------------------------------------------------------------------
 
-KEYWORDS = 8  # per section: enough to tell it apart, few enough to read at a glance
+DESCRIPTORS = 5  # at most, per section: enough to tell it apart, few enough to read at a glance
 CANDIDATES = 20  # terms per section the embedding model reranks (`rerank`)
 
 type Embed = Callable[[list[str]], list[list[float]]]  # document-side embeddings, one per text
 
 
 class Run(NamedTuple):
-    """One section as a strategy sees it: how many headings deep it sits, and the chunks it runs
-    over, both ends inclusive."""
+    """One section as a strategy sees it: the headings it sits under, outermost first, and the
+    chunks it runs over, both ends inclusive."""
 
-    depth: int
+    headings: tuple[str, ...]
     first: int
     last: int
 
+    @property
+    def depth(self) -> int:
+        return len(self.headings)
+
+
+def said(headings: Iterable[str]) -> set[str]:
+    """The words of `headings`, as `terms` keys them. A term all of whose words they hold the
+    header already says, so as a descriptor it adds nothing: "small aggregates" under "Rule: Design
+    Small Aggregates", while "separate aggregates" still adds "separate"."""
+    return {key for heading in headings for key, _ in terms(heading) if " " not in key}
+
 
 class Strategy(Protocol):
-    """How an outline picks the keywords of each of a document's sections (`outline.build`)."""
+    """How the descriptors of each of a document's sections are picked (`build.describe`)."""
 
     def pick(
         self,
@@ -216,8 +245,8 @@ class Strategy(Protocol):
         runs: Sequence[Run],
         vectors: np.ndarray | None,
         embed: Embed | None,
-    ) -> list[dict[str, int]]:
-        """Each run's keywords as written, best first, with how often the run uses each.
+    ) -> list[list[str]]:
+        """Each run's descriptors as written, best first.
 
         `texts` are the document's chunks in order. `vectors` holds one unit vector per run, and
         `embed` embeds any text the same way; both are None without an embedding model."""
@@ -230,9 +259,9 @@ class ClassTfidf:
 
     The sections of one depth are the classes of one c-TF-IDF, so a chapter's terms are weighed
     against the other chapters' and a section's against the other sections'. A depth with one
-    section only is weighed against itself. With a model, each section's best `CANDIDATES` terms
-    are embedded, in one call for the whole document, and reranked against the section's vector;
-    without one, the best terms by weight are its keywords."""
+    section only ranks its terms by how often it uses them. With a model, each section's best
+    `CANDIDATES` terms are embedded, in one call for the whole document, and reranked against the
+    section's vector; without one, the best terms by weight are its descriptors."""
 
     def pick(
         self,
@@ -240,23 +269,35 @@ class ClassTfidf:
         runs: Sequence[Run],
         vectors: np.ndarray | None,
         embed: Embed | None,
-    ) -> list[dict[str, int]]:
+    ) -> list[list[str]]:
         forms: Counter[Term] = Counter()
         per_chunk = [counted(terms(text), forms) for text in texts]
         counts = [summed(per_chunk[run.first : run.last + 1]) for run in runs]
         weights: list[dict[str, float]] = [{} for _ in runs]
         for depth in {run.depth for run in runs}:
             at = [n for n, run in enumerate(runs) if run.depth == depth]
+            common = widespread([counts[n] for n in at])
             for n, weighed in zip(at, ctfidf([counts[n] for n in at]), strict=True):
-                # every use weighs how common a term is; only a term used enough is a candidate
-                kept = frequent(counts[n], KEYWORDS)
+                # every use weighs how common a term is; only a term of the section's own, that
+                # its header does not already say, used enough, is a candidate
+                header = said(runs[n].headings)
+                own = Counter(
+                    {
+                        key: uses
+                        for key, uses in counts[n].items()
+                        if key not in common and not set(key.split()) <= header
+                    }
+                )
+                # at least one descriptor while the section has a word: its best, even one the
+                # header or the whole document already says
+                kept = frequent(own, DESCRIPTORS) or set(counts[n])
                 weights[n] = {key: weight for key, weight in weighed.items() if key in kept}
         if embed is None or vectors is None:
-            chosen = [best(weighed, KEYWORDS) for weighed in weights]
+            chosen = [best(weighed, DESCRIPTORS) for weighed in weights]
         else:
             chosen = _reranked(vectors, weights, forms, embed)
         written = shown([key for keys in chosen for key in keys], forms)
-        return [{written[key]: counts[n][key] for key in keys} for n, keys in enumerate(chosen)]
+        return [[written[key] for key in keys] for keys in chosen]
 
 
 def _reranked(
@@ -265,7 +306,7 @@ def _reranked(
     forms: Counter[Term],
     embed: Embed,
 ) -> list[list[str]]:
-    """Each section's keywords: its best `CANDIDATES` terms, reranked against its unit vector
+    """Each section's descriptors: its best `CANDIDATES` terms, reranked against its unit vector
     (`rerank`). Every distinct candidate of the document is embedded once."""
     candidates = [best(weighed, CANDIDATES) for weighed in weights]
     distinct = list(dict.fromkeys(key for keys in candidates for key in keys))
@@ -275,7 +316,7 @@ def _reranked(
     embedded = unit_rows(embed([written[key] for key in distinct]))
     position = {key: at for at, key in enumerate(distinct)}
     return [
-        [keys[at] for at in rerank(embedded[[position[key] for key in keys]], section, KEYWORDS)]
+        [keys[at] for at in rerank(embedded[[position[key] for key in keys]], section, DESCRIPTORS)]
         for keys, section in zip(candidates, vectors, strict=True)
     ]
 

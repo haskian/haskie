@@ -23,6 +23,8 @@ flowchart LR
 ## The shared ranking
 
 1. **Scope.** The `collections` argument, else the session's collections, else all of them.
+   Narrower, when given: `document_ids` and `section_ids` (see "Keeping to documents and
+   sections" below).
 2. **Retrieve.** Each collection runs `hybrid` (vector and BM25, fused), `vector` or `fts`.
    Fusion is `rrf` (reciprocal rank fusion) or `linear`. Without an embedding model everything is
    `fts`. The query is embedded once, and up to 8 collections are read in parallel. A collection
@@ -67,7 +69,7 @@ source row.
 | passage | neighbouring matched chunks of one section, merged | `explore?granularity=passage` |
 | excerpt | one section of a document, with every passage of it the search kept | `search_excerpts` (the Explore page too) |
 | source | one document: score, best chunk, hottest sections, collections | `search_sources` |
-| section | one section of a document: where it is, its keywords, the sections it covers; no text | `search_sections` (the Explore page too, which opens a section on its document's outline) |
+| section | one section of a document: its id, where it is, its descriptors, the sections it covers; no text | `search_sections` (the Explore page too, which opens a section among its document's sections) |
 
 A passage is the text its chunks cover, read by their offsets, with nothing added around it.
 Chunks are cut at headings, blank lines, blocks and sentences (see [chunking](chunking.md)), so a
@@ -87,14 +89,15 @@ section of one document, holding every passage the search kept in it, in documen
 counts excerpts, so the passages below the cut join the sections they belong to, and a section
 that no kept passage opens takes no slot.
 
-Which section: the largest one that still reads as a quote. A passage's heading path is tried
-from the top. A level whose section holds the whole document (a title over everything) says
-nothing, and a level whose section is longer than `max_section_chars` (12,000) is split one heading
-down. So a book groups by chapter or by section, and a short note by its title. A passage under
-the deepest heading it has takes that section, however long. The sections come from where each
-chunk of the document sits: its `seq`, heading path and char span, read from the collection's
-table in one LanceDB query per collection. A chunk never spans two sections, so the grouping is
-exact.
+Which section: the largest one that still reads as a quote. A passage's heading path is tried from
+the top. A level whose section holds the whole document (a title over everything) says nothing, and
+a level whose section is longer than `max_section_chars` (12,000) is split one heading down. So a
+book groups by chapter or by section, and a short note by its title. A passage under the deepest
+heading it has takes that section, however long. The sections come from where each chunk of the
+document sits: its `seq`, heading path, char span and the ids of its sections, read from the
+collection's table in one LanceDB query per collection. A chunk never spans two sections, so the
+grouping is exact. An excerpt names its section by id (`section_id`), and each of its spans the
+deepest section its chunks sit in.
 
 The excerpt's `text` joins its passages. Each passage opens with the headings it sits under that
 the one before it did not, below the section's own `header`, as markdown headings of their depth.
@@ -213,11 +216,11 @@ question.
 `search_sections` answers "what do my sources hold on this, and nearby?" before any text is
 read. It returns sections, each with where it is and what it is about, and no text: an agent
 reads the map, then asks `search_excerpts` about the sections worth reading. It runs
-`retrieve -> merge -> observe -> hits -> map_sections` (`search/overview.py`):
+`retrieve -> merge -> rerank -> hits -> map_sections` (`search/section_map.py`):
 
 1. **No reranker.** A map wants breadth and speed; the reranker's floor would drop chunks and
-   narrow it, and it costs about 5 ms a pair. `observe` records the ranking for the search log as
-   `rerank` does. The scan goes 20 chunks deep per section asked for, up to 200.
+   narrow it, and it costs about 5 ms a pair. The search plans none, so its `rerank` step only
+   records the ranking for the search log. The scan goes 20 chunks deep per section asked for, up to 200.
 2. **Group by section.** Each scanned chunk joins the section an excerpt would quote it in
    (`section.section_of`), so a section on the map is the one `search_excerpts` returns. One span
    of one document counts once, whichever collections hold it.
@@ -225,7 +228,7 @@ reads the map, then asks `search_excerpts` about the sections worth reading. It 
    demand point weighed by its share of the scan's relevance, and a section covers it as closely
    as its nearest chunk is, `max(cos, 0)`. The first pick is the most relevant section; each next
    is the section that covers the most demand the picks leave uncovered, so a near copy of a pick
-   adds nothing and is not picked. It stops at `limit` (12 by default, at most 40), or when no
+   adds nothing and is not picked. It stops at `limit` (15 by default, at most 40), or when no
    section covers anything new. Without an aspect list, this is the best-supported coverage
    method in the literature we follow: in GeoRAG's ablation [9] it beat MMR and DPP by 3 to 5
    points of exact match, and roughly matched a cross-encoder. Greedy takes under a millisecond
@@ -246,19 +249,34 @@ reads the map, then asks `search_excerpts` about the sections worth reading. It 
    matched words repeat a pick's (word Jaccard 0.5 or more, as the collapse uses) is related to it.
 
 Each pick lists up to five `related` sections: those it covers best, by the relevance-weighted
-mean of their chunks' nearness to it. A near copy lands there, as a repeat lands in `also_in`.
+mean of their chunks' nearness to it. Every section the scan reached and the map did not pick goes
+under the one pick closest to it, when it is closer than 0, and each pick keeps its five closest.
+There is no threshold, so `related` means nearby, not repeated. A near copy of the pick lands
+there. So does a section the pick only sits close to, and that one may be the best section on the
+topic: the pick covered its chunks by their vectors, not by what it says.
+
+`related` and `also_in` look alike and answer different questions:
+
+| | `related` (sections) | `also_in` (excerpts) |
+| --- | --- | --- |
+| question | what else is near this pick? | where else is this same point? |
+| entry rule | not picked, and closest to this pick | passes a repeat test with a threshold |
+| label | `similarity` only | `relation`: `duplicate`, `contained` or `equivalent` |
+| typical content | full: up to five per pick | often empty |
+| can the agent skip it? | no: read the headers | yes: it adds nothing new |
+
+Without vectors the rule is stricter: a section joins `related` only when its matched words repeat
+the pick's (step 6), so there it does mean repeated.
 The answer's `collections` holds every section listed, related ones included, by the same greedy
 set cover as `search_sources`, ready for `set_session_collections`.
 
-Each section says what it is about twice. `keywords` come from the document's outline, built at
-indexing ([Indexing](indexing.md#the-three-workflows)): the section's words weighed against the
-other sections of its depth by c-TF-IDF [10], reranked by meaning [11]. `distinct` holds the few
-of those keywords that set it apart from the other sections this scan reached: c-TF-IDF again, each
-section's stored keywords with their counts as one class. It reads the stored keywords rather
-than the matched chunks' words: one to three chunks are too little text to tell a rare word from
-a common one, and on real books that put words like "anything" and "although" on the map.
-Keywords never decide what is picked: in the studies we follow, clusters of the pool used as
-aspects gained nothing, and terms mined from it only re-weighted the aspects already on top.
+`descriptors` say what each section is about. They are fixed at indexing
+([Indexing](indexing.md#the-three-workflows)) and read by the section's id from the cache entry
+the collection indexed the document from: one to five of the section's words weighed against the other
+sections of its depth by c-TF-IDF [10], less the words more than half of them use or its header
+holds (unless nothing else is left), and reranked by meaning [11]. They never decide what is
+picked: in the studies we follow, clusters of the pool used as aspects gained nothing, and terms
+mined from it only re-weighted the aspects already on top.
 
 Measured on three books (1.9 MB of markdown, bge-small), eight questions: the whole search took
 35 to 50 ms warm, `map_sections` 12 to 17 ms of it. Against the top sections by relevance on the
@@ -274,7 +292,24 @@ That is a sanity check, not an evaluation: the gains are small, as the literatur
 without aspects, and the half is a judgement fitted on these eight questions.
 
 Each search logs `search_map` with the chunks, the sections reached and picked, the share of
-demand covered after each pick, whether it centred, and the documents whose outline was missing.
+demand covered after each pick, whether it centred, and the documents whose sections were missing.
+
+## Keeping to documents and sections
+
+`search_excerpts`, `search_sections` and `GET /api/search/explore`, which searches chunks and
+passages, take a scope besides the collections: `document_ids` keeps to these documents, and
+`section_ids`, except in `search_sections`, to these sections and every section under them. Both
+together keep to what both allow. The ids are the ones the answers carry: a hit's `document_id`
+and `section_ids`, an excerpt's and a span's `section_id`, and a mapped section's `id`
+([Storage](storage.md#sections-and-their-ids)). An id that is not 22 base58 characters is refused
+(422), and so are more than 100 of either.
+
+The scope is a filter on every read of a collection's chunk table (`index.Scope`), applied before
+the limit, so a row outside it takes no slot. A chunk carries the ids of every section that holds
+it, so a chapter's id finds the chunks of its subsections (`array_has_any`). The reads a search
+makes around its matches keep to it too: the neighbours a short passage grows into, the text the
+fill adds around and between passages, and the chunks the excerpts are grouped by. An excerpt
+kept to one section quotes that section alone.
 
 ## How chunk scores fold
 
@@ -448,12 +483,15 @@ passages expand under Expansion: `min_passage_chars`, `max_passage_grow`, `fill_
 `grow_bias`, `max_section_chars` and `max_answer_chars`. In the shared ranking, each collection
 retrieves with its own overrides. The settings of the merged ranking (`rrf_k`, `candidates`, the
 reranker) come from the collection only when it is the one collection in scope, and from the user
-otherwise. `limit` comes from the call, else from the same place. No route takes search settings
-per call: a search with other settings is a search of a collection whose overrides say so.
+otherwise. `limit` comes from the call, else from the same place, for chunks and passages. The
+other answers have fixed defaults of their own: `search_excerpts` 10 sections
+(`flow.DEFAULT_EXCERPTS`), `search_sections` 15 and `search_sources` 10 documents. No route takes
+search settings per call: a search with other settings is a search of a collection whose overrides
+say so.
 
 Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/collapse.py`,
 `search/aspects.py`, `search/thin.py`, `search/section.py`, `search/fill.py`, `search/probe.py`,
-`search/overview.py`, `outline/`.
+`search/section_map.py`, `sections/`.
 
 ## References
 

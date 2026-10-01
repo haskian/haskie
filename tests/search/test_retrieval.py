@@ -520,6 +520,7 @@ def _excerpt(text: str, score: float, aspects: list[str] | None = None) -> Excer
         document_id="a.md",
         document="a.md",
         header="Retries",
+        section_id="retries",
         location="a.md L1-1",
         seq_start=1,
         seq_end=1,
@@ -708,7 +709,7 @@ SHELF_VECTORS = {
 
 @pytest.mark.anyio
 async def test_map_sections_covers_the_scan_with_centred_vectors() -> None:
-    """The vector road through real rows: the outlines read back from the table, the corpus
+    """The vector road through real rows: the placements read back from the table, the corpus
     mean from the collection, the picks by facility location. The saga retries section repeats
     the sagas one, so the map takes quorums second and lists the retries under sagas."""
     shelf = await Collection.create("shelf")
@@ -746,7 +747,7 @@ async def test_map_sections_covers_the_scan_with_centred_vectors() -> None:
     assert [one.header for one in sagas.related] == ["Saga retries"]
     assert sagas.related[0].similarity > 0.9, "centred, the two saga sections still agree"
     assert (sagas.seq_start, sagas.depth, sagas.chunks) == (1, 1, 1)
-    assert sagas.keywords == [], "no cache entry was written: the document has no outline"
+    assert sagas.descriptors == [], "no cache entry was written: the document has no sections"
     assert found.collections == ["shelf"]
 
 
