@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { DocumentByName } from './DocumentPanes'
-import { cite, lastHeading } from './match'
+import { cite, lastHeading, WHOLE_DOCUMENT } from './match'
 import { Modal } from './Modal'
 import { Descriptors, OpenedDetail, type OpenedSection } from './SectionGrid'
 import { Tabs, type TabDef } from './Tabs'
@@ -40,7 +40,7 @@ function SectionBody({ section, onOpen }: { section: OpenedSection; onOpen?: (se
       <Tabs tabs={TABS} selected={tab} onSelect={setTab} />
       <div id={SECTION_TAB} role="tabpanel" className="match" hidden={tab !== SECTION_TAB}>
         <div className="opened-detail">
-          <p className="section-heading">{section.header || 'The whole document'}</p>
+          <p className="section-heading">{section.header || WHOLE_DOCUMENT}</p>
           <span className="mono muted">{cite(section.location, name)}</span>
           {'descriptors' in section && <Descriptors words={section.descriptors} />}
           <OpenedDetail section={section} onOpen={onOpen} />

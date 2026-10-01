@@ -1,6 +1,6 @@
 import type { MappedDocument, MappedSection, RelatedSection } from '../api'
 import { href } from '../router'
-import { cite, fillOf, plural, scoreStyle } from './match'
+import { cite, fillOf, plural, scoreStyle, WHOLE_DOCUMENT } from './match'
 
 // Where a related section is, as far as it differs from its pick: the same section of the same
 // document, chunked by another collection, names that collection.
@@ -37,7 +37,7 @@ export function SectionGrid({ sections, onOpen }: { sections: MappedSection[]; o
             <span className="mono muted">{section.score.toFixed(2)}</span>
           </header>
           <div className="hit-body">
-            <p className="section-heading">{section.header || 'The whole document'}</p>
+            <p className="section-heading">{section.header || WHOLE_DOCUMENT}</p>
             <Descriptors words={section.descriptors} />
             <footer className="hit-foot">
               <span>{cite(section.location, section.document) || ' '}</span>

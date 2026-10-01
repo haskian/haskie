@@ -1,9 +1,9 @@
 import type { BulkKind, Operation, OperationKind, RunStatus, Stage, Task } from '../../api'
 import type { JobBar, JobState } from '../../ui'
 
-// A document operation runs some of three stages: an import converts and embeds, an index embeds
-// and writes. The stages cost different amounts of time. Embedding dominates, so its bar is the
-// widest one.
+// A document operation runs some of four stages: an import converts, embeds and describes, an
+// index embeds, describes and writes, where its embedding is missing. The stages cost different
+// amounts of time. Embedding dominates, so its bar is the widest one.
 export interface StageDef {
   stage: Stage
   label: string
@@ -12,6 +12,7 @@ export interface StageDef {
 const DOCUMENT_STAGES: Record<Stage, Omit<StageDef, 'stage'>> = {
   convert: { label: 'Convert', weight: 1 },
   embed: { label: 'Embed', weight: 2.2 },
+  describe: { label: 'Describe', weight: 1.4 },
   index: { label: 'Index', weight: 1 },
 }
 
@@ -108,10 +109,12 @@ export function endsOf<T>(rows: T[], each = TASKS_AT_EACH_END): { head: T[]; hid
   return { head: rows.slice(0, each), hidden: rows.length - each * 2, tail: rows.slice(-each) }
 }
 
-/** What one micro-batch covered: pages for a conversion, parts for an embed or an index write. */
+/** What one micro-batch covered: pages for a conversion, a part for an embed, sections for a
+ *  description, parts for an index write. */
 export function taskText(task: Task): string {
   if (task.stage === 'convert') return `pages ${task.page_start + 1}–${task.page_end}`
   if (task.stage === 'embed') return `part ${task.page_start}`
+  if (task.stage === 'describe') return `sections ${task.page_start + 1}–${task.page_end}`
   return `parts ${task.page_start}–${task.page_end}`
 }
 
@@ -120,10 +123,13 @@ export function taskState(task: Task): 'done' | 'error' | 'todo' {
   return task.status === 'ERROR' ? 'error' : 'todo'
 }
 
-/** What a job produced, summed over its tasks: OCR pages for a conversion, chunks otherwise. */
+const RESULT_UNITS: Record<Stage, string> = { convert: 'OCR pages', embed: 'chunks', describe: 'sections', index: 'chunks' }
+
+/** What a job produced, summed over its tasks: OCR pages for a conversion, sections for a
+ *  description, chunks otherwise. */
 export function stageInfo(stage: Stage, rows: Task[]): string {
   const results = rows.filter((task) => task.result !== null)
   if (results.length === 0) return ''
   const total = results.reduce((sum, task) => sum + (task.result ?? 0), 0)
-  return stage === 'convert' ? `${total} OCR pages` : `${total} chunks`
+  return `${total} ${RESULT_UNITS[stage]}`
 }

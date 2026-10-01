@@ -27,7 +27,7 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `Picker` | `<Picker options={scopes} value={scope} onChange={setScope} />` | `<details>` dropdown, each option a label plus a `sub` |
 | `Tabs` | `<Tabs tabs={[{ id: 'match', label: 'Match' }]} selected={tab} onSelect={setTab} />` | The strip only; the caller renders the panels |
 | `Modal` | `<Modal open={open} onClose={close} title={doc} subtitle="collection">{panels}</Modal>` | Native `<dialog>` |
-| `Tile` | `<Tile icon={FileText} name={doc.name} sub={doc.description} hint={doc.description} onClick={open} />` | One card in a gallery, with a hover hint |
+| `Tile` | `<Tile icon={FileText} name={doc.name} sub={sub} description={doc.description} cover={api.coverUrl(doc.name)} onClick={open} />` | One card in a gallery, with an optional cover behind it. On hover, `hint` shows below the name and detail, `description` alone |
 | `GallerySection` | `<GallerySection label="A–E" large>{tiles}</GallerySection>` | One lettered band of tiles |
 | `SearchBox` | `<SearchBox value={q} onChange={setQ} onSubmit={run} placeholder="Search" scope={<Picker … />} />` | The one search or filter box; a filter passes `onChange` alone |
 | `SearchTook` | `<SearchTook counts="12 chunks · 3 sections" ms={took} />` | The line above the results |
@@ -45,7 +45,8 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `DocumentPanes` | `<DocumentPanes doc={name} preview={doc.preview} />` | Source pane plus streamed markdown |
 | `Skeleton` | `<Skeleton />` | The shape of a document while it loads |
 | `DescriptionBox` | `<DescriptionBox value={doc.description} placeholder="What is it about?" onSave={save} />` | Saves on blur and on unmount, only what changed |
-| `RenameForm` | `<RenameForm key={doc} name={doc} label="Document name" busy={busy} onRename={rename} />` | A name input with a Rename button; keyed by the name, so each rename starts a new draft |
+| `Info` | `<Info>In no collection yet.</Info>` | A line that says how things are, boxed in a gray tint with an info icon. Not for errors |
+| `RenameForm` | `<RenameForm key={name} name={name} label="Collection name" busy={busy} onRename={rename} />` | A name input with a Rename button; keyed by the name, so each rename starts a new draft |
 | `DropOverlay` | `<DropOverlay onFiles={upload} />` | Document-level drag listeners plus the overlay |
 | `ModelFacts` / `EmbedderFacts` | `<ModelFacts name={name} metadata={metadata} />`, `<EmbedderFacts model={model} metadata={metadata} />` | A model's facts under its picker; nothing for the full-text-only profile |
 | `Num` / `SearchField` | `<Num … />`, `<SearchField … />` | A number setting in the design's `.field`; one search setting, as Settings and the first run show it |

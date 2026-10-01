@@ -15,7 +15,7 @@ while a chunk's `seq` names another text under other settings. The `s` and `c` k
 apart, so section 2 and chunk 2 of one document are two ids.
 
 Sections are named once per cached embedding (`embed_cache.write`), which sees the whole document
-in order, and described by a step after it (`pipeline.describe`). Descriptors: a
+in order, and described by a stage after it (`pipeline.describe_batch`). Descriptors: a
 `descriptors.Strategy` picks them, `descriptors.CLASS_TFIDF` unless the caller names another. The
 strategy reads each chunk's prose only (`prose`): code blocks and tables name things (identifiers,
 column headers, values) rather than say what a section is about. c-TF-IDF with a model reranks

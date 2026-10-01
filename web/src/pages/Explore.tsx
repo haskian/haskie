@@ -2,7 +2,7 @@ import { Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, MAX_PAGE_SIZE, type CollectionSummary, type Granularity, type MappedDocument, type MappedSection, type ScoreStep, type SearchScope, type SessionSummary, type StepTiming } from '../api'
 import type { PageProps } from '../App'
-import { HitGrid, MapDocuments, MatchModal, SectionsModal, Picker, SearchBox, SearchTook, SectionGrid, Shell, Toggle, type Match, type OpenedSection, type PickerOption } from '../ui'
+import { HitGrid, Info, MapDocuments, MatchModal, SectionsModal, Picker, SearchBox, SearchTook, SectionGrid, Shell, Toggle, type Match, type OpenedSection, type PickerOption } from '../ui'
 import './Explore.css'
 import { MAX_ASPECTS, questionsOf } from './explore/questions'
 import { ALL_SCOPE, parseScope, scopeParams, SESSION_PREFIX } from './explore/scope'
@@ -213,9 +213,9 @@ export function Explore({ route, counts }: PageProps) {
           <SearchTook counts={`${shown.as === 'section' ? shown.sections.length : shown.results.length} ${answerOf(shown.as).plural}`} ms={shown.took} steps={shown.steps} />
           <Toggle label="Debug" checked={debug} onChange={setDebug} />
         </div>
-        {shown.missing.length > 0 && <p className="muted">No excerpt says: {shown.missing.join(', ')}</p>}
-        {shown.uncovered.length > 0 && <p className="muted">Unanswered: {shown.uncovered.join(' · ')}</p>}
-        {shown.holders.length > 0 && <p className="muted">Held by: {shown.holders.join(', ')}</p>}
+        {shown.missing.length > 0 && <Info>No excerpt says: {shown.missing.join(', ')}</Info>}
+        {shown.uncovered.length > 0 && <Info>Unanswered: {shown.uncovered.join(' · ')}</Info>}
+        {shown.holders.length > 0 && <Info>Held by: {shown.holders.join(', ')}</Info>}
         {debug ? (
           shown.body !== null && <pre className="md explore-raw">{JSON.stringify(shown.body, null, 2)}</pre>
         ) : shown.as === 'section' ? (

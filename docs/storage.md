@@ -19,6 +19,7 @@ as plain files, since ONNX Runtime refuses external data behind the cache's link
     parts/NNNNNN.md       one per convert batch of PDF pages (one part for other files),
                           joined into the full conversion
     preview/              the preview source and its markdown
+    cover.jpg             the picture behind its card, built on first request
     embeddings/<id>.chunks.parquet     the chunks, one file per chunk settings and model
     embeddings/<id>.sections.parquet   their sections: ids, where each runs, descriptors
     embeddings/<id>.tmp/               partial results while an embedding is computed

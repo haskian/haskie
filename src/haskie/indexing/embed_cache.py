@@ -31,11 +31,10 @@ only the merge across parts can number (see `_merge`). File writes and reads run
 pyarrow is sync.
 
 Each entry also keeps its document's sections (`sections_path`, `sections.build`): named at the
-merge, and described by a step of their own (`pipeline.describe`), which reads both files back
-(`inputs`). The sections file's schema metadata names the strategy that wrote its descriptors
+merge, and described by a stage of their own (`pipeline.describe_batch`), which reads both files
+back (`inputs`). The sections file's schema metadata names the strategy that wrote its descriptors
 (`described_by`), so an entry described by another strategy than the settings now ask for is
-described again, from the cache, without embedding anything again.
-"""
+described again, from the cache, without embedding anything again."""
 
 import hashlib
 import time
@@ -143,6 +142,12 @@ def scratch_dir(doc: str, id: str) -> Path:
 
 def rows_path(doc: str, id: str, seq: int) -> Path:
     return scratch_dir(doc, id) / f"{home.part_name(seq)}.rows.json"
+
+
+def descriptors_path(doc: str, id: str, seq: int) -> Path:
+    """The descriptors one describe batch wrote, one list per section of the batch; gathered and
+    deleted by `pipeline.finalize_describe`."""
+    return scratch_dir(doc, id) / f"{home.part_name(seq)}.descriptors.json"
 
 
 def sections_path(doc: str, id: str) -> Path:

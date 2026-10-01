@@ -158,7 +158,10 @@ mark { background: none; color: inherit; font-weight: 600; text-decoration: unde
 .tile .icon { position: absolute; top: var(--sp-2); right: var(--sp-2); width: 16px; height: 16px; }
 .tile:hover, .tile[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
 .tile-add { border-style: dashed; background: transparent; } /* makes a new thing rather than opening one */
-.tile-text { display: grid; gap: 2px; text-align: left; min-width: 0; flex: 1; max-height: 100%; overflow: hidden; }
+.tile-text { position: relative; display: grid; gap: 2px; text-align: left; min-width: 0; flex: 1; max-height: 100%; overflow: hidden; } /* positioned, so it paints over the cover */
+/* a low-poly cover behind the tile, faded out before the text */
+.tile-cover { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; mask-image: linear-gradient(to bottom, #000 20%, transparent 75%); opacity: 0.33; transition: opacity 160ms ease; }
+.tile:hover .tile-cover, .tile[aria-pressed="true"] .tile-cover { opacity: 0.45; }
 .tile-text > .name { grid-column: 1 / -1; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; } /* real names are file names: three lines, then … */
 .tile-text > .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tile .sub { font-weight: 400; font-size: var(--fs-xs); opacity: 0.6; }
@@ -304,6 +307,11 @@ body:has(.modal[open]) { overflow: hidden; }
 .markdown img { max-width: 100%; }
 .toc { display: grid; gap: 2px; margin-bottom: var(--sp-4); font-size: var(--fs-sm); }
 .toc a:hover { text-decoration: underline; }
+/* a document's sections, each indented by its depth (`--depth`), its descriptors under its heading */
+.section-toc { display: grid; gap: var(--sp-3); } /* on a `.list`, which resets the list */
+.section-toc > li { display: grid; gap: var(--sp-1); padding-left: calc(var(--depth, 0) * var(--sp-6)); }
+.section-toc-head { display: flex; gap: var(--sp-3); align-items: baseline; justify-content: space-between; }
+.section-toc-head > .mono { flex: none; font-size: var(--fs-xs); }
 
 /* swatches (showcase only) */
 .swatches { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
@@ -367,6 +375,9 @@ body.over .drop-overlay { opacity: 1; }
 .list-item > .icon { width: 14px; height: 14px; flex: none; opacity: 0.6; }
 .list-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
 .list-text .sub { font-size: var(--fs-xs); color: var(--text-muted); }
+/* an info line: how things are (an empty list, what wrote a result, a hint), boxed in a gray tint */
+.info { display: flex; gap: var(--sp-2); align-items: flex-start; margin: 0; padding: var(--sp-2) var(--sp-3); border: 1px solid var(--text-faint); background: color-mix(in srgb, var(--text-muted) 10%, transparent); font-size: var(--fs-sm); }
+.info > .icon { width: 16px; height: 16px; margin-top: 1px; color: var(--text-muted); }
 /* a notice: something to read before acting, ruled in the accent colour */
 .notice { margin: 0; padding: var(--sp-2) var(--sp-3); border-left: 2px solid var(--accent); font-size: var(--fs-sm); }
 /* hit: search result tile; --score drives the bottom bar */
@@ -454,6 +465,7 @@ body:has(.statusbar) { padding-top: 40px; }
 .input-group > .input { flex: 1; min-width: 0; }
 .input-group > .input:focus { background: transparent; }
 .input-group > .btn-ghost { align-self: center; }
+.input-group > .btn:not(.btn-ghost) { border: 0; border-left: 1px solid var(--fog-2); } /* the group draws the outline */
 input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
 .field { display: flex; flex-direction: column; gap: var(--sp-2); }
 /* a model's facts, hung under the picker that chose it: one box, the picker's border, no gap */
@@ -466,6 +478,9 @@ input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; d
 .input::placeholder, .textarea::placeholder { color: var(--text-faint); }
 .input:focus, .textarea:focus { border-color: var(--line); background: rgba(255, 255, 255, 0.18); }
 .input:disabled, .textarea:disabled { opacity: 0.4; }
+/* an autofilled value looks like a typed one: the browser paints its tint with !important, so
+   its background is put off for good instead, and the text keeps the input's colour */
+.input:-webkit-autofill, .input:-webkit-autofill:focus { transition: background-color 0s 600000s, color 0s 600000s; -webkit-text-fill-color: var(--text); caret-color: var(--text); }
 .textarea { min-height: 96px; resize: vertical; }
 
 .check, .toggle { display: inline-flex; align-items: center; gap: var(--sp-3); font-size: var(--fs-sm); font-weight: 500; color: var(--text-muted); cursor: pointer; }

@@ -291,3 +291,31 @@ async def test_set_status_moves_the_row_only_where_every_guard_holds(
     assert answered is moved, name
     expected = ("cancelled", None) if moved else (start, "an earlier failure")
     assert (row.status, row.error) == expected, name
+
+
+def test_an_original_arrives_whole_or_not_at_all(tmp_path: Path) -> None:
+    """The row is visible while the file is placed, so a reader (a cover, a preview) must never
+    meet half of it: the transfer writes beside it, and one rename puts it in place."""
+    source = tmp_path / "book.pdf"
+    source.write_bytes(b"%PDF-1.4 whole")
+    target = tmp_path / "doc" / "original.pdf"
+    target.parent.mkdir()
+    seen: list[bool] = []
+
+    def copy(from_path: Path, to_path: Path) -> None:
+        to_path.write_bytes(from_path.read_bytes()[:5])  # half of it, as a copy in progress has
+        seen.append(target.exists())
+        to_path.write_bytes(from_path.read_bytes())
+
+    document._transfer_whole(copy, source, target)
+
+    assert seen == [False], "nothing at the target while the copy runs"
+    assert target.read_bytes() == b"%PDF-1.4 whole"
+
+    def failing(from_path: Path, to_path: Path) -> None:
+        to_path.write_bytes(b"half")
+        raise OSError("disk full")
+
+    with pytest.raises(OSError):
+        document._transfer_whole(failing, source, tmp_path / "doc" / "other.pdf")
+    assert sorted(path.name for path in target.parent.iterdir()) == ["original.pdf"], "no leftovers"

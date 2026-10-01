@@ -227,6 +227,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document}/sections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** DocumentSections */
+        get: operations["ApiDocumentsSectionsDocumentSections"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document}/source": {
         parameters: {
             query?: never;
@@ -253,6 +270,23 @@ export interface paths {
         };
         /** GetPreview */
         get: operations["ApiDocumentsPreviewGetPreview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{document}/cover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GetCover */
+        get: operations["ApiDocumentsCoverGetCover"];
         put?: never;
         post?: never;
         delete?: never;
@@ -288,23 +322,6 @@ export interface paths {
         /** GetLines */
         get: operations["ApiDocumentsLinesGetLines"];
         put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/documents/{document}/name": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /** RenameDocument */
-        put: operations["ApiDocumentsNameRenameDocument"];
         post?: never;
         delete?: never;
         options?: never;
@@ -392,6 +409,23 @@ export interface paths {
         get?: never;
         /** DescribeCollection */
         put: operations["ApiCollectionsDescriptionDescribeCollection"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/collections/{collection}/cover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GetCollectionCover */
+        get: operations["ApiCollectionsCoverGetCollectionCover"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -2059,6 +2093,23 @@ export interface components {
              */
             max_answer_chars: number;
         };
+        /** Section */
+        Section: {
+            id: string;
+            parent_id: string | null;
+            headings: string[];
+            seq_start: number;
+            seq_end: number;
+            line_start: number;
+            line_end: number;
+            char_start: number;
+            char_end: number;
+            byte_start: number;
+            byte_end: number;
+            page_start: number | null;
+            page_end: number | null;
+            descriptors?: string[];
+        };
         /** SectionMap */
         SectionMap: {
             sections: components["schemas"]["MappedSection"][];
@@ -2066,6 +2117,11 @@ export interface components {
             collections: string[];
             searched: string[];
             uncovered?: string[];
+        };
+        /** Sections */
+        Sections: {
+            sections: components["schemas"]["Section"][];
+            described_by: components["schemas"]["Descriptors"] | null;
         };
         /** SessionCollections */
         SessionCollections: {
@@ -2120,7 +2176,7 @@ export interface components {
          * Stage
          * @enum {string}
          */
-        Stage: "convert" | "embed" | "index";
+        Stage: "convert" | "embed" | "describe" | "index";
         /** Staged */
         Staged: {
             staging_id: string;
@@ -2661,6 +2717,39 @@ export interface operations {
             };
         };
     };
+    ApiDocumentsSectionsDocumentSections: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Sections"];
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
     ApiDocumentsSourceGetSource: {
         parameters: {
             query?: never;
@@ -2701,6 +2790,45 @@ export interface operations {
         };
     };
     ApiDocumentsPreviewGetPreview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description File Download */
+            200: {
+                headers: {
+                    /** @description File size in bytes */
+                    "content-length"?: string;
+                    /** @description Last modified data-time in RFC 2822 format */
+                    "last-modified"?: string;
+                    /** @description Entity tag */
+                    etag?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "": string;
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
+    ApiDocumentsCoverGetCover: {
         parameters: {
             query?: never;
             header?: never;
@@ -2795,43 +2923,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Lines"];
-                };
-            };
-            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        detail: string;
-                    };
-                };
-            };
-        };
-    };
-    ApiDocumentsNameRenameDocument: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                document: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["Rename"];
-            };
-        };
-        responses: {
-            /** @description Request fulfilled, document follows */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Document"];
                 };
             };
             /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
@@ -3083,6 +3174,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CollectionInfo"];
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
+    ApiCollectionsCoverGetCollectionCover: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": string;
                 };
             };
             /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */

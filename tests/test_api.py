@@ -33,7 +33,7 @@ from haskie import audit, claude, db, errors, home, ids, logs
 from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection, MemberStatus
 from haskie.collection.index import CollectionIndex
-from haskie.document import document
+from haskie.document import cover, document
 from haskie.document.document import DocumentStatus
 from haskie.indexing import embed_cache, gguf_models, mlx_models
 from haskie.indexing.chunk import Chunk, Piece, split
@@ -108,29 +108,6 @@ async def ready(client: AsyncTestClient, tmp_path: Path) -> AsyncTestClient:
 
     await client.put("/api/sessions/s1", json={"collections": ["notes"]})
     return client
-
-
-async def test_a_rename_moves_only_the_name(ready: AsyncTestClient) -> None:
-    """Every table and index holds the id, so the rename writes one row and a search cites the
-    new name at once. The name is spelled as at import, suffix the original's, so another
-    spelling of the same name changes nothing."""
-    before = (await ready.get("/api/documents/guide.md")).json()
-
-    renamed = await ready.put("/api/documents/guide.md/name", json={"name": "Retry Handbook"})
-
-    assert renamed.status_code == 200, renamed.text
-    assert (renamed.json()["name"], renamed.json()["id"]) == ("retry-handbook.md", before["id"])
-    assert (await ready.get("/api/documents/guide.md")).status_code == 404
-    assert (await ready.get("/api/documents/retry-handbook.md/collections")).json() == ["notes"]
-    members = (await ready.get("/api/collections/notes/documents")).json()["items"]
-    assert [member["document"]["name"] for member in members] == ["retry-handbook.md"]
-    mapped = (await ready.get("/api/search/sections", params={"q": "lancedb"})).json()
-    assert [one["document"] for one in mapped["documents"]] == ["retry-handbook.md"]
-    assert {one["location"].split()[0] for one in mapped["sections"]} == {"retry-handbook.md"}, (
-        "the index was not rewritten, yet it cites the new name"
-    )
-    same = await ready.put("/api/documents/retry-handbook.md/name", json={"name": "Retry_HANDBOOK"})
-    assert same.json() == renamed.json(), "another spelling of the same name is a no-op"
 
 
 def _requested(lines: list[dict]) -> list[str]:
@@ -337,26 +314,6 @@ def _requested(lines: list[dict]) -> list[str]:
             "delete an unknown document -> not found",
             "DELETE", "/api/documents/ghost.md", None, None,
             404, "document not found: ghost.md",
-        ),
-        (
-            "rename an unknown document -> not found",
-            "PUT", "/api/documents/ghost.md/name", {"name": "x.md"}, None,
-            404, "document not found: ghost.md",
-        ),
-        (
-            "rename to a name taken, in any spelling -> conflict",
-            "PUT", "/api/documents/guide.md/name", {"name": "Pending.md"}, None,
-            409, "document already exists: pending.md",
-        ),
-        (
-            "rename to a name that folds to nothing -> unprocessable, never `md.md`",
-            "PUT", "/api/documents/guide.md/name", {"name": "Отчёт.md"}, None,
-            422, "invalid name",
-        ),
-        (
-            "rename to a blank name -> unprocessable",
-            "PUT", "/api/documents/guide.md/name", {"name": "  "}, None,
-            422, "a document needs a name",
         ),
         (
             "source of an unknown document -> not found",
@@ -1542,6 +1499,77 @@ async def test_a_documents_own_bytes_are_served_sandboxed(
         assert csp == ("sandbox" if sandboxed else None), route
         nosniff = response.headers.get("x-content-type-options")
         assert nosniff == ("nosniff" if sandboxed else None), route
+
+
+async def test_a_documents_sections_and_their_descriptors(client: AsyncTestClient) -> None:
+    """The Sections tab reads the table of contents the import cut, in document order, each
+    section with its descriptors and the strategy that wrote them; nothing before a cache entry."""
+    await client.post("/api/init", json=NO_MODELS)
+    await stage_and_import(client, "guide.md", MD.encode())
+
+    found = (await client.get("/api/documents/guide.md/sections")).json()
+
+    assert found["described_by"] == "c-tf-idf"
+    assert [one["headings"] for one in found["sections"]] == [
+        [], ["Title"], ["Title", "Alpha"], ["Title", "Beta"],
+    ]  # fmt: skip
+    assert any(one["descriptors"] for one in found["sections"]), "described at import"
+    assert [one["line_start"] for one in found["sections"]] == sorted(
+        one["line_start"] for one in found["sections"]
+    ), "in document order"
+    settings = (await client.get("/api/settings")).json()
+    settings["conversion"]["chunk_size"] = 600
+    assert (await client.put("/api/settings", json=settings)).status_code == 200
+    newest = (await client.get("/api/documents/guide.md/sections")).json()
+    assert newest == found, "the default chunking has no entry: the newest one is read"
+    await embed_cache.forget(await id_of("guide.md"))
+    empty = (await client.get("/api/documents/guide.md/sections")).json()
+    assert empty == {"sections": [], "described_by": None}, "nothing cached, nothing to show"
+    missing = await client.get("/api/documents/ghost.md/sections")
+    assert missing.status_code == 404
+
+
+async def test_document_and_collection_covers(client: AsyncTestClient) -> None:
+    """A card's cover, always a low-poly JPEG seeded by the document's hash: of its cover page,
+    else of a gradient. A collection's is made of its first documents' covers by name: one alone,
+    two stacked from two or three, four in a grid from four on; empty, a gradient of its name."""
+    await client.post("/api/init", json=NO_MODELS)
+    names = ["a-notes.md", "b-paper.pdf", "c-notes.md", "d-notes.md", "e-notes.md"]
+    for name in names:
+        body = text_pdf(["Cover"]) if name.endswith(".pdf") else MD.encode()
+        await stage_and_import(client, name, body)
+    held = {"empty": [], "one": names[1:2], "three": names[:3], "five": names}
+    for collection, docs in held.items():
+        await client.post("/api/collections", json={"name": collection})
+        for doc in docs:
+            await attach_via_api(client, collection, doc)
+
+    page = await client.get("/api/documents/b-paper.pdf/cover")
+    assert page.headers["content-type"] == "image/jpeg"
+    paper = document.root(await id_of("b-paper.pdf")) / "original.pdf"
+    assert page.content == cover.draw(paper, await id_of("b-paper.pdf")), "its page, low-poly"
+    notes = await client.get("/api/documents/a-notes.md/cover")
+    assert notes.headers["content-type"] == "image/jpeg"
+    drawn = cover.low_poly(await id_of("a-notes.md"))
+    assert notes.content == drawn, "seeded by the document's hash"
+    again = await client.get("/api/documents/a-notes.md/cover")
+    assert (again.content, again.headers["cache-control"]) == (drawn, "no-cache")
+    assert (document.root(await id_of("b-paper.pdf")) / "cover.jpg").is_file(), "kept"
+
+    async def kept(docs: list[str]) -> list[Path]:
+        return [document.root(await id_of(doc)) / "cover.jpg" for doc in docs]
+
+    one = await client.get("/api/collections/one/cover")
+    assert one.content == cover.mosaic(await kept(names[1:2])), "one document: its cover alone"
+    three = await client.get("/api/collections/three/cover")
+    assert three.content == cover.mosaic(await kept(names[:2])), "three: the first two"
+    five = await client.get("/api/collections/five/cover")
+    assert five.headers["content-type"] == "image/jpeg"
+    assert five.content == cover.mosaic(await kept(names[:4])), "five: the first four"
+    empty = await client.get("/api/collections/empty/cover")
+    assert empty.content == cover.low_poly("empty")
+    for missing in ("/api/documents/ghost.md/cover", "/api/collections/ghost/cover"):
+        assert (await client.get(missing)).status_code == 404, missing
 
 
 @pytest.mark.parametrize(

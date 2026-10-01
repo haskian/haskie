@@ -1,12 +1,13 @@
 """Documents: one row in `documents`, one folder under ~/.haskie/documents/<shard>/<id>/.
 
-A document is first class and belongs to no collection: it is imported once, under a name only
-`rename` changes, and any number of collections may then hold it (`collection/collection.py`). What
+A document is first class and belongs to no collection: it is imported once, under a name fixed
+at import, and any number of collections may then hold it (`collection/collection.py`). What
 a document owns lives in its folder: `original.<ext>` (the file as uploaded), `original.<ext>.md`
 (the markdown assembled from it once, at import), `parts/` (one markdown file per convert batch,
-joined into the markdown), `preview/` (built lazily on first open) and `embeddings/` (the cache
-`indexing/embed_cache.py` writes). Deleting the folder deletes everything but the rows, and the
-rows cascade from the document's own.
+joined into the markdown), `preview/` (built lazily on first open), `cover.jpg` (built lazily
+too, `document/cover.py`) and `embeddings/` (the cache `indexing/embed_cache.py` writes).
+Deleting the folder deletes everything but the rows, and the rows cascade from the document's
+own.
 
 Two-phase intake: `stage` writes an upload into `staging/` with a `staging` row beside it, and
 commits no document. No name is taken and no `documents` row exists yet. `import_staged` /
@@ -39,7 +40,6 @@ import anyio.to_thread
 import msgspec
 from sqlalchemy import ColumnElement, Row, delete, select, update
 from sqlalchemy.dialects.sqlite import insert
-from sqlalchemy.exc import IntegrityError
 
 from haskie import cpu, db, home, ids
 from haskie.document import convert
@@ -119,6 +119,11 @@ class Document(msgspec.Struct):
     @property
     def preview_dir(self) -> Path:
         return self.root / "preview"
+
+    @property
+    def cover(self) -> Path:
+        """The picture behind its card, built on first request (`document/cover.py`)."""
+        return self.root / "cover.jpg"
 
     @property
     def parts_dir(self) -> Path:
@@ -382,15 +387,21 @@ async def _create(name: str, size: int, id: str, options: ImportOptions) -> Docu
     return await get(id)
 
 
+def _transfer_whole(transfer: Callable[[Path, Path], object], source: Path, target: Path) -> None:
+    with home.atomic_replace(target) as partial:
+        transfer(source, partial)
+
+
 async def _place(
     document: Document, source: Path, transfer: Callable[[Path, Path], object]
 ) -> Document:
     """Put the file where the row says it is, by `transfer` (`shutil.move` or `shutil.copyfile`);
     the row goes if that fails, so a failed import leaves neither a phantom row nor a name that
-    cannot be used again."""
+    cannot be used again. The row is visible meanwhile, so the file arrives whole or not at all
+    (`home.atomic_replace`): a reader never meets half of it, as a cover built mid-copy would."""
     try:
         await anyio.Path(document.root).mkdir(parents=True, exist_ok=True)
-        await anyio.to_thread.run_sync(transfer, source, document.original)
+        await anyio.to_thread.run_sync(_transfer_whole, transfer, source, document.original)
     except BaseException:
         await remove_files(document.id)
         await remove_row(document.id)
@@ -551,36 +562,6 @@ async def cancel_import(id: str) -> None:
     await set_status(
         id, DocumentStatus.CANCELLED, None, documents.c.status.in_(ACTIVE_DOCUMENT_STATUSES)
     )
-
-
-async def rename(current: Document, to: str) -> Document:
-    """Give the document another name; returns the row as it now stands.
-
-    Only the row changes: every table, folder and index refers to the document by its id, and a
-    search reads the name it cites from here (`index.gather_rows`). The suffix stays the
-    original's, and the name is spelled as at import (`stored_name`). A name taken is refused by
-    the unique index, so two renames at once cannot both take it."""
-    if not to.strip():
-        raise InvalidInput("a document needs a name")
-    id = current.id
-    name = stored_name(current.name, to)
-    if name == current.name:
-        return current
-    try:
-        async with db.connect() as conn:
-            row = (
-                await conn.execute(
-                    update(documents)
-                    .where(documents.c.id == id)
-                    .values(name=name, updated_at=time.time())
-                    .returning(*DOCUMENT_COLUMNS)
-                )
-            ).first()
-    except IntegrityError as taken:
-        raise Conflict(f"document already exists: {name}") from taken
-    if row is None:
-        raise NotFound(f"document not found: {id}")
-    return from_row(row)
 
 
 async def describe(id: str, description: str) -> Document:

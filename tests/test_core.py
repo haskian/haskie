@@ -78,6 +78,7 @@ from haskie.indexing import chunk, embed, embed_cache, onnx_models, pipeline
 from haskie.indexing.chunk import Chunk, Piece, Position
 from haskie.indexing.segment import CutReason, PieceType
 from haskie.paging import Order, PageRequest
+from haskie.sections.build import Section
 from haskie.settings import (
     DEFAULT_RERANKER,
     Accelerator,
@@ -2680,8 +2681,22 @@ async def _embed(
     for batch in batches:
         await pipeline.embed_batch(doc, batch, cache_id, chunking, embedding)
     await pipeline.finalize_embed(doc, params, embedding.dims if embedding else None, len(batches))
-    await pipeline.describe(doc, cache_id, embedding, Descriptors.C_TF_IDF, Accelerator.AUTO)
+    await _describe(doc, cache_id, embedding, Descriptors.C_TF_IDF, Accelerator.AUTO)
     return cache_id
+
+
+async def _describe(
+    doc: Document,
+    cache_id: str,
+    embedding: EmbeddingModel | None,
+    by: Descriptors,
+    accelerator: Accelerator,
+) -> int:
+    """The describe stage as the workflow runs it: plan, every batch, then the finalizer."""
+    batches = await pipeline.plan_describe(doc, cache_id, by)
+    for batch in batches:
+        await pipeline.describe_batch(doc, cache_id, embedding, by, accelerator, batch)
+    return await pipeline.finalize_describe(doc, cache_id, by, len(batches))
 
 
 async def _index(
@@ -2917,10 +2932,10 @@ async def test_describe_writes_the_descriptors_by_the_strategy_asked_for(
         return "Topic one | Topic two"
 
     monkeypatch.setattr(embed, "reply", reply)
-    on_cpu = partial(pipeline.describe, doc, cache_id, None, Descriptors.LLM, Accelerator.CPU)
+    on_cpu = partial(_describe, doc, cache_id, None, Descriptors.LLM, Accelerator.CPU)
     with pytest.raises(PermanentError, match="runs on gguf on the Apple GPU"):
         await on_cpu()  # its model would never load: no wait, an error
-    describe = partial(pipeline.describe, doc, cache_id, None, Descriptors.LLM, Accelerator.AUTO)
+    describe = partial(_describe, doc, cache_id, None, Descriptors.LLM, Accelerator.AUTO)
     with pytest.raises(models.ModelLoading):
         await describe()
     assert prompts == [] and await embed_cache.described_by(doc.id, cache_id) == (
@@ -2935,6 +2950,54 @@ async def test_describe_writes_the_descriptors_by_the_strategy_asked_for(
     assert await embed_cache.described_by(doc.id, cache_id) == Descriptors.LLM
     assert len(prompts) == sum(bool(one.descriptors) for one in described) > 0
     assert {tuple(one.descriptors) for one in described} <= {("Topic one", "Topic two"), ()}
+    assert not embed_cache.scratch_dir(doc.id, cache_id).exists(), "the batches' files are gone"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("by", "sections", "expected"),
+    [
+        pytest.param(Descriptors.LLM, 0, [], id="llm-no-sections-no-batch"),
+        pytest.param(Descriptors.LLM, 16, [(0, 16)], id="llm-one-full-batch"),
+        pytest.param(Descriptors.LLM, 17, [(0, 16), (16, 17)], id="llm-a-batch-and-one-over"),
+        pytest.param(Descriptors.C_TF_IDF, 40, [(0, 40)], id="c-tf-idf-one-batch-for-all"),
+    ],
+)
+async def test_describe_plans_its_batches_by_section(
+    monkeypatch: pytest.MonkeyPatch, by: Descriptors, sections: int, expected: list
+) -> None:
+    """The llm strategy asks about sixteen sections a batch; c-TF-IDF weighs every section against
+    the whole document, so it is one batch however many there are."""
+    doc = await import_row("plan.md")
+    # the sections a real chunking names: a chapter each, one chunk each, on its own lines
+    found = [
+        Section(
+            id=f"s{index}",
+            parent_id=None,
+            headings=[f"Chapter {index + 1}"],
+            seq_start=index + 1,
+            seq_end=index + 1,
+            line_start=3 * index + 1,
+            line_end=3 * index + 3,
+            char_start=40 * index,
+            char_end=40 * index + 40,
+            byte_start=40 * index,
+            byte_end=40 * index + 40,
+            page_start=None,
+            page_end=None,
+        )
+        for index in range(sections)
+    ]
+
+    async def read_sections(doc_id: str, cache_id: str) -> list:
+        return found
+
+    monkeypatch.setattr(embed_cache, "read_sections", read_sections)
+
+    batches = await pipeline.plan_describe(doc, "cache", by)
+
+    assert [(one.start, one.end) for one in batches] == expected
+    assert [one.seq for one in batches] == list(range(len(expected)))
 
 
 @pytest.mark.anyio

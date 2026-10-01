@@ -9,7 +9,7 @@ import { Field, GallerySection, Modal, SearchBox, Shell, Tile } from '../ui'
 import './Collections.css'
 import { CollectionModal } from './collections/CollectionModal'
 import { groupByName, tileSub } from './collections/group'
-import { errorText, matchesText, needleOf } from '../format'
+import { day, errorText, matchesText, needleOf } from '../format'
 
 const PAGE_SIZE = 500
 /** Every collection in the home, as a gallery banded by name; one modal per collection. */
@@ -73,7 +73,9 @@ export function Collections({ route, counts, refreshStatus }: PageProps<Extract<
                 icon={Library}
                 name={one.name}
                 sub={tileSub(one)}
-                hint={one.description || 'No description'}
+                meta={day(one.created_at)}
+                description={one.description}
+                cover={api.collectionCoverUrl(one.name)}
                 onClick={() => navigate({ name: 'collections', collection: one.name })}
               />
             ))}

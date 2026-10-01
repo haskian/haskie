@@ -5,7 +5,7 @@ import type { PageProps } from '../App'
 import { errorText } from '../format'
 import { useRun } from '../hooks/useRun'
 import { navigate, type Route } from '../router'
-import { GallerySection, Modal, Shell, Tabs, Tile, type TabDef } from '../ui'
+import { GallerySection, Info, Modal, Shell, Tabs, Tile, type TabDef } from '../ui'
 import './Gaps.css'
 import { bands, nearText, questionSub, replayText, topicHint, topicId, topicSub } from './gaps/group'
 
@@ -65,7 +65,7 @@ export function Gaps({ route, counts }: PageProps<Extract<Route, { name: 'gaps' 
       <div className="gallery-sections sections">
         <Tabs tabs={TABS} selected={review} onSelect={(id) => setReview(id as GapReview)} />
         {error !== null && <p className="muted">{error}</p>}
-        {loaded !== null && loaded.topics.length === 0 && <p className="muted">{EMPTY[review]}</p>}
+        {loaded !== null && loaded.topics.length === 0 && <Info>{EMPTY[review]}</Info>}
         {loaded !== null &&
           bands(loaded.topics).map((group) => (
             <GallerySection key={group.label} label={`${group.label} · ${group.items.length}`} large collapsed={group.collapsed}>
@@ -134,7 +134,7 @@ function TopicBody({ topic, review, now, onReviewed }: { topic: GapTopic; review
       </div>
       <div className="gap-panel modal-scroll">
         {error !== null && <p className="muted">{error}</p>}
-        <p className="muted">Replay asks each question again over every collection. Nothing is recorded.</p>
+        <Info>Replay asks each question again over every collection. Nothing is recorded.</Info>
         <ul className="list">
           {topic.questions.map((question) => {
             const near = nearText(question.near_misses)

@@ -33,6 +33,7 @@ mise run dev     # API and MCP on :8452 with reload, Vite on :8453
 | `dist` | `build`, then the wheel and sdist into `dist/` |
 | `smoke` | install the built wheel in a fresh venv, check the CLI, and that one `haskie run` serves the web UI, the REST API and MCP |
 | `clean-run` | destroy `~/haskie-dev` (asks first), reinstall the fresh build, run it on a clean home |
+| `reload` | `build`, then restart the haskie serving `~/haskie-dev` on :8452, so it serves this checkout's UI and backend |
 | `install-dev` | build, then install this checkout as the `haskie-dev` command, which always uses `~/haskie-dev` and port 8452 |
 | `calibrate-rerankers` | `sample` writes this home's searched questions and their chunks ranked 10 to 30 to `eval/candidates.jsonl`; after you copy one borderline chunk a question into `eval/borderline.jsonl`, `measure --model NAME [--write]` sets each reranker's floor and score curve (`haskie.catalogue.calibrate`) |
 | `calibrate-gaps` | `sample` writes this home's logged questions with their best cosines and near misses to `eval/gap-questions.jsonl`; after you mark each `answered` true or false, `measure --profile NAME [--write]` sets its `weak_match` and `answered_match` (`haskie.catalogue.calibrate_gaps`) |

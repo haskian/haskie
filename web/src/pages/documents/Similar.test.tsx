@@ -26,7 +26,7 @@ const cases: Array<{ name: string; element: ReactElement; contains: string[]; mi
   {
     name: 'nothing embedded to compare with: says so',
     element: <SimilarDocuments similar={{ nearest: [] }} />,
-    contains: ['<p class="muted">Nothing to compare with'],
+    contains: ['<p class="info"><svg', '<span>Nothing to compare with'],
     missing: ['notice', '<ul'],
   },
   {
