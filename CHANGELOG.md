@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.21.0 - 2026-10-01
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>search_sections replaces search_sources and reranks its map (#32) - (82b70fb) - Črtomir Majer
+
+- - -
+
 ## v0.20.0 - 2026-10-01
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>map of sections and document outlines with keywords and vectors (#31) - (6f6be48) - Črtomir Majer
