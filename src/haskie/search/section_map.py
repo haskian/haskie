@@ -27,8 +27,18 @@ than to repeat its best part:
 Each section says what it is about with its `descriptors`, fixed at indexing (`sections.build`).
 They never decide what is picked.
 
-No IO here: `retrieval.map_sections` reads the chunk placements, the corpus mean and the picks'
-descriptors.
+Beside the sections, the map lists the documents the search reached hardest (`documents`): every
+scanned chunk folded per document by `score_fold`, best first, and every other document a listed
+section is in, so each section's document has its row. A document the map picked nothing from can
+still lead them.
+
+With a reranker on, its own small model (`map_reranker_model`) scores every scanned chunk first
+and drops none: the scores are the demand weights, the section scores and the document scores.
+A section that only shares a word with the topic then counts for little. Without one, the fused
+retrieval scores stand, which weigh the chunks nearly alike.
+
+No IO here: `retrieval.map_sections` reads the chunk placements, the corpus mean, the picks'
+descriptors, the documents' descriptions and every listed document's memberships.
 
 [1] "GeoRAG." arXiv preprint 2606.29328, 2026, the demand-weighted objective without its
     sub-queries (its "(1,0)" ablation). https://arxiv.org/abs/2606.29328
@@ -44,7 +54,7 @@ import numpy as np
 from haskie.collection.index import Hit, SpanKey, location
 from haskie.indexing.chunk import HEADING_SEP
 from haskie.search import collapse, section
-from haskie.search.passage import fold, pages
+from haskie.search.passage import document_score, fold, pages
 from haskie.settings import ScoreFold
 
 PER_DOCUMENT = 2  # sections of one document while others have some left: Google's site cap
@@ -54,6 +64,8 @@ PER_DOCUMENT = 2  # sections of one document while others have some left: Google
 # of demand, 96% of the top sections' relevance) where a hard cap lost both (0.627, 92%).
 CAP_SHARE = 0.5
 RELATED = 5  # related sections listed under one pick
+# documents a map lists past the ones its sections are in: a shortlist, not a page of results
+DOCUMENTS = 10
 
 
 class Placed(msgspec.Struct, kw_only=True):
@@ -87,15 +99,34 @@ class MappedSection(Placed, kw_only=True):
     chars: int  # how long it is: what reading it with `search_excerpts` costs at most
     chunks: int  # how many of its chunks the search matched
     descriptors: list[str]  # what it is about, against the other sections of its depth
-    markdown_file: str
     related: list[Related] = []
 
 
+class MappedDocument(msgspec.Struct, kw_only=True):
+    """One document the search reached, and how hard: what to read, or to search alone."""
+
+    document_id: str
+    document: str  # its name, what it is cited by
+    description: str  # what `describe_document` says it is about; empty when nobody did
+    score: float  # every matched chunk of it the search read, folded by `score_fold`
+    chunks: int  # how many of its chunks matched: a sum grows with how much a document says
+    sections: int  # how many of the map's sections are in it; 0 when the map picked none
+    collections: list[str]  # every searched collection holding it, in name order
+    markdown_file: str  # the whole document on disk
+    source_file: str  # the file it was imported from
+
+
 class SectionMap(msgspec.Struct):
-    """The answer of `search_sections`: the sections, in the order they were picked."""
+    """The answer of `search_sections`: the sections, in the order they were picked, and the
+    documents the search reached, best first."""
 
     sections: list[MappedSection]
-    collections: list[str]  # the fewest that together hold every document above
+    documents: list[MappedDocument]
+    collections: list[str]  # the fewest that together hold every section and document above
+    searched: list[str]  # the collections the search covered, in the order they were chosen
+    # the question, when its best match is under the bar its models were measured at: the map is
+    # full whatever is asked, so this says it may hold nothing on the topic (`gaps.weak_questions`)
+    uncovered: list[str] = []
 
 
 class Candidate(msgspec.Struct):
@@ -268,7 +299,6 @@ def _repeat(
 
 
 def mapped(
-    hits: list[Hit],
     candidates: Sequence[Candidate],
     picked: Picked,
     described: Mapping[tuple[str, str], list[str]],
@@ -287,7 +317,6 @@ def mapped(
                 chars=one.placements[-1].char_end - one.placements[0].char_start,
                 chunks=len(one.at),
                 descriptors=described.get((one.collection, one.id), []),
-                markdown_file=hits[one.at[0]].markdown_file,
                 related=[
                     Related(**_placed(candidates[at]), similarity=round(closeness, 4))
                     for at, closeness in picked.related[pick]
@@ -295,6 +324,44 @@ def mapped(
             )
         )
     return found
+
+
+def listed(ranked: list[list[Hit]], mapped: set[str]) -> list[list[Hit]]:
+    """The documents a map lists, best first: the best `DOCUMENTS` of `ranked` (each a document's
+    hits, `passage.top_documents`), and every other one a listed section is in (`mapped`, by
+    document id), so each section's document has its row, the file to open with it."""
+    return [
+        group for at, group in enumerate(ranked) if at < DOCUMENTS or group[0].document_id in mapped
+    ]
+
+
+def documents(
+    groups: list[list[Hit]],
+    sections: Sequence[MappedSection],
+    held: Mapping[str, list[str]],
+    about: Mapping[str, str],
+    how: ScoreFold,
+) -> list[MappedDocument]:
+    """The documents the search reached hardest (`passage.top_documents`), in the order given,
+    each with how many of the map's `sections` are in it, the collections that hold it (`held`,
+    by document id; the collection whose table matched it when it was not looked up) and its
+    description (`about`)."""
+    picked = Counter(one.document_id for one in sections)
+    return [
+        MappedDocument(
+            document_id=best.document_id,
+            document=best.document,
+            description=about.get(best.document_id, ""),
+            score=document_score(group, how),
+            chunks=len(group),
+            sections=picked[best.document_id],
+            collections=held.get(best.document_id, [best.collection]),
+            markdown_file=best.markdown_file,
+            source_file=best.source_file,
+        )
+        for group in groups
+        for best in group[:1]
+    ]
 
 
 def _placed(one: Candidate) -> dict:

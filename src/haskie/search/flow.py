@@ -1,15 +1,14 @@
-"""The shape of a search: what runs, in what order, for each of the five answers.
+"""The shape of a search: what runs, in what order, for each of the four answers.
 
 Read this file for what a search does; read `retrieval.py` for what each step does with the IO it
 needs, and `passage.py` for the pure folds under them. Nothing here does work. Every step is one
 line that hands the state to one function and passes its answer on, so a stage can be added,
 dropped or reordered by reading this file alone.
 
-Five pipelines over one set of steps:
+Three pipelines over one set of steps:
 
     chunks     retrieve -> merge -> rerank -> hits -> collapse_hits
     passages   retrieve -> merge -> rerank -> hits -> fill_thin -> collapse_ranges -> read
-    sources    retrieve -> merge -> rerank -> hits -> shortlist
     sections   retrieve -> merge -> rerank -> hits -> map_sections
 
 and the excerpts an agent reads, which run the shared ranking once per question asked:
@@ -17,8 +16,8 @@ and the excerpts an agent reads, which run the shared ranking once per question 
     answers    (retrieve -> merge -> rerank -> hits -> judge_thin) per question -> fold -> group
                -> budget -> probe_gaps -> fill -> quote -> rerank_excerpts
 
-The first four steps are the search every answer shares (`sections` plans no reranker, so its
-`rerank` only measures the ranking for the log); what follows is the fold that answer is made of,
+The first four steps are the search every answer shares (in `sections` the reranker, its own
+small model, weighs every chunk and drops none); what follows is the fold that answer is made of,
 and it is a step rather than something every search pays for. `chunks` folds each near-duplicate hit
 into the hit it repeats (`collapse`). `passages` and `answers` merge the chunks of one section that
 sit next to each other into one readable span, grow a span too short to stand alone by the
@@ -26,9 +25,9 @@ neighbours that match the question or drop it (`thin`), fold near-duplicate span
 read only the spans they answer with. `answers` then groups the spans by the section they sit in, so
 `limit` counts sections, searches once more for the words of the question no section holds
 (`probe`), adds the text around and between the passages that answers too (`fill`), and writes each
-section out as one excerpt. `sources` folds the same hits per document instead. `sections` groups
-them by section and picks the sections that cover the most of what the scan found (`section_map`),
-with no reranker: a map is wide and fast, and a quote is what the reranker is for.
+section out as one excerpt. `sections` groups the same hits by section and picks the sections
+that cover the most of what the scan found (`section_map`): a map is wide, so its reranker
+weighs what the scan found rather than cutting it.
 
 Two numbers steer that. `scan` is how deep the ranking goes and is what `hits` cuts to; `limit`
 is how many answers the caller asked for and is what the last fold cuts to. Every pipeline scans
@@ -51,26 +50,18 @@ from pydantic_graph.step import StepFunction
 from haskie.collection.index import EVERYTHING, Hit, Scope
 from haskie.paging import check_page_size
 from haskie.search import aspects, log, probe, retrieval, scoring, section
-from haskie.search.passage import Answer, Excerpt, HitRange, Passage, Sources
+from haskie.search.passage import Answer, Excerpt, HitRange, Passage
 from haskie.search.section_map import SectionMap
 from haskie.settings import MAX_SCAN, SearchMode
 
 CHUNK_SCAN = 2  # chunks scanned per chunk asked for: a folded near-duplicate frees its slot
 PASSAGE_SCAN = 4  # chunks scanned per passage asked for: consecutive ones merge into one passage
-DEFAULT_SECTIONS = 3  # hot sections per document: where in it the answer is, not its contents
-MAX_SECTIONS = 20
-DEFAULT_DOCUMENTS = 10  # a shortlist to choose from, not a page of passages
-MAX_DOCUMENTS = 100  # a shortlist nobody reads past; `excerpts` is there for the passages
-# Chunks scanned per document asked for. A document can hold many matching chunks, so the scan has
-# to go deeper than the answer or the tail of the shortlist would be whichever documents happened
-# to crowd the top with chunks.
-DOCUMENT_SCAN = 20
 # Sections an agent reads by default: each excerpt is a whole section, so ten is already a long
 # read; the collection's `limit` setting stays for chunks and passages, which are short.
 DEFAULT_EXCERPTS = 10
 DEFAULT_MAP = 15  # sections on a map: a table of contents to choose from, not a reading list
 MAX_MAP = 40
-# Chunks scanned per section asked for, as deep as a shortlist of documents: the map covers what
+# Chunks scanned per section asked for: the map covers what
 # the scan found, so a shallow scan would map only the top of the ranking.
 SECTION_SCAN = 20
 
@@ -88,7 +79,6 @@ class Search(msgspec.Struct):
     # every question of the search as the steps after the ranking read them: each search of an
     # `answers` holds them all, and `query` is its own
     questions: list[probe.Question]
-    sections: int = DEFAULT_SECTIONS  # `sources` only
     # what its steps are timed under (`StepTime.branch`): `Q1`, `Q2` in the order the questions
     # were asked when several run side by side, None when one runs alone
     branch: str | None = None
@@ -136,7 +126,6 @@ STEP_LABELS: dict[str, str] = {
     "quote": "Read excerpts",
     "rerank_excerpts": "Rerank whole excerpts",
     "read": "Read passages",
-    "shortlist": "Fold into documents",
     "map_sections": "Map sections",
 }
 
@@ -231,8 +220,9 @@ async def retrieve(ctx: StepContext[Search, None, None]) -> retrieval.Pool:
 
 
 async def merge(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Pool:
-    """The per-collection rankings, fused into one by rank."""
-    return retrieval.merge(ctx.inputs, ctx.state.plan.settings.rrf_k, ctx.state.candidates)
+    """What retrieval found, as one ranking: the vector and BM25 halves of several collections
+    fused over all of them, or one collection's own ranking."""
+    return retrieval.merge(ctx.inputs, ctx.state.plan.settings, ctx.state.candidates)
 
 
 async def rerank(ctx: StepContext[Search, None, retrieval.Pool]) -> retrieval.Pool:
@@ -328,14 +318,6 @@ async def quote(ctx: StepContext[Search, None, list[section.Group]]) -> list[Exc
     return await retrieval.read_excerpts(ctx.inputs)
 
 
-async def shortlist(ctx: StepContext[Search, None, retrieval.Scanned]) -> Sources:
-    """The same hits folded per document instead of per passage, with the collections to read
-    them from."""
-    state = ctx.state
-    how = state.plan.settings.score_fold
-    return await retrieval.shortlist(ctx.inputs.hits, state.plan, state.limit, state.sections, how)
-
-
 async def map_sections(ctx: StepContext[Search, None, retrieval.Scanned]) -> SectionMap:
     """The sections the hits fall in, the `limit` that cover the most of them picked, each with
     what it is about."""
@@ -396,7 +378,6 @@ ANSWERED = _chain(
     rerank_excerpts,
     input_type=list[retrieval.Ranged],
 )
-SOURCES = _chain(Sources, *RANKING, shortlist)
 SECTIONS = _chain(SectionMap, *RANKING, map_sections)
 
 
@@ -448,26 +429,14 @@ async def answers(
     limit = DEFAULT_EXCERPTS if limit is None else limit
     states = await _searches(names, asked, limit, deeper=PASSAGE_SCAN, scope=scope)
     if states is None:
-        return probe.report([], asked.asked())
+        return probe.report([], asked.asked(), [])
     ranged = await asyncio.gather(*(RANKED.run(state=state) for state in states))
     # the steps after the ranking are shared: timed under no branch
     found = await ANSWERED.run(
         state=msgspec.structs.replace(states[0], branch=None), inputs=list(ranged)
     )
     # inline: the kept sections' words were stemmed by `probe_gaps` already (`probe.stem`)
-    return probe.report(found, states[0].questions)
-
-
-async def sources(
-    names: list[str], query: str, limit: int | None = None, sections: int | None = None
-) -> Sources:
-    """Which documents of `names` answer the query, and the smallest set of collections holding
-    them."""
-    documents = check_page_size(
-        DEFAULT_DOCUMENTS if limit is None else limit, MAX_DOCUMENTS, "limit"
-    )
-    state = await _search(names, query, documents, deeper=DOCUMENT_SCAN, sections=sections)
-    return await SOURCES.run(state=state) if state else Sources(documents=[], collections=[])
+    return probe.report(found, states[0].questions, states[0].plan.names)
 
 
 async def sections(
@@ -476,8 +445,17 @@ async def sections(
     """A map of the sections of `names` in `scope` the query touches: the `limit` that cover the
     most of what it found, and what each is about."""
     wanted = check_page_size(DEFAULT_MAP if limit is None else limit, MAX_MAP, "limit")
-    state = await _search(names, query, wanted, deeper=SECTION_SCAN, reranks=False, scope=scope)
-    return await SECTIONS.run(state=state) if state else SectionMap(sections=[], collections=[])
+    state = await _search(
+        names,
+        query,
+        wanted,
+        deeper=SECTION_SCAN,
+        weighs=True,
+        scope=scope,
+    )
+    if state is None:
+        return SectionMap(sections=[], documents=[], collections=[], searched=[])
+    return await SECTIONS.run(state=state)
 
 
 async def _search(
@@ -485,15 +463,14 @@ async def _search(
     query: str,
     limit: int | None,
     deeper: int,
-    sections: int | None = None,
     rerank_floor: float | None = None,
-    reranks: bool = True,
+    weighs: bool = False,
     scope: Scope = EVERYTHING,
 ) -> Search | None:
-    """One search, planned but not yet run, or None when nothing is left to search. `reranks`
-    False for a pipeline with no rerank step: it waits for no reranker (`retrieval.plan`)."""
+    """One search, planned but not yet run, or None when nothing is left to search. `weighs` for
+    a map: its own reranker weighs every chunk and drops none (`retrieval.plan`)."""
     asked = aspects.Questions(questions=[query])
-    found = await _searches(names, asked, limit, deeper, sections, rerank_floor, reranks, scope)
+    found = await _searches(names, asked, limit, deeper, rerank_floor, weighs, scope)
     return found[0] if found else None
 
 
@@ -502,20 +479,19 @@ async def _searches(
     asked: aspects.Questions,
     limit: int | None,
     deeper: int,
-    sections: int | None = None,
     rerank_floor: float | None = None,
-    reranks: bool = True,
+    weighs: bool = False,
     scope: Scope = EVERYTHING,
 ) -> list[Search] | None:
     """One search per query over the same collections, planned but not yet run, or None when
     nothing is left to search.
 
-    The only place a `Search` is built, so every bound a caller asked for is resolved here and
-    the steps read numbers rather than compute them. `deeper` is how many chunks the answer this
+    The only place a `Search` is built, so every bound a caller asked for is resolved here and the
+    steps read numbers rather than compute them. `deeper` is how many chunks the answer this
     pipeline builds is folded from, which is what turns the caller's limit into the scan depth.
     """
     with _timing("plan"):
-        plans = await retrieval.plan(names, asked.framed, reranks, scope)
+        plans = await retrieval.plan(names, asked.framed, weighs, scope)
     if plans is None:
         return None
     if rerank_floor is not None:
@@ -535,9 +511,6 @@ async def _searches(
     # a pipeline that folds scans deeper than it answers, and that is what `MAX_SCAN` bounds
     scan = max(limit, min(limit * deeper, MAX_SCAN))
     candidates = max(plans[0].settings.candidates, scan)
-    sections = check_page_size(
-        DEFAULT_SECTIONS if sections is None else sections, MAX_SECTIONS, "sections"
-    )
     questions = asked.asked([where.vector for where in plans])
     several = len(asked.questions) > 1
     return [
@@ -548,7 +521,6 @@ async def _searches(
             limit=limit,
             scan=scan,
             candidates=candidates,
-            sections=sections,
             questions=questions,
             branch=f"Q{at}" if several else None,
         )

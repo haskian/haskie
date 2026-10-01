@@ -131,24 +131,25 @@ async def ensure_model(kind: ModelKind, name: str) -> ModelState:
 async def required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
     """Every model this installation needs, in a stable order and without duplicates.
 
-    A collection may override the reranker model, and a search of that collection then loads it,
-    so the overrides count as required as much as the user-level pair does."""
+    A collection may override the reranker or its models, and a search of that collection then
+    loads what they resolve to, so the overrides count as required as much as the user-level pair
+    does."""
     wanted: list[tuple[ModelKind, str]] = []
     embedding = await catalogue.embedding_model(settings)
     if embedding:
         wanted.append((ModelKind.EMBEDDING, embedding.name))
     if settings.search.reranker == Reranker.CROSS_ENCODER:
-        wanted.append((ModelKind.RERANKER, settings.search.reranker_model))
-    wanted.extend((ModelKind.RERANKER, name) for name in await _collection_rerankers())
+        wanted.extend((ModelKind.RERANKER, name) for name in settings.search.reranker_models)
+    wanted.extend((ModelKind.RERANKER, name) for name in await _collection_rerankers(settings))
     return list(dict.fromkeys(wanted))
 
 
-async def _collection_rerankers() -> list[str]:
-    """Reranker models the collections override. Imported here rather than at module level: the
-    dependency runs `collection` -> `index` -> `models`."""
+async def _collection_rerankers(settings: UserSettings) -> list[str]:
+    """Reranker models the collections' overrides load (`Collection.reranker_overrides`). Imported
+    here rather than at module level: the dependency runs `collection` -> `index` -> `models`."""
     from haskie.collection.collection import Collection
 
-    return await Collection.reranker_overrides()
+    return await Collection.reranker_overrides(settings.search)
 
 
 def _model_id(kind: ModelKind, name: str) -> str:

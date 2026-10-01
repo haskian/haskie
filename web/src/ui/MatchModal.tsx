@@ -1,21 +1,20 @@
 import { Info } from 'lucide-react'
 import { Fragment, useEffect, useState, type ReactNode } from 'react'
-import { api, type Hit, type HotSection, type ScoreStep } from '../api'
+import { api, type Hit, type ScoreStep } from '../api'
 import type { Anchor } from './anchor'
 import { DocumentByName } from './DocumentPanes'
 import { Kv } from './Kv'
 import { Mark } from './Mark'
 import { MarkdownQuote } from './MarkdownQuote'
-import { CUT_REASONS, PIECE_NAMES, RELATIONS, alsoOf, chunkSizes, cite, everyPlace, overlapHint, frameOf, headingOf, isHit, isSource, lastHeading, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Reference, type Size, isExcerpt, questionLabels } from './match'
+import { CUT_REASONS, PIECE_NAMES, RELATIONS, alsoOf, chunkSizes, cite, everyPlace, overlapHint, frameOf, headingOf, isHit, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Reference, type Size, isExcerpt, questionLabels } from './match'
 import { errorText } from '../format'
 import { Modal } from './Modal'
 import { Tabs, type TabDef } from './Tabs'
 
 const MATCH_TAB = 'modal-match'
 const DOCUMENT_TAB = 'modal-document'
-// A chunk or passage is one match; a source opens on the sections where its matches live.
-const tabsFor = (source: boolean): TabDef[] => [
-  { id: MATCH_TAB, label: source ? 'Sections' : 'Match' },
+const TABS: TabDef[] = [
+  { id: MATCH_TAB, label: 'Match' },
   { id: DOCUMENT_TAB, label: 'Document' },
 ]
 
@@ -52,10 +51,8 @@ export function MatchModal({
   )
 }
 
-// A chunk or passage knows where it starts; a source only which heading its best chunk is under.
-const anchorOf = (match: Match): Anchor => ({ heading: headingOf(match), offset: isSource(match) ? undefined : match.char_start })
-// A section is a header; its last heading is the one the document is anchored by.
-const sectionAnchor = (section: HotSection): Anchor => ({ heading: lastHeading(section.header) })
+// A result knows the heading it sits under and where it starts.
+const anchorOf = (match: Match): Anchor => ({ heading: headingOf(match), offset: match.char_start })
 
 /** A result's score, with its lineage on hover or focus: each step that set or changed it, in
  *  the order they ran, and how. Nothing to hover when the search said nothing. */
@@ -272,48 +269,22 @@ function askedRows(match: Match, query: string, asked?: Asked): [string, ReactNo
 
 function MatchBody({ match, query, scoring, asked }: { match: Match; query: string; scoring: ScoreStep[]; asked?: Asked }) {
   const [tab, setTab] = useState(MATCH_TAB)
-  // The section picked in a source is where the document opens.
-  const [picked, setPicked] = useState<Anchor | null>(null)
-  const source = isSource(match)
-
-  const jump = (section: HotSection) => {
-    setPicked(sectionAnchor(section))
-    setTab(DOCUMENT_TAB)
-  }
 
   return (
     <>
-      <Tabs tabs={tabsFor(source)} selected={tab} onSelect={setTab} />
+      <Tabs tabs={TABS} selected={tab} onSelect={setTab} />
       <div id={MATCH_TAB} role="tabpanel" className="match" hidden={tab !== MATCH_TAB}>
         <Kv
           rows={[
             ['Score', <Score key="score" score={match.score} scoring={scoring} />],
-            ['Collection', source ? match.collections.join(', ') : match.collection],
-            source ? ['Chunks', match.chunks] : ['Position', position(match)],
+            ['Collection', match.collection],
+            ['Position', position(match)],
             // a chunk shows its heading path once, on grey at the top of its quote
             ...(isHit(match) ? [] : [['Heading', headingOf(match) || '—'] as [string, string]]),
             ...askedRows(match, query, asked),
           ]}
         />
-        {source ? (
-          // The source as one block: a head row naming the document and its total, then its hot
-          // sections indented under it, each citing itself without repeating the document name.
-          <div className="sections">
-            <div className="sections-head">
-              <span>{match.document}</span>
-              <span className="mono muted">{match.chunks} {match.chunks === 1 ? 'chunk' : 'chunks'}</span>
-            </div>
-            {match.sections.map((section) => (
-              <div key={section.header} className="section-row" role="button" tabIndex={0} onClick={() => jump(section)}>
-                <span className="mono muted">{section.score.toFixed(2)}</span>
-                <span className="section-title">{section.header || '—'}</span>
-                <span className="mono muted">
-                  {section.chunks} {section.chunks === 1 ? 'chunk' : 'chunks'} · {cite(section.location, match.document)}
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : isHit(match) ? (
+        {isHit(match) ? (
           <ChunkQuote hit={match} query={query} />
         ) : (
           <blockquote className="match-text match-markdown">
@@ -326,7 +297,7 @@ function MatchBody({ match, query, scoring, asked }: { match: Match; query: stri
       <div id={DOCUMENT_TAB} role="tabpanel" hidden={tab !== DOCUMENT_TAB}>
         {/* The whole document, not the preview, streamed from the moment the modal opens so it
             is already at the match when its tab is chosen. */}
-        <DocumentByName name={match.document} anchor={picked ?? anchorOf(match)} shown={tab === DOCUMENT_TAB} />
+        <DocumentByName name={match.document} anchor={anchorOf(match)} shown={tab === DOCUMENT_TAB} />
       </div>
     </>
   )

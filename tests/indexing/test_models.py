@@ -319,6 +319,7 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
             [
                 ("embedding", "BAAI/bge-small-en-v1.5"),
                 ("reranker", "Xenova/ms-marco-MiniLM-L-6-v2"),
+                ("reranker", "cross-encoder/ms-marco-MiniLM-L2-v2"),
             ],
         ),
         (
@@ -336,6 +337,7 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
             ["Xenova/ms-marco-MiniLM-L-6-v2", "BAAI/bge-reranker-base"],
             [
                 ("reranker", "Xenova/ms-marco-MiniLM-L-6-v2"),
+                ("reranker", "cross-encoder/ms-marco-MiniLM-L2-v2"),
                 ("reranker", "BAAI/bge-reranker-base"),
             ],
         ),
@@ -349,7 +351,7 @@ async def test_required_models_follow_the_settings(
     collection_rerankers: list[str],
     expected: list,
 ) -> None:
-    async def overrides() -> list[str]:
+    async def overrides(_: UserSettings) -> list[str]:
         return collection_rerankers
 
     monkeypatch.setattr(models, "_collection_rerankers", overrides)
@@ -364,14 +366,19 @@ async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> 
     monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: loaded.append(name))
     override = "jinaai/jina-reranker-v1-turbo-en"
     collection = await Collection.create("picky")
+    # both of its models, so its map loads no default of the user's either
     await collection.set_overrides(
         CollectionOverrides(
-            search=SearchOverrides(reranker=Reranker.CROSS_ENCODER, reranker_model=override)
+            search=SearchOverrides(
+                reranker=Reranker.CROSS_ENCODER,
+                reranker_model=override,
+                map_reranker_model=override,
+            )
         )
     )
     user = await save_user_settings(UserSettings(embedding="none"))
 
-    assert await Collection.reranker_overrides() == [override]
+    assert await Collection.reranker_overrides(user.search) == [override]
     (status,) = await models.ensure_models(user)
 
     assert (status.kind, status.name) == ("reranker", override)
@@ -409,6 +416,7 @@ async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> N
     assert {d.title for d in downloads} == {
         f"embedding {(await compact_model()).name}",
         "reranker Xenova/ms-marco-MiniLM-L-6-v2",
+        "reranker cross-encoder/ms-marco-MiniLM-L2-v2",
     }, "one row per required model, kind and name read out of the workflow id"
     assert {d.status for d in downloads} == {"SUCCESS"}
     assert all(d.detail["warm"] for d in downloads), "loaded here, so this process can search"

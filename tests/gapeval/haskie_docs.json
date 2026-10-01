@@ -16,7 +16,7 @@
     "How does a reranker rescore the candidates?",
     "What is an excerpt and how is a passage widened?",
     "How does DBOS resume indexing after a crash?",
-    "How does search_sources pick the collections to select?",
+    "How does search_sections pick the collections to select?",
     "What is the embedding cache keyed by?",
     "How does maintenance compact a collection's table?"
   ],

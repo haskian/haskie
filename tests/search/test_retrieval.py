@@ -262,7 +262,7 @@ NEAR = [("backend", "doc.md", 3), ("backend", "doc.md", 4)]
 
 
 @pytest.mark.parametrize(
-    ("name", "questions", "rows", "signal", "values", "aspects"),
+    ("name", "questions", "rows", "signal", "values"),
     [
         (
             "by the vector: 0 at the median kept chunk, 1 at the best",
@@ -270,7 +270,6 @@ NEAR = [("backend", "doc.md", 3), ("backend", "doc.md", 4)]
             WEIGHED,
             "vector",
             [0.5, -1.0],
-            [None, None],
         ),
         (
             "without a query vector, by the question's words",
@@ -278,10 +277,9 @@ NEAR = [("backend", "doc.md", 3), ("backend", "doc.md", 4)]
             WEIGHED,
             "words",
             [1.0, -1.0],
-            [None, None],
         ),
         (
-            "each chunk takes its best question, which tags it",
+            "each chunk is worth what its best question gives it",
             [
                 probe.Question(None, "idempotent retries", label="a"),
                 probe.Question(None, "jitter load", label="b"),
@@ -289,7 +287,6 @@ NEAR = [("backend", "doc.md", 3), ("backend", "doc.md", 4)]
             WEIGHED,
             "words",
             [1.0, 1.0],
-            ["a", "b"],
         ),
     ],
 )
@@ -299,13 +296,11 @@ def test_a_chunk_near_a_passage_is_weighed_against_the_kept_chunks(
     rows: dict,
     signal: str,
     values: list[float],
-    aspects: list[str | None],
 ) -> None:
     weighed, found = retrieval._weigh(HELD, NEAR, rows, questions)
 
     assert found == signal, name
     assert [weighed[key].value for key in NEAR] == pytest.approx(values, abs=1e-3), name
-    assert [weighed[key].aspect for key in NEAR] == aspects, name
 
 
 def test_nothing_near_or_nothing_held_weighs_nothing() -> None:

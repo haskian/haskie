@@ -1,12 +1,11 @@
 import type { CSSProperties } from 'react'
-import type { Excerpt, Hit, Passage, Source } from '../api'
+import type { Excerpt, Hit, Passage } from '../api'
 
-/** Any shape a search result arrives in: a chunk, a passage, an excerpt, or a document. */
-export type Match = Hit | Passage | Excerpt | Source
+/** Any shape a search result arrives in: a chunk, a passage or an excerpt. */
+export type Match = Hit | Passage | Excerpt
 
-/** A chunk carries its `seq`; a passage its sequence range; a source its hot sections. */
+/** A chunk carries its `seq`; a passage its sequence range; an excerpt its spans. */
 export const isHit = (match: Match): match is Hit => 'seq' in match
-export const isSource = (match: Match): match is Source => 'sections' in match
 export const isExcerpt = (match: Match): match is Excerpt => 'spans' in match
 
 /** Between two headings of a heading path, as the backend's `chunk.HEADING_SEP` joins them. */
@@ -15,8 +14,8 @@ export const HEADING_SEP = ' > '
 /** The last heading of a joined heading path (`header`): the one the text sits directly under. */
 export const lastHeading = (header: string): string => header.split(HEADING_SEP).at(-1) ?? ''
 
-/** The heading a result sits under: a chunk's is the last of its path, and a passage or a source
- *  only knows its header, whose last heading it is. */
+/** The heading a result sits under: a chunk's is the last of its path, and a passage or an
+ *  excerpt only knows its header, whose last heading it is. */
 export function headingOf(match: Match): string {
   return isHit(match) ? (match.headings.at(-1) ?? '') : lastHeading(match.header)
 }
@@ -114,10 +113,9 @@ export const RELATIONS: Record<Reference['relation'], string> = {
   equivalent: 'same meaning',
 }
 
-/** The places folded straight into a match; each holds the ones folded into it. A source folds
- *  none, and an excerpt's are those of its spans. */
+/** The places folded straight into a match; each holds the ones folded into it. An excerpt's are
+ *  those of its spans. */
 export function alsoOf(match: Match): Reference[] {
-  if (isSource(match)) return []
   return isExcerpt(match) ? match.spans.flatMap((span) => span.also_in) : match.also_in
 }
 
@@ -147,7 +145,7 @@ const overlapLines = (against: string, overlaps: Overlaps): string[] => [
 export const overlapHint = (place: Reference): string =>
   [`${place.relation}, query ${place.score.toFixed(2)}`, ...overlapLines('parent', place.to_parent), ...overlapLines('match', place.to_root)].join('\n')
 
-/** A hot section's citation without the document name it repeats: "p.3 L7-43" out of
+/** A section's citation without the document name it repeats: "p.3 L7-43" out of
  *  "doc.pdf p.3 L7-43". The block naming the section already names the document once. */
 export function cite(location: string, doc: string): string {
   return location.startsWith(doc) ? location.slice(doc.length).trim() : location
@@ -155,12 +153,11 @@ export function cite(location: string, doc: string): string {
 
 /** The chunks a match covers, by `seq` (the 1-based position in its document): one chunk's, or a
  *  passage's first and last. */
-const seqRange = (match: Hit | Passage | Excerpt): [number, number] => (isHit(match) ? [match.seq, match.seq] : [match.seq_start, match.seq_end])
+const seqRange = (match: Match): [number, number] => (isHit(match) ? [match.seq, match.seq] : [match.seq_start, match.seq_end])
 
 /** The chunks a quoted match covers, as a bare number for the bottom corner of the quote: one
- *  chunk's, a passage's run, or nothing for a source (which shows no quote). */
+ *  chunk's, or a passage's run. */
 export function seqLabel(match: Match): string {
-  if (isSource(match)) return ''
   const [first, last] = seqRange(match)
   return first === last ? `${first}` : `${first}–${last}`
 }
@@ -168,10 +165,9 @@ export function seqLabel(match: Match): string {
 const span = (unit: string, first: number, last: number): string => (first === last ? `${unit} ${first}` : `${unit}s ${first}–${last}`)
 
 /** Where the match sits in the document, in two parts: where to read it (its pages where the
- *  document has pages, and a passage's lines), then the chunks it
- *  is made of. A source covers no one run: its lines, and no chunks. Either part may be empty. */
+ *  document has pages, and a passage's lines), then the chunks it is made of. The first part may
+ *  be empty. */
 export function placeOf(match: Match): [string, string] {
-  if (isSource(match)) return [span('line', match.line_start, match.line_end), '']
   const [first, last] = seqRange(match)
   const pages =
     match.page_start === null

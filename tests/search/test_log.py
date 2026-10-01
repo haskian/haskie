@@ -188,7 +188,7 @@ async def test_a_search_that_did_not_finish_is_recorded_with_its_error_then_rais
     seeded_home, failure: BaseException, error: str
 ) -> None:
     with pytest.raises(type(failure)):
-        async with log.capturing(log.Tool.SOURCES, ["kafka"], None):
+        async with log.capturing(log.Tool.SECTIONS, ["kafka"], None):
             raise failure
 
     (logged,) = await log.load()
@@ -200,7 +200,7 @@ async def test_a_search_that_did_not_finish_is_recorded_with_its_error_then_rais
 async def test_a_search_cancelled_by_its_scope_is_still_written(seeded_home) -> None:
     """A scope's cancellation reaches every await inside it, the log's write included."""
     with anyio.CancelScope() as scope:
-        async with log.capturing(log.Tool.SOURCES, ["kafka"], None):
+        async with log.capturing(log.Tool.SECTIONS, ["kafka"], None):
             scope.cancel()
             await anyio.sleep(1)
 

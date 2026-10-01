@@ -17,7 +17,7 @@ describe('historySub', () => {
     { name: 'exploration with hits', value: search, expected: '12 hits in 2 documents via explore · 48 ms' },
     { name: 'search with no hits', value: { ...search, detail: { scope: 'text', hits: 0, documents: [] } }, expected: 'no hits via text · 48 ms' },
     { name: 'excerpts name their tool', value: { ...search, detail: { scope: 'excerpts', hits: 2, documents: ['a', 'b'] } }, expected: '2 hits in 2 documents via excerpts · 48 ms' },
-    { name: 'sources name their tool', value: { ...search, detail: { scope: 'sources', hits: 2, documents: ['a', 'b'] } }, expected: '2 hits in 2 documents via sources · 48 ms' },
+    { name: 'sections name their tool', value: { ...search, detail: { scope: 'sections', hits: 2, documents: ['a', 'b'] } }, expected: '2 hits in 2 documents via sections · 48 ms' },
     { name: 'a search that recorded no scope', value: { ...search, detail: { hits: 1, documents: ['a'] } }, expected: '1 hits in 1 documents · 48 ms' },
     {
       name: 'a failed search says why',

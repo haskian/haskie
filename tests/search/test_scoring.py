@@ -60,9 +60,11 @@ def _search(
     vector: list[float] | None = ON,
     embedding: EmbeddingModel | None = MODEL,
     calibration: RerankerCalibration | None = UNCALIBRATED,
+    drops: bool = True,
 ) -> Search:
     """A search over one collection per settings, `c0`, `c1`, …, the first settings the plan's,
-    its reranker read by `calibration` (the seed's uncalibrated floor, 0.05)."""
+    its reranker read by `calibration` (the seed's uncalibrated floor, 0.05), dropping chunks under
+    it unless it weighs them, as a map's does (`drops`)."""
     chosen = settings or (SearchSettings(),)
     indexes = [
         (CollectionIndex(Path(f"/tmp/c{n}"), f"c{n}", Path("/tmp"), embedding), one)
@@ -74,16 +76,22 @@ def _search(
         vector=vector,
         embedding=embedding,
         calibration=calibration,
+        drops=drops,
     )
     return Search(query="q", framed="q", plan=where, limit=5, scan=20, candidates=50, questions=[])
 
 
 def _pool(*answered: str, empty: tuple[str, ...] = (), ranked: int = 0) -> Pool:
-    """What the retrieval read: a ranking per collection, `empty` ones with no row."""
-    rankings: dict[str, list[Any]] = {name: [(name, "a.md", 1)] for name in answered}
+    """What the retrieval read: a ranking each, one row scored by distance in `vector`, else by
+    BM25, and `empty` rankings with no row."""
+    rankings: dict[str, list[Any]] = {name: [((name, "a.md", 1), 1.0)] for name in answered}
     rankings |= {name: [] for name in empty}
+    rows = {
+        (name, "a.md", 1): (None, {"_distance" if name == "vector" else "_score": 1.0})
+        for name in answered
+    }
     scored = [(("c0", "a.md", n), 1.0) for n in range(ranked)]
-    return Pool(rows={}, rankings=rankings, ranked=scored)
+    return Pool(rows=rows, rankings=rankings, ranked=scored)  # ty: ignore[invalid-argument-type]
 
 
 def _groups(*seqs: int) -> list[Group]:
@@ -100,7 +108,7 @@ def _read(*columns: str | None) -> Pool:
         (f"c{n}", "a.md", 1): (None, {column: 1.0}) for n, column in enumerate(columns) if column
     }
     rankings = {
-        f"c{n}": [(f"c{n}", "a.md", 1)] if column else [] for n, column in enumerate(columns)
+        f"c{n}": [((f"c{n}", "a.md", 1), 1.0)] if column else [] for n, column in enumerate(columns)
     }
     return Pool(rows=rows, rankings=rankings)  # ty: ignore[invalid-argument-type]
 
@@ -223,14 +231,21 @@ def test_retrieval_says_how_each_collection_scored(
             "One collection: its scores are kept.",
         ),
         (
-            "several fuse by rank",
+            "several fuse their two halves as one table",
             "merge",
             _search(SearchSettings(rrf_k=60), SearchSettings()),
-            _pool("c0", "c1"),
+            _pool("vector", "text"),
             None,
-            "Reciprocal rank fusion over the 2 collections' rankings replaces their scores: the "
-            "sum of 1 / (60 + rank) over the rankings a chunk is in, 0.0164 for first place in "
-            "one. Rank only.",
+            "Over all 2 collections at once, as one table: reciprocal rank fusion of the vector "
+            "and BM25 ranks, the sum of 1 / (60 + rank) over the two, at most 0.0328. Rank only.",
+        ),
+        (
+            "several with one half keep its scores",
+            "merge",
+            _search(SearchSettings(mode=SearchMode.FTS), SearchSettings(mode=SearchMode.FTS)),
+            _pool("text"),
+            None,
+            f"Over all 2 collections at once, as one table: {BM25}",
         ),
         ("no reranker changes nothing", "rerank", _search(), None, _pool("c0", ranked=3), None),
         (
@@ -248,6 +263,14 @@ def test_retrieval_says_how_each_collection_scored(
             None,
             None,
             f"{RERANKS} Chunks it scores under 0.2 (set) are dropped.",
+        ),
+        (
+            "a map's reranker weighs every chunk, whatever its floor",
+            "rerank",
+            _search(SearchSettings(reranker=Reranker.CROSS_ENCODER), drops=False),
+            None,
+            None,
+            f"{RERANKS} Its scores weigh every chunk, and none is dropped.",
         ),
         (
             "a floor of 0 drops nothing, and says nothing",
@@ -418,13 +441,14 @@ def test_retrieval_says_how_each_collection_scored(
             "chunks' scores.",
         ),
         (
-            "a document",
-            "shortlist",
+            "a map",
+            "map_sections",
             _search(),
             None,
             None,
-            "A document scores the sum of its matched chunks' scores. Each section of it scores "
-            "the same over its own chunks.",
+            "A section scores the sum of its matched chunks' scores. The order is the order the "
+            "sections were picked in to cover the scan, not the order of their scores. A document "
+            "scores the same over every chunk of it the scan holds.",
         ),
     ],
 )

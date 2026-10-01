@@ -171,8 +171,7 @@ them for the Operations view, through `table()` declarations of its own. DBOS ow
 
 Every table and index is a SQLAlchemy Core `Table` in `tables.py`, the one source of the schema.
 `db.migrate` generates the DDL from it on a fresh home, and every query is a Core statement over
-the same tables, so a column name is written once. Index names start with `idx_`. A home created
-before `tables.py` keeps its older, unprefixed names.
+the same tables, so a column name is written once. Index names start with `idx_`.
 
 ## Sections and their ids
 
@@ -199,14 +198,14 @@ its own. A membership names the entry its rows were indexed from
 (`collection_documents.cache_id`). So `search_sections` reads the descriptors of the sections a
 collection's ids name, even after its chunk settings change and before *Index all* re-chunks it.
 The collection's centre sums its members' entries the same way. A reconversion or a delete drops
-them with the cache, and the pointer with its entry (a foreign key, `on delete set null`) until
-the member is indexed again.
+the sections with the cache. Deleting an entry empties the pointer to it (a foreign key, `on
+delete set null`) until the member is indexed again.
 
 ## How each store is written
 
 | store | how it is written | why |
 | --- | --- | --- |
-| SQLite | app code through SQLAlchemy Core on `aiosqlite`, one connection per unit of work (`NullPool`); DBOS through its own connections; WAL mode | a unit of work is one transaction. A unit that writes (`db.connect`) takes the write lock at its start (`begin immediate`), so a check it reads still holds when it writes. Writers that meet, and DBOS's writers, wait on the busy timeout, then fail with "database is locked". A unit that only reads (`db.read`) takes no lock: a deferred transaction reads one snapshot, waits for no writer, and refuses any write (`query_only`) |
+| SQLite | app code through SQLAlchemy Core on `aiosqlite`, one connection per unit of work (`NullPool`); DBOS through its own connections; write-ahead log (WAL) mode | a unit of work is one transaction. A unit that writes (`db.connect`) takes the write lock at its start (`begin immediate`), so a check it reads still holds when it writes. Writers that meet, and DBOS's writers, wait on the busy timeout, then fail with "database is locked". A unit that only reads (`db.read`) takes no lock: a deferred transaction reads one snapshot, waits for no writer, and refuses any write (`query_only`) |
 | LanceDB | async API; a collection's table: one writer per collection (`task.indexing`) | one writer per table keeps commits simple |
 | small files | `home.atomic_write`: a temp file, flushed to disk, then `os.replace` | a crash or a power cut leaves the old file or the new one, never half |
 | imported originals | moved or copied into place | removed again if the import raises |

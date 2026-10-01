@@ -15,6 +15,7 @@ whether or not `web/dist` has been built. `test_static_files_*` covers the other
 
 import json
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -40,6 +41,7 @@ from haskie.indexing.segment import PieceType
 from haskie.paging import Order
 from haskie.search import aspects, flow, gaps, log
 from haskie.settings import (
+    DEFAULT_MAP_RERANKER,
     DEFAULT_RERANKER,
     Accelerator,
     ChunkSettings,
@@ -123,10 +125,11 @@ async def test_a_rename_moves_only_the_name(ready: AsyncTestClient) -> None:
     assert (await ready.get("/api/documents/retry-handbook.md/collections")).json() == ["notes"]
     members = (await ready.get("/api/collections/notes/documents")).json()["items"]
     assert [member["document"]["name"] for member in members] == ["retry-handbook.md"]
-    found = (await ready.get("/api/search/sources", params={"q": "lancedb"})).json()["documents"]
-    assert [(one["document"], one["location"].split()[0]) for one in found] == [
-        ("retry-handbook.md", "retry-handbook.md")
-    ], "the index was not rewritten, yet it cites the new name"
+    mapped = (await ready.get("/api/search/sections", params={"q": "lancedb"})).json()
+    assert [one["document"] for one in mapped["documents"]] == ["retry-handbook.md"]
+    assert {one["location"].split()[0] for one in mapped["sections"]} == {"retry-handbook.md"}, (
+        "the index was not rewritten, yet it cites the new name"
+    )
     same = await ready.put("/api/documents/retry-handbook.md/name", json={"name": "Retry_HANDBOOK"})
     assert same.json() == renamed.json(), "another spelling of the same name is a no-op"
 
@@ -531,22 +534,135 @@ async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClie
     assert response.headers["Retry-After"] == errors.NotReady.headers["Retry-After"]
 
 
-async def test_a_map_of_sections_waits_for_no_reranker(ready: AsyncTestClient) -> None:
-    """The same collection: `search_sections` has no rerank step, so it answers while the
-    reranker is not loaded, and its log row names no reranker it never ran."""
-    notes = await Collection.get("notes")
-    await notes.set_overrides(
-        CollectionOverrides(search=SearchOverrides(reranker=Reranker.CROSS_ENCODER))
-    )
+@pytest.mark.parametrize(
+    ("name", "reranker", "floor", "logit", "expected", "uncovered"),
+    [
+        (
+            "no reranker: the fused retrieval scores stand, and no model is read",
+            None,
+            None,
+            None,
+            None,
+            [],
+        ),
+        (
+            "a reranker on: the map's own model scores every chunk",
+            Reranker.CROSS_ENCODER,
+            None,
+            2.0,
+            DEFAULT_MAP_RERANKER,
+            [],
+        ),
+        (
+            "a chunk it scores far under its floor still counts, and the map says it is weak",
+            Reranker.CROSS_ENCODER,
+            None,
+            -9.0,
+            DEFAULT_MAP_RERANKER,
+            ["alpha"],
+        ),
+        (
+            "the user's floor neither cuts a map nor judges it: 0.88 sits under 0.9",
+            Reranker.CROSS_ENCODER,
+            0.9,
+            2.0,
+            DEFAULT_MAP_RERANKER,
+            [],
+        ),
+    ],
+)
+async def test_a_map_weighs_its_chunks_with_its_own_reranker(
+    ready: AsyncTestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    reranker: Reranker | None,
+    floor: float | None,
+    logit: float | None,
+    expected: str | None,
+    uncovered: list[str],
+) -> None:
+    """`search_sections` reranks with `map_reranker_model`, not the excerpts' model, and keeps
+    every chunk: its scores weigh the map, they do not cut it. Its log row names the model and no
+    floor of the user's, so the gaps judge the map by that model's own floor, and so does the
+    answer's `uncovered`."""
+    from haskie.indexing import embed, models
+
+    if reranker is not None:
+        notes = await Collection.get("notes")
+        await notes.set_overrides(
+            CollectionOverrides(search=SearchOverrides(reranker=reranker, min_rerank_score=floor))
+        )
+        monkeypatch.setattr(
+            models, "_ready", {models._model_id(models.ModelKind.RERANKER, DEFAULT_MAP_RERANKER)}
+        )
+    read: list[str] = []
+
+    def scores(model: str, accelerator: str, query: str, texts: list[str]) -> list[float]:
+        read.append(model)
+        return [logit or 0.0] * len(texts)
+
+    monkeypatch.setattr(embed, "rerank_scores", scores)
 
     response = await ready.get(
         "/api/search/sections", params={"q": "alpha", "collections": "notes", "session_id": "r"}
     )
 
-    assert response.status_code == 200, response.text
-    assert [one["document"] for one in response.json()["sections"]] == ["guide.md"]
+    assert response.status_code == 200, f"{name}: {response.text}"
+    (one,) = response.json()["sections"]
+    assert one["document"] == "guide.md", name
+    assert read == ([] if expected is None else [expected]), name
+    assert response.json()["uncovered"] == uncovered, name
+    if logit is not None:
+        assert one["score"] == pytest.approx(1 / (1 + math.exp(-logit))), f"{name}: the sigmoid"
     (logged,) = (await ready.get("/api/searches", params={"session_id": "r"})).json()
-    assert (logged["tool"], logged["reranker"]) == ("sections", None)
+    assert (logged["tool"], logged["reranker"]) == ("sections", expected), name
+    assert logged["min_rerank_score"] is None, f"{name}: no floor of the user's is logged"
+
+
+@pytest.mark.parametrize(
+    ("name", "logit", "excerpts", "uncovered"),
+    [
+        ("judged an answer: excerpts, and nothing uncovered", 2.0, 1, []),
+        (
+            "under the reranker's floor: no excerpt, and the one question is uncovered",
+            -9.0,
+            0,
+            ["alpha"],
+        ),
+    ],
+)
+async def test_one_question_hears_when_the_sources_match_it_only_weakly(
+    ready: AsyncTestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    logit: float,
+    excerpts: int,
+    uncovered: list[str],
+) -> None:
+    """`uncovered` used to list only the parts of several questions. A single question now hears
+    the verdict the Gaps page gives as weak: its best match under the bar its models were
+    measured at. The log keeps the excerpts' own `uncovered`, so the Gaps page still says weak."""
+    from haskie.indexing import embed, models
+
+    await _converted("guide.md", MD)
+    notes = await Collection.get("notes")
+    await notes.set_overrides(
+        CollectionOverrides(search=SearchOverrides(reranker=Reranker.CROSS_ENCODER))
+    )
+    monkeypatch.setattr(
+        models, "_ready", {models._model_id(models.ModelKind.RERANKER, DEFAULT_RERANKER)}
+    )
+    monkeypatch.setattr(embed, "rerank_scores", lambda m, a, q, texts: [logit] * len(texts))
+
+    response = await ready.get(
+        "/api/search/excerpts", params={"q": "alpha", "collections": "notes", "session_id": "w"}
+    )
+
+    assert response.status_code == 200, f"{name}: {response.text}"
+    answer = response.json()
+    assert (len(answer["excerpts"]), answer["uncovered"]) == (excerpts, uncovered), name
+    (logged,) = (await ready.get("/api/searches", params={"session_id": "w"})).json()
+    assert [one["uncovered"] for one in logged["questions"]] == [False], f"{name}: the log's own"
 
 
 async def test_a_limit_at_the_scan_depth_is_searched(ready: AsyncTestClient) -> None:
@@ -649,7 +765,14 @@ async def test_collection_reranker_override_starts_its_download(
 
     saved = await ready.put(
         "/api/collections/notes/overrides",
-        json={"search": {"reranker": "cross-encoder", "reranker_model": override}},
+        # both of its models, so its map loads no default of the user's either
+        json={
+            "search": {
+                "reranker": "cross-encoder",
+                "reranker_model": override,
+                "map_reranker_model": override,
+            }
+        },
     )
 
     assert saved.status_code == 200
@@ -714,7 +837,9 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     assert (reranker["parameters"], reranker["context_tokens"]) == (22714113, 512)
     assert (reranker["runtime"], reranker["devices"]) == ("onnx", ["cpu", "apple_silicon", "gpu"])
     assert "dimensions" not in reranker, "a reranker has no vectors"
-    assert options["reranker_models"][0] == DEFAULT_RERANKER, "the default is the smallest"
+    assert options["reranker_models"][:2] == [DEFAULT_MAP_RERANKER, DEFAULT_RERANKER], (
+        "smallest first: the map's default, then the excerpts'"
+    )
     # the vocabularies the UI renders rows with, so it never spells a status out for itself
     assert (
         options["document_statuses"][:3]
@@ -1424,7 +1549,6 @@ SEARCH_PATHS: dict[str, tuple[str, dict, str]] = {
     "explore chunks": ("/api/search/explore", {"granularity": "chunk"}, ""),
     "explore passages": ("/api/search/explore", {"granularity": "passage"}, ""),
     "excerpts": ("/api/search/excerpts", {}, "excerpts"),
-    "sources": ("/api/search/sources", {}, "documents"),
     "sections": ("/api/search/sections", {}, "sections"),
     "text": ("/api/search/text", {}, "items"),
 }
@@ -1458,8 +1582,8 @@ async def test_a_document_on_its_way_out_answers_no_search(
     """A detach or a document delete answers once its removal is queued, and the rows stay in the
     table until it ran: a membership `removing` does not answer from that collection, and a
     document `deleting` from none. `guide.md` sits in both collections, so it still answers from
-    the one it is not leaving; `sources` lists every collection holding a document, and a
-    collection it is leaving does not hold it any more."""
+    the one it is not leaving; the map's `documents` list every collection holding a document,
+    and a collection it is leaving does not hold it any more."""
     await client.post("/api/init", json=NO_MODELS)
     for name in ("notes", "other"):
         await client.post("/api/collections", json={"name": name})
@@ -1479,13 +1603,11 @@ async def test_a_document_on_its_way_out_answers_no_search(
     assert response.status_code == 200, response.text
     results = response.json()[key] if key else response.json()
 
-    if path == "sources":
-        held = {(one, row["document"]) for row in results for one in row["collections"]}
+    assert {(row["collection"], row["document"]) for row in results} == found, f"{path}, {leaving}"
+    if path == "sections":
+        books = response.json()["documents"]
+        held = {(one, row["document"]) for row in books for one in row["collections"]}
         assert held == sources, f"{path}, {leaving}"
-    else:
-        assert {(row["collection"], row["document"]) for row in results} == found, (
-            f"{path}, {leaving}"
-        )
 
 
 async def test_documents_are_listed_with_their_collections(ready: AsyncTestClient) -> None:
@@ -1589,7 +1711,7 @@ async def test_every_search_is_logged_with_what_it_returned(ready: AsyncTestClie
         "/api/search/excerpts",
         params={"q": ["alpha body", "zebra stripes"], "context": "notes", "session_id": "s3"},
     )
-    await ready.get("/api/search/sources", params={"q": "alpha"})
+    await ready.get("/api/search/sections", params={"q": "alpha"})
     first = (await ready.get("/api/search/text", params={"q": "alpha", "page_size": 1})).json()
     assert first["next_cursor"] is not None, "one chunk, a page of one: the walk could go on"
     await ready.get(
@@ -1607,7 +1729,7 @@ async def test_every_search_is_logged_with_what_it_returned(ready: AsyncTestClie
         (log.Tool.EXCERPTS, "s3", 0),
         (log.Tool.EXPLORE, None, 1),
         (log.Tool.TEXT, None, 1),
-        (log.Tool.SOURCES, None, 1),
+        (log.Tool.SECTIONS, None, 1),
         (log.Tool.EXCERPTS, "s3", 1),
         (log.Tool.EXCERPTS, "s3", 1),
     ], "newest first, the second page left out"
@@ -1757,13 +1879,13 @@ async def test_an_agent_reports_a_gap_on_a_question_it_asked(ready: AsyncTestCli
         )
         assert response.status_code == status and detail in response.text, (name, response.text)
 
-    await ready.get("/api/search/sources", params={"q": " alpha sources ", "session_id": "r1"})
-    sources = await ready.post(
+    await ready.get("/api/search/sections", params={"q": " alpha sections ", "session_id": "r1"})
+    mapped = await ready.post(
         "/api/gaps/report",
         params={"session_id": "r1"},
-        json={"question": " alpha sources ", "verdict": "insufficient"},
+        json={"question": " alpha sections ", "verdict": "insufficient"},
     )
-    assert sources.status_code == 200, "a sources question, passed back word for word"
+    assert mapped.status_code == 200, "a map's question, passed back word for word"
 
     async with db.connect() as conn:  # the search, asked just over an hour ago
         await conn.execute(update(searches).values(ts=time.time() - gaps.REPORT_WINDOW - 1))
@@ -1779,7 +1901,7 @@ async def test_an_agent_reports_a_gap_on_a_question_it_asked(ready: AsyncTestCli
     ("path", "params"),
     [
         ("/api/search/explore", {}),
-        ("/api/search/sources", {}),
+        ("/api/search/sections", {}),
         ("/api/search/text", {}),
     ],
 )
@@ -1923,10 +2045,10 @@ EXCERPT_STEPS = ["fold", "group", "budget", "probe_gaps", "fill", "quote", "rera
             {"Q1": [*RANKING_STEPS, "judge_thin"], "Q2": [*RANKING_STEPS, "judge_thin"]},
         ),
         (
-            "sources: the ranking, then documents",
-            "/api/search/sources",
+            "sections: the ranking, then the map",
+            "/api/search/sections",
             {"q": "lancedb"},
-            ["plan", *RANKING_STEPS, "shortlist"],
+            ["plan", *RANKING_STEPS, "map_sections"],
             {},
         ),
     ],
@@ -1977,7 +2099,6 @@ async def test_a_search_answers_with_the_time_each_step_took(
             {"q": ["lancedb", "how are rows retrieved"]},
             ["judge_thin", "fold", "group"],
         ),
-        ("sources", "/api/search/sources", {"q": "lancedb"}, ["shortlist"]),
         ("sections", "/api/search/sections", {"q": "lancedb"}, ["map_sections"]),
     ],
 )
@@ -2067,6 +2188,7 @@ async def test_an_excerpt_is_the_section_its_passages_share(client: AsyncTestCli
         "excerpts": [],
         "uncovered": [],
         "missing_terms": ["nothingmatchesthis"],
+        "searched": ["notes"],
     }, "no hits is an answer, not an error, and it says which words the sources lack"
 
 
@@ -2492,6 +2614,7 @@ async def test_several_questions_over_collections_since_deleted_find_nothing(
         "excerpts": [],
         "uncovered": [],
         "missing_terms": ["domain", "events", "carry", "change"],
+        "searched": [],
     }, "one question: no excerpts, and every word of it missing"
 
 
@@ -2572,47 +2695,34 @@ async def _two_collections_sharing_a_document(client: AsyncTestClient) -> str:
     return markdown
 
 
-async def test_sources_fold_hits_to_documents_and_cover_them_with_collections(
+async def test_a_map_lists_the_documents_it_reached_and_covers_them_with_collections(
     client: AsyncTestClient,
 ) -> None:
-    """One row per document with the hot sections inside it, and the fewest collections a
-    follow-up search has to select to reach every row."""
+    """One row per document, whichever collections hold it, and the fewest collections a
+    follow-up search has to select to reach every section and document listed."""
     await _two_collections_sharing_a_document(client)
 
-    response = await client.get("/api/search/sources", params={"q": "lancedb"})
+    response = await client.get("/api/search/sections", params={"q": "lancedb"})
 
     assert response.status_code == 200, response.text
     found = response.json()
     rows = {row["document"]: row for row in found["documents"]}
     assert set(rows) == {"shared.md", "beta-only.md"}
     assert found["collections"] == ["beta"], "one collection holds both: the cover is one name"
+    assert found["searched"] == ["alpha", "beta"], "every collection, none chosen"
     shared = rows["shared.md"]
     assert shared["collections"] == ["alpha", "beta"], "every searched collection holding it"
     assert rows["beta-only.md"]["collections"] == ["beta"]
     assert shared["description"] == "the guide", "the document's own description, not a chunk's"
-    assert shared["chunks"] == 2, "the chunks that matched, not every chunk it has"
-    assert [section["header"] for section in shared["sections"]] == ["Guide > Retrieval"]
-    section = shared["sections"][0]
-    assert section["chunks"] == 2 and section["score"] > 0
-    assert section["location"].startswith("shared.md L"), "written to be cited"
-    # every chunk that matched sits under that one heading, so the two scores are the same fold
-    assert shared["score"] == section["score"]
+    assert shared["chunks"] == 2, "the chunks that matched, each counted once across collections"
+    row = await document.named("shared.md")
+    assert shared["markdown_file"] == str(home.HOME / row.relative(row.markdown)), "on disk"
+    picked = [one["document_id"] for one in found["sections"]]
+    assert {row["document_id"]: row["sections"] for row in found["documents"]} == {
+        row["document_id"]: picked.count(row["document_id"]) for row in found["documents"]
+    }, "each document counts the map's sections in it"
     scores = [row["score"] for row in found["documents"]]
     assert scores == sorted(scores, reverse=True), "best document first"
-
-
-async def test_sources_bound_their_limit_and_their_sections(client: AsyncTestClient) -> None:
-    await _two_collections_sharing_a_document(client)
-
-    one = await client.get("/api/search/sources", params={"q": "lancedb", "limit": 1})
-    assert one.status_code == 200, one.text
-    assert len(one.json()["documents"]) == 1, "the shortlist is cut to the limit"
-    assert one.json()["collections"] == ["beta"], "the cover is of the documents returned"
-
-    none = await client.get("/api/search/sources", params={"q": "lancedb", "sections": 0})
-    assert none.status_code == 422 and "sections must be 1..20, got 0" in none.text
-    too_many = await client.get("/api/search/sources", params={"q": "lancedb", "limit": 101})
-    assert too_many.status_code == 422 and "limit must be 1..100, got 101" in too_many.text
 
 
 SAGAS_BOOK = """# Sagas
@@ -2828,8 +2938,10 @@ async def test_sections_bound_their_limit(client: AsyncTestClient) -> None:
     assert one.status_code == 200 and len(one.json()["sections"]) == 1
     too_many = await client.get("/api/search/sections", params={"q": "saga", "limit": 41})
     assert too_many.status_code == 422 and "limit must be 1..40, got 41" in too_many.text
-    nothing = await client.get("/api/search/sections", params={"q": "zeppelin"})
-    assert nothing.json() == {"sections": [], "collections": []}, "no section is an answer"
+    nothing = (await client.get("/api/search/sections", params={"q": "zeppelin"})).json()
+    assert (nothing["sections"], nothing["documents"], nothing["collections"]) == ([], [], []), (
+        "no section is an answer"
+    )
     await client.get("/api/search/sections", params={"q": "saga", "session_id": "map"})
     (logged,) = (await client.get("/api/searches", params={"session_id": "map"})).json()
     assert logged["result_limit"] == flow.DEFAULT_MAP == 15, "no limit: a map of fifteen"
@@ -2874,7 +2986,7 @@ async def test_the_search_scope_is_the_names_then_the_session_then_everything(
     [
         ("/api/search/explore", None),
         ("/api/search/excerpts", "excerpts"),
-        ("/api/search/sources", "documents"),
+        ("/api/search/sections", "sections"),
     ],
 )
 async def test_every_search_rejects_a_collection_nobody_owns(
@@ -2893,15 +3005,17 @@ async def test_every_search_rejects_a_collection_nobody_owns(
 
 
 async def test_the_mcp_surface_offers_one_search_per_question(api_client: AsyncTestClient) -> None:
-    """Two tools for the two questions an agent has: what do the sources say, and which sources
-    are there. The searches the web UI drives stay REST-only, or an agent would have to choose
-    between three that answer with overlapping chunks."""
+    """Two tools for the two questions an agent has: what do the sources say, and where in which
+    sources does a topic live. The searches the web UI drives stay REST-only, or an agent would
+    have to choose between several that answer with overlapping chunks."""
     from litestar_mcp import LitestarMCP
 
     served = set(api_client.app.plugins.get(LitestarMCP).discovered_tools)
 
-    assert {"search_excerpts", "search_sources"} <= served
-    assert served.isdisjoint({"search", "search_text", "explore", "search_collection"})
+    assert {"search_excerpts", "search_sections"} <= served
+    assert served.isdisjoint(
+        {"search", "search_text", "explore", "search_collection", "search_sources"}
+    )
 
 
 @pytest.mark.parametrize("bias", [-1.0, 1.0])

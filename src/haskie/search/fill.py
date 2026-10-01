@@ -47,7 +47,6 @@ class Candidate(msgspec.Struct, frozen=True):
 
     hit: Hit
     value: float  # around the ranked chunks: 0 the median one, 1 the best, below 0 weaker
-    aspect: str | None = None  # the question it answers best, when several were asked
 
 
 class Fill(msgspec.Struct, frozen=True):
@@ -229,8 +228,9 @@ def choose(found: list[Fill], room: int) -> list[Fill]:
 
 def apply(one: Group, taken: list[Candidate], how: ScoreFold) -> Group:
     """The group with `taken` chunks joined to its passages (`passage.rejoin`), so a bridged gap
-    makes two passages one. Each joined chunk brings the question it answers best."""
+    makes two passages one. A joined chunk tags no question: it was valued against the passages
+    kept, not judged an answer, so it cannot mark a question answered that nothing answers."""
     if not taken:
         return one
-    added = [part(chunk.hit, [chunk.aspect] if chunk.aspect else None) for chunk in taken]
+    added = [part(chunk.hit) for chunk in taken]
     return msgspec.structs.replace(one, ranges=rejoin([*one.ranges, *added], how))

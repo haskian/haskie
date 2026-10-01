@@ -52,10 +52,8 @@ def _group(*found: HitRange, section: Section = RETRIES) -> Group:
     return Group(COLLECTION, DOC, section, list(found))
 
 
-def _candidates(values: dict[int, float], aspect: str | None = None) -> dict[ChunkKey, Candidate]:
-    return {
-        (COLLECTION, DOC, seq): Candidate(HITS[seq], worth, aspect) for seq, worth in values.items()
-    }
+def _candidates(values: dict[int, float]) -> dict[ChunkKey, Candidate]:
+    return {(COLLECTION, DOC, seq): Candidate(HITS[seq], worth) for seq, worth in values.items()}
 
 
 def test_the_fixture_is_the_chunks_the_docstring_names() -> None:
@@ -179,10 +177,10 @@ def test_the_grow_bias_moves_every_value_before_it_is_summed(
 
 
 def test_no_bias_leaves_the_candidates_as_they_are() -> None:
-    candidates = _candidates({3: 0.3}, aspect="a")
+    candidates = _candidates({3: 0.3})
 
     assert fill.biased(candidates, 0.0) is candidates
-    assert fill.biased(candidates, 0.5)[(COLLECTION, DOC, 3)] == Candidate(HITS[3], 0.8, "a")
+    assert fill.biased(candidates, 0.5)[(COLLECTION, DOC, 3)] == Candidate(HITS[3], 0.8)
 
 
 # --- run ------------------------------------------------------------------------------
@@ -234,12 +232,12 @@ def test_the_budget_pays_for_the_fills_worth_most_per_character() -> None:
 def test_a_bridged_gap_makes_two_passages_one_that_keeps_what_both_held() -> None:
     first = _range(2, aspects=["a"])
     second = _range(5, aspects=["b"])
-    taken = list(_candidates({3: 0.6, 4: 0.1}, aspect="c").values())
+    taken = list(_candidates({3: 0.6, 4: 0.1}).values())
 
     (joined,) = fill.apply(_group(first, second), taken, how=HARMONIC).ranges
 
     assert (joined.seq_start, joined.seq_end) == (2, 5)
-    assert joined.aspects == ["a", "b", "c"], "the passages' questions, then the fill's"
+    assert joined.aspects == ["a", "b"], "the passages' questions; what the fill joined tags none"
     assert [hit.score for hit in joined.hits] == [1.0, 0.0, 0.0, 1.0], "a fill is not ranked"
 
 

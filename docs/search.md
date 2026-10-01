@@ -1,23 +1,22 @@
 # Search
 
-`search_excerpts`, `search_sources`, `search_sections` and `GET /api/search/explore` share one
+`search_excerpts`, `search_sections` and `GET /api/search/explore` share one
 ranking, then run the fold their answer needs. `search/flow.py` builds these pipelines in one
 screen. A search of one collection is the same search with `collections` set to it: the collection
 page asks `explore` for passages. `/api/search/text` is the one search on its own path, a separate
-BM25 search that neither merges collections nor folds repeats.
+BM25 search that sorts every collection's chunks by their raw score and folds no repeats.
 
 ```mermaid
 flowchart LR
     q(["query"]) --> scope["<b>scope</b><br/>collections argument,<br/>else session, else all"]
     scope --> retrieve["<b>retrieve</b><br/>per collection:<br/>hybrid, vector or fts"]
-    retrieve --> merge["<b>merge</b><br/>fuse collections<br/>by rank (RRF)"]
+    retrieve --> merge["<b>merge</b><br/>several collections:<br/>each half ranked over all,<br/>then fused"]
     merge --> rerank["<b>rerank</b><br/>optional<br/>cross-encoder"]
     rerank --> hits["<b>hits</b><br/>cut to scan depth"]
     hits --> fchunks["collapse hits"] --> chunks(["chunks"])
     hits --> franges["merge neighbours,<br/>grow or drop short ones,<br/>collapse ranges"] --> read["read the spans"] --> passages(["passages"])
-    franges --> group["group by section"] --> budget["cut to<br/>the budget"] --> probe["search again for<br/>missing words"] --> fill["fill around<br/>and between"] --> rerankx["rerank whole excerpts<br/>(experiment)"] --> excerpts(["excerpts"])
-    hits --> shortlist["group by document"] --> sources(["sources"])
-    merge -. "no rerank" .-> mapsec["group by section,<br/>pick to cover the scan"] --> sections(["sections"])
+    hits --> jranges["merge neighbours,<br/>find short ones,<br/>fold repeats"] --> group["group by section"] --> budget["cut to<br/>the budget"] --> probe["search again for<br/>missing words"] --> fill["fill around<br/>and between"] --> rerankx["rerank whole excerpts<br/>(experiment)"] --> excerpts(["excerpts"])
+    merge -. "a small reranker weighs,<br/>drops none" .-> mapsec["group by section,<br/>pick to cover the scan;<br/>rank documents"] --> sections(["sections"])
 ```
 
 ## The shared ranking
@@ -25,27 +24,39 @@ flowchart LR
 1. **Scope.** The `collections` argument, else the session's collections, else all of them.
    Narrower, when given: `document_ids` and `section_ids` (see "Keeping to documents and
    sections" below).
-2. **Retrieve.** Each collection runs `hybrid` (vector and BM25, fused), `vector` or `fts`.
-   Fusion is `rrf` (reciprocal rank fusion) or `linear`. Without an embedding model everything is
-   `fts`. The query is embedded once, and up to 8 collections are read in parallel. A collection
-   still building its first full-text index has no BM25 half yet: `hybrid` answers with the
-   vector half alone, and `fts` finds nothing there. A document on its way out of a collection
-   answers from none of its rows there: a membership `removing`, or a document `deleting`. One
-   query per search reads those names, and each read filters them out before its limit.
-3. **Merge** across collections by rank, because scores from two indexes are not comparable. A
-   chunk that two collections share counts once: the same span of one document, whatever `seq`
-   each collection's chunk settings give it. A search over one collection keeps that
-   collection's own scores.
+2. **Retrieve.** Each collection runs `hybrid` (vector and BM25), `vector` or `fts`. A search of one
+   collection lets LanceDB fuse the two halves; a search of several reads them apart, for the merge.
+   Without an embedding model everything is `fts`. The query is embedded once, and up to 8
+   collections are read in parallel. A collection still building its first full-text index has no
+   BM25 half yet: `hybrid` answers with the vector half alone, and `fts` finds nothing there. A
+   document on its way out of a collection answers from none of its rows there: a membership
+   `removing`, or a document `deleting`. One query per search reads those names, and each read
+   filters them out before its limit.
+3. **Merge.** A search of several collections ranks each half over all of them at once: the
+   vector half by distance, which one query embedding makes comparable, and the BM25 half by
+   score. It then fuses the two as LanceDB fuses one table's, by the `fusion` setting: `rrf`
+   (reciprocal rank fusion of the two ranks) or `linear` (a weighted sum, each half min-max
+   scaled). A chunk that two collections share counts once: the same span of one document,
+   whatever `seq` each collection's chunk settings give it. A search over one collection keeps
+   that collection's own scores.
+
+   It used to fuse one ranking per collection instead. Rank fusion reads only ranks, so every
+   collection's first chunk scored the same however far it was from the query, and each
+   collection took an equal share of the scan. On a shelf of 10 books in 3 collections, a
+   collection of 3 Python books took exactly 100 of the 200 chunks scanned for "How does leader
+   election work in a replicated log?", which none of them answers. Without a reranker, the
+   documents a search reached hardest then had the top document a cross-encoder would rank first
+   in 6 of 11 questions. Ranked as one table, they have it in 11 of 11.
 4. **Rerank** (optional). A cross-encoder rescores the merged `candidates`.
 
 The last of these steps to run sets a chunk's score. With a reranker on, it is the sigmoid of the
 cross-encoder's logit, 0 to 1, so switching the mode only changes which `candidates` it reads: a
 chunk found in both modes scores the same. The sigmoid is there because most logits are negative,
-and a passage folds its chunks' scores (below): a negative one would subtract under `sum` and
-zero the whole under `harmonic`. Without a reranker, a search of several collections gives a
-rank-fusion score, and a search of one keeps its mode's own: BM25, `1 / (1 + squared L2
-distance)`, or the fused score of `rrf` or `linear`. Passages, excerpts and documents then fold
-chunk scores their own way.
+and a passage folds its chunks' scores (below): a negative one would subtract under `sum` and zero
+the whole under `harmonic`. Without a reranker, a chunk keeps its mode's own score: BM25, `1 / (1 +
+squared L2 distance)`, or the fused score of `rrf` or `linear`. A hybrid search of several
+collections fuses over all of them at once; one half alone keeps its own score. Passages, excerpts
+and documents then fold chunk scores their own way.
 
 Each step that sets or changes a score says how as it runs (`search/scoring.py`), the way each
 step's time goes into `Server-Timing`. A search answers with that lineage, in pipeline order, in
@@ -59,27 +70,29 @@ and its server total adds the slowest branch only, since they ran at the same ti
 
 The ranking scans deeper than the answer. A folded repeat frees its slot for the next result,
 several chunks go into one passage, several passages into one excerpt, and many chunks into one
-source row.
+section of a map.
 
-## The five answers
+## The four answers
 
 | shape | what it is | who asks for it |
 | --- | --- | --- |
 | chunk (`Hit`) | one indexed chunk and its score | `explore?granularity=chunk`; also returned, without folding, by `/api/search/text` |
 | passage | neighbouring matched chunks of one section, merged | `explore?granularity=passage` |
 | excerpt | one section of a document, with every passage of it the search kept | `search_excerpts` (the Explore page too) |
-| source | one document: score, best chunk, hottest sections, collections | `search_sources` |
-| section | one section of a document: its id, where it is, its descriptors, the sections it covers; no text | `search_sections` (the Explore page too, which opens the section with the sections it covers, and its document at its heading) |
+| section | one section of a document: its id, where it is, its descriptors, the sections it covers; no text. Beside the sections, the documents the search reached hardest | `search_sections` (the Explore page too, which opens the section with the sections it covers, and its document at its heading) |
 
 A passage is the text its chunks cover, read by their offsets, with nothing added around it.
 Chunks are cut at headings, blank lines, blocks and sentences (see [chunking](chunking.md)), so a
 passage starts and ends where the author did. Each one carries its `header` (heading path) and
 its `location` (`doc p.3-4 L10-20`) to cite.
 
-`search_sources` scores a document, and each of its sections, by folding the scores of the chunks
-it matched (see "How chunk scores fold" below). It also returns a small set of collections that
-holds every document listed, ready for `set_session_collections`. The set comes from the standard
-greedy approximation of set cover, so it is small but not guaranteed smallest.
+`search_sections` scores a document by folding the scores of the chunks it matched (see "How
+chunk scores fold" below). It also returns a small set of collections that holds every section
+and document listed, ready for `set_session_collections`. The set comes from the standard greedy
+approximation of set cover, so it is small but not guaranteed smallest. `search_excerpts` and
+`search_sections` name the collections they searched (`searched`), so a session's scope, set turns
+earlier, shows in each answer. Both list in `uncovered` a question the sources match only weakly
+(see "Words the answer never mentions" below).
 
 ## Excerpts: passages grouped by section
 
@@ -120,14 +133,20 @@ section holds yet joins the answer. It joins the kept section it belongs to, or 
 others as one excerpt past `limit` and past the budget, which the sections were cut to before it.
 Taking the last ranked section's slot instead would trade one gap for another, and a search of one
 excerpt would lose its whole answer. With a reranker on, what the search finds is judged as the
-ranked chunks are: scored against each question whose words are missing, dropped under
-`min_rerank_score`, and tagged with the questions it clears. Without one, it is tagged with the
-questions whose words it holds, and it scores 0, as the fill's chunks do: its BM25 score is on
-another scale than the ranked passages', and would sort it above them.
+ranked chunks are: scored against each question whose words are missing, dropped under the
+reranker's floor (see "Several questions at once"), and tagged with the questions it clears.
+Without one, it tags no question, since holding a missing word is not an answer. It scores 0, as
+the fill's chunks do: its BM25 score is on another scale than the ranked passages', and would sort
+it above them.
 
-`search_excerpts` answers with `excerpts`, `uncovered` (the questions no excerpt names, when
-several were asked) and `missing_terms` (the words still missing after the probe). A synonym
-defeats the probe: it asks only for the words the question used. Each search that probes logs
+`search_excerpts` answers with `excerpts`, `uncovered` and `missing_terms` (the words still missing
+after the probe). `uncovered` lists the questions no excerpt names, when several were asked, and
+any question, one alone included, whose best match is under the bar its models were measured at
+(`gaps.weak_questions`, the verdict the Gaps page gives as weak). A search finds the nearest
+passages even on a topic the sources never cover, so without it a single question had no signal.
+The search log keeps only the first kind, so the Gaps page still reads a weak question as weak. The
+probe's passage tags no question: holding a missing word is not an answer. A synonym defeats the
+probe: it asks only for the words the question used. Each search that probes logs
 `search_probe` with the words, whether it found a passage, and whether that joined a kept section.
 The Explore page shows the missing words and questions under the results.
 
@@ -139,15 +158,16 @@ Every chunk of the section within `max_passage_grow` (3) chunks of a kept passag
 the question, by the query vector when every row has one, else by the question's words. Its value
 is its score around the kept chunks' own: 0 for one as good as the median kept chunk, 1 for one as
 good as the best, below 0 for a weaker one, clipped to [-1, 1]. With several questions a chunk
-takes its best question's value. Without a reranker that question tags it; with one, only the
-reranker's judgement tags (`aspects.tagged`), so a filled chunk brings no tag.
+takes its best question's value. A filled chunk tags no question: its value is relative to this
+search's own kept chunks, so it would mark a question answered that nothing answers. Only the
+reranker's judgement, or the ranking a part ran, tags (`aspects.tagged`).
 
 - A gap between two passages is filled when its values sum above 0, and the two become one. So a
   gap of up to twice `max_passage_grow` chunks can be filled. The joined passage scores by
   `score_fold` over the chunks of both.
 - Every passage grows outward by the run of chunks next to it whose values sum highest, when that
-  is above 0: into a gap as far as its half, so the passages on either side never reach for one
-  chunk.
+  is above 0: into a gap as far as its half, so the passages on either side never reach for the
+  same chunk.
 
 The same rule grows a short passage of the `passages` answer (next section), so a search has one
 way of growing a passage, one scale of value and one setting for how far. A passage grows once:
@@ -207,21 +227,24 @@ around them matches:
   [chunking](chunking.md)) is no such edge: the section goes on in the next part.
 
 The neighbours are read only when a passage is thin, in one LanceDB query per collection. Each
-search logs `search_thin` with the signal used and how many passages grew, stayed alone and were
-dropped. With several questions, each question's passages are grown or dropped against that
-question.
+search logs `search_thin` with the signal used, how many passages grew, how many stayed alone, and
+how many chunks they took. With several questions, each question's passages are grown or dropped
+against that question.
 
 ## Sections: a map of the shelf
 
 `search_sections` answers "what do my sources hold on this, and nearby?" before any text is
-read. It returns sections, each with where it is and what it is about, and no text: an agent
-reads the map, then asks `search_excerpts` about the sections worth reading. It runs
-`retrieve -> merge -> rerank -> hits -> map_sections` (`search/section_map.py`):
+read. It returns sections, each with where it is and what it is about, and no text, and the
+documents the search reached hardest: an agent reads the map, then asks `search_excerpts` about the
+sections worth reading. It runs `retrieve -> merge -> rerank -> hits -> map_sections`
+(`search/section_map.py`):
 
-1. **No reranker.** A map wants breadth and speed; the reranker's floor would drop chunks and
-   narrow it, and it costs about 5 ms a pair. The search plans none, so its `rerank` step only
-   records the ranking for the search log. The scan goes 20 chunks deep per section asked for, up
-   to 200.
+1. **A small reranker weighs every chunk.** With a reranker on, the map's own model
+   (`map_reranker_model`, MiniLM-L2 by default) scores every chunk of the scan, 20 chunks per
+   section asked for, up to 200. It drops none: the scores are the demand weights below, the
+   section scores and the document scores. A floor would narrow the map; a weight only makes a
+   section that shares a word with the topic count for little. Without a reranker the fused
+   retrieval scores stand, which weigh the top chunk only about four times the 200th.
 2. **Group by section.** Each scanned chunk joins the section an excerpt would quote it in
    (`section.section_of`), so a section on the map is the one `search_excerpts` returns. One span
    of one document counts once, whichever collections hold it.
@@ -233,8 +256,7 @@ reads the map, then asks `search_excerpts` about the sections worth reading. It 
    section covers anything new. Without an aspect list, this is the best-supported coverage
    method in the literature we follow: in GeoRAG's ablation [9] it beat maximal marginal
    relevance (MMR) and determinantal point processes (DPP) by 3 to 5 points of exact match, and
-   roughly matched a cross-encoder. Greedy takes under a millisecond
-   at 200 chunks.
+   roughly matched a cross-encoder. Greedy takes under a millisecond at 200 chunks.
 4. **Centred cosines.** Facility location reads a cosine as an amount, and embedding cosines carry
    an offset that depends on the model (bge's random pairs sit near 0.3, e5's near 0.7). So the
    vectors are centred on the mean chunk vector of the collections searched, which maintenance
@@ -252,7 +274,8 @@ reads the map, then asks `search_excerpts` about the sections worth reading. It 
 
 Each pick lists up to five `related` sections: those it covers best, by the relevance-weighted
 mean of their chunks' nearness to it. Every section the scan reached and the map did not pick goes
-under the one pick closest to it, when it is closer than 0, and each pick keeps its five closest.
+under the one pick closest to it, when that nearness is above 0, and each pick keeps its five
+closest.
 There is no threshold, so `related` means nearby, not repeated. A near copy of the pick lands
 there. So does a section the pick only sits close to, and that one may be the best section on the
 topic: the pick covered its chunks by their vectors, not by what it says.
@@ -269,16 +292,25 @@ topic: the pick covered its chunks by their vectors, not by what it says.
 
 Without vectors the rule is stricter: a section joins `related` only when its matched words repeat
 the pick's (step 6), so there it does mean repeated.
-The answer's `collections` holds every section listed, related ones included, by the same greedy
-set cover as `search_sources`, ready for `set_session_collections`.
+
+`documents` lists, best first, the ten documents the search reached hardest
+(`section_map.DOCUMENTS`), and any other document a listed section is in, so every section's
+`document_id` has its row. A document's score folds every scanned chunk of it, by `score_fold`. The
+default is a sum, so `chunks` says how much a document says. Each row also carries the document's
+description, how many of the map's sections are in it, the collections that hold it, and its files.
+The agent's view of a section names its document by `document_id` alone: the document's name,
+collections and `markdown_file` are on its row. A document the map picked no section from can still
+lead the list: the cover spreads the picks, the documents are not spread. The answer's `collections`
+holds every section listed, related ones included, and every document, by greedy set cover, ready
+for `set_session_collections`.
 
 `descriptors` say what each section is about. They are fixed at indexing
 ([Indexing](indexing.md#the-three-workflows)) and read by the section's id from the cache entry
-the collection indexed the document from: one to five of the section's words weighed against the
-other sections of its depth by c-TF-IDF [10], less the words more than half of them use or its
-header holds (unless nothing else is left), and reranked by meaning [11]. They never decide what is
-picked: in the studies we follow, clusters of the pool used as aspects gained nothing, and terms
-mined from it only re-weighted the aspects already on top.
+the collection indexed the document from: one to five of the section's terms (a word, or two words
+side by side) weighed against the other sections of its depth by c-TF-IDF [10], less the terms more
+than half of them use or its header holds (unless nothing else is left), and reranked by meaning
+[11]. They never decide what is picked: in the studies we follow, clusters of the pool used as
+aspects gained nothing, and terms mined from it only re-weighted the aspects already on top.
 
 Measured on three books (1.9 MB of markdown, bge-small), eight questions: the whole search took
 35 to 50 ms warm, `map_sections` 12 to 17 ms of it. Against the top sections by relevance on the
@@ -292,6 +324,33 @@ same scans (0.627 of the relevance-weighted demand covered, 2.0 documents, 7.6 c
 
 That is a sanity check, not an evaluation: the gains are small, as the literature says they are
 without aspects, and the half is a judgement fitted on these eight questions.
+
+The merge across collections and the map's reranker were measured on 10 books in 3 collections
+(arctic-m), on 11 questions of the learning-cycle assessment. Reference for document order: the
+book a cross-encoder (mxbai-rerank-xsmall) ranks first.
+
+| | off-domain picks | on-domain books per map | back-matter picks | top document as the cross-encoder's | rerank time |
+| --- | --- | --- | --- | --- | --- |
+| one ranking per collection, no reranker | 42 of 132 | | 9 | 6 of 11 | 0 |
+| one table, no reranker | 22 of 132 | 3.9 | 7 | 11 of 11 | 0 |
+| one table, MiniLM-L2 weighs (shipped) | 5 of 132 | 2.9 | 6 | 10 of 11 | 1.5 s |
+| one table, MiniLM-L6 weighs | 4 of 132 | 2.9 | 5 | 10 of 11 | 3.8 s |
+
+An off-domain pick is a Python book's section on an architecture question, or the reverse. The
+times were taken on a machine under heavy load (load average 55): what holds is L2 against L6,
+about 2.5 times faster. The map is narrower with a reranker because the questions one book owns
+(leader election, package stability) now map to that book, which the assessment asked for.
+Two things tried and dropped:
+- A scan capped at a fifth per document, over a pool twice as deep, spread the books (4.8 to 6.5
+  with 5 chunks or more) before the map reranked. With the reranker it added 0.2 books and mixed
+  two score scales, so it went.
+- `score_fold = max` instead of `sum` changed 1 pick of 132, and put the cross-encoder's top
+  document first in 8 of 11, against 10 of 11 for `sum`.
+
+MiniLM-L2's best score on the 11 answered questions is 0.113 at the lowest; on three questions no
+book covers it is 0.0 (espresso), 0.003 (Java garbage collection) and 0.861 (the Linux scheduler,
+against asyncio's scheduling). Its uncalibrated floor of 0.05 flags none of the answered and two
+of the three, which is the verdict a map's `uncovered` carries.
 
 Each search logs `search_map` with the chunks, the sections reached and picked, the share of
 demand covered after each pick, whether it centred, and the documents whose sections were missing.
@@ -349,10 +408,9 @@ off until an evaluation shows it returns more answer per character than the fold
 
 A pointwise reranker scores one passage at a time, so it cannot see that two results repeat each
 other [1]. `search/collapse.py` folds them in the chunk and passage pipelines, once per search, as
-the last fold before the answer. `search_sources` groups by document instead. The fold walks the
-results best first and compares each one only with the results already kept (leader clustering).
-Comparing only with kept results stops chains, so A close to B and B close to C never merges A
-with C.
+the last fold before the answer. The fold walks the results best first and compares each one only
+with the results already kept (leader clustering). Comparing only with kept results stops chains,
+so A close to B and B close to C never merges A with C.
 
 Each new result is compared with each kept result in turn:
 
@@ -425,23 +483,23 @@ puts the context in front of each part for the reranker too.
 ```mermaid
 flowchart LR
     asked(["q: 2-5 parts<br/>+ context"]) --> each["<b>shared ranking</b><br/>per part, in parallel:<br/>context + part"]
-    each --> ranges["merge neighbours,<br/>grow or drop short ones,<br/>per part"]
+    each --> ranges["merge neighbours,<br/>find short ones,<br/>per part"]
     ranges --> turns["<b>take turns</b><br/>round-robin<br/>over the parts"]
     turns --> fold["collapse ranges<br/>across all parts"]
     fold --> tag["tag each passage<br/>with its parts"]
     tag --> group["group by section"] --> budget["budget"] --> probe["probe"] --> fill["fill"] --> rerankx["rerank whole<br/>excerpts"] --> excerpts(["excerpts"])
 ```
 
-Each part runs the shared ranking on its own, as deep as one search of that `limit` would go.
-Then the parts take turns at the slots in the order they were asked. On its turn, a part takes its
-best range not yet picked. Each part is owed its own best `ceil(limit / parts)` ranges. A pick made
-for another part counts for this part too when it overlaps one of those ranges, and the part sits
-out one round for each such pick. A range that overlaps a pick, or continues it in the same section,
+Each part runs the shared ranking on its own, as deep as one search of that `limit` would go. Then
+the parts take turns at the slots in the order they were asked. On its turn, a part takes its best
+range not yet picked. Each part is owed its own best `ceil(limit / parts)` ranges. A pick made for
+another part counts for this part too when it overlaps one of those ranges, and the part sits out
+one round for each such pick. A range that overlaps a pick, or continues it in the same section,
 joins that pick, so two parts that land on one passage get one passage. Round-robin reads ranks
-alone, so it works with or without a reranker and embeddings. TREC RAG pipelines give each query
-its slots the same way [2]. Near-duplicates then fold across all the parts, once, as in one
-search, and the passages group by section, the sections taking the slots in the order the parts
-picked them.
+alone, so it works with or without a reranker and embeddings. The Text REtrieval Conference (TREC)
+retrieval-augmented generation (RAG) track pipelines give each query its slots the same way [2].
+Near-duplicates then fold across all the parts, once, as in one search, and the passages group by
+section, the sections taking the slots in the order the parts picked them.
 
 Each span's `aspect_scores` gives how well its passage matched every part whose own ranking holds
 its chunks, or those of a place folded into it: that part's best such chunk. The best chunk rather
@@ -477,19 +535,19 @@ building its first full-text index contributes nothing: LanceDB refuses a BM25 q
 ## Settings
 
 `limit`, `candidates`, `mode`, `fusion`, `rrf_k`, `vector_weight`, `bm25_weight`, `nprobes`,
-`refine_factor`, `reranker`, `reranker_model`, `rerank_with_context`, `min_rerank_score`,
-`rerank_excerpts`, `score_fold`, `min_passage_chars`, `max_passage_grow`, `grow_bias`,
-`fill_values`, `max_section_chars` and `max_answer_chars` each have a user default and a
-description in the UI, and a collection can override them. The UI groups the ones that decide how
+`refine_factor`, `reranker`, `reranker_model`, `map_reranker_model`, `rerank_with_context`,
+`min_rerank_score`, `rerank_excerpts`, `score_fold`, `min_passage_chars`, `max_passage_grow`,
+`grow_bias`, `fill_values`, `max_section_chars` and `max_answer_chars` each have a user default and
+a description in the UI, and a collection can override them. The UI groups the ones that decide how
 passages expand under Expansion: `min_passage_chars`, `max_passage_grow`, `fill_values`,
 `grow_bias`, `max_section_chars` and `max_answer_chars`. In the shared ranking, each collection
-retrieves with its own overrides. The settings of the merged ranking (`rrf_k`, `candidates`, the
-reranker) come from the collection only when it is the one collection in scope, and from the user
-otherwise. `limit` comes from the call, else from the same place, for chunks and passages. The
-other answers have fixed defaults of their own: `search_excerpts` 10 sections
-(`flow.DEFAULT_EXCERPTS`), `search_sections` 15 and `search_sources` 10 documents. No route takes
-search settings per call: a search with other settings is a search of a collection whose overrides
-say so.
+retrieves with its own overrides: `mode`, `nprobes` and `refine_factor`. The settings of the merged
+ranking (`fusion`, `rrf_k`, the two weights, `candidates`, the rerankers) and of every step after it
+come from the collection only when it is the one collection in scope, and from the user otherwise.
+`limit` comes from the call, else from the same place, for chunks and passages. The other answers
+have fixed defaults of their own: `search_excerpts` 10 sections (`flow.DEFAULT_EXCERPTS`) and
+`search_sections` 15 sections and 10 documents. No route takes search settings per call: a search
+with other settings is a search of a collection whose overrides say so.
 
 Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/collapse.py`,
 `search/aspects.py`, `search/thin.py`, `search/section.py`, `search/fill.py`, `search/probe.py`,

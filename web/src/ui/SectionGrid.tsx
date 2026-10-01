@@ -1,4 +1,5 @@
-import type { MappedSection, RelatedSection } from '../api'
+import type { MappedDocument, MappedSection, RelatedSection } from '../api'
+import { href } from '../router'
 import { cite, fillOf, plural, scoreStyle } from './match'
 
 // Where a related section is, as far as it differs from its pick: the same section of the same
@@ -101,6 +102,33 @@ export function Descriptors({ words }: { words: string[] }) {
         <span key={word} className="descriptor">
           {word}
         </span>
+      ))}
+    </div>
+  )
+}
+
+/** The documents the search reached hardest, best first: what each is about, how much of it
+ *  matched, how many of the map's sections are in it and which collections hold it; nothing when
+ *  there are none. A row opens the document. */
+export function MapDocuments({ documents }: { documents: MappedDocument[] }) {
+  if (documents.length === 0) return null
+  return (
+    <div className="sections" aria-label="Documents">
+      <div className="sections-head">
+        <span>Documents</span>
+        <span className="mono muted">{plural(documents.length, 'document')}</span>
+      </div>
+      {documents.map((one) => (
+        <a key={one.document_id} className="section-row" href={href({ name: 'documents', document: one.document })}>
+          <span className="mono muted">{one.score.toFixed(2)}</span>
+          <span className="section-title">
+            {one.document}
+            {one.description && <span className="muted"> · {one.description}</span>}
+          </span>
+          <span className="mono muted">
+            {plural(one.chunks, 'chunk')} · {plural(one.sections, 'section')} · {one.collections.join(', ')}
+          </span>
+        </a>
       ))}
     </div>
   )

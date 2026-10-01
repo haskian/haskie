@@ -328,7 +328,7 @@ async def describe_document(
 ) -> Document:
     """Replace what the document is said to be. Empty clears it.
 
-    The description is what `search_sources` returns beside each document, so it is worth writing
+    The description is what `search_sections` returns beside each document, so it is worth writing
     for anything an agent is expected to choose between.
 
     Args:

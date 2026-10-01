@@ -18,9 +18,7 @@ from haskie.search.passage import (
     HitRange,
     Passage,
     PassageReference,
-    Sources,
     fold,
-    fold_sources,
     harmonic,
     min_cover,
     part,
@@ -206,9 +204,9 @@ def test_documents_rank_by_the_rule_the_settings_choose(how: ScoreFold, order: l
     ]
     hits = [strong, *fair]
 
-    found = fold_sources(top_documents(hits, 10, how), {}, 3, how).documents
+    found = top_documents(hits, how)
 
-    assert [one.document for one in found] == order, how
+    assert [group[0].document for group in found] == order, how
     assert [ranges(hits, how)[0].hits[0].document] == [order[0]], f"{how}: passages the same"
 
 
@@ -481,117 +479,6 @@ def test_a_passage_carries_the_citation_of_the_best_chunk_over_its_lines() -> No
     assert passage.text.startswith("# Retries") and passage.text.endswith("twice.")
 
 
-# --- fold_sources ---------------------------------------------------------------------
-
-
-def _sources(hits: list[Hit], memberships=None, limit: int = 10, sections: int = 3) -> Sources:
-    return fold_sources(
-        top_documents(hits, limit, how=HARMONIC), memberships or {}, sections, how=HARMONIC
-    )
-
-
-def test_one_document_folds_to_one_row_of_evidence() -> None:
-    """The first hit of a document is its best one, so the row shows that chunk and scores the
-    whole group; the description is left for the caller, which is the only part that needs IO."""
-    found = _sources([ONE, TWO, THREE])
-
-    (source,) = found.documents
-    assert (source.document, source.chunks) == (DOC, 3)
-    assert source.score == pytest.approx(2 * 4.0 * 9.0 / 13.0), "harmonic(best 4, sum 9)"
-    assert (source.text, source.header, source.location) == (ONE.text, ONE.header, ONE.location)
-    assert (source.line_start, source.line_end) == (ONE.line_start, ONE.line_end)
-    assert (source.source_file, source.markdown_file) == (ONE.source_file, ONE.markdown_file)
-    assert source.description == "", "filled in by the caller, from the metadata store"
-    assert source.collections == [COLLECTION], "nothing looked up, so the table that matched it"
-    assert found.collections == [COLLECTION]
-
-
-def test_a_document_in_two_collections_names_both_and_is_covered_by_one() -> None:
-    found = _sources([ONE, OTHER_ONE], memberships={DOC: ["archive", COLLECTION], OTHER: ["ops"]})
-
-    assert [(s.document, s.collections) for s in found.documents] == [
-        (OTHER, ["ops"]),
-        (DOC, ["archive", COLLECTION]),
-    ], "equal scores sort by document name; the memberships are carried as given"
-    assert found.collections == ["archive", "ops"], "one per document, ties picked by name"
-
-
-@pytest.mark.parametrize(
-    ("name", "hits", "limit", "expected"),
-    [
-        ("no hits, no sources", [], 10, []),
-        (
-            "one strong chunk outranks three weak ones",
-            [_hit(OPENING, 1, 5.0)] + [_hit(OPENING, i, 2.0, document=OTHER) for i in (1, 2, 3)],
-            10,
-            [(DOC, 5.0), (OTHER, 2 * 2.0 * 6.0 / 8.0)],
-        ),
-        (
-            "the limit cuts the tail of the ranking",
-            [_hit(OPENING, 1, 5.0), _hit(OPENING, 1, 4.0, document=OTHER)],
-            1,
-            [(DOC, 5.0)],
-        ),
-        (
-            "documents that score the same sort by name",
-            [_hit(OPENING, 1, 3.0), _hit(OPENING, 1, 3.0, document=OTHER)],
-            10,
-            [(OTHER, 3.0), (DOC, 3.0)],
-        ),
-    ],
-)
-def test_fold_sources_ranks_documents_by_the_harmonic_of_best_and_sum(
-    name: str, hits: list[Hit], limit: int, expected: list[tuple[str, float]]
-) -> None:
-    found = _sources(hits, limit=limit)
-
-    assert [(s.document, pytest.approx(s.score)) for s in found.documents] == expected, name
-
-
-def test_sections_are_the_headings_the_query_kept_landing_under() -> None:
-    """A document is worth reading in one place more than another. The sections score the way the
-    document does, so two weak chunks under one heading can outrank one middling chunk alone."""
-    hits = [
-        _hit(BACKOFF, 2, 3.0, header="Retries > Backoff"),
-        _hit(SKEW, 3, 2.5, header="Retries > Ordering > Skew"),
-        _hit(DEDUP, 4, 2.0, header="Retries > Backoff"),
-        _hit(OPENING, 1, 1.0, header="Retries"),
-    ]
-
-    (source,) = _sources(hits, sections=2).documents
-
-    assert [(s.header, s.chunks) for s in source.sections] == [
-        ("Retries > Backoff", 2),
-        ("Retries > Ordering > Skew", 1),
-    ], "top 2 by score; the lone weak heading is cut"
-    hot = source.sections[0]
-    assert hot.score == pytest.approx(2 * 3.0 * 5.0 / 8.0), "harmonic(best 3, sum 5)"
-    assert (hot.line_start, hot.line_end) == (3, 19), "min and max over the heading's chunks"
-    assert hot.location == f"{DOC} L3-19", "cited over the whole heading, not one chunk"
-
-
-def test_a_section_cites_every_page_its_chunks_cover() -> None:
-    """The best chunk sits on page 2, a weaker one under the same heading on page 4: the section
-    spans both, so citing the best chunk's page alone would send the reader to half of it."""
-    hits = [
-        _hit(BACKOFF, 2, 3.0, header="Retries > Backoff", page_start=2, page_end=2),
-        _hit(DEDUP, 4, 2.0, header="Retries > Backoff", page_start=4, page_end=4),
-    ]
-
-    (source,) = _sources(hits, sections=1).documents
-
-    (hot,) = source.sections
-    assert hot.location == location(DOC, 2, 4, hot.line_start, hot.line_end)
-
-
-def test_sections_that_score_the_same_sort_by_header() -> None:
-    hits = [_hit(OPENING, 1, 2.0, header=h) for h in ("Retries > Zoning", "Retries > Backoff")]
-
-    (source,) = _sources(hits, sections=5).documents
-
-    assert [s.header for s in source.sections] == ["Retries > Backoff", "Retries > Zoning"]
-
-
 # --- min_cover ------------------------------------------------------------------------
 
 
@@ -783,12 +670,11 @@ def test_a_shared_chunk_is_held_as_the_first_part_listed_has_it() -> None:
     assert [hit.score for hit in rebuilt.hits] == [4.0, 3.0, 2.0]
 
 
-def test_a_part_is_an_unranked_chunk_with_the_questions_it_answers() -> None:
-    found = part(TWO, ["a"])
+def test_a_part_is_an_unranked_chunk_that_answers_no_question() -> None:
+    found = part(TWO)
 
     assert [(hit.seq, hit.score) for hit in found.hits] == [(2, 0.0)]
-    assert (found.aspects, found.alone) == (["a"], False)
-    assert part(TWO).aspects == []
+    assert (found.aspects, found.alone) == ([], False)
 
 
 # --- rejoin, over many random parts ---------------------------------------------------------

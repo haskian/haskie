@@ -55,22 +55,23 @@ that hold it ([Storage](storage.md#sections-and-their-ids)). Then `embed_cache.w
 the sections and writes them into their own file beside the chunks', before the entry's row. So a
 cache hit has both. Each cache entry, so each chunking, has its own sections and descriptors.
 
-A descriptor strategy picks one to five words for each section that has any
-(`descriptors.Strategy`). It reads prose only: code blocks and tables name identifiers and values,
-not what a section is about. The only strategy, `ClassTfidf`, weighs the sections of one depth
-against each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25 weighting: a chapter's words
-against the other chapters'. Unlike BERTopic, it counts how many sections use a term rather than how
-often the whole book does. A term more than half the sections of a depth use is the book's topic, so
-it is no descriptor there. In one book on Domain-Driven Design, "model", "design" and "chapter" had
-been descriptors of 31 sections, and are of none. The whole document's section keeps them. Nor is a
-term whose every word the section's header already holds: "aggregates" under `Aggregates > Rule:
-Design Small Aggregates` says nothing new. With an embedding model, each section's best 20
-candidates are embedded in one call for the whole document. They are reranked against the
-section's vector (the mean of its chunks' unit vectors, scaled to length one, never stored), as
-BERTopic's `KeyBERTInspired` does. A word or word pair that a section uses once is left out, unless
-the section is too short to have enough used twice. Most such terms are halves of a word a PDF split
-over two lines, or two words that happen to meet. Measured once on one book (1.4 MB of markdown,
-1,776 chunks, bge-small, on the dev machine): the descriptors took 2.4 s, the chunk embeddings 50 s.
+A descriptor strategy picks up to five terms, each a word or a word pair, for each section that
+has any (`descriptors.Strategy`). It reads prose only: code blocks and tables name identifiers and
+values, not what a section is about. The only strategy, `ClassTfidf`, weighs the sections of one
+depth against each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25 weighting: a
+chapter's words against the other chapters'. Unlike BERTopic, it counts how many sections use a
+term rather than how often the whole book does. A term more than half the sections of a depth use
+is the book's topic, so it is no descriptor there. In one book on Domain-Driven Design, "model",
+"design" and "chapter" had been descriptors of 31 sections, and are of none. The whole document's
+section keeps them. Nor is a term whose every word the section's header already holds:
+"aggregates" under `Aggregates > Rule: Design Small Aggregates` says nothing new. With an
+embedding model, each section's best 20 candidates are embedded in one call for the whole
+document. They are reranked against the section's vector (the mean of its chunks' unit vectors,
+scaled to length one, never stored), as BERTopic's `KeyBERTInspired` does. A word or word pair
+that a section uses once is left out, unless the section is too short to have enough used twice.
+Most such terms are halves of a word a PDF split over two lines, or two words that happen to meet.
+Measured once on one book (1.4 MB of markdown, 1,776 chunks, bge-small, on the dev machine): the
+descriptors took 2.4 s, the chunk embeddings 50 s.
 
 **Batches.** Work is cut where the document's sections start (`indexing/parts.py`), so a section
 is whole in one batch wherever it can be. Batches are packed greedily: a batch holds as many whole

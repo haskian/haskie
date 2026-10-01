@@ -29,7 +29,6 @@ VERSION = "2026-07-28"  # the protocol version `litestar_mcp` speaks
 SESSION = "agent-1"
 TOOLS = {
     "search_excerpts",
-    "search_sources",
     "search_sections",
     "set_session_collections",
     "list_collections",
@@ -196,23 +195,14 @@ async def test_the_tools_an_agent_is_offered(client: AsyncTestClient) -> None:
             ),
         ),
         (
-            "the sources, one section each",
-            "search_sources",
-            {"q": BY_RETRY, "sections": 1},
-            lambda found: (
-                [one["document"] for one in found["documents"]] == ["retries.md"]
-                and found["collections"] == ["notes"]
-                and len(found["documents"][0]["sections"]) == 1
-            ),
-        ),
-        (
-            "a map of the sections",
+            "a map of the sections, and the documents it reached",
             "search_sections",
             {"q": BY_RETRY, "session_id": SESSION},
             lambda found: (
-                found["sections"][0]["document"] == "retries.md"
+                found["documents"][0]["document"] == "retries.md"
+                and found["sections"][0]["document_id"] == found["documents"][0]["document_id"]
                 and found["sections"][0]["descriptors"]
-                and found["collections"] == ["notes"]
+                and found["collections"] == found["searched"] == ["notes"]
             ),
         ),
     ],
@@ -230,7 +220,6 @@ async def test_every_read_tool_answers(
 # with (`api.agent`).
 VIEWS = [
     ("search_excerpts", {"q": [BY_RETRY]}, "/api/search/excerpts", {"q": BY_RETRY}, agent.Answer),
-    ("search_sources", {"q": BY_RETRY}, "/api/search/sources", {"q": BY_RETRY}, agent.Sources),
     ("search_sections", {"q": BY_RETRY}, "/api/search/sections", {"q": BY_RETRY}, agent.SectionMap),
 ]
 
@@ -302,12 +291,6 @@ async def test_a_tool_answers_with_fewer_fields_than_its_route(
             "search_excerpts",
             {"q": [BY_RETRY], "context": "x" * 201},
             "context is at most 200 characters",
-        ),
-        (
-            "an unknown collection to search",
-            "search_sources",
-            {"q": "x", "collections": "ghost"},
-            "collection not found: ghost",
         ),
         (
             "an unknown collection to map",

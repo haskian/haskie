@@ -31,7 +31,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 from uuid import uuid4
 
 import anyio
@@ -604,23 +604,8 @@ async def describe(id: str, description: str) -> Document:
 
 async def descriptions_of(docs: set[str]) -> dict[str, str]:
     """The descriptions of several documents in one query, keyed by id. A document with none
-    is absent from the result. Batched because the caller is a search shortlist."""
+    is absent from the result. Batched because the caller is a search's list of documents."""
     return await _by_id(documents.c.description, docs, documents.c.description != "")
-
-
-class Described(Protocol):
-    """A search row carrying the description of the document it points at."""
-
-    document_id: str
-    description: str
-
-
-def fill_descriptions(rows: Iterable[Described], described: dict[str, str]) -> None:
-    """Put each row's description on it, empty for a document that has none. A description
-    belongs to the document rather than to the row, so every search fills it the same way, from
-    one `descriptions_of` over its whole shortlist."""
-    for row in rows:
-        row.description = described.get(row.document_id, "")
 
 
 async def collections_of(id: str) -> list[str]:

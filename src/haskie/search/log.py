@@ -33,7 +33,7 @@ from sqlalchemy import delete, func, insert, select
 from haskie import audit, db, home
 from haskie.collection.index import Hit, HitReference, Relation
 from haskie.search import collapse, session
-from haskie.search.passage import Excerpt, Passage, PassageReference, Source
+from haskie.search.passage import Excerpt, Passage, PassageReference
 from haskie.search.section_map import MappedSection
 from haskie.settings import Reranker, SearchMode
 from haskie.tables import search_questions, search_results, searches
@@ -46,7 +46,6 @@ class Tool(StrEnum):
     """Which endpoint ran a search."""
 
     EXCERPTS = "excerpts"
-    SOURCES = "sources"
     SECTIONS = "sections"
     EXPLORE = "explore"
     TEXT = "text"
@@ -65,8 +64,8 @@ class LoggedResult(msgspec.Struct):
     relation: Relation | None  # how it overlaps its parent; None for a result
     collection: str
     document: str
-    seq_start: int | None  # the chunks it covers; None for a document row (`search_sources`)
-    seq_end: int | None
+    seq_start: int  # the chunks it covers
+    seq_end: int
     line_start: int
     line_end: int
     header: str
@@ -74,7 +73,7 @@ class LoggedResult(msgspec.Struct):
     score: float
 
 
-Place = Hit | HitReference | Passage | PassageReference | Excerpt | Source | MappedSection
+Place = Hit | HitReference | Passage | PassageReference | Excerpt | MappedSection
 
 
 def _folded(place: Place) -> list[PassageReference] | list[HitReference]:
@@ -82,7 +81,7 @@ def _folded(place: Place) -> list[PassageReference] | list[HitReference]:
     passages are the excerpt itself, what repeats them is somewhere else."""
     if isinstance(place, Excerpt):
         return [folded for span in place.spans for folded in span.also_in]
-    return [] if isinstance(place, Source | MappedSection) else place.also_in
+    return [] if isinstance(place, MappedSection) else place.also_in
 
 
 def flatten(found: Sequence[Place]) -> list[LoggedResult]:
@@ -103,11 +102,9 @@ def flatten(found: Sequence[Place]) -> list[LoggedResult]:
 def _result(place: Place, position: int, parent: int | None) -> LoggedResult:
     match place:
         case Hit() | HitReference():
-            seq: tuple[int | None, int | None] = (place.seq, place.seq)
+            seq = (place.seq, place.seq)
         case Passage() | PassageReference() | Excerpt() | MappedSection():
             seq = (place.seq_start, place.seq_end)
-        case Source():
-            seq = (None, None)
     return LoggedResult(
         position=position,
         parent=parent,

@@ -93,8 +93,8 @@ retrieval decisions, so the agent needs fewer round trips and fewer tokens.
 - **The agent decides, haskie does the legwork.** One `search_excerpts` call searches every
   collection in scope, merges neighbouring hits and folds repeats. A question with several parts
   goes in one call: each part gets its share of the slots, and each excerpt names the parts it
-  answers. `search_sources` names the documents and collections that cover a topic. Each excerpt
-  links to its full markdown file.
+  answers. `search_sections` maps where a topic lives: the sections, the documents and the
+  collections that cover it. Each excerpt links to its full markdown file.
 - **Local and polite to your machine.** Your documents never leave it. Only the models download,
   once, from Hugging Face. Indexing runs in parallel within a CPU budget you set, and after a crash
   the run resumes at the step it was on.
@@ -128,7 +128,8 @@ haskie uninstall claude     # removes all four again; documents and collections 
 - **Smoke test:** import a file on *Documents*, add it to a collection, then ask about it on
   *Explore*.
 - **Other commands:** `haskie stop`, `haskie run --foreground` (for a supervisor),
-  `haskie destroy`. `--port` or `HASKIE_PORT` moves the port, `--home` or `HASKIE_HOME` the data.
+  `haskie destroy`, `haskie version`. `--port` or `HASKIE_PORT` moves the port, `--home` or
+  `HASKIE_HOME` the data.
 
 ## From files to answers
 
@@ -138,10 +139,10 @@ haskie uninstall claude     # removes all four again; documents and collections 
    imported, and shows the nearest documents once done.
 2. **Collections.** Create one per topic and add its documents. Give it a one-line description.
    The agent reads it to choose where to look.
-3. **Explore.** Search and see what your agent finds: *Excerpts*, *Sources* and *Sections*, the
-   map of the sections a topic touches. Open a section to see what the map said about it and
-   the sections it covers, and its document at its heading. Switch to *Chunks* or *Passages* to
-   see how haskie cut the documents and built each answer.
+3. **Explore.** Search and see what your agent finds: *Excerpts* and *Sections*, the map of the
+   sections a topic touches and the documents that cover it. Open a section to see what the map
+   said about it and the sections it covers, and its document at its heading. Switch to *Chunks*
+   or *Passages* to see how haskie cut the documents and built each answer.
 
 **Operations** shows background jobs with their progress, and cancels running ones. **Sessions**
 replays each agent conversation. **Gaps** lists the questions your sources did not answer, grouped
@@ -181,14 +182,13 @@ change a document or collection take a `session_id`, so Sessions can replay the 
 | tool | what it does |
 | --- | --- |
 | `search_excerpts` | **The main search.** Passages ready to quote, best first (in turns for several parts), each with `header` and `location`. Repeats fold into `also_in`. Takes up to 5 parts of one question, and tags each excerpt with the parts it answers. `document_ids` and `section_ids` keep it to those documents and sections |
-| `search_sources` | Which documents and collections cover a topic. One row per document, with its best sections |
-| `search_sections` | A map of a topic: which sections of which documents touch it, near topics included, each with its descriptors and no text. Fast, for orientation before `search_excerpts`. Each section has an `id` to pass on as `section_ids` |
-| `set_session_collections` | Limits the rest of the conversation to the collections `search_sources` suggested |
+| `search_sections` | A map of a topic: which sections of which documents touch it, near topics included, each with its descriptors and no text, and the documents and collections that cover it. Fast, for orientation before `search_excerpts`. Each section has an `id` to pass on as `section_ids` |
+| `set_session_collections` | Limits the rest of the conversation to the collections `search_sections` suggested |
 | `list_collections`, `get_collection`, `list_collection_documents` | Browse collections and their descriptions |
 | `list_documents`, `get_document` | Browse documents |
 | `add_document` | Import a local file by path |
 | `add_document_to_collection`, `remove_document_from_collection` | Attach or detach a document |
-| `describe_document` | Set what a document is about. `search_sources` shows it |
+| `describe_document` | Set what a document is about. `search_sections` shows it |
 | `report_gap` | Say a search just run did not answer a question. The Gaps page shows it |
 | `list_searches`, `list_gaps`, `replay_gaps`, `review_gaps` | Read the search log and the questions it did not answer, ask them again, resolve or dismiss them ([Gaps](docs/gaps.md)) |
 
@@ -225,22 +225,22 @@ vector and full-text (BM25) search in one table, on a columnar format built for 
 [17]. So hybrid search needs no server.
 
 **Hybrid search and reranking.** Vectors find meaning. BM25 finds exact terms, such as an error
-code. haskie fuses both by rank (reciprocal rank fusion, RRF). An optional cross-encoder reads the
-query and passage together and rescores the top candidates. Adding one takes the cut in failed
-retrievals from 49% to 67% [14]. It is off by default. Settings offers models from 23 million
-parameters up to multilingual ones.
+code. By default haskie fuses both by rank (reciprocal rank fusion, RRF). An optional
+cross-encoder reads the query and passage together and rescores the top candidates. Adding one
+takes the cut in failed retrievals from 49% to 67% [14]. It is off by default. Settings offers
+models from 16 million parameters up to multilingual ones.
 
 **Repeats folded, passages whole.** Five books that make the same point would fill five of your
 agent's slots. Most rerankers score one passage at a time, so they cannot see repeats [18]. haskie
-merges hits on neighbouring chunks, then folds repeats with leader clustering. It walks the
-results best first and compares each one only with the results already kept, by wording and, for
-models with duplicate thresholds, by vector. The best result of each group keeps its place, so the
-ranking stays intact. Diversity rerankers such as maximal marginal relevance (MMR) reorder it
-instead. Comparing only with kept results stops chains, so A close to B and B close to C never
-merges A with C. The same input always gives the same output. A repeat stays citable as an
-`also_in` entry (`duplicate`, `contained` or `equivalent`), and its slot goes to the next distinct
-result. Repeated passages do not significantly improve answer correctness, while different
-documents improve it by 17–47% [19].
+merges hits on neighbouring chunks, then folds repeats with leader clustering. It walks the results
+best first and compares each one only with the results already kept, by wording and, for models with
+duplicate thresholds, by vector. Each group keeps the place and score of its best result, so the
+ranking stays intact; a later result that holds the kept one whole takes that slot. Diversity
+rerankers such as maximal marginal relevance (MMR) reorder it instead. Comparing only with kept
+results stops chains, so A close to B and B close to C never merges A with C. The same input always
+gives the same output. A repeat stays citable as an `also_in` entry (`duplicate`, `contained` or
+`equivalent`), and its slot goes to the next distinct result. Repeated passages do not significantly
+improve answer correctness, while different documents improve it by 17–47% [19].
 
 **Async-first, with durable jobs.** Every IO is awaited, and CPU work runs in worker threads, so
 search and the UI stay responsive while the machine indexes. Imports, indexing, deletes,

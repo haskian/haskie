@@ -41,6 +41,7 @@ export function effectiveSearch(overrides: SearchOverrides, defaults: SearchSett
     refine_factor: overrides.refine_factor ?? defaults.refine_factor,
     reranker: overrides.reranker ?? defaults.reranker,
     reranker_model: overrides.reranker_model ?? defaults.reranker_model,
+    map_reranker_model: overrides.map_reranker_model ?? defaults.map_reranker_model,
     rerank_with_context: overrides.rerank_with_context ?? defaults.rerank_with_context,
     min_rerank_score: overrides.min_rerank_score ?? defaults.min_rerank_score,
     score_fold: overrides.score_fold ?? defaults.score_fold,
@@ -57,7 +58,7 @@ export function effectiveSearch(overrides: SearchOverrides, defaults: SearchSett
 /**
  * Which search fields a form shows, in order: a field is only asked for when the effective
  * settings make it do something. Fusion weights belong to a hybrid query, and probes to a
- * vector one. The reranker model, and whether it reads the shared context, belong to a reranker.
+ * vector one. The reranker models, and whether one reads the shared context, belong to a reranker.
  * The candidate pool belongs to whichever of the two reads it. How chunk scores fold always
  * shows, since every search reads it. How passages grow is its own group
  * (`visibleExpansionFields`).
@@ -71,7 +72,7 @@ export function visibleSearchFields(effective: SearchSettings): (keyof SearchSet
   if (hybrid && effective.fusion === 'linear') fields.push('vector_weight', 'bm25_weight')
   if (effective.mode !== 'fts') fields.push('nprobes', 'refine_factor')
   fields.push('reranker')
-  if (reranked) fields.push('reranker_model', 'rerank_with_context', 'min_rerank_score', 'rerank_excerpts')
+  if (reranked) fields.push('reranker_model', 'map_reranker_model', 'rerank_with_context', 'min_rerank_score', 'rerank_excerpts')
   if (hybrid || reranked) fields.push('candidates')
   fields.push('score_fold')
   return fields

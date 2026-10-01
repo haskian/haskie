@@ -34,14 +34,14 @@ flowchart TB
   slot. A pipeline step holds a slot for its CPU part only, never for the IO around it. The pool is
   pebble's: a parser that crashes its worker fails only its own call, and a new worker takes its
   place. One exception runs on the event loop: stemming a search's answer (`probe.vocabulary`). It
-  remembers every word it stemmed, so it costs well under a millisecond once a server has seen the
-  words, and waiting for a slot that indexing holds would cost more. Another runs outside our
-  threads: maintenance has LanceDB train a vector index on its own runtime, where no slot can be
-  held (`maintenance.run`).
+  remembers the last 32,768 words it stemmed (`probe.stem`), so it costs well under a millisecond
+  once a server has seen the words, and waiting for a slot that indexing holds would cost more.
+  Another runs outside our threads: maintenance has LanceDB train a vector index on its own
+  runtime, where no slot can be held (`maintenance.run`).
 - **A budget change applies to running work.** A resize counts the slots already held, so a
-  raise from 2 to 3 admits one more job, not three. The process pool has one worker per slot. A
-  pool of the old size takes no new work, finishes what it took, and exits. The next extraction
-  builds a pool of the new size.
+  raise from 2 to 3 admits one more piece of work, not three. The process pool has one worker per
+  slot. A pool of the old size takes no new work, finishes what it took, and exits. The next
+  extraction builds a pool of the new size.
 - **Two loops, nothing shared.** Litestar and DBOS each run an event loop. They share no
   loop-bound primitive, so the budget is a `threading` semaphore, each loop has its own thread
   limiter, and the search fan-out builds its semaphore per call.
@@ -64,14 +64,14 @@ ONNX Runtime holds the global interpreter lock (GIL) while it builds a session. 
 waits for as long as the build takes, which can be seconds. ONNX models run on CUDA on Linux with
 an NVIDIA GPU, else on the CPU. On Apple Silicon the GPU is reached through MLX
 (`indexing/mlx_models.py`) and llama.cpp (`indexing/gguf_models.py`, the `-gguf` profiles), which
-load a model in under a second and release the GIL while they compute. llama.cpp's first load on a machine also compiles its Metal shaders,
-once, in about 8 s. MLX keeps its streams per thread, so every MLX load and forward pass runs on
-one thread of its own. CoreML runs ONNX models only when the hardware setting says `coreml`.
-It keeps compiled models under `cache/models`, so a model compiles once per home. Embedders and
-rerankers follow the same hardware setting. `indexing/hardware.py` decides the device of each
-model. A model with no device here, such as an MLX model without Apple Silicon, is refused by its
-loader and left out of `/api/options`. Settings that would strand a model are rejected. Each model
-in `/api/status` reports its device.
+load a model in under a second and release the GIL while they compute. llama.cpp's first load on
+a machine also compiles its Metal shaders, once, in about 8 s. MLX keeps its streams per thread,
+so every MLX load and forward pass runs on one thread of its own. CoreML runs ONNX models only
+when the hardware setting says `coreml`. It keeps compiled models under `cache/models`, so a model
+compiles once per home. Embedders and rerankers follow the same hardware setting.
+`indexing/hardware.py` decides the device of each model. A model with no device here, such as an
+MLX model without Apple Silicon, is refused by its loader and left out of `/api/options`. Settings
+that would strand a model are rejected. Each model in `/api/status` reports its device.
 
 A downloaded model still has to load into the process. A boot that finds a finished download warms
 it in a background task and reports it ready only after that. A search that needs a model still
