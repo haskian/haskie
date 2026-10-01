@@ -178,7 +178,10 @@ document_id:<id>;model:<model>;chunk_size:<n>;chunk_merge_below:<n>;chunk_frame:
 document prefix and Matryoshka recipe. Those are everything that shapes a stored vector, so a
 change to any of them misses the cache and needs no `chunk_version` bump.
 
-Same inputs give the same id, so the work runs once, until a re-import clears it. Two collections
+Same inputs give the same id, so the chunking and embedding run once, until a re-import clears
+them. The descriptor strategy is not in the key: it shapes no stored vector. The sections file
+names the strategy that wrote its descriptors instead, so a hit written by another strategy is
+described again from the cache, embedding nothing. Two collections
 that ask for the same missing entry at the same moment share one DBOS run. A collection with other
 chunk settings gets its own entry. The accelerator, the query prefix and the duplicate
 thresholds are not in the key: they shape no stored vector.
@@ -188,8 +191,10 @@ flowchart LR
     attach["attach document<br/>to collection"] --> key["URN from the collection's<br/>chunk settings + model"]
     key --> run["ensure_embedding<br/>(one run per id)"]
     run --> hit{"cached?"}
-    hit -- yes --> write["write rows into<br/>the collection's table"]
-    hit -- no --> embed["chunk + embed"] --> write
+    hit -- yes --> same{"described by the<br/>strategy asked for?"}
+    same -- yes --> write["write rows into<br/>the collection's table"]
+    same -- no --> describe["describe the<br/>sections"] --> write
+    hit -- no --> embed["chunk + embed"] --> describe
 ```
 
 Code: `document/document.py`, `collection/collection.py`, `indexing/embed_cache.py`.

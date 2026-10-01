@@ -114,7 +114,7 @@ def _key(written: str) -> str:
 
 
 def _prose(chunks: list[Chunk]) -> list[str]:
-    return [build.prose(chunk) for chunk in chunks]
+    return [build.prose(chunk.pieces) for chunk in chunks]
 
 
 def _described(embed: descriptors.Embed | None, vectors: bool = True) -> dict[str, build.Section]:

@@ -69,9 +69,8 @@ documents.
   on the topic left.
 - Per section: `id`, `document_id`, `header`, `location` (it names the document), `chars` (its
   length), `chunks` (how many of its chunks matched), `score`.
-- `descriptors`: one to five words or phrases for what the section is about, set apart from the
-  other sections of its depth, and not what its `header` already says unless it has no other
-  words. They are the sources' own vocabulary: a question asked in them finds the section.
+- `descriptors`: one to five words or phrases for what the section is about, and not what its
+  `header` already says unless it has no other words.
 - Picks come by coverage, not by score, so `score` does not fall down the list. A pick can still
   be back matter (an index, a bare "Summary" that names no chapter), and with no reranker a section
   that shares a word with the topic but not its meaning; the fewer the documents, the more of

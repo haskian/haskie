@@ -29,11 +29,13 @@ from dbos import DBOS
 
 from haskie.collection.collection import Collection
 from haskie.errors import HaskieError, NotReady, Unavailable
-from haskie.indexing import dbos_names, embed, models, operations, workflows
+from haskie.indexing import dbos_names, embed, gguf_models, models, operations, workflows
 from haskie.indexing.models import ModelKind, ModelLoading
 from haskie.settings import (
     CollectionOverrides,
+    Descriptors,
     Fusion,
+    PipelineSettings,
     Reranker,
     SearchMode,
     SearchOverrides,
@@ -341,6 +343,17 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
                 ("reranker", "BAAI/bge-reranker-base"),
             ],
         ),
+        (
+            "descriptors an llm writes",
+            UserSettings(
+                embedding="compact", pipeline=PipelineSettings(descriptors=Descriptors.LLM)
+            ),
+            [],
+            [
+                ("embedding", "BAAI/bge-small-en-v1.5"),
+                ("describer", "ggml-org/gemma-4-E2B-it-GGUF"),
+            ],
+        ),
     ],
 )
 async def test_required_models_follow_the_settings(
@@ -357,6 +370,51 @@ async def test_required_models_follow_the_settings(
     monkeypatch.setattr(models, "_collection_rerankers", overrides)
 
     assert await models.required(user) == expected, name
+
+
+async def test_the_describer_is_downloaded_by_its_own_loader(dbos, monkeypatch) -> None:
+    """The llm descriptor strategy needs its generator: a download record of its own kind, loaded
+    by the generator's loader, after which describing can ask it."""
+    loaded: list[str] = []
+    monkeypatch.setattr(embed, "warm_generator", lambda name, accelerator: loaded.append(name))
+    user = await save_user_settings(
+        UserSettings(embedding="none", pipeline=PipelineSettings(descriptors=Descriptors.LLM))
+    )
+
+    (status,) = await models.ensure_models(user)
+
+    assert (status.kind, status.name) == ("describer", gguf_models.DESCRIBER)
+    workflow_id = models._model_id(ModelKind.DESCRIBER, gguf_models.DESCRIBER)
+    await await_terminal([workflow_id])
+    assert loaded == [gguf_models.DESCRIBER]
+    await models.require_ready(ModelKind.DESCRIBER, gguf_models.DESCRIBER)  # no raise
+
+
+async def test_a_downloaded_model_nothing_requires_warms_when_asked_for(dbos, monkeypatch) -> None:
+    """The boot warms only what the settings require now. A run resumed after a change may still
+    ask for another downloaded model, the describer after a switch back to c-TF-IDF: asking warms
+    it, so the run's wait ends rather than loops."""
+    loaded: list[str] = []
+    monkeypatch.setattr(embed, "warm_generator", lambda name, accelerator: loaded.append(name))
+    user = await save_user_settings(
+        UserSettings(embedding="none", pipeline=PipelineSettings(descriptors=Descriptors.LLM))
+    )
+    await models.ensure_models(user)
+    workflow_id = models._model_id(ModelKind.DESCRIBER, gguf_models.DESCRIBER)
+    await await_terminal([workflow_id])
+    await save_user_settings(UserSettings(embedding="none"))  # nothing requires it now
+    models._ready.clear()  # a restart: the files stay, the caches do not
+    loaded.clear()
+
+    with pytest.raises(NotReady, match="is loading in this process"):
+        await models.require_ready(ModelKind.DESCRIBER, gguf_models.DESCRIBER)
+
+    async def warm() -> bool:
+        return models.is_warm(workflow_id)
+
+    await until(warm, "the ask never warmed the model")
+    assert loaded == [gguf_models.DESCRIBER]
+    await models.require_ready(ModelKind.DESCRIBER, gguf_models.DESCRIBER)  # no raise
 
 
 async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> None:

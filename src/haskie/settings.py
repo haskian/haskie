@@ -47,6 +47,11 @@ class Accelerator(StrEnum):
     COREML = "coreml"  # ONNX Runtime's CoreML on Apple Silicon, only when asked for (`embed`)
 
 
+class Descriptors(StrEnum):  # the strategies of `sections.descriptors`
+    C_TF_IDF = "c-tf-idf"
+    LLM = "llm"
+
+
 class SearchMode(StrEnum):
     HYBRID = "hybrid"
     VECTOR = "vector"
@@ -233,11 +238,24 @@ TASK_TIMEOUT = Meta(
 ACCELERATOR = Meta(
     title="Model hardware",
     description=(
-        "Device for the embedding and reranker models. auto: CUDA on Linux with an NVIDIA "
-        "GPU, else CPU. On Apple Silicon, the MLX and GGUF models run on the GPU, and auto runs "
-        "the rest on the CPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is "
-        "offered. coreml: run ONNX models through CoreML on Apple Silicon; today that is slower "
+        "Device for the embedding, reranker and descriptor models. auto: CUDA on Linux with an "
+        "NVIDIA GPU, else CPU. On Apple Silicon, the MLX and GGUF models run on the GPU, and auto "
+        "runs the rest on the CPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none "
+        "is offered. coreml: run ONNX models through CoreML on Apple Silicon; today that is slower "
         "than the CPU for them."
+    ),
+)
+DESCRIPTORS = Meta(
+    title="Section descriptors",
+    description=(
+        "How the words and phrases that say what each section is about are written, once per "
+        "document and chunk settings, as a step after embedding. c-tf-idf: the terms a section "
+        "uses more than the sections beside it, reranked by the embedding model; fast, runs "
+        "everywhere. llm: Gemma-4-E2B (2.8 GB download, Apache 2.0) reads each section and "
+        "names its topics; judged far better on technical books, about half a second a "
+        "section, Apple Silicon only, with a model hardware other than cpu. A change applies to "
+        'documents embedded or indexed afterwards; "Index all" in a collection re-describes the '
+        "rest, for every collection that chunks them alike, as they share the descriptors."
     ),
 )
 # How deep any search reads. A passage or a document row is folded from several chunks, so the scan
@@ -669,6 +687,7 @@ class PipelineSettings(msgspec.Struct):
     ann_min_rows: Annotated[int, ANN_MIN_ROWS] = 50_000
     preview_workers: Annotated[int, PREVIEW_WORKERS] = 2
     accelerator: Annotated[Accelerator, ACCELERATOR] = Accelerator.AUTO
+    descriptors: Annotated[Descriptors, DESCRIPTORS] = Descriptors.C_TF_IDF
 
     def __post_init__(self) -> None:
         _at_least(

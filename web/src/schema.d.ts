@@ -831,7 +831,7 @@ export interface components {
     schemas: {
         /**
          * Accelerator
-         * @description Device for the embedding and reranker models. auto: CUDA on Linux with an NVIDIA GPU, else CPU. On Apple Silicon, the MLX and GGUF models run on the GPU, and auto runs the rest on the CPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. coreml: run ONNX models through CoreML on Apple Silicon; today that is slower than the CPU for them.
+         * @description Device for the embedding, reranker and descriptor models. auto: CUDA on Linux with an NVIDIA GPU, else CPU. On Apple Silicon, the MLX and GGUF models run on the GPU, and auto runs the rest on the CPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. coreml: run ONNX models through CoreML on Apple Silicon; today that is slower than the CPU for them.
          * @default auto
          * @enum {string}
          */
@@ -999,6 +999,13 @@ export interface components {
         Describe: {
             description: string;
         };
+        /**
+         * Descriptors
+         * @description How the words and phrases that say what each section is about are written, once per document and chunk settings, as a step after embedding. c-tf-idf: the terms a section uses more than the sections beside it, reranked by the embedding model; fast, runs everywhere. llm: Gemma-4-E2B (2.8 GB download, Apache 2.0) reads each section and names its topics; judged far better on technical books, about half a second a section, Apple Silicon only, with a model hardware other than cpu. A change applies to documents embedded or indexed afterwards; "Index all" in a collection re-describes the rest, for every collection that chunks them alike, as they share the descriptors.
+         * @default c-tf-idf
+         * @enum {string}
+         */
+        Descriptors: "c-tf-idf" | "llm";
         /**
          * Device
          * @enum {string}
@@ -1438,7 +1445,7 @@ export interface components {
          * ModelKind
          * @enum {string}
          */
-        ModelKind: "embedding" | "reranker";
+        ModelKind: "embedding" | "reranker" | "describer";
         /**
          * ModelState
          * @enum {string}
@@ -1497,6 +1504,7 @@ export interface components {
             parsers: components["schemas"]["Parser"][];
             chunkers: components["schemas"]["Chunker"][];
             accelerators: components["schemas"]["Accelerator"][];
+            descriptors: components["schemas"]["Descriptors"][];
             search_modes: components["schemas"]["SearchMode"][];
             fusions: components["schemas"]["Fusion"][];
             score_folds: components["schemas"]["ScoreFold"][];
@@ -1697,6 +1705,7 @@ export interface components {
              */
             preview_workers: number;
             accelerator?: components["schemas"]["Accelerator"];
+            descriptors?: components["schemas"]["Descriptors"];
         };
         /** Position */
         Position: {

@@ -83,6 +83,7 @@ from haskie.indexing import (
     dbos_names,
     embed,
     embed_cache,
+    gguf_models,
     models,
     operations,
     pipeline,
@@ -95,6 +96,7 @@ from haskie.search import log
 from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
+    Descriptors,
     PipelineSettings,
     RetentionSettings,
     SearchOverrides,
@@ -977,7 +979,105 @@ async def test_reindexing_with_unchanged_settings_hits_the_cache(
     steps = await _steps(embedding)
     assert "cache_lookup" in steps, f"the run never looked the cache up: {steps}"
     assert "plan" not in steps and "try_finalize_embed" not in steps, "it returned on the hit"
+    assert "described_by" in steps and "try_describe" not in steps, "described alike already"
     assert len(await embed_cache.entries(doc.id)) == 1
+
+
+async def test_an_import_describes_its_sections_in_a_step_after_the_merge(
+    dbos, tmp_path: Path
+) -> None:
+    """Describing is a step of its own, after the merge, by the strategy the settings name."""
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+
+    (entry,) = await embed_cache.entries(doc.id)
+    assert await embed_cache.described_by(doc.id, entry.id) == Descriptors.C_TF_IDF
+    assert any(one.descriptors for one in await embed_cache.read_sections(doc.id, entry.id))
+    (run,) = await DBOS.list_workflows_async(name=dbos_names.EMBED_WORKFLOW)
+    steps = await _steps(run.workflow_id)
+    assert steps.index("try_finalize_embed") < steps.index("try_describe"), steps
+
+
+async def test_a_hit_another_strategy_described_is_described_again_from_the_cache(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A changed descriptor strategy re-describes an entry on its next index, from the cache: the
+    run waits for the describer, then writes its descriptors, and embeds nothing again."""
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+    spy = _spy_embed(monkeypatch)
+    monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await (await Collection.create("again")).add(doc.id)
+    prompts: list[str] = []
+
+    def reply(name: str, accelerator, prompt: str, max_tokens: int) -> str:
+        prompts.append(prompt)
+        return "Topic one | Topic two"
+
+    monkeypatch.setattr(embed, "reply", reply)
+    user = await load_user_settings()
+    llm = msgspec.structs.replace(user.pipeline, descriptors=Descriptors.LLM)
+    # saved, not applied: applying would download the describer
+    await save_user_settings(msgspec.structs.replace(user, pipeline=llm))
+
+    job_id = await dbos.start_index_collection_document("again", doc.id)
+    describer = models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER)
+    embedding = workflows.embed_id(job_id, doc.id)
+
+    async def waiting() -> bool:
+        return (await _steps(embedding)).count("try_describe") >= 2
+
+    await until(waiting, "the run never asked for the describer twice")
+    assert prompts == [], "nothing asked while the describer was on its way"
+    models._mark_ready(describer)
+    assert await wait_for(job_id) == "indexed"
+
+    (entry,) = await embed_cache.entries(doc.id)
+    assert sum(spy.calls.values()) == 1, "nothing embedded again"
+    assert await embed_cache.described_by(doc.id, entry.id) == Descriptors.LLM
+    described = await embed_cache.read_sections(doc.id, entry.id)
+    assert {tuple(one.descriptors) for one in described} <= {("Topic one", "Topic two"), ()}
+    assert len(prompts) == sum(bool(one.descriptors) for one in described) > 0
+
+
+async def test_an_embedding_run_describes_by_the_strategy_it_was_asked_for(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The strategy is the run's argument, not the settings when it runs: a run asked for under
+    llm describes by it, though the settings changed back meanwhile, and a hit described alike
+    loads no context at all."""
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    row = await document.named(doc.name)
+    params = embed_cache.params(row, (await load_user_settings()).conversion.chunking, None)
+    monkeypatch.setattr(embed, "reply", lambda name, accelerator, prompt, tokens: "Topic one")
+    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER))
+    assert (await load_user_settings()).pipeline.descriptors == Descriptors.C_TF_IDF
+
+    async def run(by: Descriptors) -> str:
+        with SetWorkflowID(f"{workflows.EMBED_PREFIX}:{row.id}:{uuid4().hex}"):
+            handle = await DBOS.enqueue_workflow_async(
+                workflows.EMBEDDING_QUEUE, workflows.ensure_embedding, row.id, params, by
+            )
+        await handle.get_result(polling_interval_sec=workflows.TASK_POLL)
+        return handle.workflow_id
+
+    described = await _steps(await run(Descriptors.LLM))
+    assert "try_describe" in described, described
+    cache_id = embed_cache.key(params)
+    assert await embed_cache.described_by(row.id, cache_id) == Descriptors.LLM
+
+    alike = await _steps(await run(Descriptors.LLM))
+    assert "load_context" not in alike and "try_describe" not in alike, alike
+
+    # a run recorded before the strategy was an argument describes by the settings
+    user = await load_user_settings()
+    await save_user_settings(msgspec.structs.replace(user, pipeline=PipelineSettings()))
+    with SetWorkflowID(f"{workflows.EMBED_PREFIX}:{row.id}:{uuid4().hex}"):
+        handle = await DBOS.enqueue_workflow_async(
+            workflows.EMBEDDING_QUEUE, workflows.ensure_embedding, row.id, params
+        )
+    assert await handle.get_result(polling_interval_sec=workflows.TASK_POLL) == cache_id
+    assert await embed_cache.described_by(row.id, cache_id) == Descriptors.C_TF_IDF
 
 
 async def test_concurrent_attaches_converge_on_one_embedding_run(
@@ -1232,12 +1332,13 @@ async def test_a_batch_waits_for_the_embedding_model_to_warm(
     assert await embed_cache.entries(doc.id), "the embedding is cached"
 
 
-async def test_the_merge_waits_for_the_embedding_model_to_warm(
+async def test_describing_waits_for_the_embedding_model_to_warm(
     dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The merge embeds the descriptor candidates. A restart after the last slice reaches it
-    before the boot warmed the model again: the run sleeps durably until the model is warm,
-    rather than spending the merge step's few retries and failing the import."""
+    """Describing by c-TF-IDF embeds the descriptor candidates. A restart after the last slice
+    reaches it before the boot warmed the model again: the run sleeps durably until the model is
+    warm, rather than spending the describe step's few retries and failing the import. The
+    merge before it needs no model, and runs once."""
 
     async def load_model(kind: str, name: str) -> None:
         pass
@@ -1251,7 +1352,7 @@ async def test_the_merge_waits_for_the_embedding_model_to_warm(
         nonlocal restarted, asked
         if restarted:
             asked += 1
-            if asked > workflows.RETRY_ATTEMPTS:  # more asks than the merge step alone makes
+            if asked > workflows.RETRY_ATTEMPTS:  # more asks than the describe step alone makes
                 models._mark_ready(download)  # the boot's warm-up is done
                 restarted = False
         await require_ready(kind, name)
@@ -1275,11 +1376,13 @@ async def test_the_merge_waits_for_the_embedding_model_to_warm(
 
     assert await wait_for(job_id) == "imported"
     steps = await _steps(run)
-    merge = steps.index("try_finalize_embed")
-    assert steps[merge : merge + 3] == ["try_finalize_embed", "DBOS.sleep", "try_finalize_embed"], (
-        "the merge found the model warming, slept, and ran again"
+    assert steps.count("try_finalize_embed") == 1, steps
+    describe = steps.index("try_describe")
+    assert steps[describe : describe + 3] == ["try_describe", "DBOS.sleep", "try_describe"], (
+        "describing found the model warming, slept, and ran again"
     )
-    assert await embed_cache.entries(doc.id), "the embedding is cached"
+    (entry,) = await embed_cache.entries(doc.id)
+    assert await embed_cache.described_by(doc.id, entry.id) == Descriptors.C_TF_IDF
 
 
 async def test_an_import_whose_embedding_model_failed_ends_in_error(

@@ -30,8 +30,11 @@ column is this module's own: `seq`, the row's 1-based position among the documen
 only the merge across parts can number (see `_merge`). File writes and reads run in a worker thread:
 pyarrow is sync.
 
-Each entry also keeps its document's sections, named and described at the merge
-(`sections_path`, `sections.build`).
+Each entry also keeps its document's sections (`sections_path`, `sections.build`): named at the
+merge, and described by a step of their own (`pipeline.describe`), which reads both files back
+(`inputs`). The sections file's schema metadata names the strategy that wrote its descriptors
+(`described_by`), so an entry described by another strategy than the settings now ask for is
+described again, from the cache, without embedding anything again.
 """
 
 import hashlib
@@ -48,16 +51,16 @@ import pyarrow.parquet as pq
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert
 
-from haskie import cpu, db, home
+from haskie import db, home
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.collection import MemberStatus
 from haskie.collection.index import Row, vector_field
 from haskie.document import document
 from haskie.indexing import chunk
-from haskie.indexing.chunk import CHUNK_VERSION, Chunk
+from haskie.indexing.chunk import CHUNK_VERSION, Chunk, Piece
 from haskie.search import collapse
-from haskie.sections import build, descriptors
-from haskie.settings import Chunker, ChunkSettings, Parser
+from haskie.sections import build
+from haskie.settings import Chunker, ChunkSettings, Descriptors, Parser
 from haskie.tables import collection_documents, documents, embeddings
 
 NO_MODEL = "none"  # the `model` of a profile without an embedding model: chunks only, no vectors
@@ -233,19 +236,12 @@ class _ChunkRow(msgspec.Struct):
 
 
 class Merged(msgspec.Struct):
-    """What `_merge` wrote, and what describing the sections reads: the chunks' prose, and the
-    sum of the unit vectors each section holds."""
+    """What `_merge` wrote: the sections it named, and the sum of every chunk's unit vector."""
 
     bytes: int
     rows: int
-    sections: list[build.Section]  # without descriptors yet
-    prose: list[str]  # each chunk's (`build.prose`), in `seq` order
-    sums: np.ndarray | None  # a row per section; None without an embedding model
-
-    @property
-    def summed(self) -> np.ndarray | None:
-        """The sum of every chunk's unit vector: the whole document's section holds them all."""
-        return None if self.sums is None or not self.sections else self.sums[0]
+    sections: list[build.Section]  # without descriptors yet (`describe`)
+    summed: np.ndarray | None  # None without an embedding model
 
 
 def _merge(document_id: str, parts: list[Path], target: Path, dims: int | None) -> Merged:
@@ -258,7 +254,7 @@ def _merge(document_id: str, parts: list[Path], target: Path, dims: int | None) 
     place that sees the whole document in order. Two passes, so no more than one part's vectors
     are held at once: the first reads where every chunk runs and names the sections
     (`build.sections`), the second writes each chunk with its id and sections, and sums its unit
-    vector into every section that holds it, for `write` to describe them with.
+    vector into the document's.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     # held for naming alone, not beside the second pass's vectors
@@ -270,8 +266,7 @@ def _merge(document_id: str, parts: list[Path], target: Path, dims: int | None) 
             for row in msgspec.json.decode(path.read_bytes(), type=list[_ChunkRow])
         ],
     )
-    sums = None if dims is None else np.zeros((len(found), dims), dtype=np.float64)
-    prose: list[str] = []
+    summed = None if dims is None else np.zeros(dims, dtype=np.float64)
     count = 0
     with home.atomic_replace(target) as tmp, pq.ParquetWriter(tmp, _schema(dims)) as writer:
         for part, path in enumerate(parts):
@@ -282,17 +277,20 @@ def _merge(document_id: str, parts: list[Path], target: Path, dims: int | None) 
                 row.seq = count
                 row.section_ids = [found[at].id for at in chain]
                 row.id = build.chunk_id(document_id, count)
-                prose.append(build.prose(row.chunk))
             writer.write_batch(_batch(part, rows, dims))
-            if sums is not None and rows:  # `_batch` has refused a row without a vector by now
-                units = collapse.unit_rows([row.vector for row in rows])
-                for row, unit in zip(rows, units, strict=True):
-                    sums[chains[row.seq - 1]] += unit
-    return Merged(bytes=target.stat().st_size, rows=count, sections=found, prose=prose, sums=sums)
+            if summed is not None and rows:  # `_batch` has refused a row without a vector by now
+                summed += collapse.unit_rows([row.vector for row in rows]).sum(axis=0)
+    return Merged(bytes=target.stat().st_size, rows=count, sections=found, summed=summed)
 
 
-def _write_sections(path: Path, found: list[build.Section]) -> None:
-    table = pa.Table.from_pylist([msgspec.to_builtins(one) for one in found], schema=_SECTIONS)
+# The key of the sections file's schema metadata that names the strategy its descriptors were
+# written by (`Descriptors`); a file the merge wrote has none yet.
+_DESCRIBED_BY = b"descriptors"
+
+
+def _write_sections(path: Path, found: list[build.Section], by: Descriptors | None) -> None:
+    schema = _SECTIONS if by is None else _SECTIONS.with_metadata({_DESCRIBED_BY: by.encode()})
+    table = pa.Table.from_pylist([msgspec.to_builtins(one) for one in found], schema=schema)
     with home.atomic_replace(path) as tmp:
         pq.write_table(table, tmp)
 
@@ -323,21 +321,17 @@ async def lookup(p: Params) -> str | None:
     return id
 
 
-async def write(
-    p: Params, parts: list[Path], dims: int | None, embed: descriptors.Embed | None
-) -> str:
-    """Merge the scratch rows of every part into the cache file, describe its sections into their
-    own file, publish its row, then drop the scratch directory. The drop comes last, so a retry
+async def write(p: Params, parts: list[Path], dims: int | None) -> str:
+    """Merge the scratch rows of every part into the cache file, name its sections into their own
+    file, publish its row, then drop the scratch directory. The drop comes last, so a retry
     before the row was written still finds its input. Both files are in place before the row: a
-    hit (`lookup`) has both. `embed` embeds the descriptor candidates; None ranks them by weight
-    alone."""
+    hit (`lookup`) has both. The sections have no descriptors yet: `describe` writes them, as a
+    step of its own."""
     id = key(p)
     target = file_path(p.document_id, id)
     merged = await anyio.to_thread.run_sync(_merge, p.document_id, parts, target, dims)
-    # the mean of a section's unit vectors scaled to length one, which the sum is too
-    vectors = None if merged.sums is None else collapse.unit_rows(merged.sums)
-    described = await cpu.on_cpu(build.describe, merged.sections, merged.prose, vectors, embed)
-    await anyio.to_thread.run_sync(_write_sections, sections_path(p.document_id, id), described)
+    path = sections_path(p.document_id, id)
+    await anyio.to_thread.run_sync(_write_sections, path, merged.sections, None)
     entry = Entry(
         **msgspec.structs.asdict(p),
         id=id,
@@ -354,6 +348,59 @@ async def write(
         )
     await home.remove_tree(scratch_dir(p.document_id, id))
     return id
+
+
+def _described_by(path: Path) -> Descriptors | None:
+    found = (pq.read_schema(path).metadata or {}).get(_DESCRIBED_BY)
+    return None if found is None else Descriptors(found.decode())
+
+
+async def described_by(doc: str, id: str) -> Descriptors | None:
+    """The strategy the descriptors of one cached embedding were written by; None before any."""
+    return await anyio.to_thread.run_sync(_described_by, sections_path(doc, id))
+
+
+class Described(msgspec.Struct):
+    """What describing one cached embedding's sections reads (`build.describe`)."""
+
+    sections: list[build.Section]
+    prose: list[str]  # each chunk's (`build.prose`), in `seq` order
+    vectors: np.ndarray | None  # each section's unit vector; None when not asked for
+
+
+def _inputs(doc: str, id: str, vectors: bool) -> Described:
+    """The sections and every chunk's prose, and with `vectors` each section's unit vector: the
+    mean of its chunks' unit vectors, scaled to length one. Read a row group at a time, and only
+    the columns needed, so no more than one part's vectors are held at once, as in `_merge`."""
+    found = _read_sections(sections_path(doc, id))
+    at = {one.id: position for position, one in enumerate(found)}
+    prose: list[str] = []
+    sums: np.ndarray | None = None
+    columns = ["pieces", *(["section_ids", "vector"] if vectors else [])]
+    with pq.ParquetFile(file_path(doc, id)) as file:
+        for batch in file.iter_batches(columns=columns):
+            pieces = msgspec.convert(batch.column("pieces").to_pylist(), list[list[Piece]])
+            prose.extend(build.prose(one) for one in pieces)
+            if not vectors:
+                continue
+            flat = batch.column("vector").flatten().to_numpy()
+            units = collapse.unit_rows(flat.reshape(batch.num_rows, -1))
+            if sums is None:
+                sums = np.zeros((len(found), units.shape[1]), dtype=np.float64)
+            for held, unit in zip(batch.column("section_ids").to_pylist(), units, strict=True):
+                sums[[at[one] for one in held]] += unit
+    return Described(found, prose, None if sums is None else collapse.unit_rows(sums))
+
+
+async def inputs(doc: str, id: str, vectors: bool) -> Described:
+    return await anyio.to_thread.run_sync(_inputs, doc, id, vectors)
+
+
+async def write_descriptors(
+    doc: str, id: str, described: list[build.Section], by: Descriptors
+) -> None:
+    """Replace the sections of one cached embedding with `described`, written by `by`."""
+    await anyio.to_thread.run_sync(_write_sections, sections_path(doc, id), described, by)
 
 
 def _read_sections(path: Path) -> list[build.Section]:

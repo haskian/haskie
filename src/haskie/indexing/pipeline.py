@@ -13,8 +13,11 @@ where a section is longer, when there are pages to cut at (`parts.cuts`):
   markdown without page markers is cut at headings alone (`plan_embed`). The cut depends on the
   markdown alone, so every collection that chunks the document, with any settings, chunks it from
   the same parts. `finalize_embed` merges every part into the one parquet cache file, numbering the
-  chunks and naming and describing their sections, and publishes it (`embed_cache.write`), which
-  also drops the scratch files. Skipped entirely when `embed_cache.lookup` finds the file.
+  chunks and naming their sections, and publishes it (`embed_cache.write`), which also drops the
+  scratch files. Skipped entirely when `embed_cache.lookup` finds the file. Then `describe`, one
+  step of its own, writes every section's descriptors, once per cached embedding and descriptor
+  strategy: again on a cache hit whose descriptors another strategy wrote
+  (`embed_cache.described_by`).
 - index (once per collection the document is attached to) -> rows of `index_group_parts`
   consecutive parts read out of the cache file and written to that collection's LanceDB table in
   one commit (fast; one writer per collection). `prepare_index` clears the document's older rows
@@ -45,10 +48,20 @@ from haskie.collection.index import Row
 from haskie.document import convert
 from haskie.document.bookmarks import Bookmark
 from haskie.document.document import Document
-from haskie.indexing import chunk, embed_cache, models, parts, segment
+from haskie.errors import PermanentError
+from haskie.indexing import (
+    chunk,
+    embed,
+    embed_cache,
+    gguf_models,
+    hardware,
+    models,
+    parts,
+    segment,
+)
 from haskie.indexing.segment import CutReason, SpanKind
-from haskie.sections import descriptors
-from haskie.settings import ChunkSettings
+from haskie.sections import build, generated
+from haskie.settings import Accelerator, ChunkSettings, Descriptors
 
 JOINER = "\n\n"  # between convert parts in the assembled markdown
 # About one printed page of markdown: what a page is where the text has no page markers to count
@@ -255,27 +268,56 @@ async def embed_batch(
 
 
 async def finalize_embed(
-    doc: Document, params: embed_cache.Params, embedding: EmbeddingModel | None, count: int
+    doc: Document, params: embed_cache.Params, dims: int | None, count: int
 ) -> None:
-    """Publish one computed embedding of `count` parts, its sections described, under
-    `embed_cache.key(params)`. The model embeds the descriptor candidates: it fails fast when not
-    loaded, as `embed_batch` does.
+    """Publish one computed embedding of `count` parts, its sections named, under
+    `embed_cache.key(params)`; `describe` writes their descriptors.
 
     A part whose rows were never written raises `FileNotFoundError` out of the merge, which
     leaves no partial cache file behind (see `embed_cache._merge`)."""
     cache_id = embed_cache.key(params)
     paths = [embed_cache.rows_path(doc.id, cache_id, part) for part in range(count)]
-    embed: descriptors.Embed | None = None
-    if embedding is not None:
-        await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
-        embed = partial(_embed, embedding)
-    await embed_cache.write(params, paths, embedding.dims if embedding else None, embed)
+    await embed_cache.write(params, paths, dims)
 
 
-def _embed(embedding: EmbeddingModel, texts: list[str]) -> list[list[float]]:
-    from haskie.indexing.embed import embed_texts  # heavy imports, as in `embed_batch`
+# --- describe -------------------------------------------------------------------
 
-    return embed_texts(embedding, texts)
+
+async def describe(
+    doc: Document,
+    cache_id: str,
+    embedding: EmbeddingModel | None,
+    by: Descriptors,
+    accelerator: Accelerator,
+) -> int:
+    """Write the descriptors of one cached embedding's sections by strategy `by`; returns how
+    many sections it described. c-TF-IDF embeds its candidates with the embedding model, and the
+    llm strategy asks the describer: either fails fast when its model is not loaded, as
+    `embed_batch` does. A describer the hardware setting leaves nowhere to run is permanent: it
+    would never load."""
+    if by == Descriptors.LLM:
+        if hardware.device(gguf_models.DESCRIBER, accelerator) is None:
+            # the settings changed under a run asked for llm: its model never warms here
+            raise PermanentError(hardware.nowhere(gguf_models.DESCRIBER))
+        await models.require_ready(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER)
+        found = await embed_cache.inputs(doc.id, cache_id, vectors=False)
+        strategy = generated.Generated(partial(embed.reply, gguf_models.DESCRIBER, accelerator))
+        # a worker thread without a CPU slot: the describer runs on the GPU, one prompt at a time,
+        # and documents waiting their turn there must not hold the slots searches need
+        described = await anyio.to_thread.run_sync(
+            build.describe, found.sections, found.prose, None, None, strategy
+        )
+    else:
+        embedder = None
+        if embedding is not None:
+            await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
+            embedder = partial(embed.embed_texts, embedding)
+        found = await embed_cache.inputs(doc.id, cache_id, vectors=embedder is not None)
+        described = await cpu.on_cpu(
+            build.describe, found.sections, found.prose, found.vectors, embedder
+        )
+    await embed_cache.write_descriptors(doc.id, cache_id, described, by)
+    return len(described)
 
 
 # --- index ----------------------------------------------------------------------

@@ -24,7 +24,7 @@ from haskie.indexing import embed_cache
 from haskie.indexing.chunk import CHUNK_VERSION, Chunk, Piece
 from haskie.indexing.embed_cache import NO_MODEL, Params
 from haskie.indexing.segment import PieceType
-from haskie.settings import Chunker, ChunkSettings, Parser
+from haskie.settings import Chunker, ChunkSettings, Descriptors, Parser
 from haskie.tables import embeddings
 
 pytestmark = pytest.mark.anyio  # most cases await; the pure ones ignore the marker
@@ -210,7 +210,7 @@ async def test_write_lookup_read_round_trip(
 
     assert await embed_cache.lookup(params) is None, f"{name}: nothing cached yet"
 
-    cache_id = await embed_cache.write(params, parts, dims, None)
+    cache_id = await embed_cache.write(params, parts, dims)
 
     assert cache_id == embed_cache.key(params), name
     assert await embed_cache.lookup(params) == cache_id, name
@@ -251,7 +251,7 @@ async def test_seq_numbers_the_whole_document_across_its_parts(tmp_path: Path) -
     assert all(row.seq == 0 for group in groups for row in group), "unnumbered going in"
     parts = _parts(tmp_path / "scratch", groups)
 
-    cache_id = await embed_cache.write(params, parts, None, None)
+    cache_id = await embed_cache.write(params, parts, None)
 
     read = [group async for group in embed_cache.read(doc.id, cache_id, 0, 4)]
 
@@ -270,7 +270,7 @@ async def test_read_of_a_range_returns_only_that_range(tmp_path: Path) -> None:
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
     parts = _parts(tmp_path / "scratch", [[_row(f"part {i}")] for i in range(4)])
-    cache_id = await embed_cache.write(params, parts, None, None)
+    cache_id = await embed_cache.write(params, parts, None)
 
     read = [part async for part, _ in embed_cache.read(doc.id, cache_id, 1, 3)]
 
@@ -288,7 +288,7 @@ async def test_write_consumes_the_scratch_directory_of_the_computation(tmp_path:
     parts = _parts(embed_cache.scratch_dir(doc.id, cache_id), [[_row("alpha")]])
     assert all(path.exists() for path in parts)
 
-    await embed_cache.write(params, parts, None, None)
+    await embed_cache.write(params, parts, None)
 
     assert not embed_cache.scratch_dir(doc.id, cache_id).exists(), "the scratch files are gone"
     assert embed_cache.file_path(doc.id, cache_id).is_file(), "the cache file is not"
@@ -300,9 +300,9 @@ async def test_a_second_write_of_the_same_params_is_a_no_op_row(tmp_path: Path) 
     params = msgspec.structs.replace(BASE, document_id=doc.id)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
 
-    first = await embed_cache.write(params, parts, None, None)
+    first = await embed_cache.write(params, parts, None)
     (before,) = await embed_cache.entries(doc.id)
-    again = await embed_cache.write(params, parts, None, None)
+    again = await embed_cache.write(params, parts, None)
 
     assert again == first, "the same params, so the same id"
     entries = await embed_cache.entries(doc.id)
@@ -350,7 +350,7 @@ async def test_write_stores_the_document_vector(
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
 
-    await embed_cache.write(params, _parts(tmp_path / "scratch", groups), dims, None)
+    await embed_cache.write(params, _parts(tmp_path / "scratch", groups), dims)
 
     stored = await _vector_of(doc.id)
     if expected is None:
@@ -367,7 +367,7 @@ async def _embedded(
         BASE, document_id=await id_of(name), model=model, chunk_size=size
     )
     parts = _parts(tmp_path / f"{name}-{model}-{size}", [[_row(name, vector)]])
-    await embed_cache.write(params, parts, len(vector), None)
+    await embed_cache.write(params, parts, len(vector))
 
 
 async def test_nearest_ranks_imported_documents_by_their_newest_vector(tmp_path: Path) -> None:
@@ -413,8 +413,8 @@ async def test_entries_lists_every_cache_of_one_document_newest_first(
         msgspec.structs.replace(BASE, document_id=doc.id, chunk_size=size)
         for size in (400, 800, 1200)
     ]
-    written = [await embed_cache.write(params, parts, None, None) for params in wanted]
-    await embed_cache.write(msgspec.structs.replace(BASE, document_id=other.id), parts, None, None)
+    written = [await embed_cache.write(params, parts, None) for params in wanted]
+    await embed_cache.write(msgspec.structs.replace(BASE, document_id=other.id), parts, None)
 
     entries = await embed_cache.entries(doc.id)
 
@@ -440,7 +440,7 @@ async def test_lookup_answers_a_hit_only_when_the_row_and_the_file_agree(
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
-    cache_id = await embed_cache.write(params, parts, None, None)
+    cache_id = await embed_cache.write(params, parts, None)
     if not keep_row:
         async with db.connect() as conn:
             await conn.execute(delete(embeddings).where(embeddings.c.id == cache_id))
@@ -464,7 +464,7 @@ async def test_a_failed_merge_leaves_no_partial_cache_file(tmp_path: Path) -> No
     missing = tmp_path / "scratch" / "000000.rows.json"  # never written by any embed slice
 
     with pytest.raises(FileNotFoundError):
-        await embed_cache.write(params, [missing], None, None)
+        await embed_cache.write(params, [missing], None)
 
     directory = doc.embeddings_dir
     assert list(directory.glob("*.parquet.tmp")) == [], "the temp file is removed by the failure"
@@ -479,7 +479,7 @@ async def test_writing_vectors_the_rows_do_not_carry_is_refused(tmp_path: Path) 
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])  # no vector on the row
 
     with pytest.raises(ValueError, match="carries no vector"):
-        await embed_cache.write(params, parts, 4, None)
+        await embed_cache.write(params, parts, 4)
 
     assert await embed_cache.lookup(params) is None
 
@@ -489,7 +489,7 @@ async def test_the_cache_row_goes_when_the_document_does(tmp_path: Path) -> None
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
     parts = _parts(tmp_path / "scratch", [[_row("alpha")]])
-    await embed_cache.write(params, parts, None, None)
+    await embed_cache.write(params, parts, None)
     assert len(await embed_cache.entries(doc.id)) == 1
 
     await document.remove_row(doc.id)
@@ -536,7 +536,7 @@ async def test_a_write_names_every_chunk_and_section(tmp_path: Path) -> None:
         _headed("A quorum read, once more: the quorum overlaps.", "Quorums", [0.0, 3.0, 0.0, 0.0]),
     ]
     cache_id = await embed_cache.write(
-        params, _parts(tmp_path / "scratch", [rows[:1], rows[1:]]), 4, None
+        params, _parts(tmp_path / "scratch", [rows[:1], rows[1:]]), 4
     )
 
     found = await embed_cache.read_sections(doc.id, cache_id)
@@ -554,9 +554,9 @@ async def test_a_write_names_every_chunk_and_section(tmp_path: Path) -> None:
     assert embed_cache.sections_path(doc.id, cache_id).parent == doc.embeddings_dir
 
 
-def test_the_merge_sums_each_sections_unit_vectors(tmp_path: Path) -> None:
-    """What the descriptors rerank against: every chunk's unit vector summed into each section
-    that holds it, so a long chunk weighs no more than a short one."""
+def test_the_merge_sums_the_documents_unit_vectors(tmp_path: Path) -> None:
+    """The document's vector: every chunk's unit vector summed, so a long chunk weighs no more
+    than a short one."""
     rows = [
         *_book(),
         _headed("A quorum read, once more: the quorum overlaps.", "Quorums", [0.0, 3.0, 0.0, 0.0]),
@@ -565,32 +565,51 @@ def test_the_merge_sums_each_sections_unit_vectors(tmp_path: Path) -> None:
 
     merged = embed_cache._merge("doc", parts, tmp_path / "out.parquet", 4)
 
-    assert merged.sums is not None and merged.sums.shape == (4, 4)
-    assert merged.sums[3] == pytest.approx([0.0, 2.0, 0.0, 0.0]), "unit vectors, then the sum"
-    assert merged.summed == pytest.approx([1.0, 2.0, 0.0, 0.0]), "the whole document's"
-    assert [text.startswith("A ") for text in merged.prose] == [True, True, True]
+    assert merged.summed == pytest.approx([1.0, 2.0, 0.0, 0.0]), "unit vectors, then the sum"
+    assert [one.descriptors for one in merged.sections] == [[], [], [], []], "not described yet"
 
 
-async def test_a_write_describes_every_section(tmp_path: Path) -> None:
-    """The descriptor candidates of the whole document are embedded in one call, and each
-    section keeps its own words, not its header's."""
+async def test_a_write_leaves_the_sections_to_describe(tmp_path: Path) -> None:
+    """Describing is a step of its own: the write names the sections, and what describing reads
+    comes back out of the two files, each section's unit vector the mean of its chunks'."""
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
-    calls: list[list[str]] = []
+    rows = [
+        *_book(),
+        _headed("A quorum read, once more: the quorum overlaps.", "Quorums", [0.0, 3.0, 0.0, 0.0]),
+    ]
+    cache_id = await embed_cache.write(params, _parts(tmp_path / "scratch", [rows]), 4)
 
-    def embed(texts: list[str]) -> list[list[float]]:
-        calls.append(texts)
-        return [[1.0, 0.0, 0.0, 0.0] if "saga" in text else [0.0, 1.0, 0.0, 0.0] for text in texts]
+    assert await embed_cache.described_by(doc.id, cache_id) is None
+    assert (await embed_cache.inputs(doc.id, cache_id, vectors=False)).vectors is None, "unasked"
+    found = await embed_cache.inputs(doc.id, cache_id, vectors=True)
+    assert [one.header for one in found.sections] == ["", "Book", "Book > Sagas", "Book > Quorums"]
+    assert [text.startswith("A ") for text in found.prose] == [True, True, True]
+    assert found.vectors is not None
+    assert found.vectors[3] == pytest.approx([0.0, 1.0, 0.0, 0.0]), "unit vectors, then unit"
+    # the book holds one chunk of sagas and two of quorums: (1, 2), scaled to length one
+    assert found.vectors[1] == pytest.approx(np.array([1.0, 2.0, 0.0, 0.0]) / 5**0.5)
 
-    cache_id = await embed_cache.write(params, _parts(tmp_path / "scratch", [_book()]), 4, embed)
 
-    sagas = (await embed_cache.read_sections(doc.id, cache_id))[2]
-    assert sagas.header == "Book > Sagas"
-    assert "step" in sagas.descriptors
-    assert "saga" not in sagas.descriptors, "its header says it"
-    assert not {"quorum", "majority", "replica"} & set(sagas.descriptors), "its own words only"
-    assert (sagas.line_start, sagas.page_start, sagas.page_end) == (1, 2, 3)
-    assert len(calls) == 1, "one embedding call per document"
+async def test_written_descriptors_round_trip_with_their_strategy(tmp_path: Path) -> None:
+    """The descriptors are written over the sections, and the file says which strategy wrote
+    them, so another strategy's are told apart; a second write replaces the first."""
+    doc = await import_row(DOC, BODY)
+    params = msgspec.structs.replace(BASE, document_id=doc.id)
+    cache_id = await embed_cache.write(params, _parts(tmp_path / "scratch", [_book()]), 4)
+    found = (await embed_cache.inputs(doc.id, cache_id, vectors=False)).sections
+    first = [msgspec.structs.replace(one, descriptors=["saga steps"]) for one in found]
+
+    await embed_cache.write_descriptors(doc.id, cache_id, first, Descriptors.C_TF_IDF)
+    assert await embed_cache.described_by(doc.id, cache_id) == Descriptors.C_TF_IDF
+    assert (await embed_cache.read_sections(doc.id, cache_id))[2].descriptors == ["saga steps"]
+
+    again = [msgspec.structs.replace(one, descriptors=["Compensating steps"]) for one in found]
+    await embed_cache.write_descriptors(doc.id, cache_id, again, Descriptors.LLM)
+    assert await embed_cache.described_by(doc.id, cache_id) == Descriptors.LLM
+    read = await embed_cache.read_sections(doc.id, cache_id)
+    assert [one.descriptors for one in read] == [["Compensating steps"]] * 4
+    assert [one.id for one in read] == [one.id for one in found], "the sections stay"
 
 
 async def test_each_chunking_keeps_its_own_sections(tmp_path: Path) -> None:
@@ -599,8 +618,8 @@ async def test_each_chunking_keeps_its_own_sections(tmp_path: Path) -> None:
     doc = await import_row(DOC, BODY)
     first = msgspec.structs.replace(BASE, document_id=doc.id)
     second = msgspec.structs.replace(first, chunk_size=400)
-    one = await embed_cache.write(first, _parts(tmp_path / "one", [_book()]), 4, None)
-    two = await embed_cache.write(second, _parts(tmp_path / "two", [_book()[:1]]), 4, None)
+    one = await embed_cache.write(first, _parts(tmp_path / "one", [_book()]), 4)
+    two = await embed_cache.write(second, _parts(tmp_path / "two", [_book()[:1]]), 4)
 
     assert len(await embed_cache.read_sections(doc.id, one)) == 4
     assert [one.header for one in await embed_cache.read_sections(doc.id, two)] == [
@@ -610,15 +629,19 @@ async def test_each_chunking_keeps_its_own_sections(tmp_path: Path) -> None:
     ]
 
 
-async def test_a_write_without_a_model_describes_by_weight(tmp_path: Path) -> None:
+async def test_the_inputs_without_a_model_read_the_prose_alone(tmp_path: Path) -> None:
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id, model=NO_MODEL)
     rows = [_headed(SAGAS_TEXT, "Sagas"), _headed(QUORUMS_TEXT, "Quorums")]
 
-    cache_id = await embed_cache.write(params, _parts(tmp_path / "scratch", [rows]), None, None)
+    cache_id = await embed_cache.write(params, _parts(tmp_path / "scratch", [rows]), None)
 
-    found = await embed_cache.read_sections(doc.id, cache_id)
-    assert len(found) == 4 and "majority" in found[3].descriptors
+    found = await embed_cache.inputs(doc.id, cache_id, vectors=False)
+    assert (len(found.sections), found.prose, found.vectors) == (
+        4,
+        [SAGAS_TEXT, QUORUMS_TEXT],
+        None,
+    )
 
 
 async def test_a_forgotten_entry_has_no_sections(tmp_path: Path) -> None:
@@ -626,7 +649,7 @@ async def test_a_forgotten_entry_has_no_sections(tmp_path: Path) -> None:
     read as none, not as an error."""
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
-    cache_id = await embed_cache.write(params, _parts(tmp_path / "one", [_book()]), 4, None)
+    cache_id = await embed_cache.write(params, _parts(tmp_path / "one", [_book()]), 4)
 
     await embed_cache.forget(doc.id)
 
@@ -647,7 +670,7 @@ async def test_corpus_sum_adds_the_indexed_members_by_their_chunks(tmp_path: Pat
         await document.set_status(doc.id, DocumentStatus.IMPORTED)
         params = msgspec.structs.replace(BASE, document_id=doc.id, model=TINY.cache_name)
         rows = [_row(name, vector) for vector in vectors]
-        cache_id = await embed_cache.write(params, _parts(tmp_path / name, [rows]), 4, None)
+        cache_id = await embed_cache.write(params, _parts(tmp_path / name, [rows]), 4)
         await notes.add(doc.id)
         await notes.set_member_entry(doc.id, cache_id)
         if name != "pending.md":

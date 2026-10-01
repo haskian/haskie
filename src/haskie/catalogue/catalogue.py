@@ -20,9 +20,15 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from haskie import db, home
 from haskie.errors import InvalidInput
-from haskie.indexing import hardware
+from haskie.indexing import gguf_models, hardware
 from haskie.indexing.hardware import Device, Runtime
-from haskie.settings import NO_EMBEDDING, Accelerator, CollectionOverrides, Reranker, UserSettings
+from haskie.settings import (
+    NO_EMBEDDING,
+    Accelerator,
+    CollectionOverrides,
+    Reranker,
+    UserSettings,
+)
 from haskie.tables import embedding_profiles, models, reranker_calibration
 
 
@@ -275,7 +281,8 @@ async def _exists(conn: AsyncConnection, statement: Select[Any]) -> bool:
 
 async def check(settings: UserSettings | CollectionOverrides) -> None:
     """Reject settings that name a profile or a reranker model the catalogue does not hold, or
-    user settings whose hardware setting leaves a model they use nowhere to run. Only here, where
+    user settings whose hardware setting leaves a model they use nowhere to run, the describer
+    of `Descriptors.LLM` among them. Only here, where
     settings are written: a stored row that no longer runs still loads, and its model reports why.
     """
     async with db.read() as conn:
@@ -294,6 +301,8 @@ async def _stranded(settings: UserSettings) -> str:
         used.append((await embedders())[settings.embedding].name)
     if settings.search.reranker != Reranker.NONE:
         used += settings.search.reranker_models
+    if describer := gguf_models.describer(settings.pipeline.descriptors):
+        used.append(describer)
     return "; ".join(
         hardware.nowhere(name) for name in used if hardware.device(name, accelerator) is None
     )

@@ -1,8 +1,9 @@
 """The words that say what a section is about, and what sets it apart from the sections beside it.
 
-Each section's descriptors are picked through a `Strategy`. `ClassTfidf` is the one there is,
-four steps, three of them the ones BERTopic describes for a topic, with a section in place of a
-topic:
+Each section's descriptors are picked through a `Strategy`, the one the settings name
+(`settings.Descriptors`): `ClassTfidf` here, or `generated.Generated`, which asks a language model.
+`ClassTfidf` is four steps, three of them the ones BERTopic describes for a topic, with a section in
+place of a topic:
 
 - **Terms.** A text's words, lowercase, three letters or more, no stopwords, counted by their
   stem (`probe.stem`, the Snowball stemmer LanceDB's full-text index uses), and every pair of

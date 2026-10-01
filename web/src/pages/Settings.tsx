@@ -183,6 +183,14 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
             />
             <span className="faint">{skipOcr.description}</span>
           </div>
+          <Field label={docFor(docs, 'pipeline.descriptors').title} help={docFor(docs, 'pipeline.descriptors').description}>
+            <Picker
+              ariaLabel={docFor(docs, 'pipeline.descriptors').title}
+              options={choices(options.descriptors)}
+              value={settings.pipeline.descriptors}
+              onChange={(descriptors) => pipeline({ descriptors })}
+            />
+          </Field>
         </section>
 
         <section id="chunking">

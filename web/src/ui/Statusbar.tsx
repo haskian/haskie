@@ -34,6 +34,8 @@ export function Statusbar({ status }: { status: Status }) {
   const embedding = status.models.filter((model) => model.kind === 'embedding')
   // a reranker is in the list only when one is on, in the settings or a collection's overrides
   const rerankers = status.models.filter((model) => model.kind === 'reranker')
+  // the describer only when the settings ask a language model for section descriptors
+  const describers = status.models.filter((model) => model.kind === 'describer')
 
   return (
     <div className="statusbar" role="status">
@@ -46,6 +48,7 @@ export function Statusbar({ status }: { status: Status }) {
       </span>
       <Models label="Embedding" models={embedding} none="full-text only" />
       {rerankers.length > 0 && <Models label="Reranker" models={rerankers} />}
+      {describers.length > 0 && <Models label="Describer" models={describers} />}
       <span className="spacer" />
       <a className="statusbar-item" href={href({ name: 'operations' })}>
         <Activity className="icon" />

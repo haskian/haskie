@@ -15,8 +15,9 @@ SUCCESS record still has cold caches. `_ready` holds the ids this process has lo
 Loading a model is CPU work, not IO, so it goes through `cpu.on_cpu`: a worker thread, under one
 slot of the CPU budget, whichever event loop asked for it.
 
-Depends on leaf modules only (`cpu`, `embed`, `settings`, `catalogue`, `dbos_names`): `index`
-and `pipeline` import this module, so it must not reach back into them or into `workflows`.
+Depends on leaf modules only (`cpu`, `embed`, `gguf_models`, `settings`, `catalogue`,
+`dbos_names`): `index` and `pipeline` import this module, so it must not reach back into them or
+into `workflows`.
 `collection` is read through a function-local import for the same reason (see
 `_collection_rerankers`).
 """
@@ -32,7 +33,7 @@ from dbos import WorkflowStatus as DbosWorkflowStatus
 from haskie import cpu
 from haskie.catalogue import catalogue
 from haskie.errors import HaskieError, NotReady, Unavailable
-from haskie.indexing import embed, hardware
+from haskie.indexing import embed, gguf_models, hardware
 from haskie.indexing.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, RunStatus, root_cause
 from haskie.indexing.hardware import Device
 from haskie.logs import get_logger
@@ -63,6 +64,7 @@ class ModelLoading(NotReady):
 class ModelKind(StrEnum):
     EMBEDDING = "embedding"
     RERANKER = "reranker"
+    DESCRIBER = "describer"  # writes section descriptors (`gguf_models.DESCRIBER`)
 
 
 class ModelState(StrEnum):
@@ -93,7 +95,11 @@ async def warm_model(kind: ModelKind, name: str) -> None:
     The load itself is CPU (and, on a cold cache, a download inside fastembed), so it runs in a
     worker thread under one slot of the CPU budget rather than on the caller's loop."""
     accelerator = (await load_user_settings()).pipeline.accelerator
-    warm = embed.warm_reranker if kind == ModelKind.RERANKER else embed.warm
+    warm = {
+        ModelKind.EMBEDDING: embed.warm,
+        ModelKind.RERANKER: embed.warm_reranker,
+        ModelKind.DESCRIBER: embed.warm_generator,
+    }[kind]
     await cpu.on_cpu(warm, name, accelerator)
 
 
@@ -141,6 +147,8 @@ async def required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
     if settings.search.reranker == Reranker.CROSS_ENCODER:
         wanted.extend((ModelKind.RERANKER, name) for name in settings.search.reranker_models)
     wanted.extend((ModelKind.RERANKER, name) for name in await _collection_rerankers(settings))
+    if describer := gguf_models.describer(settings.pipeline.descriptors):
+        wanted.append((ModelKind.DESCRIBER, describer))
     return list(dict.fromkeys(wanted))
 
 
@@ -316,9 +324,10 @@ async def require_ready(kind: ModelKind, name: str) -> None:
         raise Unavailable(f"{kind} model {name} failed to load: {status.error}")
     if status.state == ModelState.PENDING:
         raise ModelLoading(f"{kind} model {name} is not loaded yet; check /api/status")
-    if (
-        found and found[0].status == RunStatus.SUCCESS
-    ):  # downloaded, warming up (see `_model_status`)
+    if found and found[0].status == RunStatus.SUCCESS:
+        # downloaded, warming up (see `_model_status`); warmed here too, since the boot warms only
+        # what the settings require now, and a run resumed after a change may ask for another
+        _warm_in_background(kind, name)
         raise ModelLoading(f"{kind} model {name} is loading in this process; retry in a moment")
     raise ModelLoading(
         f"{kind} model {name} is downloading (operation {workflow_id}); "
