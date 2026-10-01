@@ -41,6 +41,8 @@ dependencies = [
     "numpy>=2.0",
     "pebble>=5.2.2",
     "snowballstemmer>=3.1.1",
+    "pillow>=12.3.0",
+    "pypdfium2>=5.13.0",
 ]
 
 [project.scripts]

@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import type { Chunker, ChunkSettings, CollectionOverrides, FillValues, Fusion, Options, Reranker, ScoreFold, SearchMode, SearchSettings } from '../../api'
-import { effectiveSearch, Field, Picker, rerankerOption, SEARCH_BOUNDS, visibleExpansionFields, visibleSearchFields, type KeysOf, type NumericKeys, type PickerOption } from '../../ui'
+import { effectiveSearch, Field, Info, Picker, rerankerOption, SEARCH_BOUNDS, visibleExpansionFields, visibleSearchFields, type KeysOf, type NumericKeys, type PickerOption } from '../../ui'
 
 type SearchField = keyof SearchSettings
 
@@ -157,7 +157,7 @@ export function SettingsForm({
 
   return (
     <div className="collection-settings">
-      {outdated && <p className="muted">index was built by an older version — use Index all to rebuild it</p>}
+      {outdated && <Info>The index was built by an older version. Use Index all to rebuild it.</Info>}
       <span className="mono muted">Chunking</span>
       <div className="collection-fields">
         {enumInput('chunker', 'conversion.chunker', options.chunkers, draft.chunker, effective.chunker, (next) =>

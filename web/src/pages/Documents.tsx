@@ -13,6 +13,7 @@ import {
   type DocumentStatus,
   type Document,
   type EmbeddingEntry,
+  type Sections,
   type Similar,
 } from "../api";
 import type { DroppedProps, PageProps } from "../App";
@@ -29,9 +30,9 @@ import {
   DocumentPanes,
   GallerySection,
   groupByRange,
+  Info,
   Kv,
   Modal,
-  RenameForm,
   Shell,
   SearchBox,
   Tabs,
@@ -41,6 +42,7 @@ import {
 import "./Documents.css";
 import { embeddingLabel } from "./documents/embedding";
 import { groupByDay, groupByStatus } from "./documents/group";
+import { SectionsTab } from "./documents/Sections";
 import { Duplicate, JustImported, SimilarDocuments } from "./documents/Similar";
 import { fresh, importedNames, importLabel, staged as stagedFrom, waitingAfter, type StagedFile } from "./documents/staged";
 
@@ -205,7 +207,8 @@ export function Documents({
                   </>
                 }
                 meta={day(doc.created_at)}
-                hint={doc.description || "No description"}
+                description={doc.description}
+                cover={api.coverUrl(doc.name)}
                 onClick={() => navigate({ name: "documents", document: doc.name })}
               />
             ))}
@@ -337,10 +340,12 @@ const RETRYABLE: readonly DocumentStatus[] = ["error", "cancelled"];
 
 const CONTENT_TAB = "modal-content";
 const COLLECTIONS_TAB = "modal-collections";
+const SECTIONS_TAB = "modal-sections";
 const SIMILAR_TAB = "modal-similar";
 const IMPORT_TAB = "modal-import";
 const MODAL_TABS: TabDef[] = [
   { id: CONTENT_TAB, label: "Content" },
+  { id: SECTIONS_TAB, label: "Sections" },
   { id: COLLECTIONS_TAB, label: "Collections" },
   { id: SIMILAR_TAB, label: "Similar" },
   { id: IMPORT_TAB, label: "Info" },
@@ -361,6 +366,7 @@ function DocumentModal({
   const [collections, setCollections] = useState<string[]>([]);
   const [embeddings, setEmbeddings] = useState<EmbeddingEntry[]>([]);
   const [similar, setSimilar] = useState<Similar | null>(null);
+  const [sections, setSections] = useState<Sections | null>(null);
 
   // The three reads the modal needs, in one round: the row itself, who holds it, what is cached.
   const load = useCallback((): Promise<void> => {
@@ -390,6 +396,13 @@ function DocumentModal({
     api.similarDocuments(doc).then(setSimilar).catch((cause: unknown) => setError(errorText(cause)));
   }, [similarOpen, doc, similar, setError]);
 
+  // Read when the tab is first opened, like Similar: a long book has hundreds of sections.
+  const sectionsOpen = tab === SECTIONS_TAB;
+  useEffect(() => {
+    if (!sectionsOpen || doc === null || sections !== null) return;
+    api.documentSections(doc).then(setSections).catch((cause: unknown) => setError(errorText(cause)));
+  }, [sectionsOpen, doc, sections, setError]);
+
   // A deletion is accepted (202) and runs in the background: the modal follows it, then
   // closes and lets the listing re-read itself.
   const onDeleted = useCallback(() => {
@@ -404,20 +417,6 @@ function DocumentModal({
       return;
     deletion
       .start(() => api.deleteDocument(doc))
-      .catch((cause: unknown) => setError(errorText(cause)));
-  };
-
-  // Not through `run`: its re-read would ask for the old name. The route moves to the new one,
-  // and the modal reads the document there.
-  const rename = (to: string) => {
-    if (doc === null) return;
-    setError(null);
-    api
-      .renameDocument(doc, to)
-      .then((renamed) => {
-        onChanged();
-        navigate({ name: "documents", document: renamed.name });
-      })
       .catch((cause: unknown) => setError(errorText(cause)));
   };
 
@@ -470,13 +469,16 @@ function DocumentModal({
       >
         {row !== null && <DocumentPanes doc={row.name} preview={row.preview} />}
       </div>
+      <div id={SECTIONS_TAB} role="tabpanel" hidden={tab !== SECTIONS_TAB}>
+        {sections !== null && <SectionsTab found={sections} />}
+      </div>
       <div
         id={COLLECTIONS_TAB}
         role="tabpanel"
         hidden={tab !== COLLECTIONS_TAB}
       >
         {collections.length === 0 ? (
-          <p className="muted">In no collection yet.</p>
+          <Info>In no collection yet.</Info>
         ) : (
           <ul className="list">
             {collections.map((name) => (
@@ -496,7 +498,6 @@ function DocumentModal({
         {similar !== null && <SimilarDocuments similar={similar} />}
       </div>
       <div id={IMPORT_TAB} role="tabpanel" hidden={tab !== IMPORT_TAB}>
-        {doc !== null && <RenameForm key={doc} name={doc} label="Document name" busy={busy} onRename={rename} />}
         <div className="split">
           <section className="pane">
             <span className="pane-head mono muted">Details</span>

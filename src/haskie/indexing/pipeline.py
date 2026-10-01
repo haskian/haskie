@@ -1,6 +1,6 @@
 """Convert, embed and index steps as micro-batches cut by sections, so memory stays bounded.
 
-Three stages, each a set of independent, idempotent steps, and each with its own owner. Work is
+Four stages, each a set of independent, idempotent steps, and each with its own owner. Work is
 cut where the document's sections start, packed up to `batch_pages` pages a batch, and at pages
 where a section is longer, when there are pages to cut at (`parts.cuts`):
 
@@ -14,10 +14,12 @@ where a section is longer, when there are pages to cut at (`parts.cuts`):
   markdown alone, so every collection that chunks the document, with any settings, chunks it from
   the same parts. `finalize_embed` merges every part into the one parquet cache file, numbering the
   chunks and naming their sections, and publishes it (`embed_cache.write`), which also drops the
-  scratch files. Skipped entirely when `embed_cache.lookup` finds the file. Then `describe`, one
-  step of its own, writes every section's descriptors, once per cached embedding and descriptor
-  strategy: again on a cache hit whose descriptors another strategy wrote
-  (`embed_cache.described_by`).
+  scratch files. Skipped entirely when `embed_cache.lookup` finds the file.
+- describe (once per cached embedding and descriptor strategy, again on a cache hit whose
+  descriptors another strategy wrote, see `embed_cache.described_by`) ->
+  `embeddings/<id>.tmp/NNNNNN.descriptors.json`: the descriptors of a run of sections, sixteen a
+  batch for the llm strategy, all of them in one for c-TF-IDF (`plan_describe`).
+  `finalize_describe` puts them on the sections file and drops the scratch files.
 - index (once per collection the document is attached to) -> rows of `index_group_parts`
   consecutive parts read out of the cache file and written to that collection's LanceDB table in
   one commit (fast; one writer per collection). `prepare_index` clears the document's older rows
@@ -71,8 +73,8 @@ PAGE_CHARS = 3_000
 
 class Batch(msgspec.Struct):
     seq: int
-    start: int  # convert: first page, 0-based; embed/index: part number
-    end: int  # convert: exclusive page bound; embed/index: part number + 1
+    start: int  # convert: first page, 0-based; embed/index: part number; describe: first section
+    end: int  # convert: exclusive page bound; embed/index: part number + 1; describe: section bound
     line_offset: int = 0  # embed: lines / chars / bytes preceding this part in the assembled file
     char_offset: int = 0
     byte_offset: int = 0
@@ -283,40 +285,86 @@ async def finalize_embed(
 # --- describe -------------------------------------------------------------------
 
 
-async def describe(
-    doc: Document,
-    cache_id: str,
-    embedding: EmbeddingModel | None,
-    by: Descriptors,
-    accelerator: Accelerator,
-) -> int:
-    """Write the descriptors of one cached embedding's sections by strategy `by`; returns how
-    many sections it described. c-TF-IDF embeds its candidates with the embedding model, and the
-    llm strategy asks the describer: either fails fast when its model is not loaded, as
-    `embed_batch` does. A describer the hardware setting leaves nowhere to run is permanent: it
-    would never load."""
+# sections one batch of the llm strategy asks about: about 8 s at 0.5 s a section, so the
+# Operations view moves often, and a crash repeats little
+DESCRIBE_SECTIONS = 16
+
+
+async def plan_describe(doc: Document, cache_id: str, by: Descriptors) -> list[Batch]:
+    """The describe batches of one cached embedding, by section index. The llm strategy reads one
+    section a prompt, so its sections batch up freely. c-TF-IDF weighs every section against the
+    whole document, so it is one batch."""
+    count = len(await embed_cache.read_sections(doc.id, cache_id))
+    size = DESCRIBE_SECTIONS if by == Descriptors.LLM else max(1, count)
+    return [
+        Batch(seq=seq, start=start, end=min(start + size, count))
+        for seq, start in enumerate(range(0, count, size))
+    ]
+
+
+async def describe_ready(
+    embedding: EmbeddingModel | None, by: Descriptors, accelerator: Accelerator
+) -> None:
+    """Fail fast when the model strategy `by` describes with is not loaded, as `embed_batch`
+    does: the describer for llm, the embedding model c-TF-IDF reranks its candidates with. A
+    describer the hardware setting leaves nowhere to run is permanent: it would never load."""
     if by == Descriptors.LLM:
         if hardware.device(gguf_models.DESCRIBER, accelerator) is None:
             # the settings changed under a run asked for llm: its model never warms here
             raise PermanentError(hardware.nowhere(gguf_models.DESCRIBER))
         await models.require_ready(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER)
+    elif embedding is not None:
+        await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
+
+
+async def describe_batch(
+    doc: Document,
+    cache_id: str,
+    embedding: EmbeddingModel | None,
+    by: Descriptors,
+    accelerator: Accelerator,
+    batch: Batch,
+) -> int:
+    """Write the descriptors of sections [start, end) of one cached embedding by strategy `by`
+    into a scratch file of the batch; returns how many sections it described."""
+    await describe_ready(embedding, by, accelerator)
+    span = slice(batch.start, batch.end)
+    if by == Descriptors.LLM:
         found = await embed_cache.inputs(doc.id, cache_id, vectors=False)
         strategy = generated.Generated(partial(embed.reply, gguf_models.DESCRIBER, accelerator))
         # a worker thread without a CPU slot: the describer runs on the GPU, one prompt at a time,
         # and documents waiting their turn there must not hold the slots searches need
         described = await anyio.to_thread.run_sync(
-            build.describe, found.sections, found.prose, None, None, strategy
+            build.describe, found.sections[span], found.prose, None, None, strategy
         )
     else:
-        embedder = None
-        if embedding is not None:
-            await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
-            embedder = partial(embed.embed_texts, embedding)
+        embedder = None if embedding is None else partial(embed.embed_texts, embedding)
         found = await embed_cache.inputs(doc.id, cache_id, vectors=embedder is not None)
+        vectors = None if found.vectors is None else found.vectors[span]
         described = await cpu.on_cpu(
-            build.describe, found.sections, found.prose, found.vectors, embedder
+            build.describe, found.sections[span], found.prose, vectors, embedder
         )
+    path = embed_cache.descriptors_path(doc.id, cache_id, batch.seq)
+    await anyio.Path(path.parent).mkdir(parents=True, exist_ok=True)
+    await home.atomic_write(path, msgspec.json.encode([one.descriptors for one in described]))
+    return len(described)
+
+
+async def finalize_describe(doc: Document, cache_id: str, by: Descriptors, count: int) -> int:
+    """Put the descriptors every one of `count` batches wrote on the sections of one cached
+    embedding, written by `by`, then drop the scratch files; returns how many sections it
+    described. The drop comes last, so a retry still finds its input."""
+    found = await embed_cache.read_sections(doc.id, cache_id)
+    words: list[list[str]] = []
+    for seq in range(count):
+        path = anyio.Path(embed_cache.descriptors_path(doc.id, cache_id, seq))
+        words.extend(msgspec.json.decode(await path.read_bytes(), type=list[list[str]]))
+    described = [
+        msgspec.structs.replace(one, descriptors=each)
+        for one, each in zip(found, words, strict=True)
+    ]
     await embed_cache.write_descriptors(doc.id, cache_id, described, by)
+    await home.remove_tree(embed_cache.scratch_dir(doc.id, cache_id))
     return len(described)
 
 

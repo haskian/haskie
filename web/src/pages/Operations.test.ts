@@ -234,6 +234,7 @@ describe('taskText', () => {
     { name: 'a conversion names its pages, counted from one', task: task({ stage: 'convert', page_start: 0, page_end: 10 }), expected: 'pages 1–10' },
     { name: 'an embed names its one part', task: task({ stage: 'embed', page_start: 3, page_end: 4 }), expected: 'part 3' },
     { name: 'an index write names the range it wrote', task: task({ stage: 'index', page_start: 0, page_end: 50 }), expected: 'parts 0–50' },
+    { name: 'a description names its sections, counted from one', task: task({ stage: 'describe', page_start: 16, page_end: 32 }), expected: 'sections 17–32' },
   ]
   for (const testCase of cases) {
     test(testCase.name, () => {
@@ -258,6 +259,12 @@ describe('taskState', () => {
 describe('stageInfo', () => {
   const cases: { name: string; stage: Stage; rows: Task[]; expected: string }[] = [
     { name: 'no batches says nothing', stage: 'convert', rows: [], expected: '' },
+    {
+      name: 'a description sums the sections it described',
+      stage: 'describe',
+      rows: [task({ stage: 'describe', seq: 0, result: 16 }), task({ stage: 'describe', seq: 1, result: 5 })],
+      expected: '21 sections',
+    },
     { name: 'batches with no result yet say nothing', stage: 'embed', rows: [task({ stage: 'embed', status: 'PENDING', result: null })], expected: '' },
     {
       name: 'a conversion sums the pages that needed OCR',

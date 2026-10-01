@@ -4,7 +4,7 @@ import { errorText } from '../../format'
 import { useOptions } from '../../hooks/useOptions'
 import { usePoll } from '../../hooks/usePoll'
 import { href } from '../../router'
-import { documentIcon } from '../../ui'
+import { documentIcon, Info } from '../../ui'
 
 const link = (name: string) => <a href={href({ name: 'documents', document: name })}>{name}</a>
 const suffixOf = (name: string) => name.slice(name.lastIndexOf('.'))
@@ -24,7 +24,7 @@ export function SimilarDocuments({ similar }: { similar: Similar }) {
   return (
     <>
       {similar.nearest.length === 0 ? (
-        <p className="muted">Nothing to compare with: no other document has a vector under the current embedding model.</p>
+        <Info>Nothing to compare with: no other document has a vector under the current embedding model.</Info>
       ) : (
         <ul className="list">
           {similar.nearest.map((one) => {

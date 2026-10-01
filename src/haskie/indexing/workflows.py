@@ -18,18 +18,20 @@ Layout:
 - `ensure_embedding` per (document, `embed_cache.Params`), on `operation.embedding`, deduplicated
   by the cache id: whoever asks for a missing embedding first computes it, everyone else asking for
   the same one meanwhile waits on that run. This is the only place chunks and vectors are
-  computed, and section descriptors written: a step after the embed (`try_describe`), and the only
-  work a hit in the cache does, when another descriptor strategy wrote it than the one asked for.
+  computed, and section descriptors written: a stage after the embed (`Stage.DESCRIBE`), and the
+  only work a hit in the cache does, when another descriptor strategy wrote it than the one asked
+  for.
 - `index_collection_document` per (collection, document), on `operation.indexing`: ensures the
   embedding the collection's chunk settings call for, then writes it from the cache into the
   collection's table. Moves the membership's status, never the document's.
 - Convert and embed are cut into at most `resolve_parallelism` contiguous slices, one
   `stage_slice` child each (`dbos_names.STAGE_WORKFLOW`), with a durable step per micro-batch. So
-  one large document spreads over the slots instead of trickling through a single one. The index
-  stage is never sliced: it runs as one child on the collection's partition. Each stage has a
-  queue of its own, capped by its share of `pipeline.cpu_budget`: `task.converting`,
-  `task.embedding`, and `task.indexing` (partitioned by collection, see `INDEX_QUEUE`). A slow
-  stage backs up on its own queue instead of taking every slot.
+  one large document spreads over the slots instead of trickling through a single one. The
+  describe and index stages are never sliced: each runs as one child, the index child on the
+  collection's partition. Each stage has a queue of its own, capped by its share of
+  `pipeline.cpu_budget`: `task.converting`, `task.embedding`, `task.describing` (the embed share)
+  and `task.indexing` (partitioned by collection, see `INDEX_QUEUE`). A slow stage backs up on its
+  own queue instead of taking every slot.
 - `remove_from_collection_index` per (collection, document) leaving a collection: on that
   collection's index partition, so rows are never deleted while a step of another document writes
   them. A detach runs one; `delete_document_workflow` runs one per collection the document is in,
@@ -150,6 +152,9 @@ COLLECTION_QUEUE = "operation.collection"  # whole-collection index/delete and d
 MAINTENANCE_QUEUE = "operation.maintenance"  # debounced maintenance and the nightly schedule
 CONVERT_QUEUE = "task.converting"  # convert slices; cap = the stage's share of the CPU budget
 EMBED_QUEUE = "task.embedding"  # embed slices; cap = the stage's share of the CPU budget
+DESCRIBE_QUEUE = "task.describing"  # describe slices; cap = the embed stage's share of the CPU
+# budget. c-TF-IDF is CPU work under that budget, and the llm describer answers one prompt at a
+# time behind its own lock (`gguf_models.GgufGenerator`), in a thread that holds no CPU slot
 INDEX_QUEUE = "task.indexing"  # index children, maintenance and removals. LanceDB takes one
 # writer per collection, so this queue is partitioned by collection and admits one workflow per
 # partition (see `index_partition`)
@@ -226,6 +231,7 @@ TASK_POLL = 0.25
 class Stage(StrEnum):
     CONVERT = "convert"
     EMBED = "embed"
+    DESCRIBE = "describe"
     INDEX = "index"
 
 
@@ -233,6 +239,7 @@ STAGE_ORDER: tuple[Stage, ...] = tuple(Stage)
 STAGE_QUEUE: dict[Stage, str] = {
     Stage.CONVERT: CONVERT_QUEUE,
     Stage.EMBED: EMBED_QUEUE,
+    Stage.DESCRIBE: DESCRIBE_QUEUE,
     Stage.INDEX: INDEX_QUEUE,
 }
 
@@ -241,8 +248,8 @@ class Context(msgspec.Struct):
     """Everything a task needs, captured once per workflow so steps stay pure.
 
     `document` is the row at load time: its id, suffix, parser and OCR policy are immutable, and
-    they are all a pipeline step reads out of it. Its name is not: a rename may change it meanwhile,
-    so a step that shows the name reads it by id (`document.name_of`). `chunking` is the
+    they are all a pipeline step reads out of it. Its name is fixed at import too, but a step that
+    holds only the id reads it by id (`document.name_of`). `chunking` is the
     collection's when the workflow serves one, the user default otherwise. `pipeline` is carried
     whole rather than field by field, so a step that needs another knob costs no new field here.
     `cache_id` is filled in by the workflow that reaches the stage needing it (embed, index)."""
@@ -545,6 +552,7 @@ _QUEUES: tuple[Queue, ...] = (
     Queue(MAINTENANCE_QUEUE, lambda indexing, caps: MAINTENANCE_CONCURRENCY),
     Queue(CONVERT_QUEUE, lambda indexing, caps: caps[Stage.CONVERT]),
     Queue(EMBED_QUEUE, lambda indexing, caps: caps[Stage.EMBED]),
+    Queue(DESCRIBE_QUEUE, lambda indexing, caps: caps[Stage.EMBED]),
     Queue(INDEX_QUEUE, lambda indexing, caps: caps[Stage.INDEX], partition_concurrency=1),
 )
 
@@ -666,6 +674,8 @@ async def plan(stage: Stage, ctx: Context) -> list[Batch]:
         return await pipeline.plan_convert(ctx.document, ctx.pipeline.batch_pages)
     if stage == Stage.EMBED:
         return await pipeline.plan_embed(ctx.document, ctx.pipeline.batch_pages)
+    if stage == Stage.DESCRIBE:
+        return await pipeline.plan_describe(ctx.document, ctx.cache_id, ctx.pipeline.descriptors)
     return await pipeline.plan_index(ctx.document, ctx.cache_id, ctx.pipeline.index_group_parts)
 
 
@@ -721,6 +731,18 @@ async def try_batch(stage: Stage, batch: Batch, ctx: Context) -> BatchResult:
         return await _guarded(
             pipeline.embed_batch(ctx.document, batch, ctx.cache_id, ctx.chunking, ctx.embedding)
         )
+    if stage == Stage.DESCRIBE:
+        # its model, the embedding model or the describer, can still be on its way (`run_batch`)
+        return await _guarded(
+            pipeline.describe_batch(
+                ctx.document,
+                ctx.cache_id,
+                ctx.embedding,
+                ctx.pipeline.descriptors,
+                ctx.pipeline.accelerator,
+                batch,
+            )
+        )
     return await _guarded(_index_batch(batch, ctx))
 
 
@@ -756,14 +778,17 @@ async def described_by(doc: str, cache_id: str) -> Descriptors | None:
 
 
 @retried_step
-async def try_describe(ctx: Context, by: Descriptors) -> BatchResult:
-    """Write the descriptors of the cached embedding's sections by strategy `by` (see
-    `pipeline.describe`). Its model, the embedding model or the describer, can still be on its
-    way, as a batch's can (see `run_batch`)."""
-    describing = pipeline.describe(
-        ctx.document, ctx.cache_id, ctx.embedding, by, ctx.pipeline.accelerator
-    )
-    return await _guarded(describing)
+async def describer_ready(ctx: Context) -> BatchResult:
+    """Whether this process can describe by the run's strategy yet (see `_awaiting_model`)."""
+    by = ctx.pipeline.descriptors
+    return await _guarded(pipeline.describe_ready(ctx.embedding, by, ctx.pipeline.accelerator))
+
+
+@retried_step
+async def try_finalize_describe(ctx: Context, count: int) -> BatchResult:
+    """Put the descriptors every describe batch wrote on the sections (see `pipeline`)."""
+    by = ctx.pipeline.descriptors
+    return await _guarded(pipeline.finalize_describe(ctx.document, ctx.cache_id, by, count))
 
 
 @retried_step
@@ -904,8 +929,11 @@ def embed_id(parent_id: str, doc: str) -> str:
 
 
 def _slice_count(stage: Stage, ctx: Context) -> int:
-    """Slices this stage may be cut into. The index stage is never sliced (see `INDEX_QUEUE`)."""
-    return 1 if stage == Stage.INDEX else resolve_parallelism(ctx.pipeline, stage)
+    """Slices this stage may be cut into. The index stage is never sliced (see `INDEX_QUEUE`), nor
+    is describe: c-TF-IDF is one batch, and the llm describer answers one prompt at a time."""
+    if stage in (Stage.INDEX, Stage.DESCRIBE):
+        return 1
+    return resolve_parallelism(ctx.pipeline, stage)
 
 
 def _slices(batches: list[Batch], parts: int) -> list[list[Batch]]:
@@ -1051,8 +1079,8 @@ async def ensure_embedding(
     doc: str, params: embed_cache.Params, by: Descriptors | None = None
 ) -> str:
     """One cached embedding of one document, with its sections, computed when missing, and their
-    descriptors by strategy `by`, written by a step of their own when missing or written by
-    another strategy; returns its cache id. `by` is None in a run recorded before it was an
+    descriptors by strategy `by`, written by a describe stage of their own when missing or written
+    by another strategy; returns its cache id. `by` is None in a run recorded before it was an
     argument, which describes by the settings.
 
     The chunk settings come from `params`, not from any collection: the collection's settings may
@@ -1064,7 +1092,7 @@ async def ensure_embedding(
         cache_id = embed_cache.key(params)
         ctx: Context | None = None
         if await cache_lookup(params) is None:
-            ctx = await _embedding_context(doc, params)
+            ctx = await _embedding_context(doc, params, by)
             if ctx.embedding is not None:
                 # here rather than in the slices: a download takes minutes, and a slice waiting
                 # it out would hold a slot of `task.embedding` and run into its own timeout
@@ -1078,21 +1106,33 @@ async def ensure_embedding(
             by = ctx.pipeline.descriptors
         if await described_by(doc, cache_id) != by:
             # a hit too checks the model: c-TF-IDF would rerank its vectors by another model's
-            ctx = ctx or await _embedding_context(doc, params)
-            _value(await _awaiting_model(partial(try_describe, ctx, by)))
+            ctx = ctx or await _embedding_context(doc, params, by)
+            # here rather than in the slice, for the reason the embed's model wait is above
+            _value(await _awaiting_model(partial(describer_ready, ctx)))
+            count = len(await _stage(Stage.DESCRIBE, ctx))
+            _value(await try_finalize_describe(ctx, count))
         return cache_id
 
 
-async def _embedding_context(doc: str, params: embed_cache.Params) -> Context:
+async def _embedding_context(
+    doc: str, params: embed_cache.Params, by: Descriptors | None = None
+) -> Context:
     """The context an embedding run computes or describes under: the settings now, with the chunk
-    settings and the cache id `params` name. A model changed since `params` were asked for fails
-    the run, and its parent with it."""
+    settings and the cache id `params` name, and the descriptor strategy `by` when the run was
+    asked for one. A model changed since `params` were asked for fails the run, and its parent
+    with it."""
     ctx = await load_context(doc, None)
     current = embed_cache.model_of(ctx.embedding)
     if current != params.model:
         raise PermanentError(f"embedding model changed: wanted {params.model}, have {current}")
+    pipeline_by = (
+        ctx.pipeline if by is None else msgspec.structs.replace(ctx.pipeline, descriptors=by)
+    )
     return msgspec.structs.replace(
-        ctx, chunking=ChunkSettings.of(params), cache_id=embed_cache.key(params)
+        ctx,
+        chunking=ChunkSettings.of(params),
+        cache_id=embed_cache.key(params),
+        pipeline=pipeline_by,
     )
 
 

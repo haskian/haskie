@@ -162,19 +162,24 @@ export function seqLabel(match: Match): string {
   return first === last ? `${first}` : `${first}–${last}`
 }
 
-const span = (unit: string, first: number, last: number): string => (first === last ? `${unit} ${first}` : `${unit}s ${first}–${last}`)
+/** What a section with no heading path is: the root of its document's tree. */
+export const WHOLE_DOCUMENT = 'The whole document'
+
+/** `line 4` or `lines 4–9`: one unit, or a run of them. */
+export const span = (unit: string, first: number, last: number): string => (first === last ? `${unit} ${first}` : `${unit}s ${first}–${last}`)
+
+/** `p. 3` or `p. 3–12`; empty where the document has no pages. */
+export function pagesOf(start: number | null, end: number | null): string {
+  if (start === null) return ''
+  return end === null || end === start ? `p. ${start}` : `p. ${start}–${end}`
+}
 
 /** Where the match sits in the document, in two parts: where to read it (its pages where the
  *  document has pages, and a passage's lines), then the chunks it is made of. The first part may
  *  be empty. */
 export function placeOf(match: Match): [string, string] {
   const [first, last] = seqRange(match)
-  const pages =
-    match.page_start === null
-      ? ''
-      : match.page_end === null || match.page_end === match.page_start
-        ? `p. ${match.page_start}`
-        : `p. ${match.page_start}–${match.page_end}`
+  const pages = pagesOf(match.page_start, match.page_end)
   const lines = isHit(match) ? '' : span('line', match.line_start, match.line_end)
   return [[pages, lines].filter(Boolean).join(' · '), span('chunk', first, last)]
 }

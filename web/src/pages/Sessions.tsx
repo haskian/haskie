@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { api, MAX_PAGE_SIZE, type CollectionSummary, type SessionAction, type SessionEvent, type SessionSummary } from '../api'
 import type { PageProps } from '../App'
 import { navigate, type Route } from '../router'
-import { Check, Field, GallerySection, Modal, SearchBox, SearchPanel, Shell, Tabs, Tile, type TabDef } from '../ui'
+import { Check, Field, GallerySection, Info, Modal, SearchBox, SearchPanel, Shell, Tabs, Tile, type TabDef } from '../ui'
 import './Sessions.css'
 import { errorText, matchesText, needleOf, relative } from '../format'
 import { groupByStatus, tileSub } from './sessions/group'
@@ -103,9 +103,9 @@ export function Sessions({ route, counts }: PageProps<Extract<Route, { name: 'se
             </button>
           </div>
           {createError !== null && <p className="muted session-error">{createError}</p>}
-          <p className="muted">
+          <Info>
             Agents call <span className="code">set_session_collections</span> then <span className="code">search</span> with the same id.
-          </p>
+          </Info>
         </form>
       </Modal>
     </Shell>
@@ -209,7 +209,7 @@ function History({ id, version }: { id: string; version: number }) {
 
   if (error !== null) return <p className="muted">{error}</p>
   if (loaded === null) return null
-  if (loaded.events.length === 0) return <p className="muted">Nothing yet.</p>
+  if (loaded.events.length === 0) return <Info>Nothing yet.</Info>
   return (
     <ul className="list">
       {loaded.events.map((event) => {

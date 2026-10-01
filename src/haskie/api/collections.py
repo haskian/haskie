@@ -7,7 +7,7 @@ rows of this collection's index, never the document itself (see `collection/coll
 from typing import Annotated
 
 import msgspec
-from litestar import delete, get, post, put
+from litestar import Response, delete, get, post, put
 
 from haskie import audit, logs
 from haskie.api.common import PAGED, BulkStarted, Describe, Rename, SessionId
@@ -19,6 +19,7 @@ from haskie.collection.collection import (
     Member,
     MemberStatus,
 )
+from haskie.document import cover
 from haskie.document import document as documents
 from haskie.indexing import models, workflows
 from haskie.paging import Page, PageRequest, one_of
@@ -101,6 +102,16 @@ async def describe_collection(collection: str, data: Describe) -> CollectionInfo
     found = await Collection.get(collection)
     await found.describe(data.description)
     return await found.info()
+
+
+@get("/api/collections/{collection:str}/cover")
+async def get_collection_cover(collection: str) -> Response[bytes]:
+    """The picture behind the collection's card, as a JPEG: the cover of its first document by
+    name alone, the first two stacked when it holds two or three, the first four in a grid when it
+    holds four or more. An empty collection gets a low-poly gradient seeded by its name."""
+    found = await Collection.get(collection)
+    image = await cover.of_collection(await found.first_members(4), found.name)
+    return Response(image, media_type=cover.JPEG, headers=cover.FRESH)
 
 
 @put("/api/collections/{collection:str}/name")

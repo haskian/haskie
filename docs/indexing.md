@@ -11,7 +11,7 @@ haskie counts work in three words:
 
 - An **operation** is what someone asked for: import a document, index it into a collection,
   delete a collection, download a model.
-- A **job** is one stage of an operation: convert, embed or index.
+- A **job** is one stage of an operation: convert, embed, describe or index.
 - A **task** is one batch of a job, and one durable step.
 
 "Workflow" is DBOS's word. The UI does not use it, though a few API names and DBOS error
@@ -21,11 +21,14 @@ messages still carry it.
 flowchart LR
     op["<b>operation</b><br/>import report.pdf"] --> convert["<b>job</b><br/>convert"]
     op --> embed["<b>job</b><br/>embed"]
+    op --> describe["<b>job</b><br/>describe"]
     convert --> c1["task<br/>pages 1-10"]
     convert --> c2["task<br/>pages 11-20"]
     convert --> c3["task<br/>..."]
     embed --> e1["task<br/>part 1"]
     embed --> e2["task<br/>..."]
+    describe --> d1["task<br/>sections 1-16"]
+    describe --> d2["task<br/>..."]
 ```
 
 ## The three workflows
@@ -37,7 +40,7 @@ flowchart TB
     end
     subgraph ensure_embedding
         chunk["cache hit, or chunk + embed<br/>slices (task.embedding)"] --> parquet[("chunks and sections<br/>in cache, with ids")]
-        parquet --> describe["describe the sections,<br/>unless the settings'<br/>strategy already did"]
+        parquet --> describe["describe slice, unless the<br/>settings' strategy already<br/>did (task.describing)"]
     end
     subgraph index_collection_document
         need["ensure_embedding<br/>for this collection's settings"] --> rows["write chunk rows;<br/>build the FTS index if the<br/>table has none (task.indexing)"]
@@ -57,10 +60,17 @@ that hold it ([Storage](storage.md#sections-and-their-ids)). `embed_cache.write`
 sections into their own file beside the chunks', before the entry's row. So a cache hit has both.
 Each cache entry, so each chunking, has its own sections and descriptors.
 
-**Descriptors.** A step of its own after the merge, `try_describe`, writes up to five descriptors
-for each section that has prose (`pipeline.describe`), by the strategy the settings name
-(`pipeline.descriptors`). It reads both files back, so describing again costs no embedding. The
-sections file's metadata names the strategy that wrote it. A cache hit whose strategy differs from
+**Descriptors.** A stage of its own after the merge, `describe`, writes up to five descriptors
+for each section that has prose, by the strategy the settings name (`pipeline.descriptors`). It
+reads both files back, so describing again costs no embedding. It runs as one child workflow on
+`task.describing` with a durable step per batch (`pipeline.describe_batch`), once the run has
+waited for the model its strategy needs: sixteen sections a
+batch for llm, which asks about one section at a time, and every section in one batch for
+c-tf-idf, which weighs each section against the others. Each batch writes its descriptors to a
+scratch file, and a last step puts them all on the sections file (`pipeline.finalize_describe`).
+So the Operations view shows a describe job and how many of its batches are done, and a crash
+repeats one batch, not the whole document. The sections file's metadata names the strategy that
+wrote it. A cache hit whose strategy differs from
 the settings' is described again, so *Index all* applies a changed setting to a whole collection.
 Every strategy reads prose only: code blocks and tables name identifiers and values, not what a
 section is about.
@@ -72,7 +82,7 @@ section is about.
   terms, unless nothing else is left: asking the model to avoid the heading's words made it leave
   out the main topic. A blind judge scored it 4.04 of 5 on 200 sections of four technical books,
   against 2.13 for c-TF-IDF, at 0.51 s a section on an M4 Pro. Its model downloads like the others,
-  as a `describer`, and the step waits for it.
+  as a `describer`, and each batch waits for it.
 - **c-tf-idf**, the default, runs everywhere. `ClassTfidf` weighs the sections of one depth against
   each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25 weighting: a chapter's words
   against the other chapters'. Unlike BERTopic, it counts how many sections use a term rather than
@@ -111,7 +121,8 @@ them. A section longer than that is cut at a page inside it, and a PDF without s
 **Slices.** Convert and embed cut their batches into contiguous slices, at most
 `document_parallelism` of them and never more than the stage's share of the CPU budget (0 means
 that share). Each slice is one child workflow with one durable step per batch, so a large PDF
-spreads over the free slots. The index stage is one child and is never sliced.
+spreads over the free slots. The describe and index stages are one child each and are never
+sliced.
 
 **One writer per table.** Every index child runs on `task.indexing`, partitioned by collection
 with one slot per partition, and under a per-collection lock. So LanceDB sees one writer per
@@ -130,6 +141,7 @@ membership reads `removing` until it has run (see
 | `operation.maintenance` | 4 | maintenance orchestrators and nightly housekeeping |
 | `task.converting` | its weight's share of `cpu_budget` | convert slices |
 | `task.embedding` | its weight's share of `cpu_budget` | embed slices |
+| `task.describing` | the embed weight's share of `cpu_budget` | describe slices, one per document. The llm describer answers one prompt at a time behind its own lock, in a thread that holds no CPU slot |
 | `task.indexing` | its weight's share, one per collection | index writes, compaction and index builds, removals |
 
 Most `operation.*` workflows orchestrate and wait on `task.*` children. Some do their own work:

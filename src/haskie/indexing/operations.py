@@ -2,8 +2,8 @@
 
 An **operation** is the whole of what someone asked for: import a document, index one document
 into a collection, index a whole collection, delete a collection, delete a document, maintain a
-collection, download a model. A **job** is one stage of an operation: convert, embed or index.
-A **task** is one micro-batch: one durable step below a job.
+collection, download a model. A **job** is one stage of an operation: convert, embed, describe
+or index. A **task** is one micro-batch: one durable step below a job.
 
 "Workflow" is DBOS's word for the thing that runs any of them, and it stays in the modules that
 talk to DBOS (`workflows`, `dbos_names`, `sysdb`, `models`). Nothing this module returns says it.
@@ -85,13 +85,24 @@ ORDER = Order.DESC
 CURSOR = OffsetCursor(SORT, ORDER)
 
 
+class _StageCounts(msgspec.Struct):
+    """The micro-batches of one stage of one run, summed over its slices, and when its first
+    slice was created."""
+
+    done: int = 0
+    running: int = 0
+    total: int = 0
+    started_at: float = 0.0  # unix seconds
+
+
 class _StageRun(msgspec.Struct):
     """One run of one pipeline over one document, as DBOS's history holds it: the raw row
     `fold_operations` folds into an operation and its jobs. Internal on purpose: nothing outside
     this module sees it, and no route returns it.
 
     `collection` is None for an import and an embed: both are collection-independent, and only the
-    index of a member belongs to a collection."""
+    index of a member belongs to a collection. `stages` holds the batches of each stage its slices
+    ran: an embedding run has embed slices, then a describe slice."""
 
     id: str
     action: PipelineAction
@@ -102,9 +113,7 @@ class _StageRun(msgspec.Struct):
     created_at: float
     updated_at: float
     error: str | None
-    tasks_done: int = 0
-    tasks_running: int = 0
-    tasks_total: int = 0
+    stages: dict[Stage, _StageCounts] = {}
 
 
 # A whole-collection or whole-document operation is reported under the name DBOS records it as, so
@@ -153,8 +162,9 @@ KIND_LABELS: dict[OperationKind, str] = {
 
 class Job(msgspec.Struct):
     """One stage of an operation, and the run whose batches it is made of: the convert and index
-    stages run in the operation's own run, the embed stage in the `ensure_embedding` child it
-    spawns (see `fold_operations`)."""
+    stages run in the operation's own run, the embed and describe stages in the
+    `ensure_embedding` child it spawns (see `fold_operations`). The two jobs of that child share
+    its id, and its tasks say which stage each belongs to."""
 
     id: str  # pass it to `list_tasks` for this job's batches
     stage: Stage
@@ -201,11 +211,12 @@ class Task(msgspec.Struct):
     child_id: str  # the `stage_slice` run that did the batch; the task id is `{it}:{seq}`
     stage: Stage
     seq: int
-    # convert: PDF pages [start, end); embed: the one part; index: the part range written together
+    # convert: PDF pages [start, end); embed: the one part; describe: sections [start, end);
+    # index: the part range written together
     page_start: int
     page_end: int
     status: RunStatus
-    result: int | None  # convert: pages needing OCR; embed/index: chunks
+    result: int | None  # convert: pages needing OCR; describe: sections; embed/index: chunks
     error: str | None
 
 
@@ -417,9 +428,18 @@ def _document_title(run: _StageRun) -> str:
     return run.document
 
 
+# The stage a run's own job is before any of its slices exists: an import converts, an embedding
+# run embeds, an index writes.
+_FIRST_STAGE: dict[PipelineAction, Stage] = {
+    PipelineAction.IMPORT: Stage.CONVERT,
+    PipelineAction.EMBED: Stage.EMBED,
+    PipelineAction.INDEX: Stage.INDEX,
+}
+
+
 def fold_operations(runs: list[_StageRun]) -> list[Operation]:
-    """The page as operations: an import or an index of one document, with the embed run it
-    spawned folded in as its embed job rather than listed as an operation of its own.
+    """The page as operations: an import or an index of one document, with the embedding run it
+    spawned folded in as that run's jobs rather than listed as an operation of its own.
 
     The child is found by id: `workflows._ensure_embedding` names it `emb:{doc}:{tail}` with the
     tail of its parent's id. An embed whose parent is not on this page (a page boundary fell
@@ -436,27 +456,62 @@ def fold_operations(runs: list[_StageRun]) -> list[Operation]:
     for run in runs:
         if run.action == PipelineAction.EMBED:
             if run.id not in folded:
-                out.append(_document_row(run, [_job(Stage.EMBED, run)]))
+                out.append(_document_row(run, _jobs(run)))
             continue
         embed = embeds.get(workflows.embed_id(run.id, run.document_id))
-        imported = run.action == PipelineAction.IMPORT
-        own = _job(Stage.CONVERT if imported else Stage.INDEX, run, embed)
-        embed_job = [] if embed is None else [_job(Stage.EMBED, embed)]
-        jobs = [own, *embed_job] if imported else [*embed_job, own]
-        out.append(_document_row(run, jobs))
+        if embed is None:
+            out.append(_document_row(run, _jobs(run)))
+        elif run.action == PipelineAction.IMPORT:
+            # an import converts, then spawns its embedding run and waits: its jobs end there
+            converted = _jobs(run, end=embed.created_at, status=RunStatus.SUCCESS)
+            out.append(_document_row(run, [*converted, *_jobs(embed)]))
+        else:
+            # an index waits for its embedding run, then writes: its jobs start where that ends
+            status = run.status
+            if status in ACTIVE_STATUS:
+                status = (
+                    RunStatus.PENDING if embed.status == RunStatus.SUCCESS else RunStatus.ENQUEUED
+                )
+            own = _jobs(run, start=embed.updated_at, status=status)
+            out.append(_document_row(run, [*_jobs(embed), *own]))
     return out
 
 
-def _job(stage: Stage, run: _StageRun, embed: _StageRun | None = None) -> Job:
-    """One job, read from the run that carries it. The embed child sets the jobs around it
-    straight: an import converts before it spawns the embed, so a convert job with an embed
-    beside it is over; an index writes after the embed, so an index job waits while the embed is
-    not done and runs once it is. Without the child, the run's own status stands."""
-    status = run.status
-    if embed is not None and stage == Stage.CONVERT:
-        status = RunStatus.SUCCESS
-    if embed is not None and stage == Stage.INDEX and status in ACTIVE_STATUS:
-        status = RunStatus.PENDING if embed.status == RunStatus.SUCCESS else RunStatus.ENQUEUED
+def _jobs(
+    run: _StageRun,
+    end: float | None = None,
+    start: float | None = None,
+    status: RunStatus | None = None,
+) -> list[Job]:
+    """One job per stage the run ran, in pipeline order, its first stage even before a slice of
+    it exists. A run's stages run one after another, so a stage is over once the next one began,
+    which ends its clock, and the last one stands as the run does. `start`, `end` and `status`
+    stand for the run's own where another run sets them: an import is done converting once it
+    spawned its embedding run, and an index writes only once that run has ended."""
+    stages = sorted(set(run.stages) | {_FIRST_STAGE[run.action]}, key=STAGE_ORDER.index)
+    # every stage after the first has a slice, so a moment it began
+    starts = [
+        run.created_at if start is None else start,
+        *(run.stages[stage].started_at for stage in stages[1:]),
+    ]
+    ends = [*starts[1:], run.updated_at if end is None else end]
+    last = len(stages) - 1
+    return [
+        _job(
+            stage,
+            run,
+            RunStatus.SUCCESS if index < last else (status or run.status),
+            starts[index],
+            ends[index],
+        )
+        for index, stage in enumerate(stages)
+    ]
+
+
+def _job(stage: Stage, run: _StageRun, status: RunStatus, start: float, end: float) -> Job:
+    """One job, read from the run that carries it: its status and the span it ran over, as the
+    caller worked them out, and the batches of its stage."""
+    counts = run.stages.get(stage, _StageCounts())
     return Job(
         id=run.id,
         stage=stage,
@@ -465,10 +520,11 @@ def _job(stage: Stage, run: _StageRun, embed: _StageRun | None = None) -> Job:
         updated_at=run.updated_at,
         # a job this listing declared successful never failed, whatever the run around it did
         error=None if status == RunStatus.SUCCESS else run.error,
-        tasks_done=run.tasks_done,
-        tasks_running=run.tasks_running,
-        tasks_total=run.tasks_total,
-        seconds=_job_seconds(stage, run, embed) if _is_over(status) else None,
+        tasks_done=counts.done,
+        tasks_running=counts.running,
+        tasks_total=counts.total,
+        # a clock that went backwards reads as zero, never negative
+        seconds=max(0.0, end - start) if _is_over(status) else None,
     )
 
 
@@ -476,19 +532,6 @@ def _is_over(status: RunStatus) -> bool:
     """Whether a job has stopped running. DELAYED is a debounce waiting, not work in flight, but
     no job is ever debounced, so "not active" is the whole of it here."""
     return status not in ACTIVE_STATUS
-
-
-def _job_seconds(stage: Stage, run: _StageRun, embed: _StageRun | None) -> float:
-    """How long one finished job ran, from the run's timestamps alone. The owning run spans more
-    than its own stage: an import converts and then waits for the embed it spawned, and an index
-    waits for the embed before it writes. The child's timestamps split the two."""
-    if embed is None:
-        return max(0.0, run.updated_at - run.created_at)
-    if stage == Stage.CONVERT:
-        return max(0.0, embed.created_at - run.created_at)
-    if stage == Stage.INDEX:
-        return max(0.0, run.updated_at - embed.updated_at)
-    return max(0.0, embed.updated_at - embed.created_at)
 
 
 def _document_row(run: _StageRun, jobs: list[Job]) -> Operation:
@@ -594,12 +637,30 @@ def _pipeline_of(workflow_id: str) -> tuple[PipelineAction, str | None, str]:
     return pipeline_names(workflow_id) or (PipelineAction.IMPORT, None, "?")
 
 
+def _stage_of(parent: str, child: str) -> Stage | None:
+    """The stage a slice ran, read out of its id, `{parent}:{stage}[:{slice}]`, so no input is
+    unpickled; None for an id of another shape."""
+    found = child.removeprefix(f"{parent}:").split(":")[0]
+    return Stage(found) if found in STAGE_ORDER else None
+
+
 def _stage_run(
     status, children: list, done_by_child: dict[str, int], names: dict[str, str]
 ) -> _StageRun:
     action, collection, doc = _pipeline_of(status.workflow_id)
-    totals = [_batch_count(c) for c in children]
-    done = [done_by_child.get(c.workflow_id, 0) for c in children]
+    stages: dict[Stage, _StageCounts] = {}
+    for child in children:
+        stage = _stage_of(status.workflow_id, child.workflow_id)
+        if stage is None:
+            continue
+        created = (child.created_at or 0) / 1000
+        counts = stages.setdefault(stage, _StageCounts(started_at=created))
+        total = _batch_count(child)
+        done = done_by_child.get(child.workflow_id, 0)
+        counts.done += done
+        counts.running += _runs_a_batch(child, done, total)
+        counts.total += total
+        counts.started_at = min(counts.started_at, created)
     return _StageRun(
         id=status.workflow_id,
         action=action,
@@ -610,11 +671,7 @@ def _stage_run(
         created_at=(status.created_at or 0) / 1000,
         updated_at=(status.updated_at or 0) / 1000,
         error=str(status.error) if status.error else None,
-        tasks_done=sum(done),
-        tasks_running=sum(
-            _runs_a_batch(c, d, t) for c, d, t in zip(children, done, totals, strict=True)
-        ),
-        tasks_total=sum(totals),
+        stages=stages,
     )
 
 
@@ -729,7 +786,7 @@ async def chunks_since(cutoff: float) -> list[ChunksAt]:
             parent_workflow_id=list(live), name=STAGE_WORKFLOW, load_input=False
         ):
             parent = child.parent_workflow_id or ""
-            stage = child.workflow_id.removeprefix(f"{parent}:").split(":")[0]
+            stage = _stage_of(parent, child.workflow_id)
             if parent in chunks and stage in (Stage.EMBED, Stage.INDEX):
                 chunks[parent] += sum(child.output or [])
     points: list[ChunksAt] = []

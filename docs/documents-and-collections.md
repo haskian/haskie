@@ -47,11 +47,9 @@ or a digit turned into one dash, so `A_B--CC.d.f.pdf` is `a-b-cc-d-f.pdf`. The s
 too. Each name has one spelling, so `Notes.md` and `notes .md` are the same name, and the second
 is refused.
 
-A rename (`PUT /api/documents/{name}/name`, or the Info tab) changes one column, `documents.name`.
-Nothing else holds the name: the tables, folders, embedding cache and every collection's LanceDB
-rows refer to the document by its id, and a search reads the names it cites from SQLite, one batched
-query per read of the indexes. The original suffix stays. The search log and session history keep
-the name as it was when they were written.
+The name is chosen at import and never changes afterwards. Everything else refers to the
+document by its id: the tables, the folders, the embedding cache and every collection's LanceDB
+rows. A search reads the names it cites from SQLite, one batched query per read of the indexes.
 
 An agent's `add_document` imports a local path directly and copies the file. When it refuses the
 path, the error names the file alone. The audit trail copies that error, and it never records the
@@ -104,6 +102,31 @@ in any state. The original suffix is kept in the name, because it decides the ro
 
 The import also warms the embedding cache for the default chunk settings. A re-import clears the
 document's cached embeddings first.
+
+## Covers
+
+Each document and collection card shows a cover behind its name (`document/cover.py`). Every cover
+is a low-poly picture drawn with Pillow: a 7 by 7 grid of cells, its corners shifted at random, cut
+into triangles, each one colour, lightened or darkened at random so each facet shows.
+`GET /api/documents/{name}/cover` answers with it as a 480 by 480 JPEG. Its triangles take the mean
+colour of the document's cover page under them, the page cropped square from its top:
+
+- a PDF's first page, rendered with pdfium;
+- an EPUB's cover image, the manifest item marked `cover-image` (EPUB 3) or the one
+  `<meta name="cover">` names (EPUB 2);
+- an image file itself, SVG aside.
+
+Any other document, and one whose cover page cannot be read, gets a gradient instead: each
+triangle a colour on the line between two random ones, picked mostly by its place. The triangles
+and the gradient are seeded by the document's id, the MD5 of its bytes, so the same file always
+draws the same picture. The cover is built on first request and kept in the document's folder as
+`cover.jpg`.
+
+`GET /api/collections/{name}/cover` answers with the covers of the collection's first documents
+by name: one cover alone for one document, the first two stacked top and bottom for two or three,
+and the first four in a 2 by 2 grid for four or more. Each is cropped to its cell around its
+centre. An empty collection gets a gradient seeded by its name. Both routes answer with a JPEG and
+`Cache-Control: no-cache`: a rename or a new member can change what the same URL shows.
 
 ## Repeats
 

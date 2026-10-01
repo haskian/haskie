@@ -4,6 +4,7 @@ import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { EmbedderMetadata, Excerpt, Hit, MappedDocument, MappedSection, Passage, RerankerMetadata, Status } from '../api'
 import { Field } from './Field'
+import { Info } from './Info'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
 import { Kv } from './Kv'
@@ -209,6 +210,16 @@ describe('Tabs', () => {
   ])
 })
 
+describe('Info', () => {
+  check([
+    {
+      name: 'a box with the info icon first, then what it says',
+      element: <Info>In no collection yet.</Info>,
+      contains: ['<p class="info"><svg', 'lucide-info icon"', '</svg><span>In no collection yet.</span></p>'],
+    },
+  ])
+})
+
 describe('Tile', () => {
   check([
     {
@@ -230,7 +241,24 @@ describe('Tile', () => {
       name: 'pressed omitted leaves a plain button',
       element: <Tile icon={FileText} name="Area" sub="" hint="" onClick={noop} />,
       contains: ['class="tile"'],
-      missing: ['aria-pressed'],
+      missing: ['aria-pressed', 'tile-cover'],
+    },
+    {
+      name: 'a description shows alone on hover',
+      element: <Tile icon={FileText} name="Area" sub="A. Hoffmann" meta="Thu 1 Oct" description="Notes on area lights." onClick={noop} />,
+      contains: ['<span class="hint" role="tooltip">Notes on area lights.</span>'],
+      missing: ['<strong>'],
+    },
+    {
+      name: 'an empty description shows nothing on hover',
+      element: <Tile icon={FileText} name="Area" sub="A. Hoffmann" description="" onClick={noop} />,
+      contains: ['<span class="sub">A. Hoffmann</span></span></button>'],
+      missing: ['class="hint"'],
+    },
+    {
+      name: 'a cover sits behind the icon, loaded as it scrolls into view',
+      element: <Tile icon={FileText} name="Area" sub="" hint="" cover="/api/documents/area.pdf/cover" onClick={noop} />,
+      contains: ['<img class="tile-cover" src="/api/documents/area.pdf/cover" alt="" loading="lazy"/><svg'],
     },
   ])
 })

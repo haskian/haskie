@@ -782,6 +782,18 @@ class Collection:
         async with db.read() as conn:
             return list(await conn.scalars(ids.order_by(member.document_id).limit(limit)))
 
+    async def first_members(self, limit: int) -> list[document.Document]:
+        """Its first `limit` documents by name, leaving out those on their way out."""
+        first = (
+            _MEMBERS.where(
+                collection_documents.c.collection == self.name, *(not_(one) for one in LEAVING)
+            )
+            .order_by(documents.c.name)
+            .limit(limit)
+        )
+        async with db.read() as conn:
+            return [document.from_row(row) for row in await conn.execute(first)]
+
     async def counts(self) -> DocumentCounts:
         async with db.read() as conn:
             return (await _counts_by_collection(conn, [self.name]))[self.name]

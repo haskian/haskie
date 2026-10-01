@@ -379,6 +379,7 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
     embedding = workflows.embed_id(first, pdf.id)
     assert [(t.stage, t.seq, t.status) for t in await operations.list_tasks(embedding)] == [
         ("embed", 0, "SUCCESS"), ("embed", 1, "SUCCESS"), ("embed", 2, "SUCCESS"),
+        ("describe", 0, "SUCCESS"),
     ]  # fmt: skip
     assert [(t.stage, t.seq, t.status) for t in await operations.list_tasks(indexing)] == [
         ("index", 0, "SUCCESS"), ("index", 1, "SUCCESS"), ("index", 2, "SUCCESS"),
@@ -846,7 +847,10 @@ async def test_one_document_creates_a_bounded_number_of_workflows(dbos, tmp_path
 
     assert await named(import_id) == {dbos_names.IMPORT_WORKFLOW: 1, dbos_names.STAGE_WORKFLOW: 3}
     embedding = workflows.embed_id(import_id, doc.id)
-    assert await named(embedding) == {dbos_names.EMBED_WORKFLOW: 1, dbos_names.STAGE_WORKFLOW: 3}
+    assert await named(embedding) == {
+        dbos_names.EMBED_WORKFLOW: 1,
+        dbos_names.STAGE_WORKFLOW: 4,  # three embed slices and the one describe slice
+    }
     assert await named(index_id) == {
         dbos_names.COLLECTION_DOCUMENT_WORKFLOW: 1,
         dbos_names.STAGE_WORKFLOW: 1,  # the index stage is one writer, so never sliced
@@ -855,6 +859,7 @@ async def test_one_document_creates_a_bounded_number_of_workflows(dbos, tmp_path
     stages = {
         *(f"{import_id}:convert:{i}" for i in range(3)),
         *(f"{embedding}:embed:{i}" for i in range(3)),
+        f"{embedding}:describe:0",
         f"{index_id}:index",
     }
     listed = await DBOS.list_workflows_async(
@@ -862,7 +867,7 @@ async def test_one_document_creates_a_bounded_number_of_workflows(dbos, tmp_path
     )
     assert {s.workflow_id for s in listed} == stages
     assert len(await operations.list_tasks(import_id)) == 3
-    assert len(await operations.list_tasks(embedding)) == 3
+    assert len(await operations.list_tasks(embedding)) == 3 + 1, "three embed, one describe"
     assert len(await operations.list_tasks(index_id)) == 3
 
 
@@ -979,14 +984,16 @@ async def test_reindexing_with_unchanged_settings_hits_the_cache(
     steps = await _steps(embedding)
     assert "cache_lookup" in steps, f"the run never looked the cache up: {steps}"
     assert "plan" not in steps and "try_finalize_embed" not in steps, "it returned on the hit"
-    assert "described_by" in steps and "try_describe" not in steps, "described alike already"
+    assert "described_by" in steps and "try_finalize_describe" not in steps, "described alike"
+    assert await _steps(f"{embedding}:{Stage.DESCRIBE}:0") == [], "no describe stage ran"
     assert len(await embed_cache.entries(doc.id)) == 1
 
 
-async def test_an_import_describes_its_sections_in_a_step_after_the_merge(
+async def test_an_import_describes_its_sections_in_a_stage_after_the_merge(
     dbos, tmp_path: Path
 ) -> None:
-    """Describing is a step of its own, after the merge, by the strategy the settings name."""
+    """Describing is a stage of its own, after the merge, by the strategy the settings name: a
+    child with a step per batch, then a step that puts the descriptors on the sections."""
     doc = await import_document(dbos, "a.md", MD, tmp_path)
 
     (entry,) = await embed_cache.entries(doc.id)
@@ -994,7 +1001,15 @@ async def test_an_import_describes_its_sections_in_a_step_after_the_merge(
     assert any(one.descriptors for one in await embed_cache.read_sections(doc.id, entry.id))
     (run,) = await DBOS.list_workflows_async(name=dbos_names.EMBED_WORKFLOW)
     steps = await _steps(run.workflow_id)
-    assert steps.index("try_finalize_embed") < steps.index("try_describe"), steps
+    assert steps.index("try_finalize_embed") < steps.index("try_finalize_describe"), steps
+    assert await _steps(f"{run.workflow_id}:{Stage.DESCRIBE}:0") == ["try_batch"], "c-TF-IDF: one"
+    (operation,) = (await operations.list_operations("document")).items
+    assert [(job.stage, job.status) for job in operation.jobs] == [
+        ("convert", "SUCCESS"), ("embed", "SUCCESS"), ("describe", "SUCCESS"),
+    ], "the Operations view lists describe as a job of its own"  # fmt: skip
+    describe = operation.jobs[-1]
+    assert (describe.tasks_done, describe.tasks_total) == (1, 1)
+    assert describe.seconds is not None and operation.jobs[1].seconds is not None
 
 
 async def test_a_hit_another_strategy_described_is_described_again_from_the_cache(
@@ -1024,7 +1039,7 @@ async def test_a_hit_another_strategy_described_is_described_again_from_the_cach
     embedding = workflows.embed_id(job_id, doc.id)
 
     async def waiting() -> bool:
-        return (await _steps(embedding)).count("try_describe") >= 2
+        return (await _steps(embedding)).count("describer_ready") >= 2
 
     await until(waiting, "the run never asked for the describer twice")
     assert prompts == [], "nothing asked while the describer was on its way"
@@ -1062,12 +1077,12 @@ async def test_an_embedding_run_describes_by_the_strategy_it_was_asked_for(
         return handle.workflow_id
 
     described = await _steps(await run(Descriptors.LLM))
-    assert "try_describe" in described, described
+    assert "try_finalize_describe" in described, described
     cache_id = embed_cache.key(params)
     assert await embed_cache.described_by(row.id, cache_id) == Descriptors.LLM
 
     alike = await _steps(await run(Descriptors.LLM))
-    assert "load_context" not in alike and "try_describe" not in alike, alike
+    assert "load_context" not in alike and "try_finalize_describe" not in alike, alike
 
     # a run recorded before the strategy was an argument describes by the settings
     user = await load_user_settings()
@@ -1356,7 +1371,7 @@ async def test_describing_waits_for_the_embedding_model_to_warm(
         nonlocal restarted, asked
         if restarted:
             asked += 1
-            if asked > workflows.RETRY_ATTEMPTS:  # more asks than the describe step alone makes
+            if asked > workflows.RETRY_ATTEMPTS:  # more asks than one readiness step makes
                 models._mark_ready(download)  # the boot's warm-up is done
                 restarted = False
         await require_ready(kind, name)
@@ -1383,9 +1398,12 @@ async def test_describing_waits_for_the_embedding_model_to_warm(
     assert await wait_for(job_id) == "imported"
     steps = await _steps(run)
     assert steps.count("try_finalize_embed") == 1, steps
-    describe = steps.index("try_describe")
-    assert steps[describe : describe + 3] == ["try_describe", "DBOS.sleep", "try_describe"], (
-        "describing found the model warming, slept, and ran again"
+    asked_at = steps.index("describer_ready")
+    assert steps[asked_at : asked_at + 3] == ["describer_ready", "DBOS.sleep", "describer_ready"], (
+        "the run found the model warming, slept, and asked again, before the describe slice"
+    )
+    assert await _steps(f"{run}:{Stage.DESCRIBE}:0") == ["try_batch"], (
+        "the slice waited for nothing"
     )
     (entry,) = await embed_cache.entries(doc.id)
     assert await embed_cache.described_by(doc.id, entry.id) == Descriptors.C_TF_IDF
@@ -2454,6 +2472,7 @@ async def test_the_pipeline_page_reports_the_action_collection_and_document(
     assert [j.stage for row in rows if row.title == "a.md" for j in row.jobs] == [
         "convert",
         "embed",
+        "describe",
     ]
 
 
@@ -2643,13 +2662,13 @@ async def test_list_tasks_reports_stage_slices_still_waiting(
     assert tasks[0].status == "SUCCESS" and tasks[0].result is not None
     assert [t.status for t in tasks[1:]] == ["PENDING", "ENQUEUED"]
     (run,) = [r for r in (await operations._pipeline_page()).items if r.action == "import"]
-    assert (run.tasks_total, run.tasks_done, run.tasks_running) == (3, 1, 1)
+    converting = run.stages[Stage.CONVERT]
+    assert (converting.total, converting.done, converting.running) == (3, 1, 1)
     gate.release.set()
     assert await wait_for(job_id) == "imported"
     assert {t.status for t in await operations.list_tasks(job_id)} == {"SUCCESS"}
-    assert len(await operations.list_tasks(workflows.embed_id(job_id, doc.id))) == 3, (
-        "the embed job's own"
-    )
+    embedding = await operations.list_tasks(workflows.embed_id(job_id, doc.id))
+    assert [t.stage for t in embedding] == ["embed"] * 3 + ["describe"], "the embedding run's own"
 
 
 async def test_list_tasks_merges_the_slices_of_a_stage(dbos, tmp_path: Path, monkeypatch) -> None:
@@ -2673,7 +2692,8 @@ async def test_list_tasks_merges_the_slices_of_a_stage(dbos, tmp_path: Path, mon
         "seq 1 is gated in its own slice; the other two ran without it"
     )
     (run,) = [r for r in (await operations._pipeline_page()).items if r.action == "import"]
-    assert (run.tasks_total, run.tasks_done, run.tasks_running) == (3, 2, 1)
+    converting = run.stages[Stage.CONVERT]
+    assert (converting.total, converting.done, converting.running) == (3, 2, 1)
     assert {t.id for t in tasks} == {f"{job_id}:convert:{i}:{i}" for i in range(3)}
     gate.release.set()
     assert await wait_for(job_id) == "imported"

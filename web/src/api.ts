@@ -76,6 +76,7 @@ export type BulkStarted = Wire<'BulkStarted'>
 export type OperationProgress = Wire<'OperationProgress'>
 export type Preview = Wire<'Preview'>
 export type Staged = Wire<'Staged'>
+export type Sections = Wire<'Sections'> // a document's table of contents, each section with its descriptors
 export type Similar = Wire<'Similar'> // what a document may repeat: the nearest by content
 export type Rendered = Wire<'Rendered'>
 export type Member = Wire<'Member'>
@@ -282,6 +283,7 @@ export const api = {
   saveCollectionOverrides: (name: string, s: CollectionOverrides) =>
     request<CollectionInfo>(`${collectionPath(name)}/overrides`, json('PUT', s)),
   indexCollection: (name: string) => request<BulkStarted>(`${collectionPath(name)}/index`, { method: 'POST' }),
+  collectionCoverUrl: (name: string) => `${collectionPath(name)}/cover`,
 
   // The collection's members: one document row each, plus how far this collection indexed it.
   collectionDocuments: (name: string, q: PageRequest & { status?: MemberStatus } = {}) => {
@@ -317,8 +319,8 @@ export const api = {
   reimportDocument: (doc: string) => request<BulkStarted>(`${documentPath(doc)}/import`, { method: 'POST' }),
   documentCollections: (doc: string) => request<string[]>(`${documentPath(doc)}/collections`),
   documentEmbeddings: (doc: string) => request<EmbeddingEntry[]>(`${documentPath(doc)}/embeddings`),
+  documentSections: (doc: string) => request<Sections>(`${documentPath(doc)}/sections`),
   similarDocuments: (doc: string) => request<Similar>(`${documentPath(doc)}/similar`),
-  renameDocument: (doc: string, to: string) => request<ImportedDocument>(`${documentPath(doc)}/name`, json('PUT', { name: to })),
   describeDocument: (doc: string, description: string) =>
     request<ImportedDocument>(`${documentPath(doc)}/description`, json('PUT', { description })),
   // Some lines of the converted markdown: what an `also_in` place reads back when it is opened.
@@ -326,6 +328,7 @@ export const api = {
     request<Lines>(`${documentPath(doc)}/lines${pageQuery({}, { line_start: String(lineStart), line_end: String(lineEnd) })}`),
   previewUrl: (doc: string) => `${documentPath(doc)}/preview`,
   sourceUrl: (doc: string) => `${documentPath(doc)}/source`,
+  coverUrl: (doc: string) => `${documentPath(doc)}/cover`,
   // Yields each frame as it arrives, so the first page shows without waiting for the last.
   markdown: (doc: string, full = false) => ndjson<Frame>(`${documentPath(doc)}/markdown${full ? '?full=true' : ''}`),
 

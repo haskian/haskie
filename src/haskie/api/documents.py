@@ -1,8 +1,8 @@
 """Document routes: the two-phase intake, the listing, the delete, and the two preview panes.
 
 Every route here is collection-independent: a document is imported once, and which collections
-hold it is a membership the collection routes manage. A route addresses a document by its name;
-a rename changes only that (`rename_document`).
+hold it is a membership the collection routes manage. A route addresses a document by its name,
+fixed at import.
 """
 
 from collections.abc import AsyncIterator
@@ -20,16 +20,17 @@ from litestar.params import Body
 from litestar.response import File, Stream
 
 from haskie import audit, cpu, logs
-from haskie.api.common import PAGED, BulkStarted, Describe, Rename, SessionId
+from haskie.api.common import PAGED, BulkStarted, Describe, SessionId
 from haskie.catalogue import catalogue
-from haskie.document import convert, render
+from haskie.document import convert, cover, render
 from haskie.document import document as documents
 from haskie.document.document import Document, DocumentStatus, ImportOptions, Staged
 from haskie.errors import InvalidInput, NotFound
 from haskie.indexing import embed_cache, workflows
 from haskie.paging import Page, PageRequest, one_of
 from haskie.search import session
-from haskie.settings import load_user_settings
+from haskie.sections import build
+from haskie.settings import Descriptors, load_user_settings
 
 
 class ImportRequest(ImportOptions):
@@ -47,6 +48,14 @@ class Similar(msgspec.Struct):
 
 
 NEAREST = 3  # enough to spot a second edition, few enough to read at a glance
+
+
+class Sections(msgspec.Struct):
+    """A document's sections in document order, each with what it is about, as one chunking cut
+    them, and the strategy that wrote their descriptors (None before they are described)."""
+
+    sections: list[build.Section]
+    described_by: Descriptors | None
 
 
 class Head(msgspec.Struct):
@@ -203,6 +212,25 @@ async def similar_documents(document: str) -> Similar:
     return Similar(nearest=nearest)
 
 
+@get("/api/documents/{document:str}/sections")
+async def document_sections(document: str) -> Sections:
+    """The document's table of contents with each section's descriptors. Read from the cache
+    entry the import warmed, under the default chunk settings; else the newest entry; empty before
+    any is cached."""
+    row = await documents.named(document)
+    user = await load_user_settings()
+    model = await catalogue.embedding_model(user)
+    default = embed_cache.key(embed_cache.params(row, user.conversion.chunking, model))
+    cached = [one.id for one in await embed_cache.entries(row.id)]
+    cache_id = default if default in cached else next(iter(cached), None)
+    if cache_id is None:
+        return Sections(sections=[], described_by=None)
+    return Sections(
+        sections=await embed_cache.read_sections(row.id, cache_id),
+        described_by=await embed_cache.described_by(row.id, cache_id),
+    )
+
+
 # A document's own bytes are served on haskie's origin, where an HTML or SVG file would run its
 # script against an API that authenticates no one. `sandbox` gives the response an opaque origin
 # and no script, however it is opened: in the pane, in a new tab, or from a link. PDF is left out:
@@ -246,6 +274,14 @@ async def get_preview(document: str) -> File:
         content_disposition_type="inline",
         headers=_untrusted_headers(preview.kind == convert.PreviewKind.PDF),
     )
+
+
+@get("/api/documents/{document:str}/cover")
+async def get_cover(document: str) -> File:
+    """The picture behind the document's card, as a JPEG: its cover page, else a low-poly picture
+    seeded by its id. Drawn by haskie, never the document's own bytes."""
+    path = await cover.of_document(await documents.named(document))
+    return File(path=path, media_type=cover.JPEG, headers=cover.FRESH)
 
 
 @get("/api/documents/{document:str}/markdown")
@@ -307,18 +343,6 @@ async def get_lines(document: str, line_start: int, line_end: int) -> Lines:
     except FileNotFoundError as missing:
         raise NotFound(f"document not imported yet: {document}") from missing
     return Lines(text=convert.without_markers(raw).strip())
-
-
-@put("/api/documents/{document:str}/name")
-@audit.audited("document.rename")
-async def rename_document(document: str, data: Rename) -> Document:
-    """Rename the document. Its collections, indexes and cached embeddings stay as they are, and
-    searches cite it by the new name at once. The suffix stays the original's, since it decides
-    how the file was converted, and the name is stored in lowercase-kebab-case, as at import.
-    The same name is a no-op; a name taken is 409."""
-    renamed = await documents.rename(await documents.named(document), data.name)
-    audit.attach(renamed_to=renamed.name)
-    return renamed
 
 
 @put("/api/documents/{document:str}/description", mcp_tool="describe_document")

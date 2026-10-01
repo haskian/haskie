@@ -11,8 +11,8 @@ Each feature has one module under `src/haskie/api/`.
 
 | prefix | module | covers |
 | --- | --- | --- |
-| `/api/documents` | `documents.py` | two-phase intake (`staging`, then `import`), re-import, listing, one document, rename, delete, its collections, embeddings, similar documents, source, preview, markdown and line views, description, `render` (a search result's markdown as HTML) |
-| `/api/collections` | `collections.py` | listing, create, one collection, rename, delete, overrides, description, members, attach, detach, re-index of the collection or of one member |
+| `/api/documents` | `documents.py` | two-phase intake (`staging`, then `import`), re-import, listing, one document, delete, its collections, embeddings, similar documents, sections, source, preview, cover, markdown and line views, description, `render` (a search result's markdown as HTML) |
+| `/api/collections` | `collections.py` | listing, create, one collection, rename, delete, overrides, description, cover, members, attach, detach, re-index of the collection or of one member |
 | `/api/search` | `search.py` | `excerpts`, `sections`, `explore` (chunk or passage) and `text` (BM25 only, no model); one collection is `collections=<name>`; all but `text` keep to `document_ids`, and `excerpts` and `explore` to `section_ids` |
 | `/api/sessions`, `/api/insights`, `/api/searches` | `search.py` | session selection and history, searches and indexed chunks as raw points, the search log |
 | `/api/gaps` | `gaps.py` | questions that found no answer, grouped by topic; review (dismiss, resolve, reopen); replay against the collections as they are now; an agent's report that a search did not answer it |
