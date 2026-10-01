@@ -13,14 +13,16 @@ Every export was checked against sentence-transformers on the original weights: 
 CPU's output (worst cosine 0.99999) in about half the time (M4 Pro, 512 real chunks; see
 `embed`).
 
-Each model has one session, and one run at a time on it. Every WebGPU session shares one lock
-besides: they share one Metal device, and two runs at once on two sessions (an embed while a
-search reranks) abort the process ("A command encoder is already encoding to this command
+Each model has one session, which ONNX Runtime runs from several threads at once on the CPU or
+CUDA (four threads embedding with e5-base-v2: 6.5 s, against 15.5 s one at a time). On WebGPU
+every session shares one lock: they share one Metal device, and two runs at once (an embed while
+a search reranks) abort the process ("A command encoder is already encoding to this command
 buffer", measured). A batch is padded to its own longest row: a model's `tokenizer.json` may pad
 to a fixed length (gte's pads every pair to 8,000 tokens, measured at 538 s and 33 GB for 5
 pairs).
 """
 
+import contextlib
 import json
 import math
 import struct
@@ -155,7 +157,7 @@ class _Session:
         # the longer side of a pair is cut first: the text, unless the query outgrows it
         self._tokenizer.enable_truncation(tokens, strategy="longest_first")
         on_webgpu = self._session.get_providers()[0] == WEBGPU
-        self._lock = _WEBGPU_LOCK if on_webgpu else threading.Lock()
+        self._lock = _WEBGPU_LOCK if on_webgpu else contextlib.nullcontext()
 
     def run(self, rows: list[Any]) -> tuple[np.ndarray, np.ndarray]:
         """The export's output for `rows` (texts or pairs), and their attention mask."""

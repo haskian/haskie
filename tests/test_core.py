@@ -4049,6 +4049,40 @@ def test_a_vector_is_stored_whole_or_cut_as_the_profile_says(
     assert embed._cut(model, vector).tolist() == pytest.approx(expected), name
 
 
+@pytest.mark.parametrize(
+    ("name", "texts"),
+    [
+        ("one text", ["a job retries"]),
+        ("texts out of length order run shortest first", ["a long text here", "a", "mid one"]),
+        ("ties keep their order", ["bb", "aa", "c"]),
+    ],
+)
+def test_texts_run_shortest_first_and_answer_in_the_order_they_came(
+    name: str, texts: list[str], monkeypatch
+) -> None:
+    """A batch pads to its longest row, so like lengths batch together; each text still gets
+    its own vector and score."""
+    ran: list[list[str]] = []
+
+    class Model:
+        def embed(self, batch: list[str]) -> list[np.ndarray]:
+            ran.append(list(batch))
+            return [np.array([float(len(text)), 1.0]) for text in batch]
+
+        def rerank(self, query: str, batch: list[str]) -> list[float]:
+            ran.append(list(batch))
+            return [float(len(text)) for text in batch]
+
+    monkeypatch.setattr(embed, "_model", lambda name, accelerator: Model())
+    monkeypatch.setattr(embed, "_cross_encoder", lambda name, accelerator: Model())
+
+    vectors = embed.embed_texts(EmbeddingModel("test/tiny", 2), texts)
+    scores = embed.rerank_scores("test/reranker", Accelerator.CPU, "q", texts)
+
+    assert ran == [sorted(texts, key=len)] * 2, name
+    assert [vector[0] for vector in vectors] == scores == [float(len(t)) for t in texts], name
+
+
 def test_embedding_helpers_short_circuit_on_empty_input() -> None:
     """No text means no model, so neither call may download anything."""
     assert embed.embed_texts(COMPACT, []) == []

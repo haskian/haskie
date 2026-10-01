@@ -198,10 +198,11 @@ def test_a_pair_cuts_its_longer_side_first(
     assert len(words) == 9 and words[0] == "[CLS]" and words[-1] == "[SEP]", name
 
 
-def test_every_webgpu_session_shares_one_lock_and_a_cpu_session_has_its_own(
+def test_every_webgpu_session_shares_one_lock_and_a_cpu_session_takes_none(
     tmp_path: Path, session: list[Session]
 ) -> None:
-    """Two runs at once on two WebGPU sessions abort the process (one Metal device)."""
+    """Two runs at once on two WebGPU sessions abort the process (one Metal device); on the CPU
+    ONNX Runtime runs one session from several threads at once."""
     path = _tokenizer_file(tmp_path)
     on_webgpu = [onnx_models.WEBGPU, "CPUExecutionProvider"]
     first, second = (onnx_models._Session(path, "m.onnx", on_webgpu, 16) for _ in range(2))
@@ -210,7 +211,8 @@ def test_every_webgpu_session_shares_one_lock_and_a_cpu_session_has_its_own(
     )
 
     assert first._lock is second._lock is onnx_models._WEBGPU_LOCK
-    assert cpu_a._lock is not cpu_b._lock and cpu_a._lock is not first._lock
+    assert not isinstance(cpu_a._lock, type(onnx_models._WEBGPU_LOCK)), "no lock on the CPU"
+    assert not isinstance(cpu_b._lock, type(onnx_models._WEBGPU_LOCK))
 
 
 # --- embedders and cross-encoders ---------------------------------------------------------

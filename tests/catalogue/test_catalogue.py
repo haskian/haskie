@@ -121,14 +121,16 @@ async def test_every_model_has_a_loader_and_every_pin_a_model() -> None:
     assert {gguf_models.describer(one) for one in Descriptors} - {None} == set(
         gguf_models.GENERATORS
     ), "every generator is some strategy's describer"
-    # a GGUF file holds no positions past its model's context, which the catalogue also states
+    # each loader cuts a text at the model's own context (a GGUF file holds no positions past
+    # it, a BERT none past 512), which the catalogue also states: the two must agree
     metadata = await catalogue.embedding_metadata()
     contexts = {
         model.name: metadata[profile].context_tokens
         for profile, model in (await catalogue.embedders()).items()
     }
-    assert {name: pin.tokens for name, pin in gguf_models.PINS.items()} == {
-        name: contexts[name] for name in gguf_models.PINS
+    pins = onnx_models.EMBEDDERS | mlx_models.POOLED | gguf_models.PINS
+    assert {name: pin.tokens for name, pin in pins.items()} == {
+        name: contexts[name] for name in pins
     }
 
 

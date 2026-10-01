@@ -85,7 +85,7 @@ def test_every_reranker_answers_a_logit(
     [
         ("no texts, no scores", 0),
         ("one text, one score", 1),
-        ("past one batch, every score in the order the texts went in", mlx_models.PAIR_BATCH + 1),
+        ("past one batch, every score in the order the texts went in", mlx_models.BATCH + 1),
     ],
 )
 def test_a_reranker_answers_one_score_per_text_in_order(name: str, count: int) -> None:
@@ -127,7 +127,7 @@ def test_an_array_left_lazy_by_one_caller_evaluates_for_another() -> None:
     [
         ("no texts, no vectors", 0),
         ("one text, one vector", 1),
-        ("past one batch, every vector in order", mlx_models.EMBED_BATCH + 1),
+        ("past one batch, every vector in order", mlx_models.BATCH + 1),
     ],
 )
 def test_an_embedder_answers_one_vector_per_text(name: str, count: int) -> None:
@@ -241,7 +241,8 @@ def test_a_pooled_embedder_pools_its_token_states_as_its_model_asks(
         return {"input_ids": np.zeros((2, 2)), "attention_mask": np.array([[1, 1], [1, 0]])}
 
     embedder = mlx_models.PooledEmbedder.__new__(mlx_models.PooledEmbedder)  # no download
-    embedder._model, embedder._tokenizer, embedder._pooling = model, tokenizer, pooling
+    embedder._model, embedder._tokenizer = model, tokenizer
+    embedder._pooling, embedder._tokens = pooling, 512
 
     vectors = [vector.tolist() for vector in embedder.embed(["a", "b"])]
 

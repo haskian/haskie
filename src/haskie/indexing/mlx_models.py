@@ -40,29 +40,29 @@ from itertools import batched
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from haskie.indexing.onnx_models import MAX_EMBED_TOKENS, MAX_PAIR_TOKENS, Pooling, pool
+from haskie.indexing.onnx_models import BATCH, MAX_EMBED_TOKENS, MAX_PAIR_TOKENS, Pooling, pool
 
 
 class Pin(NamedTuple):
-    """A model's revision measured, and how its token states are pooled."""
+    """A model's revision measured, how its token states are pooled, and its own context."""
 
     revision: str
     pooling: Pooling
+    tokens: int  # it reads at most `MAX_EMBED_TOKENS` of a text
 
 
 POOLED: dict[str, Pin] = {
     "hotchpotch/bekko-embedding-v1-a25m:mlx": Pin(
-        "44f0b8af0f487acd0ccf1a7cb7ae7a29a6dfc09c", Pooling.MEAN
+        "44f0b8af0f487acd0ccf1a7cb7ae7a29a6dfc09c", Pooling.MEAN, 8192
     ),
-    "intfloat/e5-base-v2:mlx": Pin("f52bf8ec8c7124536f0efb74aca902b2995e5bcd", Pooling.MEAN),
-    "codefuse-ai/F2LLM-v2-160M:mlx": Pin("4ffe22c31406fc321b65a05b15563d38275ee51f", Pooling.LAST),
+    "intfloat/e5-base-v2:mlx": Pin("f52bf8ec8c7124536f0efb74aca902b2995e5bcd", Pooling.MEAN, 512),
+    "codefuse-ai/F2LLM-v2-160M:mlx": Pin(
+        "4ffe22c31406fc321b65a05b15563d38275ee51f", Pooling.LAST, 40960
+    ),
 }
 # Hugging Face repository -> the revision its code and weights are read at
 RERANKERS: dict[str, str] = {}
 JINA_V5: dict[str, str] = {}
-EMBED_BATCH = 16  # texts a forward pass
-
-PAIR_BATCH = 16  # pairs a forward pass: the candidates of one search in a few passes
 
 
 # MLX keeps its streams per thread: an array still lazy on one thread aborts the process when
@@ -100,7 +100,8 @@ def embedder(name: str) -> "PooledEmbedder | JinaV5Embedder":
     path = _download(name)  # see `reranker`
     if name in JINA_V5:
         return _on_mlx_thread(JinaV5Embedder, path)
-    return _on_mlx_thread(PooledEmbedder, path, POOLED[name].pooling)
+    pin = POOLED[name]
+    return _on_mlx_thread(PooledEmbedder, path, pin.pooling, min(pin.tokens, MAX_EMBED_TOKENS))
 
 
 def _download(name: str) -> Path:
@@ -143,7 +144,7 @@ class Reranker:
 
     def rerank(self, query: str, texts: Sequence[str]) -> list[float]:
         scores: list[float] = []
-        for batch in batched(texts, PAIR_BATCH, strict=False):
+        for batch in batched(texts, BATCH, strict=False):
             encoded = self._tokenizer(
                 [query] * len(batch),
                 list(batch),
@@ -213,18 +214,18 @@ class PooledEmbedder:
     model asks and normalized. mlx-embeddings pools a ModernBERT itself, by its config, and
     answers no token states then: its pooled vector is taken as it comes."""
 
-    def __init__(self, path: Path, pooling: Pooling) -> None:
+    def __init__(self, path: Path, pooling: Pooling, tokens: int) -> None:
         self._model, self._tokenizer = _load(path)
         self._tokenizer.padding_side = "right"  # the last real token sits at its length less one
-        self._pooling = pooling
+        self._pooling, self._tokens = pooling, tokens
 
     def embed(self, texts: Sequence[str]) -> Iterator[Any]:
-        for batch in batched(texts, EMBED_BATCH, strict=False):
+        for batch in batched(texts, BATCH, strict=False):
             encoded = self._tokenizer(
                 list(batch),
                 padding=True,
                 truncation=True,
-                max_length=MAX_EMBED_TOKENS,
+                max_length=self._tokens,
                 return_tensors="np",
             )
             yield from _on_mlx_thread(self._forward, encoded)
@@ -267,7 +268,7 @@ class JinaV5Embedder:
         self._tokenizer = Tokenizer.from_file(str(path / "tokenizer.json"))
 
     def _encode(self, texts: Sequence[str], task: str) -> Iterator[Any]:
-        for batch in batched(texts, EMBED_BATCH, strict=False):
+        for batch in batched(texts, BATCH, strict=False):
             yield from _on_mlx_thread(self._forward, list(batch), task)
 
     def _forward(self, texts: list[str], task: str) -> Any:

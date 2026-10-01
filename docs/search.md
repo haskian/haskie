@@ -401,8 +401,8 @@ question's excerpts are then sorted by it; several keep the order their turns ga
 
 It runs only when every excerpt fits what the reranker reads, estimated at four characters a
 token: the catalogue's context, or less where the loader cuts shorter. Every reranker today reads
-512, though the models read 8,192: haskie cuts each pair there (`onnx_models.MAX_PAIR_TOKENS`,
-`mlx_models.MAX_PAIR_TOKENS`). An excerpt cut short would be
+512, though the models read 8,192: haskie cuts each pair there (`onnx_models.MAX_PAIR_TOKENS`).
+An excerpt cut short would be
 scored on its opening alone, beside others scored whole, so if one does not fit the chunk scores
 stand. Each search logs `search_rerank_excerpts` with whether it ran and how long it took. It is
 off until an evaluation shows it returns more answer per character than the fold.
