@@ -277,7 +277,8 @@ async def test_models_are_idempotent_and_fail_fast_when_missing(dbos, monkeypatc
     await models.ensure_models(broken)
     with pytest.raises(HaskieError):  # the model does not exist
         await wait_for(models._model_id(ModelKind.RERANKER, "nope/x"))
-    (status,) = await models.model_statuses()
+    # a cross-encoder also loads the map's reranker, which is no part of this
+    (status,) = [one for one in await models.model_statuses() if one.name == "nope/x"]
     assert (status.kind, status.state) == ("reranker", "error") and status.error
     with pytest.raises(Unavailable, match="failed to load"):
         await models.require_ready(ModelKind.RERANKER, "nope/x")
