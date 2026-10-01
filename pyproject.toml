@@ -81,6 +81,7 @@ replace-imports-with-any = [
     "mlx_embeddings.**",
     "transformers.**",
     "llama_cpp.**",
+    "onnxruntime_ep_webgpu.**",
 ]
 
 [tool.pytest.ini_options]
