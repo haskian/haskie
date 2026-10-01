@@ -57,7 +57,7 @@ below, and the first that fires names the signal:
 | `reported` | the agent that asked it said the excerpts do not answer it (`report_gap`), fully or in part. It reads the excerpts, so its verdict outranks every score |
 | `empty` | its search returned nothing |
 | `uncovered` | several questions were asked at once, and no excerpt answers this one |
-| `weak` | its best match is under the bar. A reranked search is judged by the floor it dropped chunks under: the settings' `min_rerank_score` when one is set, else the reranker's calibrated floor (`reranker_calibration`), because the reranker reads query and passage together. A map drops nothing, so it is judged by its own `map_reranker_model`'s calibrated floor, never by `min_rerank_score`. Otherwise the profile's `weak_match` cosine decides. No bar known: no verdict |
+| `weak` | its best match is under the bar. A reranked search is judged by the floor it dropped chunks under: the settings' `min_rerank_score` when one is set, else the reranker's calibrated floor (`reranker_calibration`), because the reranker reads query and passage together. A map drops nothing, so it is judged by the reranker's calibrated floor, never by `min_rerank_score`. Otherwise the profile's `weak_match` cosine decides. No bar known: no verdict |
 | `borderline` | no reranker judged it, and its best cosine sits from `weak_match` up to `answered_match`. It may be answered. `list_gaps` leaves it out unless `signals` asks for it, and the page folds these topics away |
 
 A failed search is an error, not a gap. A search kept to some documents or sections

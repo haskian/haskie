@@ -259,8 +259,8 @@ async def agent_search_sections(
     document_ids: Ids = None,
 ) -> agent.SectionMap:
     """A map of a topic: which sections of which documents touch it, near topics included, and
-    what each is about, without their text. Fast: no text read, and the reranker is a small
-    one that weighs every chunk the search scanned and drops none.
+    what each is about, without their text. No text is read, and the search's reranker weighs
+    every chunk the search scanned and drops none.
 
     The search scans deep and groups what it finds into the sections an excerpt would quote. It
     then picks `limit` of them (15 by default, at most 40) to cover everything the scan found

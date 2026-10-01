@@ -137,15 +137,15 @@ async def ensure_model(kind: ModelKind, name: str) -> ModelState:
 async def required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
     """Every model this installation needs, in a stable order and without duplicates.
 
-    A collection may override the reranker or its models, and a search of that collection then
-    loads what they resolve to, so the overrides count as required as much as the user-level pair
+    A collection may override the reranker or its model, and a search of that collection then
+    loads what they resolve to, so the overrides count as required as much as the user's model
     does."""
     wanted: list[tuple[ModelKind, str]] = []
     embedding = await catalogue.embedding_model(settings)
     if embedding:
         wanted.append((ModelKind.EMBEDDING, embedding.name))
     if settings.search.reranker == Reranker.CROSS_ENCODER:
-        wanted.extend((ModelKind.RERANKER, name) for name in settings.search.reranker_models)
+        wanted.append((ModelKind.RERANKER, settings.search.reranker_model))
     wanted.extend((ModelKind.RERANKER, name) for name in await _collection_rerankers(settings))
     if describer := gguf_models.describer(settings.pipeline.descriptors):
         wanted.append((ModelKind.DESCRIBER, describer))

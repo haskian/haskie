@@ -61,9 +61,8 @@ measured at.
 **`search_sections(q, session_id?, collections?, limit?, document_ids?)`** → `sections` (in pick
 order), `documents` (best first), `collections`, `searched` and `uncovered` (the question, when
 the sources match it only weakly: a map is always full). A map of a topic, near topics included,
-with no text, and the documents that cover it. With a reranker on, a small one of its own
-(`map_reranker_model`) weighs every chunk and drops none. `document_ids` keeps it to those
-documents.
+with no text, and the documents that cover it. With a reranker on, it weighs every chunk and
+drops none. `document_ids` keeps it to those documents.
 
 - `limit`: sections, 1 to 40, default 15. At most two of one document while another has a section
   on the topic left.

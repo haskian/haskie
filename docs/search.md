@@ -16,7 +16,7 @@ flowchart LR
     hits --> fchunks["collapse hits"] --> chunks(["chunks"])
     hits --> franges["merge neighbours,<br/>grow or drop short ones,<br/>collapse ranges"] --> read["read the spans"] --> passages(["passages"])
     hits --> jranges["merge neighbours,<br/>find short ones,<br/>fold repeats"] --> group["group by section"] --> budget["cut to<br/>the budget"] --> probe["search again for<br/>missing words"] --> fill["fill around<br/>and between"] --> rerankx["rerank whole excerpts<br/>(experiment)"] --> excerpts(["excerpts"])
-    merge -. "a small reranker weighs,<br/>drops none" .-> mapsec["group by section,<br/>pick to cover the scan;<br/>rank documents"] --> sections(["sections"])
+    merge -. "the reranker weighs,<br/>drops none" .-> mapsec["group by section,<br/>pick to cover the scan;<br/>rank documents"] --> sections(["sections"])
 ```
 
 ## The shared ranking
@@ -239,9 +239,9 @@ documents the search reached hardest: an agent reads the map, then asks `search_
 sections worth reading. It runs `retrieve -> merge -> rerank -> hits -> map_sections`
 (`search/section_map.py`):
 
-1. **A small reranker weighs every chunk.** With a reranker on, the map's own model
-   (`map_reranker_model`, MiniLM-L2 by default) scores every chunk of the scan, 20 chunks per
-   section asked for, up to 200. It drops none: the scores are the demand weights below, the
+1. **The reranker weighs every chunk.** With a reranker on, the search's model
+   (`reranker_model`) scores every chunk of the scan, 20 chunks per section asked for, up to
+   200. It drops none: the scores are the demand weights below, the
    section scores and the document scores. A floor would narrow the map; a weight only makes a
    section that shares a word with the topic count for little. Without a reranker the fused
    retrieval scores stand, which weigh the top chunk only about four times the 200th.
@@ -335,13 +335,15 @@ book a cross-encoder (mxbai-rerank-xsmall) ranks first.
 | --- | --- | --- | --- | --- | --- |
 | one ranking per collection, no reranker | 42 of 132 | | 9 | 6 of 11 | 0 |
 | one table, no reranker | 22 of 132 | 3.9 | 7 | 11 of 11 | 0 |
-| one table, MiniLM-L2 weighs (shipped) | 5 of 132 | 2.9 | 6 | 10 of 11 | 1.5 s |
+| one table, MiniLM-L2 weighs | 5 of 132 | 2.9 | 6 | 10 of 11 | 1.5 s |
 | one table, MiniLM-L6 weighs | 4 of 132 | 2.9 | 5 | 10 of 11 | 3.8 s |
 
 An off-domain pick is a Python book's section on an architecture question, or the reverse. The
 times were taken on a machine under heavy load (load average 55): what holds is L2 against L6,
 about 2.5 times faster. The map is narrower with a reranker because the questions one book owns
 (leader election, package stability) now map to that book, which the assessment asked for.
+Maps now score with the search's own reranker (ettin-32m by default), which this table does not
+measure.
 Two things tried and dropped:
 - A scan capped at a fifth per document, over a pool twice as deep, spread the books (4.8 to 6.5
   with 5 chunks or more) before the map reranked. With the reranker it added 0.2 books and mixed
@@ -349,10 +351,10 @@ Two things tried and dropped:
 - `score_fold = max` instead of `sum` changed 1 pick of 132, and put the cross-encoder's top
   document first in 8 of 11, against 10 of 11 for `sum`.
 
-MiniLM-L2's best score on the 11 answered questions is 0.113 at the lowest; on three questions no
-book covers it is 0.0 (espresso), 0.003 (Java garbage collection) and 0.861 (the Linux scheduler,
-against asyncio's scheduling). Its uncalibrated floor of 0.05 flags none of the answered and two
-of the three, which is the verdict a map's `uncovered` carries.
+MiniLM-L2's best score on the 11 answered questions was 0.113 at the lowest; on three questions no
+book covers it was 0.0 (espresso), 0.003 (Java garbage collection) and 0.861 (the Linux scheduler,
+against asyncio's scheduling). Its uncalibrated floor of 0.05 flagged none of the answered and two
+of the three, which is the verdict a map's `uncovered` carries. ettin-32m was not measured here.
 
 Each search logs `search_map` with the chunks, the sections reached and picked, the share of
 demand covered after each pick, whether it centred, and the documents whose sections were missing.
@@ -541,14 +543,14 @@ building its first full-text index contributes nothing: LanceDB refuses a BM25 q
 ## Settings
 
 `limit`, `candidates`, `mode`, `fusion`, `rrf_k`, `vector_weight`, `bm25_weight`, `nprobes`,
-`refine_factor`, `reranker`, `reranker_model`, `map_reranker_model`, `rerank_with_context`,
+`refine_factor`, `reranker`, `reranker_model`, `rerank_with_context`,
 `min_rerank_score`, `rerank_excerpts`, `score_fold`, `min_passage_chars`, `max_passage_grow`,
 `grow_bias`, `fill_values`, `max_section_chars` and `max_answer_chars` each have a user default and
 a description in the UI, and a collection can override them. The UI groups the ones that decide how
 passages expand under Expansion: `min_passage_chars`, `max_passage_grow`, `fill_values`,
 `grow_bias`, `max_section_chars` and `max_answer_chars`. In the shared ranking, each collection
 retrieves with its own overrides: `mode`, `nprobes` and `refine_factor`. The settings of the merged
-ranking (`fusion`, `rrf_k`, the two weights, `candidates`, the rerankers) and of every step after it
+ranking (`fusion`, `rrf_k`, the two weights, `candidates`, the reranker) and of every step after it
 come from the collection only when it is the one collection in scope, and from the user otherwise.
 `limit` comes from the call, else from the same place, for chunks and passages. The other answers
 have fixed defaults of their own: `search_excerpts` 10 sections (`flow.DEFAULT_EXCERPTS`) and

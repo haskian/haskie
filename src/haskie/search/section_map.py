@@ -32,7 +32,7 @@ scanned chunk folded per document by `score_fold`, best first, and every other d
 section is in, so each section's document has its row. A document the map picked nothing from can
 still lead them.
 
-With a reranker on, its own small model (`map_reranker_model`) scores every scanned chunk first
+With a reranker on, the search's model (`reranker_model`) scores every scanned chunk first
 and drops none: the scores are the demand weights, the section scores and the document scores.
 A section that only shares a word with the topic then counts for little. Without one, the fused
 retrieval scores stand, which weigh the chunks nearly alike.

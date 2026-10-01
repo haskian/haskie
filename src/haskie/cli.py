@@ -159,6 +159,11 @@ def _serve_here(host: str, port: int, reload: bool) -> None:
     # one carrier, so a `--reload` child that re-imports `home` records the same thing.
     os.environ[home.ADDRESS_ENV] = f"http://{host}:{port}"
     os.environ[home.SERVER_PID_ENV] = str(os.getpid())
+    if not reload:  # `--reload` watches the working directory, which is the code being edited
+        # Not the caller's directory: it may be deleted while the server lives on, and then every
+        # new worker process fails on `os.getcwd()`, which breaks every PDF conversion.
+        home.ensure_home_sync()  # a first run's home does not exist yet
+        os.chdir(home.HOME)
     typer.echo(f"haskie {APP_VERSION} on http://{host}:{port}  (home: {home.HOME})")
     uvicorn.run(
         "haskie.app:create_app",

@@ -101,13 +101,13 @@ The rule and the skill teach this; the reasons come from a simulated agent run o
 books, three collections, an `mxbai-rerank-xsmall` reranker) and from the retrieval research the
 search follows. The map numbers predate two changes measured on the same shelf
 ([Search](search.md#sections-a-map-of-the-shelf)): the merge across collections cut its off-domain
-picks from 42 to 22 of 132, and the map's own small reranker from 22 to 5.
+picks from 42 to 22 of 132, and a small reranker (MiniLM-L2) weighing the map from 22 to 5.
 
 | | `search_excerpts` | `search_sections` |
 | --- | --- | --- |
 | answers | what the sources say: sections, quoted | where a topic lives: sections and documents, no text |
 | reach | deep: few sections, grown to read whole | wide: picked to cover the whole scan |
-| reranker | the one set, which drops what it judges no answer | a small one of its own, which weighs every chunk and drops none |
+| reranker | the one set, which drops what it judges no answer | the same one, which weighs every chunk and drops none |
 | use it when | the agent knows the sources' words | the question is broad, the words are unknown, or it needs several authors |
 
 - **Map first when the words are missing.** A novice question on keeping data consistent across

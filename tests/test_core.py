@@ -79,7 +79,6 @@ from haskie.indexing.chunk import Chunk, Piece, Position
 from haskie.indexing.segment import CutReason, PieceType
 from haskie.paging import Order, PageRequest
 from haskie.settings import (
-    DEFAULT_MAP_RERANKER,
     DEFAULT_RERANKER,
     Accelerator,
     Chunker,
@@ -1269,18 +1268,15 @@ async def test_reranker_overrides_lists_every_model_a_collection_chose() -> None
 
 
 @pytest.mark.anyio
-async def test_a_collection_that_turns_the_reranker_on_loads_the_users_models() -> None:
-    """With the user's reranker off, nothing else downloads the models such a collection's
-    excerpts and map resolve to."""
+async def test_a_collection_that_turns_the_reranker_on_loads_the_users_model() -> None:
+    """With the user's reranker off, nothing else downloads the model such a collection's
+    search resolves to."""
     await Collection.create("reranked")
     await Collection("reranked").set_overrides(
         CollectionOverrides(search=SearchOverrides(reranker=Reranker.CROSS_ENCODER))
     )
 
-    assert await Collection.reranker_overrides(SearchSettings()) == [
-        DEFAULT_RERANKER,
-        DEFAULT_MAP_RERANKER,
-    ]
+    assert await Collection.reranker_overrides(SearchSettings()) == [DEFAULT_RERANKER]
 
 
 @pytest.mark.anyio

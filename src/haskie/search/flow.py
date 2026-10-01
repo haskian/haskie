@@ -16,8 +16,8 @@ and the excerpts an agent reads, which run the shared ranking once per question 
     answers    (retrieve -> merge -> rerank -> hits -> judge_thin) per question -> fold -> group
                -> budget -> probe_gaps -> fill -> quote -> rerank_excerpts
 
-The first four steps are the search every answer shares (in `sections` the reranker, its own
-small model, weighs every chunk and drops none); what follows is the fold that answer is made of,
+The first four steps are the search every answer shares (in `sections` the reranker weighs every
+chunk and drops none); what follows is the fold that answer is made of,
 and it is a step rather than something every search pays for. `chunks` folds each near-duplicate hit
 into the hit it repeats (`collapse`). `passages` and `answers` merge the chunks of one section that
 sit next to each other into one readable span, grow a span too short to stand alone by the
@@ -468,7 +468,7 @@ async def _search(
     scope: Scope = EVERYTHING,
 ) -> Search | None:
     """One search, planned but not yet run, or None when nothing is left to search. `weighs` for
-    a map: its own reranker weighs every chunk and drops none (`retrieval.plan`)."""
+    a map: the reranker weighs every chunk and drops none (`retrieval.plan`)."""
     asked = aspects.Questions(questions=[query])
     found = await _searches(names, asked, limit, deeper, rerank_floor, weighs, scope)
     return found[0] if found else None

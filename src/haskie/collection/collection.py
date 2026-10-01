@@ -437,20 +437,20 @@ class Collection:
     @staticmethod
     async def reranker_overrides(user: SearchSettings) -> list[str]:
         """Every reranker model a collection's overrides make a search of it load, in name order
-        and without duplicates: each model one names, for its excerpts or its map, and both models
-        its settings resolve to against `user` when it turns the reranker on.
+        and without duplicates: each model one names, and the model its settings resolve to
+        against `user` when it turns the reranker on.
 
         One query over the `overrides` column: the model downloads have to cover the overrides too.
         A collection that turns the reranker on while the user's settings keep it off loads the
-        user's models, which nothing else would download."""
+        user's model, which nothing else would download."""
         async with db.read() as conn:
             rows = await conn.scalars(select(collections.c.overrides).order_by(collections.c.name))
         chosen: list[str | None] = []
         for search in (_overrides(raw).search for raw in rows):
-            chosen += search.reranker_models
+            chosen.append(search.reranker_model)
             resolved = search.resolve(user)
             if resolved.reranker != Reranker.NONE:
-                chosen += resolved.reranker_models
+                chosen.append(resolved.reranker_model)
         return list(dict.fromkeys(model for model in chosen if model))
 
     async def chunk_settings(self) -> ChunkSettings:

@@ -45,8 +45,8 @@ values
     ('mradermacher/granite-embedding-english-r2-GGUF', 'embedder', 'granite-english on the Apple GPU through llama.cpp, 16-bit: about 2.5x faster than on WebGPU (~300 MB).', 149014272, 8192, 'English', 'Apache-2.0', '2025-07-17', 'https://huggingface.co/ibm-granite/granite-embedding-english-r2'),
     ('ChristianAzinn/e5-base-v2-gguf', 'embedder', 'e5-base-v2 on the Apple GPU through llama.cpp, 16-bit: about 3x faster than on WebGPU (~220 MB).', 109482752, 512, 'English', 'MIT', '2023-05-19', 'https://huggingface.co/intfloat/e5-base-v2'),
     ('mradermacher/F2LLM-v2-160M-GGUF', 'embedder', 'F2LLM-v2-160M on the Apple GPU through llama.cpp, 16-bit: about 2x faster than on WebGPU (~320 MB).', 159185024, 40960, 'multilingual (200+)', 'Apache-2.0', '2026-03-09', 'https://huggingface.co/codefuse-ai/F2LLM-v2-160M'),
-    -- the map's reranker (`DEFAULT_MAP_RERANKER`), measured for maps before this catalogue
-    ('cross-encoder/ms-marco-MiniLM-L2-v2', 'reranker', 'The smallest MiniLM: two layers, about 2.5x faster than L-6 on a map, for 4 points of MRR; the default for maps.', 15616257, 512, 'English', 'Apache-2.0', '2021-04-15', 'https://huggingface.co/cross-encoder/ms-marco-MiniLM-L2-v2'),
+    -- measured for maps before this catalogue
+    ('cross-encoder/ms-marco-MiniLM-L2-v2', 'reranker', 'The smallest MiniLM: two layers, about 2.5x faster than L-6 on a map, for 4 points of MRR.', 15616257, 512, 'English', 'Apache-2.0', '2021-04-15', 'https://huggingface.co/cross-encoder/ms-marco-MiniLM-L2-v2'),
     -- each Ettin's own weights; its scoring head adds well under 1%
     ('cross-encoder/ettin-reranker-17m-v1', 'reranker', 'The fastest reranker here, and better than the MiniLM rerankers it replaces (~67 MB).', 16797440, 8192, 'English', 'Apache-2.0', '2026-05-15', 'https://huggingface.co/cross-encoder/ettin-reranker-17m-v1'),
     ('cross-encoder/ettin-reranker-32m-v1', 'reranker', 'Small and accurate: beats rerankers 17 times its size, about 3x slower than ettin-17m; a good default (~128 MB).', 31883136, 8192, 'English', 'Apache-2.0', '2026-05-15', 'https://huggingface.co/cross-encoder/ettin-reranker-32m-v1'),

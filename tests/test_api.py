@@ -41,7 +41,6 @@ from haskie.indexing.segment import PieceType
 from haskie.paging import Order
 from haskie.search import aspects, flow, gaps, log
 from haskie.settings import (
-    DEFAULT_MAP_RERANKER,
     DEFAULT_RERANKER,
     Accelerator,
     ChunkSettings,
@@ -546,11 +545,11 @@ async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClie
             [],
         ),
         (
-            "a reranker on: the map's own model scores every chunk",
+            "a reranker on: the search's model scores every chunk",
             Reranker.CROSS_ENCODER,
             None,
             2.0,
-            DEFAULT_MAP_RERANKER,
+            DEFAULT_RERANKER,
             [],
         ),
         (
@@ -558,7 +557,7 @@ async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClie
             Reranker.CROSS_ENCODER,
             None,
             -9.0,
-            DEFAULT_MAP_RERANKER,
+            DEFAULT_RERANKER,
             ["alpha"],
         ),
         (
@@ -566,12 +565,12 @@ async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClie
             Reranker.CROSS_ENCODER,
             0.9,
             2.0,
-            DEFAULT_MAP_RERANKER,
+            DEFAULT_RERANKER,
             [],
         ),
     ],
 )
-async def test_a_map_weighs_its_chunks_with_its_own_reranker(
+async def test_a_map_weighs_its_chunks_with_the_reranker(
     ready: AsyncTestClient,
     monkeypatch: pytest.MonkeyPatch,
     name: str,
@@ -581,10 +580,9 @@ async def test_a_map_weighs_its_chunks_with_its_own_reranker(
     expected: str | None,
     uncovered: list[str],
 ) -> None:
-    """`search_sections` reranks with `map_reranker_model`, not the excerpts' model, and keeps
-    every chunk: its scores weigh the map, they do not cut it. Its log row names the model and no
-    floor of the user's, so the gaps judge the map by that model's own floor, and so does the
-    answer's `uncovered`."""
+    """`search_sections` reranks with the excerpts' model, and keeps every chunk: its scores weigh
+    the map, they do not cut it. Its log row names the model and no floor of the user's, so the
+    gaps judge the map by that model's own floor, and so does the answer's `uncovered`."""
     from haskie.indexing import embed, models
 
     if reranker is not None:
@@ -593,7 +591,7 @@ async def test_a_map_weighs_its_chunks_with_its_own_reranker(
             CollectionOverrides(search=SearchOverrides(reranker=reranker, min_rerank_score=floor))
         )
         monkeypatch.setattr(
-            models, "_ready", {models._model_id(models.ModelKind.RERANKER, DEFAULT_MAP_RERANKER)}
+            models, "_ready", {models._model_id(models.ModelKind.RERANKER, DEFAULT_RERANKER)}
         )
     read: list[str] = []
 
@@ -765,14 +763,7 @@ async def test_collection_reranker_override_starts_its_download(
 
     saved = await ready.put(
         "/api/collections/notes/overrides",
-        # both of its models, so its map loads no default of the user's either
-        json={
-            "search": {
-                "reranker": "cross-encoder",
-                "reranker_model": override,
-                "map_reranker_model": override,
-            }
-        },
+        json={"search": {"reranker": "cross-encoder", "reranker_model": override}},
     )
 
     assert saved.status_code == 200
@@ -801,6 +792,36 @@ async def test_status_reports_an_unreadable_settings_row(ready: AsyncTestClient)
 
     assert status["settings_error"] is not None and "unreadable" in status["settings_error"]
     assert status["initialized"] is True, "defaults are in use, the app still runs"
+
+
+async def test_rows_written_with_the_maps_own_reranker_still_read(ready: AsyncTestClient) -> None:
+    """v0.23.0 stored `map_reranker_model` in the settings row and in a collection's overrides.
+    The setting is gone; both rows still read, keeping every value they hold besides it."""
+    from sqlalchemy import update
+
+    from haskie import db
+    from haskie.tables import collections
+    from haskie.tables import settings as settings_table
+
+    chosen = "cross-encoder/ettin-reranker-17m-v1"
+    old_key = {"map_reranker_model": "cross-encoder/ms-marco-MiniLM-L2-v2"}
+    stored = (await ready.get("/api/settings")).json()
+    stored["search"] |= {"reranker_model": chosen, **old_key}
+    overrides = {"search": {"reranker_model": chosen, **old_key}}
+    async with db.connect() as conn:
+        await conn.execute(update(settings_table).values(json=json.dumps(stored)))
+        await conn.execute(
+            update(collections)
+            .where(collections.c.name == "notes")
+            .values(overrides=json.dumps(overrides))
+        )
+    forget_settings()  # a direct write bypasses the process cache
+
+    assert (await ready.get("/api/status")).json()["settings_error"] is None
+    assert (await ready.get("/api/settings")).json()["search"]["reranker_model"] == chosen
+    notes = (await ready.get("/api/collections/notes")).json()
+    assert notes["overrides"]["search"]["reranker_model"] == chosen
+    assert "map_reranker_model" not in notes["overrides"]["search"]
 
 
 async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
@@ -845,10 +866,10 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     assert (reranker["runtime"], reranker["devices"]) == ("onnx", ["cpu", "apple_silicon", "gpu"])
     assert "dimensions" not in reranker, "a reranker has no vectors"
     assert options["reranker_models"][:3] == [
-        DEFAULT_MAP_RERANKER,
+        "cross-encoder/ms-marco-MiniLM-L2-v2",
         "cross-encoder/ettin-reranker-17m-v1",
         DEFAULT_RERANKER,
-    ], "smallest first: the map's default, then ettin-17m, then the excerpts'"
+    ], "smallest first: MiniLM-L2, then ettin-17m, then the default"
     # the vocabularies the UI renders rows with, so it never spells a status out for itself
     assert (
         options["document_statuses"][:3]
@@ -940,12 +961,13 @@ async def test_a_write_naming_a_model_the_catalogue_lacks_stores_nothing(
 
 
 @pytest.mark.parametrize(
-    ("name", "body", "expected"),
+    ("name", "body", "llama_cpp", "expected"),
     [
         (
-            "the profile alone: hybrid search, reranked by the smallest cross-encoder",
+            "the profile alone: hybrid search, reranked by ettin-32m, c-TF-IDF descriptors",
             {"profile": "none"},
-            ("hybrid", "cross-encoder", "cross-encoder/ettin-reranker-32m-v1"),
+            False,
+            ("hybrid", "cross-encoder", "cross-encoder/ettin-reranker-32m-v1", "c-tf-idf"),
         ),
         (
             "the search picked with it is stored as given, what it leaves out as no reranker",
@@ -956,18 +978,57 @@ async def test_a_write_naming_a_model_the_catalogue_lacks_stores_nothing(
                     "reranker_model": "Alibaba-NLP/gte-reranker-modernbert-base",
                 },
             },
-            ("fts", "none", "Alibaba-NLP/gte-reranker-modernbert-base"),
+            False,
+            ("fts", "none", "Alibaba-NLP/gte-reranker-modernbert-base", "c-tf-idf"),
+        ),
+        (
+            "llm descriptors where llama.cpp runs: stored, and their describer downloads",
+            {**NO_MODELS, "descriptors": "llm"},
+            True,
+            ("hybrid", "none", "cross-encoder/ettin-reranker-32m-v1", "llm"),
         ),
     ],
 )
-async def test_init_stores_the_search_it_was_given(
-    client: AsyncTestClient, name: str, body: dict, expected: tuple[str, str, str]
+async def test_init_stores_what_was_picked(
+    client: AsyncTestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    body: dict,
+    llama_cpp: bool,
+    expected: tuple[str, str, str, str],
 ) -> None:
+    from haskie.indexing import embed
+
+    monkeypatch.setattr(gguf_models, "available", lambda: llama_cpp)
+    loaded: list[str] = []
+    monkeypatch.setattr(embed, "warm_generator", lambda name, accelerator: loaded.append(name))
+
     response = await client.post("/api/init", json=body)
 
     assert response.status_code == 201, f"{name}: {response.text}"
-    search = (await client.get("/api/settings")).json()["search"]
-    assert (search["mode"], search["reranker"], search["reranker_model"]) == expected, name
+    settings = (await client.get("/api/settings")).json()
+    search = settings["search"]
+    picked = (search["mode"], search["reranker"], search["reranker_model"])
+    assert (*picked, settings["pipeline"]["descriptors"]) == expected, name
+    if expected[-1] == "llm":
+        await wait_for(f"dl:describer:{gguf_models.DESCRIBER}")
+        assert loaded == [gguf_models.DESCRIBER], f"{name}: the first run starts its download"
+
+
+async def test_init_refuses_llm_descriptors_where_their_model_cannot_run(
+    client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without llama.cpp the describer runs nowhere, so the first run is refused whole: nothing
+    stored, and the page can be submitted again with c-TF-IDF."""
+    monkeypatch.setattr(gguf_models, "available", lambda: False)
+
+    response = await client.post("/api/init", json={**NO_MODELS, "descriptors": "llm"})
+
+    assert response.status_code == 422, response.text
+    assert gguf_models.DESCRIBER in response.json()["detail"]
+    assert (await client.get("/api/status")).json()["initialized"] is False
+    retried = await client.post("/api/init", json={**NO_MODELS, "descriptors": "c-tf-idf"})
+    assert retried.status_code == 201, retried.text
 
 
 async def test_the_first_run_starts_from_a_cross_encoder_and_then_reads_what_was_picked(
