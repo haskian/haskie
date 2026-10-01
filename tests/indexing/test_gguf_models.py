@@ -61,10 +61,13 @@ class Llama:
         words = [7] * len(text.split())
         return [1, *words, 2] if add_bos else words
 
+    # detokenized, each token reads as this many words, as a cut can tokenize longer than it was
+    grows = 1
+
     def detokenize(self, tokens: list[int]) -> bytes:
         if self.by_char:
             return bytes(tokens)
-        return b" ".join(b"w" for _ in tokens)
+        return b" ".join(b"w" for _ in range(len(tokens) * self.grows))
 
     def create_chat_completion(self, messages: list[dict], **options: object) -> dict:
         self.calls.append(([messages[0]["content"]], options))
@@ -146,22 +149,28 @@ def test_the_embed_path_routes_every_gguf_name_to_llama_cpp(monkeypatch) -> None
 
 
 @pytest.mark.parametrize(
-    ("name", "words", "sent"),
+    ("name", "words", "grows", "sent"),
     [
-        ("a text that fits goes as it is", 500, 500),
-        ("one at the model's cut, its two own tokens included, goes as it is", 510, 510),
-        ("a longer text is cut so the model's end token fits after it", 2000, 510),
+        ("a text that fits goes as it is", 500, 1, 500),
+        ("one at the model's cut, its two own tokens included, goes as it is", 510, 1, 510),
+        ("a longer text is cut so the model's end token fits after it", 2000, 1, 510),
+        # 510 tokens detokenize to 1020 words: the cut shrinks by 8 until it tokenizes to fit
+        ("a cut that tokenizes longer shrinks until it fits", 2000, 2, 510),
     ],
 )
-def test_a_text_is_cut_to_keep_the_end_token(name: str, words: int, sent: int, llama) -> None:
+def test_a_text_is_cut_to_keep_the_end_token(
+    name: str, words: int, grows: int, sent: int, llama, monkeypatch
+) -> None:
     """llama.cpp's own cut drops the end token with the rest, and a vector pooled without it is
     another vector (F2LLM: cosine 0.14 to its ONNX twin)."""
+    monkeypatch.setattr(llama, "grows", grows)
     embedder = gguf_models.GgufEmbedder(SHORT)
 
     list(embedder.embed(["word " * words]))
 
     ((texts, _),) = embedder._model.calls
-    assert len(texts[0].split()) == sent, name
+    assert len(texts[0].split()) <= sent, f"{name}: fits in 512 with its own two tokens"
+    assert len(texts[0].split()) > sent - 8 * grows, f"{name}: shrunk no more than it had to"
 
 
 @pytest.mark.parametrize(

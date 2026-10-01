@@ -247,13 +247,9 @@ class Head:
         return (x @ weight.T + bias)[:, 0]
 
 
-def _erf(x: np.ndarray) -> np.ndarray:
-    """erf over a whole array, which numpy lacks: Abramowitz and Stegun 7.1.26, within 1.5e-7,
-    below float32's own noise. torch's GELU is the exact one, so tanh's shortcut would not do."""
-    t = 1.0 / (1.0 + 0.3275911 * np.abs(x))
-    tail = -1.453152027 + t * 1.061405429
-    poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * tail)))
-    return np.sign(x) * (1.0 - poly * np.exp(-x * x))
+# torch's GELU is the exact one, so it takes the exact erf, which numpy lacks: tanh's shortcut
+# would not do (about 0.5 ms a batch of 16, beside the model's own hundreds)
+_erf = np.vectorize(math.erf, otypes=[np.float32])
 
 
 def _tensors(path: Path) -> dict[str, np.ndarray]:

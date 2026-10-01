@@ -229,7 +229,7 @@ vector and full-text (BM25) search in one table, on a columnar format built for 
 code. By default haskie fuses both by rank (reciprocal rank fusion, RRF). An optional
 cross-encoder reads the query and passage together and rescores the top candidates. Adding one
 takes the cut in failed retrievals from 49% to 67% [14]. It is off by default. Settings offers
-models from 16 million parameters up to multilingual ones.
+English models from 16 million parameters up to 150 million.
 
 **Repeats folded, passages whole.** Five books that make the same point would fill five of your
 agent's slots. Most rerankers score one passage at a time, so they cannot see repeats [18]. haskie
