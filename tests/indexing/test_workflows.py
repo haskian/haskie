@@ -1403,6 +1403,8 @@ async def test_a_description_no_run_could_write_is_refused_before_it_is_queued(
     cached: bool,
     refused: str,
 ) -> None:
+    # llama.cpp stood in for, so a runner without an Apple GPU reaches the checks after the device
+    monkeypatch.setattr(gguf_models, "available", lambda: True)
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     await document.set_status(doc.id, status)
     if llm:
