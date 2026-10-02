@@ -181,6 +181,7 @@ class Staged(msgspec.Struct):
 
     staging_id: str
     filename: str
+    name: str  # what the import stores it as unless renamed: `stored_name(filename)`
     size: int
     # the document these exact bytes already are, by name: importing them again is refused
     duplicate: str | None
@@ -295,7 +296,13 @@ async def stage(filename: str, content: bytes) -> Staged:
             )
         )
     duplicate = await identical(md5)
-    return Staged(staging_id=staging_id, filename=name, size=len(content), duplicate=duplicate)
+    return Staged(
+        staging_id=staging_id,
+        filename=name,
+        name=importable,
+        size=len(content),
+        duplicate=duplicate,
+    )
 
 
 async def sweep_staging(max_age_seconds: float) -> int:

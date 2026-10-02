@@ -133,7 +133,7 @@ describe('embeddingLabel', () => {
 
 describe('staging several files', () => {
   // `POST /api/documents/staging` as it answers for a real upload.
-  const STAGED: Staged = { staging_id: '3f2b9c1e8a7d4b6f', filename: 'area-lights.pdf', size: 421_904, duplicate: null }
+  const STAGED: Staged = { staging_id: '3f2b9c1e8a7d4b6f', filename: 'Area Lights.PDF', name: 'area-lights.pdf', size: 421_904, duplicate: null }
   const file = (name: string) => new File(['%PDF-1.4'], name, { type: 'application/pdf' })
   const cases: Array<{
     name: string
@@ -143,17 +143,17 @@ describe('staging several files', () => {
   }> = [
     { name: 'nothing picked stages nothing', files: [], results: [], expected: { added: [], failures: [] } },
     {
-      name: 'each landed file is named after itself, a repeat keeps the document it already is',
-      files: [file('area-lights.pdf'), file('soft-shadows.pdf')],
+      name: 'each landed file takes the name the server normalized, a repeat keeps the document it already is',
+      files: [file('Area Lights.PDF'), file('Soft Shadows.pdf')],
       results: [
         { status: 'fulfilled', value: STAGED },
-        { status: 'fulfilled', value: { ...STAGED, staging_id: '9a1c', filename: 'soft-shadows.pdf', duplicate: 'shadows.pdf' } },
+        { status: 'fulfilled', value: { ...STAGED, staging_id: '9a1c', filename: 'Soft Shadows.pdf', name: 'soft-shadows.pdf', duplicate: 'shadows.pdf' } },
       ],
       expected: { added: [['area-lights.pdf', null], ['soft-shadows.pdf', 'shadows.pdf']], failures: [] },
     },
     {
       name: 'a refused file costs only itself, and says which one it was',
-      files: [file('area-lights.pdf'), file('huge.pdf')],
+      files: [file('Area Lights.PDF'), file('huge.pdf')],
       results: [
         { status: 'fulfilled', value: STAGED },
         { status: 'rejected', reason: new Error('Request Entity Too Large') },

@@ -2181,6 +2181,7 @@ export interface components {
         Staged: {
             staging_id: string;
             filename: string;
+            name: string;
             size: number;
             duplicate: string | null;
         };
