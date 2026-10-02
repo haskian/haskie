@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.27.0 - 2026-10-02
+#### Features
+- describe documents and collections with the describer model (#38) - (c6114ad) - Črtomir Majer
+
+- - -
+
 ## v0.26.0 - 2026-10-02
 #### Features
 - (**documents**) stored names, unfiled warning, describing status (#37) - (8a48a8b) - Črtomir Majer
