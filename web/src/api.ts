@@ -277,6 +277,9 @@ export const api = {
     request<CollectionInfo>('/api/collections', json('POST', { name, description })),
   describeCollection: (name: string, description: string) =>
     request<CollectionInfo>(`${collectionPath(name)}/description`, json('PUT', { description })),
+  // Queued: its documents with none are described first, then the collection, replacing its own.
+  generateCollectionDescription: (name: string) =>
+    request<BulkStarted>(`${collectionPath(name)}/description/generate`, { method: 'POST' }),
   renameCollection: (name: string, to: string) => request<CollectionInfo>(`${collectionPath(name)}/name`, json('PUT', { name: to })),
   collection: (name: string) => request<CollectionInfo>(collectionPath(name)),
   deleteCollection: (name: string) => request<BulkStarted>(collectionPath(name), { method: 'DELETE' }),
@@ -323,6 +326,9 @@ export const api = {
   similarDocuments: (doc: string) => request<Similar>(`${documentPath(doc)}/similar`),
   describeDocument: (doc: string, description: string) =>
     request<ImportedDocument>(`${documentPath(doc)}/description`, json('PUT', { description })),
+  // Queued: the describer writes it in the background, replacing the one there.
+  generateDescription: (doc: string) =>
+    request<BulkStarted>(`${documentPath(doc)}/description/generate`, { method: 'POST' }),
   // Some lines of the converted markdown: what an `also_in` place reads back when it is opened.
   lines: (doc: string, lineStart: number, lineEnd: number) =>
     request<Lines>(`${documentPath(doc)}/lines${pageQuery({}, { line_start: String(lineStart), line_end: String(lineEnd) })}`),

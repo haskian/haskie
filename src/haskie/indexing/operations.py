@@ -1,9 +1,9 @@
 """Read model over the operation history, in the three words this app counts work in.
 
 An **operation** is the whole of what someone asked for: import a document, index one document
-into a collection, index a whole collection, delete a collection, delete a document, maintain a
-collection, download a model. A **job** is one stage of an operation: convert, embed, describe
-or index. A **task** is one micro-batch: one durable step below a job.
+into a collection, index, delete or describe a whole collection, delete or describe a document,
+maintain a collection, download a model. A **job** is one stage of an operation: convert, embed,
+describe or index. A **task** is one micro-batch: one durable step below a job.
 
 "Workflow" is DBOS's word for the thing that runs any of them, and it stays in the modules that
 talk to DBOS (`workflows`, `dbos_names`, `sysdb`, `models`). Nothing this module returns says it.
@@ -54,14 +54,18 @@ from haskie.indexing.dbos_names import (
     ACTIVE_STATUS,
     BULK_WORKFLOWS,
     COLLECTION_DOCUMENT_WORKFLOW,
+    COLLECTION_STEP,
     DAILY_MAINTENANCE_WORKFLOW,
     DELETE_DOCUMENT_WORKFLOW,
     DOCUMENT_OPERATION_WORKFLOWS,
     DOWNLOAD_WORKFLOW,
     EMBED_WORKFLOW,
     MAINTAIN_PARTITION_WORKFLOW,
+    MEMBER_STEP,
+    MEMBERS_STEP,
     STAGE_STEP,
     STAGE_WORKFLOW,
+    SUMMARIZE_COLLECTION_WORKFLOW,
     BulkWorkflow,
     RunStatus,
 )
@@ -120,19 +124,17 @@ class _StageRun(msgspec.Struct):
 # the kind the API reports is the workflow name (`test_workflows` pins that against the registry).
 BulkKind = BulkWorkflow
 BULK_KINDS: tuple[BulkKind, ...] = BULK_WORKFLOWS
-# What a bulk operation works on. The verb is the row's tag in the UI, so the title leaves it out.
-BULK_TITLES: dict[BulkKind, str] = {
-    BulkKind.INDEX_COLLECTION: "collection",
-    BulkKind.DELETE_COLLECTION: "collection",
-    BulkKind.DELETE_DOCUMENT: "document",
-}
+# The bulk kinds whose id carries a document's id where the rest carry a collection's name. What a
+# bulk operation works on is its title; the verb is the row's tag in the UI, so the title leaves
+# it out.
+DOCUMENT_BULK_KINDS = frozenset({BulkKind.DELETE_DOCUMENT, BulkKind.SUMMARIZE_DOCUMENT})
 
 
 class OperationProgress(msgspec.Struct):
     """How far one whole-collection or whole-document operation got: what the 202 of an "index
-    all", a collection delete or a document delete points at.
+    all", a collection delete, a document delete or a description points at.
 
-    `collection` is None for a document delete: it spans every collection the document is in."""
+    `collection` is None for a document's operation: it belongs to no one collection."""
 
     id: str
     kind: BulkKind
@@ -184,7 +186,8 @@ class Operation(msgspec.Struct):
     index, warm for a download). Kept flat and untyped on purpose: it is a read model for a table.
 
     A document operation (an import, or an index of one document) lists the `jobs` it is made of,
-    each with the tasks it ran."""
+    each with the tasks it ran; so does a collection's description, whose one job describes its
+    documents one task each (`description_tasks`)."""
 
     id: str
     kind: OperationKind
@@ -195,7 +198,7 @@ class Operation(msgspec.Struct):
     error: str | None
     origin: str | None = None  # the session whose action started it; None for the web UI
     detail: dict[str, int | str | bool | None] = {}
-    jobs: list[Job] = []  # documents only, in pipeline order
+    jobs: list[Job] = []  # documents and a collection's description only, in pipeline order
 
 
 class OperationKindSummary(msgspec.Struct):
@@ -208,16 +211,18 @@ class OperationKindSummary(msgspec.Struct):
 
 class Task(msgspec.Struct):
     id: str
-    child_id: str  # the `stage_slice` run that did the batch; the task id is `{it}:{seq}`
+    child_id: str  # the run that did it (a `stage_slice`); the task id is `{it}:{seq}`
     stage: Stage
     seq: int
     # convert: PDF pages [start, end); embed: the one part; describe: sections [start, end);
-    # index: the part range written together
+    # index: the part range written together. 0 for a task that `name` says instead
     page_start: int
     page_end: int
     status: RunStatus
     result: int | None  # convert: pages needing OCR; describe: sections; embed/index: chunks
     error: str | None
+    # what a task of a collection's description covers: a document's name, or the collection
+    name: str | None = None
 
 
 def _second_segment(operation_id: str) -> str | None:
@@ -227,12 +232,12 @@ def _second_segment(operation_id: str) -> str | None:
     return parts[1] if len(parts) == 3 else None
 
 
-def _collection_of(operation_id: str) -> str | None:
+def _collection_of(kind: BulkKind, operation_id: str) -> str | None:
     """The collection an operation belongs to; None when it belongs to none.
 
-    A document delete is the exception: `del-doc:{doc}:{uuid}` carries a document where every
-    other id carries a collection, and the delete spans every collection the document is in."""
-    if operation_id.startswith(f"{workflows.DELETE_DOCUMENT_PREFIX}:"):
+    A document's operation is the exception: `del-doc:{doc}:{uuid}` and `sum-doc:{doc}:{uuid}`
+    carry a document where every other id carries a collection."""
+    if kind in DOCUMENT_BULK_KINDS:
         return None
     return _second_segment(operation_id)
 
@@ -263,6 +268,7 @@ _COLLECTION_PREFIX: dict[OperationKind, list[str]] = {
     OperationKind.COLLECTION: [
         f"{workflows.BULK_INDEX_PREFIX}:",
         f"{workflows.BULK_DELETE_PREFIX}:",
+        f"{workflows.SUMMARIZE_COLLECTION_PREFIX}:",
     ],
     OperationKind.MAINTENANCE: [f"{workflows.MAINTAIN_PREFIX}:"],
 }
@@ -326,11 +332,11 @@ async def list_operations(
     found = await _kind_statuses(checked, collection, page_size + 1, offset)
     # every row costs a read of its own (see `_detail`), so the page is built in one round trip
     page = found[:page_size]
-    # a document delete is titled by the document's name: one lookup for the whole page
+    # a document's operation is titled by the document's name: one lookup for the whole page
     names = await _document_names(
         doc
         for s in page
-        if _bulk_kind(s.name) == BulkKind.DELETE_DOCUMENT
+        if _bulk_kind(s.name) in DOCUMENT_BULK_KINDS
         and (doc := _second_segment(s.workflow_id)) is not None
     )
     rows = await asyncio.gather(*(_kind_row(checked, s, names) for s in page))
@@ -553,7 +559,7 @@ def _document_row(run: _StageRun, jobs: list[Job]) -> Operation:
 
 
 async def _kind_row(kind: OperationKind, status, names: dict[str, str]) -> Operation:
-    return Operation(
+    row = Operation(
         id=status.workflow_id,
         kind=kind,
         title=_title(kind, status, names),
@@ -563,6 +569,29 @@ async def _kind_row(kind: OperationKind, status, names: dict[str, str]) -> Opera
         error=str(status.error) if status.error else None,
         detail=await _detail(kind, status),
     )
+    if _bulk_kind(status.name) == BulkKind.SUMMARIZE_COLLECTION:
+        row.jobs = [_description_job(row)]
+    return row
+
+
+def _description_job(row: Operation) -> Job:
+    """The one job of a collection's description: the run itself, whose tasks are its steps."""
+    status = RunStatus(row.status)
+    return Job(
+        id=row.id,
+        stage=Stage.DESCRIBE,
+        status=status,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        error=row.error,
+        tasks_done=_number(row.detail.get("done")),
+        tasks_total=_number(row.detail.get("total")),
+        seconds=max(0.0, row.updated_at - row.created_at) if _is_over(status) else None,
+    )
+
+
+def _number(value: int | str | bool | None) -> int:
+    return value if isinstance(value, int) else 0
 
 
 def _title(kind: OperationKind, status, names: dict[str, str]) -> str:
@@ -571,14 +600,14 @@ def _title(kind: OperationKind, status, names: dict[str, str]) -> str:
 
     `document` never arrives here: it has a row builder of its own (see `list_operations`)."""
     if kind == OperationKind.COLLECTION:
-        bulk = _bulk_kind(status.name)  # the listing selects exactly these three names
+        bulk = _bulk_kind(status.name)  # the listing selects exactly these names
         if bulk is None:
             return "collection operation"
-        # the second segment is a collection for the two bulk kinds, a document's id for a delete
+        # the second segment is a collection's name, or a document's id for a document's operation
         key = _second_segment(status.workflow_id) or "?"
-        if bulk == BulkKind.DELETE_DOCUMENT:
-            key = names.get(key, key)
-        return f"{BULK_TITLES[bulk]} {key}"
+        if bulk in DOCUMENT_BULK_KINDS:
+            return f"document {names.get(key, key)}"
+        return f"collection {key}"
     if kind == OperationKind.DOWNLOAD:
         download_kind, model = models.model_names(status.workflow_id)
         return f"{download_kind} {model}"
@@ -588,7 +617,7 @@ def _title(kind: OperationKind, status, names: dict[str, str]) -> str:
 
 
 async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | None]:
-    """The numbers only this kind has. A collection operation names which of the three it is
+    """The numbers only this kind has. A collection operation names which of them it is
     (`bulk`), since the kind alone does not. A bulk index also publishes its progress as a DBOS
     event, which is read without waiting: an operation that has not finished its first page yet
     has none.
@@ -599,6 +628,10 @@ async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | N
     if kind != OperationKind.COLLECTION:
         return {}
     bulk = _bulk_kind(status.name)
+    if bulk == BulkKind.SUMMARIZE_COLLECTION:
+        tasks = await description_tasks(status)
+        done = sum(task.status == RunStatus.SUCCESS for task in tasks)
+        return {"bulk": bulk, "done": done, "total": len(tasks)}
     if bulk != BulkKind.INDEX_COLLECTION:
         return {"bulk": bulk}
     progress = await DBOS.get_event_async(
@@ -829,8 +862,11 @@ def _ordered(tasks: list[Task]) -> list[Task]:
 async def list_tasks(job_id: str) -> list[Task]:
     """The micro-batches of one job. Gone once retention purged the job: the batches live in the
     step log of its children, which DBOS drops with them."""
-    if await DBOS.get_workflow_status_async(job_id) is None:
+    found = await DBOS.get_workflow_status_async(job_id)
+    if found is None:
         raise NotFound(f"job not found: {job_id}")
+    if found.name == SUMMARIZE_COLLECTION_WORKFLOW:
+        return await description_tasks(found)
     children = await DBOS.list_workflows_async(parent_workflow_id=job_id, name=STAGE_WORKFLOW)
     return _ordered([task for child in children for task in await _stage_tasks(child)])
 
@@ -878,6 +914,51 @@ async def _stage_tasks(child) -> list[Task]:
     return out
 
 
+async def description_tasks(run) -> list[Task]:
+    """The tasks of a collection's description: one a member it describes, in the order the run
+    listed them (`workflows.summarize_collection_workflow`), then the collection itself. Finished
+    ones from the run's step log, a step that only found the describer still loading left out; the
+    next one is running while the run runs; the rest wait. None before the run listed its
+    members."""
+    steps = await DBOS.list_workflow_steps_async(run.workflow_id)
+    planned = next((one["output"] for one in steps if one["function_name"] == MEMBERS_STEP), None)
+    if not isinstance(planned, list):
+        return []
+    names = await _document_names(planned)
+    collection = _second_segment(run.workflow_id)
+    covers = [*(names.get(doc, doc) for doc in planned), f"collection {collection}"]
+    outcomes = [
+        step
+        for step in steps
+        if step["function_name"] in (MEMBER_STEP, COLLECTION_STEP)
+        and not (isinstance(step["output"], BatchResult) and step["output"].model_loading)
+    ]
+    running = run.status == RunStatus.PENDING
+    out: list[Task] = []
+    for seq, name in enumerate(covers):
+        error = None
+        if seq < len(outcomes):
+            _, error = _step_outcome(outcomes[seq])
+            status = RunStatus.ERROR if error else RunStatus.SUCCESS
+        else:
+            status = RunStatus.PENDING if running and seq == len(outcomes) else RunStatus.ENQUEUED
+        out.append(
+            Task(
+                id=f"{run.workflow_id}:{seq}",
+                child_id=run.workflow_id,
+                stage=Stage.DESCRIBE,
+                seq=seq,
+                page_start=0,
+                page_end=0,
+                status=status,
+                result=None,
+                error=error,
+                name=name,
+            )
+        )
+    return out
+
+
 def _step_outcome(step) -> tuple[int | None, str | None]:
     """A step that failed permanently returns its message instead of raising (see BatchResult)."""
     output, error = step["output"], step["error"]
@@ -900,7 +981,7 @@ async def progress(operation_id: str) -> OperationProgress:
     return OperationProgress(
         id=operation_id,
         kind=kind,
-        collection=_collection_of(operation_id),
+        collection=_collection_of(kind, operation_id),
         status=RunStatus(status.status),
         progress=found if isinstance(found, workflows.BulkProgress) else None,
         error=str(status.error) if status.error else None,

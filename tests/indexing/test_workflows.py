@@ -17,6 +17,7 @@ collection's table. The cache is what makes the second collection cheap, so the 
 the mechanism (how often the embed work ran, which workflow ran it) and not only the end state.
 """
 
+import contextlib
 import os
 import signal
 import threading
@@ -27,6 +28,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import anyio
+import anyio.from_thread
 import anyio.to_thread
 import msgspec
 import pytest
@@ -53,7 +55,9 @@ from conftest import (
     import_row,
     maintenance_state,
     restart_dbos,
+    save_llm_descriptors,
     search_with,
+    stand_in_describer,
     text_pdf,
     until,
     wait_event,
@@ -1055,10 +1059,7 @@ async def test_a_hit_another_strategy_described_is_described_again_from_the_cach
         return "Topic one | Topic two"
 
     monkeypatch.setattr(embed, "reply", reply)
-    user = await load_user_settings()
-    llm = msgspec.structs.replace(user.pipeline, descriptors=Descriptors.LLM)
-    # saved, not applied: applying would download the describer
-    await save_user_settings(msgspec.structs.replace(user, pipeline=llm))
+    await save_llm_descriptors()
 
     job_id = await dbos.start_index_collection_document("again", doc.id)
     describer = models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER)
@@ -1072,13 +1073,15 @@ async def test_a_hit_another_strategy_described_is_described_again_from_the_cach
     assert (await document.named(doc.name)).status == "imported", "an index never moves it"
     models._mark_ready(describer)
     assert await wait_for(job_id) == "indexed"
+    await _drain()  # the description the run queued, not waited for
 
     (entry,) = await embed_cache.entries(doc.id)
     assert sum(spy.calls.values()) == 1, "nothing embedded again"
     assert await embed_cache.described_by(doc.id, entry.id) == Descriptors.LLM
     described = await embed_cache.read_sections(doc.id, entry.id)
     assert {tuple(one.descriptors) for one in described} <= {("Topic one", "Topic two"), ()}
-    assert len(prompts) == sum(bool(one.descriptors) for one in described) > 0
+    # one prompt a section with prose, and one for the document's missing description
+    assert len(prompts) - 1 == sum(bool(one.descriptors) for one in described) > 0
 
 
 async def test_an_embedding_run_describes_by_the_strategy_it_was_asked_for(
@@ -1095,20 +1098,12 @@ async def test_an_embedding_run_describes_by_the_strategy_it_was_asked_for(
     models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER))
     assert (await load_user_settings()).pipeline.descriptors == Descriptors.C_TF_IDF
 
-    async def run(by: Descriptors) -> str:
-        with SetWorkflowID(f"{workflows.EMBED_PREFIX}:{row.id}:{uuid4().hex}"):
-            handle = await DBOS.enqueue_workflow_async(
-                workflows.EMBEDDING_QUEUE, workflows.ensure_embedding, row.id, params, by
-            )
-        await handle.get_result(polling_interval_sec=workflows.TASK_POLL)
-        return handle.workflow_id
-
-    described = await _steps(await run(Descriptors.LLM))
+    described = await _steps(await _embedding_run(row, params, Descriptors.LLM))
     assert "try_finalize_describe" in described, described
     cache_id = embed_cache.key(params)
     assert await embed_cache.described_by(row.id, cache_id) == Descriptors.LLM
 
-    alike = await _steps(await run(Descriptors.LLM))
+    alike = await _steps(await _embedding_run(row, params, Descriptors.LLM))
     assert "load_context" not in alike and "try_finalize_describe" not in alike, alike
 
     # a run recorded before the strategy was an argument describes by the settings
@@ -1120,6 +1115,309 @@ async def test_an_embedding_run_describes_by_the_strategy_it_was_asked_for(
         )
     assert await handle.get_result(polling_interval_sec=workflows.TASK_POLL) == cache_id
     assert await embed_cache.described_by(row.id, cache_id) == Descriptors.C_TF_IDF
+
+
+async def _embedding_run(row: Document, params: embed_cache.Params, by: Descriptors) -> str:
+    """One `ensure_embedding` run of the document under `params`, described by `by`; its id."""
+    with SetWorkflowID(f"{workflows.EMBED_PREFIX}:{row.id}:{uuid4().hex}"):
+        handle = await DBOS.enqueue_workflow_async(
+            workflows.EMBEDDING_QUEUE, workflows.ensure_embedding, row.id, params, by
+        )
+    await handle.get_result(polling_interval_sec=workflows.TASK_POLL)
+    return handle.workflow_id
+
+
+COVERS = "Summary: It covers alpha and beta."
+
+
+@pytest.mark.parametrize(
+    ("name", "by", "before", "answer", "meanwhile", "after", "asked"),
+    [
+        ("llm writes a missing description", Descriptors.LLM, "", COVERS, "",
+         "It covers alpha and beta.", 1),
+        ("llm keeps one someone wrote", Descriptors.LLM, "On LanceDB.", COVERS, "",
+         "On LanceDB.", 0),
+        ("one written while the model answers stands", Descriptors.LLM, "", COVERS, "Mine.",
+         "Mine.", 1),
+        ("an answer with no sentence writes none", Descriptors.LLM, "", "**", "", "", 1),
+        ("c-tf-idf writes none", Descriptors.C_TF_IDF, "", COVERS, "", "", 0),
+    ],
+)  # fmt: skip
+async def test_an_llm_run_describes_a_document_without_a_description(
+    dbos,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    by: Descriptors,
+    before: str,
+    answer: str,
+    meanwhile: str,
+    after: str,
+    asked: int,
+) -> None:
+    """After the sections, the describer writes the document's description from its outline,
+    only where it has none: one someone wrote stands, before the model is asked or while it
+    answers, and the model is not asked for another."""
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    row = await document.describe(doc.id, before)
+    params = embed_cache.params(row, (await load_user_settings()).conversion.chunking, None)
+
+    def summary(prompt: str) -> str:
+        if meanwhile:  # the describer answers in a worker thread, so the write runs on the loop
+            anyio.from_thread.run(document.describe, doc.id, meanwhile)
+        return answer
+
+    summaries = stand_in_describer(monkeypatch, summary)
+
+    await _embedding_run(row, params, by)
+    queued = await _workflow_ids(dbos_names.SUMMARIZE_DOCUMENT_WORKFLOW)
+    for one in queued:
+        await wait_for(one)
+
+    assert (await document.named(doc.name)).description == after, name
+    assert len(queued) == (by == Descriptors.LLM), "queued by the llm describe stage alone"
+    assert len(summaries) == asked, name
+    if summaries:
+        assert "- Alpha (Topic one, Topic two)" in summaries[0], "the outline with descriptors"
+
+
+@pytest.mark.parametrize(
+    ("name", "answer", "description", "status"),
+    [
+        ("a description replaces the one there", "Explains alpha.", "Explains alpha.", "SUCCESS"),
+        ("an empty answer fails and keeps it", "", "Old notes.", "ERROR"),
+    ],
+)
+async def test_a_description_asked_for_replaces_the_one_there(
+    dbos,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    answer: str,
+    description: str,
+    status: str,
+) -> None:
+    """A person asks the describer for a description: it runs as a document's operation, and
+    replaces what someone wrote. An answer with no sentence in it fails the operation."""
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await document.describe(doc.id, "Old notes.")
+    asked_twice = threading.Event()  # the run answers only once the second ask is made
+    summaries = stand_in_describer(
+        monkeypatch, lambda prompt: answer if asked_twice.wait(WAIT) else ""
+    )
+    await save_llm_descriptors()
+
+    operation_id = await workflows.start_summarize_document(await document.get(doc.id))
+    assert await workflows.start_summarize_document(doc) == operation_id, "one at a time"
+    asked_twice.set()
+    with contextlib.suppress(Exception):  # a failed run raises its error here
+        await wait_for(operation_id)
+
+    assert (await document.get(doc.id)).description == description, name
+    assert len(summaries) == 1, name
+    progress = await operations.progress(operation_id)
+    assert (progress.kind, progress.collection, progress.status) == (
+        "summarize_document",
+        None,
+        status,
+    ), name
+    assert ("wrote no description" in (progress.error or "")) == (status == "ERROR"), name
+    listed = await operations.list_operations("collection")
+    (row,) = [one for one in listed.items if one.id == operation_id]
+    assert (row.title, row.detail) == (f"document {doc.name}", {"bulk": "summarize_document"})
+
+
+async def test_deleting_a_document_cancels_the_description_asked_for(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A description waiting for the describer is cancelled with its document, not left to fail
+    on the files and the row the delete removes."""
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+    monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await save_llm_descriptors()
+    operation_id = await workflows.start_summarize_document(doc)
+
+    async def waiting() -> bool:
+        return (await _steps(operation_id)).count("try_summarize") >= 2
+
+    await until(waiting, "the description never waited for the describer")
+    await wait_for(await dbos.start_delete_document(doc))
+
+    status = await DBOS.get_workflow_status_async(operation_id)
+    assert status is not None and status.status == "CANCELLED"
+
+
+async def test_a_collection_is_described_from_its_documents_each_described_first(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member with no description is described first; one someone described keeps theirs.
+    The collection's description, written from both, replaces its own."""
+    described = await import_document(dbos, "a.md", MD, tmp_path)
+    bare = await import_document(dbos, "b.md", MD.replace("lancedb", "quorums"), tmp_path)
+    await (await Collection.create("shelf", "Old shelf.")).add(described.id)
+    await Collection("shelf").add(bare.id)
+    await document.describe(described.id, "Covers LanceDB.")
+    await save_llm_descriptors()
+
+    def summary(prompt: str) -> str:
+        return "Spans storage." if prompt.startswith("A person collected") else "Explains quorums."
+
+    summaries = stand_in_describer(monkeypatch, summary)
+
+    operation_id = await workflows.start_summarize_collection("shelf")
+    assert await wait_for(operation_id) == 1, "one member described on the way"
+
+    assert (await document.get(described.id)).description == "Covers LanceDB."
+    assert (await document.get(bare.id)).description == "Explains quorums."
+    assert (await Collection("shelf").info()).description == "Spans storage."
+    assert len(summaries) == 2, "the bare member, then the collection"
+    assert "Covers LanceDB." in summaries[1] and "Explains quorums." in summaries[1]
+    progress = await operations.progress(operation_id)
+    assert (progress.kind, progress.collection, progress.status) == (
+        "summarize_collection",
+        "shelf",
+        "SUCCESS",
+    )
+    listed = await operations.list_operations("collection", collection="shelf")
+    (row,) = [one for one in listed.items if one.id == operation_id]
+    assert (row.title, row.detail) == (
+        "collection shelf",
+        {"bulk": "summarize_collection", "done": 2, "total": 2},
+    )
+    (job,) = row.jobs
+    assert (job.id, job.stage, job.tasks_done, job.tasks_total) == (operation_id, "describe", 2, 2)
+    tasks = await operations.list_tasks(job.id)
+    assert [(task.name, task.status) for task in tasks] == [
+        ("b.md", "SUCCESS"),
+        ("collection shelf", "SUCCESS"),
+    ], "one task a member it described, then the collection"
+
+
+async def test_a_collection_with_no_description_to_read_fails_its_description(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member with no cached embedding yet is left out rather than described; with nothing else
+    to read, the run fails, and the collection keeps its description."""
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await (await Collection.create("shelf", "Old shelf.")).add(doc.id)
+    await embed_cache.forget(doc.id)
+    await save_llm_descriptors()
+    summaries = stand_in_describer(monkeypatch, lambda prompt: "Spans storage.")
+
+    operation_id = await workflows.start_summarize_collection("shelf")
+    with pytest.raises(Exception, match="no document of the collection has a description"):
+        await wait_for(operation_id)
+
+    assert summaries == [], "nothing asked of the describer"
+    assert (await document.get(doc.id)).description == ""
+    assert (await Collection("shelf").info()).description == "Old shelf."
+
+
+@pytest.mark.parametrize(
+    ("name", "members", "llm", "refused"),
+    [
+        ("no documents", False, True, "no documents to describe"),
+        ("another strategy", True, False, "needs the llm"),
+    ],
+)
+async def test_a_collection_description_no_run_could_write_is_refused(
+    dbos, tmp_path: Path, name: str, members: bool, llm: bool, refused: str
+) -> None:
+    shelf = await Collection.create("shelf")
+    if members:
+        await shelf.add((await import_document(dbos, "a.md", MD, tmp_path)).id)
+    if llm:
+        await save_llm_descriptors()
+
+    with pytest.raises(Conflict, match=refused):
+        await workflows.start_summarize_collection("shelf")
+
+    assert await _workflow_ids(dbos_names.SUMMARIZE_COLLECTION_WORKFLOW) == [], name
+
+
+async def test_a_collection_being_described_is_not_renamed_and_its_delete_cancels_it(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run holds the collection's name until it ends: a rename waits for it, and a delete
+    cancels it rather than leave it to fail on a collection that is gone."""
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+    monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await (await Collection.create("shelf")).add(doc.id)
+    await save_llm_descriptors()
+    operation_id = await workflows.start_summarize_collection("shelf")
+
+    async def waiting() -> bool:
+        return (await _steps(operation_id)).count("try_describe_member") >= 2
+
+    await until(waiting, "the description never waited for the describer")
+    tasks = await operations.list_tasks(operation_id)
+    assert [(task.name, task.status) for task in tasks] == [
+        ("a.md", "PENDING"),
+        ("collection shelf", "ENQUEUED"),
+    ], "waiting for the describer is no outcome: the first task still runs"
+    with pytest.raises(Conflict, match="busy"):
+        await workflows.rename_collection("shelf", "books")
+    await wait_for(await dbos.start_delete_collection("shelf"))
+
+    status = await DBOS.get_workflow_status_async(operation_id)
+    assert status is not None and status.status == "CANCELLED"
+
+
+async def test_a_description_is_written_from_the_sections_the_llm_described(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The newest cached embedding the llm strategy described is read, though a newer one
+    c-TF-IDF described is there; without one, the newest."""
+    stand_in_describer(monkeypatch, lambda prompt: "Explains alpha.")
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    chunking = (await load_user_settings()).conversion.chunking
+    imported = embed_cache.params(doc, chunking, None)
+    smaller = embed_cache.params(doc, msgspec.structs.replace(chunking, chunk_size=600), None)
+    await _embedding_run(doc, smaller, Descriptors.C_TF_IDF)
+    assert await workflows._summary_source(doc.id) == embed_cache.key(smaller), "the newest"
+
+    await _embedding_run(doc, imported, Descriptors.LLM)
+
+    assert await workflows._summary_source(doc.id) == embed_cache.key(imported), "the llm's"
+
+
+@pytest.mark.parametrize(
+    ("name", "status", "llm", "runs_somewhere", "cached", "refused"),
+    [
+        ("not imported", DocumentStatus.ERROR, True, True, True, "only an imported one"),
+        ("another strategy", DocumentStatus.IMPORTED, False, True, True, "needs the llm"),
+        ("nowhere to run", DocumentStatus.IMPORTED, True, False, True, "cpu"),
+        ("nothing cached", DocumentStatus.IMPORTED, True, True, False, "no cached embedding"),
+    ],
+)
+async def test_a_description_no_run_could_write_is_refused_before_it_is_queued(
+    dbos,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    status: DocumentStatus,
+    llm: bool,
+    runs_somewhere: bool,
+    cached: bool,
+    refused: str,
+) -> None:
+    # llama.cpp stood in for, so a runner without an Apple GPU reaches the checks after the device
+    monkeypatch.setattr(gguf_models, "available", lambda: True)
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await document.set_status(doc.id, status)
+    if llm:
+        await save_llm_descriptors()
+    if not runs_somewhere:
+        monkeypatch.setattr(workflows.hardware, "device", lambda model, accelerator: None)
+    if not cached:
+        await embed_cache.forget(doc.id)
+
+    with pytest.raises(Conflict, match=refused):
+        await workflows.start_summarize_document(await document.get(doc.id))
+
+    assert await _workflow_ids(dbos_names.SUMMARIZE_DOCUMENT_WORKFLOW) == [], name
 
 
 async def test_concurrent_attaches_converge_on_one_embedding_run(
@@ -2796,19 +3094,22 @@ def test_a_pipeline_id_names_its_action_collection_and_document(
 
 
 @pytest.mark.parametrize(
-    ("name", "operation_id", "collection"),
+    ("name", "kind", "operation_id", "collection"),
     [
-        ("a bulk index", "bulk-index:law:cafe", "law"),
-        ("a bulk delete", "bulk-delete:law:cafe", "law"),
-        ("a maintenance run", "maint:law:cafe", "law"),
-        ("a document delete, which spans every collection", "del-doc:book.pdf:cafe", None),
-        ("an id with nothing in that place", "bulk-index", None),
+        ("a bulk index", "index_collection", "bulk-index:law:cafe", "law"),
+        ("a bulk delete", "delete_collection", "bulk-delete:law:cafe", "law"),
+        ("a document delete, which spans every collection", "delete_document",
+         "del-doc:book.pdf:cafe", None),
+        ("a description, which belongs to no collection", "summarize_document",
+         "sum-doc:book.pdf:cafe", None),
+        ("an id with nothing in that place", "index_collection", "bulk-index", None),
     ],
-)
+)  # fmt: skip
 def test_only_an_operation_of_one_collection_carries_its_name(
-    name: str, operation_id: str, collection: str | None
+    name: str, kind: str, operation_id: str, collection: str | None
 ) -> None:
-    assert operations._collection_of(operation_id) == collection, name
+    found = operations._collection_of(operations.BulkKind(kind), operation_id)
+    assert found == collection, name
 
 
 async def test_a_document_delete_is_listed_as_a_collection_operation_with_no_collection(
@@ -2890,6 +3191,8 @@ def test_the_names_the_operations_view_spells_out_are_the_ones_dbos_records() ->
             get_dbos_func_name(workflows.index_collection_workflow),
             get_dbos_func_name(workflows.delete_collection_workflow),
             get_dbos_func_name(workflows.delete_document_workflow),
+            get_dbos_func_name(workflows.summarize_document_workflow),
+            get_dbos_func_name(workflows.summarize_collection_workflow),
         ],
         "download": [get_dbos_func_name(models.ensure_model)],
         "maintenance": [

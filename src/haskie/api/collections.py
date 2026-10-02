@@ -137,6 +137,21 @@ async def index_collection(collection: str) -> BulkStarted:
     return BulkStarted(operation_id=operation_id)
 
 
+@post("/api/collections/{collection:str}/description/generate", status_code=202)
+@audit.audited("collection.summarize")
+async def generate_collection_description(collection: str) -> BulkStarted:
+    """Queue a description the describer writes from the collection's documents' descriptions,
+    replacing the one it has. A document with none is described first. Poll the operation for the
+    outcome.
+
+    `start_summarize_collection` refuses with a conflict a collection with no documents, and
+    settings under which the describer cannot run.
+    """
+    operation_id = await workflows.start_summarize_collection(collection)
+    audit.attach(operation_id=operation_id)
+    return BulkStarted(operation_id=operation_id)
+
+
 @get(
     "/api/collections/{collection:str}/documents",
     mcp_tool="list_collection_documents",

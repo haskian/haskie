@@ -1,3 +1,4 @@
+export { BulkStatus } from './BulkStatus'
 export { documentIcon, groupByRange, NAME_RANGES, nameRange, type IconComponent, type RangeGroup } from './documents'
 export { DocumentPanes } from './DocumentPanes'
 export { DropOverlay } from './DropOverlay'

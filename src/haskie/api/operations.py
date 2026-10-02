@@ -44,8 +44,8 @@ async def list_job_tasks(job_id: str) -> list[operations.Task]:
 
 @get("/api/operations/{operation_id:str}/progress")
 async def get_operation_progress(operation_id: str) -> operations.OperationProgress:
-    """How far a whole-collection index or delete, or a document delete, got; 404 for any other
-    operation id."""
+    """How far a whole-collection index or delete, a document delete or a description asked for
+    of either got; 404 for any other operation id."""
     return await operations.progress(operation_id)
 
 
