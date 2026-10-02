@@ -9,8 +9,10 @@ erDiagram
     DOCUMENT ||--o{ MEMBERSHIP : "is in"
     COLLECTION ||--o{ MEMBERSHIP : holds
     DOCUMENT ||--o{ EMBEDDING : "is cached as"
+    MEMBERSHIP }o--o| EMBEDDING : "indexed from"
     DOCUMENT {
-        string name "fixed at import"
+        string id "MD5 of the bytes, base58"
+        string name "lowercase-kebab-case, renamable"
         string status "queued ... imported"
         string parser
         string description
@@ -22,6 +24,7 @@ erDiagram
     }
     MEMBERSHIP {
         string status "pending ... indexed"
+        string cache_id "the embedding its rows come from"
     }
     EMBEDDING {
         string id "sha256 of the URN"
@@ -29,15 +32,26 @@ erDiagram
     }
 ```
 
-A membership has no column pointing at an embedding. When a collection indexes a document, it
-computes the cache id from its own chunk settings and reads that entry.
+When a collection indexes a document, it computes the cache id from its own chunk settings and
+reads that entry. The membership records that id in `cache_id` before the rows are written. A
+re-import clears it with the entry. A section id names a place in one chunking, so a search reads
+a section's descriptors from the entry the membership names, not from the current chunk settings.
 
 ## A document's life
 
 An upload from the UI lands in `staging/` first, as a file and a `staging` row, with no document
-yet. The import then fixes the name, creates the document and moves the file into its folder. A
-name is taken ignoring case: the folder is named after it, and on a case-insensitive disk
-`Notes.md` and `notes.md` would be one folder. An agent's `add_document` imports a local path directly and copies the file. When it refuses the
+yet. The import then fixes the name, creates the document and moves the file into its folder. The
+folder is named after the document's id, the MD5 of its bytes. A name is stored in
+lowercase-kebab-case: accents dropped, the stem lowered, and every run of anything but a letter
+or a digit turned into one dash, so `A_B--CC.d.f.pdf` is `a-b-cc-d-f.pdf`. The suffix is lowered
+too. Each name has one spelling, so `Notes.md` and `notes .md` are the same name, and the second
+is refused.
+
+The name is chosen at import and never changes afterwards. Everything else refers to the
+document by its id: the tables, the folders, the embedding cache and every collection's LanceDB
+rows. A search reads the names it cites from SQLite, one batched query per read of the indexes.
+
+An agent's `add_document` imports a local path directly and copies the file. When it refuses the
 path, the error names the file alone. The audit trail copies that error, and it never records the
 folder an import came from. The nightly run (at 03:17, if haskie is running then) sweeps uploads
 older than a day.
@@ -67,10 +81,20 @@ stateDiagram-v2
 
 Any failure lands in `error`: a parser error, an OCR policy failure, or retries run out. A
 re-import runs from `queued`, `error` or `cancelled`, with the `parser` and `skip_ocr_pages` the
-document was imported with: to change either, delete it and import it again. A delete is accepted
+document was imported with. To change either, delete it and import it again. A delete is accepted
 in any state. The original suffix is kept in the name, because it decides the route:
 
-- PDFs convert page by page with pdf-inspector.
+- PDFs convert page by page with pdf-inspector. It judges a heading by its font. So a typeset
+  book comes out with its chapters and sections at one level, and each page's running header
+  ("348 Chapter 10 AGGREGATES") becomes a heading of its own. When the PDF has bookmarks of more
+  than one level, they set the headings instead (`document/bookmarks.py`). pypdf reads them once,
+  when the conversion is planned, and each batch gets them. A heading whose letters match a
+  bookmark of its page, or of the page before, takes the bookmark's depth as its level. Every
+  other heading becomes plain text. A bookmark matches once, so a running header matches none: it
+  either adds its page number to the title, or repeats a title that a heading a page before
+  already claimed. On one 657-page book, 232 of its 283 bookmarks matched, and its 748 sections
+  became 251, nested as its table of contents is. Without such bookmarks, pdf-inspector's
+  headings stand.
 - Text and HTML files are read as they are.
 - Images are stored and previewed, with no text to index.
 - Everything else converts with anydoc, or is read as raw text when the document's `parser` is
@@ -79,19 +103,45 @@ in any state. The original suffix is kept in the name, because it decides the ro
 The import also warms the embedding cache for the default chunk settings. A re-import clears the
 document's cached embeddings first.
 
+## Covers
+
+Each document and collection card shows a cover behind its name (`document/cover.py`). Every cover
+is a low-poly picture drawn with Pillow: a 7 by 7 grid of cells, its corners shifted at random, cut
+into triangles, each one colour, lightened or darkened at random so each facet shows.
+`GET /api/documents/{name}/cover` answers with it as a 480 by 480 JPEG. Its triangles take the mean
+colour of the document's cover page under them, the page cropped square from its top:
+
+- a PDF's first page, rendered with pdfium;
+- an EPUB's cover image, the manifest item marked `cover-image` (EPUB 3) or the one
+  `<meta name="cover">` names (EPUB 2);
+- an image file itself, SVG aside.
+
+Any other document, and one whose cover page cannot be read, gets a gradient instead: each
+triangle a colour on the line between two random ones, picked mostly by its place. The triangles
+and the gradient are seeded by the document's id, the MD5 of its bytes, so the same file always
+draws the same picture. The cover is built on first request and kept in the document's folder as
+`cover.jpg`.
+
+`GET /api/collections/{name}/cover` answers with the covers of the collection's first documents
+by name: one cover alone for one document, the first two stacked top and bottom for two or three,
+and the first four in a 2 by 2 grid for four or more. Each is cropped to its cell around its
+centre. An empty collection gets a gradient seeded by its name. Both routes answer with a JPEG and
+`Cache-Control: no-cache`: a rename or a new member can change what the same URL shows.
+
 ## Repeats
 
-The web UI stages several files at once, and checks each new book for repeats in its own row:
+The web UI stages several files at once, and checks each new file for repeats in its own row:
 
-- **The same file.** Staging and a path import both take the MD5 of the bytes. Staging answers
-  with `duplicates`, the documents that already hold those bytes. The row names them, and the one
-  import button turns into "Import anyway". A file the import refuses, such as a name already
-  taken, stays in the list with the reason, so you can rename or remove it.
+- **The same file.** Staging and a path import both take the MD5 of the bytes, which is the
+  document's id. Staging answers with `duplicate`: the name of the document those bytes already are,
+  or null. The row names it, and the import leaves that file out. An import of the same bytes is
+  refused with 409, naming the document. A file the import refuses for another reason, such as a
+  name already taken, stays in the list with the reason, so you can rename or remove it.
 - **The nearest documents.** Writing a cache entry also stores the document as one vector: the
-  mean of its unit chunk vectors, normalized. `GET /api/documents/{name}/similar` names the
-  identical documents and the three nearest by cosine, under the current embedding model. The
-  vector exists only once the import has embedded the document, so the UI follows the new book
-  until then. Full-text only has no vectors, so it finds no nearest documents.
+  mean of its unit chunk vectors. `GET /api/documents/{name}/similar` names the three nearest by
+  cosine, under the current embedding model. The vector exists only once the import has embedded
+  the document, so the UI follows the new file until then. A full-text-only profile has no
+  vectors, so it finds no nearest documents.
 
 ## A membership's life
 
@@ -122,12 +172,11 @@ membership `removing`, cancels its index and queues the removal on the collectio
 It answers at once: a compaction or another document's write may hold that writer for minutes.
 `removing` counts as active, so the UI keeps polling until the membership is gone. Until then, the
 old rows stay in the table, but a search leaves them out. The same holds for a document being
-deleted, in every collection. An attach or a re-index of that document is refused
-meanwhile, and its index can no longer change the status. A removal that fails leaves the
-membership in `error` with the reason, and detaching again retries it. Deleting a collection deletes
-its table and memberships, and keeps every document. Deleting a document detaches it from every
-collection first, then drops its folder and row. Memberships also go when their collection or
-document is deleted.
+deleted, in every collection. Meanwhile an attach or a re-index of that document is refused, and
+its index can no longer change the status. A removal that fails leaves the membership in `error`
+with the reason, and detaching again retries it. Deleting a collection deletes its
+table and memberships, and keeps every document. Deleting a document detaches it from every
+collection first, then drops its folder and row.
 
 Renaming a collection moves its row, its memberships, every session that chose it and its folder
 in one transaction. The index table holds no collection name, so it moves as it is. A rename is
@@ -138,19 +187,24 @@ folder it moved.
 
 ## The embedding cache
 
-The cache makes one document cheap to share between collections. Each computed embedding is one parquet file
-under the document, plus one `embeddings` row. Its id is the SHA-256 of a URN, one line, that
-names everything the rows depend on:
+The cache makes one document cheap to share between collections. Each computed embedding is one
+parquet file under the document, plus one `embeddings` row. Beside it, a second file holds the
+document's sections as that chunking cuts them, each with its id and descriptors. Every chunk
+names its own id and its sections ([storage](storage.md#sections-and-their-ids)). An embedding's
+id is the SHA-256 of a one-line URN that names everything the rows depend on:
 
 ```
-document:<name>;model:<model>;chunk_size:<n>;chunk_merge_below:<n>;chunk_frame:<b>;chunker:<c>;chunk_version:<v>;parser:<p>;skip_ocr_pages:<b>
+document_id:<id>;model:<model>;chunk_size:<n>;chunk_merge_below:<n>;chunk_frame:<b>;chunker:<c>;chunk_version:<v>;parser:<p>;skip_ocr_pages:<b>
 ```
 
 `<model>` is `EmbeddingModel.cache_name`: the model's name and vector size, plus a hash of its
 document prefix and Matryoshka recipe. Those are everything that shapes a stored vector, so a
 change to any of them misses the cache and needs no `chunk_version` bump.
 
-Same inputs give the same id, so the work runs once, until a re-import clears it. Two collections
+Same inputs give the same id, so the chunking and embedding run once, until a re-import clears
+them. The descriptor strategy is not in the key: it shapes no stored vector. The sections file
+names the strategy that wrote its descriptors instead, so a hit written by another strategy is
+described again from the cache, embedding nothing. Two collections
 that ask for the same missing entry at the same moment share one DBOS run. A collection with other
 chunk settings gets its own entry. The accelerator, the query prefix and the duplicate
 thresholds are not in the key: they shape no stored vector.
@@ -160,8 +214,10 @@ flowchart LR
     attach["attach document<br/>to collection"] --> key["URN from the collection's<br/>chunk settings + model"]
     key --> run["ensure_embedding<br/>(one run per id)"]
     run --> hit{"cached?"}
-    hit -- yes --> write["write rows into<br/>the collection's table"]
-    hit -- no --> embed["chunk + embed"] --> write
+    hit -- yes --> same{"described by the<br/>strategy asked for?"}
+    same -- yes --> write["write rows into<br/>the collection's table"]
+    same -- no --> describe["describe the<br/>sections"] --> write
+    hit -- no --> embed["chunk + embed"] --> describe
 ```
 
 Code: `document/document.py`, `collection/collection.py`, `indexing/embed_cache.py`.

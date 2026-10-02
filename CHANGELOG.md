@@ -2,6 +2,60 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.25.0 - 2026-10-01
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>card covers, a Sections tab, and describe as its own stage (#36) - (0af4cc5) - Črtomir Majer
+
+- - -
+
+## v0.24.0 - 2026-10-01
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>one reranker for maps and search; descriptors picked at first run (#35) - (3679792) - Črtomir Majer
+
+- - -
+
+## v0.23.0 - 2026-10-01
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>catalogue of small 2025-26 models; Apple GPU via WebGPU, MLX and GGUF (#33) - (b207873) - Črtomir Majer
+
+- - -
+
+## v0.22.0 - 2026-10-01
+#### Features
+- section descriptors written by Gemma-4, as an import step (#34) - (8eae58e) - Črtomir Majer
+
+- - -
+
+## v0.21.0 - 2026-10-01
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>search_sections replaces search_sources and reranks its map (#32) - (82b70fb) - Črtomir Majer
+
+- - -
+
+## v0.20.0 - 2026-10-01
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>map of sections and document outlines with keywords and vectors (#31) - (6f6be48) - Črtomir Majer
+
+- - -
+
+## v0.19.0 - 2026-09-30
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>document id is the MD5 of its bytes; rename; kebab-case names (#30) - (00c6278) - Črtomir Majer
+
+- - -
+
+## v0.18.0 - 2026-09-29
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>refresh Claude Code installs on collection change; add uninstall (#29) - (b3744b1) - Črtomir Majer
+
+- - -
+
+## v0.17.0 - 2026-09-29
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>scrollable upload modal, newest-first attach list with also-in (#28) - (45a80c8) - Črtomir Majer
+
+- - -
+
 ## v0.16.0 - 2026-09-29
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>one haskie run, multi-file import, GPU support on every platform (#27) - (143d745) - Črtomir Majer

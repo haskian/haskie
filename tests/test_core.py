@@ -19,6 +19,7 @@ import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 
 import anyio
@@ -33,18 +34,21 @@ from conftest import (
     collection_hits,
     document_names,
     events,
+    id_of,
     import_row,
     index_hits,
     legacy_index,
     maintenance_state,
+    refresh_settled,
     remove_collection,
     text_pdf,
+    until,
 )
 from sqlalchemy import event, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
-from haskie import audit, db, home, logs, tables
-from haskie.catalogue.catalogue import EmbeddingModel, Matryoshka
+from haskie import audit, db, home, ids, logs, tables
+from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import index as index_module
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection, DocumentCounts, Member, MemberStatus
@@ -70,16 +74,19 @@ from haskie.errors import (
     NotReady,
     PermanentError,
 )
-from haskie.indexing import chunk, embed, embed_cache, pipeline
+from haskie.indexing import chunk, embed, embed_cache, onnx_models, pipeline
 from haskie.indexing.chunk import Chunk, Piece, Position
 from haskie.indexing.segment import CutReason, PieceType
 from haskie.paging import Order, PageRequest
+from haskie.sections.build import Section
 from haskie.settings import (
+    DEFAULT_RERANKER,
     Accelerator,
     Chunker,
     ChunkSettings,
     CollectionOverrides,
     ConversionSettings,
+    Descriptors,
     Fusion,
     Parser,
     PipelineSettings,
@@ -145,8 +152,8 @@ async def attachable(name: str, content: bytes | str = MD, **options) -> Documen
     """`imported`, moved on to the status the pipeline ends at: `Collection.add` takes only an
     imported document, so a test that attaches one has to get it there first."""
     doc = await import_row(name, content, **options)
-    await document.set_status(doc.name, DocumentStatus.IMPORTED)
-    return await document.get(doc.name)
+    await document.set_status(doc.id, DocumentStatus.IMPORTED)
+    return await document.named(doc.name)
 
 
 # --- settings ----------------------------------------------------------------------
@@ -266,16 +273,20 @@ def test_docs_rejects_a_non_struct() -> None:
 async def test_user_settings_persist_in_db() -> None:
     assert await load_user_settings_or_none() is None, "not initialized yet"
     assert (await load_user_settings()).embedding == "none"
-    await save_user_settings(UserSettings(embedding="compact"))
+    await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     assert await load_user_settings_or_none() is not None
-    assert (await load_user_settings()).embedding == "compact"
+    assert (await load_user_settings()).embedding == "granite-97m-multilingual"
 
 
 @pytest.mark.anyio
 async def test_init_user_settings_creates_the_row_once() -> None:
-    assert await init_user_settings(UserSettings(embedding="compact")) is True
-    assert await init_user_settings(UserSettings(embedding="quality")) is False, "second call loses"
-    assert (await load_user_settings()).embedding == "compact", "the first write stands"
+    assert await init_user_settings(UserSettings(embedding="granite-97m-multilingual")) is True
+    assert await init_user_settings(UserSettings(embedding="granite-english")) is False, (
+        "second call loses"
+    )
+    assert (await load_user_settings()).embedding == "granite-97m-multilingual", (
+        "the first write stands"
+    )
 
 
 # --- conversion --------------------------------------------------------------------
@@ -399,11 +410,11 @@ def test_build_preview_of_a_corrupt_pdf_raises_conversion_error(tmp_path: Path) 
         convert.build_preview(bad, tmp_path / "p", Parser.ANYDOC)
 
 
-def test_pdf_page_count_of_a_corrupt_file_raises_conversion_error(tmp_path: Path) -> None:
+def test_pdf_bookmarks_of_a_corrupt_file_raises_conversion_error(tmp_path: Path) -> None:
     bad = tmp_path / "broken.pdf"
     bad.write_bytes(b"not a pdf at all")
     with pytest.raises(PermanentError, match="broken.pdf"):
-        convert.pdf_page_count(bad)
+        convert.pdf_bookmarks(bad)
 
 
 # --- documents: staging and import -------------------------------------------------
@@ -415,10 +426,19 @@ def test_pdf_page_count_of_a_corrupt_file_raises_conversion_error(tmp_path: Path
         ("the file name, cleaned", "guide.md", None, "guide.md"),
         ("a path keeps only its last segment", "/tmp/deep/guide.md", None, "guide.md"),
         ("unsafe characters collapse into one dash", "a b  c.md", None, "a-b-c.md"),
-        ("a rename with no suffix keeps the original's", "book.pdf", "My Book", "My-Book.pdf"),
+        ("a rename with no suffix keeps the original's", "book.pdf", "My Book", "my-book.pdf"),
         ("a rename with the same suffix is taken as is", "book.pdf", "atlas.pdf", "atlas.pdf"),
-        ("a rename to another suffix keeps the original's", "book.pdf", "a.txt", "a.txt.pdf"),
-        ("the suffix decides the parser, so case is ignored", "BOOK.PDF", None, "BOOK.PDF"),
+        ("a rename to another suffix keeps the original's", "book.pdf", "a.txt", "a-txt.pdf"),
+        ("upper case is lowered, the suffix too", "BOOK.PDF", None, "book.pdf"),
+        (
+            "every run of dots, spaces and punctuation in the stem is one dash",
+            "2013-Vaughn-Implementing Domain  Driven_Design (v1.2).pdf",
+            None,
+            "2013-vaughn-implementing-domain-driven-design-v1-2.pdf",
+        ),
+        ("accents are dropped, and letters fold", "Résumé Straße.md", None, "resume-strasse.md"),
+        ("a rename is spelled the same way", "a.md", "My  Notes!", "my-notes.md"),
+        ("underscores, dashes and inner dots alike", "A_B--CC.d.f.pdf", None, "a-b-cc-d-f.pdf"),
     ],
 )
 def test_stored_name_keeps_the_suffix_the_parser_is_chosen_by(
@@ -432,7 +452,9 @@ def test_stored_name_keeps_the_suffix_the_parser_is_chosen_by(
     [
         ("a type nothing can read", "virus.exe", PermanentError, "unsupported file type"),
         ("no suffix at all", "README", PermanentError, "unsupported file type"),
-        ("nothing left after cleaning", "***", InvalidInput, "invalid name"),
+        ("nothing left after cleaning, so no suffix", "***", PermanentError, "unsupported"),
+        ("a stem with no letter or digit", "_.md", InvalidInput, "invalid name"),
+        ("a name with no Latin letter or digit", "Отчёт.pdf", InvalidInput, "invalid name"),
     ],
 )
 def test_stored_name_refuses_what_could_never_be_imported(
@@ -481,39 +503,45 @@ async def test_import_staged_moves_the_file_and_creates_the_row() -> None:
         ),
     )
 
-    assert (doc.name, doc.suffix, doc.size) == ("My-Guide.md", ".md", len(MD.encode()))
+    assert (doc.name, doc.suffix, doc.size) == ("my-guide.md", ".md", len(MD.encode()))
     assert (doc.status, doc.error, doc.preview) == ("queued", None, None), "the pipeline starts it"
     assert (doc.parser, doc.skip_ocr_pages) == ("plain", False), "conversion is fixed at import"
     assert doc.description == "the guide"
     assert doc.original.read_text() == MD
     assert not document.staging_path(staged.staging_id).exists(), "moved, not copied"
     assert await _staging_rows() == [], "the staging row goes with the bytes"
-    assert await document_names() == ["My-Guide.md"]
+    assert await document_names() == ["my-guide.md"]
 
 
 @pytest.mark.anyio
-async def test_the_same_bytes_are_spotted_at_staging_whichever_way_they_came_in(
-    tmp_path: Path,
-) -> None:
-    """The MD5 is taken at staging and at a path import alike, so an upload that repeats either
-    names every document that already holds those bytes; other bytes name none."""
-    md5 = hashlib.md5(MD.encode()).hexdigest()
+async def test_the_bytes_are_the_document_whichever_way_they_came_in(tmp_path: Path) -> None:
+    """A document's id is the MD5 of its bytes, taken at staging and at a path import alike. The
+    same bytes again are refused under any name, naming the document they already are; staging
+    them says so first. Other bytes are another document."""
+    md5 = ids.md5(MD.encode())
     first = await document.stage("guide.md", MD.encode())
-    assert first.duplicates == [], "nothing imported yet"
+    assert first.duplicate is None, "nothing imported yet"
     staged = await document.import_staged(first.staging_id)
     copy = tmp_path / "copy.md"
     copy.write_text(MD)
-    by_path = await document.import_path(str(copy), document.ImportOptions(name="b-copy.md"))
 
+    with pytest.raises(Conflict, match="this file is already imported as guide.md"):
+        await document.import_path(str(copy), document.ImportOptions(name="b-copy.md"))
     again = await document.stage("renamed.md", MD.encode())
     other = await document.stage("other.md", b"# Other\n\nnot the guide\n")
 
-    assert (staged.md5, by_path.md5) == (md5, md5), "one hash, staged or read from a path"
-    assert again.duplicates == ["b-copy.md", "guide.md"], "every holder, in name order"
-    assert other.duplicates == [], "other bytes are another file"
-    assert await document.identical(md5, but="guide.md") == ["b-copy.md"], "itself left out"
-    await document.set_status("b-copy.md", DocumentStatus.DELETING)
-    assert await document.identical(md5) == ["guide.md"], "one being deleted is no longer a copy"
+    assert staged.id == md5, "the id is the MD5 of the bytes"
+    assert await document_names() == ["guide.md"], "the refused import left no row"
+    assert not (document.root(md5) / "original.md.md").exists()
+    assert again.duplicate == "guide.md", "staging names the document the bytes already are"
+    assert other.duplicate is None, "other bytes are another file"
+    with pytest.raises(Conflict, match="this file is already imported as guide.md"):
+        await document.import_staged(again.staging_id)
+    await document.set_status(md5, DocumentStatus.DELETING)
+    assert await document.identical(md5) is None, "one being deleted is no longer a repeat"
+    leaving = await document.stage("back.md", MD.encode())
+    with pytest.raises(Conflict, match="this file is guide.md, being deleted; import it once"):
+        await document.import_staged(leaving.staging_id)
 
 
 @pytest.mark.anyio
@@ -523,7 +551,7 @@ async def test_import_staged_without_a_name_keeps_the_uploaded_file_name() -> No
 
     doc = await document.import_staged(staged.staging_id)
 
-    assert doc.name == "My-Guide.md"
+    assert doc.name == "my-guide.md"
     assert await _staging_rows() == [], "the row is consumed with the staged file"
 
 
@@ -543,21 +571,22 @@ async def test_import_staged_defaults_conversion_to_the_user_settings() -> None:
     ("second", "reason"),
     [
         pytest.param("Notes.md", "the same name", id="exact"),
-        pytest.param("NOTES.md", "one folder on a case-insensitive disk", id="case-only"),
+        pytest.param("NOTES.md", "spelled one way, so another case is the same name", id="case"),
+        pytest.param("notes .md", "and other punctuation too", id="punctuation"),
     ],
 )
 @pytest.mark.anyio
-async def test_a_name_taken_ignoring_case_is_refused(second: str, reason: str) -> None:
-    """A document's folder is named after it, so a name that differs only in case would share the
-    first one's folder on macOS, and its import would overwrite the first one's files."""
+async def test_a_name_taken_in_any_spelling_is_refused(second: str, reason: str) -> None:
+    """A name is stored in one spelling (`stored_name`), so a second import that spells it
+    another way asks for the same name, and is refused with the first one untouched."""
     first = await document.stage("Notes.md", b"# first\n")
     doc = await document.import_staged(first.staging_id)
     clash = await document.stage(second, b"# second\n")
 
-    with pytest.raises(Conflict, match="document already exists: Notes.md"):
+    with pytest.raises(Conflict, match="document already exists: notes.md"):
         await document.import_staged(clash.staging_id)
 
-    assert await document_names() == ["Notes.md"], reason
+    assert await document_names() == ["notes.md"], reason
     assert doc.original.read_bytes() == b"# first\n", "the first document's file is untouched"
 
 
@@ -570,14 +599,14 @@ async def test_import_staged_renames_and_refuses_a_name_already_taken() -> None:
         first.staging_id, document.ImportOptions(name="Atlas of Maps")
     )
 
-    assert doc.name == "Atlas-of-Maps.pdf", "the rename names the document, not the parser"
+    assert doc.name == "atlas-of-maps.pdf", "the rename names the document, not the parser"
     with pytest.raises(Conflict, match="document already exists"):
         await document.import_staged(
             second.staging_id, document.ImportOptions(name="Atlas of Maps")
         )
     assert document.staging_path(second.staging_id).exists(), "the refused upload is still staged"
     assert [row[0] for row in await _staging_rows()] == [second.staging_id], "and so is its row"
-    assert await document_names() == ["Atlas-of-Maps.pdf"]
+    assert await document_names() == ["atlas-of-maps.pdf"]
 
 
 @pytest.mark.parametrize(
@@ -706,9 +735,9 @@ async def test_a_failed_import_leaves_neither_a_row_nor_a_name_it_holds(
 async def test_get_reads_the_row_and_refuses_a_name_with_none() -> None:
     await import_row("a.md")
 
-    assert (await document.get("a.md")).size == len(MD)
+    assert (await document.named("a.md")).size == len(MD)
     with pytest.raises(NotFound, match="document not found"):
-        await document.get("ghost.md")
+        await document.named("ghost.md")
 
 
 @pytest.mark.anyio
@@ -727,37 +756,37 @@ async def test_set_status_bumps_updated_at_and_the_preview_does_not() -> None:
     assert first.created_at > 0, "stamped on import"
     assert first.updated_at == first.created_at, "an import is the document's first change"
 
-    await document.set_status("a.md", DocumentStatus.IMPORTED)
-    done = await document.get("a.md")
+    await document.set_status(await id_of("a.md"), DocumentStatus.IMPORTED)
+    done = await document.named("a.md")
     assert done.updated_at > first.updated_at, "a lifecycle step is a change"
     assert (done.status, done.error) == ("imported", None)
     assert done.created_at == first.created_at, "the import moment never moves"
 
-    await document.set_status("a.md", DocumentStatus.ERROR, "boom")
-    failed = await document.get("a.md")
+    await document.set_status(await id_of("a.md"), DocumentStatus.ERROR, "boom")
+    failed = await document.named("a.md")
     assert (failed.status, failed.error) == ("error", "boom"), "the reason is stored with it"
 
-    await document.ensure_preview("a.md")
-    previewed = await document.get("a.md")
+    await document.ensure_preview(await document.named("a.md"))
+    previewed = await document.named("a.md")
     assert previewed.preview is not None, "the preview was built"
     assert previewed.updated_at == failed.updated_at, "filling in the preview is not a change"
 
 
 @pytest.mark.anyio
 async def test_describe_replaces_the_description_and_reads_in_batches() -> None:
-    await import_row("a.md")
-    await import_row("b.md")
+    a = await import_row("a.md")
+    b = await import_row("b.md")
 
-    described = await document.describe("a.md", "the alpha guide")
+    described = await document.describe(a.id, "the alpha guide")
 
     assert described.description == "the alpha guide"
-    assert await document.descriptions_of({"a.md", "b.md"}) == {"a.md": "the alpha guide"}, (
+    assert await document.descriptions_of({a.id, b.id}) == {a.id: "the alpha guide"}, (
         "a document without one is absent"
     )
     assert await document.descriptions_of(set()) == {}
-    assert (await document.describe("a.md", "")).description == "", "empty clears it"
+    assert (await document.describe(a.id, "")).description == "", "empty clears it"
     with pytest.raises(NotFound, match="document not found"):
-        await document.describe("ghost.md", "x")
+        await document.describe("0" * 32, "x")
 
 
 @pytest.mark.anyio
@@ -765,8 +794,8 @@ async def test_document_page_sorts_filters_and_resumes_by_keyset() -> None:
     sizes = {"a.md": 30, "b.md": 10, "c.md": 20}
     for name, size in sizes.items():
         await import_row(name, "x" * size)
-    await document.set_status("a.md", DocumentStatus.IMPORTED)
-    await document.set_status("b.md", DocumentStatus.ERROR, "boom")
+    await document.set_status(await id_of("a.md"), DocumentStatus.IMPORTED)
+    await document.set_status(await id_of("b.md"), DocumentStatus.ERROR, "boom")
 
     by_name = await document.page(PageRequest(page_size=2))
     assert [d.name for d in by_name.items] == ["a.md", "b.md"]
@@ -777,6 +806,9 @@ async def test_document_page_sorts_filters_and_resumes_by_keyset() -> None:
 
     by_size = await document.page(PageRequest(sort="size", order=Order.DESC))
     assert [d.name for d in by_size.items] == ["a.md", "c.md", "b.md"]
+
+    newest_first = await document.page(PageRequest(sort="created_at", order=Order.DESC))
+    assert [d.name for d in newest_first.items] == ["c.md", "b.md", "a.md"]
 
     filtered = await document.page(PageRequest(), status=DocumentStatus.IMPORTED)
     assert [d.name for d in filtered.items] == ["a.md"]
@@ -800,8 +832,8 @@ async def test_ensure_preview_builds_once_and_then_reads_the_stored_row(
 
     monkeypatch.setattr(convert, "build_preview", counted)
 
-    _, first = await document.ensure_preview(doc.name)
-    _, second = await document.ensure_preview(doc.name)
+    _, first = await document.ensure_preview(doc)
+    _, second = await document.ensure_preview(doc)
 
     assert builds == ["original.md"], "the second call reads the row instead of converting again"
     assert first == second and first.kind == "text"
@@ -827,13 +859,13 @@ async def test_ensure_preview_builds_once_when_two_readers_arrive_together() -> 
         return real(*args, **kwargs)
 
     async def first_reader() -> None:
-        row, preview = await document.ensure_preview(doc.name)
+        row, preview = await document.ensure_preview(doc)
         results.append((row, preview.kind))
 
     async def second_reader() -> None:
-        await document.get(doc.name)  # the row is readable while the first reader holds the lock
+        await document.named(doc.name)  # the row is readable while the first reader holds the lock
         reader_ready.set()
-        row, preview = await document.ensure_preview(doc.name)
+        row, preview = await document.ensure_preview(doc)
         results.append((row, preview.kind))
 
     with pytest.MonkeyPatch.context() as patch:
@@ -843,7 +875,7 @@ async def test_ensure_preview_builds_once_when_two_readers_arrive_together() -> 
             await anyio.to_thread.run_sync(building.wait)  # the first build is under way
             readers.start_soon(second_reader)
             await reader_ready.wait()
-            lock = document._preview_locks[doc.name]
+            lock = document._preview_locks[doc.id]
             while lock.statistics().tasks_waiting == 0:  # the second reader is on the lock
                 await anyio.sleep(0.01)
             release.set()
@@ -861,16 +893,16 @@ async def test_a_preview_lock_is_dropped_whichever_way_the_build_ends(
     doc = await import_row("g.md")
     assert document._preview_locks == {}, "nothing is allocated before a build"
 
-    await document.ensure_preview(doc.name)
+    await document.ensure_preview(doc)
     assert document._preview_locks == {}, "the build is committed; the next reader needs no lock"
 
-    await document.ensure_preview(doc.name)
+    await document.ensure_preview(doc)
     assert document._preview_locks == {}, "and the early return takes none at all"
 
     other = await import_row("h.md")
     monkeypatch.setattr(convert, "build_preview", _refuse_to_build)
     with pytest.raises(PermanentError, match="no preview today"):
-        await document.ensure_preview(other.name)
+        await document.ensure_preview(other)
 
     assert document._preview_locks == {}, "a failed build leaves no lock behind either"
 
@@ -908,7 +940,7 @@ async def test_a_failed_preview_build_is_never_retried_side_by_side() -> None:
     async def reader() -> None:
         nonlocal failures
         with pytest.raises(PermanentError, match="no preview today"):
-            await document.ensure_preview(doc.name)
+            await document.ensure_preview(doc)
         failures += 1
 
     with pytest.MonkeyPatch.context() as patch:
@@ -917,7 +949,7 @@ async def test_a_failed_preview_build_is_never_retried_side_by_side() -> None:
             readers.start_soon(reader)  # A: the build that will fail
             await anyio.to_thread.run_sync(entered.acquire)
             readers.start_soon(reader)  # B: queued on A's lock
-            lock = document._preview_locks[doc.name]
+            lock = document._preview_locks[doc.id]
             while lock.statistics().tasks_waiting == 0:
                 await anyio.sleep(0.01)
             let_first_fail.set()  # A raises; B rebuilds under the same lock
@@ -988,11 +1020,11 @@ async def test_ensure_preview_bounds_concurrent_builds(
 
     The stripe lock is per document, so nothing but the semaphore holds these four apart.
     """
-    names = [(await import_row(f"doc-{i}.md")).name for i in range(4)]
+    rows = [await import_row(f"doc-{i}.md") for i in range(4)]
     document.configure_preview_slots(workers)
     async with anyio.create_task_group() as readers:
-        for doc in names:
-            readers.start_soon(document.ensure_preview, doc)
+        for row in rows:
+            readers.start_soon(document.ensure_preview, row)
         await preview_builds.wait_entered(workers)  # every slot of the pool is now inside a build
         assert document._preview_slots.available_tokens == 0, f"{name}: no slot left"
         preview_builds.release.set()
@@ -1006,11 +1038,11 @@ async def test_resizing_the_preview_pool_counts_the_builds_already_running(
     preview_builds: PreviewBuilds,
 ) -> None:
     """Two builds run and two wait; raising the pool from 2 to 3 admits one more, not three."""
-    names = [(await import_row(f"doc-{i}.md")).name for i in range(4)]
+    rows = [await import_row(f"doc-{i}.md") for i in range(4)]
     document.configure_preview_slots(2)
     async with anyio.create_task_group() as readers:
-        for doc in names:
-            readers.start_soon(document.ensure_preview, doc)
+        for row in rows:
+            readers.start_soon(document.ensure_preview, row)
         await preview_builds.wait_entered(2)
 
         document.configure_preview_slots(3)
@@ -1037,11 +1069,11 @@ async def test_ensure_preview_returns_not_ready_when_the_queue_is_full(
     await slots.acquire_on_behalf_of(holder)  # it holds the only slot, so every reader waits
     try:
         with pytest.raises(NotReady, match="preview queue is full"):
-            await document.ensure_preview(doc.name)
+            await document.ensure_preview(doc)
     finally:
         slots.release_on_behalf_of(holder)
 
-    assert (await document.get(doc.name)).preview is None, "nothing built, nothing stored"
+    assert (await document.named(doc.name)).preview is None, "nothing built, nothing stored"
 
 
 # --- collections -------------------------------------------------------------------
@@ -1119,6 +1151,9 @@ async def test_load_settings_reads_every_collection_it_was_asked_for_in_one_quer
         await Collection.create(name)
     await Collection("alpha").set_overrides(CollectionOverrides(chunker=Chunker.TEXT))
     assert await Collection.load_overrides([]) == {}, "nothing asked for, nothing read"
+    # a collection change refreshes the Claude Code installs in the background: counted, its
+    # query would land inside the window below
+    await until(refresh_settled, "the creates' own refresh ended")
     statements: list[str] = []
 
     def counted(_conn, _cursor, statement: str, *_args) -> None:
@@ -1165,35 +1200,40 @@ async def test_a_search_reads_one_rule_for_a_document_on_its_way_out(
     not cover holds nothing, and a document none of them holds is absent."""
     for name in ("notes", "other", "unsearched"):
         await Collection.create(name)
+    ids: dict[str, str] = {}
     for name in ("guide.md", "keep.md", "lonely.md"):
-        await import_row(name)
-        await document.set_status(name, DocumentStatus.IMPORTED)
+        ids[name] = (await import_row(name)).id
+        await document.set_status(ids[name], DocumentStatus.IMPORTED)
     for collection, doc in (
         ("notes", "guide.md"),
         ("other", "guide.md"),
         ("notes", "keep.md"),
         ("unsearched", "keep.md"),
     ):
-        await Collection(collection).add(doc)
+        await Collection(collection).add(ids[doc])
     if way_out == "guide.md removing from notes":
-        await Collection("notes").start_removal("guide.md")
+        await Collection("notes").start_removal(ids["guide.md"])
     elif way_out == "guide.md deleting":
-        await document.set_status("guide.md", DocumentStatus.DELETING)
+        await document.set_status(ids["guide.md"], DocumentStatus.DELETING)
     names = ["notes", "other", "ghost"]
-    docs = {"guide.md", "keep.md", "lonely.md"}
+    docs = set(ids.values())
+    named = {id: name for name, id in ids.items()}
 
     found = await Collection.for_search(names, None)
 
     assert list(found) == ["notes", "other"], f"{way_out}: in the order given, a ghost absent"
-    assert {name: index.leaving for name, (index, _) in found.items()} == leaving, way_out
-    assert await Collection.holding(docs, names) == held, way_out
+    assert {
+        name: frozenset(named[doc] for doc in index.leaving) for name, (index, _) in found.items()
+    } == leaving, way_out
+    holding = await Collection.holding(docs, names)
+    assert {named[doc]: held_in for doc, held_in in holding.items()} == held, way_out
     assert await Collection.holding(set(), names) == {}, "no document asked for"
     assert await Collection.holding(docs, []) == {}, "no collection searched"
 
 
 def test_the_leaving_query_reads_by_index_not_every_membership() -> None:
     """Almost always nothing is leaving, so finding that out must not read every membership of
-    the searched collections: each road of `LEAVING` is bound by its status index."""
+    the searched collections: each branch of `LEAVING` is bound by its status index."""
     from sqlalchemy.dialects import sqlite as sqlite_dialect
 
     from haskie.collection.collection import _leaving_query
@@ -1215,7 +1255,7 @@ def test_the_leaving_query_reads_by_index_not_every_membership() -> None:
 @pytest.mark.anyio
 async def test_reranker_overrides_lists_every_model_a_collection_chose() -> None:
     """The model downloads have to cover the overrides too, so they are read in one query."""
-    chosen = "Xenova/ms-marco-MiniLM-L-12-v2"
+    chosen = "cross-encoder/ettin-reranker-17m-v1"
     for name in ("a", "b", "c"):
         await Collection.create(name)
     await Collection("b").set_overrides(
@@ -1225,7 +1265,19 @@ async def test_reranker_overrides_lists_every_model_a_collection_chose() -> None
         CollectionOverrides(search=SearchOverrides(reranker_model=chosen))
     )
 
-    assert await Collection.reranker_overrides() == [chosen], "no duplicates"
+    assert await Collection.reranker_overrides(SearchSettings()) == [chosen], "no duplicates"
+
+
+@pytest.mark.anyio
+async def test_a_collection_that_turns_the_reranker_on_loads_the_users_model() -> None:
+    """With the user's reranker off, nothing else downloads the model such a collection's
+    search resolves to."""
+    await Collection.create("reranked")
+    await Collection("reranked").set_overrides(
+        CollectionOverrides(search=SearchOverrides(reranker=Reranker.CROSS_ENCODER))
+    )
+
+    assert await Collection.reranker_overrides(SearchSettings()) == [DEFAULT_RERANKER]
 
 
 @pytest.mark.anyio
@@ -1233,8 +1285,8 @@ async def test_collection_page_lists_summaries_with_their_counts() -> None:
     for name in ("alpha", "beta", "gamma"):
         await Collection.create(name, description=f"{name} notes")
     await attachable("a.md")
-    await Collection("beta").add("a.md")
-    await Collection("beta").set_member_status("a.md", MemberStatus.INDEXED)
+    await Collection("beta").add(await id_of("a.md"))
+    await Collection("beta").set_member_status(await id_of("a.md"), MemberStatus.INDEXED)
 
     first = await Collection.page(PageRequest(page_size=2))
 
@@ -1255,25 +1307,25 @@ async def test_add_is_idempotent_and_member_reads_the_document_with_it() -> None
     collection = await Collection.create("notes")
     doc = await attachable("a.md")
 
-    await collection.add(doc.name)
-    first = await collection.member(doc.name)
-    await collection.add(doc.name)
-    again = await collection.member(doc.name)
+    await collection.add(doc.id)
+    first = await collection.member(doc.id)
+    await collection.add(doc.id)
+    again = await collection.member(doc.id)
 
     assert isinstance(first, Member) and first.status == "pending", "indexing moves it along"
     assert first.document.name == doc.name and first.document.size == doc.size
     assert (again.status, again.added_at) == (first.status, first.added_at), "a no-op re-attach"
-    assert await collection.member_names() == ["a.md"]
+    assert await collection.member_ids() == [doc.id]
 
-    await collection.set_member_status(doc.name, MemberStatus.ERROR, "boom")
-    failed = await collection.member(doc.name)
+    await collection.set_member_status(doc.id, MemberStatus.ERROR, "boom")
+    failed = await collection.member(doc.id)
     assert (failed.status, failed.error) == ("error", "boom")
     assert failed.updated_at >= failed.added_at
 
     with pytest.raises(NotFound, match="document not found"):
-        await collection.add("ghost.md")
+        await collection.add("0" * 32)
     with pytest.raises(NotFound, match="document not in collection notes"):
-        await collection.member("ghost.md")
+        await collection.member("0" * 32)
 
 
 @pytest.mark.parametrize(
@@ -1296,8 +1348,8 @@ async def test_rename_moves_the_folder_unless_a_member_is_being_deleted(
     the source itself: it is moved, never swept away as a leftover."""
     collection = await Collection.create("health")
     doc = await attachable("a.md")
-    await collection.add(doc.name)
-    await document.set_status(doc.name, status)  # ty: ignore
+    await collection.add(doc.id)
+    await document.set_status(doc.id, status)  # ty: ignore
 
     if refused is not None:
         with pytest.raises(Conflict, match=refused):
@@ -1308,7 +1360,7 @@ async def test_rename_moves_the_folder_unless_a_member_is_being_deleted(
 
     assert await Collection.names() == [to], name
     assert renamed.root.is_dir(), f"{name}: the folder moved, not removed"
-    assert await renamed.member_names() == [doc.name], name
+    assert await renamed.member_ids() == [doc.id], name
 
 
 @pytest.mark.parametrize("status", ["queued", "converting", "embedding", "error", "deleting"])
@@ -1318,34 +1370,36 @@ async def test_add_refuses_a_document_that_is_not_imported(status: str) -> None:
     being deleted must not gain a membership the delete's snapshot missed."""
     collection = await Collection.create("notes")
     doc = await import_row("a.md")
-    await document.set_status(doc.name, status)  # ty: ignore
+    await document.set_status(doc.id, status)  # ty: ignore
 
     with pytest.raises(Conflict, match=f"document is {status}; only an imported document"):
-        await collection.add(doc.name)
+        await collection.add(doc.id)
 
-    assert await collection.member_names() == [], "nothing attached"
+    assert await collection.member_ids() == [], "nothing attached"
 
 
 @pytest.mark.anyio
-async def test_member_names_walk_one_page_at_a_time() -> None:
+async def test_member_ids_walk_one_page_at_a_time() -> None:
     collection = await Collection.create("notes")
-    for name in ("a.md", "b.md", "c.md"):
-        await collection.add((await attachable(name)).name)
+    names = ("a.md", "b.md", "c.md")
+    first, second, third = sorted([(await attachable(name)).id for name in names])
+    for doc in (first, second, third):
+        await collection.add(doc)
 
-    assert await collection.member_names() == ["a.md", "b.md", "c.md"]
-    assert await collection.member_names(limit=2) == ["a.md", "b.md"]
-    assert await collection.member_names(after="b.md") == ["c.md"]
+    assert await collection.member_ids() == [first, second, third]
+    assert await collection.member_ids(limit=2) == [first, second]
+    assert await collection.member_ids(after=second) == [third]
 
 
 @pytest.mark.anyio
 async def test_member_counts_group_by_status() -> None:
     collection = await Collection.create("counts")
     for name in ("a.md", "b.md", "c.md", "d.md", "e.md"):
-        await collection.add((await attachable(name)).name)
-    await collection.set_member_status("a.md", MemberStatus.INDEXED)
-    await collection.set_member_status("b.md", MemberStatus.INDEXING)
-    await collection.set_member_status("c.md", MemberStatus.ERROR, "boom")
-    await collection.start_removal("e.md")
+        await collection.add((await attachable(name)).id)
+    await collection.set_member_status(await id_of("a.md"), MemberStatus.INDEXED)
+    await collection.set_member_status(await id_of("b.md"), MemberStatus.INDEXING)
+    await collection.set_member_status(await id_of("c.md"), MemberStatus.ERROR, "boom")
+    await collection.start_removal(await id_of("e.md"))
 
     counts = await collection.counts()
 
@@ -1412,8 +1466,8 @@ def _fail_removal(collection: Collection, doc: str) -> Awaitable[None]:
         ),
         pytest.param(
             True,
-            lambda collection, doc: collection.start_removal("ghost.md"),
-            pytest.raises(NotFound, match="document not in collection going: ghost.md"),
+            lambda collection, doc: collection.start_removal("0" * 32),
+            pytest.raises(NotFound, match="document not in collection going: 0{32}"),
             "removing",
             None,
             id="detach a stranger",
@@ -1432,15 +1486,15 @@ async def test_a_removing_membership_keeps_its_status_until_its_removal_ends(
     no index status may overwrite that, or a poll would stop following a member still going."""
     collection = await Collection.create("going")
     doc = await attachable("going.md")
-    await collection.add(doc.name)
-    await collection.set_member_status(doc.name, MemberStatus.INDEXED)
+    await collection.add(doc.id)
+    await collection.set_member_status(doc.id, MemberStatus.INDEXED)
     if detached:
-        await collection.start_removal(doc.name)
+        await collection.start_removal(doc.id)
 
     with outcome:
-        await change(collection, doc.name)
+        await change(collection, doc.id)
 
-    member = await collection.member(doc.name)
+    member = await collection.member(doc.id)
     assert (member.status, member.error) == (status, error)
     assert (await collection.counts()).active == (status == "removing")
 
@@ -1462,13 +1516,13 @@ async def test_members_page_sorts_on_the_document_and_on_the_membership(
     `status`/`updated_at` from the membership."""
     collection = await Collection.create("notes")
     for doc, size in (("a.md", 30), ("b.md", 10), ("c.md", 20)):
-        await collection.add((await attachable(doc, "x" * size)).name)
+        await collection.add((await attachable(doc, "x" * size)).id)
     for doc, status in (
         ("a.md", MemberStatus.INDEXED),
         ("b.md", MemberStatus.PENDING),
         ("c.md", MemberStatus.ERROR),
     ):
-        await collection.set_member_status(doc, status)
+        await collection.set_member_status(await id_of(doc), status)
 
     page = await collection.members_page(PageRequest(sort=sort, order=order))  # ty: ignore
 
@@ -1480,8 +1534,8 @@ async def test_members_page_sorts_on_the_document_and_on_the_membership(
 async def test_members_page_filters_by_status_and_resumes_by_keyset() -> None:
     collection = await Collection.create("notes")
     for doc in ("a.md", "b.md", "c.md"):
-        await collection.add((await attachable(doc)).name)
-    await collection.set_member_status("b.md", MemberStatus.INDEXED)
+        await collection.add((await attachable(doc)).id)
+    await collection.set_member_status(await id_of("b.md"), MemberStatus.INDEXED)
 
     first = await collection.members_page(PageRequest(page_size=2))
     assert [m.document.name for m in first.items] == ["a.md", "b.md"]
@@ -1499,54 +1553,54 @@ async def test_one_document_sits_in_two_collections_and_a_detach_leaves_both_alo
     nor the other collection, and never the embedding cache."""
     doc = await attachable("shared.md")
     for name in ("alpha", "beta"):
-        await (await Collection.create(name)).add(doc.name)
+        await (await Collection.create(name)).add(doc.id)
     params = embed_cache.params(doc, ChunkSettings(), None)
     rows = home.HOME / "rows" / "000000.rows.json"
     rows.parent.mkdir(parents=True, exist_ok=True)
     rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0], seq=1)]))
     cache_id = await embed_cache.write(params, [rows], None)
 
-    assert await document.collections_of(doc.name) == ["alpha", "beta"]
+    assert await document.collections_of(doc.id) == ["alpha", "beta"]
 
-    await Collection("alpha").remove_member(doc.name)
+    await Collection("alpha").remove_member(doc.id)
 
-    assert await document.collections_of(doc.name) == ["beta"], "only that membership went"
-    assert (await document.get(doc.name)).name == doc.name, "the document stays"
+    assert await document.collections_of(doc.id) == ["beta"], "only that membership went"
+    assert (await document.named(doc.name)).name == doc.name, "the document stays"
     assert await embed_cache.lookup(params) == cache_id, "and so does what it costs to compute"
-    assert await Collection("beta").member(doc.name) is not None
+    assert await Collection("beta").member(doc.id) is not None
 
 
 @pytest.mark.anyio
 async def test_deleting_a_collection_leaves_its_documents() -> None:
     doc = await attachable("kept.md")
     for name in ("alpha", "beta"):
-        await (await Collection.create(name)).add(doc.name)
+        await (await Collection.create(name)).add(doc.id)
 
     await remove_collection("alpha")
 
     assert await Collection.names() == ["beta"]
     assert await document_names() == ["kept.md"], "the document belongs to no collection"
     assert doc.original.exists(), "and keeps its files"
-    assert await document.collections_of(doc.name) == ["beta"]
+    assert await document.collections_of(doc.id) == ["beta"]
 
 
 @pytest.mark.anyio
 async def test_deleting_a_document_takes_every_membership_and_cache_row_with_it() -> None:
     doc = await attachable("gone.md")
     for name in ("alpha", "beta"):
-        await (await Collection.create(name)).add(doc.name)
+        await (await Collection.create(name)).add(doc.id)
     params = embed_cache.params(doc, ChunkSettings(), None)
     rows = home.HOME / "rows" / "000000.rows.json"
     rows.parent.mkdir(parents=True, exist_ok=True)
     rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0], seq=1)]))
     await embed_cache.write(params, [rows], None)
 
-    await document.remove_files(doc.name)
-    await document.remove_row(doc.name)
+    await document.remove_files(doc.id)
+    await document.remove_row(doc.id)
 
     assert await document_names() == []
-    assert await document.collections_of("gone.md") == [], "both memberships cascaded"
-    assert await embed_cache.entries("gone.md") == [], "and so did the cache rows"
+    assert await document.collections_of(doc.id) == [], "both memberships cascaded"
+    assert await embed_cache.entries(doc.id) == [], "and so did the cache rows"
     assert not doc.root.exists()
     assert await Collection("alpha").counts() == DocumentCounts(), "the collections stay, empty"
 
@@ -1555,7 +1609,7 @@ async def test_deleting_a_document_takes_every_membership_and_cache_row_with_it(
 async def test_an_unattached_document_is_valid_and_listable() -> None:
     doc = await import_row("lonely.md")
 
-    assert await document.collections_of(doc.name) == []
+    assert await document.collections_of(doc.id) == []
     page = await document.page(PageRequest())
     assert [d.name for d in page.items] == ["lonely.md"]
 
@@ -1585,7 +1639,7 @@ async def test_deleting_a_collection_drops_it_from_every_session() -> None:
 
 # --- index -------------------------------------------------------------------------
 
-COMPACT = EmbeddingModel("BAAI/bge-small-en-v1.5", 384)
+COMPACT = EmbeddingModel("ibm-granite/granite-embedding-97m-multilingual-r2", 384)
 SAME_SIZE = EmbeddingModel("sentence-transformers/all-MiniLM-L6-v2", 384)
 VECTORS_384 = PLAIN_SCHEMA.append(pa.field("vector", pa.list_(pa.float32(), 384)))
 
@@ -2060,7 +2114,7 @@ async def test_a_leaving_document_takes_no_slot_of_a_search(
         assert not isinstance(vector, str)
         rows = await index.search_rows("row3 lancedb", vector, settings, 3)
 
-    assert {row["document"] for row in rows} == documents, name
+    assert {row["document_id"] for row in rows} == documents, name
     assert len(rows) == 3, f"{name}: filtered before the limit, not after it"
 
 
@@ -2114,6 +2168,32 @@ async def test_run_maintenance_trains_the_vector_index_once_it_is_big_enough() -
     again = await maintenance.run(collection, TINY, settings)
 
     assert again.ann_trained is False, "the collection has not doubled since it was trained"
+
+
+@pytest.mark.anyio
+async def test_run_maintenance_records_the_corpus_mean_a_search_centres_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under the model it indexes with; a collection without a model sums nothing. The sum
+    itself is `embed_cache.corpus_sum`'s, tested with it."""
+    asked: list[tuple[str, str]] = []
+
+    async def corpus_sum(name: str, model: str) -> tuple[np.ndarray, int]:
+        asked.append((name, model))
+        return np.asarray([2.0, 0.0, 0.0, 2.0]), 4
+
+    monkeypatch.setattr(maintenance.embed_cache, "corpus_sum", corpus_sum)
+    vec = await Collection.create("vec")
+    await _fill(vec.index_with(TINY), "a.md", 0, 3, vectors=True)
+    plain = await Collection.create("plain")
+    await _fill(plain.index_with(None), "a.md", 0, 3)
+
+    await maintenance.run(vec, TINY, PipelineSettings())
+    await maintenance.run(plain, None, PipelineSettings())
+
+    assert asked == [("vec", TINY.cache_name)]
+    centre = await Collection.centre(["vec", "plain"], TINY.cache_name)
+    assert centre is not None and centre.tolist() == [0.5, 0.0, 0.0, 0.5]
 
 
 @pytest.mark.parametrize(
@@ -2180,7 +2260,7 @@ async def test_search_falls_back_to_fts_without_an_embedding_model(tmp_path: Pat
     schema = PLAIN_SCHEMA.append(pa.field("vector", pa.list_(pa.float32(), 2)))
     table = lancedb.connect(str(path)).create_table("chunks", schema=schema)
     row = {
-        "document": "a.md",
+        "document_id": "a.md",  # no such row: its id stands in for the name
         "seq": 1,
         "headings": ["H"],
         "text": "hi",
@@ -2242,6 +2322,7 @@ def test_hit_names_the_collection_that_matched_and_builds_a_citation(tmp_path: P
     index = CollectionIndex(tmp_path / "index", "notes", tmp_path, None)
     hit = index.hit(
         {
+            "document_id": "1f" + "0" * 30,
             "document": "book.pdf",
             "part": 2,
             "seq": 7,
@@ -2385,8 +2466,9 @@ async def test_an_index_with_an_embedding_stores_a_vector_column(tmp_path: Path)
     assert table is not None
     assert (await table.schema()).field("vector").type == pa.list_(pa.float32(), 2)
     (record,) = (await table.to_arrow()).to_pylist()
-    assert (record["document"], record["headings"], record["part"]) == ("g.md", ["H", "Sub"], 0)
-    hit = index.hit(record)
+    assert (record["document_id"], record["headings"], record["part"]) == ("g.md", ["H", "Sub"], 0)
+    assert "document" not in record, "the name is read at search time, so a rename moves no row"
+    hit = index.hit(record | {"document": "g.md"})
     assert (hit.headings, hit.header) == (["H", "Sub"], "H > Sub"), "the path read back whole"
     assert record["vector"] == pytest.approx([0.1, 0.2])
     assert await index.schema_current() is True
@@ -2424,14 +2506,17 @@ async def test_delete_parts_removes_only_the_range(tmp_path: Path) -> None:
     (chunk_,) = chunk.split("# H\n\nbody\n", ChunkSettings())
     for doc in ("a.md", "b.md"):
         await index.add_parts(
-            doc, "s", "m", _aparts([(part, [Row(chunk=chunk_, seq=part + 1)]) for part in range(4)])
+            doc,
+            "s",
+            "m",
+            _aparts([(part, [Row(chunk=chunk_, seq=part + 1)]) for part in range(4)]),
         )
 
     await index.delete_parts("a.md", 1, 3)
 
     table = await index._existing()
     assert table is not None
-    kept = {(r["document"], r["part"]) for r in (await table.to_arrow()).to_pylist()}
+    kept = {(r["document_id"], r["part"]) for r in (await table.to_arrow()).to_pylist()}
     assert kept == {("a.md", 0), ("a.md", 3)} | {("b.md", part) for part in range(4)}
 
 
@@ -2458,7 +2543,7 @@ async def test_fts_rows_is_empty_without_an_fts_index(tmp_path: Path) -> None:
     await index.finish()
 
     (row,) = await index.fts_rows("lancedb", 10)
-    assert (row["document"], row["seq"]) == ("d.md", 1)
+    assert (row["document_id"], row["seq"]) == ("d.md", 1)
     assert row["_score"] > 0, "raw BM25, which is what the cross-collection merge sorts on"
 
 
@@ -2506,7 +2591,7 @@ async def test_search_rows_returns_raw_rows_without_cutting(tmp_path: Path) -> N
 
     assert len(rows) == 4, "the fetch size wins over settings.limit"
     assert all("_score" in row and "_relevance_score" not in row for row in rows)
-    assert {row["document"] for row in rows} == {"d.md"}
+    assert {row["document_id"] for row in rows} == {"d.md"}
     assert len(await index.search_rows("lancedb", None, settings, 100)) == 6, "no more than exist"
     missing = CollectionIndex(tmp_path / "missing", "notes", tmp_path, None)
     assert await missing.search_rows("lancedb", None, settings, 4) == [], "no table, no rows"
@@ -2585,13 +2670,33 @@ async def _convert(doc: Document, batch_pages: int = 10) -> list[pipeline.Batch]
 
 
 async def _embed(
-    doc: Document, chunking: ChunkSettings, embedding: EmbeddingModel | None = None
+    doc: Document,
+    chunking: ChunkSettings,
+    embedding: EmbeddingModel | None = None,
+    batch_pages: int = 10,
 ) -> str:
     params = embed_cache.params(doc, chunking, embedding)
     cache_id = embed_cache.key(params)
-    for batch in await pipeline.plan_embed(doc):
+    batches = await pipeline.plan_embed(doc, batch_pages)
+    for batch in batches:
         await pipeline.embed_batch(doc, batch, cache_id, chunking, embedding)
-    return await pipeline.finalize_embed(doc, params, embedding)
+    await pipeline.finalize_embed(doc, params, embedding.dims if embedding else None, len(batches))
+    await _describe(doc, cache_id, embedding, Descriptors.C_TF_IDF, Accelerator.AUTO)
+    return cache_id
+
+
+async def _describe(
+    doc: Document,
+    cache_id: str,
+    embedding: EmbeddingModel | None,
+    by: Descriptors,
+    accelerator: Accelerator,
+) -> int:
+    """The describe stage as the workflow runs it: plan, every batch, then the finalizer."""
+    batches = await pipeline.plan_describe(doc, cache_id, by)
+    for batch in batches:
+        await pipeline.describe_batch(doc, cache_id, embedding, by, accelerator, batch)
+    return await pipeline.finalize_describe(doc, cache_id, by, len(batches))
 
 
 async def _index(
@@ -2608,37 +2713,92 @@ async def _index(
     return written
 
 
+def _parts_of(doc: Document, batches: list[pipeline.Batch]) -> list[str]:
+    markdown = doc.markdown.read_bytes()
+    return [markdown[b.byte_offset : b.byte_end].decode() for b in batches]
+
+
+def _rows_of(doc: Document, batches: list[pipeline.Batch]) -> list[list[Row]]:
+    """The rows each embed batch wrote, a list per batch."""
+    return [
+        msgspec.json.decode(
+            embed_cache.rows_path(doc.id, "cache", batch.seq).read_bytes(), type=list[Row]
+        )
+        for batch in batches
+    ]
+
+
 @pytest.mark.anyio
-async def test_a_part_is_embedded_under_the_headings_an_earlier_part_opened() -> None:
-    """A PDF converts ten pages a part: a chapter opened in one part still frames the chunks
-    of the next, both in the chunk's headings and in what the model embeds. Where the two parts
-    meet is a part boundary, not the document's edge: the section goes on across it."""
+async def test_the_markdown_is_cut_where_its_sections_start_and_packed_up_to_a_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sections go whole into a part, as many as fit a batch of pages; a part never ends inside
+    one while a heading is there to end it at, and the parts tile the markdown."""
+    monkeypatch.setattr(pipeline, "PAGE_CHARS", 60)
     doc = await import_row("g.md")
-    parts = ["# Replication\n\n## Leaders\n\nOne leader takes writes.", "Followers apply the log."]
-    doc.parts_dir.mkdir(parents=True, exist_ok=True)
-    for seq, text in enumerate(parts):
-        doc.part_path(seq).write_text(text)
-    doc.markdown.write_text(pipeline.JOINER.join(parts))
+    sections = [f"# Chapter {n}\n\n{'Words of the chapter. ' * 2}\n\n" for n in range(5)]
+    doc.markdown.write_text("".join(sections))
 
-    batches = await pipeline.plan_embed(doc)
+    batches = await pipeline.plan_embed(doc, 2)
 
-    assert [[text for _, text in b.opened] for b in batches] == [[], ["Replication", "Leaders"]]
+    assert _parts_of(doc, batches) == [
+        sections[0] + sections[1],
+        sections[2] + sections[3],
+        sections[4],
+    ], "two sections a part: a third would not fit 120 characters"
     assert [(b.start_reason, b.end_reason) for b in batches] == [
-        (CutReason.EDGE, CutReason.PART),
+        (CutReason.EDGE, CutReason.HEADING),
+        (CutReason.HEADING, CutReason.HEADING),
+        (CutReason.HEADING, CutReason.EDGE),
+    ]
+    assert [b.char_offset for b in batches] == [0, len(sections[0]) * 2, len(sections[0]) * 4]
+
+
+@pytest.mark.anyio
+async def test_a_part_is_embedded_under_the_headings_an_earlier_part_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A section longer than a batch is cut at a page marker inside it: a chapter opened in one
+    part still frames the chunks of the next, both in the chunk's headings and in what the model
+    embeds. Where the two parts meet is a part boundary, not the document's edge: the section
+    goes on across it."""
+    monkeypatch.setattr(pipeline, "PAGE_CHARS", 100)
+    doc = await import_row("g.md")
+    long = "One leader takes writes. " * 6
+    markdown = (
+        f"# Replication\n\n## Leaders\n\n{long}\n\n<!-- page 2 -->\n\nFollowers apply the log."
+    )
+    doc.markdown.write_text(markdown)
+
+    batches = await pipeline.plan_embed(doc, 1)
+
+    assert _parts_of(doc, batches) == [
+        "# Replication\n\n",
+        f"## Leaders\n\n{long}\n\n",
+        "<!-- page 2 -->\n\nFollowers apply the log.",
+    ], "at the one heading inside the batch, then at the page marker inside the long section"
+    assert [[text for _, text in b.opened] for b in batches] == [
+        [],
+        ["Replication"],
+        ["Replication", "Leaders"],
+    ]
+    assert [(b.start_reason, b.end_reason) for b in batches] == [
+        (CutReason.EDGE, CutReason.HEADING),
+        (CutReason.HEADING, CutReason.PART),
         (CutReason.PART, CutReason.EDGE),
     ]
     for batch in batches:
         await pipeline.embed_batch(doc, batch, "cache", SMALL, None)
-    first, rows = (
-        msgspec.json.decode(
-            embed_cache.rows_path(doc.name, "cache", seq).read_bytes(), type=list[Row]
-        )
-        for seq in (0, 1)
+    _, leaders, followers = _rows_of(doc, batches)
+    assert {tuple(row.chunk.headings) for row in [*leaders, *followers]} == {
+        ("Replication", "Leaders")
+    }
+    assert followers[0].chunk.char_start == markdown.index("Followers"), "offsets into the file"
+    assert (leaders[0].chunk.start_reason, leaders[-1].chunk.end_reason) == (
+        CutReason.HEADING,
+        CutReason.PART,
     )
-    assert [row.chunk.headings for row in rows] == [["Replication", "Leaders"]]
-    assert rows[0].chunk.char_start == len(parts[0]) + len(pipeline.JOINER)
-    reasons = [(row.chunk.start_reason, row.chunk.end_reason) for row in [*first, *rows]]
-    assert reasons == [(CutReason.EDGE, CutReason.PART), (CutReason.PART, CutReason.EDGE)]
+    assert followers[0].chunk.start_reason == CutReason.PART
 
 
 @pytest.mark.anyio
@@ -2648,47 +2808,91 @@ async def test_a_part_is_embedded_under_the_headings_an_earlier_part_opened() ->
         ("text goes on: the section crosses the boundary", "More of it.", CutReason.PART),
         (
             "the next part opens with a heading, behind its page marker: the section ends",
-            "<!-- page 11 -->\n\n# Chapter 4\n\nMore.",
+            "# Chapter 4\n\nMore.",
             CutReason.HEADING,
         ),
     ],
 )
 async def test_where_two_parts_meet_is_cut_for_what_comes_next(
-    name: str, second: str, meets: CutReason
+    name: str, second: str, meets: CutReason, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A PDF chapter often starts on a new page, so a part often opens with its heading. The cut
-    between the two parts is then a heading on both sides, and a short section just before it is
-    whole: nothing grows across the heading."""
+    """A PDF chapter often starts on a new page, so a part cut at a page marker often opens with
+    its heading. The cut between the two parts is then a heading on both sides, and a short
+    section just before it is whole: nothing grows across the heading."""
+    monkeypatch.setattr(pipeline, "PAGE_CHARS", 50)
     doc = await import_row("g.md")
-    parts = ["# Chapter 3\n\nA short note.", second]
-    doc.parts_dir.mkdir(parents=True, exist_ok=True)
-    for seq, text in enumerate(parts):
-        doc.part_path(seq).write_text(text)
-    doc.markdown.write_text(pipeline.JOINER.join(parts))
+    doc.markdown.write_text(f"# Chapter 3\n\n{'A long note. ' * 6}\n\n<!-- page 11 -->\n\n{second}")
 
-    batches = await pipeline.plan_embed(doc)
+    batches = await pipeline.plan_embed(doc, 1)
     for batch in batches:
         await pipeline.embed_batch(doc, batch, "cache", SMALL, None)
-    rows = [
-        row
-        for seq in (0, 1)
-        for row in msgspec.json.decode(
-            embed_cache.rows_path(doc.name, "cache", seq).read_bytes(), type=list[Row]
-        )
-    ]
+    before, after = _rows_of(doc, batches)
 
     assert [(b.start_reason, b.end_reason) for b in batches] == [
         (CutReason.EDGE, meets),
         (meets, CutReason.EDGE),
     ], name
-    assert (rows[0].chunk.end_reason, rows[1].chunk.start_reason) == (meets, meets), name
+    assert (before[-1].chunk.end_reason, after[0].chunk.start_reason) == (meets, meets), name
+
+
+@pytest.mark.anyio
+async def test_a_heading_is_cut_ahead_of_its_page_marker() -> None:
+    """A PDF chapter starts behind the marker of its page. The cut goes ahead of the marker, so
+    the chapter's part knows its page from the first chunk, and no part holds a marker alone."""
+    doc = await import_row("g.md")
+    pages = [
+        f"<!-- page {n} -->\n\n# Chapter {n}\n\n{'Words of the chapter. ' * 4}".strip()
+        for n in (1, 2, 3)
+    ]
+    doc.markdown.write_text("\n\n".join(pages))
+
+    batches = await pipeline.plan_embed(doc, 1)
+    for batch in batches:
+        await pipeline.embed_batch(doc, batch, "cache", SMALL, None)
+
+    assert [part.strip() for part in _parts_of(doc, batches)] == pages
+    assert [(b.start_reason, b.end_reason) for b in batches] == [
+        (CutReason.EDGE, CutReason.HEADING),
+        (CutReason.HEADING, CutReason.HEADING),
+        (CutReason.HEADING, CutReason.EDGE),
+    ]
+    assert [
+        {(row.chunk.page_start, row.chunk.page_end) for row in rows}
+        for rows in _rows_of(doc, batches)
+    ] == [{(1, 1)}, {(2, 2)}, {(3, 3)}]
+
+
+@pytest.mark.anyio
+async def test_a_part_cut_mid_page_starts_on_the_page_open_there() -> None:
+    """A heading partway down a page opens a part with no marker of its own ahead of its text:
+    its chunks are on the page an earlier part's marker opened, until the part's first marker."""
+    doc = await import_row("g.md")
+    words = "Words of the chapter. " * 4
+    doc.markdown.write_text(
+        f"<!-- page 1 -->\n\n# One\n\n{words}\n\n<!-- page 2 -->\n\n{words}\n\n# Two\n\n{words}"
+        f"\n\n<!-- page 3 -->\n\n{words}"
+    )
+
+    batches = await pipeline.plan_embed(doc, 1)
+    for batch in batches:
+        await pipeline.embed_batch(doc, batch, "cache", SMALL, None)
+
+    assert [part.lstrip()[:5] for part in _parts_of(doc, batches)] == [
+        "<!-- ",
+        "<!-- ",
+        "# Two",
+        "<!-- ",
+    ], "cut at the heading on page 2, then at the marker of page 3"
+    assert [b.page for b in batches] == [None, 1, 2, 2]
+    two = _rows_of(doc, batches)[2]
+    assert {(row.chunk.page_start, row.chunk.page_end) for row in two} == {(2, 2)}
 
 
 @pytest.mark.anyio
 async def test_plan_embed_requires_a_converted_document() -> None:
     doc = await import_row("g.md")
-    with pytest.raises(FileNotFoundError, match="markdown parts missing"):
-        await pipeline.plan_embed(doc)
+    with pytest.raises(FileNotFoundError, match="markdown missing"):
+        await pipeline.plan_embed(doc, 10)
 
 
 @pytest.mark.anyio
@@ -2698,8 +2902,102 @@ async def test_finalize_embed_requires_the_rows_of_every_part() -> None:
 
     params = embed_cache.params(doc, ChunkSettings(), None)
     with pytest.raises(FileNotFoundError):
-        await pipeline.finalize_embed(doc, params, None)
+        await pipeline.finalize_embed(doc, params, None, 1)
     assert await embed_cache.lookup(params) is None, "and nothing was published"
+
+
+@pytest.mark.anyio
+async def test_describe_writes_the_descriptors_by_the_strategy_asked_for(
+    dbos, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """c-TF-IDF needs no model without an embedding one; the llm strategy waits for its describer
+    (`ModelLoading`, which a workflow sleeps out) and then asks it once per section with prose,
+    and the file says which strategy wrote what it holds."""
+    from haskie.indexing import gguf_models, models
+
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+
+    doc = await import_row("g.md")
+    await _convert(doc)
+    cache_id = await _embed(doc, SMALL)  # described by c-TF-IDF, without a model
+    assert await embed_cache.described_by(doc.id, cache_id) == Descriptors.C_TF_IDF
+    by_weight = await embed_cache.read_sections(doc.id, cache_id)
+    assert any(one.descriptors for one in by_weight)
+
+    prompts: list[str] = []
+
+    def reply(name: str, accelerator: Accelerator, prompt: str, max_tokens: int) -> str:
+        assert (name, accelerator) == (gguf_models.DESCRIBER, Accelerator.AUTO)
+        prompts.append(prompt)
+        return "Topic one | Topic two"
+
+    monkeypatch.setattr(embed, "reply", reply)
+    on_cpu = partial(_describe, doc, cache_id, None, Descriptors.LLM, Accelerator.CPU)
+    with pytest.raises(PermanentError, match="runs on gguf on the Apple GPU"):
+        await on_cpu()  # its model would never load: no wait, an error
+    describe = partial(_describe, doc, cache_id, None, Descriptors.LLM, Accelerator.AUTO)
+    with pytest.raises(models.ModelLoading):
+        await describe()
+    assert prompts == [] and await embed_cache.described_by(doc.id, cache_id) == (
+        Descriptors.C_TF_IDF
+    ), "nothing asked, nothing written"
+
+    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER))
+    count = await describe()
+
+    described = await embed_cache.read_sections(doc.id, cache_id)
+    assert count == len(described) == len(by_weight)
+    assert await embed_cache.described_by(doc.id, cache_id) == Descriptors.LLM
+    assert len(prompts) == sum(bool(one.descriptors) for one in described) > 0
+    assert {tuple(one.descriptors) for one in described} <= {("Topic one", "Topic two"), ()}
+    assert not embed_cache.scratch_dir(doc.id, cache_id).exists(), "the batches' files are gone"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("by", "sections", "expected"),
+    [
+        pytest.param(Descriptors.LLM, 0, [], id="llm-no-sections-no-batch"),
+        pytest.param(Descriptors.LLM, 16, [(0, 16)], id="llm-one-full-batch"),
+        pytest.param(Descriptors.LLM, 17, [(0, 16), (16, 17)], id="llm-a-batch-and-one-over"),
+        pytest.param(Descriptors.C_TF_IDF, 40, [(0, 40)], id="c-tf-idf-one-batch-for-all"),
+    ],
+)
+async def test_describe_plans_its_batches_by_section(
+    monkeypatch: pytest.MonkeyPatch, by: Descriptors, sections: int, expected: list
+) -> None:
+    """The llm strategy asks about sixteen sections a batch; c-TF-IDF weighs every section against
+    the whole document, so it is one batch however many there are."""
+    doc = await import_row("plan.md")
+    # the sections a real chunking names: a chapter each, one chunk each, on its own lines
+    found = [
+        Section(
+            id=f"s{index}",
+            parent_id=None,
+            headings=[f"Chapter {index + 1}"],
+            seq_start=index + 1,
+            seq_end=index + 1,
+            line_start=3 * index + 1,
+            line_end=3 * index + 3,
+            char_start=40 * index,
+            char_end=40 * index + 40,
+            byte_start=40 * index,
+            byte_end=40 * index + 40,
+            page_start=None,
+            page_end=None,
+        )
+        for index in range(sections)
+    ]
+
+    async def read_sections(doc_id: str, cache_id: str) -> list:
+        return found
+
+    monkeypatch.setattr(embed_cache, "read_sections", read_sections)
+
+    batches = await pipeline.plan_describe(doc, "cache", by)
+
+    assert [(one.start, one.end) for one in batches] == expected
+    assert [one.seq for one in batches] == list(range(len(expected)))
 
 
 @pytest.mark.anyio
@@ -2717,11 +3015,12 @@ async def test_convert_and_embed_write_atomically() -> None:
     assert await pipeline.convert_batch(doc, batch) == 0, "no OCR pages in markdown"
     await pipeline.finalize_convert(doc, [batch], 0)
     params = embed_cache.params(doc, SMALL, None)
-    chunks = await pipeline.embed_batch(doc, batch, embed_cache.key(params), SMALL, None)
+    (part,) = await pipeline.plan_embed(doc, 10)
+    chunks = await pipeline.embed_batch(doc, part, embed_cache.key(params), SMALL, None)
 
     assert chunks == len(chunk.split(MD, SMALL))
     assert doc.markdown.read_text() == MD
-    assert doc.part_path(0).read_text() == MD, "the part stays: it is the re-chunking input"
+    assert doc.part_path(0).read_text() == MD, "the convert part stays"
     assert list(doc.parts_dir.glob("*.tmp")) == [], "no temp file left behind"
     assert not doc.markdown.with_name(doc.markdown.name + ".tmp").exists()
 
@@ -2729,20 +3028,49 @@ async def test_convert_and_embed_write_atomically() -> None:
 @pytest.mark.anyio
 async def test_a_reconversion_starts_the_documents_outputs_over() -> None:
     """The parts and the markdown are outputs of the conversion, so `plan_convert` rebuilds them.
-    The cached embeddings were chunked from that markdown, so they go too — dropped by
-    `embed_cache.forget`, which `workflows.import_document` runs before the convert stage."""
+    The cached embeddings were chunked from that markdown, so they go too. `embed_cache.forget`
+    drops them, and `workflows.import_document` runs it before the convert stage."""
     doc = await import_row("g.md")
     await _convert(doc)
     cache_id = await _embed(doc, SMALL)
-    assert embed_cache.file_path(doc.name, cache_id).exists()
+    assert embed_cache.file_path(doc.id, cache_id).exists()
 
-    await embed_cache.forget(doc.name)
+    await embed_cache.forget(doc.id)
     await pipeline.plan_convert(doc, 10)
 
     assert not doc.markdown.exists(), "the assembled markdown is rebuilt"
     assert list(doc.parts_dir.iterdir()) == [], "and so are the parts"
     assert not doc.embeddings_dir.exists(), "no cache file survives a reconversion"
-    assert await embed_cache.entries(doc.name) == [], "and no cache row either"
+    assert await embed_cache.entries(doc.id) == [], "and no cache row either"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "marks", "expected"),
+    [
+        ("no bookmarks: every four pages", [], [(0, 4), (4, 6)]),
+        ("a chapter starting on page 4 ends the batch before it", [0, 3], [(0, 3), (3, 6)]),
+        ("short chapters packed, as many as fit four pages", [0, 1, 2, 5], [(0, 2), (2, 6)]),
+    ],
+)
+async def test_a_pdf_converts_in_batches_cut_where_its_bookmarks_start(
+    name: str, marks: list[int], expected: list[tuple[int, int]], tmp_path: Path
+) -> None:
+    """At most four pages a batch, each ending where the last section starting inside it does."""
+    from pypdf import PdfWriter
+
+    plain = tmp_path / "plain.pdf"
+    plain.write_bytes(text_pdf([f"page {n}" for n in range(6)]))
+    writer = PdfWriter(clone_from=str(plain))
+    for page in marks:
+        writer.add_outline_item(f"Chapter {page}", page)
+    writer.write(tmp_path / "book.pdf")
+    doc = await import_row("book.pdf", (tmp_path / "book.pdf").read_bytes())
+
+    batches = await pipeline.plan_convert(doc, 4)
+
+    assert [(b.start, b.end) for b in batches] == expected, name
+    assert [b.seq for b in batches] == list(range(len(expected)))
 
 
 @pytest.mark.anyio
@@ -2767,13 +3095,23 @@ async def test_the_pipeline_indexes_a_markdown_document_into_a_collection() -> N
     written = await _index(collection, doc, cache_id)
 
     assert written == await _indexed_rows(collection) > 0
-    (entry,) = await embed_cache.entries(doc.name)
+    (entry,) = await embed_cache.entries(doc.id)
     assert (entry.id, entry.rows) == (cache_id, written)
     (hit,) = await collection_hits(collection.name, "lancedb")
     assert (hit.collection, hit.document) == ("notes", "guide.md")
     assert hit.source_file == str(doc.original), "the hit points at the document's own files"
     assert hit.markdown_file == str(doc.markdown)
     assert Path(hit.markdown_file).read_text() == MD
+    sections = await embed_cache.read_sections(doc.id, cache_id)
+    by_header = {one.header: one for one in sections}
+    assert list(by_header) == ["", "Title", "Title > Alpha", "Title > Beta"], "in document order"
+    assert by_header["Title > Alpha"].parent_id == by_header["Title"].id
+    assert hit.section_id == by_header["Title > Alpha"].id, "the chunk names its section"
+    assert hit.section_ids == [by_header[one].id for one in ("", "Title", "Title > Alpha")]
+    assert hit.id == ids.md5(f"{doc.id}/c/{hit.seq}".encode()), "the chunk's document and seq"
+    assert [one.id for one in sections] == [
+        ids.md5(f"{doc.id}/s/{position}".encode()) for position in range(len(sections))
+    ], "each section's document and place among its sections"
 
 
 @pytest.mark.anyio
@@ -2783,9 +3121,9 @@ async def test_index_batch_group_is_idempotent() -> None:
     collection = await Collection.create("groups")
     doc = await import_row("p.pdf", text_pdf(["alpha one", "beta two", "gamma three"]))
     await _convert(doc, batch_pages=1)
-    cache_id = await _embed(doc, SMALL)
+    cache_id = await _embed(doc, SMALL, batch_pages=1)
 
-    assert await embed_cache.row_groups(doc.name, cache_id) == 3, "one group per converted part"
+    assert await embed_cache.row_groups(doc.id, cache_id) == 3, "one group per embed part"
     assert [(b.seq, b.start, b.end) for b in await pipeline.plan_index(doc, cache_id, 2)] == [
         (0, 0, 2),
         (1, 2, 3),
@@ -2804,8 +3142,8 @@ async def test_index_batch_group_is_idempotent() -> None:
 
 @pytest.mark.anyio
 async def test_two_collections_with_the_same_chunk_settings_share_one_cache_entry() -> None:
-    """The point of the cache: the second collection computes nothing, it reads the parquet file
-    the first one left and writes its own table from it."""
+    """With the cache, the second collection computes nothing. It reads the parquet file the first
+    one left and writes its own table from it."""
     alpha = await Collection.create("alpha")
     beta = await Collection.create("beta")
     # smaller than a section of `MD`: every heading starts a chunk anyway, so only a size below
@@ -2818,27 +3156,28 @@ async def test_two_collections_with_the_same_chunk_settings_share_one_cache_entr
     second = await _embed(doc, await beta.chunk_settings())
 
     assert first != second, "different chunk settings, different entries, no collision"
-    assert {entry.id for entry in await embed_cache.entries(doc.name)} == {first, second}
+    assert {entry.id for entry in await embed_cache.entries(doc.id)} == {first, second}
     assert await _embed(doc, await alpha.chunk_settings()) == first, "the same settings, same id"
 
-    await alpha.add(doc.name)
-    await beta.add(doc.name)
+    await alpha.add(doc.id)
+    await beta.add(doc.id)
     rows_alpha = await _index(alpha, doc, first)
     rows_beta = await _index(beta, doc, second)
 
     assert rows_alpha > 0 and rows_beta > rows_alpha, "beta chunks the same markdown smaller"
     assert await collection_hits("alpha", "lancedb") and await collection_hits("beta", "lancedb")
-    assert await document.collections_of(doc.name) == ["alpha", "beta"]
+    assert await document.collections_of(doc.id) == ["alpha", "beta"]
 
 
 # --- sessions and cross-collection search --------------------------------------------
 #
-# `CollectionIndex` answers retrieval (`search_rows`) and row-to-Hit (`hit`); the search embeds the
-# query once (`retrieval.plan`), fans out and rescores once.
-# `retrieval.rrf_merge` fuses the per-collection rankings by rank, because two indexes do not
-# score on the same scale. `search.text.merge` merges raw BM25 scores instead: one lexical scorer
-# with the same tokenizer answers in every collection. Both count a passage once, because one
-# document may be a member of several of the collections being searched.
+# `CollectionIndex` answers retrieval (`search_rows`, fused or as its two halves) and row-to-Hit
+# (`hit`); the search embeds the query once (`retrieval.plan`), fans out and
+# rescores once. Over several collections `retrieval.fan_out` ranks each half over all of them
+# and `retrieval.merge` fuses the two, as LanceDB fuses one table's. `search.text.merge` merges raw
+# BM25 scores too: one lexical scorer with the same tokenizer answers in every collection. Both
+# count a passage once, because one document may be a member of several of the collections being
+# searched.
 
 # How long one collection of a fan-out may wait for the other before the test calls it sequential.
 CONCURRENT_SEARCH_SECONDS = 5.0
@@ -2938,7 +3277,7 @@ async def test_session_search_reads_its_collections_concurrently(monkeypatch) ->
     await session.set_collections("s1", ["a", "b"])
     arrived = {"a": asyncio.Event(), "b": asyncio.Event()}
 
-    async def paired(self, query, vector, settings_, limit, vectors=True) -> list[dict]:
+    async def paired(self, query, vector, settings_, limit, vectors=True, fused=True) -> list[dict]:
         arrived[self.collection].set()
         other = arrived["b" if self.collection == "a" else "a"]
         await asyncio.wait_for(other.wait(), CONCURRENT_SEARCH_SECONDS)
@@ -2974,7 +3313,10 @@ async def test_session_search_counts_a_passage_once_across_collections() -> None
             for seq, (text, start) in enumerate(zip(texts, starts, strict=True), start=1)
         ]
         await index.add_parts(
-            "shared.md", "documents/shared.md", "documents/shared.md.md", _aparts([(0, rows)])
+            "shared.md",
+            "documents/shared.md",
+            "documents/shared.md.md",
+            _aparts([(0, rows)]),
         )
         await index.finish()
     await session.set_collections("s1", ["alpha", "beta"])
@@ -3010,7 +3352,10 @@ async def test_fan_out_counts_a_span_once_across_collections_that_chunk_it_two_w
     for name, rows in chunked.items():
         index = (await Collection.create(name)).index_with(None)
         await index.add_parts(
-            "shared.md", "documents/shared.md", "documents/shared.md.md", _aparts([(0, rows)])
+            "shared.md",
+            "documents/shared.md",
+            "documents/shared.md.md",
+            _aparts([(0, rows)]),
         )
         await index.finish()
     (where,) = await retrieval.plan(["alpha", "beta"], ["lancedb"]) or []
@@ -3023,8 +3368,101 @@ async def test_fan_out_counts_a_span_once_across_collections_that_chunk_it_two_w
         ("alpha", "shared.md", 3),
         ("beta", "shared.md", 1),
     }
-    assert pool.rankings["beta"] == [("beta", "shared.md", 1)], "only what alpha did not return"
+    assert set(pool.rankings) == {retrieval.TEXT_RANKING}, "no embedding: the BM25 half alone"
+    ranked = sorted(key for key, _ in pool.rankings[retrieval.TEXT_RANKING])
+    assert ranked == sorted(pool.rows), "one ranking of all"
     assert pool.rows[("beta", "shared.md", 1)][1]["text"] == "\n".join(texts[:2])
+
+
+@pytest.mark.parametrize(
+    ("name", "first", "rankings", "answered"),
+    [
+        (
+            "hybrid: each collection answers both halves, ranked over both",
+            ("hybrid", True, True, False),
+            {"vector", "text"},
+            {"_distance", "_score"},
+        ),
+        (
+            "vector mode: no BM25 half from it",
+            ("vector", True, True, False),
+            {"vector", "text"},
+            {"_distance"},
+        ),
+        (
+            "vector mode, its spans shared: no BM25 half, though its rows took the other's",
+            ("vector", True, True, True),
+            {"vector", "text"},
+            {"_distance"},
+        ),
+        (
+            "a table written without vectors answers by full text in any mode",
+            ("vector", False, True, False),
+            {"vector", "text"},
+            {"_score"},
+        ),
+        (
+            "no full-text index yet: the vector half alone",
+            ("hybrid", True, False, False),
+            {"vector", "text"},
+            {"_distance"},
+        ),
+    ],
+)
+@pytest.mark.anyio
+async def test_fan_out_reads_each_collections_halves_as_its_mode_and_table_allow(
+    tmp_path: Path,
+    name: str,
+    first: tuple[str, bool, bool, bool],
+    rankings: set[str],
+    answered: set[str],
+) -> None:
+    """Several collections answer their vector and BM25 halves apart, for the merge to rank each
+    over all of them. `first` is (mode, has vectors, has its full-text index, shares its spans
+    with the second) of the collection under test; the second is a plain hybrid one, so both
+    rankings always exist. A span both found ranks in a half by the score whichever found it
+    there, and its row keeps only the scores its own collection ran."""
+    from haskie.search import retrieval
+
+    mode, vectored, indexed, shared = first
+    alpha = CollectionIndex(tmp_path / "alpha", "alpha", tmp_path, TINY if vectored else None)
+    beta = CollectionIndex(tmp_path / "beta", "beta", tmp_path, TINY)
+    alpha_rows = [
+        _row(f"alpha lancedb row{i}", _vector(i) if vectored else None, i, i * 100) for i in (1, 2)
+    ]
+    await alpha.add_parts("a.md", "documents/a.md", "documents/a.md.md", _aparts([(0, alpha_rows)]))
+    other = "a.md" if shared else "b.md"
+    said = "alpha" if shared else "beta"  # a shared span is the same text at the same offsets
+    beta_rows = [_row(f"{said} lancedb row{i}", _vector(i + 10), i, i * 100) for i in (1, 2)]
+    await beta.add_parts(
+        other, f"documents/{other}", f"documents/{other}.md", _aparts([(0, beta_rows)])
+    )
+    if indexed:
+        await alpha.finish()
+    await beta.finish()
+    settings = SearchSettings(mode=SearchMode(mode))
+    where = retrieval.Plan(
+        settings=SearchSettings(),
+        indexes=[(alpha, settings), (beta, SearchSettings())],
+        vector=_vector(1),
+        embedding=TINY,
+    )
+
+    pool = await retrieval.fan_out(where, "lancedb", 10)
+
+    def columns(collection: str) -> set[str]:
+        held = [row for (name, *_), (_, row) in pool.rows.items() if name == collection]
+        return {one for row in held for one in ("_distance", "_score") if one in row}
+
+    assert set(pool.rankings) == rankings, name
+    assert columns("alpha") == answered, f"{name}: its rows keep the scores it ran"
+    holders = {"alpha"} if shared else {"alpha", "beta"}
+    assert {key[0] for key in pool.rows} == holders, f"{name}: a shared span counts once"
+    if shared:
+        texts = {key for key, _ in pool.rankings["text"]}
+        assert texts == set(pool.rows), f"{name}: its spans rank by beta's BM25 score"
+    else:
+        assert columns("beta") == {"_distance", "_score"}, name
 
 
 @pytest.mark.parametrize(
@@ -3056,6 +3494,130 @@ def test_rrf_merge_orders_by_rank_and_sums_duplicates(
     assert [score for _, score in merged] == pytest.approx([s for _, s in expected]), name
 
 
+def _half(collection: str, score: str, found: list[tuple[str, int, float]]) -> list[tuple]:
+    """What one half of one collection returned: (index, row) pairs, each row of document `doc`
+    chunk `seq` at its own span, scored `value` in the column `score` (`_distance` or
+    `_score`)."""
+    index = CollectionIndex(Path("/nowhere") / collection, collection, Path("/nowhere"), None)
+    return [
+        (
+            index,
+            {"document_id": doc, "seq": seq, "char_start": seq * 10, "char_end": seq * 10 + 9}
+            | {score: value},
+        )
+        for doc, seq, value in found
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "fusion", "pairs", "expected"),
+    [
+        (
+            "the closer collection takes the top, not one slot each",
+            Fusion.RRF,
+            [
+                *_half("small", "_distance", [("asyncio.md", 1, 0.9), ("asyncio.md", 2, 1.0)]),
+                *_half("big", "_distance", [("raft.md", 1, 0.2), ("raft.md", 2, 0.3)]),
+            ],
+            [
+                ("big", "raft.md", 1),
+                ("big", "raft.md", 2),
+                ("small", "asyncio.md", 1),
+                ("small", "asyncio.md", 2),
+            ],
+        ),
+        (
+            "a chunk both halves found beats one only the closer half found",
+            Fusion.RRF,
+            [
+                *_half("a", "_distance", [("d.md", 1, 0.1), ("d.md", 2, 0.2)]),
+                *_half("b", "_score", [("e.md", 5, 3.0)]),
+                *_half("a", "_score", [("d.md", 2, 2.0)]),
+            ],
+            [("a", "d.md", 2), ("a", "d.md", 1), ("b", "e.md", 5)],
+        ),
+        (
+            "a span two collections return is one row, credited to the first",
+            Fusion.RRF,
+            [
+                *_half("a", "_distance", [("d.md", 1, 0.5)]),
+                *_half("b", "_distance", [("d.md", 1, 0.5), ("d.md", 2, 0.6)]),
+            ],
+            [("a", "d.md", 1), ("b", "d.md", 2)],
+        ),
+        (
+            "one half alone keeps its order and its own scores",
+            Fusion.RRF,
+            [*_half("a", "_score", [("d.md", 1, 1.0)]), *_half("b", "_score", [("e.md", 1, 4.0)])],
+            [("b", "e.md", 1), ("a", "d.md", 1)],
+        ),
+        (
+            "linear: the weighted sum over both halves, scaled over all collections",
+            Fusion.LINEAR,
+            [
+                *_half("a", "_distance", [("d.md", 1, 0.1), ("d.md", 2, 0.9)]),
+                *_half("b", "_score", [("d.md", 2, 1.0), ("e.md", 1, 5.0)]),
+            ],
+            [("a", "d.md", 1), ("b", "e.md", 1), ("a", "d.md", 2)],
+        ),
+        ("nothing found", Fusion.RRF, [], []),
+    ],
+)
+def test_merge_ranks_every_collection_as_one_table(
+    name: str, fusion: Fusion, pairs: list[tuple], expected: list[tuple[str, str, int]]
+) -> None:
+    """Several collections are ranked per retriever over all of them, then fused: fusing one
+    ranking per collection gave each collection's first chunk the same score, however far it
+    was from the query."""
+    from haskie.search import retrieval
+
+    pool = retrieval.merge(retrieval._ranked_halves(pairs), SearchSettings(fusion=fusion), 10)
+
+    assert [key for key, _ in pool.ranked] == expected, name
+
+
+@pytest.mark.parametrize(
+    ("name", "near", "words", "share", "expected"),
+    [
+        ("nothing to merge", [], [], 0.7, []),
+        (
+            "each half scaled to 0-1, a distance turned into a closeness",
+            [("a", 0.2), ("b", 0.6)],
+            [("b", 8.0), ("a", 4.0)],
+            0.5,
+            [("a", 0.5), ("b", 0.5)],
+        ),
+        (
+            "a half that missed an item counts 0",
+            [("a", 0.2), ("c", 0.4)],
+            [("b", 3.0), ("c", 1.0)],
+            0.7,
+            [("a", 0.7), ("b", 0.3), ("c", 0.0)],
+        ),
+        (
+            "equal distances all count as the closest, as LanceDB scales them",
+            [("a", 0.4), ("b", 0.4)],
+            [],
+            1.0,
+            [("a", 1.0), ("b", 1.0)],
+        ),
+    ],
+)
+def test_linear_merge_weighs_the_two_halves(
+    name: str,
+    near: list[tuple[str, float]],
+    words: list[tuple[str, float]],
+    share: float,
+    expected: list[tuple[str, float]],
+) -> None:
+    from haskie.search import retrieval
+
+    merged = retrieval.linear_merge(near, words, share)
+
+    assert [item for item, _ in merged] == [item for item, _ in expected], name
+    assert [score for _, score in merged] == pytest.approx([s for _, s in expected]), name
+
+
 CHUNK_CHARS = 100  # how long each chunk `_retrieved` writes is
 
 
@@ -3069,7 +3631,7 @@ def _retrieved(rows: list[tuple]) -> tuple[CollectionIndex, list[dict]]:
     placed = [(*row, (row[2] - 1) * CHUNK_CHARS)[:5] for row in rows]
     return index, [
         {
-            "document": document,
+            "document_id": document,
             "seq": seq,
             "char_start": start,
             "char_end": start + CHUNK_CHARS,
@@ -3080,7 +3642,7 @@ def _retrieved(rows: list[tuple]) -> tuple[CollectionIndex, list[dict]]:
 
 
 def _identity(pairs: list[tuple]) -> list[tuple[str, str, int]]:
-    return [(index.collection, row["document"], row["seq"]) for index, row in pairs]
+    return [(index.collection, row["document_id"], row["seq"]) for index, row in pairs]
 
 
 @pytest.mark.parametrize(
@@ -3273,7 +3835,7 @@ def test_migrate_creates_the_schema_once_and_refuses_every_other_home(
 
 # The schema `tables.py` generates at this `SCHEMA_VERSION`: a SHA-256 of its DDL statements,
 # sorted, because a table's indexes are a set and come out in no fixed order.
-SCHEMA_PIN = (24, "b44a4ff4d1bc1b1838df032f1ac35ff1e8c3155fcc8fcef92b9fe2a5595ca19d")
+SCHEMA_PIN = (34, "10ceb8cab273eccf29630a23e7510f15bc99c76fa1ea4482890a616dfe6f90c7")
 
 
 def test_a_table_change_comes_with_a_new_schema_version() -> None:
@@ -3314,7 +3876,7 @@ async def test_connect_rolls_back_a_failed_unit_of_work() -> None:
         async with db.connect() as conn:
             await conn.execute(insert(tables.collections).values(name="half"))
             await conn.execute(
-                insert(tables.collection_documents).values(collection="ghost", document="a.md")
+                insert(tables.collection_documents).values(collection="ghost", document_id="a.md")
             )
     assert await Collection.names() == [], "the first insert of the failed block is gone too"
 
@@ -3332,10 +3894,27 @@ async def test_connect_rolls_back_a_failed_unit_of_work() -> None:
             ["CUDAExecutionProvider", "CPUExecutionProvider"],
         ),
         (
-            "apple silicon on auto: the cpu, coreml available or not",
+            "apple silicon on auto: webgpu, never coreml",
+            [
+                "CoreMLExecutionProvider",
+                "WebGpuExecutionProvider",
+                "AzureExecutionProvider",
+                "CPUExecutionProvider",
+            ],
+            "auto",
+            ["WebGpuExecutionProvider", "CPUExecutionProvider"],
+        ),
+        (
+            "apple silicon on auto without the webgpu build: the cpu",
             ["CoreMLExecutionProvider", "AzureExecutionProvider", "CPUExecutionProvider"],
             "auto",
             ["CPUExecutionProvider"],
+        ),
+        (
+            "cuda before webgpu where both are",
+            ["WebGpuExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
+            "auto",
+            ["CUDAExecutionProvider", "WebGpuExecutionProvider", "CPUExecutionProvider"],
         ),
         (
             "coreml when asked for, then cpu",
@@ -3411,48 +3990,49 @@ def test_an_nvidia_provider_whose_library_is_missing_does_not_load(tmp_path: Pat
         embed.nvidia_loads.cache_clear()
 
 
-def test_onnx_runtime_comes_with_its_telemetry_off_once(monkeypatch) -> None:
-    """Its telemetry thread crashed processes exiting mid-upload (`embed.onnx_runtime`)."""
+@pytest.mark.parametrize(
+    ("name", "plugin", "expected"),
+    [
+        ("telemetry off, once per process", False, ["off"]),
+        (
+            "and the WebGPU plugin registered where it is installed",
+            True,
+            ["off", "register webgpu /lib/webgpu.dylib"],
+        ),
+    ],
+)
+def test_onnx_runtime_comes_with_its_telemetry_off_once(
+    name: str, plugin: bool, expected: list[str], monkeypatch
+) -> None:
+    """Its telemetry thread crashed processes exiting mid-upload (`onnx_models.runtime`)."""
+    import importlib.util
+
     calls: list[str] = []
-    stand_in = types.SimpleNamespace(disable_telemetry_events=lambda: calls.append("off"))
+    stand_in = types.SimpleNamespace(
+        disable_telemetry_events=lambda: calls.append("off"),
+        register_execution_provider_library=lambda key, path: calls.append(
+            f"register {key} {path}"
+        ),
+    )
+    webgpu = types.SimpleNamespace(get_library_path=lambda: "/lib/webgpu.dylib")
     monkeypatch.setitem(sys.modules, "onnxruntime", stand_in)
-    embed.onnx_runtime.cache_clear()
+    monkeypatch.setitem(sys.modules, "onnxruntime_ep_webgpu", webgpu)
+    found = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda module: (
+            (object() if plugin else None) if module == "onnxruntime_ep_webgpu" else found(module)
+        ),
+    )
+    onnx_models.runtime.cache_clear()
     try:
         assert embed.onnx_runtime() is stand_in
         assert embed.onnx_runtime() is stand_in
     finally:
-        embed.onnx_runtime.cache_clear()
+        onnx_models.runtime.cache_clear()
 
-    assert calls == ["off"], "once per process"
-
-
-@pytest.mark.parametrize(
-    ("name", "length", "multiple", "expected"),
-    [
-        ("a fixed length shorter than a row: padded to the longest", 2, None, [5, 5]),
-        ("already padding to the longest: unchanged", None, None, [5, 5]),
-        ("a fixed length with a multiple: the multiple stays", 2, 4, [8, 8]),
-    ],
-)
-def test_every_batch_pads_to_its_own_longest_row(
-    name: str, length: int | None, multiple: int | None, expected: list[int]
-) -> None:
-    """On a real `tokenizers.Tokenizer`, padded as a model's `tokenizer.json` may ship it."""
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from tokenizers.pre_tokenizers import Whitespace
-
-    words = ["[PAD]", "[UNK]", "a", "job", "retries", "the", "call"]
-    tokenizer = Tokenizer(WordLevel({word: i for i, word in enumerate(words)}, unk_token="[UNK]"))
-    tokenizer.pre_tokenizer = Whitespace()
-    tokenizer.enable_padding(pad_token="[PAD]", length=length, pad_to_multiple_of=multiple)
-
-    embed.pad_to_longest(tokenizer)
-
-    rows = tokenizer.encode_batch(["a job retries the call", "a call"])
-    assert [len(row.ids) for row in rows] == expected, name
-    padding = tokenizer.padding
-    assert padding is not None and (padding["pad_token"], padding["length"]) == ("[PAD]", None)
+    assert calls == expected, name
 
 
 @pytest.mark.parametrize(
@@ -3473,25 +4053,36 @@ def test_with_options_attaches_the_coreml_cache_only(name, names, expected) -> N
 
 
 CPU, CUDA = "CPUExecutionProvider", "CUDAExecutionProvider"
-MINILM = "Xenova/ms-marco-MiniLM-L-6-v2"
 ON_COREML = [embed.COREML, CPU]
+ON_WEBGPU = [onnx_models.WEBGPU, CPU]
 RERANK, EMBED = embed._cross_encoder, embed._model
-ETTIN, BGE, JINA_V3 = (
-    "cross-encoder/ettin-reranker-68m-v1",
-    "BAAI/bge-small-en-v1.5",
-    "jinaai/jina-embeddings-v3",
+GTE, ETTIN, GRANITE, F2LLM = (
+    "Alibaba-NLP/gte-reranker-modernbert-base",
+    "cross-encoder/ettin-reranker-32m-v1",
+    "ibm-granite/granite-embedding-97m-multilingual-r2",
+    "onnx-community/F2LLM-v2-160M-ONNX",
 )
+UNMEASURED = "intfloat/e5-base-v2"  # CoreML was measured to run none: the rest stand in
 
 
 @pytest.mark.parametrize(
     ("name", "build", "model", "accelerator", "available", "expected"),
     [
-        ("auto: CUDA if installed", RERANK, MINILM, "auto", [CUDA, CPU], [CUDA, CPU]),
-        ("cpu: the CPU, CUDA or not", RERANK, MINILM, "cpu", [CUDA, CPU], [CPU]),
-        ("coreml: CoreML, with its cache", RERANK, MINILM, "coreml", ON_COREML, ON_COREML),
+        ("auto: CUDA if installed", RERANK, GTE, "auto", [CUDA, CPU], [CUDA, CPU]),
+        (
+            "auto: WebGPU on Apple Silicon",
+            RERANK,
+            GTE,
+            "auto",
+            [*ON_COREML, onnx_models.WEBGPU],
+            ON_WEBGPU,
+        ),
+        ("cpu: the CPU, CUDA or not", RERANK, GTE, "cpu", [CUDA, CPU], [CPU]),
+        ("coreml: CoreML, with its cache", RERANK, GTE, "coreml", ON_COREML, ON_COREML),
         ("a headed cross-encoder the same", RERANK, ETTIN, "coreml", ON_COREML, ON_COREML),
-        ("an embedder the same", EMBED, BGE, "coreml", ON_COREML, ON_COREML),
-        ("too large for CoreML: without it", EMBED, JINA_V3, "coreml", ON_COREML, [CPU]),
+        ("an embedder the same", EMBED, GRANITE, "coreml", ON_COREML, ON_COREML),
+        ("a last-token embedder on WebGPU", EMBED, F2LLM, "auto", ON_WEBGPU, ON_WEBGPU),
+        ("not measured on CoreML: without it", EMBED, UNMEASURED, "coreml", ON_COREML, [CPU]),
     ],
 )
 def test_every_onnx_model_runs_on_the_hardware_the_settings_choose(
@@ -3505,36 +4096,16 @@ def test_every_onnx_model_runs_on_the_hardware_the_settings_choose(
 ) -> None:
     """Rerankers once ran on the CPU whatever the setting, on the claim that they score in
     milliseconds: measured, 50 candidates take 0.6 s (MiniLM-L6) to 3.3 s (bge-reranker-base)."""
-    import fastembed
-    import fastembed.rerank.cross_encoder as cross_encoder
-
-    from haskie.indexing import onnx_rerank
+    from haskie.indexing import hardware, onnx_models
 
     seen: list[list] = []
-
-    class Recorder:
-        model = None  # no ONNX model inside: nothing to pad
-
-        def __init__(self, *args: object, providers: list, **_: object) -> None:
-            seen.append(providers)
-
-        @classmethod
-        def add_custom_model(cls, **_: object) -> None:  # the registration of mxbai and the like
-            pass
-
-        @staticmethod
-        def _list_supported_models() -> list:
-            return [types.SimpleNamespace(model=model, additional_files=[])]
-
+    built = lambda model, providers: seen.append(providers)  # noqa: E731
     stand_in = types.SimpleNamespace(get_available_providers=lambda: available)
     monkeypatch.setattr(embed, "onnx_runtime", lambda: stand_in)
     monkeypatch.setattr(embed, "nvidia_loads", lambda _provider: True)  # CUDA runs here
-    monkeypatch.setattr(cross_encoder, "TextCrossEncoder", Recorder)
-    headed = lambda model, providers: seen.append(providers)  # noqa: E731
-    monkeypatch.setattr(onnx_rerank, "HeadedCrossEncoder", headed)
-    monkeypatch.setattr(fastembed, "TextEmbedding", Recorder)
-    monkeypatch.setattr(embed, "_register_custom", lambda: None)
-    monkeypatch.setattr(embed, "_register_custom_rerankers", lambda: None)
+    monkeypatch.setattr(onnx_models, "Embedder", built)
+    monkeypatch.setattr(onnx_models, "CrossEncoder", built)
+    monkeypatch.setattr(hardware, "COREML_RUNS", frozenset({GTE, ETTIN, GRANITE, F2LLM}))
     embed._build_cross_encoder.cache_clear()
     embed._build_model.cache_clear()
     try:
@@ -3554,14 +4125,8 @@ def test_every_onnx_model_runs_on_the_hardware_the_settings_choose(
         ("a model whole: its vector as it came", COMPACT, [3.0, 4.0, 0.0, 0.0]),
         (
             "a Matryoshka cut: the first values, normalized again",
-            EmbeddingModel("test/cut", 2, matryoshka=Matryoshka()),
+            EmbeddingModel("test/cut", 2, matryoshka=True),
             [0.6, 0.8],
-        ),
-        (
-            "nomic's cut: a layer norm over the whole vector first",
-            EmbeddingModel("test/cut", 2, matryoshka=Matryoshka(layer_norm=True)),
-            # centred by the mean 1.75, then the scale no longer matters: (1.25, 2.25) normalized
-            [1.25 / np.hypot(1.25, 2.25), 2.25 / np.hypot(1.25, 2.25)],
         ),
     ],
 )
@@ -3573,10 +4138,46 @@ def test_a_vector_is_stored_whole_or_cut_as_the_profile_says(
     assert embed._cut(model, vector).tolist() == pytest.approx(expected), name
 
 
+@pytest.mark.parametrize(
+    ("name", "texts"),
+    [
+        ("one text", ["a job retries"]),
+        ("texts out of length order run shortest first", ["a long text here", "a", "mid one"]),
+        ("ties keep their order", ["bb", "aa", "c"]),
+    ],
+)
+def test_texts_run_shortest_first_and_answer_in_the_order_they_came(
+    name: str, texts: list[str], monkeypatch
+) -> None:
+    """A batch pads to its longest row, so like lengths batch together; each text still gets
+    its own vector and score."""
+    ran: list[list[str]] = []
+
+    class Model:
+        def embed(self, batch: list[str]) -> list[np.ndarray]:
+            ran.append(list(batch))
+            return [np.array([float(len(text)), 1.0]) for text in batch]
+
+        def rerank(self, query: str, batch: list[str]) -> list[float]:
+            ran.append(list(batch))
+            return [float(len(text)) for text in batch]
+
+    monkeypatch.setattr(embed, "_model", lambda name, accelerator: Model())
+    monkeypatch.setattr(embed, "_cross_encoder", lambda name, accelerator: Model())
+
+    vectors = embed.embed_texts(EmbeddingModel("test/tiny", 2), texts)
+    scores = embed.rerank_scores("test/reranker", Accelerator.CPU, "q", texts)
+
+    assert ran == [sorted(texts, key=len)] * 2, name
+    assert [vector[0] for vector in vectors] == scores == [float(len(t)) for t in texts], name
+
+
 def test_embedding_helpers_short_circuit_on_empty_input() -> None:
     """No text means no model, so neither call may download anything."""
     assert embed.embed_texts(COMPACT, []) == []
-    assert embed.rerank_scores("Xenova/ms-marco-MiniLM-L-6-v2", Accelerator.AUTO, "q", []) == []
+    assert (
+        embed.rerank_scores("cross-encoder/ettin-reranker-32m-v1", Accelerator.AUTO, "q", []) == []
+    )
 
 
 @pytest.mark.parametrize(

@@ -9,12 +9,22 @@ from litestar import get, put
 from litestar.params import Parameter
 
 from haskie import audit
-from haskie.api.common import Days, Limit, RequiredSessionId, SessionId, days_ago
+from haskie.api import agent
+from haskie.api.common import (
+    Days,
+    Ids,
+    Limit,
+    RequiredSessionId,
+    SessionId,
+    days_ago,
+    scope_of,
+)
 from haskie.collection.index import Hit
 from haskie.indexing import operations
 from haskie.paging import DEFAULT_PAGE_SIZE, Page
-from haskie.search import aspects, flow, log, retrieval, session, text
-from haskie.search.passage import Answer, Passage, Sources
+from haskie.search import aspects, flow, gaps, log, retrieval, session, text
+from haskie.search.passage import Answer, Passage
+from haskie.search.section_map import SectionMap
 
 
 # What an exploration returns: the chunks the index holds, or the passages they merge into. The
@@ -58,12 +68,19 @@ async def explore(
     session_id: SessionId = None,
     collections: str | None = None,
     limit: Limit = None,
+    document_ids: Ids = None,
+    section_ids: Ids = None,
 ) -> list[Hit] | list[Passage]:
-    """Search at the granularity the caller wants: the exploration endpoint the UI drives.
+    """Search at the granularity the caller wants: the exploration endpoint the UI drives, and
+    what searches chunks and passages.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection. `limit` defaults to that collection's setting when one
     collection is searched, else to the user's.
+
+    Where it looks, narrower: `document_ids` keeps to these documents and `section_ids` to these
+    sections and every section under them, by the ids `search_sections` and each result carry; both
+    together keep to what both allow.
 
     What comes back per granularity: `chunk`, the matching index rows; `passage`, the consecutive
     chunks of one section merged into one span, cut where the chunker cut. The excerpts an agent
@@ -72,29 +89,51 @@ async def explore(
     slot goes to the next result down.
     """
     q = aspects.question(q)  # stripped as `report_gap` matches it
+    within = scope_of(document_ids, section_ids)
     async with log.capturing(log.Tool.EXPLORE, [q], session_id) as capture:
         names = await retrieval.scope(session_id, collections)
         if granularity == Granularity.PASSAGE:
-            found: list[Hit] | list[Passage] = await flow.passages(names, q, limit)
+            found: list[Hit] | list[Passage] = await flow.passages(names, q, limit, within)
         else:
-            found = await flow.chunks(names, q, limit)
+            found = await flow.chunks(names, q, limit, scope=within)
         capture.answer(found)
     return found
 
 
-@get("/api/search/excerpts", mcp_tool="search_excerpts")
+@get("/api/search/excerpts")
 async def search_excerpts(
     q: list[str],
     context: str | None = None,
     session_id: SessionId = None,
     collections: str | None = None,
     limit: Limit = None,
+    document_ids: Ids = None,
+    section_ids: Ids = None,
 ) -> Answer:
+    """What the sources say about a question, one section of a document per excerpt, and what
+    they leave out. The MCP tool `search_excerpts` answers the same with fewer fields."""
+    return await _search_excerpts(
+        q, context, session_id, collections, limit, document_ids, section_ids
+    )
+
+
+@get("/api/agent/search/excerpts", mcp_tool="search_excerpts", include_in_schema=False)
+async def agent_search_excerpts(
+    q: list[str],
+    context: str | None = None,
+    session_id: SessionId = None,
+    collections: str | None = None,
+    limit: Limit = None,
+    document_ids: Ids = None,
+    section_ids: Ids = None,
+) -> agent.Answer:
     """What the sources say about a question, one section of a document per excerpt, and what
     they leave out: best first for one question, in the order the parts took turns for several.
 
-    The answer is `excerpts`, `uncovered` and `missing_terms`. `uncovered` lists the questions no
-    excerpt answers, when several were asked. `missing_terms` lists the words of the questions
+    The answer is `excerpts`, `uncovered`, `missing_terms` and `searched`. `uncovered` lists the
+    questions no excerpt answers, when several were asked, and any question, one alone included,
+    whose best match is under the bar its models were measured at: the sources match it only
+    weakly, whatever came back. `missing_terms` lists the words of the questions
     (stopwords aside) that no excerpt's text or headings hold, a form of the word counting ("keeps"
     holds "keep"). Before answering, the search looks for those words once more by full text, and
     the best passage it finds joins the answer: in the section it belongs to, or as one excerpt past
@@ -107,7 +146,7 @@ async def search_excerpts(
     passage opens with the headings it sits under below `header`, and `[…]` marks text skipped
     between two of them because it did not match. Chunks are cut at headings, blank lines,
     blocks and sentences, so each passage begins and ends where the author stopped. `limit`
-    counts excerpts, and the sections are cut to `max_answer_chars` characters.
+    counts excerpts, 10 by default, and the sections are cut to `max_answer_chars` characters.
     Cite the excerpt by its `header` (the section's heading path) and `location` (document, pages,
     lines), or one passage by its span's `header` and `location`. `spans` lists the passages, each
     with its lines, its score, the questions it answers and the places that repeat it.
@@ -121,12 +160,13 @@ async def search_excerpts(
     a reranker on, a tag is its judgement: chunks it scores under the floor are dropped. Without
     one, a tag is rank, not a judgement: a vector or hybrid search finds a nearest passage for any
     question, so read the text before citing it as the answer to a part. A question in `uncovered`
-    found nothing. A question no excerpt lists found nothing at all. Write each part as a full
+    found no excerpt, or matched only weakly: treat it as unanswered. Write each part as a full
     question, not a keyword. Keep in one `q` the conditions one passage must meet together. Resolve
     an ambiguous question before searching; when you cannot ask, pass one part per reading.
 
     A passage that says what other places say lists every one of them in its span's `also_in`
-    rather than returning each on its own. `also_in` is a tree: each place sits under what it
+    rather than returning each on its own. Each one passed a repeat test, so it adds nothing to
+    read, unlike `related` in `search_sections`. `also_in` is a tree: each place sits under what it
     repeats, the passage or a place above it, and has its own `also_in`. Its `relation` to that
     parent says how. `duplicate` is an exact character match: the same text, whitespace aside,
     in any document. `contained` sits inside its parent, which says more. `equivalent` is a
@@ -135,14 +175,24 @@ async def search_excerpts(
     `to_parent` and `to_root` measure it against its parent and against the passage: how much
     of it is in the other (`contained`), how much of the other is in it (`contains`), how alike
     the two are (`alike`), by `words` and by `embedding`, and by `chars` within one document.
-    A place may be
-    elsewhere in the same document: check its `document` before citing it as a second source.
+    A place may be elsewhere in the same document: check its `document` before citing it as a
+    second source.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
-    `session_id`, else every collection. Run `search_sources` first when the question is which
-    documents or collections cover a topic, then `set_session_collections` with the cover it
-    returns. No excerpts is an answer: the sources do not cover this, and saying so beats
-    guessing.
+    `session_id`, else every collection; `searched` names them. Run `search_sections` first when
+    the question is broad, when you lack the sources' words for it, or when it asks which
+    documents cover a topic. No excerpts is an answer: the sources do not cover this. Say so
+    rather than guess.
+
+    The excerpts often come from one document, the one that says most about the topic. When a
+    question needs several authors, map it with `search_sections` and pass sections of several
+    documents as `section_ids`.
+
+    Narrower still: `document_ids` keeps to these documents and `section_ids` to these sections and
+    every section under them, by the ids `search_sections` and each excerpt carry (`document_id`,
+    `section_id`); both together keep to what both allow. The text an excerpt adds around a passage
+    stays inside them too. No excerpts then says only that these documents or sections do not cover
+    it: search again without them before saying the sources do not.
 
     Args:
         q: The question, or 2 to 5 parts of one question, each at most 500 characters.
@@ -152,46 +202,132 @@ async def search_excerpts(
             `rerank_with_context` setting is on).
         session_id: The conversation's id; the search then shows in that session's history.
     """
+    return agent.view(
+        await _search_excerpts(
+            q, context, session_id, collections, limit, document_ids, section_ids
+        ),
+        agent.Answer,
+    )
+
+
+async def _search_excerpts(
+    q: list[str],
+    context: str | None = None,
+    session_id: SessionId = None,
+    collections: str | None = None,
+    limit: Limit = None,
+    document_ids: Ids = None,
+    section_ids: Ids = None,
+) -> Answer:
     # a malformed question is a refused request, not a search: it is checked before the capture
     asked = aspects.questions(q, context)
+    within = scope_of(document_ids, section_ids)
     async with log.capturing(
         log.Tool.EXCERPTS, asked.questions, session_id, context=asked.context
     ) as capture:
-        found = await flow.answers(await retrieval.scope(session_id, collections), asked, limit)
+        names = await retrieval.scope(session_id, collections)
+        found = await flow.answers(names, asked, limit, within)
         capture.answer(found.excerpts, found.uncovered, found.missing_terms)
-    return found
+        # the log keeps what the excerpts left out; the caller also hears which questions the
+        # sources match only weakly, which a single question has no other way to learn
+        weak = await gaps.weak_questions(capture)
+    unanswered = set(found.uncovered) | set(weak)
+    return msgspec.structs.replace(
+        found, uncovered=[one for one in asked.questions if one in unanswered]
+    )
 
 
-@get("/api/search/sources", mcp_tool="search_sources")
-async def search_sources(
+@get("/api/search/sections")
+async def search_sections(
     q: str,
     session_id: SessionId = None,
     collections: str | None = None,
     limit: Limit = None,
-    sections: int | None = None,
-) -> Sources:
-    """Which documents cover a topic, and which collections to select to read them.
+    document_ids: Ids = None,
+) -> SectionMap:
+    """A map of a topic: which sections of which documents touch it, and what each is about,
+    without their text. The MCP tool `search_sections` answers the same with fewer fields."""
+    return await _search_sections(q, session_id, collections, limit, document_ids)
 
-    One row per document rather than per passage: `score` folds the scores of every chunk it
-    matched, by the `score_fold` setting (by default their sum, so a document that answers
-    throughout outranks one that answers once), `chunks` counts them, `sections`
-    names the hottest headings inside it with their `location`, and `collections` says which of
-    the searched collections hold it. `documents` is that list, best first; `collections` at the
-    top level is the smallest set of collections covering every document in it — pass it to
-    `set_session_collections`, then ask `search_excerpts` for the passages themselves.
+
+@get("/api/agent/search/sections", mcp_tool="search_sections", include_in_schema=False)
+async def agent_search_sections(
+    q: str,
+    session_id: SessionId = None,
+    collections: str | None = None,
+    limit: Limit = None,
+    document_ids: Ids = None,
+) -> agent.SectionMap:
+    """A map of a topic: which sections of which documents touch it, near topics included, and
+    what each is about, without their text. No text is read, and the search's reranker weighs
+    every chunk the search scanned and drops none.
+
+    The search scans deep and groups what it finds into the sections an excerpt would quote. It
+    then picks `limit` of them (15 by default, at most 40) to cover everything the scan found
+    rather than to repeat its best part: the most relevant section first, then each time the one
+    that covers the most of what the picks so far leave out, at most two of one document while
+    another has a section on the topic left. `sections` is that list, in pick order.
+
+    Each section the map did not pick is listed under the pick closest to it, in `related`: at
+    most five per pick, closest first, each with its `similarity` to the pick. `related` means
+    nearby, not repeated. A near copy of the pick lands there, but so does a section the pick only
+    sits close to, and that one may be the best section on the topic. Read the `related` headers
+    before choosing what to read. Only `also_in` in `search_excerpts` lists repeats.
+
+    `descriptors` say what each section is about: one to five words or phrases that skip what its
+    `header` says unless they have no other words. They are written when a document is indexed,
+    by the strategy the settings then name (`pipeline.descriptors`), and shared by every
+    collection that chunks it alike. `chars` is how long it is, `chunks` how many of its chunks
+    matched. Cite it by `header` and `location`. Its `document_id` names its row in `documents`.
+
+    A pick can still be back matter (an index, a bare "Summary"), and with no reranker a section
+    that only shares a word with the topic, more often the fewer the documents. Judge each pick by
+    its `header` and `descriptors`. `uncovered` holds the question when its best match is under
+    the bar its models were measured at: a map is always full, so this is what says it may hold
+    nothing on the topic.
+
+    `documents` lists, best first, the ten documents the search reached hardest, and any other
+    document a listed section is in. The ranking reads every chunk the search read, not only the
+    ones the map covers, so a document the map picked no section from can still lead. Per document:
+    its `score` (its matched chunks' scores folded by the `score_fold` setting, by default their
+    sum), `chunks` (how many matched: a sum grows with how much a document says, so read the two
+    together), `sections` (how many of the map's sections are in it), its `description`, the
+    `collections` holding it and its `markdown_file` on disk. Search a document the map picked
+    nothing from with this tool again, its id in `document_ids`.
+
+    Use it before `search_excerpts` to see what the sources hold on a topic and nearby, then ask
+    `search_excerpts` about the sections worth reading: pass their `id`s as its `section_ids` to
+    read those alone. `collections` at the top level is the smallest set of collections holding
+    every section and document listed, for `set_session_collections`.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
-    `session_id`, else every collection. No results is an answer: nothing here covers the topic.
+    `session_id`, else every collection, and only the documents `document_ids` names, when
+    given; `searched` names the collections. No sections means the collections hold nothing that
+    matches, within `document_ids` when given.
 
     Args:
         session_id: The conversation's id; the search then shows in that session's history.
     """
+    return agent.view(
+        await _search_sections(q, session_id, collections, limit, document_ids), agent.SectionMap
+    )
+
+
+async def _search_sections(
+    q: str,
+    session_id: SessionId = None,
+    collections: str | None = None,
+    limit: Limit = None,
+    document_ids: Ids = None,
+) -> SectionMap:
     q = aspects.question(q)  # stripped as `report_gap` matches it
-    async with log.capturing(log.Tool.SOURCES, [q], session_id) as capture:
+    within = scope_of(document_ids)
+    async with log.capturing(log.Tool.SECTIONS, [q], session_id) as capture:
         names = await retrieval.scope(session_id, collections)
-        found = await flow.sources(names, q, limit, sections)
-        capture.answer(found.documents)
-    return found
+        found = await flow.sections(names, q, limit, within)
+        capture.answer(found.sections)
+        weak = await gaps.weak_questions(capture)
+    return msgspec.structs.replace(found, uncovered=weak)
 
 
 MAX_SEARCHES = 200  # a page of the log an agent reads through, not an export

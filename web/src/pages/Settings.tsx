@@ -87,7 +87,7 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
     storeBackground(on)
   }
 
-  // no scroll-spy. The nav marks what was last clicked, which is where the page went.
+  // No scroll-spy. The nav marks what was last clicked, which is where the page went.
   const goTo = (id: string): void => {
     setSection(id)
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -183,6 +183,14 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
             />
             <span className="faint">{skipOcr.description}</span>
           </div>
+          <Field label={docFor(docs, 'pipeline.descriptors').title} help={docFor(docs, 'pipeline.descriptors').description}>
+            <Picker
+              ariaLabel={docFor(docs, 'pipeline.descriptors').title}
+              options={choices(options.descriptors)}
+              value={settings.pipeline.descriptors}
+              onChange={(descriptors) => pipeline({ descriptors })}
+            />
+          </Field>
         </section>
 
         <section id="chunking">

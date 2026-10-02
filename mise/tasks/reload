@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="Rebuild the web UI, then restart the haskie serving ~/haskie-dev on :8452, so it serves this checkout's UI and backend"
+#MISE depends=["build"]
+set -euo pipefail
+# HASKIE_HOME and HASKIE_PORT come from mise.toml. `stop` returns once the server has let go of the
+# home, and is a no-op when none serves it; `run` starts a fresh one, which imports this checkout's
+# code (the venv installs it editable) and serves the UI `build` just put in src/haskie/web.
+uv run haskie stop
+uv run haskie run --no-browser

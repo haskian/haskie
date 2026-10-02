@@ -129,6 +129,15 @@ def _weak(search: Searched, asked: LoggedQuestion, bars: Bars) -> Signal | None:
     return Signal.BORDERLINE if high is not None and asked.best_similarity < high else None
 
 
+async def weak_questions(search: log.Capture) -> list[str]:
+    """The questions `search` asked whose best match falls under the bar its models were measured
+    at: the verdict the Gaps page gives as `weak` (`_weak`), told to the caller as it answers. A
+    search finds the nearest passages even on a topic the sources never cover, so an answer can
+    look full and say nothing."""
+    judged = await bars({search.reranker} if search.reranker else set())
+    return [one.question for one in search.asked if _weak(search, one, judged) == Signal.WEAK]
+
+
 Detector = Callable[[Searched, LoggedQuestion, Bars], Signal | None]
 DETECTORS: tuple[Detector, ...] = (_reported, _empty, _uncovered, _weak)
 
@@ -137,6 +146,8 @@ def signal(search: Searched, asked: LoggedQuestion, bars: Bars) -> Signal | None
     """Why `asked`, one question of `search`, is a gap, or None when it is not one."""
     if search.error is not None:
         return None
+    if search.scoped:  # what it missed may sit in the documents it kept out; only the agent knows
+        return _reported(search, asked, bars)
     return next((found for detect in DETECTORS if (found := detect(search, asked, bars))), None)
 
 

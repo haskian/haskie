@@ -8,17 +8,26 @@ manage; relevant evidence without repeats; the agent reasons, haskie does the re
 
 ```
 src/haskie/
-  api/          routes, one module per feature; handlers marked mcp_tool= are also MCP tools
+  api/          routes, one module per feature; handlers marked mcp_tool= are also MCP tools;
+                agent.py: the leaner answers of the search tools
   document/     convert files to markdown, store them, render previews
   collection/   named sets of documents, one LanceDB index each
   indexing/     DBOS pipeline: chunk, embed, cache, index; model lifecycle
-  search/       retrieval, passages, near-duplicate folding, sessions, the search log, gaps
+  search/       retrieval, passages, near-duplicate folding, the map of sections, sessions,
+                the search log, gaps
+  sections/     every document's sections as a tree, with their ids and descriptors: named at
+                the cache merge, described by a step after it (c-TF-IDF or an LLM), kept in
+                the embedding cache
   catalogue/    models and embedding profiles, seeded into SQLite; loaders stay in indexing/
   claude_code/  skill and rule files installed into Claude Code
   app.py        Litestar app; cli.py the CLI; claude.py the Claude Code install
-  settings.py   settings; db.py SQLite; tables.py its schema (Core); home.py ~/.haskie; cpu.py CPU
+  settings.py   settings; db.py SQLite; tables.py its schema (Core); home.py ~/.haskie; cpu.py CPU;
+                ids.py document, section and chunk ids, an MD5 in base58
+  errors.py     typed errors, the contract between the domain and HTTP; paging.py cursors and sorts
+  logs.py       structured JSON logs; audit.py the audit trail; sysdb.py reads DBOS's own tables
   shutdown.py   which shutdown signals count, and how long the exit may take
-tests/          by area: flat test_*.py plus catalogue/, document/, indexing/, search/
+tests/          by area: flat test_*.py plus catalogue/, document/, indexing/, search/, sections/;
+                gapeval/ the offline evaluation of gap detection
 docs/           one page per topic, with diagrams; update it when behavior changes
 web/            React + TypeScript UI (Bun)
 design/         HTML mockups and design.css, which web/ imports

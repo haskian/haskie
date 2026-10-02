@@ -152,33 +152,6 @@ def test_the_kept_text_is_every_passage_and_heading() -> None:
     assert probe.covered(groups) == ["Orders ship.", "Messaging", "Retries"]
 
 
-@pytest.mark.parametrize(
-    ("name", "text", "questions", "expected"),
-    [
-        (
-            "tagged with the question whose word it holds",
-            "Inventory counts drop.",
-            [ORDER, LEDGER],
-            ["order"],
-        ),
-        (
-            "with every question it helps, in the order asked",
-            "The ledger shows inventory.",
-            [ORDER, LEDGER],
-            ["order", "ledger"],
-        ),
-        ("a single question tags nothing", "The ledger balances.", [ALONE], []),
-    ],
-)
-def test_a_probed_passage_is_tagged_with_the_questions_it_helps(
-    name: str, text: str, questions: list[Question], expected: list[str]
-) -> None:
-    (found,) = ranges([hit(text, 1.0)], how=HARMONIC)
-    wanted = probe.missing(questions, [])
-
-    assert probe.tags(found, wanted) == expected, name
-
-
 def test_the_probed_section_joins_the_section_it_is_part_of_else_comes_after() -> None:
     kept = [_group("a.md", "Orders ship."), _group("b.md", "Ledgers balance.")]
     same = _group("b.md", "The ledger is reconciled nightly.")
@@ -188,12 +161,13 @@ def test_the_probed_section_joins_the_section_it_is_part_of_else_comes_after() -
     added = probe.placed(kept, other)
 
     assert [len(one.ranges) for one in joined] == [1, 2], "into its section, not a slot"
-    assert [one.document for one in added] == ["a.md", "b.md", "c.md"], "past the others"
+    assert [one.document_id for one in added] == ["a.md", "b.md", "c.md"], "past the others"
 
 
 def _excerpt(text: str, aspects: list[str], header: str = "Shop") -> Excerpt:
     span = Span(
         header=f"{header} > Stock",
+        section_id="stock",
         location="a.md L1-1",
         seq_start=1,
         seq_end=1,
@@ -208,8 +182,10 @@ def _excerpt(text: str, aspects: list[str], header: str = "Shop") -> Excerpt:
     )
     return Excerpt(
         collection="backend",
+        document_id="a.md",
         document="a.md",
         header=header,
+        section_id=header.lower(),
         location="a.md L1-1",
         seq_start=1,
         seq_end=1,
@@ -262,17 +238,18 @@ def test_the_answer_reports_what_it_lacks(
     uncovered: list[str],
     missing: list[str],
 ) -> None:
-    answer = probe.report(excerpts, questions)
+    answer = probe.report(excerpts, questions, ["ops"])
 
-    assert answer.excerpts == excerpts
+    assert (answer.excerpts, answer.searched) == (excerpts, ["ops"])
     assert (answer.uncovered, answer.missing_terms) == (uncovered, missing), name
 
 
 def test_an_answer_is_the_wire_shape_the_tool_returns() -> None:
-    answer = probe.report([], [ALONE])
+    answer = probe.report([], [ALONE], [])
 
     assert msgspec.to_builtins(answer) == {
         "excerpts": [],
         "uncovered": [],
         "missing_terms": ["ledger", "reconciled"],
+        "searched": [],
     }

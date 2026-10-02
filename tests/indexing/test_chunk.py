@@ -1,9 +1,9 @@
 """Structure-Aware Chunking (`indexing/chunk.py`, `indexing/segment.py`).
 
 Every case runs through `chunk.split`, the one entry the indexer calls, and every chunk of every
-case is held to the same contract by `_check` - the offsets cut out exactly its text, the text is
+case is held to the same contract by `_check`: the offsets cut out exactly its text, the text is
 its sentences joined, no chunk is longer than the chunk size, and no visible character of the
-input is lost - so a case only has to state what is particular to it.
+input is lost. So a case only has to state what is particular to it.
 """
 
 import pytest

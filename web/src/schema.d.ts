@@ -227,6 +227,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document}/sections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** DocumentSections */
+        get: operations["ApiDocumentsSectionsDocumentSections"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document}/source": {
         parameters: {
             query?: never;
@@ -253,6 +270,23 @@ export interface paths {
         };
         /** GetPreview */
         get: operations["ApiDocumentsPreviewGetPreview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{document}/cover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GetCover */
+        get: operations["ApiDocumentsCoverGetCover"];
         put?: never;
         post?: never;
         delete?: never;
@@ -375,6 +409,23 @@ export interface paths {
         get?: never;
         /** DescribeCollection */
         put: operations["ApiCollectionsDescriptionDescribeCollection"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/collections/{collection}/cover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GetCollectionCover */
+        get: operations["ApiCollectionsCoverGetCollectionCover"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -638,15 +689,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/search/sources": {
+    "/api/search/sections": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** SearchSources */
-        get: operations["ApiSearchSourcesSearchSources"];
+        /** SearchSections */
+        get: operations["ApiSearchSectionsSearchSections"];
         put?: never;
         post?: never;
         delete?: never;
@@ -814,7 +865,7 @@ export interface components {
     schemas: {
         /**
          * Accelerator
-         * @description Device for the embedding and reranker models. auto: CUDA on Linux with an NVIDIA GPU, else CPU. On Apple Silicon, the MLX and GGUF models run on the GPU, and auto runs the rest on the CPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. coreml: run ONNX models through CoreML on Apple Silicon; today that is slower than the CPU for them.
+         * @description Device for the embedding, reranker and descriptor models. auto: CUDA on Linux with an NVIDIA GPU, WebGPU on Apple Silicon, else CPU; the MLX and GGUF models run on the Apple GPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. coreml: run ONNX models through CoreML on Apple Silicon, only those it was measured to run (none today), the rest on the CPU.
          * @default auto
          * @enum {string}
          */
@@ -838,6 +889,7 @@ export interface components {
             excerpts: components["schemas"]["Excerpt"][];
             uncovered: string[];
             missing_terms: string[];
+            searched: string[];
         };
         /** BulkProgress */
         BulkProgress: {
@@ -866,7 +918,7 @@ export interface components {
             chunk_size: number;
             /**
              * Merge short paragraphs (% of chunk size)
-             * @description A paragraph - text between blank lines, or a whole list - shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
+             * @description A paragraph (text between blank lines, or a whole list) shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
              * @default 66
              */
             chunk_merge_below: number;
@@ -918,7 +970,7 @@ export interface components {
             chunk_size?: number | null;
             /**
              * Merge short paragraphs (% of chunk size)
-             * @description A paragraph - text between blank lines, or a whole list - shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
+             * @description A paragraph (text between blank lines, or a whole list) shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
              */
             chunk_merge_below?: number | null;
             /**
@@ -947,7 +999,7 @@ export interface components {
             chunk_size: number;
             /**
              * Merge short paragraphs (% of chunk size)
-             * @description A paragraph - text between blank lines, or a whole list - shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
+             * @description A paragraph (text between blank lines, or a whole list) shorter than this share of Chunk size is merged with the paragraphs around it: into the one below when both fit one chunk, else with the short ones next to it. Longer paragraphs are chunks of their own. 0 never merges; 100 merges every paragraph that fits.
              * @default 66
              */
             chunk_merge_below: number;
@@ -982,12 +1034,20 @@ export interface components {
             description: string;
         };
         /**
+         * Descriptors
+         * @description How the words and phrases that say what each section is about are written, once per document and chunk settings, as a step after embedding. c-tf-idf: the terms a section uses more than the sections beside it, reranked by the embedding model; fast, runs everywhere. llm: Gemma-4-E2B (2.8 GB download, Apache 2.0) reads each section and names its topics; judged far better on technical books, about half a second a section, Apple Silicon only, with a model hardware other than cpu. A change applies to documents embedded or indexed afterwards; "Index all" in a collection re-describes the rest, for every collection that chunks them alike, as they share the descriptors.
+         * @default c-tf-idf
+         * @enum {string}
+         */
+        Descriptors: "c-tf-idf" | "llm";
+        /**
          * Device
          * @enum {string}
          */
         Device: "cpu" | "apple_silicon" | "gpu";
         /** Document */
         Document: {
+            id: string;
             name: string;
             suffix: string;
             size: number;
@@ -1003,8 +1063,6 @@ export interface components {
             updated_at: number;
             /** @default  */
             description: string;
-            /** @default  */
-            md5: string;
         };
         /** DocumentCounts */
         DocumentCounts: {
@@ -1059,11 +1117,12 @@ export interface components {
             query_prefix: string;
             /** @default  */
             document_prefix: string;
-            matryoshka?: components["schemas"]["Matryoshka"] | null;
+            /** @default false */
+            matryoshka: boolean;
         };
         /** Entry */
         Entry: {
-            document: string;
+            document_id: string;
             model: string;
             chunk_size: number;
             chunk_merge_below: number;
@@ -1092,8 +1151,10 @@ export interface components {
         /** Excerpt */
         Excerpt: {
             collection: string;
+            document_id: string;
             document: string;
             header: string;
+            section_id: string;
             location: string;
             seq_start: number;
             seq_end: number;
@@ -1127,7 +1188,7 @@ export interface components {
         FillValues: "relative" | "absolute";
         /**
          * Fusion
-         * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
+         * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
          * @default rrf
          * @enum {string}
          */
@@ -1184,6 +1245,7 @@ export interface components {
         /** Hit */
         Hit: {
             collection: string;
+            document_id: string;
             document: string;
             source_path: string;
             markdown_path: string;
@@ -1211,10 +1273,16 @@ export interface components {
             /** @default  */
             markdown_file: string;
             also_in?: components["schemas"]["HitReference"][];
+            /** @default  */
+            id: string;
+            /** @default  */
+            section_id: string;
+            section_ids?: string[];
         };
         /** HitReference */
         HitReference: {
             collection: string;
+            document_id: string;
             document: string;
             seq: number;
             header: string;
@@ -1227,15 +1295,6 @@ export interface components {
             to_parent: components["schemas"]["Overlaps"];
             to_root: components["schemas"]["Overlaps"];
             also_in?: components["schemas"]["HitReference"][];
-        };
-        /** HotSection */
-        HotSection: {
-            header: string;
-            score: number;
-            chunks: number;
-            line_start: number;
-            line_end: number;
-            location: string;
         };
         /** ImportRequest */
         ImportRequest: {
@@ -1261,6 +1320,7 @@ export interface components {
         Init: {
             profile: string;
             search?: components["schemas"]["SearchSettings"];
+            descriptors?: components["schemas"]["Descriptors"];
         };
         /** Job */
         Job: {
@@ -1284,6 +1344,7 @@ export interface components {
         };
         /** Listed */
         Listed: {
+            id: string;
             name: string;
             suffix: string;
             size: number;
@@ -1299,10 +1360,7 @@ export interface components {
             updated_at: number;
             /** @default  */
             description: string;
-            /** @default  */
-            md5: string;
-            /** @default 0 */
-            collections: number;
+            collections?: string[];
         };
         /** LoggedQuestion */
         LoggedQuestion: {
@@ -1325,8 +1383,8 @@ export interface components {
             relation: components["schemas"]["Relation"] | null;
             collection: string;
             document: string;
-            seq_start: number | null;
-            seq_end: number | null;
+            seq_start: number;
+            seq_end: number;
             line_start: number;
             line_end: number;
             header: string;
@@ -1346,6 +1404,8 @@ export interface components {
             result_limit?: number | null;
             /** @default 0 */
             result_count: number;
+            /** @default false */
+            scoped: boolean;
             missing_terms?: string[];
             error?: string | null;
             id: number;
@@ -1362,14 +1422,40 @@ export interface components {
             last_maintained_at: number | null;
             vector_index_rows: number;
         };
+        /** MappedDocument */
+        MappedDocument: {
+            document_id: string;
+            document: string;
+            description: string;
+            score: number;
+            chunks: number;
+            sections: number;
+            collections: string[];
+            markdown_file: string;
+            source_file: string;
+        };
+        /** MappedSection */
+        MappedSection: {
+            collection: string;
+            document_id: string;
+            document: string;
+            header: string;
+            id: string;
+            location: string;
+            line_start: number;
+            line_end: number;
+            score: number;
+            depth: number;
+            seq_start: number;
+            seq_end: number;
+            chars: number;
+            chunks: number;
+            descriptors: string[];
+            related?: components["schemas"]["Related"][];
+        };
         /** Markdown */
         Markdown: {
             markdown: string;
-        };
-        /** Matryoshka */
-        Matryoshka: {
-            /** @default false */
-            layer_norm: boolean;
         };
         /** Member */
         Member: {
@@ -1390,7 +1476,7 @@ export interface components {
          * ModelKind
          * @enum {string}
          */
-        ModelKind: "embedding" | "reranker";
+        ModelKind: "embedding" | "reranker" | "describer";
         /**
          * ModelState
          * @enum {string}
@@ -1449,6 +1535,7 @@ export interface components {
             parsers: components["schemas"]["Parser"][];
             chunkers: components["schemas"]["Chunker"][];
             accelerators: components["schemas"]["Accelerator"][];
+            descriptors: components["schemas"]["Descriptors"][];
             search_modes: components["schemas"]["SearchMode"][];
             fusions: components["schemas"]["Fusion"][];
             score_folds: components["schemas"]["ScoreFold"][];
@@ -1529,6 +1616,7 @@ export interface components {
         /** Passage */
         Passage: {
             header: string;
+            section_id: string;
             location: string;
             seq_start: number;
             seq_end: number;
@@ -1545,6 +1633,7 @@ export interface components {
                 [key: string]: number;
             };
             collection: string;
+            document_id: string;
             document: string;
             text: string;
             source_file: string;
@@ -1553,6 +1642,7 @@ export interface components {
         /** PassageReference */
         PassageReference: {
             collection: string;
+            document_id: string;
             document: string;
             seq_start: number;
             seq_end: number;
@@ -1605,7 +1695,7 @@ export interface components {
             document_parallelism: number;
             /**
              * Pages per micro-batch
-             * @description Number of PDF pages one task converts, or one task chunks and embeds. Bounds memory: at most the CPU budget x Pages per micro-batch pages are in flight. Non-PDF files are one batch.
+             * @description Number of PDF pages one task converts, or one task chunks and embeds. Bounds memory: at most the CPU budget x Pages per micro-batch pages are in flight. Non-PDF files convert as one batch, and chunk and embed in parts cut at their headings.
              * @default 10
              */
             batch_pages: number;
@@ -1646,6 +1736,7 @@ export interface components {
              */
             preview_workers: number;
             accelerator?: components["schemas"]["Accelerator"];
+            descriptors?: components["schemas"]["Descriptors"];
         };
         /** Position */
         Position: {
@@ -1669,6 +1760,19 @@ export interface components {
         QueueActivity: {
             queued: number;
             running: number;
+        };
+        /** Related */
+        Related: {
+            collection: string;
+            document_id: string;
+            document: string;
+            header: string;
+            id: string;
+            location: string;
+            line_start: number;
+            line_end: number;
+            score: number;
+            similarity: number;
         };
         /**
          * Relation
@@ -1782,7 +1886,7 @@ export interface components {
         SearchOverrides: {
             /**
              * Results
-             * @description Number of results a search returns, at most 200.
+             * @description Number of chunks or passages a search returns, at most 200. Excerpts and sections have their own defaults.
              */
             limit?: number | null;
             /**
@@ -1797,7 +1901,7 @@ export interface components {
             mode?: components["schemas"]["SearchMode"] | null;
             /**
              * Fusion
-             * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
+             * @description Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank fusion (rank based, uses RRF k). linear: weighted sum of normalized scores using Vector weight and BM25 weight.
              */
             fusion?: components["schemas"]["Fusion"] | null;
             /**
@@ -1832,7 +1936,7 @@ export interface components {
             reranker?: components["schemas"]["Reranker"] | null;
             /**
              * Reranker model
-             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded as soon as it is chosen; a search that needs it is refused until the download finishes.
+             * @description The model the cross-encoder reranker scores with, for excerpts and for a map of sections (search_sections) alike; what each one is, its size, languages, license and hardware are listed with it. Downloaded as soon as it is chosen; a search that needs it is refused until the download finishes.
              */
             reranker_model?: string | null;
             /**
@@ -1890,7 +1994,7 @@ export interface components {
         SearchSettings: {
             /**
              * Results
-             * @description Number of results a search returns, at most 200.
+             * @description Number of chunks or passages a search returns, at most 200. Excerpts and sections have their own defaults.
              * @default 25
              */
             limit: number;
@@ -1935,8 +2039,8 @@ export interface components {
             reranker?: components["schemas"]["Reranker"];
             /**
              * Reranker model
-             * @description The model the cross-encoder reranker scores with; what each one is, its size, languages, license and hardware are listed with it. Downloaded as soon as it is chosen; a search that needs it is refused until the download finishes.
-             * @default Xenova/ms-marco-MiniLM-L-6-v2
+             * @description The model the cross-encoder reranker scores with, for excerpts and for a map of sections (search_sections) alike; what each one is, its size, languages, license and hardware are listed with it. Downloaded as soon as it is chosen; a search that needs it is refused until the download finishes.
+             * @default cross-encoder/ettin-reranker-32m-v1
              */
             reranker_model: string;
             /**
@@ -1989,6 +2093,36 @@ export interface components {
              */
             max_answer_chars: number;
         };
+        /** Section */
+        Section: {
+            id: string;
+            parent_id: string | null;
+            headings: string[];
+            seq_start: number;
+            seq_end: number;
+            line_start: number;
+            line_end: number;
+            char_start: number;
+            char_end: number;
+            byte_start: number;
+            byte_end: number;
+            page_start: number | null;
+            page_end: number | null;
+            descriptors?: string[];
+        };
+        /** SectionMap */
+        SectionMap: {
+            sections: components["schemas"]["MappedSection"][];
+            documents: components["schemas"]["MappedDocument"][];
+            collections: string[];
+            searched: string[];
+            uncovered?: string[];
+        };
+        /** Sections */
+        Sections: {
+            sections: components["schemas"]["Section"][];
+            described_by: components["schemas"]["Descriptors"] | null;
+        };
         /** SessionCollections */
         SessionCollections: {
             collections: string[];
@@ -2016,34 +2150,12 @@ export interface components {
         Signal: "reported" | "empty" | "uncovered" | "weak" | "borderline";
         /** Similar */
         Similar: {
-            identical: string[];
             nearest: components["schemas"]["Neighbour"][];
-        };
-        /** Source */
-        Source: {
-            collection: string;
-            document: string;
-            score: number;
-            chunks: number;
-            description: string;
-            header: string;
-            location: string;
-            text: string;
-            source_file: string;
-            markdown_file: string;
-            line_start: number;
-            line_end: number;
-            collections: string[];
-            sections: components["schemas"]["HotSection"][];
-        };
-        /** Sources */
-        Sources: {
-            documents: components["schemas"]["Source"][];
-            collections: string[];
         };
         /** Span */
         Span: {
             header: string;
+            section_id: string;
             location: string;
             seq_start: number;
             seq_end: number;
@@ -2064,13 +2176,13 @@ export interface components {
          * Stage
          * @enum {string}
          */
-        Stage: "convert" | "embed" | "index";
+        Stage: "convert" | "embed" | "describe" | "index";
         /** Staged */
         Staged: {
             staging_id: string;
             filename: string;
             size: number;
-            duplicates: string[];
+            duplicate: string | null;
         };
         /** Status */
         Status: {
@@ -2099,7 +2211,7 @@ export interface components {
          * @description Which endpoint ran a search.
          * @enum {string}
          */
-        Tool: "excerpts" | "sources" | "explore" | "text";
+        Tool: "excerpts" | "sections" | "explore" | "text";
         /** UserSettings */
         UserSettings: {
             /**
@@ -2605,6 +2717,39 @@ export interface operations {
             };
         };
     };
+    ApiDocumentsSectionsDocumentSections: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Sections"];
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
     ApiDocumentsSourceGetSource: {
         parameters: {
             query?: never;
@@ -2645,6 +2790,45 @@ export interface operations {
         };
     };
     ApiDocumentsPreviewGetPreview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description File Download */
+            200: {
+                headers: {
+                    /** @description File size in bytes */
+                    "content-length"?: string;
+                    /** @description Last modified data-time in RFC 2822 format */
+                    "last-modified"?: string;
+                    /** @description Entity tag */
+                    etag?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "": string;
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
+    ApiDocumentsCoverGetCover: {
         parameters: {
             query?: never;
             header?: never;
@@ -2990,6 +3174,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CollectionInfo"];
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
+    ApiCollectionsCoverGetCollectionCover: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": string;
                 };
             };
             /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
@@ -3461,6 +3678,8 @@ export interface operations {
                 session_id?: string | null;
                 collections?: string | null;
                 limit?: number | null;
+                document_ids?: string[] | null;
+                section_ids?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -3498,6 +3717,8 @@ export interface operations {
                 session_id?: string | null;
                 collections?: string | null;
                 limit?: number | null;
+                document_ids?: string[] | null;
+                section_ids?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -3527,14 +3748,14 @@ export interface operations {
             };
         };
     };
-    ApiSearchSourcesSearchSources: {
+    ApiSearchSectionsSearchSections: {
         parameters: {
             query: {
                 q: string;
                 session_id?: string | null;
                 collections?: string | null;
                 limit?: number | null;
-                sections?: number | null;
+                document_ids?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -3548,7 +3769,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Sources"];
+                    "application/json": components["schemas"]["SectionMap"];
                 };
             };
             /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */

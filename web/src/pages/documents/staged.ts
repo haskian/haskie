@@ -40,5 +40,9 @@ export function waitingAfter(
   })
 }
 
+/** The files one Import sends: the same bytes are the same document, so a file already imported
+ *  is left out. */
+export const fresh = (files: StagedFile[]): StagedFile[] => files.filter((one) => one.duplicate === null)
+
 /** The one button's label: the count once there is more than one file. */
 export const importLabel = (count: number): string => (count === 1 ? 'Import' : `Import ${count} documents`)

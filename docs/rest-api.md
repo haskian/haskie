@@ -1,9 +1,9 @@
 # REST API
 
-The API is the contract for the web UI, for scripts and, through the same handlers, for MCP. A
-running server serves its OpenAPI document at `/schema/openapi.json`. `mise run schema` builds the
-same document from the app, with no server, and turns it into `web/src/schema.d.ts`.
-`mise run check` fails when the two drift.
+The API is the contract for the web UI, for scripts and, through the same handlers, for the Model
+Context Protocol (MCP). A running server serves its OpenAPI document at `/schema/openapi.json`.
+`mise run schema` builds the same document from the app, with no server, and turns it into
+`web/src/schema.d.ts`. `mise run check` fails when the two drift.
 
 ## Routes
 
@@ -11,15 +11,17 @@ Each feature has one module under `src/haskie/api/`.
 
 | prefix | module | covers |
 | --- | --- | --- |
-| `/api/documents` | `documents.py` | two-phase intake (`staging`, then `import`), re-import, listing, one document, delete, its collections, embeddings and similar documents, source, preview, markdown and line views, description, `render` (a search result's markdown as HTML) |
-| `/api/collections` | `collections.py` | listing, create, rename, delete, overrides, description, members, attach, detach, re-index |
-| `/api/search` | `search.py` | `excerpts`, `sources`, `explore` (chunk or passage; one collection is `collections=<name>`), `text` (BM25 only, no model) |
+| `/api/documents` | `documents.py` | two-phase intake (`staging`, then `import`), re-import, listing, one document, delete, its collections, embeddings, similar documents, sections, source, preview, cover, markdown and line views, description, `render` (a search result's markdown as HTML) |
+| `/api/collections` | `collections.py` | listing, create, one collection, rename, delete, overrides, description, cover, members, attach, detach, re-index of the collection or of one member |
+| `/api/search` | `search.py` | `excerpts`, `sections`, `explore` (chunk or passage) and `text` (BM25 only, no model); one collection is `collections=<name>`; all but `text` keep to `document_ids`, and `excerpts` and `explore` to `section_ids` |
 | `/api/sessions`, `/api/insights`, `/api/searches` | `search.py` | session selection and history, searches and indexed chunks as raw points, the search log |
-| `/api/gaps` | `gaps.py` | questions that found no answer, grouped by topic; review (dismiss, resolve, reopen); replay against the collections as they are now |
+| `/api/gaps` | `gaps.py` | questions that found no answer, grouped by topic; review (dismiss, resolve, reopen); replay against the collections as they are now; an agent's report that a search did not answer it |
 | `/api/operations`, `/api/jobs` | `operations.py` | history per kind, live activity, progress, a job's tasks, cancel |
 | `/api/status`, `/api/init`, `/api/settings`, `/api/options` | `settings.py` | first-run init, user settings, and the option catalogue the UI builds its forms from |
 
-A handler marked `mcp_tool="<name>"` is also an MCP tool. See [MCP and Claude Code](mcp.md).
+A handler marked `mcp_tool="<name>"` is also an MCP tool. The search tools are separate handlers
+under `/api/agent/`, left out of this document, that answer with fewer fields. See
+[MCP and Claude Code](mcp.md).
 
 ## Two-phase intake
 
@@ -52,8 +54,8 @@ Nothing authenticates a caller, and the server binds loopback. A browser ignores
 - `Origin`, when present on a request that writes, must be haskie's own UI or listed in
   `HASKIE_ALLOWED_ORIGINS`. This stops any other page from posting to the API.
 
-Agents, MCP clients and scripts send no `Origin`, so they pass whatever their origin. A refused
-request answers `Forbidden`.
+Agents, MCP clients and scripts send no `Origin`, so they pass the origin check. A refused request
+answers `Forbidden`.
 
 ## Errors
 
@@ -64,7 +66,7 @@ Errors are part of the contract. Each type in `errors.py` carries its status cod
 | `HaskieError` | 400 | the base type, for example a home at another schema version |
 | `Forbidden` | 403 | a host haskie does not serve, or a browser origin it does not trust (see above) |
 | `NotFound` | 404 | no such collection, document or operation |
-| `Conflict` | 409 | the state does not allow it: a name taken, a document not imported yet, a home already initialized |
+| `Conflict` | 409 | the state does not allow it: a name taken, the same file already imported, a document not imported yet, a home already initialized |
 | `InvalidInput` | 422 | a bad argument |
 | `ValidationException` (Litestar's) | 422 | a parameter or body that does not decode: a wrong type, a missing field, a value out of bounds |
 | `PermanentError` | 422 | the file cannot be processed as it is |

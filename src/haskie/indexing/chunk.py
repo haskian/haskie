@@ -48,7 +48,7 @@ from haskie.indexing.segment import CutReason, Packed, PieceType, Span, SpanKind
 from haskie.settings import Chunker, ChunkSettings
 
 # see the module docstring; 3: e5's query and passage prefixes; 4: a part boundary is `part` or
-# `heading`, not `edge`; 5: a text of headings alone is chunked as text
+# `heading`, not `edge`; 5: parts cut where sections start (`pipeline.plan_embed`)
 CHUNK_VERSION = 5
 HEADING_SEP = " > "  # between two headings of a heading path: "Part I > Chapter 2 > Retries"
 WORD = re.compile(r"\w")  # what a piece needs one of to say anything
@@ -128,8 +128,8 @@ def record(
 ) -> dict[str, Any]:
     """One Arrow record for a chunk: its own fields, plus the columns the table adds around it.
 
-    Both tables that hold chunks build their rows here - the parquet cache (`embed_cache`) and a
-    collection's LanceDB table (`index`) - so both see the same fields. Each table's schema
+    Both tables that hold chunks build their rows here (the parquet cache, `embed_cache`, and a
+    collection's LanceDB table, `index`), so both see the same fields. Each table's schema
     (`embed_cache._PLAIN`, `index.PLAIN_SCHEMA`) drops a key it does not name, so a new field on
     `Chunk` must be added to both schemas to be stored. The record carries the pieces and the text
     joined from them, and each table's schema takes the one it stores: the cache keeps the pieces,
@@ -161,6 +161,8 @@ class Chunking(msgspec.Struct, frozen=True):
     # why the first chunk starts and the last one ends: the document's edge, or a part boundary
     start_reason: CutReason = CutReason.EDGE
     end_reason: CutReason = CutReason.EDGE
+    # the page open where `text` starts, by an earlier part's marker; None before any
+    page: int | None = None
 
 
 # --- the steps --------------------------------------------------------------------
@@ -284,14 +286,15 @@ def split(
     opened: Sequence[Opened] = (),
     start_reason: CutReason = CutReason.EDGE,
     end_reason: CutReason = CutReason.EDGE,
+    page: int | None = None,
 ) -> list[Chunk]:
     """`text` as chunks. The pipeline chunks a document one part at a time, so `line_offset`,
     `char_offset` and `byte_offset` count what comes before `text` in the whole document,
     `opened` holds the headings still open where it starts (see `open_headings`), and
     `start_reason` and `end_reason` say why its ends are cut: the document's own (`EDGE`), else
     where another part meets it, at a heading the later part opens with (`HEADING`) or partway
-    through a section (`PART`). A markdown text that packs into no chunk though it holds a word
-    has all its words in headings, and is chunked as text: its heading lines become its text."""
+    through a section (`PART`). `page` is the page open where it starts, until its first page
+    marker."""
     run = Chunking(
         text,
         settings,
@@ -301,6 +304,7 @@ def split(
         tuple(opened),
         start_reason,
         end_reason,
+        page,
     )
     value: Any = None
     for step in pipeline(settings):
@@ -392,7 +396,7 @@ def locate(run: Chunking, packed: list[Packed]) -> list[Chunk]:
 
     def page_at(pos: int) -> int | None:
         idx = bisect_right(marker_offsets, pos) - 1
-        return markers[idx][1] if idx >= 0 else None
+        return markers[idx][1] if idx >= 0 else run.page
 
     # Byte offsets are walked, not looked up: chunks tile the text in order, so the cursor
     # encodes every character once, the gap before a chunk and then the chunk itself.

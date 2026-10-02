@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import signal
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -22,8 +23,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import anyio
+import httpx
 import pytest
-from conftest import fresh_attribute, holding
+from conftest import (
+    NO_MODELS,
+    claude_installed,
+    fresh_attribute,
+    holding,
+    refresh_settled,
+    text_pdf,
+    until,
+    wait_import,
+)
+from sqlalchemy import select
 from typer.testing import CliRunner
 
 from haskie import APP_VERSION, claude, db, home
@@ -32,6 +45,7 @@ from haskie.claude import Scope
 from haskie.cli import cli
 from haskie.collection.collection import Collection, CollectionSummary, DocumentCounts
 from haskie.errors import Conflict, InvalidInput
+from haskie.tables import installations
 
 runner = CliRunner()
 
@@ -107,7 +121,7 @@ def test_run_refuses_a_home_from_before_collections(
 
 
 def test_destroy_after_a_refused_run_lets_it_start_over(elsewhere: Path) -> None:
-    """The recovery path the message prescribes has to actually work."""
+    """The recovery path the message prescribes has to work."""
     _pre_collection_home(elsewhere)
 
     assert runner.invoke(cli, ["destroy", "--home", str(elsewhere), "--yes"]).exit_code == 0
@@ -313,7 +327,7 @@ def test_claim_home_refuses_a_second_holder_and_says_who_has_it(
     elsewhere: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`flock` is per open file description, so a second claim from this process conflicts exactly
-    as a second process would - no subprocess needed to prove the guard. No database either: the
+    as a second process would. No subprocess is needed to prove the guard. No database either: the
     lock needs none, and makes the home itself."""
     home.use(elsewhere)
 
@@ -342,23 +356,40 @@ def test_claim_home_claims_once_and_gives_the_home_back(elsewhere: Path) -> None
         assert home.LOCK_FILE.read_text().startswith("pid "), "the next one gets in"
 
 
-def test_run_exports_its_own_pid_for_the_lock(
-    elsewhere: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("flag", "serves_in_home"),
+    [
+        ("--foreground", True),  # a shell's directory may be deleted while the server lives on
+        ("--reload", False),  # uvicorn watches the working directory: the code being edited
+    ],
+)
+def test_run_exports_its_own_pid_and_serves_from_its_home(
+    flag: str,
+    serves_in_home: bool,
+    elsewhere: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`run` puts its pid in the environment before uvicorn starts, so a `--reload` worker that
-    claims the home records the reloader, not itself."""
+    claims the home records the reloader, not itself. Outside development it serves from the
+    home, so no worker process it starts reads a working directory that is gone."""
+    shell = tmp_path / "shell"
+    shell.mkdir()
+    monkeypatch.chdir(shell)  # and back to the suite's own afterwards
     seen: dict[str, str | None] = {}
 
     def serve(*_args, **_kwargs) -> None:
         seen["pid"] = os.environ.get(home.SERVER_PID_ENV)
+        seen["cwd"] = os.getcwd()
 
     monkeypatch.setattr("uvicorn.run", serve)
     monkeypatch.delenv(home.SERVER_PID_ENV, raising=False)
 
-    result = runner.invoke(cli, ["run", "--home", str(elsewhere), "--reload"])
+    result = runner.invoke(cli, ["run", "--home", str(elsewhere), flag])
 
     assert result.exit_code == 0, result.output
     assert seen["pid"] == str(os.getpid())
+    assert seen["cwd"] == str(elsewhere.resolve() if serves_in_home else shell.resolve())
 
 
 def test_run_refuses_in_one_line_when_the_home_is_taken(elsewhere: Path) -> None:
@@ -492,6 +523,59 @@ RUN_CASES = {
         held_at="http://127.0.0.1:8451",
     ),
 }
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+@pytest.mark.anyio
+async def test_a_fresh_install_serves_a_new_home_after_the_shell_it_started_from_is_gone(
+    tmp_path: Path,
+) -> None:
+    """End to end, in real processes: `run` on a home that does not exist yet starts a server, the
+    first run picks its settings, and a PDF imports through the extraction pool. The directory
+    `run` started in is deleted first, as a Claude Code session's worktree is: a server still in
+    it failed every PDF with a BrokenProcessPool, since a new worker process reads its cwd."""
+    new_home = tmp_path / "new-home"
+    session = tmp_path / "session"
+    session.mkdir()
+    url = f"http://127.0.0.1:{_free_port()}"
+    haskie = claude.own_command()
+    host, port = claude.address(url)
+    started = subprocess.run(
+        [*haskie, "run", "--home", str(new_home), "--host", host, "--port", str(port)]
+        + ["--no-browser"],
+        cwd=session,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    try:
+        assert started.returncode == 0, started.stdout + started.stderr
+        session.rmdir()
+        async with httpx.AsyncClient(base_url=url, timeout=30) as http:
+            status = (await http.get("/api/status")).json()
+            assert (status["initialized"], status["home"]) == (False, str(new_home.resolve()))
+            picked = {**NO_MODELS, "descriptors": "c-tf-idf"}
+            assert (await http.post("/api/init", json=picked)).status_code == 201
+            settings = (await http.get("/api/settings")).json()
+            assert settings["pipeline"]["descriptors"] == "c-tf-idf"
+
+            pdf = text_pdf(["Sagas keep a long transaction consistent without locks."])
+            upload = {"data": ("fresh.pdf", pdf, "application/pdf")}
+            staged = (await http.post("/api/documents/staging", files=upload)).json()
+            body = {"staging_id": staged["staging_id"]}
+            name = (await http.post("/api/documents/import", json=body)).json()["name"]
+            document = await wait_import(http, name)
+            assert document["status"] == "imported", document
+            markdown = await http.get(f"/api/documents/{name}/markdown")
+            assert markdown.status_code == 200, markdown.text
+            assert "Sagas keep a long transaction" in markdown.text
+    finally:
+        subprocess.run([*haskie, "stop", "--home", str(new_home)], timeout=60, check=False)
 
 
 @pytest.mark.parametrize("case", RUN_CASES.values(), ids=list(RUN_CASES))
@@ -870,13 +954,17 @@ def test_install_claude(
 
     assert result.exit_code == 0, result.output
     assert case.expect_in_output in _text(result)
-    written = claude.skill_path(case.scope).read_text()
-    rule = claude.rule_path(case.scope).read_text()
+    directory = claude.claude_dir(case.scope)
+    written = claude.skill_path(directory).read_text()
+    rule = claude.rule_path(directory).read_text()
+    assert asyncio.run(_installations()) == [str(directory)], "recorded, to refresh it later"
     for expected in case.expect_in_skill:
         assert expected in written
         assert expected in rule, "the rule names the same collections as the trigger"
     assert "before answering from memory" in rule, "the rule fires on knowledge questions"
-    hooks = json.loads(claude.settings_path(case.scope).read_text())["hooks"]["SessionStart"]
+    hooks = json.loads(claude.settings_path(claude.claude_dir(case.scope)).read_text())["hooks"][
+        "SessionStart"
+    ]
     hooked = hooks[0]["hooks"][0]["command"]
     assert claude.HOOK_MARKERS[0] in hooked, "the hook starts haskie"
     assert hooked.endswith("--hook"), "a session start reads its payload, never waits on a boot"
@@ -903,12 +991,101 @@ def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
     again = runner.invoke(cli, arguments)
 
     assert again.exit_code == 0, again.output
-    written = claude.skill_path(Scope.PROJECT).read_text()
+    directory = claude.claude_dir(Scope.PROJECT)
+    written = claude.skill_path(directory).read_text()
     assert written.count("name: haskie") == 1, "rewritten, not appended to"
     assert "adr: Architecture decisions" in written, "the new collection reached the trigger"
-    rule = claude.rule_path(Scope.PROJECT).read_text()
+    assert asyncio.run(_installations()) == [str(directory)], "recorded once"
+    rule = claude.rule_path(directory).read_text()
     assert rule.count("Search the user's own") == 1, "rewritten, not appended to"
     assert "adr: Architecture decisions" in rule, "the new collection reached the rule"
+
+
+async def _installations() -> list[str]:
+    """The directories recorded for Claude Code, in the current home."""
+    async with db.read() as conn:
+        return list(await conn.scalars(select(installations.c.directory).order_by("directory")))
+
+
+@dataclass
+class RefreshCase:
+    files_kept: bool = True  # False: removed by hand, or with their whole project
+    hooked_home: str | None = None  # another home's install took the hook over
+    writable: bool = True
+    home_name: str = "home"
+    expect_written: bool = True
+
+
+REFRESH_CASES = {
+    "an installation still ours is rewritten": RefreshCase(),
+    "a home whose path needs quoting still finds its hook": RefreshCase(home_name="my home"),
+    "a skill and rule removed stay removed": RefreshCase(files_kept=False, expect_written=False),
+    "a directory another home installed into is left to it": RefreshCase(
+        hooked_home="other-home", expect_written=False
+    ),
+    "a directory that refuses the write is tried again next change": RefreshCase(
+        writable=False, expect_written=False
+    ),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("case", REFRESH_CASES.values(), ids=list(REFRESH_CASES))
+async def test_refresh_installations(case: RefreshCase, tmp_path: Path) -> None:
+    """Every installation is refreshed on its own: the one under test sits beside one that always
+    works, which must be rewritten whatever happens to the first. None is ever forgotten: only
+    `uninstall` does that."""
+    home.use((tmp_path / case.home_name).resolve())
+    await Collection.create("roasting", "Three books on coffee roasting.")
+    hooked = None if case.hooked_home is None else tmp_path / case.hooked_home
+    tested = claude_installed(tmp_path / "tested" / ".claude", hooked)
+    beside = claude_installed(tmp_path / "beside" / ".claude")
+    if not case.files_kept:
+        claude.skill_path(tested).unlink()
+        claude.rule_path(tested).unlink()
+    locked = claude.skill_path(tested).parent
+    if not case.writable:
+        locked.chmod(0o500)
+    for directory in (tested, beside):
+        await claude.record_installation(directory)
+
+    try:
+        await claude.refresh_installations()
+    finally:
+        locked.chmod(0o700)
+
+    assert "roasting: Three books on coffee roasting" in claude.rule_path(beside).read_text()
+    skill = claude.skill_path(tested)
+    assert skill.is_file() == case.files_kept, "a refresh never makes nor removes a file"
+    assert (skill.is_file() and "roasting" in skill.read_text()) == case.expect_written
+    assert await _installations() == sorted([str(beside), str(tested)])
+
+
+@pytest.mark.anyio
+async def test_changes_during_a_refresh_coalesce_into_one_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A change landing while a refresh runs gets one more round after it, because the running one
+    may have read the collections before the change; three such changes still cost one round."""
+    rounds: list[int] = []
+    first_entered, release = anyio.Event(), anyio.Event()
+
+    async def refresh() -> None:
+        rounds.append(len(rounds))
+        if len(rounds) == 1:
+            first_entered.set()
+            await release.wait()
+
+    monkeypatch.setattr(claude, "refresh_installations", refresh)
+
+    claude.refresh_in_background()
+    await first_entered.wait()
+    for _ in range(3):
+        claude.refresh_in_background()
+    release.set()
+    await until(refresh_settled, "the refresh task finished")
+
+    assert rounds == [0, 1], "one round for the first request, one for the three during it"
 
 
 def test_install_claude_leaves_stdin_to_the_script_that_runs_it(
@@ -930,6 +1107,108 @@ def test_install_claude_leaves_stdin_to_the_script_that_runs_it(
     assert result.exit_code == 0, _text(result)
     assert "session id is" not in _text(result), "stdin was not read as a hook payload"
     assert served == [(claude.MCP_URL, True)], "brings the server up and waits for it"
+
+
+USER_SETTINGS = {"model": "opus"}  # a setting of the user's that no install may touch
+USER_HOOK = {"type": "command", "command": "echo hello"}
+
+
+@dataclass
+class UninstallCase:
+    installed: bool = True
+    claude_on_path: bool = True
+    user_hook_beside: bool = False  # the user's own hook in haskie's matcher
+    user_file_in_skill_folder: bool = False
+    times: int = 1
+    expect_in_output: list[str] = field(default_factory=list)
+    expect_not_in_output: list[str] = field(default_factory=list)
+    expect_settings: dict = field(default_factory=lambda: dict(USER_SETTINGS))
+
+
+UNINSTALL_CASES = {
+    "undoes an install": UninstallCase(
+        expect_in_output=[
+            "stopped refreshing",
+            "removed the haskie MCP server (project scope)",
+            "removed the SessionStart hook",
+            "SKILL.md",
+            "haskie.md",
+        ],
+    ),
+    "a hook of the user's beside haskie's stays": UninstallCase(
+        user_hook_beside=True,
+        expect_settings={**USER_SETTINGS, "hooks": {"SessionStart": [{"hooks": [USER_HOOK]}]}},
+    ),
+    "a file of the user's keeps the skill folder": UninstallCase(user_file_in_skill_folder=True),
+    "without the claude cli it prints the command": UninstallCase(
+        claude_on_path=False,
+        expect_in_output=["remove the server by hand", "claude mcp remove -s project haskie"],
+    ),
+    "a second uninstall finds nothing to do": UninstallCase(
+        times=2,
+        expect_in_output=["removed the haskie MCP server"],
+        expect_not_in_output=["stopped refreshing", "removed the SessionStart hook", "SKILL.md"],
+    ),
+    "nothing installed does nothing and makes no home": UninstallCase(
+        installed=False,
+        expect_in_output=["removed the haskie MCP server"],
+        expect_not_in_output=["stopped refreshing", "removed the SessionStart hook"],
+        expect_settings=USER_SETTINGS,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", UNINSTALL_CASES.values(), ids=list(UNINSTALL_CASES))
+def test_uninstall_claude(
+    case: UninstallCase,
+    elsewhere: Path,
+    tmp_path: Path,
+    claude_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = claude.claude_dir(Scope.PROJECT)
+    settings_file = claude.settings_path(claude.claude_dir(Scope.PROJECT))
+    settings_file.parent.mkdir(parents=True)
+    settings_file.write_text(json.dumps(USER_SETTINGS))
+    if case.claude_on_path:
+        _with_claude(claude_workspace)
+    if case.installed:
+        _make_home(elsewhere)
+        asyncio.run(Collection.create("roasting", "Coffee."))
+        monkeypatch.setattr(cli_module, "_status", _serves(elsewhere))
+        installed = runner.invoke(
+            cli, ["install", "claude", "--home", str(elsewhere), "--scope", "project"]
+        )
+        assert installed.exit_code == 0, _text(installed)
+    if case.user_hook_beside:
+        settings = json.loads(settings_file.read_text())
+        settings["hooks"]["SessionStart"][0]["hooks"].append(USER_HOOK)
+        settings_file.write_text(json.dumps(settings))
+    user_file = claude.skill_path(directory).parent / "notes.md"
+    if case.user_file_in_skill_folder:
+        user_file.write_text("mine")
+
+    arguments = ["uninstall", "claude", "--home", str(elsewhere), "--scope", "project"]
+    results = [runner.invoke(cli, arguments) for _ in range(case.times)]
+
+    for result in results:
+        assert result.exit_code == 0, _text(result)
+    output = _text(results[-1])
+    for expected in case.expect_in_output:
+        assert expected in output
+    for unexpected in case.expect_not_in_output:
+        assert unexpected not in output
+    assert json.loads(settings_file.read_text()) == case.expect_settings
+    assert not claude.skill_path(directory).exists()
+    assert not claude.rule_path(directory).exists()
+    assert claude.skill_path(directory).parent.exists() == case.user_file_in_skill_folder
+    if case.installed:
+        assert asyncio.run(_installations()) == [], "a collection change no longer rewrites it"
+    else:
+        assert not elsewhere.exists(), "uninstalling never makes a home"
+    if case.claude_on_path:
+        recorded = (tmp_path / "argv.log").read_text().splitlines()
+        assert recorded[-1] == "mcp remove -s project haskie"
 
 
 SKILL_DESCRIPTION_CAP = 1536  # where Claude Code cuts a skill description in its listing
@@ -1021,7 +1300,7 @@ def test_install_claude_refuses_in_one_line(
         stub.write_text("#!/bin/sh\necho 'error: no such scope' >&2\nexit 1\n")
         stub.chmod(0o755)
     if case.settings is not None:
-        settings_file = claude.settings_path(Scope.PROJECT)
+        settings_file = claude.settings_path(claude.claude_dir(Scope.PROJECT))
         settings_file.parent.mkdir(parents=True)
         settings_file.write_text(case.settings)
     monkeypatch.setattr(cli_module, "_status", _serves(elsewhere))
@@ -1035,7 +1314,9 @@ def test_install_claude_refuses_in_one_line(
     assert case.expect_error in result.stderr
     assert len(result.stderr.strip().splitlines()) == 1, "one line"
     if case.settings is not None:
-        assert claude.settings_path(Scope.PROJECT).read_text() == case.settings, "left as it was"
+        assert (
+            claude.settings_path(claude.claude_dir(Scope.PROJECT)).read_text() == case.settings
+        ), "left as it was"
 
 
 # `install_hook` merges into a file the user owns, so its branches are worth reaching directly
@@ -1081,12 +1362,14 @@ HOOK_CASES = {
 
 @pytest.mark.parametrize("case", HOOK_CASES.values(), ids=list(HOOK_CASES))
 def test_install_hook(case: HookCase, claude_workspace: Path, tmp_path: Path) -> None:
-    settings_file = claude.settings_path(Scope.PROJECT)
+    settings_file = claude.settings_path(claude.claude_dir(Scope.PROJECT))
     if case.before is not None:
         settings_file.parent.mkdir(parents=True)
         settings_file.write_text(case.before)
 
-    added = claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8451/mcp")
+    added = claude.install_hook(
+        claude.claude_dir(Scope.PROJECT), tmp_path / "home", "http://127.0.0.1:8451/mcp"
+    )
 
     assert added is case.added
     settings = json.loads(settings_file.read_text())
@@ -1129,12 +1412,14 @@ def test_install_hook_refuses_a_settings_file_it_cannot_follow(
 ) -> None:
     """Rewriting a file we could not read would throw the user's settings away, and every failure
     here must be a `HaskieError`, never a bare `AttributeError`."""
-    settings_file = claude.settings_path(Scope.PROJECT)
+    settings_file = claude.settings_path(claude.claude_dir(Scope.PROJECT))
     settings_file.parent.mkdir(parents=True)
     settings_file.write_bytes(before.encode("latin-1"))
 
     with pytest.raises(InvalidInput, match=expect_error):
-        claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8451/mcp")
+        claude.install_hook(
+            claude.claude_dir(Scope.PROJECT), tmp_path / "home", "http://127.0.0.1:8451/mcp"
+        )
 
     assert settings_file.read_bytes() == before.encode("latin-1"), "left exactly as it was"
 
@@ -1163,7 +1448,7 @@ def test_install_hook_keeps_the_settings_file_what_it_was(
     """The rewrite is a rename, which replaces whatever sits at the path. A settings file that is a
     link into a dotfiles repository must stay one, and one kept private (it can hold API keys) must
     not come back world-readable."""
-    settings_file = claude.settings_path(Scope.PROJECT)
+    settings_file = claude.settings_path(claude.claude_dir(Scope.PROJECT))
     settings_file.parent.mkdir(parents=True)
     real = tmp_path / "dotfiles" / "settings.json" if case.linked else settings_file
     if case.mode is not None:
@@ -1173,7 +1458,9 @@ def test_install_hook_keeps_the_settings_file_what_it_was(
     if case.linked:
         settings_file.symlink_to(real)
 
-    claude.install_hook(Scope.PROJECT, tmp_path / "home", "http://127.0.0.1:8451/mcp")
+    claude.install_hook(
+        claude.claude_dir(Scope.PROJECT), tmp_path / "home", "http://127.0.0.1:8451/mcp"
+    )
 
     assert settings_file.is_symlink() is case.linked
     umask = os.umask(0)

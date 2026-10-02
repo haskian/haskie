@@ -15,28 +15,31 @@ whether or not `web/dist` has been built. `test_static_files_*` covers the other
 
 import json
 import logging
+import math
 import threading
 import time
 from pathlib import Path
 from urllib.parse import unquote
 
+import msgspec
 import pytest
 import structlog
+from conftest import id_of
 from litestar.testing import AsyncTestClient, RequestFactory
 from sqlalchemy import update
 
 from haskie import app as app_module
-from haskie import audit, db, errors, home, logs
+from haskie import audit, claude, db, errors, home, ids, logs
 from haskie.catalogue import catalogue
 from haskie.collection.collection import Collection, MemberStatus
 from haskie.collection.index import CollectionIndex
-from haskie.document import document
+from haskie.document import cover, document
 from haskie.document.document import DocumentStatus
 from haskie.indexing import embed_cache, gguf_models, mlx_models
 from haskie.indexing.chunk import Chunk, Piece, split
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order
-from haskie.search import gaps, log
+from haskie.search import aspects, flow, gaps, log
 from haskie.settings import (
     DEFAULT_RERANKER,
     Accelerator,
@@ -57,6 +60,8 @@ from conftest import (  # isort: skip
     api_app,
     attach_via_api,
     audit_lines,
+    claude_installed,
+    refresh_settled,
     document_names,
     forget_settings,
     get_page,
@@ -92,13 +97,13 @@ async def ready(client: AsyncTestClient, tmp_path: Path) -> AsyncTestClient:
     source = tmp_path / "guide.md"
     source.write_text(MD)
     imported = await document.import_path(str(source))
-    await document.set_status(imported.name, DocumentStatus.IMPORTED)
+    await document.set_status(imported.id, DocumentStatus.IMPORTED)
     (tmp_path / "pending.md").write_text("# pending\n")
     await document.import_path(str(tmp_path / "pending.md"))  # stays `queued`: nothing started it
 
     notes = await Collection.get("notes")
-    await notes.add(imported.name)
-    await notes.set_member_status(imported.name, MemberStatus.INDEXED)
+    await notes.add(imported.id)
+    await notes.set_member_status(imported.id, MemberStatus.INDEXED)
     await seed_index("notes", imported.name, "alpha body about lancedb")
 
     await client.put("/api/sessions/s1", json={"collections": ["notes"]})
@@ -149,8 +154,8 @@ def _requested(lines: list[dict]) -> list[str]:
         ),
         (
             "an embedder is no reranker -> unprocessable",
-            "PUT", "/api/settings", {"search": {"reranker_model": "BAAI/bge-small-en-v1.5"}}, None,
-            422, "unknown reranker model: BAAI/bge-small-en-v1.5",
+            "PUT", "/api/settings", {"search": {"reranker_model": "intfloat/e5-base-v2"}}, None,
+            422, "unknown reranker model: intfloat/e5-base-v2",
         ),
         (
             "merge share past 100% -> unprocessable",
@@ -485,6 +490,136 @@ async def test_model_not_ready_asks_the_caller_to_come_back(ready: AsyncTestClie
     assert response.headers["Retry-After"] == errors.NotReady.headers["Retry-After"]
 
 
+@pytest.mark.parametrize(
+    ("name", "reranker", "floor", "logit", "expected", "uncovered"),
+    [
+        (
+            "no reranker: the fused retrieval scores stand, and no model is read",
+            None,
+            None,
+            None,
+            None,
+            [],
+        ),
+        (
+            "a reranker on: the search's model scores every chunk",
+            Reranker.CROSS_ENCODER,
+            None,
+            2.0,
+            DEFAULT_RERANKER,
+            [],
+        ),
+        (
+            "a chunk it scores far under its floor still counts, and the map says it is weak",
+            Reranker.CROSS_ENCODER,
+            None,
+            -9.0,
+            DEFAULT_RERANKER,
+            ["alpha"],
+        ),
+        (
+            "the user's floor neither cuts a map nor judges it: 0.88 sits under 0.9",
+            Reranker.CROSS_ENCODER,
+            0.9,
+            2.0,
+            DEFAULT_RERANKER,
+            [],
+        ),
+    ],
+)
+async def test_a_map_weighs_its_chunks_with_the_reranker(
+    ready: AsyncTestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    reranker: Reranker | None,
+    floor: float | None,
+    logit: float | None,
+    expected: str | None,
+    uncovered: list[str],
+) -> None:
+    """`search_sections` reranks with the excerpts' model, and keeps every chunk: its scores weigh
+    the map, they do not cut it. Its log row names the model and no floor of the user's, so the
+    gaps judge the map by that model's own floor, and so does the answer's `uncovered`."""
+    from haskie.indexing import embed, models
+
+    if reranker is not None:
+        notes = await Collection.get("notes")
+        await notes.set_overrides(
+            CollectionOverrides(search=SearchOverrides(reranker=reranker, min_rerank_score=floor))
+        )
+        monkeypatch.setattr(
+            models, "_ready", {models._model_id(models.ModelKind.RERANKER, DEFAULT_RERANKER)}
+        )
+    read: list[str] = []
+
+    def scores(model: str, accelerator: str, query: str, texts: list[str]) -> list[float]:
+        read.append(model)
+        return [logit or 0.0] * len(texts)
+
+    monkeypatch.setattr(embed, "rerank_scores", scores)
+
+    response = await ready.get(
+        "/api/search/sections", params={"q": "alpha", "collections": "notes", "session_id": "r"}
+    )
+
+    assert response.status_code == 200, f"{name}: {response.text}"
+    (one,) = response.json()["sections"]
+    assert one["document"] == "guide.md", name
+    assert read == ([] if expected is None else [expected]), name
+    assert response.json()["uncovered"] == uncovered, name
+    if logit is not None:
+        assert one["score"] == pytest.approx(1 / (1 + math.exp(-logit))), f"{name}: the sigmoid"
+    (logged,) = (await ready.get("/api/searches", params={"session_id": "r"})).json()
+    assert (logged["tool"], logged["reranker"]) == ("sections", expected), name
+    assert logged["min_rerank_score"] is None, f"{name}: no floor of the user's is logged"
+
+
+@pytest.mark.parametrize(
+    ("name", "logit", "excerpts", "uncovered"),
+    [
+        ("judged an answer: excerpts, and nothing uncovered", 2.0, 1, []),
+        (
+            "under the reranker's floor: no excerpt, and the one question is uncovered",
+            -9.0,
+            0,
+            ["alpha"],
+        ),
+    ],
+)
+async def test_one_question_hears_when_the_sources_match_it_only_weakly(
+    ready: AsyncTestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    logit: float,
+    excerpts: int,
+    uncovered: list[str],
+) -> None:
+    """`uncovered` used to list only the parts of several questions. A single question now hears
+    the verdict the Gaps page gives as weak: its best match under the bar its models were
+    measured at. The log keeps the excerpts' own `uncovered`, so the Gaps page still says weak."""
+    from haskie.indexing import embed, models
+
+    await _converted("guide.md", MD)
+    notes = await Collection.get("notes")
+    await notes.set_overrides(
+        CollectionOverrides(search=SearchOverrides(reranker=Reranker.CROSS_ENCODER))
+    )
+    monkeypatch.setattr(
+        models, "_ready", {models._model_id(models.ModelKind.RERANKER, DEFAULT_RERANKER)}
+    )
+    monkeypatch.setattr(embed, "rerank_scores", lambda m, a, q, texts: [logit] * len(texts))
+
+    response = await ready.get(
+        "/api/search/excerpts", params={"q": "alpha", "collections": "notes", "session_id": "w"}
+    )
+
+    assert response.status_code == 200, f"{name}: {response.text}"
+    answer = response.json()
+    assert (len(answer["excerpts"]), answer["uncovered"]) == (excerpts, uncovered), name
+    (logged,) = (await ready.get("/api/searches", params={"session_id": "w"})).json()
+    assert [one["uncovered"] for one in logged["questions"]] == [False], f"{name}: the log's own"
+
+
 async def test_a_limit_at_the_scan_depth_is_searched(ready: AsyncTestClient) -> None:
     """The top of the shared `limit` bound (`settings.MAX_SCAN`) is a search, not a rejection; one
     past it is in the error table."""
@@ -577,11 +712,11 @@ async def test_collection_reranker_override_starts_its_download(
 ) -> None:
     """Q1: saving a reranker for one collection used to change nothing but the row, so the first
     search of that collection answered "not loaded yet" for a model nothing ever fetched."""
-    from haskie.indexing import embed
+    from haskie.indexing import embed, hardware
 
     loaded: list[str] = []
     monkeypatch.setattr(embed, "warm_reranker", lambda name, accelerator: loaded.append(name))
-    override = "jinaai/jina-reranker-v1-turbo-en"
+    override = "cross-encoder/ettin-reranker-150m-v1"
 
     saved = await ready.put(
         "/api/collections/notes/overrides",
@@ -593,8 +728,10 @@ async def test_collection_reranker_override_starts_its_download(
     await wait_for(f"dl:reranker:{override}")
     assert loaded == [override], "the PUT started the download"
     listed = (await ready.get("/api/status")).json()["models"]
+    here = hardware.device(override, Accelerator.AUTO)  # the CPU, or Apple Silicon by WebGPU
+    assert here is not None
     assert [(m["kind"], m["name"], m["state"], m["device"]) for m in listed] == [
-        ("reranker", override, "ready", "cpu")
+        ("reranker", override, "ready", here.value)
     ], "and /api/status reports it like any other required model, with where it runs"
 
 
@@ -614,6 +751,36 @@ async def test_status_reports_an_unreadable_settings_row(ready: AsyncTestClient)
     assert status["initialized"] is True, "defaults are in use, the app still runs"
 
 
+async def test_rows_written_with_the_maps_own_reranker_still_read(ready: AsyncTestClient) -> None:
+    """v0.23.0 stored `map_reranker_model` in the settings row and in a collection's overrides.
+    The setting is gone; both rows still read, keeping every value they hold besides it."""
+    from sqlalchemy import update
+
+    from haskie import db
+    from haskie.tables import collections
+    from haskie.tables import settings as settings_table
+
+    chosen = "cross-encoder/ettin-reranker-17m-v1"
+    old_key = {"map_reranker_model": "cross-encoder/ms-marco-MiniLM-L2-v2"}
+    stored = (await ready.get("/api/settings")).json()
+    stored["search"] |= {"reranker_model": chosen, **old_key}
+    overrides = {"search": {"reranker_model": chosen, **old_key}}
+    async with db.connect() as conn:
+        await conn.execute(update(settings_table).values(json=json.dumps(stored)))
+        await conn.execute(
+            update(collections)
+            .where(collections.c.name == "notes")
+            .values(overrides=json.dumps(overrides))
+        )
+    forget_settings()  # a direct write bypasses the process cache
+
+    assert (await ready.get("/api/status")).json()["settings_error"] is None
+    assert (await ready.get("/api/settings")).json()["search"]["reranker_model"] == chosen
+    notes = (await ready.get("/api/collections/notes")).json()
+    assert notes["overrides"]["search"]["reranker_model"] == chosen
+    assert "map_reranker_model" not in notes["overrides"]["search"]
+
+
 async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     status = (await client.get("/api/status")).json()
     assert (status["initialized"], status["embedding"], status["models"]) == (False, None, [])
@@ -623,34 +790,43 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     assert "anydoc" in options["parsers"] and "hybrid" in options["search_modes"]
     assert options["docs"]["conversion.chunk_size"]["title"] == "Chunk size (characters)"
     assert options["docs"]["search.grow_bias"]["title"] == "Growth bias"
-    assert options["embedding_profiles"]["compact"]["dims"] == 384
+    assert options["embedding_profiles"]["granite-97m-multilingual"]["dims"] == 384
     # the catalogue, read from the database: full-text only first, then the models by size
     profiles = options["embedding_profiles"]
     assert next(iter(profiles)) == "none" and profiles["none"] is None
     sizes = [model["dims"] for model in profiles.values() if model]
-    assert "compact" in profiles and sizes == sorted(sizes), "the smaller vectors first"
+    assert "granite-97m-multilingual" in profiles and sizes == sorted(sizes), (
+        "the smaller vectors first"
+    )
     metadata = options["embedding_metadata"]
     assert set(metadata) == set(await catalogue.embedders()), "every profile's, offered or not"
     assert set(profiles) - {"none"} <= set(metadata), "metadata for every offered model"
-    assert metadata["compact"] == {
-        "description": "Small and fast; a good default (~130 MB).",
-        "parameters": 33360512,
-        "context_tokens": 512,
-        "languages": "English",
-        "license": "MIT",
-        "released": "2023-09-12",
-        "model_card_url": "https://huggingface.co/BAAI/bge-small-en-v1.5",
+    assert metadata["granite-97m-multilingual"] == {
+        "description": (
+            "The best all-round small multilingual embedder: #1 on multilingual and reasoning "
+            "retrieval; a good default (~390 MB)."
+        ),
+        "parameters": 97441152,
+        "context_tokens": 32768,
+        "languages": "multilingual (200+, 52 enhanced)",
+        "license": "Apache-2.0",
+        "released": "2026-04-20",
+        "model_card_url": "https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2",
         "runtime": "onnx",
         "devices": ["cpu", "apple_silicon", "gpu"],
         "dimensions": 384,
     }
-    assert metadata["nomic-v1.5-512"]["description"] != metadata["nomic-v1.5"]["description"]
-    assert metadata["nomic-v1.5-512"]["parameters"] == metadata["nomic-v1.5"]["parameters"]
+    assert metadata["bekko-a25m-256"]["description"] != metadata["bekko-a25m"]["description"]
+    assert metadata["bekko-a25m-256"]["parameters"] == metadata["bekko-a25m"]["parameters"]
     reranker = options["reranker_metadata"][DEFAULT_RERANKER]
-    assert (reranker["parameters"], reranker["context_tokens"]) == (22714113, 512)
+    assert (reranker["parameters"], reranker["context_tokens"]) == (31883136, 8192)
     assert (reranker["runtime"], reranker["devices"]) == ("onnx", ["cpu", "apple_silicon", "gpu"])
     assert "dimensions" not in reranker, "a reranker has no vectors"
-    assert options["reranker_models"][0] == DEFAULT_RERANKER, "the default is the smallest"
+    assert options["reranker_models"][:3] == [
+        "cross-encoder/ms-marco-MiniLM-L2-v2",
+        "cross-encoder/ettin-reranker-17m-v1",
+        DEFAULT_RERANKER,
+    ], "smallest first: MiniLM-L2, then ettin-17m, then the default"
     # the vocabularies the UI renders rows with, so it never spells a status out for itself
     assert (
         options["document_statuses"][:3]
@@ -674,8 +850,8 @@ async def test_the_options_offer_mlx_models_only_where_mlx_is_installed(
     options = (await client.get("/api/options")).json()
 
     profiles = options["embedding_profiles"].values()
-    embedders = {model["name"] for model in profiles if model} & set(mlx_models.EMBEDDERS)
-    assert embedders == (set(mlx_models.EMBEDDERS) if installed else set()), name
+    embedders = {model["name"] for model in profiles if model} & set(mlx_models.POOLED)
+    assert embedders == (set(mlx_models.POOLED) if installed else set()), name
     rerankers = set(options["reranker_models"]) & mlx_rerankers
     assert rerankers == (mlx_rerankers if installed else set()), name
     assert mlx_rerankers <= set(options["reranker_metadata"]), "metadata, offered or not"
@@ -689,7 +865,7 @@ async def test_the_options_offer_mlx_models_only_where_mlx_is_installed(
         ("the settings ask for the CPU, which llama.cpp is not run on", True, "cpu", False),
     ],
 )
-async def test_the_options_offer_gguf_profiles_only_where_they_run(
+async def test_the_options_offer_gguf_models_only_where_they_run(
     client: AsyncTestClient,
     monkeypatch: pytest.MonkeyPatch,
     name: str,
@@ -708,6 +884,8 @@ async def test_the_options_offer_gguf_profiles_only_where_they_run(
     offered = set(options["embedding_profiles"]) & gguf
     assert offered == (gguf if offer else set()), name
     assert gguf <= set(options["embedding_metadata"]), "metadata, offered or not"
+    # the llm descriptors' describer is a GGUF model too
+    assert options["descriptors"] == (["c-tf-idf", "llm"] if offer else ["c-tf-idf"]), name
 
 
 @pytest.mark.parametrize(
@@ -740,31 +918,74 @@ async def test_a_write_naming_a_model_the_catalogue_lacks_stores_nothing(
 
 
 @pytest.mark.parametrize(
-    ("name", "body", "expected"),
+    ("name", "body", "llama_cpp", "expected"),
     [
         (
-            "the profile alone: hybrid search, reranked by the smallest cross-encoder",
+            "the profile alone: hybrid search, reranked by ettin-32m, c-TF-IDF descriptors",
             {"profile": "none"},
-            ("hybrid", "cross-encoder", "Xenova/ms-marco-MiniLM-L-6-v2"),
+            False,
+            ("hybrid", "cross-encoder", "cross-encoder/ettin-reranker-32m-v1", "c-tf-idf"),
         ),
         (
             "the search picked with it is stored as given, what it leaves out as no reranker",
             {
                 "profile": "none",
-                "search": {"mode": "fts", "reranker_model": "BAAI/bge-reranker-base"},
+                "search": {
+                    "mode": "fts",
+                    "reranker_model": "Alibaba-NLP/gte-reranker-modernbert-base",
+                },
             },
-            ("fts", "none", "BAAI/bge-reranker-base"),
+            False,
+            ("fts", "none", "Alibaba-NLP/gte-reranker-modernbert-base", "c-tf-idf"),
+        ),
+        (
+            "llm descriptors where llama.cpp runs: stored, and their describer downloads",
+            {**NO_MODELS, "descriptors": "llm"},
+            True,
+            ("hybrid", "none", "cross-encoder/ettin-reranker-32m-v1", "llm"),
         ),
     ],
 )
-async def test_init_stores_the_search_it_was_given(
-    client: AsyncTestClient, name: str, body: dict, expected: tuple[str, str, str]
+async def test_init_stores_what_was_picked(
+    client: AsyncTestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    body: dict,
+    llama_cpp: bool,
+    expected: tuple[str, str, str, str],
 ) -> None:
+    from haskie.indexing import embed
+
+    monkeypatch.setattr(gguf_models, "available", lambda: llama_cpp)
+    loaded: list[str] = []
+    monkeypatch.setattr(embed, "warm_generator", lambda name, accelerator: loaded.append(name))
+
     response = await client.post("/api/init", json=body)
 
     assert response.status_code == 201, f"{name}: {response.text}"
-    search = (await client.get("/api/settings")).json()["search"]
-    assert (search["mode"], search["reranker"], search["reranker_model"]) == expected, name
+    settings = (await client.get("/api/settings")).json()
+    search = settings["search"]
+    picked = (search["mode"], search["reranker"], search["reranker_model"])
+    assert (*picked, settings["pipeline"]["descriptors"]) == expected, name
+    if expected[-1] == "llm":
+        await wait_for(f"dl:describer:{gguf_models.DESCRIBER}")
+        assert loaded == [gguf_models.DESCRIBER], f"{name}: the first run starts its download"
+
+
+async def test_init_refuses_llm_descriptors_where_their_model_cannot_run(
+    client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without llama.cpp the describer runs nowhere, so the first run is refused whole: nothing
+    stored, and the page can be submitted again with c-TF-IDF."""
+    monkeypatch.setattr(gguf_models, "available", lambda: False)
+
+    response = await client.post("/api/init", json={**NO_MODELS, "descriptors": "llm"})
+
+    assert response.status_code == 422, response.text
+    assert gguf_models.DESCRIBER in response.json()["detail"]
+    assert (await client.get("/api/status")).json()["initialized"] is False
+    retried = await client.post("/api/init", json={**NO_MODELS, "descriptors": "c-tf-idf"})
+    assert retried.status_code == 201, retried.text
 
 
 async def test_the_first_run_starts_from_a_cross_encoder_and_then_reads_what_was_picked(
@@ -778,7 +999,7 @@ async def test_the_first_run_starts_from_a_cross_encoder_and_then_reads_what_was
 
     assert (before["reranker"], before["reranker_model"]) == (
         "cross-encoder",
-        "Xenova/ms-marco-MiniLM-L-6-v2",
+        "cross-encoder/ettin-reranker-32m-v1",
     ), "the smallest cross-encoder, by default"
     assert after["reranker"] == "none", "the pick, once there is one"
 
@@ -858,7 +1079,7 @@ async def test_import_by_path_copies_the_file(client: AsyncTestClient, tmp_path:
 async def test_a_failed_import_can_be_re_run(client: AsyncTestClient, tmp_path: Path) -> None:
     await client.post("/api/init", json=NO_MODELS)
     row = await stage_and_import(client, "guide.md", MD.encode())
-    await document.set_status(row["name"], DocumentStatus.ERROR, "converter fell over")
+    await document.set_status(await id_of(row["name"]), DocumentStatus.ERROR, "converter fell over")
 
     again = await client.post(f"/api/documents/{row['name']}/import")
 
@@ -870,34 +1091,37 @@ async def test_a_failed_import_can_be_re_run(client: AsyncTestClient, tmp_path: 
 # --- membership -----------------------------------------------------------------------
 
 
-async def test_an_upload_names_the_documents_it_repeats(
+async def test_an_upload_names_the_document_it_repeats(
     client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Staging names every document that already holds the same bytes, before anything is
-    imported. Once imported, `similar` names them again, and the nearest by document vector
-    under the embedding model; full-text only has no vectors to compare."""
+    """Staging names the document that already is these bytes, before anything is imported, and
+    the import is refused: the bytes are what a document is. `similar` names the nearest by
+    document vector under the embedding model; full-text only has no vectors to compare."""
     await client.post("/api/init", json=NO_MODELS)
-    await stage_and_import(client, "guide.md", MD.encode())
+    guide = await stage_and_import(client, "guide.md", MD.encode())  # the first: MD, unchanged
     await stage_and_import(client, "other.md", b"# Other\n\nsomething else entirely\n")
 
     staged = await client.post(
         "/api/documents/staging", files={"data": ("copy.md", MD.encode(), "text/markdown")}
     )
     assert staged.status_code == 201, staged.text
-    assert staged.json()["duplicates"] == ["guide.md"], "the same bytes, under another name"
-    await stage_and_import(client, "copy.md", MD.encode())
+    assert staged.json()["duplicate"] == "guide.md", "the same bytes, under another name"
+    refused = await client.post(
+        "/api/documents/import",
+        json={"staging_id": staged.json()["staging_id"], "name": "copy.md"},
+    )
+    assert refused.status_code == 409, refused.text
+    assert "this file is already imported as guide.md" in refused.text
 
-    similar = await client.get("/api/documents/copy.md/similar")
+    similar = await client.get("/api/documents/guide.md/similar")
 
     assert similar.status_code == 200, similar.text
-    assert similar.json() == {"identical": ["guide.md"], "nearest": []}, "no model, no vectors"
+    assert similar.json() == {"nearest": []}, "no model, no vectors"
 
-    asked: list[tuple[str, str, int, list[str]]] = []
+    asked: list[tuple[str, str, int]] = []
 
-    async def nearest(
-        doc: str, model: str, limit: int, but: list[str]
-    ) -> list[embed_cache.Neighbour]:
-        asked.append((doc, model, limit, but))
+    async def nearest(doc: str, model: str, limit: int) -> list[embed_cache.Neighbour]:
+        asked.append((doc, model, limit))
         return [embed_cache.Neighbour(document="other.md", similarity=0.42)]
 
     async def tiny(_settings: object) -> catalogue.EmbeddingModel:
@@ -905,14 +1129,11 @@ async def test_an_upload_names_the_documents_it_repeats(
 
     monkeypatch.setattr(catalogue, "embedding_model", tiny)
     monkeypatch.setattr(embed_cache, "nearest", nearest)
-    under_model = await client.get("/api/documents/copy.md/similar")
+    under_model = await client.get("/api/documents/guide.md/similar")
 
-    assert under_model.json() == {
-        "identical": ["guide.md"],
-        "nearest": [{"document": "other.md", "similarity": 0.42}],
-    }
+    assert under_model.json() == {"nearest": [{"document": "other.md", "similarity": 0.42}]}
     tiny_model = catalogue.EmbeddingModel("test/tiny", 4).cache_name
-    assert asked == [("copy.md", tiny_model, 3, ["guide.md"])], "the copies left out of the three"
+    assert asked == [(guide["id"], tiny_model, 3)], "asked by id, answered by name"
     assert (await client.get("/api/documents/ghost.md/similar")).status_code == 404
 
 
@@ -933,7 +1154,8 @@ async def test_attach_list_and_detach_a_member(
     assert (await client.get("/api/collections/notes")).json()["counts"]["indexed"] == 1
     assert (await client.get("/api/documents/guide.md/collections")).json() == ["notes"]
     cached = (await client.get("/api/documents/guide.md/embeddings")).json()
-    assert [entry["document"] for entry in cached] == ["guide.md"] * len(cached)
+    guide = (await client.get("/api/documents/guide.md")).json()
+    assert [entry["document_id"] for entry in cached] == [guide["id"]] * len(cached)
     assert cached, "indexing the member filled the document's embedding cache"
 
     in_notes = {"q": "lancedb", "collections": "notes"}
@@ -969,7 +1191,7 @@ async def test_attach_list_and_detach_a_member(
 
 
 async def test_one_document_serves_two_collections(client: AsyncTestClient) -> None:
-    """The point of the whole model: a document is imported once and held by many collections."""
+    """A document is imported once and held by many collections."""
     await client.post("/api/init", json=NO_MODELS)
     for name in ("alpha", "beta"):
         await client.post("/api/collections", json={"name": name})
@@ -1138,6 +1360,64 @@ async def test_a_name_whose_delete_still_runs_can_be_taken(
     ] == [], f"{claim}: the folder the delete moved aside is gone"
 
 
+@pytest.mark.parametrize(
+    ("change", "method", "path", "body", "expect", "not_expect"),
+    [
+        (
+            "create",
+            "POST",
+            "/api/collections",
+            {"name": "adr", "description": "ADRs."},
+            "adr: ADRs",
+            None,
+        ),
+        (
+            "describe",
+            "PUT",
+            "/api/collections/notes/description",
+            {"description": "Field notes."},
+            "notes: Field notes",
+            None,
+        ),
+        ("rename", "PUT", "/api/collections/notes/name", {"name": "journal"}, "journal", "notes"),
+        ("delete", "DELETE", "/api/collections/notes", None, "currently other", "notes"),
+    ],
+)
+async def test_a_collection_change_refreshes_every_installation(
+    client: AsyncTestClient,
+    tmp_path: Path,
+    change: str,
+    method: str,
+    path: str,
+    body: dict | None,
+    expect: str,
+    not_expect: str | None,
+) -> None:
+    """The skill and rule name the collections, so each change rewrites them where `install
+    claude` put them, in the background: the request never waits on it."""
+    await client.post("/api/init", json=NO_MODELS)
+    directory = claude_installed(tmp_path / "project" / ".claude")
+    await claude.record_installation(directory)
+    for name in ("notes", "other"):
+        await client.post("/api/collections", json={"name": name})
+    skill, rule = claude.skill_path(directory), claude.rule_path(directory)
+
+    async def names(text: str) -> bool:
+        return all(path.is_file() and text in path.read_text() for path in (skill, rule))
+
+    await until(lambda: names("notes; other"), "the creates reached the skill and rule")
+
+    response = await client.request(method, path, json=body)
+    assert response.status_code in (200, 201, 202), f"{change}: {response.text}"
+    if method == "DELETE":
+        await wait_for(response.json()["operation_id"])
+
+    await until(lambda: names(expect), f"{change}: the change reached the skill and rule")
+    if not_expect is not None:
+        assert f"{not_expect};" not in skill.read_text(), f"{change}: the old name is gone"
+        assert f"currently {not_expect}" not in rule.read_text(), f"{change}: the old name is gone"
+
+
 async def test_deleting_a_document_removes_it_from_every_collection(
     client: AsyncTestClient,
 ) -> None:
@@ -1221,6 +1501,77 @@ async def test_a_documents_own_bytes_are_served_sandboxed(
         assert nosniff == ("nosniff" if sandboxed else None), route
 
 
+async def test_a_documents_sections_and_their_descriptors(client: AsyncTestClient) -> None:
+    """The Sections tab reads the table of contents the import cut, in document order, each
+    section with its descriptors and the strategy that wrote them; nothing before a cache entry."""
+    await client.post("/api/init", json=NO_MODELS)
+    await stage_and_import(client, "guide.md", MD.encode())
+
+    found = (await client.get("/api/documents/guide.md/sections")).json()
+
+    assert found["described_by"] == "c-tf-idf"
+    assert [one["headings"] for one in found["sections"]] == [
+        [], ["Title"], ["Title", "Alpha"], ["Title", "Beta"],
+    ]  # fmt: skip
+    assert any(one["descriptors"] for one in found["sections"]), "described at import"
+    assert [one["line_start"] for one in found["sections"]] == sorted(
+        one["line_start"] for one in found["sections"]
+    ), "in document order"
+    settings = (await client.get("/api/settings")).json()
+    settings["conversion"]["chunk_size"] = 600
+    assert (await client.put("/api/settings", json=settings)).status_code == 200
+    newest = (await client.get("/api/documents/guide.md/sections")).json()
+    assert newest == found, "the default chunking has no entry: the newest one is read"
+    await embed_cache.forget(await id_of("guide.md"))
+    empty = (await client.get("/api/documents/guide.md/sections")).json()
+    assert empty == {"sections": [], "described_by": None}, "nothing cached, nothing to show"
+    missing = await client.get("/api/documents/ghost.md/sections")
+    assert missing.status_code == 404
+
+
+async def test_document_and_collection_covers(client: AsyncTestClient) -> None:
+    """A card's cover, always a low-poly JPEG seeded by the document's hash: of its cover page,
+    else of a gradient. A collection's is made of its first documents' covers by name: one alone,
+    two stacked from two or three, four in a grid from four on; empty, a gradient of its name."""
+    await client.post("/api/init", json=NO_MODELS)
+    names = ["a-notes.md", "b-paper.pdf", "c-notes.md", "d-notes.md", "e-notes.md"]
+    for name in names:
+        body = text_pdf(["Cover"]) if name.endswith(".pdf") else MD.encode()
+        await stage_and_import(client, name, body)
+    held = {"empty": [], "one": names[1:2], "three": names[:3], "five": names}
+    for collection, docs in held.items():
+        await client.post("/api/collections", json={"name": collection})
+        for doc in docs:
+            await attach_via_api(client, collection, doc)
+
+    page = await client.get("/api/documents/b-paper.pdf/cover")
+    assert page.headers["content-type"] == "image/jpeg"
+    paper = document.root(await id_of("b-paper.pdf")) / "original.pdf"
+    assert page.content == cover.draw(paper, await id_of("b-paper.pdf")), "its page, low-poly"
+    notes = await client.get("/api/documents/a-notes.md/cover")
+    assert notes.headers["content-type"] == "image/jpeg"
+    drawn = cover.low_poly(await id_of("a-notes.md"))
+    assert notes.content == drawn, "seeded by the document's hash"
+    again = await client.get("/api/documents/a-notes.md/cover")
+    assert (again.content, again.headers["cache-control"]) == (drawn, "no-cache")
+    assert (document.root(await id_of("b-paper.pdf")) / "cover.jpg").is_file(), "kept"
+
+    async def kept(docs: list[str]) -> list[Path]:
+        return [document.root(await id_of(doc)) / "cover.jpg" for doc in docs]
+
+    one = await client.get("/api/collections/one/cover")
+    assert one.content == cover.mosaic(await kept(names[1:2])), "one document: its cover alone"
+    three = await client.get("/api/collections/three/cover")
+    assert three.content == cover.mosaic(await kept(names[:2])), "three: the first two"
+    five = await client.get("/api/collections/five/cover")
+    assert five.headers["content-type"] == "image/jpeg"
+    assert five.content == cover.mosaic(await kept(names[:4])), "five: the first four"
+    empty = await client.get("/api/collections/empty/cover")
+    assert empty.content == cover.low_poly("empty")
+    for missing in ("/api/documents/ghost.md/cover", "/api/collections/ghost/cover"):
+        assert (await client.get(missing)).status_code == 404, missing
+
+
 @pytest.mark.parametrize(
     ("name", "params", "status", "text"),
     [
@@ -1301,7 +1652,7 @@ SEARCH_PATHS: dict[str, tuple[str, dict, str]] = {
     "explore chunks": ("/api/search/explore", {"granularity": "chunk"}, ""),
     "explore passages": ("/api/search/explore", {"granularity": "passage"}, ""),
     "excerpts": ("/api/search/excerpts", {}, "excerpts"),
-    "sources": ("/api/search/sources", {}, "documents"),
+    "sections": ("/api/search/sections", {}, "sections"),
     "text": ("/api/search/text", {}, "items"),
 }
 
@@ -1334,8 +1685,8 @@ async def test_a_document_on_its_way_out_answers_no_search(
     """A detach or a document delete answers once its removal is queued, and the rows stay in the
     table until it ran: a membership `removing` does not answer from that collection, and a
     document `deleting` from none. `guide.md` sits in both collections, so it still answers from
-    the one it is not leaving; `sources` lists every collection holding a document, and a
-    collection it is leaving does not hold it any more."""
+    the one it is not leaving; the map's `documents` list every collection holding a document,
+    and a collection it is leaving does not hold it any more."""
     await client.post("/api/init", json=NO_MODELS)
     for name in ("notes", "other"):
         await client.post("/api/collections", json={"name": name})
@@ -1344,9 +1695,9 @@ async def test_a_document_on_its_way_out_answers_no_search(
     for collection, name in (("notes", "guide.md"), ("other", "guide.md"), ("notes", "keep.md")):
         await attach_via_api(client, collection, name)
     if leaving == "guide.md removing from notes":
-        await Collection("notes").start_removal("guide.md")
+        await Collection("notes").start_removal(await id_of("guide.md"))
     elif leaving == "guide.md deleting":
-        await document.set_status("guide.md", DocumentStatus.DELETING)
+        await document.set_status(await id_of("guide.md"), DocumentStatus.DELETING)
 
     route, extra, key = SEARCH_PATHS[path]
     response = await client.get(
@@ -1355,20 +1706,23 @@ async def test_a_document_on_its_way_out_answers_no_search(
     assert response.status_code == 200, response.text
     results = response.json()[key] if key else response.json()
 
-    if path == "sources":
-        held = {(one, row["document"]) for row in results for one in row["collections"]}
+    assert {(row["collection"], row["document"]) for row in results} == found, f"{path}, {leaving}"
+    if path == "sections":
+        books = response.json()["documents"]
+        held = {(one, row["document"]) for row in books for one in row["collections"]}
         assert held == sources, f"{path}, {leaving}"
-    else:
-        assert {(row["collection"], row["document"]) for row in results} == found, (
-            f"{path}, {leaving}"
-        )
 
 
-async def test_documents_are_listed_with_their_collection_counts(ready: AsyncTestClient) -> None:
-    """The gallery says how many collections hold each document; a member of none says 0."""
+async def test_documents_are_listed_with_their_collections(ready: AsyncTestClient) -> None:
+    """The gallery names the collections holding each document, by name; a member of none has
+    none."""
+    await ready.post("/api/collections", json={"name": "archive"})
+    await ready.post("/api/collections/archive/documents", json={"document": "guide.md"})
+    held = ["archive", "notes"]
     items = (await ready.get("/api/documents")).json()["items"]
-    assert {row["name"]: row["collections"] for row in items} == {"guide.md": 1, "pending.md": 0}
-    assert (await ready.get("/api/documents/guide.md")).json()["collections"] == 1
+    listed = {row["name"]: row["collections"] for row in items}
+    assert listed == {"guide.md": held, "pending.md": []}
+    assert (await ready.get("/api/documents/guide.md")).json()["collections"] == held
 
 
 async def test_session_history_holds_every_action_newest_first(
@@ -1447,7 +1801,7 @@ async def test_session_history_holds_every_action_newest_first(
 
 async def _converted(name: str, markdown: str) -> None:
     """The markdown a conversion would have written: what an excerpt is widened against."""
-    (await document.get(name)).markdown.write_text(markdown)
+    (await document.named(name)).markdown.write_text(markdown)
 
 
 async def test_every_search_is_logged_with_what_it_returned(ready: AsyncTestClient) -> None:
@@ -1460,7 +1814,7 @@ async def test_every_search_is_logged_with_what_it_returned(ready: AsyncTestClie
         "/api/search/excerpts",
         params={"q": ["alpha body", "zebra stripes"], "context": "notes", "session_id": "s3"},
     )
-    await ready.get("/api/search/sources", params={"q": "alpha"})
+    await ready.get("/api/search/sections", params={"q": "alpha"})
     first = (await ready.get("/api/search/text", params={"q": "alpha", "page_size": 1})).json()
     assert first["next_cursor"] is not None, "one chunk, a page of one: the walk could go on"
     await ready.get(
@@ -1478,7 +1832,7 @@ async def test_every_search_is_logged_with_what_it_returned(ready: AsyncTestClie
         (log.Tool.EXCERPTS, "s3", 0),
         (log.Tool.EXPLORE, None, 1),
         (log.Tool.TEXT, None, 1),
-        (log.Tool.SOURCES, None, 1),
+        (log.Tool.SECTIONS, None, 1),
         (log.Tool.EXCERPTS, "s3", 1),
         (log.Tool.EXCERPTS, "s3", 1),
     ], "newest first, the second page left out"
@@ -1492,7 +1846,7 @@ async def test_every_search_is_logged_with_what_it_returned(ready: AsyncTestClie
     assert all(one.error is None for one in logged[1:])
     assert all(one.collections == ["notes"] and one.mode == "fts" for one in logged[1:])
     assert {one.actor for one in logged} == {"web"}
-    assert logged[-1].result_limit == 25, "the user default, resolved"
+    assert logged[-1].result_limit == flow.DEFAULT_EXCERPTS, "the excerpts' default, resolved"
     (result,) = (await log.top_results([logged[-1].id], 5))[logged[-1].id]
     assert (result.document, result.parent) == ("guide.md", None)
     history = (await ready.get("/api/sessions/s3/history")).json()
@@ -1557,9 +1911,9 @@ async def test_gaps_group_review_and_replay(ready: AsyncTestClient, tmp_path: Pa
     source = tmp_path / "zebra.md"
     source.write_text("# Zebra\n\nzebra stripes run across the flank\n")
     imported = await document.import_path(str(source))
-    await document.set_status(imported.name, DocumentStatus.IMPORTED)
-    await Collection("notes").add(imported.name)
-    await Collection("notes").set_member_status(imported.name, MemberStatus.INDEXED)
+    await document.set_status(imported.id, DocumentStatus.IMPORTED)
+    await Collection("notes").add(imported.id)
+    await Collection("notes").set_member_status(imported.id, MemberStatus.INDEXED)
     await seed_index("notes", imported.name, "zebra stripes run across the flank")
     await _converted(imported.name, "zebra stripes run across the flank\n")
     (closed,) = (await ready.post("/api/gaps/replay", json={"ids": [newest]})).json()
@@ -1628,13 +1982,13 @@ async def test_an_agent_reports_a_gap_on_a_question_it_asked(ready: AsyncTestCli
         )
         assert response.status_code == status and detail in response.text, (name, response.text)
 
-    await ready.get("/api/search/sources", params={"q": " alpha sources ", "session_id": "r1"})
-    sources = await ready.post(
+    await ready.get("/api/search/sections", params={"q": " alpha sections ", "session_id": "r1"})
+    mapped = await ready.post(
         "/api/gaps/report",
         params={"session_id": "r1"},
-        json={"question": " alpha sources ", "verdict": "insufficient"},
+        json={"question": " alpha sections ", "verdict": "insufficient"},
     )
-    assert sources.status_code == 200, "a sources question, passed back word for word"
+    assert mapped.status_code == 200, "a map's question, passed back word for word"
 
     async with db.connect() as conn:  # the search, asked just over an hour ago
         await conn.execute(update(searches).values(ts=time.time() - gaps.REPORT_WINDOW - 1))
@@ -1650,7 +2004,7 @@ async def test_an_agent_reports_a_gap_on_a_question_it_asked(ready: AsyncTestCli
     ("path", "params"),
     [
         ("/api/search/explore", {}),
-        ("/api/search/sources", {}),
+        ("/api/search/sections", {}),
         ("/api/search/text", {}),
     ],
 )
@@ -1715,7 +2069,7 @@ PASSAGE_MD = (
 async def _markdown_of(doc: str) -> str:
     """The converted markdown of an imported document, as it is on disk: what a chunk's
     `char_start` and `char_end` are offsets into, and what a passage is read from."""
-    row = await document.get(doc)
+    row = await document.named(doc)
     return (home.HOME / row.relative(row.markdown)).read_text(encoding="utf-8")
 
 
@@ -1742,8 +2096,8 @@ async def _member(collection: str, doc: str) -> None:
     """Make an imported document a member of a collection without running its index; the chunks
     are seeded by hand right after (as the `ready` fixture does with `seed_index`)."""
     found = await Collection.get(collection)
-    await found.add(doc)
-    await found.set_member_status(doc, MemberStatus.INDEXED)
+    await found.add(await id_of(doc))
+    await found.set_member_status(await id_of(doc), MemberStatus.INDEXED)
 
 
 async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
@@ -1794,10 +2148,10 @@ EXCERPT_STEPS = ["fold", "group", "budget", "probe_gaps", "fill", "quote", "rera
             {"Q1": [*RANKING_STEPS, "judge_thin"], "Q2": [*RANKING_STEPS, "judge_thin"]},
         ),
         (
-            "sources: the ranking, then documents",
-            "/api/search/sources",
+            "sections: the ranking, then the map",
+            "/api/search/sections",
             {"q": "lancedb"},
-            ["plan", *RANKING_STEPS, "shortlist"],
+            ["plan", *RANKING_STEPS, "map_sections"],
             {},
         ),
     ],
@@ -1848,7 +2202,7 @@ async def test_a_search_answers_with_the_time_each_step_took(
             {"q": ["lancedb", "how are rows retrieved"]},
             ["judge_thin", "fold", "group"],
         ),
-        ("sources", "/api/search/sources", {"q": "lancedb"}, ["shortlist"]),
+        ("sections", "/api/search/sections", {"q": "lancedb"}, ["map_sections"]),
     ],
 )
 async def test_a_search_answers_with_its_score_lineage(
@@ -1937,6 +2291,7 @@ async def test_an_excerpt_is_the_section_its_passages_share(client: AsyncTestCli
         "excerpts": [],
         "uncovered": [],
         "missing_terms": ["nothingmatchesthis"],
+        "searched": ["notes"],
     }, "no hits is an answer, not an error, and it says which words the sources lack"
 
 
@@ -2131,10 +2486,11 @@ async def test_a_collection_reads_the_rows_of_named_chunks(client: AsyncTestClie
     chunks = await _guide_with_a_lead_in(client)
     index = Collection("notes").index_with(None)
 
-    rows = await index.rows_at([("thin.md", 3), ("thin.md", 2), ("thin.md", 99)], vectors=True)
-    quoted = await index.rows_at([("o'brien.md", 1)], vectors=False)
+    thin = await id_of("thin.md")
+    rows = await index.rows_at([(thin, 3), (thin, 2), (thin, 99)], vectors=True)
+    quoted = await index.rows_at([("o'brien", 1)], vectors=False)
 
-    assert sorted((row["document"], row["seq"]) for row in rows) == [("thin.md", 2), ("thin.md", 3)]
+    assert sorted((row["document_id"], row["seq"]) for row in rows) == [(thin, 2), (thin, 3)]
     assert {row["seq"]: row["text"] for row in rows}[3] == chunks[2].text
     assert quoted == [], "a quote in a name is a literal, not the end of the filter"
     assert all("vector" not in row for row in rows), "a table without vectors has none to read"
@@ -2361,6 +2717,7 @@ async def test_several_questions_over_collections_since_deleted_find_nothing(
         "excerpts": [],
         "uncovered": [],
         "missing_terms": ["domain", "events", "carry", "change"],
+        "searched": [],
     }, "one question: no excerpts, and every word of it missing"
 
 
@@ -2384,20 +2741,25 @@ async def test_questions_a_search_cannot_run_are_refused_before_it_runs(
     assert message in response.text, name
 
 
-async def test_a_default_limit_below_the_questions_gives_each_a_slot(
+async def test_excerpts_default_to_ten_whatever_the_collections_limit(
     client: AsyncTestClient,
 ) -> None:
-    """The collection's own limit is below the questions asked: a caller who set no limit, as
-    Explore and an agent do, gets a slot for each question rather than a refusal."""
+    """A caller who set no limit, as Explore and an agent do, gets `DEFAULT_EXCERPTS`: the
+    collection's own `limit`, here below the questions asked, is for chunks and passages. Ten is
+    above the most questions one call may ask, so each still gets a slot."""
+    assert flow.DEFAULT_EXCERPTS >= aspects.MAX_QUESTIONS
     await _notes_on_aggregates(client)
     await client.put("/api/collections/ddd/overrides", json={"search": {"limit": 1}})
 
     response = await client.get(
-        "/api/search/excerpts", params={"q": [BY_IDENTITY, BY_EVENT], "collections": "ddd"}
+        "/api/search/excerpts",
+        params={"q": [BY_IDENTITY, BY_EVENT], "collections": "ddd", "session_id": "ten"},
     )
 
     assert response.status_code == 200, response.text
     assert len(response.json()["excerpts"]) >= 2, "one slot per question at least"
+    (logged,) = (await client.get("/api/searches", params={"session_id": "ten"})).json()
+    assert logged["result_limit"] == flow.DEFAULT_EXCERPTS
 
 
 async def test_the_mcp_tool_takes_one_question_or_several(api_client: AsyncTestClient) -> None:
@@ -2436,47 +2798,256 @@ async def _two_collections_sharing_a_document(client: AsyncTestClient) -> str:
     return markdown
 
 
-async def test_sources_fold_hits_to_documents_and_cover_them_with_collections(
+async def test_a_map_lists_the_documents_it_reached_and_covers_them_with_collections(
     client: AsyncTestClient,
 ) -> None:
-    """One row per document with the hot sections inside it, and the fewest collections a
-    follow-up search has to select to reach every row."""
+    """One row per document, whichever collections hold it, and the fewest collections a
+    follow-up search has to select to reach every section and document listed."""
     await _two_collections_sharing_a_document(client)
 
-    response = await client.get("/api/search/sources", params={"q": "lancedb"})
+    response = await client.get("/api/search/sections", params={"q": "lancedb"})
 
     assert response.status_code == 200, response.text
     found = response.json()
     rows = {row["document"]: row for row in found["documents"]}
     assert set(rows) == {"shared.md", "beta-only.md"}
     assert found["collections"] == ["beta"], "one collection holds both: the cover is one name"
+    assert found["searched"] == ["alpha", "beta"], "every collection, none chosen"
     shared = rows["shared.md"]
     assert shared["collections"] == ["alpha", "beta"], "every searched collection holding it"
     assert rows["beta-only.md"]["collections"] == ["beta"]
     assert shared["description"] == "the guide", "the document's own description, not a chunk's"
-    assert shared["chunks"] == 2, "the chunks that matched, not every chunk it has"
-    assert [section["header"] for section in shared["sections"]] == ["Guide > Retrieval"]
-    section = shared["sections"][0]
-    assert section["chunks"] == 2 and section["score"] > 0
-    assert section["location"].startswith("shared.md L"), "written to be cited"
-    # every chunk that matched sits under that one heading, so the two scores are the same fold
-    assert shared["score"] == section["score"]
+    assert shared["chunks"] == 2, "the chunks that matched, each counted once across collections"
+    row = await document.named("shared.md")
+    assert shared["markdown_file"] == str(home.HOME / row.relative(row.markdown)), "on disk"
+    picked = [one["document_id"] for one in found["sections"]]
+    assert {row["document_id"]: row["sections"] for row in found["documents"]} == {
+        row["document_id"]: picked.count(row["document_id"]) for row in found["documents"]
+    }, "each document counts the map's sections in it"
     scores = [row["score"] for row in found["documents"]]
     assert scores == sorted(scores, reverse=True), "best document first"
 
 
-async def test_sources_bound_their_limit_and_their_sections(client: AsyncTestClient) -> None:
-    await _two_collections_sharing_a_document(client)
+SAGAS_BOOK = """# Sagas
 
-    one = await client.get("/api/search/sources", params={"q": "lancedb", "limit": 1})
-    assert one.status_code == 200, one.text
-    assert len(one.json()["documents"]) == 1, "the shortlist is cut to the limit"
-    assert one.json()["collections"] == ["beta"], "the cover is of the documents returned"
+## Choreography
 
-    none = await client.get("/api/search/sources", params={"q": "lancedb", "sections": 0})
-    assert none.status_code == 422 and "sections must be 1..20, got 0" in none.text
-    too_many = await client.get("/api/search/sources", params={"q": "lancedb", "limit": 101})
-    assert too_many.status_code == 422 and "limit must be 1..100, got 101" in too_many.text
+In a choreographed saga every service listens for events and emits compensating events.
+Choreography keeps services loosely coupled: each compensating event undoes one step.
+
+## Orchestration
+
+An orchestrator tells each service which saga step to run and which compensation to call.
+The orchestrator holds the saga state, so a failed saga step triggers its compensation.
+
+# Replication
+
+## Leaders
+
+A single leader accepts every write and ships its replication log to the followers.
+Followers apply the leader log in order, so replication lag shows as stale reads.
+"""
+SAGAS_NOTE = """# Saga notes
+
+A saga is a sequence of local transactions; a failed saga step runs compensating steps.
+The compensating steps of a saga undo what the earlier steps did, one by one.
+"""
+
+
+async def _saga_shelf(client: AsyncTestClient) -> None:
+    """Two documents about sagas in one collection, indexed by the real pipeline, no model."""
+    await client.post("/api/init", json=NO_MODELS)
+    await client.post("/api/collections", json={"name": "notes"})
+    for name, body in (("book.md", SAGAS_BOOK), ("note.md", SAGAS_NOTE)):
+        await stage_and_import(client, name, body.encode())
+        await attach_via_api(client, "notes", name)
+
+
+async def test_sections_map_a_topic_with_what_each_section_is_about(
+    client: AsyncTestClient,
+) -> None:
+    """Full text only: sections by relevance, at most two of one document while another has
+    some left, each with its descriptors, cited by header and location, and the
+    collections to select."""
+    await _saga_shelf(client)
+
+    response = await client.get(
+        "/api/search/sections", params={"q": "saga compensation", "session_id": "m1"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert "map_sections" in response.headers["server-timing"]
+    found = response.json()
+    assert found["collections"] == ["notes"]
+    headers = [(one["document"], one["header"]) for one in found["sections"]]
+    assert set(headers) == {("book.md", "Sagas"), ("note.md", "Saga notes")}, (
+        "the section an excerpt would quote: the whole chapter fits; replication says nothing"
+    )
+    scores = [one["score"] for one in found["sections"]]
+    assert scores == sorted(scores, reverse=True), "without vectors: by relevance"
+    sagas = next(one for one in found["sections"] if one["document"] == "book.md")
+    assert sagas["depth"] == 1 and sagas["location"].startswith("book.md L")
+    assert sagas["chars"] > 0 and sagas["chunks"] >= 1
+    assert "compensating" in sagas["descriptors"], "its own, against the other chapter"
+    assert "saga" not in sagas["descriptors"], "not what its header says"
+    assert "distinct" not in sagas
+
+    searches = (await client.get("/api/searches", params={"session_id": "m1"})).json()
+    (logged,) = searches
+    assert logged["tool"] == "sections"
+    assert {one["header"] for one in logged["results"]} == {header for _, header in headers}
+
+
+async def _sections_of(document: str, collection: str) -> list[dict]:
+    """The sections of `document` as `collection` indexed it, each with its header: what a
+    search of that collection names by id. None where it holds no such document."""
+    doc = await id_of(document)
+    entry = (await Collection.indexed_entries([(collection, doc)])).get((collection, doc))
+    found = [] if entry is None else await embed_cache.read_sections(doc, entry)
+    return [msgspec.to_builtins(one) | {"header": one.header} for one in found]
+
+
+async def test_each_chunking_names_and_describes_its_own_sections(client: AsyncTestClient) -> None:
+    """One book in two collections chunked two ways: each collection's sections, ids and
+    descriptors come from its own chunking, in the map and in the document's sections alike."""
+    await _saga_shelf(client)
+    await client.post("/api/collections", json={"name": "raw"})
+    await client.put("/api/collections/raw/overrides", json={"chunker": "text", "chunk_size": 300})
+    await attach_via_api(client, "raw", "book.md")
+
+    for name in ("notes", "raw"):
+        found = await client.get(
+            "/api/search/sections", params={"q": "saga compensation", "collections": name}
+        )
+        book = next(one for one in found.json()["sections"] if one["document"] == "book.md")
+        by_id = {one["id"]: one for one in await _sections_of("book.md", name)}
+        assert by_id[book["id"]]["header"] == book["header"], f"{name}: the id names its section"
+        assert book["descriptors"] == by_id[book["id"]]["descriptors"], name
+        assert book["descriptors"], f"{name}: described"
+    notes, raw = [
+        {one["id"]: one["header"] for one in await _sections_of("book.md", name)}
+        for name in ("notes", "raw")
+    ]
+    assert any(raw.get(id) not in (None, header) for id, header in notes.items()), (
+        "the text chunking puts another section at one of the same places"
+    )
+
+    # new chunk settings, not indexed yet: the rows, and so the sections, are still the old ones
+    await client.put("/api/collections/raw/overrides", json={"chunker": "text", "chunk_size": 500})
+    kept = {one["id"]: one["header"] for one in await _sections_of("book.md", "raw")}
+    assert kept == raw, "the entry the rows were indexed from, not today's settings"
+    found = await client.get(
+        "/api/search/sections", params={"q": "saga compensation", "collections": "raw"}
+    )
+    book = next(one for one in found.json()["sections"] if one["document"] == "book.md")
+    assert book["descriptors"], "still described from the entry the collection indexed"
+    assert await _sections_of("note.md", "raw") == [], "a document raw does not hold"
+
+
+async def test_a_search_keeps_to_the_documents_and_sections_it_is_given(
+    client: AsyncTestClient,
+) -> None:
+    """Every search that takes a scope answers from inside it alone: `document_ids` by document,
+    `section_ids` by a section and the sections under it, and the two together by what both
+    allow. The ids are the ones the document's sections and the answers carry."""
+    await _saga_shelf(client)
+    book, note = await id_of("book.md"), await id_of("note.md")
+    listed = await _sections_of("book.md", "notes")
+    by_header = {one["header"]: one["id"] for one in listed}
+    sagas, orchestration = by_header["Sagas"], by_header["Sagas > Orchestration"]
+    question = {"q": "saga compensation step", "limit": 10}
+
+    async def excerpts(**scope) -> list[dict]:
+        found = await client.get("/api/search/excerpts", params={**question, **scope})
+        assert found.status_code == 200, found.text
+        return found.json()["excerpts"]
+
+    async def explore(granularity: str, **scope) -> list[dict]:
+        found = await client.get(
+            "/api/search/explore", params={**question, "granularity": granularity, **scope}
+        )
+        assert found.status_code == 200, found.text
+        return found.json()
+
+    everything = await excerpts()
+    assert {one["document"] for one in everything} == {"book.md", "note.md"}
+    assert all(ids.ID.fullmatch(one["section_id"]) for one in everything), "each names its section"
+    assert {one["document"] for one in await excerpts(document_ids=[note])} == {"note.md"}
+    chapter = await excerpts(section_ids=[sagas])
+    assert [(one["document"], one["header"]) for one in chapter] == [("book.md", "Sagas")], (
+        "the chapter kept to is one excerpt, as it is unscoped"
+    )
+    assert all(span["header"].startswith("Sagas") for one in chapter for span in one["spans"]), (
+        "a chapter holds its subsections"
+    )
+    within = await excerpts(section_ids=[orchestration])
+    assert [span["section_id"] for one in within for span in one["spans"]] == [orchestration], (
+        "the text an excerpt adds around a passage stays inside the section too"
+    )
+    assert await excerpts(document_ids=[note], section_ids=[sagas]) == [], "what both allow"
+
+    chunks = await explore("chunk", section_ids=[sagas])
+    assert chunks and all(sagas in hit["section_ids"] for hit in chunks)
+    passages = await explore("passage", document_ids=[book])
+    assert passages and {one["document"] for one in passages} == {"book.md"}
+    assert all(one["section_id"] in by_header.values() for one in passages)
+
+    mapped = await client.get(
+        "/api/search/sections", params={"q": "saga compensation", "document_ids": [note]}
+    )
+    assert {one["document"] for one in mapped.json()["sections"]} == {"note.md"}
+    (saga_notes,) = mapped.json()["sections"]
+    note_sections = await _sections_of("note.md", "notes")
+    assert saga_notes["id"] in {one["id"] for one in note_sections}
+
+    logged = (await client.get("/api/searches")).json()
+    assert [one["scoped"] for one in logged if one["tool"] == "excerpts"] == [True] * 4 + [False]
+    assert not [
+        asked
+        for topic in (await client.get("/api/gaps")).json()
+        for asked in topic["questions"]
+        if asked["signal"] == "empty"
+    ], "the search both scopes left empty is no gap: other documents answer it"
+
+
+@pytest.mark.parametrize(
+    ("name", "path", "params"),
+    [
+        ("a document name is no id", "/api/search/excerpts", {"document_ids": ["book.md"]}),
+        ("a hex MD5 is no base58 id", "/api/search/explore", {"section_ids": ["0" * 32]}),
+        ("too short", "/api/search/sections", {"document_ids": ["abc"]}),
+        ("0 is not a base58 digit", "/api/search/sections", {"document_ids": ["0" * 22]}),
+        (
+            "more than a search may keep to",
+            "/api/search/excerpts",
+            {"section_ids": ["a" * 22] * 101},
+        ),
+    ],
+)
+async def test_a_scope_of_what_is_no_id_is_refused(
+    client: AsyncTestClient, name: str, path: str, params: dict
+) -> None:
+    await _saga_shelf(client)
+
+    found = await client.get(path, params={"q": "saga", **params})
+
+    assert found.status_code == 422, f"{name}: {found.text}"
+
+
+async def test_sections_bound_their_limit(client: AsyncTestClient) -> None:
+    await _saga_shelf(client)
+
+    one = await client.get("/api/search/sections", params={"q": "saga", "limit": 1})
+    assert one.status_code == 200 and len(one.json()["sections"]) == 1
+    too_many = await client.get("/api/search/sections", params={"q": "saga", "limit": 41})
+    assert too_many.status_code == 422 and "limit must be 1..40, got 41" in too_many.text
+    nothing = (await client.get("/api/search/sections", params={"q": "zeppelin"})).json()
+    assert (nothing["sections"], nothing["documents"], nothing["collections"]) == ([], [], []), (
+        "no section is an answer"
+    )
+    await client.get("/api/search/sections", params={"q": "saga", "session_id": "map"})
+    (logged,) = (await client.get("/api/searches", params={"session_id": "map"})).json()
+    assert logged["result_limit"] == flow.DEFAULT_MAP == 15, "no limit: a map of fifteen"
 
 
 async def _scoped_collections(client: AsyncTestClient) -> None:
@@ -2518,7 +3089,7 @@ async def test_the_search_scope_is_the_names_then_the_session_then_everything(
     [
         ("/api/search/explore", None),
         ("/api/search/excerpts", "excerpts"),
-        ("/api/search/sources", "documents"),
+        ("/api/search/sections", "sections"),
     ],
 )
 async def test_every_search_rejects_a_collection_nobody_owns(
@@ -2537,15 +3108,17 @@ async def test_every_search_rejects_a_collection_nobody_owns(
 
 
 async def test_the_mcp_surface_offers_one_search_per_question(api_client: AsyncTestClient) -> None:
-    """Two tools for the two questions an agent has — what do the sources say, and which sources
-    are there. The searches the web UI drives stay REST-only, or an agent would have to choose
-    between three that answer with overlapping chunks."""
+    """Two tools for the two questions an agent has: what do the sources say, and where in which
+    sources does a topic live. The searches the web UI drives stay REST-only, or an agent would
+    have to choose between several that answer with overlapping chunks."""
     from litestar_mcp import LitestarMCP
 
     served = set(api_client.app.plugins.get(LitestarMCP).discovered_tools)
 
-    assert {"search_excerpts", "search_sources"} <= served
-    assert served.isdisjoint({"search", "search_text", "explore", "search_collection"})
+    assert {"search_excerpts", "search_sections"} <= served
+    assert served.isdisjoint(
+        {"search", "search_text", "explore", "search_collection", "search_sources"}
+    )
 
 
 @pytest.mark.parametrize("bias", [-1.0, 1.0])
@@ -2780,7 +3353,7 @@ async def test_an_unexpected_failure_answers_500_with_a_scrubbed_message(
 
     assert response.status_code == 500
     assert response.json()["detail"] == (
-        "RuntimeError: row unreadable: $HASKIE_HOME/documents/guide.md"
+        f"RuntimeError: row unreadable: $HASKIE_HOME/documents/{await id_of('guide.md')}"
     )
     assert str(home.HOME) not in response.text
     assert app_module.REQUEST_ID_HEADER in response.headers
@@ -2979,6 +3552,29 @@ async def test_lifespan_starts_and_destroys_dbos_on_every_run(
     assert leaked == [], f"threads outliving DBOS block interpreter exit: {leaked}"
 
 
+async def test_startup_refreshes_every_installation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, seeded_home: Path
+) -> None:
+    """A change a crash lost before its refresh, or a template an upgrade changed, reaches the
+    installations at the next start."""
+    await Collection.create("roasting", "Coffee.")
+
+    await until(
+        refresh_settled, "the create's own refresh ended"
+    )  # before the install it would write
+    directory = claude_installed(tmp_path / "project" / ".claude")
+    await claude.record_installation(directory)
+
+    async with AsyncTestClient(api_app(tmp_path, monkeypatch), base_url=LOOPBACK_URL) as client:
+        assert (await client.get("/api/status")).status_code == 200
+
+        async def rewritten() -> bool:
+            rule = claude.rule_path(directory)
+            return rule.is_file() and "roasting: Coffee" in rule.read_text()
+
+        await until(rewritten, "the startup refresh reached the rule")
+
+
 # --- S4: full-text search across collections ------------------------------------------
 
 TEXT_DOCS = 3  # documents per collection, one chunk each: six rows to merge and page over
@@ -3039,7 +3635,7 @@ async def test_text_search_spans_all_collections_by_default(client: AsyncTestCli
     scores = [h["score"] for h in page["items"]]
     assert scores == sorted(scores, reverse=True), "raw BM25, best first, across both collections"
 
-    row = await document.get("alpha-0.md")
+    row = await document.named("alpha-0.md")
     hit = next(h for h in page["items"] if h["document"] == "alpha-0.md")
     assert hit["markdown_path"] == row.relative(row.markdown), "the document's own file"
     assert hit["source_path"] == row.relative(row.original)

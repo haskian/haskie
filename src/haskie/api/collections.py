@@ -7,10 +7,10 @@ rows of this collection's index, never the document itself (see `collection/coll
 from typing import Annotated
 
 import msgspec
-from litestar import delete, get, post, put
+from litestar import Response, delete, get, post, put
 
 from haskie import audit, logs
-from haskie.api.common import PAGED, BulkStarted, Describe, SessionId
+from haskie.api.common import PAGED, BulkStarted, Describe, Rename, SessionId
 from haskie.catalogue import catalogue
 from haskie.collection.collection import (
     Collection,
@@ -19,6 +19,8 @@ from haskie.collection.collection import (
     Member,
     MemberStatus,
 )
+from haskie.document import cover
+from haskie.document import document as documents
 from haskie.indexing import models, workflows
 from haskie.paging import Page, PageRequest, one_of
 from haskie.search import session
@@ -31,10 +33,6 @@ from haskie.settings import (
 class CreateCollection(msgspec.Struct):
     name: str
     description: str = ""
-
-
-class Rename(msgspec.Struct):
-    name: str
 
 
 class AddDocument(msgspec.Struct):
@@ -77,7 +75,7 @@ async def delete_collection(collection: str) -> BulkStarted:
     """Queue the deletion: every index still running for this collection is cancelled first.
 
     Accepted, not done: cancelling a busy collection and removing its index takes as long as the
-    last running step, which is no time to hold a request open. Poll the operation for the outcome.
+    last running step, too long to hold a request open. Poll the operation for the outcome.
     The documents survive; only this collection's memberships and index go.
     """
     operation_id = await workflows.start_delete_collection(collection)
@@ -104,6 +102,16 @@ async def describe_collection(collection: str, data: Describe) -> CollectionInfo
     found = await Collection.get(collection)
     await found.describe(data.description)
     return await found.info()
+
+
+@get("/api/collections/{collection:str}/cover")
+async def get_collection_cover(collection: str) -> Response[bytes]:
+    """The picture behind the collection's card, as a JPEG: the cover of its first document by
+    name alone, the first two stacked when it holds two or three, the first four in a grid when it
+    holds four or more. An empty collection gets a low-poly gradient seeded by its name."""
+    found = await Collection.get(collection)
+    image = await cover.of_collection(await found.first_members(4), found.name)
+    return Response(image, media_type=cover.JPEG, headers=cover.FRESH)
 
 
 @put("/api/collections/{collection:str}/name")
@@ -142,10 +150,10 @@ async def list_collection_documents(
     """List the documents of one collection, one page at a time.
 
     Sort by name, size, status or updated_at; `status` keeps one membership state only (pending,
-    indexing, indexed, error, cancelled, removing) — how far this collection got writing the
-    document into its index, or taking it out again, which is not the document's own import
-    status. Pass the `next_cursor` of a
-    response back as `cursor` to continue; it is null on the last page.
+    indexing, indexed, error, cancelled, removing). A membership state says how far this
+    collection got writing the document into its index, or taking it out again. It is not the
+    document's own import status. Pass the `next_cursor` of a response back as `cursor` to
+    continue; it is null on the last page.
     """
     found = await Collection.get(collection)
     return await found.members_page(page, status)
@@ -171,7 +179,7 @@ async def add_document(
     """
     audit.attach(document=data.document)
     logs.bind(document=data.document)
-    operation_id = await workflows.attach(collection, data.document)
+    operation_id = await workflows.attach(collection, await documents.id_of(data.document))
     audit.attach(operation_id=operation_id)
     await session.record(
         session_id,
@@ -191,7 +199,7 @@ async def add_document(
 async def remove_document(collection: str, document: str, session_id: SessionId = None) -> None:
     """Take one document out of this collection: its rows here go, the document stays.
 
-    Queued, not waited out: the removal runs on the collection's single writer, behind any index
+    Queued, not done: the removal runs on the collection's single writer, behind any index
     write, compaction or index build already there. The membership reads `removing` from now on
     and is gone once its rows are; poll `list_collection_documents`. A removal that fails leaves
     it in `error`; detaching again retries it.
@@ -199,7 +207,7 @@ async def remove_document(collection: str, document: str, session_id: SessionId 
     Args:
         session_id: The conversation's id; the detach then shows in that session's history.
     """
-    await workflows.detach(collection, document)
+    await workflows.detach(collection, await documents.id_of(document))
     await session.record(
         session_id,
         session.Action.DETACH,
@@ -213,6 +221,7 @@ async def remove_document(collection: str, document: str, session_id: SessionId 
 async def index_collection_document(collection: str, document: str) -> BulkStarted:
     """(Re)index one member: chunk and embed it if the cache misses, then write it into this
     collection's index. Poll the operation for the outcome."""
-    operation_id = await workflows.start_index_collection_document(collection, document)
+    doc = await documents.id_of(document)
+    operation_id = await workflows.start_index_collection_document(collection, doc)
     audit.attach(operation_id=operation_id)
     return BulkStarted(operation_id=operation_id)

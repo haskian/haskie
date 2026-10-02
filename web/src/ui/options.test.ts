@@ -3,28 +3,28 @@ import type { EmbedderMetadata, EmbeddingModel } from '../api'
 import { count } from '../format'
 import { profileLabel, profileOptions } from './options'
 
-// bge-small as `/api/options` sends it: the model under `embedding_profiles`, its metadata apart
-const COMPACT: EmbeddingModel = {
-  name: 'BAAI/bge-small-en-v1.5',
+// granite-97m as `/api/options` sends it: the model under `embedding_profiles`, its metadata apart
+const GRANITE: EmbeddingModel = {
+  name: 'ibm-granite/granite-embedding-97m-multilingual-r2',
   dims: 384,
   accelerator: 'auto',
-  duplicate: { chunk: 0.92, passage: 0.95 },
-  profile: 'compact',
-  weak_match: 0.69,
-  answered_match: 0.775,
-  same_topic: 0.7,
+  duplicate: null,
+  profile: 'granite-97m-multilingual',
+  weak_match: 0.79,
+  answered_match: 0.885,
+  same_topic: 0.82,
   query_prefix: '',
   document_prefix: '',
-  matryoshka: null,
+  matryoshka: false,
 }
 const METADATA: EmbedderMetadata = {
-  description: 'Small and fast; a good default (~130 MB).',
-  parameters: 33360512,
-  context_tokens: 512,
-  languages: 'English',
-  license: 'MIT',
-  released: '2023-09-12',
-  model_card_url: 'https://huggingface.co/BAAI/bge-small-en-v1.5',
+  description: 'The best all-round small multilingual embedder: #1 on multilingual and reasoning retrieval; a good default (~390 MB).',
+  parameters: 97441152,
+  context_tokens: 32768,
+  languages: 'multilingual (200+, 52 enhanced)',
+  license: 'Apache-2.0',
+  released: '2026-04-20',
+  model_card_url: 'https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2',
   runtime: 'onnx',
   devices: ['cpu', 'apple_silicon', 'gpu'],
   dimensions: 384,
@@ -45,8 +45,8 @@ describe('count', () => {
 
 describe('profileLabel', () => {
   const cases: Array<{ name: string; model: EmbeddingModel | null; metadata: EmbedderMetadata | undefined; expected: string }> = [
-    { name: 'a model with its metadata: size and parameters', model: COMPACT, metadata: METADATA, expected: 'bge-small-en-v1.5 · Dim 384 · Param 33M' },
-    { name: 'a model whose metadata is missing: no parameters', model: COMPACT, metadata: undefined, expected: 'bge-small-en-v1.5 · Dim 384' },
+    { name: 'a model with its metadata: size and parameters', model: GRANITE, metadata: METADATA, expected: 'granite-embedding-97m-multilingual-r2 · Dim 384 · Param 97M' },
+    { name: 'a model whose metadata is missing: no parameters', model: GRANITE, metadata: undefined, expected: 'granite-embedding-97m-multilingual-r2 · Dim 384' },
     { name: 'full-text only', model: null, metadata: undefined, expected: 'full-text only' },
   ]
   for (const testCase of cases) {
@@ -56,11 +56,11 @@ describe('profileLabel', () => {
 
 describe('profileOptions', () => {
   test('each profile is described by its own metadata, and none by what it is', () => {
-    const options = profileOptions({ none: null, compact: COMPACT }, { compact: METADATA })
+    const options = profileOptions({ none: null, 'granite-97m-multilingual': GRANITE }, { 'granite-97m-multilingual': METADATA })
 
     expect(options).toEqual([
       { value: 'none', label: 'full-text only', sub: 'Full-text search only. No model download.' },
-      { value: 'compact', label: 'bge-small-en-v1.5 · Dim 384 · Param 33M', sub: METADATA.description },
+      { value: 'granite-97m-multilingual', label: 'granite-embedding-97m-multilingual-r2 · Dim 384 · Param 97M', sub: METADATA.description },
     ])
   })
 })

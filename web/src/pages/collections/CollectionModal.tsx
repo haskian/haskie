@@ -1,5 +1,5 @@
 import { Minus, Plus, RefreshCw, Trash2 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   api,
   MAX_PAGE_SIZE,
@@ -15,7 +15,7 @@ import { useOperation } from '../../hooks/useOperation'
 import { useOptions } from '../../hooks/useOptions'
 import { usePoll } from '../../hooks/usePoll'
 import { useRun } from '../../hooks/useRun'
-import { DescriptionBox, documentIcon, Kv, Modal, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
+import { DescriptionBox, documentIcon, Kv, Modal, RenameForm, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
 import { candidateDocuments } from './candidates'
 import { SettingsForm } from './SettingsForm'
 
@@ -62,7 +62,6 @@ function CollectionBody({
   const [options, setOptions] = useState<Options | null>(null)
   const [tab, setTab] = useState<string>(TABS[0].id)
   const [filter, setFilter] = useState('')
-  const [draftName, setDraftName] = useState(name)
 
   // what background work moves: the counts in the header, and how far each member got
   const refreshInfo = useCallback(
@@ -75,9 +74,13 @@ function CollectionBody({
       ),
     [name],
   )
-  // A document may be attached only once it is imported, so the other pane lists exactly those.
+  // A document may be attached only once it is imported, so the other pane lists exactly those,
+  // newest first: the one just imported is usually the one to add.
   const refreshImported = useCallback(
-    () => api.documents({ status: 'imported', page_size: MAX_PAGE_SIZE, sort: 'name' }).then((page) => setImported(page.items)),
+    () =>
+      api
+        .documents({ status: 'imported', page_size: MAX_PAGE_SIZE, sort: 'created_at', order: 'desc' })
+        .then((page) => setImported(page.items)),
     [],
   )
   // what a mutation re-reads: this collection, plus the gallery behind the modal
@@ -122,11 +125,10 @@ function CollectionBody({
 
   // Not through `run`: its re-read would ask for the old name. The route moves to the new one,
   // and the modal remounts there.
-  const rename = (event: FormEvent): void => {
-    event.preventDefault()
+  const rename = (to: string): void => {
     setError(null)
     api
-      .renameCollection(name, draftName.trim())
+      .renameCollection(name, to)
       .then(async (renamed) => {
         await onChanged()
         onRenamed(renamed.name)
@@ -142,8 +144,8 @@ function CollectionBody({
   )
   const shownCandidates = useMemo(() => candidates.filter((doc) => matchesText(needle, doc.name, doc.description)), [candidates, needle])
 
-  // Nothing to show until the collection answers — except why it did not, for a name that is
-  // in the hash but not in the home any more.
+  // Nothing to show until the collection answers. The one exception is why it did not answer,
+  // for a name that is in the hash but not in the home any more.
   if (info === null) return error === null ? null : <p className="muted collection-error">{error}</p>
 
   const index = info.index
@@ -204,6 +206,20 @@ function CollectionBody({
                         {doc.name}
                         <span className="sub">{doc.description || 'No description'}</span>
                       </span>
+                      {doc.collections.length > 0 && (
+                        <span className="also-in" tabIndex={0}>
+                          <span className="tag">
+                            <span className="kind">also in</span>
+                            <span>{doc.collections.length}</span>
+                          </span>
+                          {/* flipped: the tag sits at the pane's right edge */}
+                          <span className="hint hint-below flip" role="tooltip">
+                            {doc.collections.map((collection) => (
+                              <span key={collection}>{collection}</span>
+                            ))}
+                          </span>
+                        </span>
+                      )}
                       <button
                         className="btn btn-ghost"
                         type="button"
@@ -247,13 +263,7 @@ function CollectionBody({
       </div>
 
       <div id={TABS[3].id} role="tabpanel" className="modal-panel collection-panel" hidden={tab !== TABS[3].id}>
-        {/* A form, so Enter renames the way the browser already does it. */}
-        <form className="input-group" onSubmit={rename}>
-          <input className="input" aria-label="Collection name" value={draftName} onChange={(event) => setDraftName(event.target.value)} />
-          <button className="btn" type="submit" disabled={bulk.running || draftName.trim() === '' || draftName.trim() === name}>
-            Rename
-          </button>
-        </form>
+        <RenameForm key={name} name={name} label="Collection name" busy={bulk.running} onRename={rename} />
         <div className="split">
           <section className="pane">
             <span className="pane-head mono muted">Details</span>

@@ -2,7 +2,7 @@
 profiles a user picks from. It lives in the database (`models`, `embedding_profiles`), seeded once
 from `seed.sql`, so this module reads it and holds none of it.
 
-How a model loads stays in code: the pinned revisions in `embed`, `onnx_rerank`, `mlx_models` and
+How a model loads stays in code: the pinned revisions in `onnx_models`, `mlx_models` and
 `gguf_models` name reviewed code and weights, and a row cannot add a loader. Settings name a
 profile and a reranker model by key, and those keys are checked here, because a settings struct
 decodes without the database: at the write boundaries (`check`), and when the stored row is read
@@ -20,9 +20,15 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from haskie import db, home
 from haskie.errors import InvalidInput
-from haskie.indexing import hardware
+from haskie.indexing import gguf_models, hardware
 from haskie.indexing.hardware import Device, Runtime
-from haskie.settings import NO_EMBEDDING, Accelerator, CollectionOverrides, Reranker, UserSettings
+from haskie.settings import (
+    NO_EMBEDDING,
+    Accelerator,
+    CollectionOverrides,
+    Reranker,
+    UserSettings,
+)
 from haskie.tables import embedding_profiles, models, reranker_calibration
 
 
@@ -70,14 +76,6 @@ class DuplicateCosine(msgspec.Struct, frozen=True):
     passage: float  # mean vector to mean vector: means are smoother, so they run higher
 
 
-class Matryoshka(msgspec.Struct, frozen=True):
-    """A model trained so that the first values of its vector are a vector of their own
-    (Matryoshka Representation Learning): its vectors are cut to `EmbeddingModel.dims`, then
-    normalized again, which makes the index and every comparison smaller for a small loss."""
-
-    layer_norm: bool = False  # nomic's recipe: layer-normalize the whole vector before the cut
-
-
 class EmbeddingModel(msgspec.Struct):
     name: str
     dims: int  # of the vectors stored and searched: the model's own, or its Matryoshka cut
@@ -92,19 +90,22 @@ class EmbeddingModel(msgspec.Struct):
     # at and over it a best match is an answer; between the two bars it is borderline
     answered_match: float | None = None
     same_topic: float | None = None
-    # What the model was trained to read ahead of a query and of a passage (e5's "query: ",
-    # nomic's "search_query: "); empty for models that need none. They shape every vector, so
+    # What the model was trained to read ahead of a query and of a passage (e5's "query: " and
+    # "passage: "); empty for models that need none. They shape every vector, so
     # changing one is changing the model. The document prefix is part of `cache_name`, so the
     # cached vectors it shaped are not served after it changes.
     query_prefix: str = ""
     document_prefix: str = ""
-    matryoshka: Matryoshka | None = None
+    # A model trained so that the first values of its vector are a vector of their own
+    # (Matryoshka Representation Learning): its vectors are cut to `dims`, then normalized again,
+    # which makes the index and every comparison smaller for a small loss.
+    matryoshka: bool = False
 
     @property
     def cache_name(self) -> str:
         """What the embedding cache keys this model's vectors by: everything that shapes a stored
-        vector. Its name and size are readable; the document prefix and the Matryoshka recipe
-        are hashed. The query prefix, the accelerator and the thresholds shape no stored vector,
+        vector. Its name and size are readable; the document prefix and the Matryoshka cut are
+        hashed. The query prefix, the accelerator and the thresholds shape no stored vector,
         so changing them keeps the cache."""
         shaping = msgspec.json.encode([self.document_prefix, self.matryoshka])
         return f"{self.name}@{self.dims}:{hashlib.sha256(shaping).hexdigest()[:12]}"
@@ -126,7 +127,7 @@ _PROFILE = (
     embedding_profiles.c.dims,
     embedding_profiles.c.query_prefix,
     embedding_profiles.c.document_prefix,
-    embedding_profiles.c.matryoshka_layer_norm,
+    embedding_profiles.c.matryoshka,
     embedding_profiles.c.duplicate_chunk,
     embedding_profiles.c.duplicate_passage,
     embedding_profiles.c.weak_match,
@@ -153,7 +154,7 @@ def _model(row: Row[Any]) -> tuple[str, EmbeddingModel]:
         dims,
         query_prefix,
         document_prefix,
-        layer_norm,
+        matryoshka,
         chunk,
         passage,
         weak_match,
@@ -170,7 +171,7 @@ def _model(row: Row[Any]) -> tuple[str, EmbeddingModel]:
         same_topic=same_topic,
         query_prefix=query_prefix,
         document_prefix=document_prefix,
-        matryoshka=None if layer_norm is None else Matryoshka(layer_norm=bool(layer_norm)),
+        matryoshka=bool(matryoshka),
     )
 
 
@@ -262,7 +263,8 @@ async def unknown(conn: AsyncConnection, settings: UserSettings | CollectionOver
         missing.append(f"unknown embedding profile: {profile}")
     reranker = settings.search.reranker_model
     if reranker is not None and not await _exists(
-        conn, select(models.c.name).where(models.c.name == reranker, models.c.kind == "reranker")
+        conn,
+        select(models.c.name).where(models.c.name == reranker, models.c.kind == "reranker"),
     ):
         missing.append(f"unknown reranker model: {reranker}")
     return "; ".join(missing)
@@ -274,7 +276,8 @@ async def _exists(conn: AsyncConnection, statement: Select[Any]) -> bool:
 
 async def check(settings: UserSettings | CollectionOverrides) -> None:
     """Reject settings that name a profile or a reranker model the catalogue does not hold, or
-    user settings whose hardware setting leaves a model they use nowhere to run. Only here, where
+    user settings whose hardware setting leaves a model they use nowhere to run, the describer
+    of `Descriptors.LLM` among them. Only here, where
     settings are written: a stored row that no longer runs still loads, and its model reports why.
     """
     async with db.read() as conn:
@@ -293,6 +296,8 @@ async def _stranded(settings: UserSettings) -> str:
         used.append((await embedders())[settings.embedding].name)
     if settings.search.reranker != Reranker.NONE:
         used.append(settings.search.reranker_model)
+    if describer := gguf_models.describer(settings.pipeline.descriptors):
+        used.append(describer)
     return "; ".join(
         hardware.nowhere(name) for name in used if hardware.device(name, accelerator) is None
     )

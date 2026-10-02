@@ -149,7 +149,7 @@ def _ranked_high(span: HitRange, tops: list[list[HitRange]]) -> set[int]:
 def _overlaps(one: HitRange, other: HitRange) -> bool:
     """Whether two ranges of one document share a chunk."""
     first, second = one.hits[0], other.hits[0]
-    if (first.collection, first.document) != (second.collection, second.document):
+    if (first.collection, first.document_id) != (second.collection, second.document_id):
         return False
     return one.seq_start <= other.seq_end and other.seq_start <= one.seq_end
 
@@ -209,10 +209,10 @@ def tagged(
     was picked with.
 
     The fold keeps one of the picks as each result and lists others under it, so every place is
-    looked up by the chunks it covers - picks never overlap, so those are unique.
+    looked up by the chunks it covers. Picks never overlap, so those are unique.
     """
     by_place = {
-        _place(pick.span.hits[0].collection, pick.span.hits[0].document, pick.span): (
+        _place(pick.span.hits[0].collection, pick.span.hits[0].document_id, pick.span): (
             pick.questions | pick.ranked_high
         )
         for pick in picks
@@ -220,16 +220,16 @@ def tagged(
 
     def answered(one: HitRange) -> list[str]:
         first = one.hits[0]
-        parts = set(by_place[_place(first.collection, first.document, one)])
+        parts = set(by_place[_place(first.collection, first.document_id, one)])
         for place in _walk(one.also_in):
-            parts |= by_place.get(_place(place.collection, place.document, place), set())
+            parts |= by_place.get(_place(place.collection, place.document_id, place), set())
         return [labels[part] for part in sorted(parts)]
 
     by_label = dict(zip(labels, scans, strict=True))
 
     def keys(one: HitRange) -> list[ChunkKey]:
         return [chunk_key(hit) for hit in one.hits] + [
-            (place.collection, place.document, seq)
+            (place.collection, place.document_id, seq)
             for place in _walk(one.also_in)
             for seq in range(place.seq_start, place.seq_end + 1)
         ]
@@ -274,9 +274,9 @@ def question_scores(
 
 
 def _place(
-    collection: str, document: str, span: HitRange | PassageReference
+    collection: str, document_id: str, span: HitRange | PassageReference
 ) -> tuple[str, str, int, int]:
-    return (collection, document, span.seq_start, span.seq_end)
+    return (collection, document_id, span.seq_start, span.seq_end)
 
 
 def _walk(references: list[PassageReference]) -> Iterator[PassageReference]:

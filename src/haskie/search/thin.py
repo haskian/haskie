@@ -13,7 +13,7 @@ short passage inside a section with another passage stays in that section's exce
 range with a section end on both sides is a whole section, a short note say, not a piece of one:
 it is kept as the author wrote it.
 
-"Matches" is measured, not assumed: `retrieval.fill_thin` scores the neighbours the way it scores
+"Matches" is measured: `retrieval.fill_thin` scores the neighbours the way it scores
 the scanned hits (the reranker, the query vector, or the question's words), and values each
 around them (`fill.value`): 0 as good as the median scanned hit, 1 as good as the best. The
 floor is this search's own, so no calibrated threshold is needed. With `fill_values = absolute`
@@ -70,9 +70,9 @@ def around(hit_ranges: list[HitRange], min_chars: int, grow: int) -> set[ChunkKe
         first, last = hit_range.hits[0], hit_range.hits[-1]
         for step in range(1, grow + 1):
             if first.start_reason != CutReason.HEADING and first.seq - step >= 1:
-                wanted.add((first.collection, first.document, first.seq - step))
+                wanted.add((first.collection, first.document_id, first.seq - step))
             if not ends_section(last):
-                wanted.add((last.collection, last.document, last.seq + step))
+                wanted.add((last.collection, last.document_id, last.seq + step))
     return wanted
 
 
@@ -158,8 +158,8 @@ def _settled(hit_range: HitRange, offered: set[ChunkKey]) -> HitRange:
         return hit_range
     first, last = hit_range.hits[0], hit_range.hits[-1]
     beside = {
-        (first.collection, first.document, first.seq - 1),
-        (last.collection, last.document, last.seq + 1),
+        (first.collection, first.document_id, first.seq - 1),
+        (last.collection, last.document_id, last.seq + 1),
     }
     return msgspec.structs.replace(hit_range, owed=False, alone=not beside & offered)
 

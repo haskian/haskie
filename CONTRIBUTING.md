@@ -33,6 +33,7 @@ mise run dev     # API and MCP on :8452 with reload, Vite on :8453
 | `dist` | `build`, then the wheel and sdist into `dist/` |
 | `smoke` | install the built wheel in a fresh venv, check the CLI, and that one `haskie run` serves the web UI, the REST API and MCP |
 | `clean-run` | destroy `~/haskie-dev` (asks first), reinstall the fresh build, run it on a clean home |
+| `reload` | `build`, then restart the haskie serving `~/haskie-dev` on :8452, so it serves this checkout's UI and backend |
 | `install-dev` | build, then install this checkout as the `haskie-dev` command, which always uses `~/haskie-dev` and port 8452 |
 | `calibrate-rerankers` | `sample` writes this home's searched questions and their chunks ranked 10 to 30 to `eval/candidates.jsonl`; after you copy one borderline chunk a question into `eval/borderline.jsonl`, `measure --model NAME [--write]` sets each reranker's floor and score curve (`haskie.catalogue.calibrate`) |
 | `calibrate-gaps` | `sample` writes this home's logged questions with their best cosines and near misses to `eval/gap-questions.jsonl`; after you mark each `answered` true or false, `measure --profile NAME [--write]` sets its `weak_match` and `answered_match` (`haskie.catalogue.calibrate_gaps`) |
@@ -60,17 +61,17 @@ Timing knobs are module constants, not variables (`workflows.OPERATION_POLL`,
 
 | decision | why | details |
 | --- | --- | --- |
-| One handler serves REST and MCP (`litestar-mcp`) | One contract, one test surface. A handler marked `mcp_tool=` becomes a tool | [REST API](docs/rest-api.md) |
+| One handler serves REST and MCP (`litestar-mcp`) | One contract, one test surface. A handler marked `mcp_tool=` becomes a tool. The search tools are twins that answer with fewer fields (`api/agent.py`): what an agent reads costs tokens | [REST API](docs/rest-api.md) |
 | MCP over HTTP, not stdio | One server serves the UI, the API and every client at once. litestar-mcp speaks MCP `2026-07-28`, which replaced `initialize` with `server/discover` | [MCP](docs/mcp.md) |
 | `msgspec` for every model | Fast, strict decoding at the trust boundary. The same types generate the OpenAPI document | `api/`, `settings.py` |
 | Frontend types generated from OpenAPI | One source of truth for the contract. `check` fails on drift | [REST API](docs/rest-api.md) |
 | SQLite in WAL mode, through SQLAlchemy Core on `aiosqlite` | A single-user app needs no database server. One connection per unit of work, so none is ever shared. Core tables are the one source of the schema: the DDL is generated from them, and queries name columns through them | [Storage](docs/storage.md) |
 | LanceDB, one table per collection | Embedded, on local disk, vector and full-text search in one table. One writer per collection keeps writes simple | [Storage](docs/storage.md) |
 | DBOS on the same SQLite file | Durable, resumable, cancellable work with no broker or extra server | [Indexing](docs/indexing.md) |
-| Model catalogue in SQLite, loaders in code | A model card edit is a row, not a release. A row cannot add reviewed code, so loaders and their pinned revisions stay in `indexing/`. A test keeps the two in step | [Storage](docs/storage.md) |
+| Model catalogue in SQLite, loaders in code | A model card edit is a row, not a release. A row cannot add reviewed code, so loaders and their pinned revisions stay in `indexing/`. A test keeps the two in step. The descriptor generator (`gguf_models.GENERATORS`) has no row: nobody picks it, one setting names one model, and its facts sit in that setting's text | [Storage](docs/storage.md) |
 | Embedding cache keyed by everything the vectors depend on | A document is chunked and embedded once per distinct setting, however many collections share it | [Documents and collections](docs/documents-and-collections.md) |
 | Structure-Aware Chunking, no overlap | Chunks follow the author's sections and paragraphs. The heading path gives the context an overlap would | [Chunking](docs/chunking.md) |
-| Rank fusion across collections | Scores from two indexes are not comparable. Ranks are | [Search](docs/search.md) |
+| Several collections ranked as one table | Each retriever (vector, BM25) is ranked over all of them, then fused. Fusing one ranking per collection gave each an equal share of the scan | [Search](docs/search.md) |
 | Near-duplicates folded after ranking | A pointwise reranker cannot see repeats. Folding keeps the citation and frees the slot | [Search](docs/search.md) |
 | One CPU budget for all work | Indexing never takes the whole machine. The UI stays responsive | [Runtime](docs/runtime.md) |
 | Exclusive lock on the home | One home is one SQLite file and one set of queues. Two servers would take each other's work | [Architecture](docs/architecture.md) |

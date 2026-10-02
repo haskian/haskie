@@ -1,12 +1,14 @@
 import { describe, expect, test } from 'bun:test'
-import { pageQuery, parseScoreLineage, parseServerTiming, type Hit, type ScoreStep, type Passage, type SearchScope, type Source, type StepTiming } from '../api'
+import { pageQuery, parseScoreLineage, parseServerTiming, type Hit, type ScoreStep, type Passage, type SearchScope, type StepTiming } from '../api'
 import { cite, position, seqLabel, type Match } from '../ui/match'
 import { questionsOf } from './explore/questions'
 import { parseScope, scopeParams, type Scope } from './explore/scope'
 
 const HIT: Hit = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area-lights.pdf',
+  id: 'c1', section_id: 's-soft', section_ids: ['s-doc', 's-soft'],
   source_path: 'documents/area-lights.pdf',
   markdown_path: 'markdown/area-lights.md',
   part: 0,
@@ -33,27 +35,12 @@ const HIT: Hit = {
   also_in: [],
 }
 
-const SOURCE: Source = {
-  collection: 'A–E',
-  document: 'area-lights.pdf',
-  score: 0.91,
-  chunks: 7,
-  description: 'Notes on area lights and soft shadow falloff.',
-  header: 'Lighting > Soft shadows',
-  location: 'lines 41–58',
-  text: 'Area lights soften the shadow edge in proportion to their size.',
-  source_file: '/Users/ada/.haskie/documents/area-lights.pdf',
-  markdown_file: '/Users/ada/.haskie/markdown/area-lights.md',
-  line_start: 41,
-  line_end: 58,
-  collections: ['A–E'],
-  sections: [{ header: 'Lighting > Soft shadows', score: 0.91, chunks: 7, line_start: 41, line_end: 58, location: 'area-lights.pdf p.2 L41-58' }],
-}
-
 const PASSAGE: Passage = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area-lights.pdf',
   header: 'Lighting > Soft shadows',
+  section_id: 's-soft',
   location: 'area-lights.pdf p.2 L41-58',
   seq_start: 4,
   seq_end: 6,
@@ -108,7 +95,6 @@ describe('position', () => {
     { name: 'a chunk with no pages is its chunk alone', value: { ...HIT, page_start: null, page_end: null }, expected: 'chunk 4' },
     { name: 'a passage reads as its page, its lines and its chunks', value: PASSAGE, expected: 'p. 2 · lines 41–58 · chunks 4–6' },
     { name: 'a passage of one line and one chunk, without pages', value: { ...PASSAGE, line_end: 41, seq_end: 4, page_start: null, page_end: null }, expected: 'line 41 · chunk 4' },
-    { name: 'a source has only lines', value: SOURCE, expected: 'lines 41–58' },
   ]
   for (const testCase of cases) {
     test(testCase.name, () => {
@@ -122,7 +108,6 @@ describe('seqLabel', () => {
     { name: 'a hit is its own sequence number', value: HIT, expected: '4' },
     { name: 'a passage over several chunks is the run', value: PASSAGE, expected: '4–6' },
     { name: 'a passage of one chunk is that number alone', value: { ...PASSAGE, seq_end: 4 }, expected: '4' },
-    { name: 'a source shows no quote, so no number', value: SOURCE, expected: '' },
   ]
   for (const testCase of cases) {
     test(testCase.name, () => {

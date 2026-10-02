@@ -1,38 +1,30 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api, type Document, type Similar } from '../../api'
 import { errorText } from '../../format'
 import { useOptions } from '../../hooks/useOptions'
 import { usePoll } from '../../hooks/usePoll'
 import { href } from '../../router'
-import { documentIcon } from '../../ui'
+import { documentIcon, Info } from '../../ui'
 
 const link = (name: string) => <a href={href({ name: 'documents', document: name })}>{name}</a>
 const suffixOf = (name: string) => name.slice(name.lastIndexOf('.'))
 
-/** The documents holding the very same file, each a link, and what that means for the reader. */
-export function Duplicates({ names, advice = '' }: { names: string[]; advice?: string }) {
+/** The document a staged file already is, as a link: the file is not imported again. */
+export function Duplicate({ name }: { name: string }) {
   return (
     <p className="notice">
-      The same file is already imported as{' '}
-      {names.map((name, at) => (
-        <Fragment key={name}>
-          {at > 0 && ', '}
-          {link(name)}
-        </Fragment>
-      ))}
-      .{advice && ` ${advice}`}
+      The same file is already imported as {link(name)}. It is not imported again.
     </p>
   )
 }
 
-/** What a document may repeat: the same file under other names, then the nearest by content.
- *  Each name opens that document. */
+/** What a document may repeat: the documents nearest by content, each name opening it. The
+ *  same file is never imported twice, so there are no identical ones to list. */
 export function SimilarDocuments({ similar }: { similar: Similar }) {
   return (
     <>
-      {similar.identical.length > 0 && <Duplicates names={similar.identical} />}
       {similar.nearest.length === 0 ? (
-        <p className="muted">Nothing to compare with: no other document has a vector under the current embedding model.</p>
+        <Info>Nothing to compare with: no other document has a vector under the current embedding model.</Info>
       ) : (
         <ul className="list">
           {similar.nearest.map((one) => {

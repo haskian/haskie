@@ -1,7 +1,8 @@
 """Document routes: the two-phase intake, the listing, the delete, and the two preview panes.
 
-Every route here is collection-independent: a document is imported once, under a name that never
-changes, and which collections hold it is a membership the collection routes manage.
+Every route here is collection-independent: a document is imported once, and which collections
+hold it is a membership the collection routes manage. A route addresses a document by its name,
+fixed at import.
 """
 
 from collections.abc import AsyncIterator
@@ -21,14 +22,15 @@ from litestar.response import File, Stream
 from haskie import audit, cpu, logs
 from haskie.api.common import PAGED, BulkStarted, Describe, SessionId
 from haskie.catalogue import catalogue
-from haskie.document import convert, render
+from haskie.document import convert, cover, render
 from haskie.document import document as documents
 from haskie.document.document import Document, DocumentStatus, ImportOptions, Staged
 from haskie.errors import InvalidInput, NotFound
 from haskie.indexing import embed_cache, workflows
 from haskie.paging import Page, PageRequest, one_of
 from haskie.search import session
-from haskie.settings import load_user_settings
+from haskie.sections import build
+from haskie.settings import Descriptors, load_user_settings
 
 
 class ImportRequest(ImportOptions):
@@ -39,14 +41,21 @@ class ImportRequest(ImportOptions):
 
 
 class Similar(msgspec.Struct):
-    """What a document may repeat: the same file imported under other names, and the documents
-    whose content lies closest to it."""
+    """What a document may repeat: the documents whose content lies closest to it. The same file
+    is never imported twice, as its bytes are what a document is."""
 
-    identical: list[str]  # the same bytes (`md5`), in name order
     nearest: list[embed_cache.Neighbour]  # empty until it is imported, or with no embedding model
 
 
 NEAREST = 3  # enough to spot a second edition, few enough to read at a glance
+
+
+class Sections(msgspec.Struct):
+    """A document's sections in document order, each with what it is about, as one chunking cut
+    them, and the strategy that wrote their descriptors (None before they are described)."""
+
+    sections: list[build.Section]
+    described_by: Descriptors | None
 
 
 class Head(msgspec.Struct):
@@ -86,8 +95,8 @@ async def stage_document(
     """Upload a file and keep it until it is imported. Nothing is committed here: no name, no
     document row. Call `import_document` with the returned `staging_id` to commit it.
 
-    `duplicates` names the documents that already hold these exact bytes: importing the file
-    again only adds a copy."""
+    `duplicate` names the document these bytes already are, if any: the bytes are the document,
+    so importing them again is refused with 409."""
     content = await data.read()
     upload = Path(data.filename)
     audit.attach(name=upload.name, size=len(content), suffix=upload.suffix.lower())
@@ -99,9 +108,11 @@ async def stage_document(
 async def import_document(data: ImportRequest, session_id: SessionId = None) -> Document:
     """Import a staged upload (`staging_id`) or a local file by absolute path (`path`).
 
-    The name is fixed here and never changes: `name` renames the document, but the original
-    suffix is kept because it decides how the document is parsed. Returns the document at status
-    `queued`; convert and embed then run in the background, so poll `get_document` for `imported`.
+    `name` names the document, else the file does. The name is stored in lowercase-kebab-case
+    (`My Notes` becomes `my-notes.md`), with the original suffix, which decides how it is
+    parsed: address the document by the `name` of the returned row from then on. Returns the
+    document at status `queued`; convert and embed then run in the background, so poll
+    `get_document` for `imported`.
 
     Args:
         session_id: The conversation's id; the import and its operation then show in that session.
@@ -116,7 +127,7 @@ async def import_document(data: ImportRequest, session_id: SessionId = None) -> 
         raise InvalidInput("give either staging_id or path")
     audit.attach(document=row.name, size=row.size)
     logs.bind(document=row.name)
-    operation_id = await workflows.start_import(row.name)
+    operation_id = await workflows.start_import(row)
     audit.attach(operation_id=operation_id)
     await session.record(session_id, session.Action.IMPORT, row.name, operation_id=operation_id)
     return row
@@ -126,11 +137,11 @@ async def import_document(data: ImportRequest, session_id: SessionId = None) -> 
 async def list_documents(
     page: PageRequest, status: Annotated[DocumentStatus | None, one_of(DocumentStatus)] = None
 ) -> Page[documents.Listed]:
-    """List every imported document, one page at a time, with how many collections hold each.
+    """List every imported document, one page at a time, with the collections holding each.
 
-    Sort by name, size, status or updated_at; `status` keeps one lifecycle state only (queued,
-    converting, embedding, imported, error, cancelled, deleting). Pass the `next_cursor` of a
-    response back as `cursor` to continue; it is null on the last page.
+    Sort by name, size, status, created_at or updated_at; `status` keeps one lifecycle state only
+    (queued, converting, embedding, imported, error, cancelled, deleting). Pass the `next_cursor`
+    of a response back as `cursor` to continue; it is null on the last page.
     """
     found = await documents.page(page, status)
     return Page(
@@ -142,9 +153,9 @@ async def list_documents(
 
 @get("/api/documents/{document:str}", mcp_tool="get_document")
 async def get_document(document: str) -> documents.Listed:
-    """One document: its import status, its size, what it is said to be, and how many collections
-    hold it."""
-    (found,) = await documents.listed([await documents.get(document)])
+    """One document: its import status, its size, what it is said to be, and the collections
+    holding it."""
+    (found,) = await documents.listed([await documents.named(document)])
     return found
 
 
@@ -157,7 +168,7 @@ async def delete_document(document: str) -> BulkStarted:
     Accepted, not done: each collection's index is cleaned on its own partition, which takes as
     long as the work already queued there. Poll the operation for the outcome.
     """
-    operation_id = await workflows.start_delete_document(document)
+    operation_id = await workflows.start_delete_document(await documents.named(document))
     audit.attach(operation_id=operation_id)
     return BulkStarted(operation_id=operation_id)
 
@@ -172,7 +183,7 @@ async def reimport_document(document: str) -> BulkStarted:
     race it. A queued document is let through: the deduplication returns the import already queued
     for it.
     """
-    operation_id = await workflows.start_import(document)
+    operation_id = await workflows.start_import(await documents.named(document))
     audit.attach(operation_id=operation_id)
     return BulkStarted(operation_id=operation_id)
 
@@ -180,31 +191,44 @@ async def reimport_document(document: str) -> BulkStarted:
 @get("/api/documents/{document:str}/collections")
 async def list_document_collections(document: str) -> list[str]:
     """Which collections hold this document, in name order."""
-    await documents.get(document)  # NotFound rather than an empty list for a name nobody owns
-    return await documents.collections_of(document)
+    # NotFound rather than an empty list for a name nobody owns
+    return await documents.collections_of(await documents.id_of(document))
 
 
 @get("/api/documents/{document:str}/embeddings")
 async def list_document_embeddings(document: str) -> list[embed_cache.Entry]:
     """What the embedding cache holds for this document: one entry per distinct chunk settings
     and embedding model, shared by every collection that indexes it with them."""
-    await documents.get(document)
-    return await embed_cache.entries(document)
+    return await embed_cache.entries(await documents.id_of(document))
 
 
 @get("/api/documents/{document:str}/similar")
 async def similar_documents(document: str) -> Similar:
-    """The documents this one may repeat: identical files, and the three others nearest by the
-    mean vector of their chunks under the current embedding model."""
-    row = await documents.get(document)
-    identical = await documents.identical(row.md5, but=row.name)
+    """The three documents nearest to this one by the mean vector of their chunks under the
+    current embedding model: a second edition, a near copy."""
+    row = await documents.named(document)
     model = await catalogue.embedding_model(await load_user_settings())
-    nearest = (
-        []
-        if model is None
-        else await embed_cache.nearest(row.name, model.cache_name, NEAREST, but=identical)
+    nearest = [] if model is None else await embed_cache.nearest(row.id, model.cache_name, NEAREST)
+    return Similar(nearest=nearest)
+
+
+@get("/api/documents/{document:str}/sections")
+async def document_sections(document: str) -> Sections:
+    """The document's table of contents with each section's descriptors. Read from the cache
+    entry the import warmed, under the default chunk settings; else the newest entry; empty before
+    any is cached."""
+    row = await documents.named(document)
+    user = await load_user_settings()
+    model = await catalogue.embedding_model(user)
+    default = embed_cache.key(embed_cache.params(row, user.conversion.chunking, model))
+    cached = [one.id for one in await embed_cache.entries(row.id)]
+    cache_id = default if default in cached else next(iter(cached), None)
+    if cache_id is None:
+        return Sections(sections=[], described_by=None)
+    return Sections(
+        sections=await embed_cache.read_sections(row.id, cache_id),
+        described_by=await embed_cache.described_by(row.id, cache_id),
     )
-    return Similar(identical=identical, nearest=nearest)
 
 
 # A document's own bytes are served on haskie's origin, where an HTML or SVG file would run its
@@ -220,7 +244,7 @@ def _untrusted_headers(is_pdf: bool) -> dict[str, str]:
 
 @get("/api/documents/{document:str}/source")
 async def get_source(document: str) -> File:
-    row = await documents.get(document)
+    row = await documents.named(document)
     # named after the document, not the stored `original.*`: the name is what the media type is
     # guessed from, and what a browser that saves it calls the file
     return File(
@@ -241,7 +265,7 @@ PREVIEW_MEDIA = {
 @get("/api/documents/{document:str}/preview")
 async def get_preview(document: str) -> File:
     """Left pane: original (pdf cut to first pages, image, text) or HTML stand-in for office."""
-    info, preview = await documents.ensure_preview(document)
+    info, preview = await documents.ensure_preview(await documents.named(document))
     media = PREVIEW_MEDIA.get(preview.kind)
     return File(
         path=info.preview_dir / "source",
@@ -252,11 +276,19 @@ async def get_preview(document: str) -> File:
     )
 
 
+@get("/api/documents/{document:str}/cover")
+async def get_cover(document: str) -> File:
+    """The picture behind the document's card, as a JPEG: its cover page, else a low-poly picture
+    seeded by its id. Drawn by haskie, never the document's own bytes."""
+    path = await cover.of_document(await documents.named(document))
+    return File(path=path, media_type=cover.JPEG, headers=cover.FRESH)
+
+
 @get("/api/documents/{document:str}/markdown")
 async def get_markdown(document: str, full: bool = False) -> Stream:
     """Right pane, as NDJSON: one `head` line, then one `page` line per page of HTML.
 
-    Streamed because a full text is one lump otherwise - a 1200-page book renders to megabytes,
+    Streamed because otherwise a full text is one lump. A 1200-page book renders to megabytes,
     and the pane could show nothing until all of it had arrived and been parsed. Rendered on the
     server because the browser then inserts HTML instead of parsing markdown, and because raw HTML
     has to be dropped somewhere it cannot be forgotten (see `render`).
@@ -264,7 +296,7 @@ async def get_markdown(document: str, full: bool = False) -> Stream:
     `full=true` is the whole converted text; the default is the preview (only the first pages of a
     PDF).
     """
-    info, preview = await documents.ensure_preview(document)
+    info, preview = await documents.ensure_preview(await documents.named(document))
     path = anyio.Path(info.markdown if full else info.preview_dir / "preview.md")
     if not await path.exists():
         raise NotFound(f"document not imported yet: {document}")
@@ -305,7 +337,7 @@ async def get_lines(document: str, line_start: int, line_end: int) -> Lines:
             f"lines must be 1 <= line_start <= line_end, at most {MAX_LINES} of them; "
             f"got {line_start}-{line_end}"
         )
-    info = await documents.get(document)
+    info = await documents.named(document)
     try:
         raw = await anyio.to_thread.run_sync(_read_lines, info.markdown, line_start, line_end)
     except FileNotFoundError as missing:
@@ -320,12 +352,12 @@ async def describe_document(
 ) -> Document:
     """Replace what the document is said to be. Empty clears it.
 
-    The description is what `search_sources` returns beside each document, so it is worth writing
+    The description is what `search_sections` returns beside each document, so it is worth writing
     for anything an agent is expected to choose between.
 
     Args:
         session_id: The conversation's id; the change then shows in that session's history.
     """
-    described = await documents.describe(document, data.description)
+    described = await documents.describe(await documents.id_of(document), data.description)
     await session.record(session_id, session.Action.DESCRIBE, document)
     return described

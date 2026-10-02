@@ -4,12 +4,12 @@ The table holds the chunks of every document of the collection, as rows read out
 document's embedding cache (`indexing/embed_cache.py`): a document that sits in several
 collections is chunked and embedded once per distinct chunk settings and written into each
 collection's table from that cache. The table is therefore a per-collection view, never the only
-copy of anything — dropping it (`reset_for_write`) and refilling it from the cache is what
+copy of anything. Dropping it (`reset_for_write`) and refilling it from the cache is what
 "Index all" does.
 
 Every table access is awaited: LanceDB's async API (`lancedb.connect_async`, `AsyncTable`) runs on
-its own tokio runtime, so nothing here blocks the event loop that called it. The pure parts —
-Arrow encoding, scoring, row-to-`Hit` — stay sync.
+its own tokio runtime, so nothing here blocks the event loop that called it. The pure parts
+(Arrow encoding, scoring, row-to-`Hit`) stay sync.
 
 Write and read paths differ on purpose: only the index stage of a document may drop an
 outdated table (`reset_for_write`), every other write no-ops on one, and a read never creates a
@@ -33,6 +33,7 @@ from lancedb.index import FTS, IvfPq
 
 from haskie import cpu
 from haskie.catalogue.catalogue import EmbeddingModel
+from haskie.document import document
 from haskie.indexing import models
 from haskie.indexing.chunk import HEADING_SEP, Chunk, CutReason, Position, framed
 from haskie.indexing.chunk import record as chunk_record
@@ -40,16 +41,42 @@ from haskie.logs import get_logger
 from haskie.settings import Fusion, SearchMode, SearchSettings, load_user_settings
 
 # Where a row sits in one collection's table: what `rows_at` reads it back by.
-RowKey = tuple[str, int]  # (document, seq)
+RowKey = tuple[str, int]  # (document id, seq)
 # One chunk as a search result: the collection too, since two collections may chunk one document
 # with different settings and each numbers its own `seq` (`search.passage.ranges`).
-ChunkKey = tuple[str, str, int]  # (collection, document, seq)
+ChunkKey = tuple[str, str, int]  # (collection, document id, seq)
 # What identifies one chunk's text, wherever it is stored. The collection is deliberately not part
 # of it: the same span of the same document is the same answer, whichever collection's table it
 # came out of, so `search.retrieval.fan_out` and `search.text.merge` both count it once. The `seq`
 # is not part of it either: two chunk settings number one span differently, and give one `seq`
 # other text.
-SpanKey = tuple[str, int, int]  # (document, char_start, char_end)
+SpanKey = tuple[str, int, int]  # (document id, char_start, char_end)
+
+
+class Scope(msgspec.Struct, frozen=True):
+    """Which rows a search may answer from: those of these documents, and those in these sections
+    or any section under them, each by id and each only when given. Empty narrows nothing."""
+
+    document_ids: frozenset[str] = frozenset()
+    section_ids: frozenset[str] = frozenset()
+
+    @property
+    def narrows(self) -> bool:
+        return bool(self.document_ids or self.section_ids)
+
+    def clauses(self) -> list[str]:
+        """The scope as LanceDB filters, one per part given. A section is matched through
+        `section_ids`, every section a chunk sits in, so a chapter holds its subsections' chunks."""
+        found: list[str] = []
+        if self.document_ids:
+            found.append(f"document_id IN {_listed(self.document_ids)}")
+        if self.section_ids:
+            listed = ", ".join(_quoted_all(self.section_ids))
+            found.append(f"array_has_any(section_ids, [{listed}])")
+        return found
+
+
+EVERYTHING = Scope()  # the scope of a search that asks for no narrowing
 
 
 class Row(msgspec.Struct):
@@ -59,7 +86,10 @@ class Row(msgspec.Struct):
     vector: list[float] | None = None
     # 1-based position among the document's chunks, numbered by `embed_cache._merge`: the parts
     # are chunked independently, so nothing before the merge sees the whole document in order.
+    # The merge names the chunk and its sections too (`sections.build`).
     seq: int = 0
+    id: str = ""  # the chunk's own id
+    section_ids: list[str] = []  # every section that holds it, the whole document first
 
 
 TABLE = "chunks"
@@ -68,11 +98,17 @@ _log = get_logger(__name__)
 
 PLAIN_SCHEMA = pa.schema(
     [
-        ("document", pa.string()),
+        # `Document.id`: what the rows are kept and found by. The name a hit cites is not stored:
+        # a rename would have to rewrite every table, so `gather_rows` reads it for each search
+        ("document_id", pa.string()),
         ("source_path", pa.string()),  # relative to the haskie home (portable)
         ("markdown_path", pa.string()),
         ("part", pa.int32()),
         ("seq", pa.int32()),
+        ("id", pa.string()),  # `Row.id`: the chunk's own id
+        # `Row.section_ids`: every section that holds it, the whole document first, so a search
+        # filtered to a section finds the chunks of the sections under it too (`Scope`)
+        ("section_ids", pa.list_(pa.string())),
         ("line_start", pa.int32()),
         ("line_end", pa.int32()),
         ("char_start", pa.int32()),
@@ -152,7 +188,8 @@ class HitReference(msgspec.Struct):
     and moved under it with everything folded into it."""
 
     collection: str
-    document: str
+    document_id: str
+    document: str  # its name, what it is cited by
     seq: int  # 1-based position among the document's chunks
     header: str
     location: str
@@ -170,7 +207,8 @@ class Hit(msgspec.Struct):
     """One matching chunk with everything needed to cite or open it."""
 
     collection: str  # the collection whose table matched; the document itself belongs to none
-    document: str
+    document_id: str  # `Document.id`: what a search keys a hit by
+    document: str  # its name, what a hit is cited by
     source_path: str  # original upload, relative to home
     markdown_path: str  # full converted markdown, relative to home
     part: int  # micro-batch that produced the chunk
@@ -197,21 +235,25 @@ class Hit(msgspec.Struct):
     end_reason: CutReason = CutReason.EDGE
     # Absolute, built by `hit` from the index's own home rather than stored: the index keeps its
     # paths home-relative so a home stays portable. These are what a tool outside the app opens or
-    # greps - `line_start`/`line_end` are lines in `markdown_file`.
+    # greps. `line_start`/`line_end` are lines in `markdown_file`.
     source_file: str = ""
     markdown_file: str = ""
     also_in: list[HitReference] = []  # the near-duplicates folded into this hit, a tree
+    id: str = ""  # the chunk's own id (`sections.build`)
+    section_id: str = ""  # the deepest section that holds it
+    section_ids: list[str] = []  # every section that holds it, the whole document first
 
 
 def chunk_key(hit: "Hit") -> ChunkKey:
     """Which chunk a hit is, as a search keys it."""
-    return (hit.collection, hit.document, hit.seq)
+    return (hit.collection, hit.document_id, hit.seq)
 
 
 def location(
-    doc: str, page_start: int | None, page_end: int | None, line_start: int, line_end: int
+    document: str, page_start: int | None, page_end: int | None, line_start: int, line_end: int
 ) -> str:
-    """The citation of one span of a document: "doc p.3-4 L10-20", pages only for a PDF.
+    """The citation of one span of the document named `document`: "guide.pdf p.3-4 L10-20",
+    pages only for a PDF.
 
     Shared so a passage (`passage.quote`) cites in exactly the format a chunk does.
     """
@@ -220,7 +262,7 @@ def location(
         pages = f" p.{page_start}"
         if page_end != page_start:
             pages += f"-{page_end}"
-    return f"{doc}{pages} L{line_start}-{line_end}"
+    return f"{document}{pages} L{line_start}-{line_end}"
 
 
 # `schema_current` opens the table and reads its Arrow schema, and the read path asks for every
@@ -243,6 +285,11 @@ _schema_lock = threading.Lock()
 EMBEDDING_KEY = b"haskie.embedding"
 
 
+def vector_field(dims: int) -> pa.Field:
+    """The column every table that stores vectors holds them in: `dims` float32s per row."""
+    return pa.field("vector", pa.list_(pa.float32(), dims))
+
+
 def forget_schema(path: Path) -> None:
     """Drop the cached `schema_current` answers for one index directory."""
     directory = str(path)
@@ -257,9 +304,7 @@ def _fusion(settings: SearchSettings):
     from lancedb.rerankers import LinearCombinationReranker, RRFReranker
 
     if settings.fusion == Fusion.LINEAR:
-        total = settings.vector_weight + settings.bm25_weight
-        weight = settings.vector_weight / total if total > 0 else 0.5
-        return LinearCombinationReranker(weight=weight)
+        return LinearCombinationReranker(weight=settings.vector_share)
     return RRFReranker(K=settings.rrf_k)
 
 
@@ -271,6 +316,7 @@ class CollectionIndex:
         home: Path,
         embedding: EmbeddingModel | None,
         leaving: frozenset[str] = frozenset(),
+        scope: Scope = EVERYTHING,
     ) -> None:
         """Sync and IO-free: opening the table is what `_existing` / `_for_write` do, awaited."""
         self.path = path
@@ -278,8 +324,10 @@ class CollectionIndex:
         self.home = home  # stored paths are relative to it (see Document.relative)
         self.embedding = embedding
         # the documents on their way out of the collection when a search opened this index
-        # (`collection.LEAVING`): no search read answers with their rows (see `_excluding`)
+        # (`collection.LEAVING`): no search read answers with their rows (see `_scoped`)
         self.leaving = leaving
+        # the rows a search asked to answer from (`Scope`): every search read keeps to them
+        self.scope = scope
         self._conn: lancedb.AsyncConnection | None = None  # one connection per index instance
         self._cached: lancedb.AsyncTable | None = None  # one handle per index instance
 
@@ -376,11 +424,10 @@ class CollectionIndex:
             return False
         return (schema.metadata or {}).get(EMBEDDING_KEY) == self.embedding.cache_name.encode()
 
-    def _schema(self) -> Any:
+    def _schema(self) -> pa.Schema:
         if self.embedding is None:
             return PLAIN_SCHEMA
-        vector = pa.field("vector", pa.list_(pa.float32(), self.embedding.dims))
-        return PLAIN_SCHEMA.append(vector).with_metadata(
+        return PLAIN_SCHEMA.append(vector_field(self.embedding.dims)).with_metadata(
             {EMBEDDING_KEY: self.embedding.cache_name.encode()}
         )
 
@@ -391,16 +438,17 @@ class CollectionIndex:
         return table if table is not None and await self.schema_current() else None
 
     async def delete_document(self, doc: str) -> None:
+        """Drop every row of one document, by its id."""
         table = await self._deletable()
         if table is not None:
-            await table.delete(f"document = {_quoted(doc)}")
+            await table.delete(f"document_id = {quoted(doc)}")
 
     async def delete_parts(self, doc: str, start: int, end: int) -> None:
         """Drop the parts `[start, end)` of one document, leaving every other part alone."""
         table = await self._deletable()
         if table is not None:
             await table.delete(
-                f"document = {_quoted(doc)} and part >= {int(start)} and part < {int(end)}"
+                f"document_id = {quoted(doc)} and part >= {int(start)} and part < {int(end)}"
             )
 
     async def add_parts(
@@ -446,11 +494,13 @@ class CollectionIndex:
                 row.chunk,
                 row.vector,
                 dims,
-                document=doc,
+                document_id=doc,
                 source_path=source_path,
                 markdown_path=markdown_path,
                 part=part,
                 seq=row.seq,
+                id=row.id,
+                section_ids=row.section_ids,
                 **{FTS_COLUMN: framed(row.chunk.frame, row.chunk.text)},
             )
             for row in rows
@@ -510,8 +560,8 @@ class CollectionIndex:
         """Compact fragments, fold new rows into every index, and drop versions older than `keep`.
 
         `keep` is a grace period, not a deadline: a reader that opened the table before this call
-        keeps reading the version it opened, so pruning it out from under them must not be
-        possible. No-op when there is no table."""
+        keeps reading the version it opened, so that version must not be pruned while it reads.
+        No-op when there is no table."""
         table = await self._existing()
         if table is not None:
             await table.optimize(cleanup_older_than=keep)
@@ -572,17 +622,23 @@ class CollectionIndex:
         settings: SearchSettings,
         limit: int,
         vectors: bool = True,
+        fused: bool = True,
     ) -> list[dict]:
         """Retrieval only: at most `limit` raw LanceDB rows, neither cut to `settings.limit` nor
         rescored by a cross-encoder.
 
-        `vector` is None for a lexical query; a table without a vector column
-        falls back to full text whatever the caller passed, so one collection of a session can lack
-        the embedding the others have. A hybrid query always fuses over at least
-        `settings.candidates` rows, because the fusion is only as good as its candidate pool.
+        `vector` is None for a lexical query; a table without a vector column falls back to full
+        text whatever the caller passed, so one collection of a session can lack the embedding the
+        others have. A hybrid query always fuses over at least `settings.candidates` rows, because
+        the fusion is only as good as its candidate pool.
 
         `vectors` False leaves the vector column out of a lexical read, for a caller that only
         wants the chunks: the probe for missing words (`search.retrieval.probe_gaps`).
+
+        `fused` False answers a hybrid query's two halves unfused, up to `limit` rows each: the
+        nearest with their `_distance`, the best by BM25 with their `_score`. What a search of
+        several collections ranks over all of them at once (`search.retrieval.fan_out`), since one
+        query embedding makes their distances comparable.
 
         A table with rows and no full-text index yet, a collection in the middle of its first
         index, answers what it can: LanceDB refuses any full-text query without the index, so a
@@ -594,12 +650,16 @@ class CollectionIndex:
         if vector is None or not await self.has_vector_column():
             return await self._lexical(table, query, limit, vectors)
         if settings.mode == SearchMode.VECTOR or not await self.has_index(FTS_COLUMN):
-            found = _tuned(await table.search(vector, query_type="vector"), settings)
-            found = _excluding(found, self.leaving)
-            return _rows(await found.limit(limit).to_arrow())
+            return await self._nearest(table, vector, settings, limit)
+        if not fused:
+            near, words = await asyncio.gather(
+                self._nearest(table, vector, settings, limit),
+                self._lexical(table, query, limit, vectors),
+            )
+            return [*near, *words]
         # the async API builds a hybrid query out of its two halves instead of `query_type=hybrid`
         hybrid = table.query().nearest_to(vector).nearest_to_text(query)
-        hybrid = _excluding(hybrid, self.leaving)
+        hybrid = self._scoped(hybrid)
         return _rows(
             await _tuned(hybrid, settings)
             .limit(max(settings.candidates, limit))
@@ -607,26 +667,31 @@ class CollectionIndex:
             .to_arrow()
         )
 
+    async def _nearest(
+        self, table: lancedb.AsyncTable, vector: list[float], settings: SearchSettings, limit: int
+    ) -> list[dict]:
+        found = self._scoped(_tuned(await table.search(vector, query_type="vector"), settings))
+        return _rows(await found.limit(limit).to_arrow())
+
     async def fts_rows(self, query: str, limit: int) -> list[dict]:
         """Lexical retrieval alone: at most `limit` BM25 rows, whatever this index could answer
-        with, none of them of a document `leaving` (see `_excluding`). `[]` when it cannot
-        answer one at all — no table, no rows, or no full-text index yet, which is what a
-        collection in the middle of its first index looks like.
-
-        LanceDB refuses a full-text query without the index rather than scanning, so a
-        collection still building its index answers nothing here, as it does in `search_rows`.
-        """
+        with, none of them of a document `leaving` and all of them in `scope` (see `_scoped`). `[]`
+        when it cannot answer one at all: no table, no rows, or no full-text index yet, which is
+        what a collection in the middle of its first index looks like. LanceDB refuses a full-text
+        query without the index rather than scanning, so a collection still building its index
+        answers nothing here, as it does in `search_rows`."""
         table = await self._readable()
         return [] if table is None else await self._lexical(table, query, limit)
 
     async def _lexical(
         self, table: lancedb.AsyncTable, query: str, limit: int, vectors: bool = True
     ) -> list[dict]:
-        """At most `limit` BM25 rows of a readable table, none of a document `leaving`, and
-        without the vector column when `vectors` is False. `[]` without the full-text index."""
+        """At most `limit` BM25 rows of a readable table, of `scope` and none of a document
+        `leaving`, and without the vector column when `vectors` is False. `[]` without the full-text
+        index."""
         if not await self.has_index(FTS_COLUMN):
             return []
-        found = _excluding(await table.search(query, query_type="fts"), self.leaving)
+        found = self._scoped(await table.search(query, query_type="fts"))
         if not vectors:
             found = found.select([*PLAIN_SCHEMA.names, "_score"])
         return _rows(await found.limit(limit).to_arrow())
@@ -635,32 +700,51 @@ class CollectionIndex:
         """The stored rows of these chunks, in no order: what a search reads to look at the
         neighbours of a chunk it matched. Their vectors only when `vectors` says the search can
         compare them. `[]` when there is nothing readable."""
-        by_document: dict[str, set[int]] = {}
+        by_document_id: dict[str, set[int]] = {}
         for doc, seq in keys:
-            by_document.setdefault(doc, set()).add(seq)
+            by_document_id.setdefault(doc, set()).add(seq)
         table = await self._readable()
-        if table is None or not by_document:
+        if table is None or not by_document_id:
             return []
         wanted = " OR ".join(
-            f"(document = {_quoted(doc)} AND seq IN ({', '.join(map(str, sorted(seqs)))}))"
-            for doc, seqs in sorted(by_document.items())
+            f"(document_id = {quoted(doc)} AND seq IN ({', '.join(map(str, sorted(seqs)))}))"
+            for doc, seqs in sorted(by_document_id.items())
         )
+        wanted = self._within(wanted)
         columns = PLAIN_SCHEMA.names + (
             ["vector"] if vectors and await self.has_vector_column() else []
         )
         return _rows(await table.query().where(wanted).select(columns).to_arrow())
 
-    async def outline_rows(self, documents: Iterable[str]) -> list[dict]:
-        """Where every chunk of these documents sits: its `document`, `seq`, heading path and char
-        span, and nothing else, in no order. What a search reads to know how large each section
-        around a match is. `[]` when there is nothing readable."""
-        names = set(documents)
+    async def placement_rows(self, document_ids: Iterable[str]) -> list[dict]:
+        """Where every chunk of these documents (by id) sits: its `document_id`, `seq`, heading
+        path, and its char, line and page span, and nothing else, in no order. What a search
+        reads to know how large each section around a match is, and where it is. `[]` when there
+        is nothing readable."""
+        ids = set(document_ids)
         table = await self._readable()
-        if table is None or not names:
+        if table is None or not ids:
             return []
-        wanted = f"document IN {_listed(names)}"
-        columns = ["document", "seq", "headings", "char_start", "char_end"]
+        wanted = self._within(f"document_id IN {_listed(ids)}")
+        columns = ["document_id", "seq", "section_ids", "headings", "char_start", "char_end"]
+        columns += ["line_start", "line_end", "page_start", "page_end"]
         return await table.query().where(wanted).select(columns).to_list()
+
+    def _within(self, wanted: str) -> str:
+        """`wanted` kept to the search's `scope`: the neighbours and the sections a search reads
+        around its matches stay inside what it was asked to answer from."""
+        return " AND ".join([f"({wanted})", *self.scope.clauses()])
+
+    def _scoped(self, builder: Any) -> Any:
+        """A query that keeps to `scope` and leaves the documents `leaving` out: those on their
+        way out of the collection, whose rows stay until the removal queued for them runs. A
+        filter on the query rather than on its answer: LanceDB applies it before the limit, so a
+        row left out takes no slot. No filter at all for a search of everything with nothing
+        leaving, which is almost every search. Sync, like `_tuned`."""
+        clauses = self.scope.clauses()
+        if self.leaving:
+            clauses.append(f"document_id NOT IN {_listed(self.leaving)}")
+        return builder.where(" AND ".join(clauses)) if clauses else builder
 
     def hit(self, r: dict, score: float | None = None) -> Hit:
         """One result row as a `Hit`, with the file paths resolved against this index's home.
@@ -671,6 +755,7 @@ class CollectionIndex:
         source_path, markdown_path = r["source_path"], r["markdown_path"]
         return Hit(
             collection=self.collection,
+            document_id=r["document_id"],
             document=r["document"],
             source_path=source_path,
             markdown_path=markdown_path,
@@ -695,6 +780,9 @@ class CollectionIndex:
             end_reason=r["end_reason"],
             source_file=str(self.home / source_path) if source_path else "",
             markdown_file=str(self.home / markdown_path) if markdown_path else "",
+            id=r.get("id") or "",
+            section_id=(r.get("section_ids") or [""])[-1],
+            section_ids=r.get("section_ids") or [],
         )
 
 
@@ -772,9 +860,9 @@ def _rows(found: pa.Table) -> list[dict]:
     the list a row would carry is never built. A row without a vector holds None."""
     if "vector" not in found.column_names:
         return found.to_pylist()
-    column = found.column("vector").combine_chunks()
-    width = column.type.list_size
-    matrix = column.flatten().to_numpy(zero_copy_only=False).reshape(-1, width)
+    column = found.column("vector")
+    joined = column.combine_chunks()
+    matrix = joined.flatten().to_numpy(zero_copy_only=False).reshape(-1, joined.type.list_size)
     rows = found.drop_columns(["vector"]).to_pylist()
     if column.null_count:
         # `flatten` skips the slots of a null vector, so the rows of the matrix follow the others
@@ -787,25 +875,17 @@ def _rows(found: pa.Table) -> list[dict]:
     return rows
 
 
-def _excluding(builder: Any, documents: frozenset[str]) -> Any:
-    """A query that leaves the rows of `documents` out: those of a document on its way out of the
-    collection (`CollectionIndex.leaving`), whose rows stay until the removal queued for them runs.
-
-    A filter on the query rather than on its answer: LanceDB applies it before the limit, so a
-    document that leaves does not take the slots of the ones that stay. No filter at all when
-    nothing is leaving, which is almost every search. Sync, like `_tuned`."""
-    if not documents:
-        return builder
-    return builder.where(f"document NOT IN {_listed(documents)}")
-
-
 def _listed(values: Iterable[str]) -> str:
     """`values` as a parenthesized list of SQL string literals for a LanceDB `IN`, sorted so one
     set always makes one filter."""
-    return f"({', '.join(_quoted(value) for value in sorted(values))})"
+    return f"({', '.join(_quoted_all(values))})"
 
 
-def _quoted(value: str) -> str:
+def _quoted_all(values: Iterable[str]) -> list[str]:
+    return [quoted(value) for value in sorted(values)]
+
+
+def quoted(value: str) -> str:
     """`value` as a SQL string literal for a LanceDB filter. A document name is the user's file
     name, so a quote in it is doubled rather than allowed to end the literal."""
     return "'" + value.replace("'", "''") + "'"
@@ -814,14 +894,6 @@ def _quoted(value: str) -> str:
 def _header(r: dict) -> str:
     """The header of a stored row, as `Chunk.header` builds it."""
     return HEADING_SEP.join(r["headings"] or [])
-
-
-def row_mode(r: dict) -> SearchMode:
-    """The search a row came out of, read off the score column it carries, as `row_score` reads
-    it: fused scores for hybrid, a distance for vector, BM25 for full text."""
-    if "_relevance_score" in r:
-        return SearchMode.HYBRID
-    return SearchMode.VECTOR if "_distance" in r else SearchMode.FTS
 
 
 def row_score(r: dict) -> float:
@@ -840,15 +912,19 @@ def row_score(r: dict) -> float:
 
 
 def span_key(row: dict) -> SpanKey:
-    """(document, char_start, char_end) of one result row."""
-    return (row["document"], row["char_start"], row["char_end"])
+    """(document id, char_start, char_end) of one result row."""
+    return (row["document_id"], row["char_start"], row["char_end"])
 
 
 async def gather_rows(
     indexes: list[CollectionIndex],
     fetch: Callable[[CollectionIndex], Awaitable[list[dict]]],
+    document_names: dict[str, str] | None = None,
 ) -> list[tuple[CollectionIndex, list[dict]]]:
-    """Read every index concurrently, at most `SEARCH_CONCURRENCY` at a time, in the order given.
+    """Read every index concurrently, at most `SEARCH_CONCURRENCY` at a time, in the order given,
+    and name each row's document (`document`, what `hit` cites) from one query for all of them.
+    `document_names` is the search's own map of them, id to name: a read asks only for the ids it
+    lacks, and adds them, so one search of many reads looks each document up once.
 
     One semaphore per call, never at import time: an anyio primitive belongs to the loop that
     first used it, and both the Litestar loop and the DBOS loop run searches.
@@ -862,7 +938,15 @@ async def gather_rows(
         async with slots:
             return index, await fetch(index)
 
-    return list(await asyncio.gather(*(read(index) for index in indexes)))
+    found = list(await asyncio.gather(*(read(index) for index in indexes)))
+    names = {} if document_names is None else document_names
+    missing = {row["document_id"] for _, rows in found for row in rows} - names.keys()
+    names.update(await document.names_of(missing))
+    for _, rows in found:
+        for row in rows:
+            # a document deleted since the read has no name left: its id stands in
+            row["document"] = names.get(row["document_id"], row["document_id"])
+    return found
 
 
 def first_per_span(

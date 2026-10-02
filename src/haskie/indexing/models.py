@@ -3,20 +3,21 @@
 Downloaded and usable are two different things, and this module keeps them apart.
 
 *Downloaded* is durable: `ensure_model` has one fixed id per model (`dl:{kind}:{name}`), so it is
-idempotent, retried on failure, queryable, and it outlives the process — the files stay in the
+idempotent, retried on failure, queryable, and it outlives the process. The files stay in the
 disk cache, so a restart must not fetch them again (which is what a boot id in the id used to
 cost: one record, one download and one row in the Downloads list per process start).
 
 *Usable* is per process: a model lives in the caches of one process, so a boot that finds a
 SUCCESS record still has cold caches. `_ready` holds the ids this process has loaded,
 `ensure_models` warms the rest in a background task (a local read, no network), and
-`require_ready` — which every search calls — answers from `_ready`, not from the record alone.
+`require_ready` (which every search calls) answers from `_ready`, not from the record alone.
 
 Loading a model is CPU work, not IO, so it goes through `cpu.on_cpu`: a worker thread, under one
 slot of the CPU budget, whichever event loop asked for it.
 
-Depends on leaf modules only (`cpu`, `embed`, `settings`, `catalogue`, `dbos_names`): `index`
-and `pipeline` import this module, so it must not reach back into them or into `workflows`.
+Depends on leaf modules only (`cpu`, `embed`, `gguf_models`, `settings`, `catalogue`,
+`dbos_names`): `index` and `pipeline` import this module, so it must not reach back into them or
+into `workflows`.
 `collection` is read through a function-local import for the same reason (see
 `_collection_rerankers`).
 """
@@ -32,7 +33,7 @@ from dbos import WorkflowStatus as DbosWorkflowStatus
 from haskie import cpu
 from haskie.catalogue import catalogue
 from haskie.errors import HaskieError, NotReady, Unavailable
-from haskie.indexing import embed, hardware
+from haskie.indexing import embed, gguf_models, hardware
 from haskie.indexing.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, RunStatus, root_cause
 from haskie.indexing.hardware import Device
 from haskie.logs import get_logger
@@ -63,6 +64,7 @@ class ModelLoading(NotReady):
 class ModelKind(StrEnum):
     EMBEDDING = "embedding"
     RERANKER = "reranker"
+    DESCRIBER = "describer"  # writes section descriptors (`gguf_models.DESCRIBER`)
 
 
 class ModelState(StrEnum):
@@ -90,10 +92,14 @@ async def warm_model(kind: ModelKind, name: str) -> None:
     """Load one model into this process's caches. Fetches it when the disk cache is cold, so a
     call made after the record says SUCCESS is a local read.
 
-    The load itself is CPU (and, on a cold cache, a download inside fastembed), so it runs in a
+    The load itself is CPU (and, on a cold cache, a download from Hugging Face), so it runs in a
     worker thread under one slot of the CPU budget rather than on the caller's loop."""
     accelerator = (await load_user_settings()).pipeline.accelerator
-    warm = embed.warm_reranker if kind == ModelKind.RERANKER else embed.warm
+    warm = {
+        ModelKind.EMBEDDING: embed.warm,
+        ModelKind.RERANKER: embed.warm_reranker,
+        ModelKind.DESCRIBER: embed.warm_generator,
+    }[kind]
     await cpu.on_cpu(warm, name, accelerator)
 
 
@@ -131,24 +137,27 @@ async def ensure_model(kind: ModelKind, name: str) -> ModelState:
 async def required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
     """Every model this installation needs, in a stable order and without duplicates.
 
-    A collection may override the reranker model, and a search of that collection then loads it,
-    so the overrides count as required as much as the user-level pair does."""
+    A collection may override the reranker or its model, and a search of that collection then
+    loads what they resolve to, so the overrides count as required as much as the user's model
+    does."""
     wanted: list[tuple[ModelKind, str]] = []
     embedding = await catalogue.embedding_model(settings)
     if embedding:
         wanted.append((ModelKind.EMBEDDING, embedding.name))
     if settings.search.reranker == Reranker.CROSS_ENCODER:
         wanted.append((ModelKind.RERANKER, settings.search.reranker_model))
-    wanted.extend((ModelKind.RERANKER, name) for name in await _collection_rerankers())
+    wanted.extend((ModelKind.RERANKER, name) for name in await _collection_rerankers(settings))
+    if describer := gguf_models.describer(settings.pipeline.descriptors):
+        wanted.append((ModelKind.DESCRIBER, describer))
     return list(dict.fromkeys(wanted))
 
 
-async def _collection_rerankers() -> list[str]:
-    """Reranker models the collections override. Imported here rather than at module level: the
-    dependency runs `collection` -> `index` -> `models`."""
+async def _collection_rerankers(settings: UserSettings) -> list[str]:
+    """Reranker models the collections' overrides load (`Collection.reranker_overrides`). Imported
+    here rather than at module level: the dependency runs `collection` -> `index` -> `models`."""
     from haskie.collection.collection import Collection
 
-    return await Collection.reranker_overrides()
+    return await Collection.reranker_overrides(settings.search)
 
 
 def _model_id(kind: ModelKind, name: str) -> str:
@@ -172,7 +181,7 @@ async def _download_records(
     wanted: list[tuple[ModelKind, str]],
 ) -> dict[str, DbosWorkflowStatus]:
     """The download record of every model in `wanted`, in one query, keyed by workflow id. A
-    model nobody ever asked for simply has none. The output is loaded because DBOS carries a
+    model nobody ever asked for has none. The output is loaded because DBOS carries a
     workflow's error alongside it, and `_model_status` reports that error."""
     if not wanted:
         return {}
@@ -315,9 +324,10 @@ async def require_ready(kind: ModelKind, name: str) -> None:
         raise Unavailable(f"{kind} model {name} failed to load: {status.error}")
     if status.state == ModelState.PENDING:
         raise ModelLoading(f"{kind} model {name} is not loaded yet; check /api/status")
-    if (
-        found and found[0].status == RunStatus.SUCCESS
-    ):  # downloaded, warming up (see `_model_status`)
+    if found and found[0].status == RunStatus.SUCCESS:
+        # downloaded, warming up (see `_model_status`); warmed here too, since the boot warms only
+        # what the settings require now, and a run resumed after a change may ask for another
+        _warm_in_background(kind, name)
         raise ModelLoading(f"{kind} model {name} is loading in this process; retry in a moment")
     raise ModelLoading(
         f"{kind} model {name} is downloading (operation {workflow_id}); "

@@ -3,7 +3,7 @@ import { useEffect } from 'react'
 
 /**
  * The whole window is a file target. Port of the `documents.html` script: `dragenter` and
- * `dragleave` fire for every child element, so a depth counter decides when the drag really left.
+ * `dragleave` fire for every child element, so a depth counter decides when the drag left the window.
  */
 export function DropOverlay({ onFiles }: { onFiles: (files: File[]) => void }) {
   useEffect(() => {

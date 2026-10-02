@@ -16,24 +16,40 @@ from haskie.indexing.workflows import (
 
 TAIL = "c3680a02207a41f89078486d1b3a4c90"
 DOC = "principles.pdf"
+DOC_ID = "9e107d9d372bb6826bd81d3542a419d6"  # an MD5, what a workflow id carries
+
+
+OWN_STAGE = {"import": Stage.CONVERT, "embed": Stage.EMBED, "index": Stage.INDEX}
 
 
 def run(
-    action: operations.PipelineAction, status: RunStatus = RunStatus.SUCCESS, **patch
+    action: operations.PipelineAction,
+    status: RunStatus = RunStatus.SUCCESS,
+    tasks_done: int = 27,
+    tasks_running: int = 0,
+    tasks_total: int = 27,
+    described_from: float | None = None,
+    **patch,
 ) -> operations._StageRun:
+    """One run as `_pipeline_page` reads it: its own stage's batches, and for an embedding run
+    with `described_from`, one describe batch from that moment on."""
     prefix = {"import": "imp", "embed": "emb", "index": "idx-col:asd"}[action]
+    stages = {OWN_STAGE[action]: operations._StageCounts(tasks_done, tasks_running, tasks_total)}
+    if described_from is not None:
+        stages[Stage.DESCRIBE] = operations._StageCounts(
+            done=int(status == RunStatus.SUCCESS), total=1, started_at=described_from
+        )
     base = operations._StageRun(
-        id=f"{prefix}:{DOC}:{TAIL}",
+        id=f"{prefix}:{DOC_ID}:{TAIL}",
         action=action,
         collection="asd" if action == "index" else None,
+        document_id=DOC_ID,
         document=DOC,
         status=status,
         created_at=1_000.0,
         updated_at=1_009.0,
         error=None,
-        tasks_done=27,
-        tasks_running=0,
-        tasks_total=27,
+        stages=stages,
     )
     return msgspec.structs.replace(base, **patch)
 
@@ -108,6 +124,54 @@ def shape(rows: list[operations.Operation]) -> list[tuple]:
             [("imp", [("convert", "imp", "SUCCESS", 27), ("embed", "emb", "ERROR", 27)])],
         ),
         (
+            "an import whose embedding run describes: convert, embed, then describe",
+            [run(PipelineAction.EMBED, described_from=1_005.0), run(PipelineAction.IMPORT)],
+            [
+                (
+                    "imp",
+                    [
+                        ("convert", "imp", "SUCCESS", 27),
+                        ("embed", "emb", "SUCCESS", 27),
+                        ("describe", "emb", "SUCCESS", 1),
+                    ],
+                )
+            ],
+        ),
+        (
+            "a run describing: its embed is over, the describe runs",
+            [
+                run(PipelineAction.EMBED, status=RunStatus.PENDING, described_from=1_005.0),
+                run(PipelineAction.IMPORT, status=RunStatus.PENDING),
+            ],
+            [
+                (
+                    "imp",
+                    [
+                        ("convert", "imp", "SUCCESS", 27),
+                        ("embed", "emb", "SUCCESS", 27),
+                        ("describe", "emb", "PENDING", 1),
+                    ],
+                )
+            ],
+        ),
+        (
+            "a hit described again: an embed of no batches, then the describe, then the index",
+            [
+                run(PipelineAction.EMBED, tasks_done=0, tasks_total=0, described_from=1_001.0),
+                run(PipelineAction.INDEX, tasks_total=2, tasks_done=2),
+            ],
+            [
+                (
+                    "idx-col",
+                    [
+                        ("embed", "emb", "SUCCESS", 0),
+                        ("describe", "emb", "SUCCESS", 1),
+                        ("index", "idx-col", "SUCCESS", 2),
+                    ],
+                )
+            ],
+        ),
+        (
             "another document's embed is not this operation's",
             [
                 run(PipelineAction.EMBED, id=f"emb:other.pdf:{TAIL}", document="other.pdf"),
@@ -122,6 +186,22 @@ def shape(rows: list[operations.Operation]) -> list[tuple]:
 )
 def test_operations(name: str, page: list, expected: list[tuple]) -> None:
     assert shape(operations.fold_operations(page)) == expected, name
+
+
+def test_a_failed_describe_carries_the_error_and_the_embed_none() -> None:
+    (row,) = operations.fold_operations(
+        [
+            run(
+                PipelineAction.EMBED,
+                status=RunStatus.ERROR,
+                error="describer gone",
+                described_from=1_005.0,
+            )
+        ]
+    )
+    embed, describe = row.jobs
+    assert (embed.status, embed.error) == ("SUCCESS", None), "the embed was over"
+    assert (describe.status, describe.error) == ("ERROR", "describer gone")
 
 
 def test_a_job_declared_done_carries_no_error() -> None:
@@ -168,6 +248,24 @@ def test_operations_sum_the_counters() -> None:
             [3.0, 5.0],
         ),
         ("a job on its own is its whole run", [run(PipelineAction.EMBED)], [9.0]),
+        (
+            "the describe slice splits the embedding run: embed until it began, describe after",
+            [
+                run(
+                    PipelineAction.EMBED,
+                    created_at=1_003.0,
+                    updated_at=1_020.0,
+                    described_from=1_012.0,
+                ),
+                run(PipelineAction.IMPORT, updated_at=1_021.0),
+            ],
+            [3.0, 9.0, 8.0],
+        ),
+        (
+            "a describing run: the embed is over, the describe has no duration yet",
+            [run(PipelineAction.EMBED, status=RunStatus.PENDING, described_from=1_004.0)],
+            [4.0, None],
+        ),
         (
             "a running job has no duration yet",
             [

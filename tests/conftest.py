@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
@@ -63,7 +63,7 @@ def fast_runtime() -> None:
     `CONVERT_WORKERS = 0` extracts PDFs inline: a process pool per xdist worker costs more to
     start than the tests would save. `test_cpu_pool` is the one module that puts that back.
     ONNX Runtime's telemetry goes off as the app turns it off (`embed.onnx_runtime`): some tests
-    import fastembed without passing through the app, and a worker exiting mid-upload crashes.
+    load a model without passing through the app, and a worker exiting mid-upload crashes.
 
     The step retry intervals are not here: DBOS copies them into the decorator at import, so the
     two retry tests pay the real wait. `-n auto` absorbs it.
@@ -144,7 +144,7 @@ def template_home(tmp_path_factory: pytest.TempPathFactory, fast_runtime: None) 
 
     The queues are the reason this is worth a fixture. DBOS's queue manager discovers queues by
     listing them from the system database once a second, so queues registered after
-    `DBOS.launch()` — which is when `apply_settings` can register them — are only served from the
+    `DBOS.launch()` (which is when `apply_settings` can register them) are only served from the
     next sweep, and the first dequeue of every test waits out that second. Rows that are in the
     file before launch are found by the first sweep instead.
 
@@ -201,7 +201,7 @@ def seeded_home(haskie_home: Path, template_home: Path, monkeypatch: pytest.Monk
 def _sweep_delayed(stop: threading.Event) -> None:
     """Promote debounced workflows whose delay has expired, at the interval everything else here
     polls at. DBOS's queue manager does exactly this on its own sweep, once a second, which is
-    longer than most of these tests take. The delay still has to have expired - only the sweep's
+    longer than most of these tests take. The delay still has to have expired. Only the sweep's
     granularity goes away, not the debounce.
 
     Runs while DBOS is up and gives up quietly otherwise: a test may be restarting it, and the
@@ -296,6 +296,23 @@ def extraction_pool(monkeypatch: pytest.MonkeyPatch, workers: int) -> Iterator[N
         cpu.configure_cpu_budget(budget)
 
 
+def claude_installed(directory: Path, home_dir: Path | None = None) -> Path:
+    """A Claude Code directory as `install claude` leaves it: the skill, the rule, and the
+    SessionStart hook that starts `home_dir` (the current home by default)."""
+    from haskie import claude, home
+
+    claude.write_instructions(directory, [])
+    claude.install_hook(directory, home_dir or home.HOME, claude.MCP_URL)
+    return directory
+
+
+async def refresh_settled() -> bool:
+    """Whether no installation refresh is running; the task discards itself when it ends."""
+    from haskie import claude
+
+    return not claude._refresh_tasks
+
+
 @contextmanager
 def holding(address: str = "http://127.0.0.1:8451") -> Iterator[None]:
     """Claim the home for the body, and give it back afterwards. `claim_home` takes the address
@@ -332,8 +349,8 @@ WAIT = 30.0  # generous: every wait in the suite is released by another thread, 
 
 
 async def wait_event(event: threading.Event, timeout: float = WAIT) -> bool:
-    """Wait for a `threading.Event` without blocking the caller's loop. Two loops are involved -
-    the test's and DBOS's background one - so the blocking wait goes to a worker thread."""
+    """Wait for a `threading.Event` without blocking the caller's loop. Two loops are involved
+    (the test's and DBOS's background one), so the blocking wait goes to a worker thread."""
     return await anyio.to_thread.run_sync(functools.partial(event.wait, timeout))
 
 
@@ -456,15 +473,21 @@ async def restart_dbos() -> None:
     await workflows.start()
 
 
-def text_pdf(pages: list[str | None]) -> bytes:
-    """Minimal PDF: one Helvetica line per page; None = blank page (needs OCR)."""
+def text_pdf(pages: Sequence[str | None | list[tuple[int, str]]]) -> bytes:
+    """Minimal PDF: one Helvetica line per page, or several lines of the font sizes given (a
+    larger one is what `pdf_inspector` reads as a heading); None = blank page (needs OCR)."""
     objs: list[str] = ["<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", ""]
     page_ids: list[int] = []
     for text in pages:
-        stream = "" if text is None else f"BT /F1 18 Tf 40 150 Td ({text}) Tj ET"
+        lines = text if isinstance(text, list) else [] if text is None else [(18, text)]
+        box, y, parts = ("612 792", 760, []) if isinstance(text, list) else ("400 200", 150, [])
+        for size, line in lines:
+            parts.append(f"BT /F1 {size} Tf 40 {y} Td ({line}) Tj ET")
+            y -= size * 2
+        stream = "\n".join(parts)
         objs.append(f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream")
         objs.append(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200] /Contents {len(objs)} 0 R "
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {box}] /Contents {len(objs)} 0 R "
             "/Resources << /Font << /F1 1 0 R >> >> >>"
         )
         page_ids.append(len(objs))
@@ -517,8 +540,28 @@ async def import_row(name: str, content: bytes | str = MD, into: Path | None = N
 
     source = (into or home.HOME / "incoming") / name
     source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_bytes(content.encode() if isinstance(content, str) else content)
+    source.write_bytes(await unique(content.encode() if isinstance(content, str) else content))
     return await document.import_path(str(source), document.ImportOptions(**options))
+
+
+async def unique(body: bytes) -> bytes:
+    """`body`, with blank lines added at its end until no document already is these bytes: the
+    bytes are a document's id, and many tests import one sample under several names. A markdown
+    body reads the same with them; a test of the same file imported twice writes its bytes
+    itself."""
+    from haskie import ids
+    from haskie.document import document
+
+    while await document.identical(ids.md5(body)):
+        body += b"\n"
+    return body
+
+
+async def id_of(name: str) -> str:
+    """The id of the document called `name`: what the functions under the API take."""
+    from haskie.document import document
+
+    return await document.id_of(name)
 
 
 def hit(
@@ -537,6 +580,7 @@ def hit(
     line = char_start // 80 + 1
     return Hit(
         collection=collection,
+        document_id=document,
         document=document,
         source_path=f"documents/{document}",
         markdown_path=f"documents/{document}.md",
@@ -575,6 +619,7 @@ def chunk_hit(
 
     return Hit(
         collection=collection,
+        document_id=document,
         document=document,
         source_path=f"documents/{document}",
         markdown_path=f"documents/{document}.md",
@@ -609,13 +654,13 @@ def words_scan(hits: "list[Hit]") -> "Scan":
     return collapse.spaces([one.text for one in hits], [None] * len(hits), None)
 
 
-async def compact_model() -> "EmbeddingModel":
-    """The "compact" profile's model as the catalogue holds it: bge-small, with the seed's own
-    thresholds."""
+async def default_model() -> "EmbeddingModel":
+    """The model of the profile a new home picks first, as the catalogue holds it: granite-97m,
+    with the seed's own thresholds."""
     from haskie.catalogue import catalogue
     from haskie.settings import UserSettings
 
-    model = await catalogue.embedding_model(UserSettings(embedding="compact"))
+    model = await catalogue.embedding_model(UserSettings(embedding="granite-97m-multilingual"))
     assert model is not None
     return model
 
@@ -625,7 +670,11 @@ async def index_hits(
 ) -> list["Hit"]:
     """What one bare index retrieves for `query` by full text, as a search's `retrieve` step reads
     it (`search_rows`), cut to `settings.limit`: no embedding, no reranker, no fold."""
-    rows = await index.search_rows(query, None, settings, settings.limit)
+    from haskie.collection.index import gather_rows
+
+    ((_, rows),) = await gather_rows(
+        [index], lambda one: one.search_rows(query, None, settings, settings.limit)
+    )
     return [index.hit(row) for row in rows]
 
 
@@ -676,22 +725,32 @@ async def seed_index(collection: str, doc: str, text: str, heading: str = "Alpha
 
 
 async def seed_chunks(collection: str, doc: str, chunks: "list[Chunk]") -> None:
-    """Several indexed chunks of one imported document, numbered `seq` 1..N the way a real index
-    numbers them (see `embed_cache._merge`).
+    """Several indexed chunks of one imported document, numbered `seq` 1..N and named with their
+    ids and sections the way a real index names them (see `embed_cache._merge`).
 
     The real write path with no embedding model, so what a test gets is what a full-text-only
-    collection holds — without paying for a pipeline run to put it there. The chunks carry real
+    collection holds, without paying for a pipeline run to put it there. The chunks carry real
     offsets into the document's markdown, which the caller builds itself.
     """
     from haskie.collection.collection import Collection
     from haskie.collection.index import Row
     from haskie.document import document
+    from haskie.sections import build
 
-    row = await document.get(doc)
-    rows = [Row(chunk=chunk, seq=seq) for seq, chunk in enumerate(chunks, start=1)]
+    row = await document.named(doc)
+    found, chains = build.sections(row.id, chunks)
+    rows = [
+        Row(
+            chunk=chunk,
+            seq=seq,
+            id=build.chunk_id(row.id, seq),
+            section_ids=[found[at].id for at in chain],
+        )
+        for seq, (chunk, chain) in enumerate(zip(chunks, chains, strict=True), start=1)
+    ]
     index = Collection(collection).index_with(None)
     await index.add_parts(
-        doc, row.relative(row.original), row.relative(row.markdown), one_part(0, rows)
+        row.id, row.relative(row.original), row.relative(row.markdown), one_part(0, rows)
     )
     await index.finish()  # the full-text index the search reads
 
@@ -716,19 +775,24 @@ async def import_document(dbos, name: str, content: bytes | str, tmp_dir: Path):
     from haskie.document import document
 
     row = await import_row(name, content, tmp_dir)
-    assert await wait_for(await dbos.start_import(row.name)) == "imported"
-    return await document.get(row.name)
+    assert await wait_for(await dbos.start_import(row)) == "imported"
+    return await document.get(row.id)
 
 
 async def attach_document(dbos, collection: str, doc: str) -> None:
     """Attach one imported document to a collection and wait for its index."""
-    assert await wait_for(await dbos.attach(collection, doc)) == "indexed"
+    from haskie.document import document
+
+    member = await document.named(doc)
+    assert await wait_for(await dbos.attach(collection, member.id)) == "indexed"
 
 
 async def delete_document(dbos, doc: str) -> None:
     """Delete one document and wait for the job: the app only ever starts it and polls the
     progress, so waiting for the result is a test's business, not the runtime's."""
-    await wait_for(await dbos.start_delete_document(doc))
+    from haskie.document import document
+
+    await wait_for(await dbos.start_delete_document(await document.named(doc)))
 
 
 async def delete_collection(dbos, collection: str) -> None:
@@ -862,7 +926,7 @@ async def stage_and_import(client, name: str, body: bytes, wait: bool = True, **
     The import names the document: staging keeps the bytes under an id of its own, so the caller
     passes back the `filename` the staging call returned (or a name of its choosing)."""
     staged = await client.post(
-        "/api/documents/staging", files={"data": (name, body, "text/markdown")}
+        "/api/documents/staging", files={"data": (name, await unique(body), "text/markdown")}
     )
     assert staged.status_code == 201, staged.text
     started = await client.post(

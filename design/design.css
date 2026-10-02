@@ -1,4 +1,4 @@
-/* haskie design tokens — source of truth for web/. Reference: END IS UI #013. */
+/* haskie design tokens: the source of truth for web/. Reference: END IS UI #013. */
 
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Archivo+Black&family=Rajdhani:wght@700&family=IBM+Plex+Mono:wght@400;500&display=swap");
 
@@ -158,7 +158,10 @@ mark { background: none; color: inherit; font-weight: 600; text-decoration: unde
 .tile .icon { position: absolute; top: var(--sp-2); right: var(--sp-2); width: 16px; height: 16px; }
 .tile:hover, .tile[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
 .tile-add { border-style: dashed; background: transparent; } /* makes a new thing rather than opening one */
-.tile-text { display: grid; gap: 2px; text-align: left; min-width: 0; flex: 1; max-height: 100%; overflow: hidden; }
+.tile-text { position: relative; display: grid; gap: 2px; text-align: left; min-width: 0; flex: 1; max-height: 100%; overflow: hidden; } /* positioned, so it paints over the cover */
+/* a low-poly cover behind the tile, faded out before the text */
+.tile-cover { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; mask-image: linear-gradient(to bottom, #000 20%, transparent 75%); opacity: 0.33; transition: opacity 160ms ease; }
+.tile:hover .tile-cover, .tile[aria-pressed="true"] .tile-cover { opacity: 0.45; }
 .tile-text > .name { grid-column: 1 / -1; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; } /* real names are file names: three lines, then … */
 .tile-text > .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tile .sub { font-weight: 400; font-size: var(--fs-xs); opacity: 0.6; }
@@ -227,8 +230,10 @@ body:has(.modal[open]) { overflow: hidden; }
 .modal::before { content: ""; position: absolute; inset: -100px; z-index: -1; background-image: var(--modern-gradient); filter: blur(100px); } /* same layer as the page background */
 .modal::backdrop { background: var(--glass-dark); backdrop-filter: blur(6px); }
 .modal-body:focus { outline: none; } /* dialog focuses the body, not the close button, so no ring on open */
-.modal-body { height: 100%; display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: var(--sp-4); padding: var(--sp-6); }
-.modal-body > [role="tabpanel"] { min-height: 0; overflow: auto; padding-right: var(--sp-4); } /* room for an overlay scrollbar, which would otherwise sit on the tiles */
+.modal-body { height: 100%; display: flex; flex-direction: column; gap: var(--sp-4); padding: var(--sp-6); }
+/* any number of fixed rows (head, tabs, actions) above one region that takes the rest and scrolls: a tab panel, or .modal-scroll in a modal without tabs */
+.modal-body > * { flex: none; }
+.modal-body > [role="tabpanel"], .modal-body > .modal-scroll { flex: 1 1 0; min-height: 0; overflow: auto; padding-right: var(--sp-4); } /* room for an overlay scrollbar, which would otherwise sit on the tiles */
 .modal-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: var(--sp-3); }
 .modal-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--sp-4); }
 
@@ -257,7 +262,7 @@ body:has(.modal[open]) { overflow: hidden; }
 .chunk-piece:hover { z-index: 1; outline-color: var(--text-faint); } /* above its neighbours, whose background would paint over its outline */
 .chunk-frame { color: var(--text-muted); background: var(--line-soft); } /* the heading path the models read ahead of the text */
 .chunk-piece > .hint { white-space: normal; user-select: none; } /* the text is pre-wrap, the hint is not; copying the text leaves the hints out */
-/* a source as one block: the document once, then its hot sections indented, each a jump */
+/* a list under a head row naming what it lists: the documents a map reached, each a link */
 .sections { display: grid; gap: var(--sp-1); }
 .sections-head { display: flex; justify-content: space-between; gap: var(--sp-4); padding-bottom: var(--sp-2); border-bottom: 1px solid var(--line); font-size: var(--fs-sm); }
 .section-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: var(--sp-3); padding: var(--sp-2) 0 var(--sp-2) var(--sp-4); border-bottom: 1px solid var(--line-soft); font-size: var(--fs-sm); cursor: pointer; }
@@ -302,6 +307,11 @@ body:has(.modal[open]) { overflow: hidden; }
 .markdown img { max-width: 100%; }
 .toc { display: grid; gap: 2px; margin-bottom: var(--sp-4); font-size: var(--fs-sm); }
 .toc a:hover { text-decoration: underline; }
+/* a document's sections, each indented by its depth (`--depth`), its descriptors under its heading */
+.section-toc { display: grid; gap: var(--sp-3); } /* on a `.list`, which resets the list */
+.section-toc > li { display: grid; gap: var(--sp-1); padding-left: calc(var(--depth, 0) * var(--sp-6)); }
+.section-toc-head { display: flex; gap: var(--sp-3); align-items: baseline; justify-content: space-between; }
+.section-toc-head > .mono { flex: none; font-size: var(--fs-xs); }
 
 /* swatches (showcase only) */
 .swatches { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
@@ -365,14 +375,19 @@ body.over .drop-overlay { opacity: 1; }
 .list-item > .icon { width: 14px; height: 14px; flex: none; opacity: 0.6; }
 .list-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
 .list-text .sub { font-size: var(--fs-xs); color: var(--text-muted); }
+/* an info line: how things are (an empty list, what wrote a result, a hint), boxed in a gray tint */
+.info { display: flex; gap: var(--sp-2); align-items: flex-start; margin: 0; padding: var(--sp-2) var(--sp-3); border: 1px solid var(--text-faint); background: color-mix(in srgb, var(--text-muted) 10%, transparent); font-size: var(--fs-sm); }
+.info > .icon { width: 16px; height: 16px; margin-top: 1px; color: var(--text-muted); }
 /* a notice: something to read before acting, ruled in the accent colour */
 .notice { margin: 0; padding: var(--sp-2) var(--sp-3); border-left: 2px solid var(--accent); font-size: var(--fs-sm); }
 /* hit: search result tile; --score drives the bottom bar */
 .hits { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(450px, 100%), 1fr)); gap: var(--sp-4); } /* 50% wider than it was; a container narrower than one tile gets one tile its width */
-.hit { display: grid; grid-template-columns: minmax(0, 1fr); cursor: pointer; } /* the head sits right on top of the box, as a job's does */
-.hit-body { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-3); padding: var(--sp-4); border: var(--border); background: rgba(255, 255, 255, 0.18); }
+.hit { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; cursor: pointer; } /* the head sits right on top of the box, as a job's does */
+.hit-body { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: var(--sp-3); padding: var(--sp-4); border: var(--border); background: rgba(255, 255, 255, 0.18); }
 .hit:hover .hit-body { background: var(--ink); color: var(--paper); }
 .hit:hover .hit-body .muted { color: rgba(255, 255, 255, 0.6); }
+/* on the inverted ground the soft lines invert too: the same 14%, of paper instead of ink */
+.hit:hover .hit-body .descriptor, .hit:hover .hit-body .related { border-color: rgba(255, 255, 255, 0.14); }
 .hit-head { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-3); }
 /* a line each: the heading, the pages and lines, the chunks and where else it is */
 .hit-foot { display: grid; gap: var(--sp-1); font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--tracking-mono); text-transform: uppercase; color: var(--text-muted); }
@@ -383,6 +398,21 @@ body.over .drop-overlay { opacity: 1; }
 .question-tag { position: relative; cursor: default; padding: var(--sp-1) var(--sp-2); border: 1px solid currentColor; font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--tracking-mono); line-height: 1; }
 .question-tag:hover, .question-tag:focus-visible { background: color-mix(in srgb, currentColor 25%, transparent); outline: none; }
 .question-tag .hint { font-family: var(--font-sans); letter-spacing: 0; line-height: 1.4; white-space: normal; }
+/* a section of the map: its heading path, what it is about, and the sections it covers best
+   under it */
+.section-heading { margin: 0; font-size: var(--fs-md); font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+.descriptors { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.descriptor { padding: var(--sp-1) var(--sp-2); border: 1px solid var(--line-soft); font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--tracking-mono); line-height: 1; }
+.related { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-1); margin: 0; padding: var(--sp-2) 0 0; list-style: none; border-top: 1px solid var(--line-soft); font-size: var(--fs-xs); }
+.related > li { display: flex; gap: var(--sp-3); cursor: pointer; }
+.related > li:hover .related-title { text-decoration: underline; }
+/* the title takes what is left; where it is (another document or collection) shortens too; the
+   closeness never does */
+.related-title { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.related-place { flex: 0 1 auto; max-width: 50%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.related > li > :last-child { flex: none; white-space: nowrap; }
+/* an opened section: its heading, what it is about, what the map said, the sections it covers */
+.opened-detail { display: grid; gap: var(--sp-2); padding-top: var(--sp-2); font-size: var(--fs-xs); }
 /* four lines whatever the result says: a one-word hit and a long one make the same tile */
 .hit-text { margin: 0; font-size: var(--fs-sm); line-height: 1.5; height: calc(4 * 1.5em); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .hit-body::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: linear-gradient(var(--ok), var(--ok)) 0 0 / calc(var(--score, 0) * 100%) 100% no-repeat; }
@@ -414,6 +444,9 @@ body:has(.statusbar) { padding-top: 40px; }
 .picker[open] > summary .icon { transform: rotate(180deg); }
 .picker-value, .picker-list li { display: grid; gap: 2px; font-size: var(--fs-sm); }
 .picker-value .sub, .picker-list .sub { font-size: var(--fs-xs); color: var(--text-muted); }
+/* a label with a short mark beside it, as MCP marks the answers an agent gets too */
+.picker-label { display: flex; align-items: center; gap: var(--sp-2); }
+.picker-tag { padding: 2px var(--sp-1); border: 1px solid currentColor; font-family: var(--font-mono); font-size: 10px; letter-spacing: var(--tracking-mono); line-height: 1; color: var(--text-muted); }
 .picker-list { position: absolute; left: 0; right: 0; top: calc(100% + var(--sp-1)); z-index: 2; margin: 0; padding: var(--sp-1); list-style: none; background: var(--paper); border: var(--border); box-shadow: 0 8px 24px rgba(15, 19, 23, 0.12); }
 .picker-list li { padding: var(--sp-2) var(--sp-3); cursor: pointer; }
 .picker-list li:hover, .picker-list li:focus-visible { background: var(--ink); color: var(--paper); outline: none; }
@@ -432,6 +465,7 @@ body:has(.statusbar) { padding-top: 40px; }
 .input-group > .input { flex: 1; min-width: 0; }
 .input-group > .input:focus { background: transparent; }
 .input-group > .btn-ghost { align-self: center; }
+.input-group > .btn:not(.btn-ghost) { border: 0; border-left: 1px solid var(--fog-2); } /* the group draws the outline */
 input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
 .field { display: flex; flex-direction: column; gap: var(--sp-2); }
 /* a model's facts, hung under the picker that chose it: one box, the picker's border, no gap */
@@ -444,6 +478,9 @@ input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; d
 .input::placeholder, .textarea::placeholder { color: var(--text-faint); }
 .input:focus, .textarea:focus { border-color: var(--line); background: rgba(255, 255, 255, 0.18); }
 .input:disabled, .textarea:disabled { opacity: 0.4; }
+/* an autofilled value looks like a typed one: the browser paints its tint with !important, so
+   its background is put off for good instead, and the text keeps the input's colour */
+.input:-webkit-autofill, .input:-webkit-autofill:focus { transition: background-color 0s 600000s, color 0s 600000s; -webkit-text-fill-color: var(--text); caret-color: var(--text); }
 .textarea { min-height: 96px; resize: vertical; }
 
 .check, .toggle { display: inline-flex; align-items: center; gap: var(--sp-3); font-size: var(--fs-sm); font-weight: 500; color: var(--text-muted); cursor: pointer; }

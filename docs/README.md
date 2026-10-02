@@ -9,7 +9,7 @@ Start with the architecture, then follow a document from import to a cited answe
 | [Documents and collections](documents-and-collections.md) | the two core entities, their lifecycles, the embedding cache |
 | [Indexing](indexing.md) | the durable DBOS pipeline, queues, the CPU budget, recovery |
 | [Chunking](chunking.md) | Structure-Aware Chunking: settings, steps, and every cut rule |
-| [Search](search.md) | from query to excerpts: ranking, the four answers, folding repeats |
+| [Search](search.md) | from query to excerpts: ranking, the four answers, the map of sections, folding repeats |
 | [Gaps](gaps.md) | the search log, which searches found no answer, and how the bars were measured |
 | [Storage](storage.md) | the home directory, the metadata database, schema changes |
 | [REST API](rest-api.md) | routes, intake, errors, paging |

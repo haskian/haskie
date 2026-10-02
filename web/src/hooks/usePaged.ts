@@ -37,7 +37,7 @@ export function usePaged<T>(fetchPage: (q: PageRequest) => Promise<Page<T>>, opt
   const [pageSize, setPageSizeState] = useState(opts.pageSize ?? DEFAULT_PAGE_SIZE)
 
   // callers pass an inline fetcher, so its identity changes every render: keep it out of the
-  // dependencies and read the latest one when a request actually starts
+  // dependencies and read the latest one when a request starts
   const fetchRef = useRef(fetchPage)
   const itemsRef = useRef<T[]>(items) // `refresh` sizes its window without re-creating itself
   const requestId = useRef(0)

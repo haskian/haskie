@@ -10,8 +10,9 @@ holds the whole document says nothing (a title heading over everything), and a l
 is split one heading down, so a book groups by chapter or section and a short note by its title.
 A passage under the deepest heading it has takes that heading's section, however large.
 
-A section is found from the document's outline (`Entry`: every chunk's `seq`, heading path and
-char span), which the chunker makes exact: a chunk never spans two sections. No IO here.
+A section is found from the document's chunk placements (`Placement`: every chunk's `seq`,
+heading path and char span), which the chunker makes exact: a chunk never spans two sections. No
+IO here.
 """
 
 import bisect
@@ -28,17 +29,24 @@ from haskie.search.passage import Excerpt, HitRange, best_of, pages, span
 ELISION = "[…]"  # between two passages the document has text between
 
 
-class Entry(msgspec.Struct, frozen=True):
-    """One chunk of a document's outline: where it sits and under which headings."""
+class Placement(msgspec.Struct, frozen=True):
+    """Where one chunk of a document sits, and under which headings."""
 
     seq: int
     headings: tuple[str, ...]
     char_start: int
     char_end: int
+    line_start: int  # what a section cites (`search.section_map`); the grouping reads none of it
+    line_end: int
+    page_start: int | None
+    page_end: int | None
+    # the ids of the sections that hold it, the whole document first (`sections.build`): the
+    # section of depth d is `section_ids[d]`
+    section_ids: tuple[str, ...] = ()
 
 
-type Outline = list[Entry]  # one document's chunks, by `seq`
-type Place = tuple[str, str]  # (collection, document)
+type Placements = list[Placement]  # one document's chunks, by `seq`
+type Place = tuple[str, str]  # (collection, document id)
 
 
 class Section(msgspec.Struct, frozen=True):
@@ -47,51 +55,68 @@ class Section(msgspec.Struct, frozen=True):
     path: tuple[str, ...]
     seq_start: int
     seq_end: int
+    id: str = ""  # its id (`sections.build`); empty for chunks indexed without one
 
 
-def outlines(rows: Sequence[tuple[str, dict]]) -> dict[Place, Outline]:
-    """Each document's outline out of the rows `CollectionIndex.outline_rows` read, one pair of
-    (collection, row) each, in any order."""
-    found: dict[Place, Outline] = {}
+def placements(rows: Sequence[tuple[str, dict]]) -> dict[Place, Placements]:
+    """Each document's placements out of the rows `CollectionIndex.placement_rows` read, one pair
+    of (collection, row) each, in any order."""
+    found: dict[Place, Placements] = {}
     for collection, row in rows:
-        entry = Entry(
+        one = Placement(
             seq=row["seq"],
             headings=tuple(row["headings"] or ()),
             char_start=row["char_start"],
             char_end=row["char_end"],
+            line_start=row["line_start"],
+            line_end=row["line_end"],
+            page_start=row["page_start"],
+            page_end=row["page_end"],
+            section_ids=tuple(row.get("section_ids") or ()),
         )
-        found.setdefault((collection, row["document"]), []).append(entry)
-    for outline in found.values():
-        outline.sort(key=lambda entry: entry.seq)
+        found.setdefault((collection, row["document_id"]), []).append(one)
+    for chunks in found.values():
+        chunks.sort(key=lambda one: one.seq)
     return found
 
 
-def section_of(outline: Outline, seq: int, max_chars: int) -> Section:
-    """The section chunk `seq` is grouped in (see the module).
+def section_of(
+    chunks: Placements, seq: int, max_chars: int, kept: frozenset[str] = frozenset()
+) -> Section:
+    """The section chunk `seq` is grouped in (see the module). `kept` names the sections a search
+    keeps to (`Scope.section_ids`): `chunks` then holds theirs alone, so one of them can span all
+    of it and still be no whole document.
 
-    The outline is read through the same open table as the hits (`retrieval.sections`), so it
-    holds every chunk a hit names; one it does not is a broken search, not a case to guess at.
+    The placements are read through the same open table as the hits (`retrieval.sections`), so
+    they hold every chunk a hit names; one they do not is a broken search, not a case to guess at.
     """
-    at = bisect.bisect_left(outline, seq, key=lambda entry: entry.seq)
-    if at == len(outline) or outline[at].seq != seq:
-        raise LookupError(f"chunk {seq} is not in the outline its hit was read with")
-    path = outline[at].headings
+    at = bisect.bisect_left(chunks, seq, key=lambda one: one.seq)
+    if at == len(chunks) or chunks[at].seq != seq:
+        raise LookupError(f"chunk {seq} is not in the placements its hit was read with")
+    path, ids = chunks[at].headings, chunks[at].section_ids
     for level in range(1, len(path)):
-        first, last = _run(outline, at, path[:level])
-        whole = first == 0 and last == len(outline) - 1
-        if not whole and outline[last].char_end - outline[first].char_start <= max_chars:
-            return Section(path[:level], outline[first].seq, outline[last].seq)
-    first, last = _run(outline, at, path)
-    return Section(path, outline[first].seq, outline[last].seq)
+        first, last = _run(chunks, at, path[:level])
+        scoped = level < len(ids) and ids[level] in kept
+        whole = first == 0 and last == len(chunks) - 1 and not scoped
+        if not whole and chunks[last].char_end - chunks[first].char_start <= max_chars:
+            return _section(chunks, at, path[:level], first, last)
+    first, last = _run(chunks, at, path)
+    return _section(chunks, at, path, first, last)
 
 
-def _run(outline: Outline, at: int, prefix: tuple[str, ...]) -> tuple[int, int]:
-    """The outline positions of the longest run around `at` whose headings open with `prefix`."""
+def _section(chunks: Placements, at: int, path: tuple[str, ...], first: int, last: int) -> Section:
+    ids = chunks[at].section_ids
+    id = ids[len(path)] if len(path) < len(ids) else ""
+    return Section(path, chunks[first].seq, chunks[last].seq, id)
+
+
+def _run(chunks: Placements, at: int, prefix: tuple[str, ...]) -> tuple[int, int]:
+    """Where in `chunks` the longest run around `at` whose headings open with `prefix` runs."""
     level = len(prefix)
     first = last = at
-    while first > 0 and outline[first - 1].headings[:level] == prefix:
+    while first > 0 and chunks[first - 1].headings[:level] == prefix:
         first -= 1
-    while last + 1 < len(outline) and outline[last + 1].headings[:level] == prefix:
+    while last + 1 < len(chunks) and chunks[last + 1].headings[:level] == prefix:
         last += 1
     return first, last
 
@@ -100,7 +125,7 @@ class Group(msgspec.Struct):
     """The kept passages of one section, in the order they were kept."""
 
     collection: str
-    document: str
+    document_id: str
     section: Section
     ranges: list[HitRange]
 
@@ -135,24 +160,27 @@ def within(groups: list[Group], budget: int) -> list[Group]:
 
 
 def group(
-    hit_ranges: list[HitRange], found: dict[Place, Outline], max_chars: int, limit: int
+    hit_ranges: list[HitRange],
+    found: dict[Place, Placements],
+    max_chars: int,
+    limit: int,
+    kept: frozenset[str] = frozenset(),
 ) -> list[Group]:
     """The first `limit` sections the ranges (best first) fall in, each with every range of it.
 
     A section is placed where its best range was, and a range further down joins the section it
-    belongs to rather than taking a slot: the slots count sections. A range whose chunk the
-    `found` holds the outline of every document a range that opens a section is in (see
-    `documents`); a range of any other document belongs to no section that is kept. A section
-    whose ranges are all too short to stand alone (`HitRange.alone`) is no excerpt, and frees its
-    slot.
+    belongs to rather than taking a slot: the slots count sections. `found` holds the placements
+    of every document a range that opens a section is in (see `documents`); a range of any other
+    document belongs to no section that is kept. A section whose ranges are all too short to stand
+    alone (`HitRange.alone`) is no excerpt, and frees its slot.
     """
     placed: list[tuple[tuple[str, str, Section], HitRange]] = []
     for hit_range in hit_ranges:
         first = hit_range.hits[0]
-        outline = found.get((first.collection, first.document))
-        if outline is not None:
-            where = section_of(outline, first.seq, max_chars)
-            placed.append(((first.collection, first.document, where), hit_range))
+        chunks = found.get((first.collection, first.document_id))
+        if chunks is not None:
+            where = section_of(chunks, first.seq, max_chars, kept)
+            placed.append(((first.collection, first.document_id, where), hit_range))
     groups: dict[tuple[str, str, Section], Group] = {}
     for key, hit_range in placed:
         groups.setdefault(key, Group(*key, ranges=[])).ranges.append(hit_range)
@@ -160,7 +188,7 @@ def group(
 
 
 def documents(hit_ranges: list[HitRange], limit: int) -> set[Place]:
-    """The documents whose outlines `group` needs: those of every range, in rank order, up to the
+    """The documents whose placements `group` needs: those of every range, in rank order, up to the
     one where the `limit`-th document a range standing alone is in turns up. Sections of at least
     `limit` documents have a standing range by then, so the first `limit` sections open before
     it. A section opens on its first range, which may be alone and come before its standing one,
@@ -170,7 +198,7 @@ def documents(hit_ranges: list[HitRange], limit: int) -> set[Place]:
     for hit_range in hit_ranges:
         if len(standing) == limit:
             break
-        place = (hit_range.hits[0].collection, hit_range.hits[0].document)
+        place = (hit_range.hits[0].collection, hit_range.hits[0].document_id)
         found.add(place)
         if not hit_range.alone:
             standing.add(place)
@@ -203,9 +231,11 @@ def excerpt(found: Group, texts: list[str]) -> Excerpt:
     best = first.best
     return Excerpt(
         collection=found.collection,
-        document=found.document,
+        document_id=best.document_id,
+        document=best.document,
         header=HEADING_SEP.join(found.section.path),
-        location=location(found.document, page_start, page_end, first.line_start, last.line_end),
+        section_id=found.section.id,
+        location=location(best.document, page_start, page_end, first.line_start, last.line_end),
         seq_start=first.seq_start,
         seq_end=last.seq_end,
         line_start=first.line_start,

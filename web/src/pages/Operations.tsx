@@ -3,7 +3,7 @@ import { MAX_PAGE_SIZE, api, type Operation as OperationRow, type OperationKind,
 import type { PageProps } from '../App'
 import { useOptions } from '../hooks/useOptions'
 import { usePoll } from '../hooks/usePoll'
-import { Picker, Shell } from '../ui'
+import { Info, Picker, Shell } from '../ui'
 import './Operations.css'
 import { groupOperations, type GroupBy } from './operations/group'
 import { Operation } from './operations/Operation'
@@ -58,7 +58,7 @@ export function Operations({ route, counts }: PageProps) {
     setTasks((current) => ({ ...current, ...Object.fromEntries(loaded) }))
   }, [active])
 
-  // no cursor bookkeeping. The backend's cursor is an offset, so asking for a wider
+  // No cursor bookkeeping. The backend's cursor is an offset, so asking for a wider
   // first page is the same request as paging into it, and one window size serves every kind.
   const load = useCallback((): Promise<void> => {
     const pageSize = Math.min(MAX_PAGE_SIZE, PAGE_SIZE * pages)
@@ -151,7 +151,7 @@ export function Operations({ route, counts }: PageProps) {
     <Shell current={route.name} counts={counts} side={side}>
       <div className="operations sections">
         {error !== null && <p className="muted">{error}</p>}
-        {error === null && groups.length === 0 && <p className="muted">No operations yet</p>}
+        {error === null && groups.length === 0 && <Info>No operations yet</Info>}
         {groups.map((group) => (
           <section className="operation-section section" key={group.key} data-status={group.key}>
             <span className="mono muted">{group.key}</span>

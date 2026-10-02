@@ -1,23 +1,26 @@
 import { Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { api, MAX_PAGE_SIZE, type CollectionSummary, type Granularity, type ScoreStep, type SearchScope, type SessionSummary, type StepTiming } from '../api'
+import { api, MAX_PAGE_SIZE, type CollectionSummary, type Granularity, type MappedDocument, type MappedSection, type ScoreStep, type SearchScope, type SessionSummary, type StepTiming } from '../api'
 import type { PageProps } from '../App'
-import { HitGrid, MatchModal, Picker, SearchBox, SearchTook, Shell, type Match, type PickerOption } from '../ui'
+import { HitGrid, Info, MapDocuments, MatchModal, SectionsModal, Picker, SearchBox, SearchTook, SectionGrid, Shell, Toggle, type Match, type OpenedSection, type PickerOption } from '../ui'
 import './Explore.css'
 import { MAX_ASPECTS, questionsOf } from './explore/questions'
 import { ALL_SCOPE, parseScope, scopeParams, SESSION_PREFIX } from './explore/scope'
 import { errorText } from '../format'
 
-/** What a search answers with: a granularity of matches, the excerpts an agent reads, or the
- *  documents that hold them. */
-type Answer = Granularity | 'excerpt' | 'source'
+/** What a search answers with: a granularity of matches, the excerpts an agent reads, or a map
+ *  of the sections the topic touches and the documents it reached. */
+type Answer = Granularity | 'excerpt' | 'section'
+
+// The answers an agent gets too, marked with the MCP tool that gives it the same.
+const mcp = (tool: string) => ({ text: 'MCP', title: `An agent gets the same from the MCP tool ${tool}` })
 
 // What each answer is called on screen, and what its results are: the second picker's options.
 const ANSWERS: Array<PickerOption<Answer> & { plural: string }> = [
-  { value: 'chunk', label: 'Chunks', plural: 'chunks', sub: 'as indexed' },
+  { value: 'excerpt', label: 'Excerpts', plural: 'excerpts', sub: 'what an agent reads', tag: mcp('search_excerpts') },
+  { value: 'section', label: 'Sections', plural: 'sections', sub: 'a map of the sections and documents it touches', tag: mcp('search_sections') },
   { value: 'passage', label: 'Passages', plural: 'passages', sub: 'adjacent chunks of a section' },
-  { value: 'excerpt', label: 'Excerpts', plural: 'excerpts', sub: 'what an agent reads' },
-  { value: 'source', label: 'Sources', plural: 'sources', sub: 'the documents that answer it' },
+  { value: 'chunk', label: 'Chunks', plural: 'chunks', sub: 'as indexed' },
 ]
 const answerOf = (value: Answer) => ANSWERS.find((one) => one.value === value) ?? ANSWERS[0]
 
@@ -29,11 +32,16 @@ const ASKINGS: PickerOption<Asking>[] = [
   { value: 'multi', label: 'Multi-aspect query' },
 ]
 
-/** What one search brings back: its results, how long each step took, and what the excerpts
- *  say they lack (only excerpts say): the words of the questions they never hold, and the
- *  questions they do not answer. */
+/** What one search brings back: its results (a map's are its `sections` and `documents`), how
+ *  long each step took, and what it says it lacks: the words of the questions no excerpt holds
+ *  (only excerpts say), and the questions the sources do not answer or match only weakly. A map
+ *  also names the fewest collections that hold every section and document on it. */
 interface Found {
+  body: unknown // the response as the endpoint sent it, for the debug view
   results: Match[]
+  sections: MappedSection[]
+  documents: MappedDocument[]
+  holders: string[]
   steps: StepTiming[]
   scoring: ScoreStep[] // how their scores came to be
   missing: string[]
@@ -49,28 +57,30 @@ interface Shown extends Found {
   took: number | null // null before the first search: the line above the results stays blank
 }
 
-const NOTHING: Shown = { results: [], steps: [], scoring: [], missing: [], uncovered: [], asked: [], context: '', as: 'excerpt', took: null }
+const NONE = { results: [], sections: [], documents: [], holders: [], missing: [], uncovered: [] }
+const NOTHING: Shown = { ...NONE, body: null, steps: [], scoring: [], asked: [], context: '', as: 'excerpt', took: null }
 
-/** The one request an answer takes: its own route for excerpts and for documents, the explore
- *  route for chunks and passages. Excerpts take every question asked and the shared background;
- *  the others take the first question. */
+/** The one request an answer takes: its own route for excerpts and sections, the
+ *  explore route for chunks and passages. Excerpts take every question asked and the shared
+ *  background; the others take the first question. */
 async function search(questions: string[], context: string, answer: Answer, where: SearchScope): Promise<Found> {
   const [text] = questions
-  if (answer === 'source') {
-    const found = await api.searchSources(text, where)
-    return { results: found.body.documents, steps: found.steps, scoring: found.scoring, missing: [], uncovered: [] }
+  if (answer === 'section') {
+    const found = await api.searchSections(text, where)
+    const { sections, documents, collections, uncovered = [] } = found.body
+    return { ...NONE, body: found.body, sections, documents, holders: collections, steps: found.steps, scoring: found.scoring, uncovered }
   }
   if (answer === 'excerpt') {
     const found = await api.searchExcerpts(questions, where, context.trim() || undefined)
     const { excerpts, missing_terms, uncovered } = found.body
-    return { results: excerpts, steps: found.steps, scoring: found.scoring, missing: missing_terms, uncovered }
+    return { ...NONE, body: found.body, results: excerpts, steps: found.steps, scoring: found.scoring, missing: missing_terms, uncovered }
   }
   const found = await api.explore(text, answer, where)
-  return { results: found.body, steps: found.steps, scoring: found.scoring, missing: [], uncovered: [] }
+  return { ...NONE, body: found.body, results: found.body, steps: found.steps, scoring: found.scoring }
 }
 
-/** Search across collections, answering at the granularity the picker names: matches, or the
- *  documents they come from. One request a search. */
+/** Search across collections, answering as the picker names: matches, excerpts, or a map of
+ *  sections and documents. One request a search. */
 export function Explore({ route, counts }: PageProps) {
   const [collections, setCollections] = useState<CollectionSummary[]>([])
   const [sessions, setSessions] = useState<SessionSummary[]>([])
@@ -82,7 +92,9 @@ export function Explore({ route, counts }: PageProps) {
   const [shown, setShown] = useState<Shown>(NOTHING)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState<Match | null>(null)
+  const [opened, setOpened] = useState<OpenedSection | null>(null)
   const [busy, setBusy] = useState(false)
+  const [debug, setDebug] = useState(false) // the raw response in place of the results
 
   useEffect(() => {
     Promise.all([api.collections({ page_size: MAX_PAGE_SIZE }), api.sessions()])
@@ -197,17 +209,31 @@ export function Explore({ route, counts }: PageProps) {
           />
         )}
         {error !== null && <p className="muted">{error}</p>}
-        <SearchTook counts={`${shown.results.length} ${answerOf(shown.as).plural}`} ms={shown.took} steps={shown.steps} />
-        {shown.missing.length > 0 && <p className="muted">No excerpt says: {shown.missing.join(', ')}</p>}
-        {shown.uncovered.length > 0 && <p className="muted">Unanswered: {shown.uncovered.join(' · ')}</p>}
-        <HitGrid
-          results={shown.results}
-          query={shown.asked[0] ?? ''}
-          onOpen={setOpen}
-          questions={shown.asked}
-          reranked={shown.scoring.some((one) => one.step === 'rerank')}
-        />
+        <div className="explore-status">
+          <SearchTook counts={`${shown.as === 'section' ? shown.sections.length : shown.results.length} ${answerOf(shown.as).plural}`} ms={shown.took} steps={shown.steps} />
+          <Toggle label="Debug" checked={debug} onChange={setDebug} />
+        </div>
+        {shown.missing.length > 0 && <Info>No excerpt says: {shown.missing.join(', ')}</Info>}
+        {shown.uncovered.length > 0 && <Info>Unanswered: {shown.uncovered.join(' · ')}</Info>}
+        {shown.holders.length > 0 && <Info>Held by: {shown.holders.join(', ')}</Info>}
+        {debug ? (
+          shown.body !== null && <pre className="md explore-raw">{JSON.stringify(shown.body, null, 2)}</pre>
+        ) : shown.as === 'section' ? (
+          <>
+            <MapDocuments documents={shown.documents} />
+            <SectionGrid sections={shown.sections} onOpen={setOpened} />
+          </>
+        ) : (
+          <HitGrid
+            results={shown.results}
+            query={shown.asked[0] ?? ''}
+            onOpen={setOpen}
+            questions={shown.asked}
+            reranked={shown.scoring.some((one) => one.step === 'rerank')}
+          />
+        )}
       </div>
+      <SectionsModal section={opened} onClose={() => setOpened(null)} onOpen={setOpened} />
       <MatchModal match={open} query={shown.asked[0] ?? ''} scoring={shown.scoring} asked={{ questions: shown.asked, context: shown.context }} onClose={() => setOpen(null)} />
     </Shell>
   )

@@ -2,8 +2,8 @@
 
 An **operation** is the whole of what someone asked for: import a document, index one document
 into a collection, index a whole collection, delete a collection, delete a document, maintain a
-collection, download a model. A **job** is one stage of an operation - convert, embed or index.
-A **task** is one micro-batch: one durable step below a job.
+collection, download a model. A **job** is one stage of an operation: convert, embed, describe
+or index. A **task** is one micro-batch: one durable step below a job.
 
 "Workflow" is DBOS's word for the thing that runs any of them, and it stays in the modules that
 talk to DBOS (`workflows`, `dbos_names`, `sysdb`, `models`). Nothing this module returns says it.
@@ -39,6 +39,7 @@ awaited. The row builders below take what those reads returned and touch nothing
 """
 
 import asyncio
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -46,6 +47,7 @@ import msgspec
 from dbos import DBOS, WorkflowStatus
 
 from haskie import sysdb
+from haskie.document import document as documents
 from haskie.errors import InvalidInput, NotFound
 from haskie.indexing import models, workflows
 from haskie.indexing.dbos_names import (
@@ -53,6 +55,7 @@ from haskie.indexing.dbos_names import (
     BULK_WORKFLOWS,
     COLLECTION_DOCUMENT_WORKFLOW,
     DAILY_MAINTENANCE_WORKFLOW,
+    DELETE_DOCUMENT_WORKFLOW,
     DOWNLOAD_WORKFLOW,
     EMBED_WORKFLOW,
     MAINTAIN_PARTITION_WORKFLOW,
@@ -82,25 +85,35 @@ ORDER = Order.DESC
 CURSOR = OffsetCursor(SORT, ORDER)
 
 
+class _StageCounts(msgspec.Struct):
+    """The micro-batches of one stage of one run, summed over its slices, and when its first
+    slice was created."""
+
+    done: int = 0
+    running: int = 0
+    total: int = 0
+    started_at: float = 0.0  # unix seconds
+
+
 class _StageRun(msgspec.Struct):
     """One run of one pipeline over one document, as DBOS's history holds it: the raw row
-    `fold_operations` folds into an operation and its jobs. Internal on purpose - nothing outside
+    `fold_operations` folds into an operation and its jobs. Internal on purpose: nothing outside
     this module sees it, and no route returns it.
 
     `collection` is None for an import and an embed: both are collection-independent, and only the
-    index of a member belongs to a collection."""
+    index of a member belongs to a collection. `stages` holds the batches of each stage its slices
+    ran: an embedding run has embed slices, then a describe slice."""
 
     id: str
     action: PipelineAction
     collection: str | None
-    document: str
+    document_id: str  # as the workflow id carries it
+    document: str  # its name (`_document_names`)
     status: RunStatus
     created_at: float
     updated_at: float
     error: str | None
-    tasks_done: int = 0
-    tasks_running: int = 0
-    tasks_total: int = 0
+    stages: dict[Stage, _StageCounts] = {}
 
 
 # A whole-collection or whole-document operation is reported under the name DBOS records it as, so
@@ -149,8 +162,9 @@ KIND_LABELS: dict[OperationKind, str] = {
 
 class Job(msgspec.Struct):
     """One stage of an operation, and the run whose batches it is made of: the convert and index
-    stages run in the operation's own run, the embed stage in the `ensure_embedding` child it
-    spawns (see `fold_operations`)."""
+    stages run in the operation's own run, the embed and describe stages in the
+    `ensure_embedding` child it spawns (see `fold_operations`). The two jobs of that child share
+    its id, and its tasks say which stage each belongs to."""
 
     id: str  # pass it to `list_tasks` for this job's batches
     stage: Stage
@@ -167,7 +181,7 @@ class Job(msgspec.Struct):
 class Operation(msgspec.Struct):
     """One operation of any kind, in the shape the Operations view lists: what every kind has in
     common, plus the numbers only that kind has in `detail` (tasks for a document, pages for a bulk
-    index, warm for a download). Kept flat and untyped on purpose - it is a read model for a table.
+    index, warm for a download). Kept flat and untyped on purpose: it is a read model for a table.
 
     A document operation (an import, or an index of one document) lists the `jobs` it is made of,
     each with the tasks it ran."""
@@ -197,19 +211,20 @@ class Task(msgspec.Struct):
     child_id: str  # the `stage_slice` run that did the batch; the task id is `{it}:{seq}`
     stage: Stage
     seq: int
-    # convert: PDF pages [start, end); embed: the one part; index: the part range written together
+    # convert: PDF pages [start, end); embed: the one part; describe: sections [start, end);
+    # index: the part range written together
     page_start: int
     page_end: int
     status: RunStatus
-    result: int | None  # convert: pages needing OCR; embed/index: chunks
+    result: int | None  # convert: pages needing OCR; describe: sections; embed/index: chunks
     error: str | None
 
 
-def _named(operation_id: str) -> str:
-    """The name in the second segment of an id (`{prefix}:{name}:{rest}`): the one thing the
-    operation is about, whichever kind of name it is. "?" for any other id."""
+def _second_segment(operation_id: str) -> str | None:
+    """The second segment of an id (`{prefix}:{key}:{rest}`): the one thing the operation is
+    about, a collection's name or a document's id. None for any other id."""
     parts = operation_id.split(":", 2)
-    return parts[1] if len(parts) == 3 else "?"
+    return parts[1] if len(parts) == 3 else None
 
 
 def _collection_of(operation_id: str) -> str | None:
@@ -219,8 +234,7 @@ def _collection_of(operation_id: str) -> str | None:
     other id carries a collection, and the delete spans every collection the document is in."""
     if operation_id.startswith(f"{workflows.DELETE_DOCUMENT_PREFIX}:"):
         return None
-    name = _named(operation_id)
-    return None if name == "?" else name
+    return _second_segment(operation_id)
 
 
 # --- one listing per kind of operation -----------------------------------------------------
@@ -310,7 +324,15 @@ async def list_operations(
     # one row more than the page: its presence is what tells us another page exists
     found = await _kind_statuses(checked, collection, page_size + 1, offset)
     # every row costs a read of its own (see `_detail`), so the page is built in one round trip
-    rows = await asyncio.gather(*(_kind_row(checked, s) for s in found[:page_size]))
+    page = found[:page_size]
+    # a document delete is titled by the document's name: one lookup for the whole page
+    names = await _document_names(
+        doc
+        for s in page
+        if _bulk_kind(s.name) == BulkKind.DELETE_DOCUMENT
+        and (doc := _second_segment(s.workflow_id)) is not None
+    )
+    rows = await asyncio.gather(*(_kind_row(checked, s, names) for s in page))
     return Page(
         items=await _with_origins(list(rows)),
         next_cursor=_cursor(checked, offset + page_size) if len(found) > page_size else None,
@@ -327,7 +349,7 @@ async def _with_origins(rows: list[Operation]) -> list[Operation]:
 
 async def list_kinds() -> list[OperationKindSummary]:
     """Every kind, in the order the Operations view shows them, with how many of each are enqueued
-    or running right now - one grouped query for all of them, not one per section."""
+    or running right now. One grouped query counts all of them, not one per section."""
     active = await sysdb.active_counts_by_name()
     counts: dict[OperationKind, int] = dict.fromkeys(KIND_ORDER, 0)
     for name, count in active.items():
@@ -406,9 +428,18 @@ def _document_title(run: _StageRun) -> str:
     return run.document
 
 
+# The stage a run's own job is before any of its slices exists: an import converts, an embedding
+# run embeds, an index writes.
+_FIRST_STAGE: dict[PipelineAction, Stage] = {
+    PipelineAction.IMPORT: Stage.CONVERT,
+    PipelineAction.EMBED: Stage.EMBED,
+    PipelineAction.INDEX: Stage.INDEX,
+}
+
+
 def fold_operations(runs: list[_StageRun]) -> list[Operation]:
-    """The page as operations: an import or an index of one document, with the embed run it
-    spawned folded in as its embed job rather than listed as an operation of its own.
+    """The page as operations: an import or an index of one document, with the embedding run it
+    spawned folded in as that run's jobs rather than listed as an operation of its own.
 
     The child is found by id: `workflows._ensure_embedding` names it `emb:{doc}:{tail}` with the
     tail of its parent's id. An embed whose parent is not on this page (a page boundary fell
@@ -417,7 +448,7 @@ def fold_operations(runs: list[_StageRun]) -> list[Operation]:
     """
     embeds = {run.id: run for run in runs if run.action == PipelineAction.EMBED}
     folded = {
-        workflows.embed_id(run.id, run.document)
+        workflows.embed_id(run.id, run.document_id)
         for run in runs
         if run.action != PipelineAction.EMBED
     }
@@ -425,27 +456,62 @@ def fold_operations(runs: list[_StageRun]) -> list[Operation]:
     for run in runs:
         if run.action == PipelineAction.EMBED:
             if run.id not in folded:
-                out.append(_document_row(run, [_job(Stage.EMBED, run)]))
+                out.append(_document_row(run, _jobs(run)))
             continue
-        embed = embeds.get(workflows.embed_id(run.id, run.document))
-        imported = run.action == PipelineAction.IMPORT
-        own = _job(Stage.CONVERT if imported else Stage.INDEX, run, embed)
-        embed_job = [] if embed is None else [_job(Stage.EMBED, embed)]
-        jobs = [own, *embed_job] if imported else [*embed_job, own]
-        out.append(_document_row(run, jobs))
+        embed = embeds.get(workflows.embed_id(run.id, run.document_id))
+        if embed is None:
+            out.append(_document_row(run, _jobs(run)))
+        elif run.action == PipelineAction.IMPORT:
+            # an import converts, then spawns its embedding run and waits: its jobs end there
+            converted = _jobs(run, end=embed.created_at, status=RunStatus.SUCCESS)
+            out.append(_document_row(run, [*converted, *_jobs(embed)]))
+        else:
+            # an index waits for its embedding run, then writes: its jobs start where that ends
+            status = run.status
+            if status in ACTIVE_STATUS:
+                status = (
+                    RunStatus.PENDING if embed.status == RunStatus.SUCCESS else RunStatus.ENQUEUED
+                )
+            own = _jobs(run, start=embed.updated_at, status=status)
+            out.append(_document_row(run, [*_jobs(embed), *own]))
     return out
 
 
-def _job(stage: Stage, run: _StageRun, embed: _StageRun | None = None) -> Job:
-    """One job, read from the run that carries it. The embed child sets the jobs around it
-    straight: an import converts before it spawns the embed, so a convert job with an embed
-    beside it is over; an index writes after the embed, so an index job waits while the embed is
-    not done and runs once it is. Without the child, the run's own status stands."""
-    status = run.status
-    if embed is not None and stage == Stage.CONVERT:
-        status = RunStatus.SUCCESS
-    if embed is not None and stage == Stage.INDEX and status in ACTIVE_STATUS:
-        status = RunStatus.PENDING if embed.status == RunStatus.SUCCESS else RunStatus.ENQUEUED
+def _jobs(
+    run: _StageRun,
+    end: float | None = None,
+    start: float | None = None,
+    status: RunStatus | None = None,
+) -> list[Job]:
+    """One job per stage the run ran, in pipeline order, its first stage even before a slice of
+    it exists. A run's stages run one after another, so a stage is over once the next one began,
+    which ends its clock, and the last one stands as the run does. `start`, `end` and `status`
+    stand for the run's own where another run sets them: an import is done converting once it
+    spawned its embedding run, and an index writes only once that run has ended."""
+    stages = sorted(set(run.stages) | {_FIRST_STAGE[run.action]}, key=STAGE_ORDER.index)
+    # every stage after the first has a slice, so a moment it began
+    starts = [
+        run.created_at if start is None else start,
+        *(run.stages[stage].started_at for stage in stages[1:]),
+    ]
+    ends = [*starts[1:], run.updated_at if end is None else end]
+    last = len(stages) - 1
+    return [
+        _job(
+            stage,
+            run,
+            RunStatus.SUCCESS if index < last else (status or run.status),
+            starts[index],
+            ends[index],
+        )
+        for index, stage in enumerate(stages)
+    ]
+
+
+def _job(stage: Stage, run: _StageRun, status: RunStatus, start: float, end: float) -> Job:
+    """One job, read from the run that carries it: its status and the span it ran over, as the
+    caller worked them out, and the batches of its stage."""
+    counts = run.stages.get(stage, _StageCounts())
     return Job(
         id=run.id,
         stage=stage,
@@ -454,10 +520,11 @@ def _job(stage: Stage, run: _StageRun, embed: _StageRun | None = None) -> Job:
         updated_at=run.updated_at,
         # a job this listing declared successful never failed, whatever the run around it did
         error=None if status == RunStatus.SUCCESS else run.error,
-        tasks_done=run.tasks_done,
-        tasks_running=run.tasks_running,
-        tasks_total=run.tasks_total,
-        seconds=_job_seconds(stage, run, embed) if _is_over(status) else None,
+        tasks_done=counts.done,
+        tasks_running=counts.running,
+        tasks_total=counts.total,
+        # a clock that went backwards reads as zero, never negative
+        seconds=max(0.0, end - start) if _is_over(status) else None,
     )
 
 
@@ -465,19 +532,6 @@ def _is_over(status: RunStatus) -> bool:
     """Whether a job has stopped running. DELAYED is a debounce waiting, not work in flight, but
     no job is ever debounced, so "not active" is the whole of it here."""
     return status not in ACTIVE_STATUS
-
-
-def _job_seconds(stage: Stage, run: _StageRun, embed: _StageRun | None) -> float:
-    """How long one finished job ran, from the run's timestamps alone. The owning run spans more
-    than its own stage: an import converts and then waits for the embed it spawned, and an index
-    waits for the embed before it writes. The child's timestamps split the two."""
-    if embed is None:
-        return max(0.0, run.updated_at - run.created_at)
-    if stage == Stage.CONVERT:
-        return max(0.0, embed.created_at - run.created_at)
-    if stage == Stage.INDEX:
-        return max(0.0, run.updated_at - embed.updated_at)
-    return max(0.0, embed.updated_at - embed.created_at)
 
 
 def _document_row(run: _StageRun, jobs: list[Job]) -> Operation:
@@ -498,11 +552,11 @@ def _document_row(run: _StageRun, jobs: list[Job]) -> Operation:
     )
 
 
-async def _kind_row(kind: OperationKind, status) -> Operation:
+async def _kind_row(kind: OperationKind, status, names: dict[str, str]) -> Operation:
     return Operation(
         id=status.workflow_id,
         kind=kind,
-        title=_title(kind, status),
+        title=_title(kind, status, names),
         status=status.status,
         created_at=(status.created_at or 0) / 1000,
         updated_at=(status.updated_at or 0) / 1000,
@@ -511,30 +565,33 @@ async def _kind_row(kind: OperationKind, status) -> Operation:
     )
 
 
-def _title(kind: OperationKind, status) -> str:
+def _title(kind: OperationKind, status, names: dict[str, str]) -> str:
     """Human text for one row: what this operation works on, read out of its id and the name DBOS
     recorded it under. The verb is the row's tag, so the title leaves it out.
 
     `document` never arrives here: it has a row builder of its own (see `list_operations`)."""
     if kind == OperationKind.COLLECTION:
         bulk = _bulk_kind(status.name)  # the listing selects exactly these three names
-        # the second segment is a collection for the two bulk kinds, a document for a delete
-        return (
-            f"{BULK_TITLES[bulk]} {_named(status.workflow_id)}" if bulk else "collection operation"
-        )
+        if bulk is None:
+            return "collection operation"
+        # the second segment is a collection for the two bulk kinds, a document's id for a delete
+        key = _second_segment(status.workflow_id) or "?"
+        if bulk == BulkKind.DELETE_DOCUMENT:
+            key = names.get(key, key)
+        return f"{BULK_TITLES[bulk]} {key}"
     if kind == OperationKind.DOWNLOAD:
         download_kind, model = models.model_names(status.workflow_id)
         return f"{download_kind} {model}"
     if status.name == DAILY_MAINTENANCE_WORKFLOW:  # the rest are maintenance runs
         return "daily housekeeping"
-    return _named(status.workflow_id)
+    return _second_segment(status.workflow_id) or "?"
 
 
 async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | None]:
     """The numbers only this kind has. A collection operation names which of the three it is
     (`bulk`), since the kind alone does not. A bulk index also publishes its progress as a DBOS
     event, which is read without waiting: an operation that has not finished its first page yet
-    simply has none.
+    has none.
 
     Async because that read is one, even with no wait: the event lives in the system database."""
     if kind == OperationKind.DOWNLOAD:
@@ -552,30 +609,69 @@ async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | N
     return {"bulk": bulk}
 
 
-def _stage_run(status, children: list, done_by_child: dict[str, int]) -> _StageRun:
-    # a listing selects the three pipeline workflows by name, so every id parses; an id of an
-    # older shape is listed as an import of an unknown document rather than failing the page
-    action, collection, doc = pipeline_names(status.workflow_id) or (
-        PipelineAction.IMPORT,
-        None,
-        "?",
+async def _document_names(ids: Iterable[str]) -> dict[str, str]:
+    """What people call each of these documents, by id. One deleted since has no row, so its
+    name is the one its delete was given (`delete_document_workflow(doc, name)`). One with no
+    delete on record is absent: a caller shows its id."""
+    wanted = set(ids)
+    names = await documents.names_of(wanted)
+    gone = wanted - names.keys()
+    if not gone:
+        return names
+    deletes = await DBOS.list_workflows_async(
+        name=DELETE_DOCUMENT_WORKFLOW,
+        workflow_id_prefix=[f"{workflows.DELETE_DOCUMENT_PREFIX}:{doc}:" for doc in sorted(gone)],
+        load_output=False,
+        sort_desc=True,  # a document deleted, imported again and deleted again: its latest name
     )
-    totals = [_batch_count(c) for c in children]
-    done = [done_by_child.get(c.workflow_id, 0) for c in children]
+    for run in deletes:  # latest first, so the first name of each document is kept
+        if run.input:
+            names.setdefault(_second_segment(run.workflow_id) or "?", run.input["args"][1])
+    return names
+
+
+def _pipeline_of(workflow_id: str) -> tuple[PipelineAction, str | None, str]:
+    """What a pipeline run does, to which collection and document. A listing selects the three
+    pipeline workflows by name, so every id parses; an id of an older shape reads as an import
+    of an unknown document rather than failing the page."""
+    return pipeline_names(workflow_id) or (PipelineAction.IMPORT, None, "?")
+
+
+def _stage_of(parent: str, child: str) -> Stage | None:
+    """The stage a slice ran, read out of its id, `{parent}:{stage}[:{slice}]`, so no input is
+    unpickled; None for an id of another shape."""
+    found = child.removeprefix(f"{parent}:").split(":")[0]
+    return Stage(found) if found in STAGE_ORDER else None
+
+
+def _stage_run(
+    status, children: list, done_by_child: dict[str, int], names: dict[str, str]
+) -> _StageRun:
+    action, collection, doc = _pipeline_of(status.workflow_id)
+    stages: dict[Stage, _StageCounts] = {}
+    for child in children:
+        stage = _stage_of(status.workflow_id, child.workflow_id)
+        if stage is None:
+            continue
+        created = (child.created_at or 0) / 1000
+        counts = stages.setdefault(stage, _StageCounts(started_at=created))
+        total = _batch_count(child)
+        done = done_by_child.get(child.workflow_id, 0)
+        counts.done += done
+        counts.running += _runs_a_batch(child, done, total)
+        counts.total += total
+        counts.started_at = min(counts.started_at, created)
     return _StageRun(
         id=status.workflow_id,
         action=action,
         collection=collection,
-        document=doc,
+        document_id=doc,
+        document=names.get(doc, doc),
         status=status.status,
         created_at=(status.created_at or 0) / 1000,
         updated_at=(status.updated_at or 0) / 1000,
         error=str(status.error) if status.error else None,
-        tasks_done=sum(done),
-        tasks_running=sum(
-            _runs_a_batch(c, d, t) for c, d, t in zip(children, done, totals, strict=True)
-        ),
-        tasks_total=sum(totals),
+        stages=stages,
     )
 
 
@@ -605,11 +701,11 @@ async def _pipeline_page(
 
     The collection filter is the id's prefix, so the database cuts the window after it has
     filtered: a busy collection can no longer push a quiet one out of the page. It keeps collection
-    index runs only - an import and an embed belong to no collection.
+    index runs only; an import and an embed belong to no collection.
 
     A run that starts while the page is walked shifts the offsets behind it, so a row can repeat
-    or be skipped across a page boundary - the same trade an offset cursor over a live history
-    always makes."""
+    or be skipped across a page boundary. An offset cursor over a live history always makes that
+    trade."""
     check_page_size(page_size)
     offset = _decode_cursor(cursor, OperationKind.DOCUMENT)
     # one row more than the page: its presence is what tells us another page exists
@@ -624,12 +720,15 @@ async def _pipeline_page(
         load_input=False,
     )
     page = statuses[:page_size]
-    children = await stage_children([s.workflow_id for s in page])
+    children, names = await asyncio.gather(
+        stage_children([s.workflow_id for s in page]),
+        _document_names(_pipeline_of(s.workflow_id)[2] for s in page),
+    )
     done = await sysdb.step_counts(
         [c.workflow_id for group in children.values() for c in group], STAGE_STEP
     )
     return Page(
-        items=[_stage_run(s, children[s.workflow_id], done) for s in page],
+        items=[_stage_run(s, children[s.workflow_id], done, names) for s in page],
         next_cursor=(
             _cursor(OperationKind.DOCUMENT, offset + page_size)
             if len(statuses) > page_size
@@ -687,14 +786,17 @@ async def chunks_since(cutoff: float) -> list[ChunksAt]:
             parent_workflow_id=list(live), name=STAGE_WORKFLOW, load_input=False
         ):
             parent = child.parent_workflow_id or ""
-            stage = child.workflow_id.removeprefix(f"{parent}:").split(":")[0]
+            stage = _stage_of(parent, child.workflow_id)
             if parent in chunks and stage in (Stage.EMBED, Stage.INDEX):
                 chunks[parent] += sum(child.output or [])
     points: list[ChunksAt] = []
+    ran = {id: _pipeline_of(id) for id in live}
+    names = await _document_names(doc for _, _, doc in ran.values())
     for workflow_id, status in live.items():
-        _, collection, document = pipeline_names(workflow_id) or (None, None, "?")
+        _, collection, doc = ran[workflow_id]
+        named = names.get(doc, doc)  # a document gone with no delete on record: its id
         points.append(
-            ChunksAt((status.completed_at or 0) / 1000, document, collection, chunks[workflow_id])
+            ChunksAt((status.completed_at or 0) / 1000, named, collection, chunks[workflow_id])
         )
     return sorted(points, key=lambda point: point.ts)
 

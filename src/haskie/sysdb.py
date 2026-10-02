@@ -81,7 +81,7 @@ async def operation_activity(skip: Sequence[str] = ()) -> dict[str, int]:
     `ACTIVE_STATUS` only: a DELAYED workflow is a debounce waiting out its period, not work
     waiting for a slot. Counting it made the indicator read "1 queued" for a whole
     `maintenance_idle_seconds` after the last document, with nothing queued and the Operations
-    view - which counts the same `ACTIVE_STATUS` - showing nothing."""
+    view (which counts the same `ACTIVE_STATUS`) showing nothing."""
     async with db.read() as conn:
         workflow = workflow_status.c
         rows = await conn.execute(

@@ -2,13 +2,16 @@ import { describe, expect, test } from 'bun:test'
 import { FileText } from 'lucide-react'
 import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { EmbedderMetadata, Excerpt, Hit, Passage, RerankerMetadata, Source, Status } from '../api'
+import type { EmbedderMetadata, Excerpt, Hit, MappedDocument, MappedSection, Passage, RerankerMetadata, Status } from '../api'
 import { Field } from './Field'
+import { Info } from './Info'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
 import { Kv } from './Kv'
 import { MatchModal } from './MatchModal'
 import { ModelFacts } from './ModelFacts'
+import { SectionsModal } from './SectionsModal'
+import { MapDocuments, OpenedDetail, SectionGrid } from './SectionGrid'
 import { Mark } from './Mark'
 import { markTerms } from './markTerms'
 import { Picker } from './Picker'
@@ -40,7 +43,9 @@ const noop = (): void => {}
 
 const HIT: Hit = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area.pdf',
+  id: 'c1', section_id: 's-soft', section_ids: ['s-doc', 's-soft'],
   source_path: 'sources/area.pdf',
   markdown_path: 'markdown/area.md',
   part: 0,
@@ -67,30 +72,12 @@ const HIT: Hit = {
   also_in: [],
 }
 
-const SOURCE: Source = {
-  collection: 'P–T',
-  document: 'sun.pdf',
-  score: 0.79,
-  chunks: 6,
-  description: 'Sun position by date, time and latitude.',
-  header: 'Solar geometry > Elevation tables',
-  location: 'p. 4',
-  text: 'Sun position at 35° elevation casts a shadow 1.4× the object height.',
-  source_file: '/home/ada/.haskie/sources/sun.pdf',
-  markdown_file: '/home/ada/.haskie/markdown/sun.md',
-  line_start: 3,
-  line_end: 9,
-  collections: ['P–T', 'U–Z'],
-  sections: [
-    { header: 'Elevation tables', score: 0.79, chunks: 4, line_start: 3, line_end: 9, location: 'sun.pdf p.4 L3-9' },
-    { header: 'Elevation tables > Corrections', score: 0.31, chunks: 2, line_start: 12, line_end: 15, location: 'sun.pdf p.5 L12-15' },
-  ],
-}
-
 const PASSAGE: Passage = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area.pdf',
   header: 'Lighting > Soft shadows',
+  section_id: 's-soft',
   location: 'area.pdf p.2 L41-58',
   seq_start: 4,
   seq_end: 5,
@@ -112,8 +99,10 @@ const PASSAGE: Passage = {
 // A section of two passages: its heading path, and its lines from the first passage to the last.
 const EXCERPT: Excerpt = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area.pdf',
   header: 'Lighting',
+  section_id: 's-soft',
   location: 'area.pdf p.2-3 L41-90',
   seq_start: 4,
   seq_end: 9,
@@ -175,6 +164,21 @@ describe('Picker', () => {
       contains: ['<summary aria-label="Scope">', 'role="listbox" aria-label="Scope"'],
     },
     {
+      name: 'a tagged option carries its tag beside its label, in the list and the summary',
+      element: (
+        <Picker
+          options={[...options, { value: 'mcp', label: 'Excerpts', tag: { text: 'MCP', title: 'An agent gets the same' } }]}
+          value="mcp"
+          onChange={noop}
+        />
+      ),
+      contains: [
+        '<span class="picker-value"><span class="picker-label"><span>Excerpts</span><span class="picker-tag" title="An agent gets the same">MCP</span></span></span>',
+        'aria-selected="true"><span class="picker-label"><span>Excerpts</span><span class="picker-tag"',
+        'aria-selected="false"><span>A–E</span>',
+      ],
+    },
+    {
       name: 'no options renders an empty list',
       element: <Picker<string> options={[]} value="*" onChange={noop} />,
       contains: ['<ul class="picker-list" role="listbox"></ul>'],
@@ -185,7 +189,7 @@ describe('Picker', () => {
 describe('Tabs', () => {
   const tabs = [
     { id: 'tab-matches', label: 'Excerpts · 6' },
-    { id: 'tab-sources', label: 'Sources · 3' },
+    { id: 'tab-sections', label: 'Sections · 3' },
   ]
   check([
     {
@@ -195,13 +199,23 @@ describe('Tabs', () => {
     },
     {
       name: 'the selected tab is the only one marked',
-      element: <Tabs tabs={tabs} selected="tab-sources" onSelect={noop} />,
-      contains: ['aria-selected="false" aria-controls="tab-matches">Excerpts · 6', 'aria-selected="true" aria-controls="tab-sources">Sources · 3'],
+      element: <Tabs tabs={tabs} selected="tab-sections" onSelect={noop} />,
+      contains: ['aria-selected="false" aria-controls="tab-matches">Excerpts · 6', 'aria-selected="true" aria-controls="tab-sections">Sections · 3'],
     },
     {
       name: 'no tabs renders an empty strip',
       element: <Tabs tabs={[]} selected="" onSelect={noop} />,
       contains: ['<div class="tabs" role="tablist"></div>'],
+    },
+  ])
+})
+
+describe('Info', () => {
+  check([
+    {
+      name: 'a box with the info icon first, then what it says',
+      element: <Info>In no collection yet.</Info>,
+      contains: ['<p class="info"><svg', 'lucide-info icon"', '</svg><span>In no collection yet.</span></p>'],
     },
   ])
 })
@@ -227,7 +241,24 @@ describe('Tile', () => {
       name: 'pressed omitted leaves a plain button',
       element: <Tile icon={FileText} name="Area" sub="" hint="" onClick={noop} />,
       contains: ['class="tile"'],
-      missing: ['aria-pressed'],
+      missing: ['aria-pressed', 'tile-cover'],
+    },
+    {
+      name: 'a description shows alone on hover',
+      element: <Tile icon={FileText} name="Area" sub="A. Hoffmann" meta="Thu 1 Oct" description="Notes on area lights." onClick={noop} />,
+      contains: ['<span class="hint" role="tooltip">Notes on area lights.</span>'],
+      missing: ['<strong>'],
+    },
+    {
+      name: 'an empty description shows nothing on hover',
+      element: <Tile icon={FileText} name="Area" sub="A. Hoffmann" description="" onClick={noop} />,
+      contains: ['<span class="sub">A. Hoffmann</span></span></button>'],
+      missing: ['class="hint"'],
+    },
+    {
+      name: 'a cover sits behind the icon, loaded as it scrolls into view',
+      element: <Tile icon={FileText} name="Area" sub="" hint="" cover="/api/documents/area.pdf/cover" onClick={noop} />,
+      contains: ['<img class="tile-cover" src="/api/documents/area.pdf/cover" alt="" loading="lazy"/><svg'],
     },
   ])
 })
@@ -505,16 +536,6 @@ describe('HitGrid', () => {
       contains: ['style="--score:1"', 'style="--score:0.1"'],
     },
     {
-      name: 'a source carries the same tag head, its chunk count and its section count',
-      element: <HitGrid results={[SOURCE]} query="shadow" />,
-      contains: [
-        '<span class="kind">P–T</span><span>sun.pdf</span>',
-        'Sun position by date, time and latitude.',
-        '<span>6 chunks · 2 sections</span>',
-      ],
-      missing: ['hit-title'],
-    },
-    {
       name: 'a passage: its heading on one line, its page and lines on the next',
       element: <HitGrid results={[PASSAGE]} query="shadow" />,
       contains: ['<footer class="hit-foot"><span>Soft shadows</span><span>p. 2 · lines 41–58</span><span>chunks 4–5</span></footer>'],
@@ -528,11 +549,6 @@ describe('HitGrid', () => {
       name: 'a chunk with no heading keeps the heading line, empty',
       element: <HitGrid results={[{ ...HIT, headings: [], header: '' }]} query="shadow" />,
       contains: ['<footer class="hit-foot"><span>\u00a0</span><span>p. 2</span><span>chunk 4</span></footer>'],
-    },
-    {
-      name: 'a source without a description falls back to the matched text',
-      element: <HitGrid results={[{ ...SOURCE, description: '' }]} query="shadow" />,
-      contains: ['<mark>shadow</mark> 1.4×'],
     },
     {
       name: 'an excerpt: its section heading, its pages and lines from the first passage to the last',
@@ -580,7 +596,6 @@ describe('HitGrid', () => {
       missing: ['hit-questions'],
     },
     { name: 'no hits renders an empty grid', element: <HitGrid results={[] as Hit[]} query="" />, contains: ['<div class="hits"></div>'] },
-    { name: 'no sources renders an empty grid', element: <HitGrid results={[] as Source[]} query="" />, contains: ['<div class="hits"></div>'] },
   ])
 })
 
@@ -699,6 +714,7 @@ describe('also_in', () => {
   // the same paragraph in a second book, folded into the result by the search
   const REFERENCE = {
     collection: 'A–E',
+    document_id: 'a1',
     document: 'lighting-notes.md',
     header: 'Shadows > Area lights',
     location: 'lighting-notes.md L12-14',
@@ -771,6 +787,7 @@ describe('also_in', () => {
                   {
                     ...REFERENCE,
                     seq: 8,
+                    document_id: 'a1',
                     document: 'notes.md',
                     header: 'Delivery',
                     location: 'notes.md L4-5',
@@ -885,6 +902,129 @@ describe('SearchTook', () => {
       element: <SearchTook counts="" ms={null} steps={steps} />,
       contains: ['<p class="mono muted search-took" tabindex="0"> </p>'],
       missing: ['role="tooltip"'],
+    },
+  ])
+})
+
+const SAGAS: MappedSection = {
+  collection: 'patterns',
+  document_id: 'b1',
+  document: 'iddd.pdf',
+  header: 'Sagas > Compensation',
+  id: 's-compensation',
+  location: 'iddd.pdf p.12-14 L300-360',
+  line_start: 300,
+  line_end: 360,
+  score: 0.82,
+  depth: 2,
+  seq_start: 40,
+  seq_end: 44,
+  chars: 5210,
+  chunks: 3,
+  descriptors: ['saga', 'compensating step', 'orchestrator'],
+  related: [
+    { collection: 'patterns', document_id: 'c2', document: 'ddia.pdf', header: 'Sagas', id: 's-ddia-sagas', location: 'ddia.pdf L10-40', line_start: 10, line_end: 40, score: 0.4, similarity: 0.93 },
+    { collection: 'patterns', document_id: 'b1', document: 'iddd.pdf', header: 'Sagas > Retries', id: 's-retries', location: 'iddd.pdf L361-380', line_start: 361, line_end: 380, score: 0.3, similarity: 0.88 },
+    // the pick itself, chunked by another collection: named by that collection
+    { collection: 'patterns-text', document_id: 'b1', document: 'iddd.pdf', header: 'Sagas > Compensation', id: 's-compensation', location: 'iddd.pdf L300-358', line_start: 300, line_end: 358, score: 0.3, similarity: 0.99 },
+  ],
+}
+
+describe('SectionGrid', () => {
+  check([
+    {
+      name: 'a pick names its section, what it is about and where to read it',
+      element: <SectionGrid sections={[SAGAS]} />,
+      contains: ['iddd.pdf', 'patterns', '0.82', 'Sagas &gt; Compensation', 'descriptor">compensating step', 'descriptor">saga', 'p.12-14 L300-360', '5210 chars · 3 matched chunks'],
+    },
+    {
+      name: 'the sections it covers best, another document named, its own not',
+      element: <SectionGrid sections={[SAGAS]} />,
+      contains: ['aria-label="Related sections"', 'related-place mono muted">ddia.pdf<', '>0.93<', 'Sagas &gt; Retries</span><span class="mono muted">0.88<', 'related-place mono muted">patterns-text<', '>0.99<'],
+      missing: ['related-place mono muted">iddd.pdf', 'patterns · '],
+    },
+    {
+      name: 'the whole document, no descriptors, nothing related: one chunk',
+      element: <SectionGrid sections={[{ ...SAGAS, header: '', descriptors: [], related: [], chunks: 1 }]} />,
+      contains: ['The whole document', '1 matched chunk<'],
+      missing: ['class="descriptors', 'Related sections'],
+    },
+  ])
+})
+
+const BOOKS: MappedDocument[] = [
+  {
+    document_id: 'b1',
+    document: 'iddd.pdf',
+    description: 'Implementing Domain-Driven Design',
+    score: 4.2,
+    chunks: 38,
+    sections: 2,
+    collections: ['patterns', 'patterns-text'],
+    markdown_file: '/Users/ada/.haskie/documents/b1/original.pdf.md',
+    source_file: '/Users/ada/.haskie/documents/b1/original.pdf',
+  },
+  {
+    document_id: 'c2',
+    document: 'ddia.pdf',
+    description: '',
+    score: 0.9,
+    chunks: 1,
+    sections: 0,
+    collections: ['patterns'],
+    markdown_file: '/Users/ada/.haskie/documents/c2/original.pdf.md',
+    source_file: '/Users/ada/.haskie/documents/c2/original.pdf',
+  },
+]
+
+describe('MapDocuments', () => {
+  check([
+    {
+      name: 'each document: its score, what it is about, how much matched, its picks, its holders',
+      element: <MapDocuments documents={BOOKS} />,
+      contains: [
+        'aria-label="Documents"',
+        '2 documents',
+        'href="#/documents/iddd.pdf"',
+        '>4.20<',
+        'iddd.pdf<span class="muted"> · Implementing Domain-Driven Design</span>',
+        '38 chunks · 2 sections · patterns, patterns-text',
+        '1 chunk · 0 sections · patterns',
+      ],
+    },
+    { name: 'none: nothing at all', element: <MapDocuments documents={[]} />, contains: [], missing: ['Documents'] },
+  ])
+})
+
+describe('OpenedDetail', () => {
+  check([
+    {
+      name: 'a pick: its score, its matched chunks, and the sections it covers with their similarity',
+      element: <OpenedDetail section={SAGAS} />,
+      contains: ['score 0.82 · 3 matched chunks', 'aria-label="Related sections"', 'Sagas &gt; Retries</span><span class="mono muted">0.88<', '>0.93<'],
+    },
+    {
+      name: 'a pick that covers nothing: no related list',
+      element: <OpenedDetail section={{ ...SAGAS, chunks: 1, related: [] }} />,
+      contains: ['score 0.82 · 1 matched chunk<'],
+      missing: ['Related sections'],
+    },
+    {
+      name: 'a related section: its score and how closely its pick covers it',
+      element: <OpenedDetail section={SAGAS.related[0]} />,
+      contains: ['score 0.40 · similarity 0.93 to its pick'],
+      missing: ['matched chunk', 'Related sections'],
+    },
+  ])
+})
+
+describe('SectionsModal', () => {
+  check([
+    { name: 'closed: nothing inside', element: <SectionsModal section={null} onClose={noop} />, contains: ['<dialog class="modal"'], missing: ['>Section<'] },
+    {
+      name: 'open: the section first, what the map said about it, then its document',
+      element: <SectionsModal section={SAGAS} onClose={noop} />,
+      contains: ['iddd.pdf', '>Section<', '>Document<', 'Sagas &gt; Compensation', '>p.12-14 L300-360<', 'class="descriptors"', 'score 0.82 · 3 matched chunks', 'Related sections'],
     },
   ])
 })

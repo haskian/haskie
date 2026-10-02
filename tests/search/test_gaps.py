@@ -5,18 +5,20 @@ import msgspec
 import numpy as np
 import pytest
 
+from haskie import ids
 from haskie.collection.index import Hit, Overlap, Overlaps, Relation
 from haskie.search import gaps, log
 from haskie.search.gaps import Bars, Gap, Signal
 from haskie.search.log import Asked, LoggedQuestion
-from haskie.search.passage import Excerpt, HotSection, Passage, PassageReference, Source, Span
+from haskie.search.passage import Excerpt, Passage, PassageReference, Span
+from haskie.search.section_map import MappedSection
 
-MINILM = "Xenova/ms-marco-MiniLM-L-6-v2"
+ETTIN = "cross-encoder/ettin-reranker-32m-v1"
 BARS = Bars(
-    weak_match={"compact": 0.70, "arctic-m": 0.40},
-    answered_match={"compact": 0.775},
-    same_topic={"compact": 0.70},
-    floor={MINILM: 0.05},
+    weak_match={"granite-97m-multilingual": 0.70, "bekko-a25m": 0.40},
+    answered_match={"granite-97m-multilingual": 0.775},
+    same_topic={"granite-97m-multilingual": 0.70},
+    floor={ETTIN: 0.05},
 )
 
 # one excerpts search under the default profile and reranker, as `log.load` returns it
@@ -29,8 +31,8 @@ SEARCH = log.Logged(
     context="a Python service on Kafka",
     collections=["distributed-systems", "kafka"],
     mode=None,
-    embedding="compact",
-    reranker=MINILM,
+    embedding="granite-97m-multilingual",
+    reranker=ETTIN,
     min_rerank_score=None,
     result_limit=25,
     result_count=25,
@@ -71,6 +73,18 @@ NO_RERANK = {"reranker": None}
             None,
         ),
         ("no excerpt answers it", {}, {"uncovered": True}, Signal.UNCOVERED),
+        (
+            "a scoped search that missed is no gap: the rest of the shelf may answer",
+            {"scoped": True, "result_count": 0},
+            {"uncovered": True, "best_rerank": 0.01, "best_similarity": 0.1},
+            None,
+        ),
+        (
+            "the agent's verdict stands on a scoped search",
+            {"scoped": True, "result_count": 0},
+            {"agent_verdict": "insufficient"},
+            Signal.REPORTED,
+        ),
         ("the reranker's best under its floor", {}, {"best_rerank": 0.04}, Signal.WEAK),
         ("exactly at the floor is an answer", {}, {"best_rerank": 0.05}, None),
         (
@@ -93,7 +107,7 @@ NO_RERANK = {"reranker": None}
         ),
         (
             "a reranker the bars do not know leaves it to the cosine",
-            {"reranker": "BAAI/bge-reranker-base"},
+            {"reranker": "Alibaba-NLP/gte-reranker-modernbert-base"},
             {"best_rerank": 0.0, "best_similarity": 0.6},
             Signal.WEAK,
         ),
@@ -108,7 +122,7 @@ NO_RERANK = {"reranker": None}
         ("at the high bar is an answer", NO_RERANK, {"best_similarity": 0.775}, None),
         (
             "a profile with no high bar has no band",
-            {**NO_RERANK, "embedding": "arctic-m"},
+            {**NO_RERANK, "embedding": "bekko-a25m"},
             {"best_similarity": 0.5},
             None,
         ),
@@ -120,7 +134,7 @@ NO_RERANK = {"reranker": None}
         ),
         (
             "a profile without a bar gives no verdict",
-            {**NO_RERANK, "embedding": "gte-base"},
+            {**NO_RERANK, "embedding": "bekko-a8m"},
             {"best_similarity": 0.1},
             None,
         ),
@@ -159,9 +173,9 @@ def test_topics_group_by_vector_then_by_words() -> None:
         _gap(6, "Kafka retries", 600.0, A, session_id="s1"),
         _gap(5, "idempotent Kafka consumers", 500.0, B, session_id="s2", collections=["notes"]),
         _gap(4, "sourdough starter", 400.0, C, session_id=None),
-        _gap(3, "Sourdough, starter?", 300.0, None, embedding="gte-base"),  # words: 4's
+        _gap(3, "Sourdough, starter?", 300.0, None, embedding="bekko-a8m"),  # words: 4's
         _gap(2, "Kafka retries", 200.0, None, embedding=None),  # words: 6's
-        _gap(1, "vitamin D", 100.0, [0.0, 1.0], embedding="gte-base"),  # no bar: words only
+        _gap(1, "vitamin D", 100.0, [0.0, 1.0], embedding="bekko-a8m"),  # no bar: words only
         _gap(8, "rioja grapes", 50.0, None),
     ]
     near = {6: [_result(0, None)], 5: []}
@@ -204,6 +218,7 @@ def _reference(
 ) -> PassageReference:
     return PassageReference(
         collection="books",
+        document_id=document,
         document=document,
         seq_start=seq[0],
         seq_end=seq[1],
@@ -223,8 +238,10 @@ def _reference(
 def _passage(document: str, seq: tuple[int, int], also_in: list[PassageReference]) -> Passage:
     return Passage(
         collection="books",
+        document_id=document,
         document=document,
         header="Part II > Replication > Leaders and Followers",
+        section_id="leaders",
         location=f"{document} p.151-152 L4210-4231",
         seq_start=seq[0],
         seq_end=seq[1],
@@ -294,10 +311,12 @@ def test_an_answer_flattens_in_preorder_under_its_parents() -> None:
     assert capture.results[0].location == "ddia.pdf p.151-152 L4210-4231", "the citation is kept"
 
 
-def test_a_chunk_and_a_document_row_flatten_with_their_own_spans() -> None:
-    """A chunk covers one `seq`; a document row (`search_sources`) covers none."""
+def test_a_chunk_and_a_mapped_section_flatten_with_their_own_spans() -> None:
+    """A chunk covers one `seq`; a section of the map covers its first chunk to its last, and has
+    no places folded into it."""
     hit = Hit(
         collection="books",
+        document_id="ddia.pdf",
         document="ddia.pdf",
         source_path="documents/ddia.pdf",
         markdown_path="documents/ddia.pdf.md",
@@ -318,28 +337,30 @@ def test_a_chunk_and_a_document_row_flatten_with_their_own_spans() -> None:
         text="Every write goes to the leader.",
         score=0.4,
     )
-    source = Source(
+    mapped = MappedSection(
         collection="books",
+        document_id="raft.pdf",
         document="raft.pdf",
-        score=0.2,
-        chunks=4,
-        description="The Raft paper.",
         header="Leader election",
-        location="raft.pdf p.5 L120-140",
-        text="A server remains in follower state as long as it receives valid RPCs.",
-        source_file="/home/documents/raft.pdf",
-        markdown_file="/home/documents/raft.pdf.md",
+        id="s1",
+        location="raft.pdf p.5-6 L120-160",
         line_start=120,
-        line_end=140,
-        collections=["books"],
-        sections=[HotSection("Leader election", 0.2, 4, 120, 160, "raft.pdf p.5-6 L120-160")],
+        line_end=160,
+        score=0.2,
+        depth=1,
+        seq_start=9,
+        seq_end=12,
+        chars=4_800,
+        chunks=4,
+        descriptors=["election timeout"],
+        related=[],
     )
 
     (chunk,) = log.flatten([hit])
-    (row,) = log.flatten([source])
+    (row,) = log.flatten([mapped])
 
     assert (chunk.seq_start, chunk.seq_end, chunk.score) == (41, 41, 0.4)
-    assert (row.seq_start, row.seq_end, row.document) == (None, None, "raft.pdf")
+    assert (row.seq_start, row.seq_end, row.document) == (9, 12, "raft.pdf")
 
 
 def _span(seq: tuple[int, int], also_in: list[PassageReference]) -> Span:
@@ -356,8 +377,10 @@ def test_an_excerpt_flattens_its_passages_repeats_under_itself() -> None:
     spans = [_span((3, 4), [one]), _span((6, 6), []), _span((8, 8), [other])]
     excerpt = Excerpt(
         collection="books",
+        document_id="ddia.pdf",
         document="ddia.pdf",
         header="Part II > Replication",
+        section_id=ids.md5(b"doc/s/1"),
         location="ddia.pdf p.151-153 L4210-4290",
         seq_start=3,
         seq_end=8,

@@ -50,6 +50,12 @@ collections = Table(
     Column("last_write_at", Float),
     Column("last_maintained_at", Float),
     Column("vector_index_rows", Integer, nullable=False, server_default=ZERO),
+    # the sum of the unit chunk vectors of its indexed documents under `vector_model`, and how
+    # many chunks it sums (`embed_cache.corpus_sum`), set by maintenance: what a search centres
+    # cosines on before it weighs them (`search.section_map`)
+    Column("vector_sum", LargeBinary),
+    Column("vector_rows", Integer, nullable=False, server_default=ZERO),
+    Column("vector_model", Text),
 )
 
 # a document belongs to no collection: `collection_documents` is the many-to-many, and each
@@ -57,7 +63,12 @@ collections = Table(
 documents = Table(
     "documents",
     metadata,
-    Column("name", Text, primary_key=True),
+    # the MD5 of the original file's bytes: the same file is the same document, and every table
+    # and index refers to a document by it
+    Column("id", Text, primary_key=True),
+    # what people and agents call it, unique and in lowercase-kebab-case (`stored_name`): the API,
+    # the tools and a citation address a document by it
+    Column("name", Text, nullable=False),
     Column("suffix", Text, nullable=False),
     Column("size", Integer, nullable=False),
     Column("status", Text, nullable=False, server_default="queued"),
@@ -68,12 +79,11 @@ documents = Table(
     Column("created_at", Float, nullable=False, server_default=ZERO),
     Column("updated_at", Float, nullable=False, server_default=ZERO),
     Column("description", Text, nullable=False, server_default=""),
-    # MD5 of the original file's bytes: an upload with the same hash is the same file again
-    Column("md5", Text, nullable=False),
-    Index("idx_documents_status", "status", "name"),
+    # `id` last, so a search finds the documents being deleted without reading their rows
+    Index("idx_documents_status", "status", "name", "id"),
     Index("idx_documents_updated", "updated_at", "name"),
     Index("idx_documents_size", "size", "name"),
-    Index("idx_documents_md5", "md5"),
+    Index("idx_documents_name", "name", unique=True),
 )
 
 collection_documents = Table(
@@ -85,13 +95,16 @@ collection_documents = Table(
         ForeignKey("collections.name", ondelete="CASCADE"),
         primary_key=True,
     ),
-    Column("document", Text, ForeignKey("documents.name", ondelete="CASCADE"), primary_key=True),
+    Column("document_id", Text, ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True),
     Column("status", Text, nullable=False, server_default="pending"),
     Column("error", Text),
     Column("added_at", Float, nullable=False, server_default=ZERO),
     Column("updated_at", Float, nullable=False, server_default=ZERO),
-    Index("idx_collection_documents_document", "document"),
-    Index("idx_collection_documents_status", "collection", "status", "document"),
+    # the embedding cache entry its rows are indexed from, None until indexed or once the entry is
+    # forgotten: its section ids are that entry's, whatever the chunk settings say by now
+    Column("cache_id", Text, ForeignKey("embeddings.id", ondelete="SET NULL")),
+    Index("idx_collection_documents_document_id", "document_id"),
+    Index("idx_collection_documents_status", "collection", "status", "document_id"),
 )
 
 # the durable, content-addressed embedding cache (see indexing/embed_cache.py)
@@ -99,7 +112,7 @@ embeddings = Table(
     "embeddings",
     metadata,
     Column("id", Text, primary_key=True),
-    Column("document", Text, ForeignKey("documents.name", ondelete="CASCADE"), nullable=False),
+    Column("document_id", Text, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False),
     Column("urn", Text, nullable=False),
     Column("model", Text, nullable=False),
     Column("chunk_size", Integer, nullable=False),
@@ -112,10 +125,10 @@ embeddings = Table(
     Column("rows", Integer, nullable=False, server_default=ZERO),
     Column("bytes", Integer, nullable=False, server_default=ZERO),
     Column("created_at", Float, nullable=False, server_default=ZERO),
-    # the document as one vector: the mean of its unit chunk vectors, normalized, as float32
+    # the document as one vector: the mean of its unit chunk vectors, not normalized, float32
     # bytes; what `embed_cache.nearest` compares documents by. Null without an embedding model
     Column("vector", LargeBinary),
-    Index("idx_embeddings_document", "document"),
+    Index("idx_embeddings_document_id", "document_id"),
 )
 
 session_collections = Table(
@@ -167,6 +180,8 @@ searches = Table(
     Column("min_rerank_score", Float),  # the settings' floor in place of the reranker's own
     Column("result_limit", Integer),
     Column("result_count", Integer, nullable=False, server_default=ZERO),
+    # kept to some documents or sections (`document_ids`, `section_ids`): a miss is no gap
+    Column("scoped", Integer, nullable=False, server_default=ZERO),
     Column("duration_ms", Integer, nullable=False, server_default=ZERO),
     Column("error", Text),
     # the words of its questions no excerpt held (`Answer.missing_terms`), JSON; excerpts only
@@ -250,10 +265,13 @@ embedding_profiles = Table(
     Column("description", Text),
     Column("query_prefix", Text, nullable=False, server_default=""),
     Column("document_prefix", Text, nullable=False, server_default=""),
+    # 1: the vectors are cut to `dims` (Matryoshka Representation Learning)
     Column(
-        "matryoshka_layer_norm",
+        "matryoshka",
         Integer,
-        CheckConstraint("matryoshka_layer_norm in (0, 1)"),
+        CheckConstraint("matryoshka in (0, 1)"),
+        nullable=False,
+        server_default="0",
     ),
     Column("duplicate_chunk", Float),
     Column("duplicate_passage", Float),
@@ -289,4 +307,13 @@ staging = Table(
     Column("size", Integer, nullable=False),
     Column("md5", Text, nullable=False),  # of the bytes, carried to the import
     Column("created_at", Float, nullable=False, server_default=ZERO),
+)
+
+# where `haskie install <agent>` wrote the skill and rule, so a collection change can rewrite them
+# (`claude.refresh_installations`); `directory` is the agent's configuration directory
+installations = Table(
+    "installations",
+    metadata,
+    Column("agent", Text, CheckConstraint("agent in ('claude')"), primary_key=True),
+    Column("directory", Text, primary_key=True),
 )

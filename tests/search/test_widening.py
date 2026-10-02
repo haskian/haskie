@@ -18,7 +18,7 @@ import pytest
 from conftest import one_part
 
 from haskie.catalogue.catalogue import EmbeddingModel
-from haskie.collection.index import ChunkKey, CollectionIndex, Hit, Row, chunk_key
+from haskie.collection.index import ChunkKey, CollectionIndex, Hit, Row, chunk_key, gather_rows
 from haskie.indexing.chunk import split
 from haskie.search import probe, retrieval, section
 from haskie.search.collapse import Vector
@@ -53,7 +53,9 @@ async def _index(tmp_path: Path, vectors: dict[int, list[float]]) -> tuple[Plan,
     ], "the fixture the docstring names"
     rows = [Row(chunk=one, vector=vectors[seq], seq=seq) for seq, one in enumerate(chunks, 1)]
     await index.add_parts(DOC, f"documents/{DOC}", f"documents/{DOC}.md", one_part(0, rows))
-    stored = await index.rows_at([(DOC, seq) for seq in vectors], vectors=True)
+    ((_, stored),) = await gather_rows(
+        [index], lambda one: one.rows_at([(DOC, seq) for seq in vectors], vectors=True)
+    )
     hits = {row["seq"]: index.hit(row, 1.0) for row in stored}
     settings = SearchSettings(max_passage_grow=2)
     where = Plan(settings=settings, indexes=[(index, settings)], vector=ON, embedding=model)
@@ -261,18 +263,17 @@ async def test_a_chunk_near_two_groups_is_a_candidate_of_each(
 
 
 @pytest.mark.parametrize(
-    ("name", "reranker", "tagged"),
+    ("name", "reranker"),
     [
-        ("without a reranker, a filled chunk tags the question it matches best", False, True),
-        ("with one, only the reranker tags: a filled chunk brings none", True, False),
+        ("without a reranker: a fill is valued against the kept passages, not judged", False),
+        ("with one: only the reranker tags", True),
     ],
 )
 @pytest.mark.anyio
-async def test_a_filled_chunk_tags_a_question_only_without_a_reranker(
-    tmp_path: Path, name: str, reranker: bool, tagged: bool
-) -> None:
+async def test_a_filled_chunk_tags_no_question(tmp_path: Path, name: str, reranker: bool) -> None:
     """Chunk 1 is kept untagged; chunk 2 next to it is as close to the first question as it is,
-    so the fill takes it, with the question it matches best only when no reranker judges tags."""
+    so the fill takes it. It tags no question either way: a fill's value is relative to this
+    search's own passages, so on a question nothing answers it would still mark one answered."""
     where, hits = await _index(tmp_path, VECTORS)
     judge = Reranker.CROSS_ENCODER if reranker else Reranker.NONE
     settings = SearchSettings(max_passage_grow=2, reranker=judge)
@@ -286,8 +287,7 @@ async def test_a_filled_chunk_tags_a_question_only_without_a_reranker(
     (filled,) = await retrieval.fill(groups, asked, where)
 
     assert [hit.seq for hit in filled.ranges[0].hits][:2] == [1, 2], f"{name}: chunk 2 joined"
-    assert ("q1" in filled.ranges[0].aspects) is tagged, name
-    assert bool(filled.ranges[0].aspects) is tagged, name
+    assert filled.ranges[0].aspects == [], name
 
 
 @pytest.mark.anyio

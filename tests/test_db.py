@@ -17,6 +17,7 @@ from enum import StrEnum
 
 import anyio
 import pytest
+from conftest import id_of
 from sqlalchemy import event, insert, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -72,12 +73,12 @@ class Race:
         snapshot. A busy error ends it with nothing written."""
         await self.checked.wait()
         try:
-            await document.set_status(self.doc, DocumentStatus.DELETING)
+            await document.set_status(await id_of(self.doc), DocumentStatus.DELETING)
         except OperationalError as error:
             self.delete_error = str(error.orig)
             self.settled.set()
             return
-        self.snapshot = await document.collections_of(self.doc)
+        self.snapshot = await document.collections_of(await id_of(self.doc))
         self.deleted.set()
         self.settled.set()
 
@@ -106,8 +107,8 @@ async def test_a_write_waits_for_a_unit_between_its_read_and_its_write(
     monkeypatch.setattr(db, "BUSY_TIMEOUT_SECONDS", case.busy_timeout)
     collection = await Collection.create("health")
     doc = (await import_row("a.md")).name
-    await document.set_status(doc, DocumentStatus.IMPORTED)
-    await collection.add(doc)
+    await document.set_status(await id_of(doc), DocumentStatus.IMPORTED)
+    await collection.add(await id_of(doc))
     race = Race(doc, case.pause_seconds)
 
     def pause_after_member_check(_conn, _cursor, statement: str, parameters, *_args) -> None:
@@ -125,9 +126,11 @@ async def test_a_write_waits_for_a_unit_between_its_read_and_its_write(
         event.remove(db.engine().sync_engine, "after_cursor_execute", pause_after_member_check)
 
     assert race.deleted_during_pause is False, f"{case.name}: no commit between check and write"
-    assert await document.collections_of(doc) == ["new"], f"{case.name}: the rename committed"
+    assert await document.collections_of(await id_of(doc)) == ["new"], (
+        f"{case.name}: the rename committed"
+    )
     assert race.delete_error == case.delete_error, case.name
-    status = (await document.get(doc)).status
+    status = (await document.named(doc)).status
     if case.delete_error is None:
         assert race.snapshot == ["new"], f"{case.name}: the delete sees the renamed membership"
         assert status == DocumentStatus.DELETING, case.name
@@ -147,14 +150,14 @@ async def test_an_attach_checks_and_inserts_in_one_unit() -> None:
     The attach pauses when the connection that read the status goes back to the pool, which is
     between the two units before and after the one unit now: no lock is held there either way."""
     collection = await Collection.create("health")
-    doc = (await import_row("a.md")).name
-    await document.set_status(doc, DocumentStatus.IMPORTED)
-    race = Race(doc)
+    doc = await import_row("a.md")
+    await document.set_status(doc.id, DocumentStatus.IMPORTED)
+    race = Race(doc.name)
     reader: list[object] = []  # the DBAPI connection that read the status
 
     def note_status_read(conn, _cursor, statement: str, parameters, *_args) -> None:
         # the attach's check is the first SELECT of the document's row
-        is_read = statement.lstrip().upper().startswith("SELECT") and doc in parameters
+        is_read = statement.lstrip().upper().startswith("SELECT") and doc.id in parameters
         if is_read and "FROM documents" in statement and not reader:
             reader.append(conn.connection.dbapi_connection)
 
@@ -168,14 +171,14 @@ async def test_an_attach_checks_and_inserts_in_one_unit() -> None:
     try:
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(race.delete)
-            tasks.start_soon(collection.add, doc)
+            tasks.start_soon(collection.add, doc.id)
     finally:
         event.remove(sync_engine, "after_cursor_execute", note_status_read)
         event.remove(sync_engine.pool, "checkin", pause_on_checkin)
 
     assert race.deleted_during_pause is True, "the delete ran while the attach paused"
     assert race.snapshot == ["health"], "the delete's snapshot holds the membership"
-    assert await document.collections_of(doc) == ["health"]
+    assert await document.collections_of(doc.id) == ["health"]
 
 
 class Meanwhile(StrEnum):

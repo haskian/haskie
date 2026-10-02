@@ -25,7 +25,7 @@ class GapReplay(msgspec.Struct):
 class GapReport(msgspec.Struct):
     """An agent's verdict on what a search it just ran gave it."""
 
-    question: str  # as it was asked: one `q` of `search_excerpts`, or `search_sources`' `q`
+    question: str  # as it was asked: one `q` of `search_excerpts`, or `search_sections`' `q`
     verdict: gaps.Verdict
     missing: str | None = None  # what the excerpts lacked
 
@@ -84,7 +84,7 @@ async def report_gap(session_id: RequiredSessionId, data: GapReport) -> gaps.Rep
     Call it when the excerpts do not let a careful reader answer the question from them alone
     (`insufficient`), or answer only part of it (`partial`). Not when they answer it in other
     words, and not for a question you did not search. `question` is one of the questions you
-    passed to `search_excerpts` (or `search_sources`) with this `session_id`, word for word, in
+    passed to `search_excerpts` (or `search_sections`) with this `session_id`, word for word, in
     the last hour. `missing` says in a sentence what the excerpts lacked, at most 300 characters.
     One call per miss; reporting again replaces the verdict.
 

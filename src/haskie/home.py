@@ -4,7 +4,8 @@ shares.
 `~/.haskie/documents/` and `~/.haskie/collections/` each hold one folder per entry. Ten thousand
 documents would make ten thousand entries in one directory, which every lookup and every listing
 pays for, so both roots insert a shard directory (`shard`) between them and the entry: an entry
-lives at `<root>/<shard>/<name>/`, and a root spreads over 256 directories.
+lives at `<root>/<shard>/<key>/`, and a root spreads over 256 directories. A document's key is
+its id, a collection's its name.
 
 A filesystem call blocks, so every async function here runs its work in a worker thread. The sync
 ones (`atomic_replace`, `atomic_write_sync`) are for code that already runs in one:
@@ -46,7 +47,7 @@ SERVER_PID_ENV = "HASKIE_SERVER_PID"
 # The layout, relative to `HOME`. Every name here is readable as a module attribute
 # (`home.DB_FILE`) and derived on access, so `use()` has one global to rebind.
 _LAYOUT: dict[str, str] = {
-    "COLLECTION_ROOT": "collections",  # one LanceDB index per collection
+    "COLLECTION_ROOT": "collections",  # one LanceDB index (chunks) per collection
     "DOCUMENT_ROOT": "documents",  # one folder per imported document: original, markdown, cache
     "STAGING_ROOT": "staging",  # uploads not yet imported; swept by the nightly housekeeping
     "AUDIT_DIR": "audit",
@@ -104,7 +105,7 @@ def claim_home() -> None:
     A home is one SQLite file and one durable pipeline, and a boot is a DBOS executor that
     recovers in-flight workflows and starts polling the queues. Two of them on the same file take
     each other's tasks. The TCP port is not the guard it looks like: a server runs its whole
-    startup - migrations, `DBOS.launch`, re-enqueuing orphans - before it binds.
+    startup (migrations, `DBOS.launch`, re-enqueuing orphans) before it binds.
 
     So this runs as the app's first startup hook rather than in the CLI: `haskie run`, `litestar
     --app haskie.app:app run` and any other ASGI server all reach the same lifespan, and only the
@@ -214,7 +215,7 @@ def ensure_home_sync() -> Path:
     fixtures) or block theirs once, before serving (the startup hook that claims the lock).
 
     `HOME` is made first and by name, because `parents=True` does not apply `mode` to the parents
-    it creates - so a home made only as a parent of its subdirectories would be world-readable.
+    it creates, so a home made only as a parent of its subdirectories would be world-readable.
     """
     for directory in (HOME, *(HOME / _LAYOUT[name] for name in _MADE)):
         directory.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)

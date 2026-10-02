@@ -17,18 +17,21 @@ Layout:
   attaching to one is then free). Ends at document status `imported`; no collection is touched.
 - `ensure_embedding` per (document, `embed_cache.Params`), on `operation.embedding`, deduplicated
   by the cache id: whoever asks for a missing embedding first computes it, everyone else asking for
-  the same one meanwhile waits on that run. A hit in the cache returns at once. This is the only
-  place chunks and vectors are computed.
+  the same one meanwhile waits on that run. This is the only place chunks and vectors are
+  computed, and section descriptors written: a stage after the embed (`Stage.DESCRIBE`), and the
+  only work a hit in the cache does, when another descriptor strategy wrote it than the one asked
+  for.
 - `index_collection_document` per (collection, document), on `operation.indexing`: ensures the
   embedding the collection's chunk settings call for, then writes it from the cache into the
   collection's table. Moves the membership's status, never the document's.
 - Convert and embed are cut into at most `resolve_parallelism` contiguous slices, one
   `stage_slice` child each (`dbos_names.STAGE_WORKFLOW`), with a durable step per micro-batch. So
-  one large document spreads over the slots instead of trickling through a single one. The index
-  stage is never sliced: it runs as one child on the collection's partition. Each stage has a
-  queue of its own, capped by its share of `pipeline.cpu_budget`: `task.converting`,
-  `task.embedding`, and `task.indexing` (partitioned by collection, see `INDEX_QUEUE`). A slow
-  stage backs up on its own queue instead of taking every slot.
+  one large document spreads over the slots instead of trickling through a single one. The
+  describe and index stages are never sliced: each runs as one child, the index child on the
+  collection's partition. Each stage has a queue of its own, capped by its share of
+  `pipeline.cpu_budget`: `task.converting`, `task.embedding`, `task.describing` (the embed share)
+  and `task.indexing` (partitioned by collection, see `INDEX_QUEUE`). A slow stage backs up on its
+  own queue instead of taking every slot.
 - `remove_from_collection_index` per (collection, document) leaving a collection: on that
   collection's index partition, so rows are never deleted while a step of another document writes
   them. A detach runs one; `delete_document_workflow` runs one per collection the document is in,
@@ -61,12 +64,12 @@ Workflow ids, every one starting with a prefix that names its kind and the names
 convert or embed child and `{parent}:index` for the index child, `bulk-index:{collection}:{uuid}`
 and `bulk-delete:{collection}:{uuid}` for the two bulk operations, `del-doc:{doc}:{uuid}` for a
 document delete (and `{parent}:rm:{collection}` for each collection it leaves),
-`rm:{collection}:{doc}:{uuid}` for the removal a detach queues,
-`maint:{collection}:{parent}` for a maintenance run, and `dl:{kind}:{model}` for a model download
-(see `models`). `document.safe_name` keeps `:` out of every name, so a prefix is unambiguous: one
-query finds a whole operation. Child ids are deterministic, so a replay after a crash re-attaches
-to the child that already exists instead of starting a second one. Every workflow is registered
-under an explicit name (see `dbos_names`).
+`rm:{collection}:{doc}:{uuid}` for the removal a detach queues, `maint:{collection}:{parent}` for a
+maintenance run, and `dl:{kind}:{model}` for a model download (see `models`). A document id is
+base58 and `document.safe_name` keeps `:` out of a collection name, so a prefix is unambiguous: one
+query finds a whole operation. Child ids are deterministic, so a replay after a crash re-attaches to
+the child that already exists instead of starting a second one. Every workflow is registered under
+an explicit name (see `dbos_names`).
 """
 
 import asyncio
@@ -128,7 +131,13 @@ from haskie.indexing.dbos_names import (
 )
 from haskie.indexing.pipeline import Batch
 from haskie.search import log
-from haskie.settings import ChunkSettings, PipelineSettings, UserSettings, load_user_settings
+from haskie.settings import (
+    ChunkSettings,
+    Descriptors,
+    PipelineSettings,
+    UserSettings,
+    load_user_settings,
+)
 
 _log = logs.get_logger(__name__)
 
@@ -143,6 +152,9 @@ COLLECTION_QUEUE = "operation.collection"  # whole-collection index/delete and d
 MAINTENANCE_QUEUE = "operation.maintenance"  # debounced maintenance and the nightly schedule
 CONVERT_QUEUE = "task.converting"  # convert slices; cap = the stage's share of the CPU budget
 EMBED_QUEUE = "task.embedding"  # embed slices; cap = the stage's share of the CPU budget
+DESCRIBE_QUEUE = "task.describing"  # describe slices; cap = the embed stage's share of the CPU
+# budget. c-TF-IDF is CPU work under that budget, and the llm describer answers one prompt at a
+# time behind its own lock (`gguf_models.GgufGenerator`), in a thread that holds no CPU slot
 INDEX_QUEUE = "task.indexing"  # index children, maintenance and removals. LanceDB takes one
 # writer per collection, so this queue is partitioned by collection and admits one workflow per
 # partition (see `index_partition`)
@@ -192,8 +204,8 @@ def pipeline_names(workflow_id: str) -> tuple[PipelineAction, str | None, str] |
 
     Here because this module writes those ids (see the prefixes above). `imp:{doc}:{uuid}` and
     `emb:{doc}:{uuid}` name no collection; `idx-col:{collection}:{doc}:{uuid}` names both.
-    `document.safe_name` keeps `:` out of a document and a collection name alike, so the split
-    is exact."""
+    A document id is base58 and `document.safe_name` keeps `:` out of a collection name, so the
+    split is exact."""
     parts = workflow_id.split(":")
     action = _PIPELINE_ACTIONS.get(parts[0])
     if action is None:
@@ -219,6 +231,7 @@ TASK_POLL = 0.25
 class Stage(StrEnum):
     CONVERT = "convert"
     EMBED = "embed"
+    DESCRIBE = "describe"
     INDEX = "index"
 
 
@@ -226,6 +239,7 @@ STAGE_ORDER: tuple[Stage, ...] = tuple(Stage)
 STAGE_QUEUE: dict[Stage, str] = {
     Stage.CONVERT: CONVERT_QUEUE,
     Stage.EMBED: EMBED_QUEUE,
+    Stage.DESCRIBE: DESCRIBE_QUEUE,
     Stage.INDEX: INDEX_QUEUE,
 }
 
@@ -233,11 +247,12 @@ STAGE_QUEUE: dict[Stage, str] = {
 class Context(msgspec.Struct):
     """Everything a task needs, captured once per workflow so steps stay pure.
 
-    `document` is the row at load time: its name, suffix, parser and OCR policy are immutable,
-    and they are all a pipeline step reads out of it. `chunking` is the collection's when the
-    workflow serves one, the user default otherwise. `pipeline` is carried whole rather than
-    field by field, so a step that needs another knob costs no new field here. `cache_id` is
-    filled in by the workflow that reaches the stage needing it (embed, index)."""
+    `document` is the row at load time: its id, suffix, parser and OCR policy are immutable, and
+    they are all a pipeline step reads out of it. Its name is fixed at import too, but a step that
+    holds only the id reads it by id (`document.name_of`). `chunking` is the
+    collection's when the workflow serves one, the user default otherwise. `pipeline` is carried
+    whole rather than field by field, so a step that needs another knob costs no new field here.
+    `cache_id` is filled in by the workflow that reaches the stage needing it (embed, index)."""
 
     document: Document
     chunking: ChunkSettings
@@ -296,7 +311,7 @@ def collection_lock(collection: str) -> anyio.Lock:
     `DBOS.cancel_workflows` rewrites the status row and nothing else: a step already inside its
     LanceDB write keeps running, and the index partition frees its slot as soon as the row says
     CANCELLED. So a delete or a detach that cancelled an index workflow can reach its own removal
-    while that write is still going - and the write would recreate the table folder the delete
+    while that write is still going. The write would then recreate the table folder the delete
     just took away, or put back rows the detach just removed. A queue cannot order those two; this
     lock does.
 
@@ -322,9 +337,9 @@ def stage_caps(indexing: PipelineSettings) -> dict[Stage, int]:
     """How many tasks each stage queue admits: `cpu_budget` shared out over the stage weights.
 
     Largest remainder: every stage gets the whole part of its share, and the spare slots go to the
-    stages that lost the most to rounding. So the caps add up to the budget exactly - except under
+    stages that lost the most to rounding. So the caps add up to the budget exactly, except under
     the floor of one slot per stage, which a budget below three cannot pay for. That is what
-    `cpu.cpu_slot` is for: the floors keep every stage alive, the semaphore keeps the total honest.
+    `cpu.cpu_slot` is for: the floors keep every stage alive, the semaphore caps the total.
     """
     weights: dict[Stage, int] = {
         Stage.CONVERT: indexing.converting_weight,
@@ -453,7 +468,7 @@ async def _register_schedule() -> None:
     """Put the nightly cron definition in the system database, where it outlives the process.
 
     `apply_schedules_async` is an idempotent upsert by name that keeps the schedule's id, status
-    and last fire time, so every boot may simply declare what this build wants."""
+    and last fire time, so every boot may declare what this build wants."""
     await DBOS.apply_schedules_async(
         [
             {
@@ -537,6 +552,7 @@ _QUEUES: tuple[Queue, ...] = (
     Queue(MAINTENANCE_QUEUE, lambda indexing, caps: MAINTENANCE_CONCURRENCY),
     Queue(CONVERT_QUEUE, lambda indexing, caps: caps[Stage.CONVERT]),
     Queue(EMBED_QUEUE, lambda indexing, caps: caps[Stage.EMBED]),
+    Queue(DESCRIBE_QUEUE, lambda indexing, caps: caps[Stage.EMBED]),
     Queue(INDEX_QUEUE, lambda indexing, caps: caps[Stage.INDEX], partition_concurrency=1),
 )
 
@@ -571,10 +587,11 @@ async def apply_settings(settings: UserSettings) -> None:
 # Read once, here: DBOS copies a step's retry settings into the decorator, so this cannot change
 # after import.
 RETRY_INTERVAL_SECONDS = 1.0
+RETRY_ATTEMPTS = 3
 MODEL_WAIT_SECONDS = 2.0  # between two asks whether the embedding model is ready yet
 retried_step = DBOS.step(
     retries_allowed=True,
-    max_attempts=3,
+    max_attempts=RETRY_ATTEMPTS,
     interval_seconds=RETRY_INTERVAL_SECONDS,
     backoff_rate=2.0,
 )
@@ -601,7 +618,7 @@ async def load_context(doc: str, collection: str | None) -> Context:
 
 def resolve_parallelism(indexing: PipelineSettings, stage: Stage) -> int:
     """Slices one document may be cut into for one stage: that stage's cap when the setting is 0,
-    never more - a slice occupies one slot of that stage's queue, so asking for more only queues
+    never more. A slice occupies one slot of that stage's queue, so asking for more only queues
     them."""
     cap = stage_caps(indexing)[stage]
     if indexing.document_parallelism == 0:
@@ -644,8 +661,8 @@ async def index_write(collection: str, doc: str) -> AsyncIterator[bool]:
 
     The lock alone only orders this write against a removal (see `collection_lock`); the re-check
     inside it is what the loser of that race acts on. A removal that went first took the
-    membership with it - the whole collection row for a delete (memberships cascade), this one
-    row for a detach - so a write that finds none has nothing left to write into. A membership a
+    membership with it: the whole collection row for a delete (memberships cascade), this one
+    row for a detach. So a write that finds none has nothing left to write into. A membership a
     detach marked `removing` counts as gone too: its removal is queued behind this write."""
     async with collection_lock(collection):
         yield await _member_present(collection, doc)
@@ -656,7 +673,9 @@ async def plan(stage: Stage, ctx: Context) -> list[Batch]:
     if stage == Stage.CONVERT:
         return await pipeline.plan_convert(ctx.document, ctx.pipeline.batch_pages)
     if stage == Stage.EMBED:
-        return await pipeline.plan_embed(ctx.document)
+        return await pipeline.plan_embed(ctx.document, ctx.pipeline.batch_pages)
+    if stage == Stage.DESCRIBE:
+        return await pipeline.plan_describe(ctx.document, ctx.cache_id, ctx.pipeline.descriptors)
     return await pipeline.plan_index(ctx.document, ctx.cache_id, ctx.pipeline.index_group_parts)
 
 
@@ -693,7 +712,7 @@ def _value(result: BatchResult) -> int:
 async def _index_batch(batch: Batch, ctx: Context) -> int:
     """One index micro-batch, under the collection's write lock (see `index_write`)."""
     assert ctx.collection is not None, "the index stage always names a collection"
-    async with index_write(ctx.collection, ctx.document.name) as present:
+    async with index_write(ctx.collection, ctx.document.id) as present:
         if not present:
             raise PermanentError("document is no longer in the collection")
         return await pipeline.index_batch(
@@ -711,6 +730,18 @@ async def try_batch(stage: Stage, batch: Batch, ctx: Context) -> BatchResult:
     if stage == Stage.EMBED:
         return await _guarded(
             pipeline.embed_batch(ctx.document, batch, ctx.cache_id, ctx.chunking, ctx.embedding)
+        )
+    if stage == Stage.DESCRIBE:
+        # its model, the embedding model or the describer, can still be on its way (`run_batch`)
+        return await _guarded(
+            pipeline.describe_batch(
+                ctx.document,
+                ctx.cache_id,
+                ctx.embedding,
+                ctx.pipeline.descriptors,
+                ctx.pipeline.accelerator,
+                batch,
+            )
         )
     return await _guarded(_index_batch(batch, ctx))
 
@@ -735,9 +766,29 @@ async def forget_embeddings(doc: str) -> None:
 
 
 @retried_step
-async def finalize_embed(params: embed_cache.Params, ctx: Context) -> str:
+async def try_finalize_embed(params: embed_cache.Params, ctx: Context, count: int) -> BatchResult:
     """Merge the rows of every part into the cache file and publish it (see `embed_cache`)."""
-    return await pipeline.finalize_embed(ctx.document, params, ctx.embedding)
+    dims = ctx.embedding.dims if ctx.embedding else None
+    return await _guarded(pipeline.finalize_embed(ctx.document, params, dims, count))
+
+
+@retried_step
+async def described_by(doc: str, cache_id: str) -> Descriptors | None:
+    return await embed_cache.described_by(doc, cache_id)
+
+
+@retried_step
+async def describer_ready(ctx: Context) -> BatchResult:
+    """Whether this process can describe by the run's strategy yet (see `_awaiting_model`)."""
+    by = ctx.pipeline.descriptors
+    return await _guarded(pipeline.describe_ready(ctx.embedding, by, ctx.pipeline.accelerator))
+
+
+@retried_step
+async def try_finalize_describe(ctx: Context, count: int) -> BatchResult:
+    """Put the descriptors every describe batch wrote on the sections (see `pipeline`)."""
+    by = ctx.pipeline.descriptors
+    return await _guarded(pipeline.finalize_describe(ctx.document, ctx.cache_id, by, count))
 
 
 @retried_step
@@ -747,16 +798,18 @@ async def prepare_index(collection: str, ctx: Context) -> None:
 
     Recreates a missing table, so it takes the write lock like the batches do. Skipped rather than
     failed once the membership is gone: the batch write is where that is reported."""
-    async with index_write(collection, ctx.document.name) as present:
+    async with index_write(collection, ctx.document.id) as present:
         if present:
-            await pipeline.prepare_index(Collection(collection), ctx.document, ctx.embedding)
+            await pipeline.prepare_index(
+                Collection(collection), ctx.document, ctx.embedding, ctx.cache_id
+            )
 
 
 @retried_step
 async def finalize_index(collection: str, ctx: Context) -> None:
     """Rebuild the full-text index once, on the collection's partition, under the same lock and
     the same re-check as the batches (see `prepare_index`)."""
-    async with index_write(collection, ctx.document.name) as present:
+    async with index_write(collection, ctx.document.id) as present:
         if present:
             await pipeline.finalize_index(Collection(collection), ctx.embedding)
 
@@ -765,7 +818,7 @@ async def finalize_index(collection: str, ctx: Context) -> None:
 async def note_indexed_step(collection: str, doc: str) -> int:
     """Count one more indexed document for the collection; returns how many await maintenance."""
     pending = await Collection(collection).note_indexed()
-    _log.debug("index_pending", collection=collection, document=doc, pending=pending)
+    _log.debug("index_pending", collection=collection, document_id=doc, pending=pending)
     return pending
 
 
@@ -876,8 +929,11 @@ def embed_id(parent_id: str, doc: str) -> str:
 
 
 def _slice_count(stage: Stage, ctx: Context) -> int:
-    """Slices this stage may be cut into. The index stage is never sliced (see `INDEX_QUEUE`)."""
-    return 1 if stage == Stage.INDEX else resolve_parallelism(ctx.pipeline, stage)
+    """Slices this stage may be cut into. The index stage is never sliced (see `INDEX_QUEUE`), nor
+    is describe: c-TF-IDF is one batch, and the llm describer answers one prompt at a time."""
+    if stage in (Stage.INDEX, Stage.DESCRIBE):
+        return 1
+    return resolve_parallelism(ctx.pipeline, stage)
 
 
 def _slices(batches: list[Batch], parts: int) -> list[list[Batch]]:
@@ -933,9 +989,12 @@ async def _stage(stage: Stage, ctx: Context) -> list[int]:
 
 async def _ensure_embedding(ctx: Context) -> str:
     """The cache id of the embedding `ctx` calls for, computing it through `ensure_embedding`
-    when it is missing. Deduplicated by the cache id: two callers wanting the same embedding at
-    once share one run instead of computing it twice (and racing on the write). The child id is
-    derived from this workflow's, so a replay re-attaches to the run it already started.
+    when it is missing, and describing its sections by the strategy `ctx` names. Deduplicated by
+    the cache id: two callers wanting the same embedding at once share one run instead of
+    computing it twice (and racing on its scratch files and the write). So a caller that joins a
+    run asked for by another strategy, as the setting changed between the two asks, gets that
+    strategy's descriptors, until the next index describes them again. The child id is derived
+    from this workflow's, so a replay re-attaches to the run it already started.
 
     A shared run is the child of whoever asked first, so cancelling that caller cascades into it,
     and every other caller would fail with it. A caller waiting on someone else's run therefore
@@ -944,7 +1003,8 @@ async def _ensure_embedding(ctx: Context) -> str:
     caller that was cancelled itself stops at that ask, which DBOS refuses from a cancelled
     workflow. A cancel of its own run is final."""
     params = embed_cache.params(ctx.document, ctx.chunking, ctx.embedding)
-    own = embed_id(DBOS.workflow_id or "", ctx.document.name)
+    by = ctx.pipeline.descriptors
+    own = embed_id(DBOS.workflow_id or "", ctx.document.id)
     while True:
         with (
             SetWorkflowID(own),
@@ -953,7 +1013,7 @@ async def _ensure_embedding(ctx: Context) -> str:
             ),
         ):
             handle = await DBOS.enqueue_workflow_async(
-                EMBEDDING_QUEUE, ensure_embedding, ctx.document.name, params
+                EMBEDDING_QUEUE, ensure_embedding, ctx.document.id, params, by
             )
         try:
             return await handle.get_result(polling_interval_sec=TASK_POLL)
@@ -998,7 +1058,7 @@ async def _outcome(
 async def import_document(doc: str) -> DocumentStatus:
     """convert, then pre-warm the embedding cache under the user's default chunk settings;
     document status mirrors the stage. Collection-independent: nothing is written to any table."""
-    with logs.bound(workflow_id=DBOS.workflow_id, document=doc):
+    with logs.bound(workflow_id=DBOS.workflow_id, document_id=doc):
         # first step, so a deduplicated submit changes nothing
         await set_status(doc, DocumentStatus.QUEUED)
         set_state = partial(set_status, doc)
@@ -1015,32 +1075,65 @@ async def import_document(doc: str) -> DocumentStatus:
 
 
 @DBOS.workflow(name=EMBED_WORKFLOW)
-async def ensure_embedding(doc: str, params: embed_cache.Params) -> str:
-    """One cached embedding of one document, computed when missing; returns its cache id.
+async def ensure_embedding(
+    doc: str, params: embed_cache.Params, by: Descriptors | None = None
+) -> str:
+    """One cached embedding of one document, with its sections, computed when missing, and their
+    descriptors by strategy `by`, written by a describe stage of their own when missing or written
+    by another strategy; returns its cache id. `by` is None in a run recorded before it was an
+    argument, which describes by the settings.
 
     The chunk settings come from `params`, not from any collection: the collection's settings may
     change between the enqueue and the run, and what was asked for is what the id names. The
     embedding model is the global one, so a model changed meanwhile fails the run, and the parent
-    with it: a reindex asks again under the new model."""
-    with logs.bound(workflow_id=DBOS.workflow_id, document=doc):
-        found = await cache_lookup(params)
-        if found is not None:
-            return found
-        ctx = await load_context(doc, None)
-        current = ctx.embedding.cache_name if ctx.embedding else embed_cache.NO_MODEL
-        if current != params.model:
-            raise PermanentError(f"embedding model changed: wanted {params.model}, have {current}")
-        ctx = msgspec.structs.replace(
-            ctx,
-            chunking=ChunkSettings.of(params),
-            cache_id=embed_cache.key(params),
-        )
-        if ctx.embedding is not None:
-            # here rather than in the slices: a download takes minutes, and a slice waiting it out
-            # would hold a slot of `task.embedding` and run into its own timeout
-            _value(await _awaiting_model(partial(embedding_ready, ctx.embedding)))
-        await _stage(Stage.EMBED, ctx)
-        return await finalize_embed(params, ctx)
+    with it: a reindex asks again under the new model. A hit loads no context unless it is
+    described again."""
+    with logs.bound(workflow_id=DBOS.workflow_id, document_id=doc):
+        cache_id = embed_cache.key(params)
+        ctx: Context | None = None
+        if await cache_lookup(params) is None:
+            ctx = await _embedding_context(doc, params, by)
+            if ctx.embedding is not None:
+                # here rather than in the slices: a download takes minutes, and a slice waiting
+                # it out would hold a slot of `task.embedding` and run into its own timeout
+                _value(await _awaiting_model(partial(embedding_ready, ctx.embedding)))
+            count = len(await _stage(Stage.EMBED, ctx))
+            # the merge needs no model now, but a run recorded by a build whose merge did can
+            # resume under this one, its sleeps and retries in its step log (`adopt_orphans`)
+            _value(await _awaiting_model(partial(try_finalize_embed, params, ctx, count)))
+        if by is None:
+            ctx = ctx or await _embedding_context(doc, params)
+            by = ctx.pipeline.descriptors
+        if await described_by(doc, cache_id) != by:
+            # a hit too checks the model: c-TF-IDF would rerank its vectors by another model's
+            ctx = ctx or await _embedding_context(doc, params, by)
+            # here rather than in the slice, for the reason the embed's model wait is above
+            _value(await _awaiting_model(partial(describer_ready, ctx)))
+            count = len(await _stage(Stage.DESCRIBE, ctx))
+            _value(await try_finalize_describe(ctx, count))
+        return cache_id
+
+
+async def _embedding_context(
+    doc: str, params: embed_cache.Params, by: Descriptors | None = None
+) -> Context:
+    """The context an embedding run computes or describes under: the settings now, with the chunk
+    settings and the cache id `params` name, and the descriptor strategy `by` when the run was
+    asked for one. A model changed since `params` were asked for fails the run, and its parent
+    with it."""
+    ctx = await load_context(doc, None)
+    current = embed_cache.model_of(ctx.embedding)
+    if current != params.model:
+        raise PermanentError(f"embedding model changed: wanted {params.model}, have {current}")
+    pipeline_by = (
+        ctx.pipeline if by is None else msgspec.structs.replace(ctx.pipeline, descriptors=by)
+    )
+    return msgspec.structs.replace(
+        ctx,
+        chunking=ChunkSettings.of(params),
+        cache_id=embed_cache.key(params),
+        pipeline=pipeline_by,
+    )
 
 
 @DBOS.workflow(name=COLLECTION_DOCUMENT_WORKFLOW)
@@ -1048,7 +1141,7 @@ async def index_collection_document(collection: str, doc: str) -> MemberStatus:
     """Write one document into one collection's table from its embedding cache, computing the
     embedding first when the collection's chunk settings have none yet. Membership status mirrors
     the progress; the document's own status is the import's and is never touched here."""
-    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, document=doc):
+    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, document_id=doc):
         await set_member_status(collection, doc, MemberStatus.INDEXING)
         set_state = partial(set_member_status, collection, doc)
         done, failed = MemberStatus.INDEXED, MemberStatus.ERROR
@@ -1068,8 +1161,8 @@ async def index_collection_document(collection: str, doc: str) -> MemberStatus:
 async def _record(
     collection: str | None, doc: str, event: str, started: float, error: str | None
 ) -> None:
-    """One audit line per finished document. Not a step: a replay after a crash re-appends it,
-    which an append-only trail tolerates."""
+    """One audit line per finished document, naming it as the request lines do. Not a step: a
+    replay after a crash re-appends it, which an append-only trail tolerates."""
     await audit.record(
         event,
         actor=Actor.OPERATION,
@@ -1077,7 +1170,7 @@ async def _record(
         duration_ms=int((time.perf_counter() - started) * 1000),
         operation_id=DBOS.workflow_id,
         collection=collection,
-        document=doc,
+        document=await document.name_of(doc),
         error=error,
     )
 
@@ -1143,7 +1236,8 @@ async def schedule_pending_maintenance(idle_seconds: int) -> None:
 
 @retried_step
 async def remove_index_rows(collection: str, doc: str) -> None:
-    await (await Collection(collection).index()).delete_document(doc)
+    index = await Collection(collection).index()
+    await index.delete_document(doc)
 
 
 @retried_step
@@ -1168,7 +1262,7 @@ async def remove_from_collection_index(collection: str, doc: str) -> None:
 
     A removal that fails moves a `removing` membership to `error`: the detach answered long ago,
     and the member listing is the only place its caller looks."""
-    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, document=doc):
+    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection, document_id=doc):
         try:
             async with collection_lock(collection):
                 await remove_index_rows(collection, doc)
@@ -1207,13 +1301,14 @@ async def remove_document_row(doc: str) -> None:
 
 
 @DBOS.workflow(name=DELETE_DOCUMENT_WORKFLOW)
-async def delete_document_workflow(doc: str) -> None:
+async def delete_document_workflow(doc: str, name: str) -> None:
     """Delete a document everywhere: out of every collection's table (one child per collection,
     each on that collection's index partition), then its folder, then its row.
 
     `deleting` is set first, so an attach that lands after the membership snapshot below is
-    refused instead of leaving rows in a table no membership points at."""
-    with logs.bound(workflow_id=DBOS.workflow_id, document=doc):
+    refused instead of leaving rows in a table no membership points at. `name` is only kept, as
+    the workflow's input: the operations listing reads it once the row is gone."""
+    with logs.bound(workflow_id=DBOS.workflow_id, document_id=doc):
         await set_status(doc, DocumentStatus.DELETING)
         await cancel_document_work(doc)
         handles: list[WorkflowHandleAsync[None]] = []
@@ -1244,9 +1339,9 @@ async def count_members(collection: str) -> int:
 
 @retried_step
 async def member_page(collection: str, after: str | None) -> list[str]:
-    """One keyset page of member names, ordered by name. Empty once the collection is exhausted,
-    and also when it was deleted while the bulk index ran, which ends the walk either way."""
-    return await Collection(collection).member_names(after, BULK_INDEX_PAGE)
+    """One keyset page of member ids, in id order. Empty once the collection is exhausted, and
+    also when it was deleted while the bulk index ran, which ends the walk either way."""
+    return await Collection(collection).member_ids(after, BULK_INDEX_PAGE)
 
 
 async def enqueue_page(collection: str, after: str | None, bulk_id: str) -> BulkProgress:
@@ -1276,7 +1371,8 @@ async def enqueue_page(collection: str, after: str | None, bulk_id: str) -> Bulk
 @DBOS.workflow(name=INDEX_COLLECTION_WORKFLOW)
 async def index_collection_workflow(collection: str) -> BulkResult:
     """(Re)index every member of one collection, one durable page of enqueues at a time. Cheap
-    for a member whose embedding is cached: the embed is skipped and only the table is written."""
+    for a member whose embedding is cached: the embed is skipped and only the table is written,
+    and the sections are described again when another strategy described them."""
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection):
         bulk_id = DBOS.workflow_id or ""
         total = await count_members(collection)
@@ -1331,7 +1427,7 @@ async def delete_collection_workflow(collection: str) -> None:
 
     The sweep repeats until it finds nothing: a bulk index still queueing documents can add more
     while the first sweep runs. Each sweep's cancel is final for the status row and for nothing
-    else - a step already inside its LanceDB write keeps running - so the removal below waits for
+    else (a step already inside its LanceDB write keeps running), so the removal below waits for
     the collection's write lock, which that step holds until it is done (see `collection_lock`).
 
     A maintenance run already debounced for this collection is left alone: it finds no row and
@@ -1435,7 +1531,7 @@ async def _start(
 
 
 # An import runs from a fresh document (`queued`) and from one whose import ended without its
-# markdown (`error`, `cancelled`). Any other status means a pipeline - or a delete - is writing
+# markdown (`error`, `cancelled`). Any other status means a pipeline or a delete is writing
 # the same files right now, or that the markdown is already there.
 IMPORTABLE: tuple[DocumentStatus, ...] = (
     DocumentStatus.QUEUED,
@@ -1444,23 +1540,23 @@ IMPORTABLE: tuple[DocumentStatus, ...] = (
 )
 
 
-async def start_import(doc: str) -> str:
-    """Queue the import of one document; a second call while it runs returns the same operation.
-    The id names the document, so an operation and its stage children share one prefix.
+async def start_import(row: Document) -> str:
+    """Queue the import of one document, as the caller has just read it; a second call while it
+    runs returns the same operation. The id names the document, so an operation and its stage
+    children share one prefix.
 
     The only admission rule for an import, so a re-import goes through here too rather than
     repeating the check at the route."""
-    row = await document.get(doc)
     if row.status not in IMPORTABLE:
         raise Conflict(
-            f"document is {row.status}; only a queued, failed or cancelled import runs: {doc}"
+            f"document is {row.status}; only a queued, failed or cancelled import runs: {row.name}"
         )
     return await _start(
         INDEXING_QUEUE,
         import_document,
-        doc,
-        workflow_id=f"{IMPORT_PREFIX}:{doc}:{uuid4().hex}",
-        dedup_id=f"import:{doc}",
+        row.id,
+        workflow_id=f"{IMPORT_PREFIX}:{row.id}:{uuid4().hex}",
+        dedup_id=f"import:{row.id}",
     )
 
 
@@ -1567,16 +1663,16 @@ async def _active_document_workflows(doc: str) -> list[str]:
     return ids
 
 
-async def start_delete_document(doc: str) -> str:
-    """Queue the deletion of a document from everywhere; returns the id of the operation. A second
-    call while one runs is deduplicated into it."""
-    await document.get(doc)  # NotFound before anything is queued
+async def start_delete_document(row: Document) -> str:
+    """Queue the deletion of a document, as the caller has just read it, from everywhere; returns
+    the id of the operation. A second call while one runs is deduplicated into it."""
     return await _start(
         COLLECTION_QUEUE,
         delete_document_workflow,
-        doc,
-        workflow_id=f"{DELETE_DOCUMENT_PREFIX}:{doc}:{uuid4().hex}",
-        dedup_id=f"delete-doc:{doc}",
+        row.id,
+        row.name,
+        workflow_id=f"{DELETE_DOCUMENT_PREFIX}:{row.id}:{uuid4().hex}",
+        dedup_id=f"delete-doc:{row.id}",
     )
 
 
@@ -1654,8 +1750,8 @@ async def rename_collection(collection: str, name: str) -> Collection:
 
 async def cancel_operation(operation_id: str) -> None:
     """Cancel one pipeline operation and record what that left behind: an import stops the
-    document, an index stops that one membership, and an embed stops neither - it writes only the
-    cache.
+    document, an index stops that one membership, and an embed stops neither (it writes only the
+    cache).
 
     Here rather than in `operations`, which is a read model: this writes, and it reads the names it
     writes by out of the id grammar this module owns (see `pipeline_names`).

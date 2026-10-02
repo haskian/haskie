@@ -42,9 +42,14 @@ class Chunker(StrEnum):  # the two pipelines of `indexing.chunk`
 
 
 class Accelerator(StrEnum):
-    AUTO = "auto"  # the best ONNX Runtime provider: CUDA where installed, else the CPU
+    AUTO = "auto"  # the best ONNX Runtime provider: CUDA, else WebGPU (Apple Silicon), else the CPU
     CPU = "cpu"
     COREML = "coreml"  # ONNX Runtime's CoreML on Apple Silicon, only when asked for (`embed`)
+
+
+class Descriptors(StrEnum):  # the strategies of `sections.descriptors`
+    C_TF_IDF = "c-tf-idf"
+    LLM = "llm"
 
 
 class SearchMode(StrEnum):
@@ -80,8 +85,9 @@ class Reranker(StrEnum):
 
 
 NO_EMBEDDING = "none"  # the embedding profile of full-text search only: no model at all
-# the smallest reranker in the catalogue (`catalogue.rerankers`), so the default costs least
-DEFAULT_RERANKER = "Xenova/ms-marco-MiniLM-L-6-v2"
+# ettin-32m: on the CPU about 3x slower than the smallest, ettin-17m, and more accurate
+# (MTEB English reranking 0.578 against 0.558)
+DEFAULT_RERANKER = "cross-encoder/ettin-reranker-32m-v1"
 
 
 # --- definitions ------------------------------------------------------------------
@@ -127,7 +133,7 @@ CHUNK_SIZE = Meta(
 CHUNK_MERGE_BELOW = Meta(
     title="Merge short paragraphs (% of chunk size)",
     description=(
-        "A paragraph - text between blank lines, or a whole list - shorter than "
+        "A paragraph (text between blank lines, or a whole list) shorter than "
         "this share of Chunk size is merged with the paragraphs around it: into the one below "
         "when both fit one chunk, else with the short ones next to it. Longer paragraphs are "
         "chunks of their own. 0 never merges; 100 merges every paragraph that fits."
@@ -187,8 +193,8 @@ BATCH_PAGES = Meta(
     title="Pages per micro-batch",
     description=(
         "Number of PDF pages one task converts, or one task chunks and embeds. Bounds memory: at "
-        "most the CPU budget x Pages per micro-batch pages are in flight. Non-PDF files are "
-        "one batch."
+        "most the CPU budget x Pages per micro-batch pages are in flight. Non-PDF files convert "
+        "as one batch, and chunk and embed in parts cut at their headings."
     ),
 )
 INDEX_GROUP_PARTS = Meta(
@@ -229,11 +235,24 @@ TASK_TIMEOUT = Meta(
 ACCELERATOR = Meta(
     title="Model hardware",
     description=(
-        "Device for the embedding and reranker models. auto: CUDA on Linux with an NVIDIA "
-        "GPU, else CPU. On Apple Silicon, the MLX and GGUF models run on the GPU, and auto runs "
-        "the rest on the CPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is "
-        "offered. coreml: run ONNX models through CoreML on Apple Silicon; today that is slower "
-        "than the CPU for them."
+        "Device for the embedding, reranker and descriptor models. auto: CUDA on Linux with an "
+        "NVIDIA GPU, WebGPU on Apple Silicon, else CPU; the MLX and GGUF models run on the Apple "
+        "GPU. cpu: force CPU; the MLX and GGUF models need the GPU, so none is offered. coreml: "
+        "run ONNX models through CoreML on Apple Silicon, only those it was measured to run "
+        "(none today), the rest on the CPU."
+    ),
+)
+DESCRIPTORS = Meta(
+    title="Section descriptors",
+    description=(
+        "How the words and phrases that say what each section is about are written, once per "
+        "document and chunk settings, as a step after embedding. c-tf-idf: the terms a section "
+        "uses more than the sections beside it, reranked by the embedding model; fast, runs "
+        "everywhere. llm: Gemma-4-E2B (2.8 GB download, Apache 2.0) reads each section and "
+        "names its topics; judged far better on technical books, about half a second a "
+        "section, Apple Silicon only, with a model hardware other than cpu. A change applies to "
+        'documents embedded or indexed afterwards; "Index all" in a collection re-describes the '
+        "rest, for every collection that chunks them alike, as they share the descriptors."
     ),
 )
 # How deep any search reads. A passage or a document row is folded from several chunks, so the scan
@@ -241,7 +260,10 @@ ACCELERATOR = Meta(
 MAX_SCAN = 200
 LIMIT = Meta(
     title="Results",
-    description=f"Number of results a search returns, at most {MAX_SCAN}.",
+    description=(
+        f"Number of chunks or passages a search returns, at most {MAX_SCAN}. Excerpts and "
+        "sections have their own defaults."
+    ),
 )
 MIN_PASSAGE_CHARS = Meta(
     title="Shortest passage (characters)",
@@ -306,7 +328,7 @@ FUSION = Meta(
     title="Fusion",
     description=(
         "Hybrid mode only: how the vector and BM25 rankings are merged. rrf: reciprocal rank "
-        "fusion (rank based, robust, uses RRF k). linear: weighted sum of normalized scores "
+        "fusion (rank based, uses RRF k). linear: weighted sum of normalized scores "
         "using Vector weight and BM25 weight."
     ),
 )
@@ -407,8 +429,9 @@ RERANK_WITH_CONTEXT = Meta(
 RERANKER_MODEL = Meta(
     title="Reranker model",
     description=(
-        "The model the cross-encoder reranker scores with; what each one is, its size, languages, "
-        "license and hardware are listed with it. Downloaded as soon as it is chosen; a search "
+        "The model the cross-encoder reranker scores with, for excerpts and for a map of sections "
+        "(search_sections) alike; what each one is, its size, languages, license and hardware "
+        "are listed with it. Downloaded as soon as it is chosen; a search "
         "that needs it is refused until the download finishes."
     ),
 )
@@ -561,6 +584,13 @@ class SearchSettings(msgspec.Struct):
         # (`catalogue.check`): the catalogue is in the database, and decoding reads none
         _check_search(self)
 
+    @property
+    def vector_share(self) -> float:
+        """The vector half's share of a linear fusion: its weight over both, half each when both
+        are 0."""
+        total = self.vector_weight + self.bm25_weight
+        return self.vector_weight / total if total > 0 else 0.5
+
 
 def first_run_search() -> SearchSettings:
     """What a first run starts from: a cross-encoder reranks, since it orders results better than
@@ -634,6 +664,7 @@ class PipelineSettings(msgspec.Struct):
     ann_min_rows: Annotated[int, ANN_MIN_ROWS] = 50_000
     preview_workers: Annotated[int, PREVIEW_WORKERS] = 2
     accelerator: Annotated[Accelerator, ACCELERATOR] = Accelerator.AUTO
+    descriptors: Annotated[Descriptors, DESCRIPTORS] = Descriptors.C_TF_IDF
 
     def __post_init__(self) -> None:
         _at_least(

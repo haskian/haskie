@@ -3,9 +3,9 @@
 structlog renders our events; a `ProcessorFormatter` renders foreign `logging` records through the
 same processor chain, so litestar, uvicorn and DBOS lines carry the same field names. Every record
 reaches the one root handler: litestar gets `logging_config=None` and `haskie run` gives uvicorn
-`log_config=None`. Two libraries install a text handler of their own anyway, so `configure` takes
-their loggers over: uvicorn's CLI (under `litestar run --reload`) sets its up before it imports the
-app, and DBOS adds its own as it initializes, unless its logger already has one.
+`log_config=None`. Two libraries install a text handler of their own anyway, so `configure` resets
+their loggers: uvicorn's CLI (under `litestar run --reload`) installs its handler before it imports
+the app, and DBOS adds its own as it initializes, unless its logger already has one.
 """
 
 import logging

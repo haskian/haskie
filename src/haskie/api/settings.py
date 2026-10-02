@@ -9,16 +9,18 @@ from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbedderMetadata, EmbeddingModel, RerankerMetadata
 from haskie.document.document import ACTIVE_DOCUMENT_STATUSES, DOCUMENT_STATUSES, DocumentStatus
 from haskie.errors import Conflict
-from haskie.indexing import hardware, models, workflows
+from haskie.indexing import gguf_models, hardware, models, workflows
 from haskie.indexing.dbos_names import ACTIVE_STATUS, RunStatus
 from haskie.settings import (
     NO_EMBEDDING,
     Accelerator,
     Chunker,
+    Descriptors,
     FieldDoc,
     FillValues,
     Fusion,
     Parser,
+    PipelineSettings,
     Reranker,
     ScoreFold,
     SearchMode,
@@ -47,11 +49,12 @@ class Status(msgspec.Struct):
 
 
 class Init(msgspec.Struct):
-    """The first run's choices: what to embed with, and how to search. Everything else starts at
-    its default and is changed in the settings later."""
+    """The first run's choices: what to embed with, how to search, and who writes the section
+    descriptors. Everything else starts at its default and is changed in the settings later."""
 
     profile: str  # a key of `Options.embedding_profiles`
     search: SearchSettings = msgspec.field(default_factory=first_run_search)
+    descriptors: Descriptors = PipelineSettings().descriptors  # one of `Options.descriptors`
 
 
 class Options(msgspec.Struct):
@@ -61,6 +64,7 @@ class Options(msgspec.Struct):
     parsers: tuple[Parser, ...]
     chunkers: tuple[Chunker, ...]
     accelerators: tuple[Accelerator, ...]
+    descriptors: tuple[Descriptors, ...]  # llm only where its model runs (`hardware.device`)
     search_modes: tuple[SearchMode, ...]
     fusions: tuple[Fusion, ...]
     score_folds: tuple[ScoreFold, ...]
@@ -109,10 +113,14 @@ async def get_status(state: State) -> Status:
 @post("/api/init")
 @audit.audited("settings.init")
 async def post_init(data: Init) -> UserSettings:
-    """First run: pick the embedding profile, the search mode and the reranker. The models
-    download in the background; poll /api/status -> models."""
+    """First run: pick the embedding profile, the search mode, the reranker and the descriptors.
+    The models download in the background; poll /api/status -> models."""
     audit.attach(profile=data.profile)
-    settings = UserSettings(embedding=data.profile, search=data.search)
+    settings = UserSettings(
+        embedding=data.profile,
+        search=data.search,
+        pipeline=PipelineSettings(descriptors=data.descriptors),
+    )
     await catalogue.check(settings)
     if not await init_user_settings(settings):
         raise Conflict("already initialized; change embedding via settings and reindex")
@@ -150,6 +158,12 @@ async def get_options() -> Options:
         parsers=tuple(Parser),
         chunkers=tuple(Chunker),
         accelerators=tuple(Accelerator),
+        descriptors=tuple(
+            one
+            for one in Descriptors
+            if (describer := gguf_models.describer(one)) is None
+            or hardware.device(describer, accelerator) is not None
+        ),
         search_modes=tuple(SearchMode),
         fusions=tuple(Fusion),
         score_folds=tuple(ScoreFold),

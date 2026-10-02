@@ -44,20 +44,21 @@
             </ul>
           </details>
           <details class="picker">
-            <summary><span class="picker-value"><span>Excerpts</span><span class="sub">what an agent reads</span></span><i data-lucide="chevron-down" class="icon"></i></summary>
+            <summary><span class="picker-value"><span class="picker-label"><span>Excerpts</span><span class="picker-tag" title="An agent gets the same from the MCP tool search_excerpts">MCP</span></span><span class="sub">what an agent reads</span></span><i data-lucide="chevron-down" class="icon"></i></summary>
             <ul class="picker-list" role="listbox">
-              <li role="option" tabindex="0" aria-selected="false"><span>Chunks</span><span class="sub">as indexed · may overlap</span></li>
+              <li role="option" tabindex="0" aria-selected="true"><span class="picker-label"><span>Excerpts</span><span class="picker-tag" title="An agent gets the same from the MCP tool search_excerpts">MCP</span></span><span class="sub">what an agent reads</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span class="picker-label"><span>Sections</span><span class="picker-tag" title="An agent gets the same from the MCP tool search_sections">MCP</span></span><span class="sub">a map of the sections it touches</span></li>
               <li role="option" tabindex="0" aria-selected="false"><span>Passages</span><span class="sub">adjacent chunks · whole sentences</span></li>
-              <li role="option" tabindex="0" aria-selected="true"><span>Excerpts</span><span class="sub">what an agent reads</span></li>
+              <li role="option" tabindex="0" aria-selected="false"><span>Chunks</span><span class="sub">as indexed · may overlap</span></li>
             </ul>
           </details>
           <input class="input" type="search" value="shadow" placeholder="Search your collections" id="q" />
           <button class="btn btn-ghost" type="button" aria-label="Clear" onclick="q.value = ''; q.focus()"><i data-lucide="x" class="icon"></i></button>
         </form>
-        <p class="mono muted">6 excerpts · 3 sources · 31 ms</p>
+        <p class="mono muted">6 excerpts · 31 ms</p>
         <div class="tabs" role="tablist">
           <button class="tab" role="tab" aria-selected="true" aria-controls="tab-matches">Excerpts · 6</button>
-          <button class="tab" role="tab" aria-selected="false" aria-controls="tab-sources">Sources · 3</button>
+          <button class="tab" role="tab" aria-selected="false" aria-controls="tab-sections">Sections · 3</button>
         </div>
         <div id="tab-matches" role="tabpanel">
           <div class="hits">
@@ -105,48 +106,41 @@
             </article>
           </div>
         </div>
-        <div id="tab-sources" role="tabpanel" hidden>
+        <div id="tab-sections" role="tabpanel" hidden>
+          <div class="sections" aria-label="Documents">
+            <div class="sections-head"><span>Documents</span><span class="mono muted">3 documents</span></div>
+            <a class="section-row" href="#"><span class="mono muted">0.91</span><span class="section-title">Area<span class="muted"> · Notes on area lights and soft shadow falloff.</span></span><span class="mono muted">7 chunks · 2 sections · A–E</span></a>
+            <a class="section-row" href="#"><span class="mono muted">0.84</span><span class="section-title">Cone<span class="muted"> · Cone primitive with tessellation trade-offs.</span></span><span class="mono muted">2 chunks · 1 section · A–E</span></a>
+            <a class="section-row" href="#"><span class="mono muted">0.79</span><span class="section-title">Sun<span class="muted"> · Sun position by date, time and latitude.</span></span><span class="mono muted">6 chunks · 0 sections · P–T</span></a>
+          </div>
+          <p class="muted">Held by: A–E, P–T</p>
           <div class="hits">
             <article class="hit" style="--score: 1.00">
               <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Area</span></span><span class="mono muted">0.91</span></header>
               <div class="hit-body">
-              <p class="hit-text">Notes on area lights and soft shadow falloff.</p>
-              <footer class="hit-foot"><span>A. Hoffmann · A–E</span><span>7/9 chunks</span></footer>
+              <p class="section-heading">Lighting &gt; Soft shadows</p>
+              <div class="descriptors"><span class="descriptor">penumbra</span><span class="descriptor">panel size</span><span class="descriptor">shadow</span><span class="descriptor">falloff</span><span class="descriptor">umbra</span></div>
+              <footer class="hit-foot"><span>p.2-3 L41-58</span><span>2140 chars · 3 matched chunks</span></footer>
+              <ul class="related" aria-label="Related sections">
+                <li><span class="related-title">Lighting &gt; Hard shadows</span><span class="mono muted">0.82</span></li>
+                <li><span class="related-title">Lamps &gt; Point lamps</span><span class="related-place mono muted">Lamp · K–O</span><span class="mono muted">0.61</span></li>
+              </ul>
               </div>
             </article>
             <article class="hit" style="--score: 0.55">
-              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Sun</span></span><span class="mono muted">0.79</span></header>
+              <header class="hit-head"><span class="tag"><span class="kind">P–T</span><span>Sun</span></span><span class="mono muted">0.79</span></header>
               <div class="hit-body">
-              <p class="hit-text">Sun position by date, time and latitude.</p>
-              <footer class="hit-foot"><span>Z. Weber · P–T</span><span>6/12 chunks</span></footer>
-              </div>
-            </article>
-            <article class="hit" style="--score: 0.66">
-              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Cone</span></span><span class="mono muted">0.84</span></header>
-              <div class="hit-body">
-              <p class="hit-text">Cone primitive with tessellation trade-offs.</p>
-              <footer class="hit-foot"><span>G. Petrov · A–E</span><span>2/6 chunks</span></footer>
-              </div>
-            </article>
-            <article class="hit" style="--score: 0.42">
-              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Lamp</span></span><span class="mono muted">0.73</span></header>
-              <div class="hit-body">
-              <p class="hit-text">Point and spot lamp presets with falloff curves.</p>
-              <footer class="hit-foot"><span>S. Iyer · K–O</span><span>2/5 chunks</span></footer>
-              </div>
-            </article>
-            <article class="hit" style="--score: 0.27">
-              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Camera</span></span><span class="mono muted">0.66</span></header>
-              <div class="hit-body">
-              <p class="hit-text">Lens presets and framing rules for product shots.</p>
-              <footer class="hit-foot"><span>C. Nakamura · A–E</span><span>1/9 chunks</span></footer>
+              <p class="section-heading">Sun &gt; Elevation tables</p>
+              <div class="descriptors"><span class="descriptor">elevation</span><span class="descriptor">latitude</span><span class="descriptor">shadow length</span><span class="descriptor">month</span></div>
+              <footer class="hit-foot"><span>p.4 L90-131</span><span>3310 chars · 2 matched chunks</span></footer>
               </div>
             </article>
             <article class="hit" style="--score: 0.10">
-              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Wind</span></span><span class="mono muted">0.58</span></header>
+              <header class="hit-head"><span class="tag"><span class="kind">A–E</span><span>Cone</span></span><span class="mono muted">0.84</span></header>
               <div class="hit-body">
-              <p class="hit-text">Wind field presets for animated foliage.</p>
-              <footer class="hit-foot"><span>C. Dubois · U–Z</span><span>3/8 chunks</span></footer>
+              <p class="section-heading">Geometry &gt; Tessellation</p>
+              <div class="descriptors"><span class="descriptor">segments</span><span class="descriptor">terminator</span><span class="descriptor">hero objects</span></div>
+              <footer class="hit-foot"><span>p.1 L12-30</span><span>1180 chars · 1 matched chunk</span></footer>
               </div>
             </article>
           </div>

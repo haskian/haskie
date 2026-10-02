@@ -82,8 +82,8 @@ async def checked_names(collections: list[str] | None) -> list[str]:
     """The collections a search covers: the names the caller gave, deduplicated and in its own
     order, or every collection when it named none.
 
-    A name nobody owns is a mistake in the request, not an empty result — unlike a session's
-    stale name, which `retrieval.plan` skips, because the caller did not choose it just now.
+    A name nobody owns is a mistake in the request, not an empty result. A session's stale name
+    is different: `retrieval.plan` skips it, because the caller did not choose it just now.
     """
     known = await Collection.names()
     if not collections:
@@ -106,7 +106,7 @@ def split_collections(raw: str | None) -> list[str] | None:
 
 
 def _rank_key(pair: tuple[CollectionIndex, dict]) -> tuple[float, str, int, int, str]:
-    """Best score first, then the identity of the chunk — (document, char_start, char_end) — and
+    """Best score first, then the identity of the chunk (document, char_start, char_end), and
     the collection last, so the ranking is the same every time it is recomputed."""
     index, row = pair
     return (-row_score(row), *span_key(row), index.collection)

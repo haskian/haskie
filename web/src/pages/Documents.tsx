@@ -13,6 +13,7 @@ import {
   type DocumentStatus,
   type Document,
   type EmbeddingEntry,
+  type Sections,
   type Similar,
 } from "../api";
 import type { DroppedProps, PageProps } from "../App";
@@ -29,6 +30,7 @@ import {
   DocumentPanes,
   GallerySection,
   groupByRange,
+  Info,
   Kv,
   Modal,
   Shell,
@@ -40,8 +42,9 @@ import {
 import "./Documents.css";
 import { embeddingLabel } from "./documents/embedding";
 import { groupByDay, groupByStatus } from "./documents/group";
-import { Duplicates, JustImported, SimilarDocuments } from "./documents/Similar";
-import { importedNames, importLabel, staged as stagedFrom, waitingAfter, type StagedFile } from "./documents/staged";
+import { SectionsTab } from "./documents/Sections";
+import { Duplicate, JustImported, SimilarDocuments } from "./documents/Similar";
+import { fresh, importedNames, importLabel, staged as stagedFrom, waitingAfter, type StagedFile } from "./documents/staged";
 
 type GroupBy = "status" | "name" | "day";
 const GROUPS: { id: GroupBy; label: string }[] = [
@@ -108,9 +111,10 @@ export function Documents({
 
   // All at once: the pipeline queues them. A file the server refuses, such as a name already
   // taken, stays in the set with the reason, to be renamed or removed.
+  const sending = fresh(staged);
   const importStaged = () =>
     run(async () => {
-      const sent = staged;
+      const sent = sending;
       const results = await Promise.allSettled(
         sent.map((one) => api.importStaged({ staging_id: one.staging_id, name: one.name.trim() })),
       );
@@ -132,8 +136,7 @@ export function Documents({
     });
   };
 
-  const repeats = staged.some((one) => one.duplicates.length > 0);
-  const unnamed = staged.some((one) => one.name.trim() === "");
+  const unnamed = sending.some((one) => one.name.trim() === "");
 
   const closeAdding = () => {
     setAdding(false);
@@ -199,12 +202,13 @@ export function Documents({
                 name={doc.name}
                 sub={
                   <>
-                    <Library className="glyph" /> {doc.collections}
+                    <Library className="glyph" /> {doc.collections.length}
                     {doc.status !== "imported" && ` · ${doc.status}`}
                   </>
                 }
                 meta={day(doc.created_at)}
-                hint={doc.description || "No description"}
+                description={doc.description}
+                cover={api.coverUrl(doc.name)}
                 onClick={() => navigate({ name: "documents", document: doc.name })}
               />
             ))}
@@ -227,7 +231,7 @@ export function Documents({
         title="Add documents"
         subtitle="import"
       >
-        <div className="add-documents">
+        <div className="add-documents modal-scroll">
           <input
             type="file"
             multiple
@@ -276,8 +280,8 @@ export function Documents({
                     >
                       <X className="icon" />
                     </button>
-                    {one.duplicates.length > 0 && (
-                      <Duplicates names={one.duplicates} advice="Importing it again only adds a copy." />
+                    {one.duplicate !== null && (
+                      <Duplicate name={one.duplicate} />
                     )}
                     {one.error !== null && <p className="muted">{one.error}</p>}
                   </li>
@@ -285,12 +289,12 @@ export function Documents({
               </ul>
               <div className="row">
                 <button
-                  className={repeats ? "btn" : "btn btn-primary"}
+                  className="btn btn-primary"
                   type="button"
-                  disabled={busy || unnamed}
+                  disabled={busy || unnamed || sending.length === 0}
                   onClick={importStaged}
                 >
-                  {repeats ? `${importLabel(staged.length)} anyway` : importLabel(staged.length)}
+                  {importLabel(sending.length)}
                 </button>
               </div>
             </div>
@@ -336,10 +340,12 @@ const RETRYABLE: readonly DocumentStatus[] = ["error", "cancelled"];
 
 const CONTENT_TAB = "modal-content";
 const COLLECTIONS_TAB = "modal-collections";
+const SECTIONS_TAB = "modal-sections";
 const SIMILAR_TAB = "modal-similar";
 const IMPORT_TAB = "modal-import";
 const MODAL_TABS: TabDef[] = [
   { id: CONTENT_TAB, label: "Content" },
+  { id: SECTIONS_TAB, label: "Sections" },
   { id: COLLECTIONS_TAB, label: "Collections" },
   { id: SIMILAR_TAB, label: "Similar" },
   { id: IMPORT_TAB, label: "Info" },
@@ -360,6 +366,7 @@ function DocumentModal({
   const [collections, setCollections] = useState<string[]>([]);
   const [embeddings, setEmbeddings] = useState<EmbeddingEntry[]>([]);
   const [similar, setSimilar] = useState<Similar | null>(null);
+  const [sections, setSections] = useState<Sections | null>(null);
 
   // The three reads the modal needs, in one round: the row itself, who holds it, what is cached.
   const load = useCallback((): Promise<void> => {
@@ -388,6 +395,13 @@ function DocumentModal({
     if (!similarOpen || doc === null || similar !== null) return;
     api.similarDocuments(doc).then(setSimilar).catch((cause: unknown) => setError(errorText(cause)));
   }, [similarOpen, doc, similar, setError]);
+
+  // Read when the tab is first opened, like Similar: a long book has hundreds of sections.
+  const sectionsOpen = tab === SECTIONS_TAB;
+  useEffect(() => {
+    if (!sectionsOpen || doc === null || sections !== null) return;
+    api.documentSections(doc).then(setSections).catch((cause: unknown) => setError(errorText(cause)));
+  }, [sectionsOpen, doc, sections, setError]);
 
   // A deletion is accepted (202) and runs in the background: the modal follows it, then
   // closes and lets the listing re-read itself.
@@ -455,13 +469,16 @@ function DocumentModal({
       >
         {row !== null && <DocumentPanes doc={row.name} preview={row.preview} />}
       </div>
+      <div id={SECTIONS_TAB} role="tabpanel" hidden={tab !== SECTIONS_TAB}>
+        {sections !== null && <SectionsTab found={sections} />}
+      </div>
       <div
         id={COLLECTIONS_TAB}
         role="tabpanel"
         hidden={tab !== COLLECTIONS_TAB}
       >
         {collections.length === 0 ? (
-          <p className="muted">In no collection yet.</p>
+          <Info>In no collection yet.</Info>
         ) : (
           <ul className="list">
             {collections.map((name) => (

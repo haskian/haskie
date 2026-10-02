@@ -23,6 +23,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 import anyio
 import msgspec
@@ -32,17 +33,20 @@ from sqlalchemy import delete, func, insert, select
 from haskie import audit, db, home
 from haskie.collection.index import Hit, HitReference, Relation
 from haskie.search import collapse, session
-from haskie.search.passage import Excerpt, Passage, PassageReference, Source
-from haskie.search.retrieval import Plan, Pool
+from haskie.search.passage import Excerpt, Passage, PassageReference
+from haskie.search.section_map import MappedSection
 from haskie.settings import Reranker, SearchMode
 from haskie.tables import search_questions, search_results, searches
+
+if TYPE_CHECKING:  # `retrieval` imports this module through `text`: at run time, a cycle
+    from haskie.search.retrieval import Plan, Pool
 
 
 class Tool(StrEnum):
     """Which endpoint ran a search."""
 
     EXCERPTS = "excerpts"
-    SOURCES = "sources"
+    SECTIONS = "sections"
     EXPLORE = "explore"
     TEXT = "text"
 
@@ -60,8 +64,8 @@ class LoggedResult(msgspec.Struct):
     relation: Relation | None  # how it overlaps its parent; None for a result
     collection: str
     document: str
-    seq_start: int | None  # the chunks it covers; None for a document row (`search_sources`)
-    seq_end: int | None
+    seq_start: int  # the chunks it covers
+    seq_end: int
     line_start: int
     line_end: int
     header: str
@@ -69,7 +73,7 @@ class LoggedResult(msgspec.Struct):
     score: float
 
 
-Place = Hit | HitReference | Passage | PassageReference | Excerpt | Source
+Place = Hit | HitReference | Passage | PassageReference | Excerpt | MappedSection
 
 
 def _folded(place: Place) -> list[PassageReference] | list[HitReference]:
@@ -77,7 +81,7 @@ def _folded(place: Place) -> list[PassageReference] | list[HitReference]:
     passages are the excerpt itself, what repeats them is somewhere else."""
     if isinstance(place, Excerpt):
         return [folded for span in place.spans for folded in span.also_in]
-    return [] if isinstance(place, Source) else place.also_in
+    return [] if isinstance(place, MappedSection) else place.also_in
 
 
 def flatten(found: Sequence[Place]) -> list[LoggedResult]:
@@ -98,11 +102,9 @@ def flatten(found: Sequence[Place]) -> list[LoggedResult]:
 def _result(place: Place, position: int, parent: int | None) -> LoggedResult:
     match place:
         case Hit() | HitReference():
-            seq: tuple[int | None, int | None] = (place.seq, place.seq)
-        case Passage() | PassageReference() | Excerpt():
+            seq = (place.seq, place.seq)
+        case Passage() | PassageReference() | Excerpt() | MappedSection():
             seq = (place.seq_start, place.seq_end)
-        case Source():
-            seq = (None, None)
     return LoggedResult(
         position=position,
         parent=parent,
@@ -178,6 +180,7 @@ class Searched(msgspec.Struct, kw_only=True):
     min_rerank_score: float | None = None
     result_limit: int | None = None
     result_count: int = 0  # the results the caller got, without the places folded into them
+    scoped: bool = False  # kept to some documents or sections: a miss says nothing of the rest
     missing_terms: list[str] = []  # the words of its questions no excerpt held; excerpts only
     error: str | None = None  # why it failed; a failed search returned nothing
 
@@ -245,7 +248,9 @@ async def capturing(
                 await _write(capture, int((time.perf_counter() - started) * 1000))
 
 
-def observe_scope(where: Plan | None, collections: list[str], mode: SearchMode, limit: int) -> None:
+def observe_scope(
+    where: "Plan | None", collections: list[str], mode: SearchMode, limit: int
+) -> None:
     """Where the search looks and how, once it is settled, and with which models when it ran a
     plan (`retrieval.plan`); a full-text listing runs none. A no-op outside a capture."""
     capture = _capture.get()
@@ -256,6 +261,7 @@ def observe_scope(where: Plan | None, collections: list[str], mode: SearchMode, 
     capture.result_limit = limit
     if where is None:
         return
+    capture.scoped = where.scope.narrows
     if where.vector is not None and where.embedding is not None:
         capture.embedding = where.embedding.profile or None
     if where.settings.reranker != Reranker.NONE:
@@ -263,7 +269,7 @@ def observe_scope(where: Plan | None, collections: list[str], mode: SearchMode, 
         capture.min_rerank_score = where.settings.min_rerank_score
 
 
-def observe_ranking(question: str, where: Plan, pool: Pool) -> None:
+def observe_ranking(question: str, where: "Plan", pool: "Pool") -> None:
     """What one question's ranking measured, once it is reranked: its query vector and its score
     profile, the best cosines to the rows read and the reranker's best scores before its floor.
 

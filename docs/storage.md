@@ -2,30 +2,35 @@
 
 Your data lives in one home directory, `~/.haskie` by default (`--home` or `HASKIE_HOME` moves
 it). You can back it up, inspect it or delete it. Downloaded model weights are the exception:
-they sit in the fastembed and Hugging Face caches, outside the home.
+they sit in the Hugging Face cache, outside the home: the ONNX models under `haskie-onnx` in it,
+as plain files, since ONNX Runtime refuses external data behind the cache's links.
 
 ```
 ~/.haskie/
   haskie.db               SQLite (WAL): settings, documents, collections, memberships,
-                          embedding metadata, sessions, the search log, and the DBOS tables
+                          embedding metadata, sessions, the search log, installations, and the
+                          DBOS tables
   haskie.lock             the home lock, naming the process that holds it
   server.log              output of a server that `haskie run` started
   staging/                uploads not yet imported; the nightly run sweeps those over a day old
-  documents/<sh>/<doc>/
+  documents/<sh>/<id>/
     original.<ext>        the file as imported
     original.<ext>.md     the full conversion
-    parts/NNNNNN.md       one per batch of PDF pages (one part for other files); every
-                          collection re-chunks from these
+    parts/NNNNNN.md       one per convert batch of PDF pages (one part for other files),
+                          joined into the full conversion
     preview/              the preview source and its markdown
-    embeddings/<id>.parquet   one per chunk settings and model
-    embeddings/<id>.tmp/      partial results while an embedding is computed
-  collections/<sh>/<name>/index/   the LanceDB table "chunks"
+    cover.jpg             the picture behind its card, built on first request
+    embeddings/<id>.chunks.parquet     the chunks, one file per chunk settings and model
+    embeddings/<id>.sections.parquet   their sections: ids, where each runs, descriptors
+    embeddings/<id>.tmp/               partial results while an embedding is computed
+  collections/<sh>/<name>/
+    index/                the LanceDB table "chunks"
   cache/models/           compiled CoreML models
   audit/                  one JSON line per action
 ```
 
-`<sh>` is the first byte of the SHA-1 of the name, in hex (`home.shard`). So 10,000 documents
-spread over 256 directories instead of filling one.
+`<sh>` is the first byte of the SHA-1 of the entry's key, in hex (`home.shard`): a document's id,
+a collection's name. So 10,000 documents spread over 256 directories instead of filling one.
 
 ## The metadata database
 
@@ -43,26 +48,30 @@ erDiagram
     models ||--o{ embedding_profiles : ""
     models ||--o| reranker_calibration : ""
     documents {
-        text name PK
+        text id PK
+        text name
         text suffix
         text status
         text parser
         text description
-        text md5
     }
     collections {
         text name PK
         text overrides
         text description
+        blob vector_sum
+        int vector_rows
+        text vector_model
     }
     collection_documents {
         text collection PK
-        text document PK
+        text document_id PK
         text status
+        text cache_id
     }
     embeddings {
         text id PK
-        text document
+        text document_id
         text urn
         text model
         blob vector
@@ -137,9 +146,17 @@ when `min_rerank_score` is empty, and the beta curve `fill_values = absolute` sp
 by. The seed gives every reranker an uncalibrated floor of 0.05 and the identity curve, until
 `catalogue/calibrate.py` measures both on borderline pairs of your own collections.
 
-`documents.md5` is the MD5 of the original file, so a second upload of the same bytes is spotted.
-`embeddings.vector` is the document as one vector: the mean of its unit chunk vectors,
-normalized. It is what the nearest documents are found by.
+`documents.id` is the MD5 of the original file, in base58 like section and chunk ids (see below).
+The bytes are the document, so the same file is never imported twice. Every table, the LanceDB
+rows, the folders and the workflow ids refer to a document by this id. `documents.name` is what
+people and agents call it. The API and the tools address a document by name. It is unique, and
+stored in lowercase-kebab-case.
+`embeddings.vector` is the document as one vector: the mean of its unit chunk vectors, not
+normalized. Its direction is what the nearest documents are found by. Its length is how tightly
+the chunks point one way, and the collection's mean needs it. Maintenance sums the members'
+means, each weighted by its chunk count, into `collections.vector_sum`. It keeps the number of
+chunks it sums in `vector_rows` and the model in `vector_model`. A map of sections centres its
+cosines on that mean ([Search](search.md#sections-a-map-of-the-shelf)).
 
 `searches` is the search log (`search/log.py`): one row per search, with or without a session,
 failed or not. `search_questions` holds each question it asked and what that question's ranking
@@ -148,32 +165,63 @@ history reads its searches from here and its other actions from `session_events`
 judges the questions on read ([Gaps](gaps.md)). The nightly run deletes searches older than
 `retention.search_days`.
 
-Two more tables stand alone: `settings` (one row of JSON) and `staging` (uploads waiting for a
-name, with the MD5 of their bytes). DBOS keeps its own workflow and queue tables in the same file. `sysdb.py` reads them for
-the Operations view, through `table()` declarations of its own: DBOS owns their schema.
+Three more tables stand alone: `settings` (one row of JSON), `staging` (uploads waiting for a
+name, with the MD5 of their bytes) and `installations` (each agent configuration directory that
+`haskie install` wrote the skill and rule into, rewritten when a collection changes; see
+[MCP](mcp.md)). DBOS keeps its own workflow and queue tables in the same file. `sysdb.py` reads
+them for the Operations view, through `table()` declarations of its own. DBOS owns their schema.
 
 Every table and index is a SQLAlchemy Core `Table` in `tables.py`, the one source of the schema.
 `db.migrate` generates the DDL from it on a fresh home, and every query is a Core statement over
-the same tables, so a column name is written once. Index names start with `idx_`. A home created
-before `tables.py` keeps its older, unprefixed names.
+the same tables, so a column name is written once. Index names start with `idx_`.
+
+## Sections and their ids
+
+Every section and every chunk has an id, named when a computed embedding is merged
+(`embed_cache._merge`, `sections/build.py`). The merge is the first place that sees the whole
+document in order.
+
+- Each of these ids is an MD5 written in base58 (`ids.py`), 22 characters: letters and digits
+  without `0`, `O`, `I` and `l`, padded with `1`, the zero digit.
+- A section is a run of chunks under one heading path, the whole document first. Its id is the
+  MD5 of `<document id>/s/<position>`, its place among the document's sections, 0 for the whole
+  document. Sections are cut by heading paths alone, so other chunk settings mostly give the same
+  sections the same ids. Each section names the one it sits in (`parent_id`).
+- A chunk's id is the MD5 of `<document id>/c/<seq>`, its 1-based place among the document's
+  chunks: under other chunk settings the same `seq`, and so the same id, names other text. Each
+  chunk names every section that holds it, the whole document first and its own section last
+  (`section_ids`), so a search kept to a chapter finds the chunks of its subsections too.
+- The `s` and `c` keep the two kinds apart: section 2 and chunk 2 of one document are two ids.
+
+The sections go into their own file beside the chunks (`<id>.sections.parquet`), each with its
+id, parent, headings, where it runs and its descriptors. The file is written before the entry's
+row, so a cache hit has both. Its schema metadata names the strategy that wrote the descriptors
+(`descriptors`); a file the merge just wrote has none, until the describe step rewrites it. Each chunking of a document keeps its own, as its section ids are
+its own. A membership names the entry its rows were indexed from
+(`collection_documents.cache_id`). So `search_sections` reads the descriptors of the sections a
+collection's ids name, even after its chunk settings change and before *Index all* re-chunks it.
+The collection's centre sums its members' entries the same way. A reconversion or a delete drops
+the sections with the cache. Deleting an entry empties the pointer to it (a foreign key, `on
+delete set null`) until the member is indexed again.
 
 ## How each store is written
 
 | store | how it is written | why |
 | --- | --- | --- |
-| SQLite | app code through SQLAlchemy Core on `aiosqlite`, one connection per unit of work (`NullPool`); DBOS through its own connections; WAL mode | a unit of work is one transaction. A unit that writes (`db.connect`) takes the write lock at its start (`begin immediate`), so a check it reads still holds when it writes. Writers that meet, and DBOS's writers, wait on the busy timeout, then fail with "database is locked". A unit that only reads (`db.read`) takes no lock: a deferred transaction reads one snapshot, waits for no writer, and refuses any write (`query_only`) |
-| LanceDB | async API, one writer per collection (`task.indexing`) | one writer per table keeps commits simple |
+| SQLite | app code through SQLAlchemy Core on `aiosqlite`, one connection per unit of work (`NullPool`); DBOS through its own connections; write-ahead log (WAL) mode | a unit of work is one transaction. A unit that writes (`db.connect`) takes the write lock at its start (`begin immediate`), so a check it reads still holds when it writes. Writers that meet, and DBOS's writers, wait on the busy timeout, then fail with "database is locked". A unit that only reads (`db.read`) takes no lock: a deferred transaction reads one snapshot, waits for no writer, and refuses any write (`query_only`) |
+| LanceDB | async API; a collection's table: one writer per collection (`task.indexing`) | one writer per table keeps commits simple |
 | small files | `home.atomic_write`: a temp file, flushed to disk, then `os.replace` | a crash or a power cut leaves the old file or the new one, never half |
 | imported originals | moved or copied into place | removed again if the import raises |
 
 ## Schema changes
 
 Before 1.0 there are no migrations. A storage change edits `tables.py` and bumps `SCHEMA_VERSION`
-in `db.py`, which is stored in `PRAGMA user_version`. A home written with another version is refused at startup, with a message
-that says so. The fix is `haskie destroy` and a fresh import.
+in `db.py`, which is stored in `PRAGMA user_version`. A home written with another version is
+refused at startup, with a message that says so. The fix is `haskie destroy` and a fresh import.
 
-A LanceDB table records the embedding its vectors were made by (the `cache_name`, in its schema
-metadata). A table of another embedding, or one from before the record, is outdated: the
-collection shows it, and *Index all* rebuilds it from the embedding cache. No re-import is needed.
+A collection's LanceDB table records the embedding its vectors were made by (the `cache_name`, in
+its schema metadata). A table of another embedding, or one from before the record, is outdated:
+the collection shows it, and *Index all* rebuilds it from the embedding cache. No re-import is
+needed.
 
 Code: `tables.py`, `db.py`, `catalogue/catalogue.py`, `catalogue/seed.sql`, `home.py`, `sysdb.py`.

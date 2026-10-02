@@ -1,9 +1,9 @@
 """Markdown to HTML for the viewer, one page at a time, and the table of contents beside it.
 
-The browser inserts what this returns, so the one thing that matters here is that it cannot carry
-script. `pyromark.html` passes raw HTML straight through — a `<script>` in an uploaded markdown
-file would reach the page verbatim — so the raw HTML is removed before rendering, using the
-parser's own idea of what is raw HTML rather than a pattern of our own.
+The browser inserts what this returns, so it must not carry script. `pyromark.html` passes raw
+HTML straight through (a `<script>` in an uploaded markdown file would reach the page verbatim),
+so the raw HTML is removed before rendering, using the parser's own idea of what is raw HTML
+rather than a pattern of our own.
 
 That also matches what the viewer did when React rendered the markdown: `react-markdown` ignores
 raw HTML unless asked for it, so nothing that used to appear stops appearing.
@@ -37,21 +37,54 @@ class Page(msgspec.Struct):
     kind: Literal["page"] = "page"  # tags this line of the NDJSON stream (see `api.documents`)
 
 
+class HeadingSpan(msgspec.Struct, frozen=True):
+    """Where one heading of the markdown is, in bytes: the whole of it, its markers included,
+    and the text inside them."""
+
+    level: int
+    start: int
+    end: int
+    text_start: int
+    text_end: int
+    text: str
+
+
+def heading_spans(markdown: str) -> list[HeadingSpan]:
+    """Every heading of the markdown, in document order, by the parser and options the chunker
+    reads it with (`segment`): a `#` line inside a code block is none."""
+    found: list[HeadingSpan] = []
+    level = start = end = 0
+    inner: list[tuple[int, int]] | None = None
+    texts: list[str] = []
+    for event, span in pyromark.events_with_range(markdown, options=OPTIONS):
+        match event:
+            case {"Start": {"Heading": {"level": depth}}}:
+                level, start, end, inner, texts = (
+                    int(str(depth)[1]),
+                    span["start"],
+                    span["end"],
+                    [],
+                    [],
+                )
+            case {"End": {"Heading": _}} if inner is not None:
+                text_start = min((one for one, _ in inner), default=start)
+                text_end = max((one for _, one in inner), default=start)
+                found.append(
+                    HeadingSpan(level, start, end, text_start, text_end, "".join(texts).strip())
+                )
+                inner = None
+            case _ if inner is not None:
+                inner.append((span["start"], span["end"]))
+                if isinstance(event, dict) and ("Text" in event or "Code" in event):
+                    texts.append(str(event.get("Text", event.get("Code"))))
+    return found
+
+
 def headings(markdown: str) -> list[Heading]:
     """The table of contents, in document order."""
-    result: list[Heading] = []
-    current: Heading | None = None
-    for event, span in pyromark.events_with_range(markdown):
-        match event:
-            case {"Start": {"Heading": {"level": level}}}:
-                current = Heading(level=int(str(level)[1]), text="", offset=span["start"])
-            case {"Text": str(text)} | {"Code": str(text)} if current is not None:
-                current.text += text
-            case {"End": {"Heading": _}} if current is not None:
-                current.text = current.text.strip()
-                result.append(current)
-                current = None
-    return result
+    return [
+        Heading(level=one.level, text=one.text, offset=one.start) for one in heading_spans(markdown)
+    ]
 
 
 def _without_raw_html(markdown: str) -> str:
@@ -87,7 +120,7 @@ def to_html(markdown: str, first_heading: int = 0) -> tuple[str, int]:
 
     `first_heading` is how many headings the document has already rendered, because a page is
     rendered on its own but its anchors have to be unique across the whole document. Raw HTML is
-    gone by the time this matches `<h1>`..`<h6>`, so the nth opening tag really is the nth heading.
+    gone by the time this matches `<h1>`..`<h6>`, so the nth opening tag is the nth heading.
     """
     html = pyromark.html(_without_raw_html(markdown), options=OPTIONS)
     counter = itertools.count(first_heading)

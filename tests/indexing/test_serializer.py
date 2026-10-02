@@ -22,6 +22,7 @@ from haskie.indexing.workflows import Context, Stage
 from haskie.settings import ChunkSettings, Parser, PipelineSettings
 
 DOCUMENT = Document(
+    id="0" * 32,
     name="patterns.pdf",
     suffix=".pdf",
     size=48_213,
@@ -32,9 +33,11 @@ DOCUMENT = Document(
 CONTEXT = Context(
     document=DOCUMENT,
     chunking=ChunkSettings(chunk_size=900),
-    # bge-small as the catalogue seeds it, with every nested struct a record can hold
+    # granite-97m with duplicate cosines, so every nested struct a record can hold is here
     embedding=EmbeddingModel(
-        "BAAI/bge-small-en-v1.5", 384, duplicate=DuplicateCosine(chunk=0.92, passage=0.95)
+        "ibm-granite/granite-embedding-97m-multilingual-r2",
+        384,
+        duplicate=DuplicateCosine(chunk=0.92, passage=0.95),
     ),
     pipeline=PipelineSettings(cpu_budget=4, batch_pages=2),
     collection=None,
@@ -148,8 +151,8 @@ def test_a_field_added_without_a_default_fails_the_load(monkeypatch) -> None:
 
 
 def test_dbos_own_pickle_breaks_on_the_same_changes(monkeypatch) -> None:
-    """Why this serializer exists: DBOS's pickle keeps a struct by position. A field removed fails
-    the load, and a field added moves every later value into the field before it."""
+    """This serializer exists because DBOS's pickle keeps a struct by position. A field removed
+    fails the load, and a field added moves every later value into the field before it."""
     recorded = DefaultSerializer().serialize(INPUT)
 
     monkeypatch.setattr(workflows, "Context", _changed(Context, CONTEXT_FIELDS[:-1]))

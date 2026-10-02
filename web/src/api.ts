@@ -28,7 +28,7 @@ export type ModelMetadata = EmbedderMetadata | RerankerMetadata
 export type Runtime = Wire<'Runtime'>
 export type Device = Wire<'Device'>
 export type EmbeddingModel = Wire<'EmbeddingModel'>
-export type InitChoices = Wire<'Init'> // what the first run picks: the profile and the search
+export type InitChoices = Wire<'Init'> // what the first run picks: the profile, the search and the descriptors
 export type ImportedDocument = Wire<'Document'>
 export type Document = Wire<'Listed'>
 export type CollectionInfo = Wire<'CollectionInfo'>
@@ -42,9 +42,12 @@ export type Passage = Wire<'Passage'>
 export type Excerpt = Wire<'Excerpt'>
 // What an excerpts search answers with: the excerpts, and what they leave out (`probe.report`).
 export type Answer = Wire<'Answer'>
-export type Source = Wire<'Source'>
-export type Sources = Wire<'Sources'>
-export type HotSection = Wire<'HotSection'>
+// A map of the sections a topic touches (`search.section_map`), each with its descriptors, and
+// the documents the search reached hardest.
+export type SectionMap = Wire<'SectionMap'>
+export type MappedDocument = Wire<'MappedDocument'>
+export type MappedSection = Wire<'MappedSection'>
+export type RelatedSection = Wire<'Related'>
 export type Lines = Wire<'Lines'>
 export type Status = Wire<'Status'>
 export type ModelStatus = Wire<'ModelStatus'>
@@ -53,7 +56,7 @@ export type Activity = Wire<'Activity'>
 export type Operation = Wire<'Operation'>
 export type Job = Wire<'Job'>
 export type SessionSummary = Wire<'SessionSummary'>
-// Not `Wire`: `EventDetail` is the one struct whose fields really are absent on the wire
+// Not `Wire`: `EventDetail` is the one struct whose fields are absent on the wire
 // (`omit_defaults`), so completing them would promise fields no action fills.
 export type EventDetail = components['schemas']['EventDetail']
 export type SessionEvent = Omit<Wire<'SessionEvent'>, 'detail'> & { detail: EventDetail }
@@ -73,7 +76,8 @@ export type BulkStarted = Wire<'BulkStarted'>
 export type OperationProgress = Wire<'OperationProgress'>
 export type Preview = Wire<'Preview'>
 export type Staged = Wire<'Staged'>
-export type Similar = Wire<'Similar'> // what a document may repeat: identical files, nearest by content
+export type Sections = Wire<'Sections'> // a document's table of contents, each section with its descriptors
+export type Similar = Wire<'Similar'> // what a document may repeat: the nearest by content
 export type Rendered = Wire<'Rendered'>
 export type Member = Wire<'Member'>
 export type CollectionSummary = Wire<'CollectionSummary'>
@@ -279,6 +283,7 @@ export const api = {
   saveCollectionOverrides: (name: string, s: CollectionOverrides) =>
     request<CollectionInfo>(`${collectionPath(name)}/overrides`, json('PUT', s)),
   indexCollection: (name: string) => request<BulkStarted>(`${collectionPath(name)}/index`, { method: 'POST' }),
+  collectionCoverUrl: (name: string) => `${collectionPath(name)}/cover`,
 
   // The collection's members: one document row each, plus how far this collection indexed it.
   collectionDocuments: (name: string, q: PageRequest & { status?: MemberStatus } = {}) => {
@@ -314,6 +319,7 @@ export const api = {
   reimportDocument: (doc: string) => request<BulkStarted>(`${documentPath(doc)}/import`, { method: 'POST' }),
   documentCollections: (doc: string) => request<string[]>(`${documentPath(doc)}/collections`),
   documentEmbeddings: (doc: string) => request<EmbeddingEntry[]>(`${documentPath(doc)}/embeddings`),
+  documentSections: (doc: string) => request<Sections>(`${documentPath(doc)}/sections`),
   similarDocuments: (doc: string) => request<Similar>(`${documentPath(doc)}/similar`),
   describeDocument: (doc: string, description: string) =>
     request<ImportedDocument>(`${documentPath(doc)}/description`, json('PUT', { description })),
@@ -322,6 +328,7 @@ export const api = {
     request<Lines>(`${documentPath(doc)}/lines${pageQuery({}, { line_start: String(lineStart), line_end: String(lineEnd) })}`),
   previewUrl: (doc: string) => `${documentPath(doc)}/preview`,
   sourceUrl: (doc: string) => `${documentPath(doc)}/source`,
+  coverUrl: (doc: string) => `${documentPath(doc)}/cover`,
   // Yields each frame as it arrives, so the first page shows without waiting for the last.
   markdown: (doc: string, full = false) => ndjson<Frame>(`${documentPath(doc)}/markdown${full ? '?full=true' : ''}`),
 
@@ -360,8 +367,8 @@ export const api = {
   // one question, or 2 to 5 parts of one and the background they share (`context`)
   searchExcerpts: (q: string[], scope: SearchScope = {}, context?: string) =>
     timedRequest<Answer>(`/api/search/excerpts${pageQuery({}, { q, context, ...scopeQuery(scope) })}`),
-  searchSources: (q: string, scope: SearchScope = {}) =>
-    timedRequest<Sources>(`/api/search/sources${pageQuery({}, { q, ...scopeQuery(scope) })}`),
+  searchSections: (q: string, scope: SearchScope = {}) =>
+    timedRequest<SectionMap>(`/api/search/sections${pageQuery({}, { q, ...scopeQuery(scope) })}`),
 }
 
 /** Which collections a search runs over; empty means every one. */

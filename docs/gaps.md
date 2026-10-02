@@ -22,22 +22,23 @@ context variable, so no step passes it along. Two places observe what they alrea
 - the flow's plan, or the full-text listing: the collections searched, the mode that ran, and
   the limit;
 - the flow's `rerank` step, which every ranked search runs once per question: the question's
-  query vector, the profile it was embedded under, and its score profile: the 20 best cosines
-  between the query and the rows read (`log.similarities`), and the reranker's 20 best scores
-  before its floor dropped any. The best cosine and the best reranker score are the heads of
-  those lists.
+  query vector, the profile it was embedded under, and its score profile. That profile holds the
+  20 best cosines between the query and the rows read (`log.similarities`), and the reranker's 20
+  best scores before its floor dropped any. The best cosine and the best reranker score are the
+  heads of those lists.
 
-The best cosine is measured on the vectors, not read off a score column. A hybrid query's fusion
+The best cosine is measured on the vectors, not read from a score column. A hybrid query's fusion
 keeps only a rank score, and a rank says nothing about how close the best row came.
 
 The capture is written when the search ends, in one transaction: a `searches` row, one
 `search_questions` row per question asked, and one `search_results` row per place returned.
 An excerpts search also keeps `missing_terms`, the words of its questions no excerpt held.
+`scoped` marks a search kept to some documents or sections.
 Places are stored in preorder with their parent, so the `also_in` trees survive; an excerpt's
 places are its passages' repeats. Each keeps its citation (`header`, `location`), so the log reads
-without the document. A failed search is written with its error, then the error goes on. A search
-without a session is written too. A later page of `/api/search/text` is the same search and writes
-nothing. A malformed question is a refused request, not a search, and writes nothing.
+without the document. A failed search is written with its error, then the error is raised again.
+A search without a session is written too. A later page of `/api/search/text` is the same search
+and writes nothing. A malformed question is a refused request, not a search, and writes nothing.
 
 `GET /api/searches` reads the log back, newest first, and an agent reads it as the MCP tool
 `list_searches`; neither ever sends a query vector. A session's history reads its searches from
@@ -48,16 +49,20 @@ everything).
 ## Which questions are gaps
 
 `search/gaps.py` judges each stored question on read, so a bar measured again re-judges every
-search already stored. A question is a gap when a detector fires:
+search already stored. A question is a gap when a detector fires. The detectors run in the order
+below, and the first that fires names the signal:
 
 | signal | when |
 | --- | --- |
 | `reported` | the agent that asked it said the excerpts do not answer it (`report_gap`), fully or in part. It reads the excerpts, so its verdict outranks every score |
 | `empty` | its search returned nothing |
 | `uncovered` | several questions were asked at once, and no excerpt answers this one |
-| `weak` | its best match is under the bar. A reranked search is judged by the floor it dropped chunks under: the settings' `min_rerank_score` when one is set, else the reranker's calibrated floor (`reranker_calibration`), because the reranker reads query and passage together. Otherwise the profile's `weak_match` cosine decides. No bar known: no verdict |
+| `weak` | its best match is under the bar. A reranked search is judged by the floor it dropped chunks under: the settings' `min_rerank_score` when one is set, else the reranker's calibrated floor (`reranker_calibration`), because the reranker reads query and passage together. A map drops nothing, so it is judged by the reranker's calibrated floor, never by `min_rerank_score`. Otherwise the profile's `weak_match` cosine decides. No bar known: no verdict |
+| `borderline` | no reranker judged it, and its best cosine sits from `weak_match` up to `answered_match`. It may be answered. `list_gaps` leaves it out unless `signals` asks for it, and the page folds these topics away |
 
-A failed search is an error, not a gap. A new signal is one `Signal` member and one detector
+A failed search is an error, not a gap. A search kept to some documents or sections
+(`document_ids`, `section_ids`; the row's `scoped`) is judged by `reported` alone: what it
+missed may sit in the documents it kept out. A new signal is one `Signal` member and one detector
 function.
 
 `report_gap` takes the session, the question as asked and a verdict, `insufficient` or `partial`,
@@ -94,38 +99,44 @@ trust, a missed one waits for the next search.
 `mise run evaluate-gaps` measures them (`tests/gapeval/`). It chunks and embeds two shelves, each
 read at a pinned commit: "The Rust Programming Language" (Apache-2.0 or MIT; 45 answered
 questions, 40 unanswered, 30 of them near its topics) and four of haskie's docs (12 answered, 5
-unanswered).
-For each question it takes the score profile a search would log, and scores every predictor in
-its `FEATURES` by AUROC, the chance an answered question scores above an unanswered one.
+unanswered). For each question it takes the score profile a search would log, and scores every
+predictor in its `FEATURES` by AUROC, the chance an answered question scores above an unanswered
+one.
 
 | model | answered, lowest | unanswered, highest | bars |
 | --- | --- | --- | --- |
-| compact (bge-small), best cosine | 0.751 (Rust), 0.673 (docs) | 0.763 (Rust), 0.700 (docs) | weak 0.67, borderline to 0.775 |
-| arctic-m, best cosine | 0.386 (Rust), 0.278 (docs) | 0.464 | weak 0.27, no band |
-| MiniLM-L-6, best reranker score | 0.939 (Rust), 0.091 (docs) | 0.984 | floor 0.05 |
+| granite-97m-multilingual, best cosine | 0.881 (Rust), 0.793 (docs) | 0.884 (Rust), 0.826 (docs) | weak 0.79, borderline to 0.885 |
+| ettin-32m, best reranker score | 0.99988 (Rust), 0.9991 (docs) | 0.99982 (Rust), 0.99998 (docs) | floor 0.05, uncalibrated |
+
+The findings below were first measured with models the catalogue no longer holds (bge-small,
+arctic-embed-m, MiniLM-L-6); where the current defaults were measured too, both are given.
 
 What the measurements say:
 
 - **The best cosine stays.** The mean of the top 5 (`mean5`) ranks answered over unanswered a
-  little better (AUROC 0.999 against 0.998 on the Rust book, 1.000 against 0.983 on the docs).
-  Under a bar that flags no answered question on either shelf, it catches 32 of 45 against 30 for
-  compact, but 13 against 18 for arctic-m. The top-two gap and the spread barely separate (AUROC
-  0.64 and 0.86).
+  little better (bge-small: AUROC 0.999 against 0.998 on the Rust book, 1.000 against 0.983 on
+  the docs; granite-97m: 0.999 against 0.997, and 0.967 for both). Under a bar that flags no
+  answered question on either shelf, it caught 32 of 45 against 30 for bge-small, but 13 against
+  18 for arctic-m. The top-two gap and the spread barely separate (AUROC 0.64 and 0.86).
 - **A bar does not travel between shelves, or between versions of one.** The Rust book's lowest
   answered cosine would flag 3 of 12 answered docs questions. An edit to the docs alone moved
   their lowest answered cosine from 0.698 to 0.673. The bars sit under both shelves, each read at
   its pinned commit.
-- **The band catches what the low bar misses.** For compact, 0.67 to 0.775 holds all 15 other
-  unanswered questions and 5 of 57 answered. For arctic-m the scores overlap too far: no band
-  holds the missed ones under 15% of answered, so it has none. The reranker's floor has no band
-  either: holding its 9 missed questions would flag 26% of answered.
-- **The reranker is the sharper judge** on the Rust book (AUROC 0.998, and its floor catches 36
-  of 45), weaker on the small docs shelf (0.883).
-- **Missing words do not tell a wording gap from a missing document.** The idea: a borderline
-  question whose words no near miss holds (`missing_terms`) exists under other words. But every
-  unanswered question has such words (45 of 45), so the rule would label 14 of 45 true content
-  gaps "wording", and catches only 12 of 20 questions asked in words the docs do not use
-  (`reworded` in `tests/gapeval`). Not shipped.
+- **The band catches what the low bar misses.** For granite-97m, 0.79 to 0.885 holds the 27
+  unanswered questions the low bar misses, with 8 of 57 answered (14%); for bge-small, 0.67 to
+  0.775 held 15 with 5 of 57. For arctic-m the scores overlapped too far: no band held the missed
+  ones under 15% of answered, so it had none.
+- **The reranker ranks best, but its floor needs calibrating.** ettin-32m ranks every answered
+  Rust book question over every unanswered one (AUROC 1.000), the docs shelf less well (0.733).
+  Its scores crowd near 1: the Rust book's unanswered questions score 0.997 on median, because
+  they sit near its topics. So at 0.05 its floor catches none of 45, where MiniLM-L-6 caught 36.
+  A floor under every answered question (0.999) would catch 39, but the floor also drops chunks
+  from every search, so it is left to `calibrate-rerankers` on borderline pairs.
+- **Missing words do not tell a wording gap from a missing document.** The idea was that a
+  borderline question whose words no near miss holds (`missing_terms`) exists under other words.
+  But every unanswered question has such words (45 of 45), so the rule would label 14 of 45 true
+  content gaps "wording", and would catch only 12 of 20 questions asked in words the docs do not
+  use (`reworded` in `tests/gapeval`). Not shipped.
 - **Shared near misses do not group topics.** Joining two gap questions by a lower cosine plus
   shared near misses joined 94% of same-topic pairs on the Rust book, against 89% by cosine alone,
   but merged 3 to 13 pairs of different topics on the docs shelf: on a small shelf, every
@@ -135,11 +146,11 @@ What the measurements say:
 A profile without `weak_match` gives no cosine verdict; its questions can still be `reported`,
 `empty` or `uncovered`.
 
-Because a bar does not travel, a home can measure its own: `mise run calibrate-gaps sample` writes
-the questions its searches logged, each with its best cosine and near misses; a person marks each
-answered or not; `measure --profile NAME --write` sets the two bars by the same rules (no answered
-question under the low bar, a band only while it flags at most 15% of answered ones). It needs 10
-labelled questions of each kind.
+Because a bar does not travel, a home can measure its own. `mise run calibrate-gaps sample`
+writes the questions its searches logged, each with its best cosine and near misses. A person
+marks each one answered or not. Then `measure --profile NAME --write` sets the two bars by the
+same rules: no answered question under the low bar, and a band only while it flags at most 15% of
+answered ones. It needs 10 labelled questions of each kind.
 
 Code: `search/log.py`, `search/gaps.py`, `api/gaps.py`, `catalogue/seed.sql`,
 `web/src/pages/Gaps.tsx`.

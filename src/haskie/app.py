@@ -34,7 +34,7 @@ from litestar.types import (
 )
 from litestar_mcp import LitestarMCP, MCPConfig
 
-from haskie import APP_VERSION, home, logs, shutdown
+from haskie import APP_VERSION, claude, home, logs, shutdown
 from haskie.api import ROUTE_HANDLERS
 from haskie.api.settings import WEB_UI_STATE
 from haskie.audit import Actor
@@ -305,12 +305,14 @@ def create_app() -> Litestar:
         before_send=[add_request_id],
         request_max_body_size=UPLOAD_MAX_BYTES,
         # `claim_home` first: everything after it migrates the database or launches DBOS, and a
-        # second haskie on the same home must refuse before any of that, not after.
+        # second haskie on the same home must refuse before any of that.
         on_startup=[
             home.claim_home,
             shutdown.bound_exit,
             shutdown.debounce_signals,
             workflows.start,
+            # a change a crash lost, or templates an upgrade changed, reach the installations
+            claude.refresh_in_background,
         ],
         on_shutdown=[stop_runtime],
     )

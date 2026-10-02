@@ -63,7 +63,7 @@ DOWNLOAD_WORKFLOW = "ensure_model"  # models.ensure_model; one record per model
 
 
 def root_cause(exc: BaseException) -> str:
-    """Flat "Type: message" of the failure that actually matters: DBOS wraps exhausted step
+    """Flat "Type: message" of the failure that matters: DBOS wraps exhausted step
     retries in DBOSMaxStepRetriesExceeded, whose own message names only the step."""
     if isinstance(exc, DBOSMaxStepRetriesExceeded) and exc.errors:
         exc = exc.errors[-1]

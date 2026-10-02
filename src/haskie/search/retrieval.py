@@ -1,7 +1,7 @@
 """What each step of a search does, and the IO it takes to do it.
 
 `flow.py` says in what order the steps run and which search runs which of them; this is what
-they call. The pure folds — hits into ranges, ranges into passages, hits into documents — live in
+they call. The pure folds (hits into ranges, ranges into passages, hits into documents) live in
 `passage.py`, so what is left here is the IO: reading the collections, checking the models,
 reading the markdown a range covers.
 
@@ -12,41 +12,56 @@ gave, else the session's selection, else every collection.
 import asyncio
 import statistics
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import ExitStack
 from itertools import islice
 from typing import BinaryIO
 
 import anyio.to_thread
 import msgspec
+import numpy as np
 
 from haskie import cpu
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import UNCALIBRATED, EmbeddingModel, RerankerCalibration
 from haskie.collection.collection import Collection
 from haskie.collection.index import (
+    EVERYTHING,
     FTS_COLUMN,
     ChunkKey,
     CollectionIndex,
     Hit,
     RowKey,
+    Scope,
+    SpanKey,
     chunk_key,
     cross_encode,
     first_per_span,
     gather_rows,
     logit,
     row_score,
+    span_key,
 )
 from haskie.document import document
-from haskie.indexing import hardware, mlx_models, models
+from haskie.indexing import embed_cache, models, onnx_models
 from haskie.indexing.embed import embed_query
-from haskie.indexing.hardware import Runtime
 from haskie.logs import get_logger
-from haskie.search import aspects, collapse, passage, probe, section, session, text, thin
+from haskie.search import (
+    aspects,
+    collapse,
+    passage,
+    probe,
+    section,
+    section_map,
+    session,
+    text,
+    thin,
+)
 from haskie.search import fill as filling
-from haskie.search.passage import Excerpt, Passage, Sources
+from haskie.search.passage import Excerpt, Passage
 from haskie.settings import (
     FillValues,
+    Fusion,
     Reranker,
     ScoreFold,
     SearchMode,
@@ -83,6 +98,13 @@ class Plan(msgspec.Struct):
     embedding: EmbeddingModel | None  # the model every index of the search embeds with
     # how the reranker's scores read, when one is on (`catalogue.calibration`)
     calibration: RerankerCalibration | None = None
+    # False when the reranker only weighs the chunks: a map keeps every one it scanned, a section
+    # that merely shares a word with the topic counting for little rather than nothing (`rerank`)
+    drops: bool = True
+    scope: Scope = EVERYTHING  # the documents and sections every read keeps to
+    # the documents' names by id, filled as its reads meet them (`gather_rows`); one map shared
+    # by every plan of a search
+    document_names: dict[str, str] = msgspec.field(default_factory=dict)
 
     @property
     def rerank_floor(self) -> float:
@@ -97,17 +119,21 @@ class Plan(msgspec.Struct):
         return [index.collection for index, _ in self.indexes]
 
 
-async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
+async def plan(
+    names: list[str], queries: list[str], weighs: bool = False, scope: Scope = EVERYTHING
+) -> list[Plan] | None:
     """One plan per query, or None when there is nothing left to search: the settings resolved
     and each model checked once for all of them, and each query embedded once. The plans differ
     only in their `vector`.
 
     A collection deleted since the caller chose it is skipped, so one stale name does not break
-    every search.
+    every search. `weighs` plans a map's search: with a reranker on, it scores every chunk it
+    scans, and drops none (`Plan.drops`); its calibrated floor still judges the search later
+    (`gaps`). Every read keeps to `scope`.
     """
     user = await load_user_settings()
     embedding = await catalogue.embedding_model(user)
-    found = await Collection.for_search(names, embedding)
+    found = await Collection.for_search(names, embedding, scope)
     for name in names:
         if name not in found:
             _log.warning("session_collection_missing", collection=name)
@@ -115,6 +141,8 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
     if not indexes:
         return None
     settings = indexes[0][1] if len(indexes) == 1 else user.search
+    if weighs:  # a map weighs every chunk: no floor of the user's applies to it
+        settings = msgspec.structs.replace(settings, min_rerank_score=None)
 
     vectors: list[list[float] | None] = [None] * len(queries)
     if embedding is not None and any(one.mode != SearchMode.FTS for _, one in indexes):
@@ -126,6 +154,7 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
         await models.require_ready(models.ModelKind.RERANKER, settings.reranker_model)
         calibrated = await catalogue.calibration(settings.reranker_model)
     await asyncio.gather(*(index.open() for index, _ in indexes))
+    document_names: dict[str, str] = {}
     return [
         Plan(
             settings=settings,
@@ -133,6 +162,9 @@ async def plan(names: list[str], queries: list[str]) -> list[Plan] | None:
             vector=vector,
             embedding=embedding,
             calibration=calibrated,
+            drops=not weighs,
+            scope=scope,
+            document_names=document_names,
         )
         for vector in vectors
     ]
@@ -154,11 +186,19 @@ class Pool(msgspec.Struct):
     """
 
     rows: dict[ChunkKey, tuple[CollectionIndex, dict]]
-    rankings: dict[str, list[ChunkKey]]  # one per collection, in that collection's own order
+    # What retrieval found, each best first with the score it ranks by, for `merge` to make one
+    # ranking of: a collection searched alone answers one ranking, its own (LanceDB fuses a hybrid
+    # query inside); several answer one per retriever over all of them, `VECTOR_RANKING` by
+    # distance and `TEXT_RANKING` by BM25 score. The rows keep the scores they came with.
+    rankings: dict[str, list[tuple[ChunkKey, float]]]
     ranked: list[tuple[ChunkKey, float]] = []  # merged, best first
     # the reranker's scores over the pool, best first, kept before its floor drops any: how close
     # the search came is what the search log records (`log.observe_ranking`)
     rerank_scores: list[float] = []
+
+
+VECTOR_RANKING = "vector"  # every collection's nearest chunks, by distance to the query
+TEXT_RANKING = "text"  # every collection's best chunks by BM25
 
 
 async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True) -> Pool:
@@ -167,10 +207,16 @@ async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True
     A chunk counts once. The same document may be a member of several of the chosen collections,
     and each of their tables then holds the same chunk. A caller searching them wants one hit per
     chunk, not one per collection that holds it. So the first collection in the caller's order
-    that returned a chunk gets the credit, and the later copies are dropped before the ranks are
-    counted. Otherwise a document in two collections would be fused with itself and outrank an
-    equally good one that sits in a single collection. A chunk is its span of the document, not its
-    `seq`: two collections that chunk one document two ways give one `seq` other text.
+    that returned a chunk gets the credit, and the later copies are dropped. A chunk is its span of
+    the document, not its `seq`: two collections that chunk one document two ways give one `seq`
+    other text.
+
+    One collection answers its own ranking, a hybrid query fused inside LanceDB. Several answer
+    their vector and BM25 halves apart (`CollectionIndex.search_rows`), ranked over all of them at
+    once (`_ranked_halves`), for `merge` to fuse as it would one table's. Fusing one ranking per
+    collection would give each collection an equal share of the ranking whatever it holds: a
+    collection of three books took 100 of the 200 chunks a search scanned on a question none of them
+    answers.
 
     A collection that fails to answer fails the search: a silent hole in a merged ranking reads as
     "no match".
@@ -179,22 +225,53 @@ async def fan_out(where: Plan, query: str, candidates: int, vectors: bool = True
     its rows stay in the table until the removal queued for them runs.
     """
     chosen = {index.collection: settings for index, settings in where.indexes}
+    alone = len(where.indexes) == 1
 
     async def read(index: CollectionIndex) -> list[dict]:
         settings = chosen[index.collection]
         wanted = None if settings.mode == SearchMode.FTS else where.vector
         try:
-            return await index.search_rows(query, wanted, settings, candidates, vectors)
+            return await index.search_rows(
+                query, wanted, settings, candidates, vectors, fused=alone
+            )
         except Exception:
             _log.exception("session_collection_search_failed", collection=index.collection)
             raise
 
-    retrieved = await gather_rows([index for index, _ in where.indexes], read)
-    pool = Pool(rows={}, rankings={index.collection: [] for index, _ in retrieved})
-    for index, row in first_per_span((i, r) for i, rows in retrieved for r in rows):
-        key = (index.collection, row["document"], row["seq"])
-        pool.rows[key] = (index, row)
-        pool.rankings[index.collection].append(key)
+    retrieved = await gather_rows([index for index, _ in where.indexes], read, where.document_names)
+    pairs = [(index, row) for index, rows in retrieved for row in rows]
+    if alone:
+        name = where.names[0]
+        pool = Pool(rows={}, rankings={name: []})
+        for index, row in first_per_span(pairs):
+            key = (index.collection, row["document_id"], row["seq"])
+            pool.rows[key] = (index, row)
+            pool.rankings[name].append((key, row_score(row)))
+        return pool
+    return _ranked_halves(pairs)
+
+
+def _ranked_halves(pairs: list[tuple[CollectionIndex, dict]]) -> Pool:
+    """Every collection's rows as one pool, one row per span, the first collection's, ranked by
+    each retriever over all of them: `VECTOR_RANKING` nearest first, `TEXT_RANKING` best BM25
+    first. A span another collection's half found too takes that half's score in its ranking, the
+    first one found; the row keeps only the scores its own collection ran (`scoring`). A
+    retriever that found nothing has no ranking."""
+    pool = Pool(rows={}, rankings={})
+    kept: dict[SpanKey, ChunkKey] = {}
+    halves: dict[str, dict[ChunkKey, float]] = {VECTOR_RANKING: {}, TEXT_RANKING: {}}
+    for index, row in pairs:
+        key = kept.setdefault(span_key(row), (index.collection, row["document_id"], row["seq"]))
+        _, held = pool.rows.setdefault(key, (index, row))
+        for name, column in ((VECTOR_RANKING, "_distance"), (TEXT_RANKING, "_score")):
+            if column in row:
+                halves[name].setdefault(key, row[column])
+                if key[0] == index.collection:  # its own other half: the row says what it ran
+                    held.setdefault(column, row[column])
+    for name, nearest in ((VECTOR_RANKING, True), (TEXT_RANKING, False)):
+        if halves[name]:
+            found = sorted(halves[name].items(), key=lambda one: one[1], reverse=not nearest)
+            pool.rankings[name] = found
     return pool
 
 
@@ -202,8 +279,7 @@ def rrf_merge[T](ranked: list[list[T]], k: int) -> list[tuple[T, float]]:
     """Reciprocal rank fusion: every item scores the sum of `1 / (k + rank)` over the rankings it
     appears in, best first. Ties keep the order of first appearance.
 
-    Pure, and the only merge that needs no calibration between the inputs: two LanceDB indexes
-    score rows on their own scale, so their ranks are comparable where their scores are not.
+    Pure, and needs no calibration between its inputs: it reads ranks, not scores.
     """
     scores: dict[T, float] = {}
     for ranking in ranked:
@@ -212,17 +288,46 @@ def rrf_merge[T](ranked: list[list[T]], k: int) -> list[tuple[T, float]]:
     return sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
 
 
-def merge(pool: Pool, rrf_k: int, candidates: int) -> Pool:
-    """One ranking out of the per-collection ones, fused by rank (see `rrf_merge`).
+def linear_merge[T](
+    near: list[tuple[T, float]], words: list[tuple[T, float]], vector_share: float
+) -> list[tuple[T, float]]:
+    """A weighted sum of the vector and BM25 halves, as LanceDB fuses one table's hybrid query
+    (`LinearCombinationReranker` after its min-max scaling): each half's scores scaled to 0-1 over
+    what it found, a distance turned into a closeness (1 - scaled), a half that missed an item
+    counting 0. `near` holds (item, distance), `words` (item, BM25 score). Best first; ties keep
+    the order of first appearance, the vector half's first."""
+    scores: dict[T, float] = {}
+    for (item, _), scaled in zip(near, _scaled([one for _, one in near]), strict=True):
+        scores[item] = vector_share * (1.0 - scaled)
+    for (item, _), scaled in zip(words, _scaled([one for _, one in words]), strict=True):
+        scores[item] = scores.get(item, 0.0) + (1.0 - vector_share) * scaled
+    return sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
 
-    A single collection keeps its own scores: there is nothing to compare them with, and fusing a
-    lone ranking with itself would only replace a real score with a rank.
+
+def _scaled(values: list[float]) -> list[float]:
+    """Min-max scaled to 0-1; all 0 when every value is the same, as LanceDB scales them."""
+    if not values:
+        return []
+    low, spread = min(values), max(values) - min(values)
+    return [(one - low) / spread if spread else 0.0 for one in values]
+
+
+def merge(pool: Pool, settings: SearchSettings, candidates: int) -> Pool:
+    """One ranking out of what retrieval found, cut to `candidates`.
+
+    One ranking keeps its own scores: a collection searched alone, or one retriever over several.
+    The two halves of a hybrid search over several collections are fused by the `fusion` setting,
+    as LanceDB fuses one table's: by rank (`rrf_merge`) or by a weighted sum (`linear_merge`).
     """
-    if len(pool.rankings) == 1:
-        keys = next(iter(pool.rankings.values()))
-        merged = [(key, row_score(pool.rows[key][1])) for key in keys]
+    if len(pool.rankings) <= 1:
+        ranking = next(iter(pool.rankings.values()), [])
+        merged = [(key, row_score(pool.rows[key][1])) for key, _ in ranking]
+    elif settings.fusion == Fusion.LINEAR:
+        near, words = pool.rankings[VECTOR_RANKING], pool.rankings[TEXT_RANKING]
+        merged = linear_merge(near, words, settings.vector_share)
     else:
-        merged = rrf_merge(list(pool.rankings.values()), rrf_k)
+        keys = [[key for key, _ in ranking] for ranking in pool.rankings.values()]
+        merged = rrf_merge(keys, settings.rrf_k)
     return msgspec.structs.replace(pool, ranked=merged[:candidates])
 
 
@@ -242,8 +347,9 @@ async def rerank(pool: Pool, query: str, where: Plan) -> Pool:
     scored = [(key, row_score(row)) for key, row in zip(keys, rows, strict=True)]
     rescored = sorted(scored, key=lambda pair: pair[1], reverse=True)
     # the reranker's score has a scale: under the floor it judged the chunk no answer, and a
-    # search that keeps it would fill a slot, or tag a question, with it
-    kept = [(key, score) for key, score in rescored if score >= where.rerank_floor]
+    # search that keeps it would fill a slot, or tag a question, with it. A map's only weighs.
+    floor = where.rerank_floor if where.drops else 0.0
+    kept = [(key, score) for key, score in rescored if score >= floor]
     scores = sorted((score for _, score in rescored), reverse=True)
     return msgspec.structs.replace(pool, ranked=kept, rerank_scores=scores)
 
@@ -392,7 +498,9 @@ async def _per_collection[T](
     """`read` over each collection of the search that `wanted` names, with what it names there,
     all at once (`gather_rows`)."""
     indexes = [index for index, _ in where.indexes if index.collection in wanted]
-    return await gather_rows(indexes, lambda index: read(index, wanted[index.collection]))
+    return await gather_rows(
+        indexes, lambda index: read(index, wanted[index.collection]), where.document_names
+    )
 
 
 def _valued(scores: list[float], reference: list[float]) -> list[float]:
@@ -450,7 +558,7 @@ def _fold_ranges(ranged: Ranged, where: Plan, limit: int | None) -> list[passage
 async def collapse_hits(scanned: Scanned, where: Plan, limit: int) -> list[Hit]:
     """The `limit` best hits, each with the near-duplicates it stands for (see `collapse`).
 
-    CPU work that grows with the square of the scan - tens of milliseconds at the default depth -
+    CPU work that grows with the square of the scan (tens of milliseconds at the default depth),
     so it runs in a worker thread rather than on the event loop the search came in on, the
     comparison spaces included.
     """
@@ -554,7 +662,7 @@ async def sections(
     """The first `limit` sections the ranges (best first) fall in, each with every range of it
     (see `section`).
 
-    The outlines of the documents a section can open in are read first (`section.documents`),
+    The placements of the documents a section can open in are read first (`section.documents`),
     one query per collection, and only the heading path and char span of each chunk. `labels` are
     the questions of a search that asked several, to log which of them no section kept.
     """
@@ -596,21 +704,21 @@ async def fill(
     # each group's own: sections of one document can nest, and a chunk near two groups is a
     # candidate of each, for the one whose passage it continues
     nears = [
-        {(one.collection, one.document, seq) for seq in filling.near(one, reach)} for one in groups
+        {(one.collection, one.document_id, seq) for seq in filling.near(one, reach)}
+        for one in groups
     ]
     wanted = set().union(*nears, (chunk_key(hit) for one in groups for hit in one.hits))
     rows = await _rows_at(where, wanted)
     budget = where.settings.max_answer_chars
-    # with a reranker on, a question tags only what it judged an answer (`aspects.tagged`); the
-    # fill weighs by vectors or words, so its chunks bring no tag of their own
+    # a question tags only what it judged an answer (`aspects.tagged`): what the fill adds was
+    # valued against the passages kept, not judged, so it brings no tag of its own
     settings = where.settings
-    tags = settings.reranker == Reranker.NONE
     absolute = None
-    if not tags and settings.fill_values == FillValues.ABSOLUTE:
+    if settings.reranker != Reranker.NONE and settings.fill_values == FillValues.ABSOLUTE:
         absolute = await _absolute(sorted(set().union(*nears)), rows, questions, where)
     how, bias = settings.score_fold, settings.grow_bias
     return await cpu.on_cpu(
-        _fill, groups, nears, rows, questions, reach, budget, tags, how, bias, absolute
+        _fill, groups, nears, rows, questions, reach, budget, how, bias, absolute
     )
 
 
@@ -644,7 +752,6 @@ def _fill(
     questions: list[probe.Question],
     reach: int,
     budget: int,
-    tags: bool,
     how: ScoreFold,
     bias: float,
     absolute: dict[ChunkKey, filling.Candidate] | None = None,
@@ -655,8 +762,6 @@ def _fill(
         weighed, signal = absolute, "reranker, absolute"
     else:
         weighed, signal = _weigh(held, near, rows, questions)
-    if not tags:
-        weighed = {key: msgspec.structs.replace(one, aspect=None) for key, one in weighed.items()}
     weighed = filling.biased(weighed, bias)
     found = [
         one
@@ -694,7 +799,7 @@ def _weigh(
     questions: list[probe.Question],
 ) -> tuple[dict[ChunkKey, filling.Candidate], str]:
     """Each chunk near a passage as a candidate: its best question's value around the passages'
-    own chunks (`_values`), and that question."""
+    own chunks (`_values`)."""
     if not near or not held:
         return {}, "none"
     values, signal = _values(
@@ -702,23 +807,31 @@ def _weigh(
         [(rows[key][0].text, rows[key][1].get("vector")) for key in near],
         [(question.asked, question.vector) for question in questions],
     )
-    weighed: dict[ChunkKey, filling.Candidate] = {}
-    for at, key in enumerate(near):
-        best = max(range(len(questions)), key=lambda question: values[question][at])
-        weighed[key] = filling.Candidate(rows[key][0], values[best][at], questions[best].label)
+    weighed = {
+        key: filling.Candidate(rows[key][0], max(column[at] for column in values))
+        for at, key in enumerate(near)
+    }
     return weighed, signal
+
+
+async def _placement_rows(where: Plan, places: Iterable[section.Place]) -> list[tuple[str, dict]]:
+    """Where every chunk of these documents sits, as (collection, row) pairs, one query per
+    collection (`CollectionIndex.placement_rows`)."""
+    wanted: dict[str, set[str]] = {}
+    for collection, doc in places:
+        wanted.setdefault(collection, set()).add(doc)
+    read = await _per_collection(where, wanted, lambda index, docs: index.placement_rows(docs))
+    return [(index.collection, row) for index, found in read for row in found]
 
 
 async def _grouped(
     hit_ranges: list[passage.HitRange], where: Plan, limit: int
 ) -> list[section.Group]:
-    """The first `limit` sections of the ranges, the outlines they need read first."""
-    wanted: dict[str, set[str]] = {}
-    for collection, doc in section.documents(hit_ranges, limit):
-        wanted.setdefault(collection, set()).add(doc)
-    read = await _per_collection(where, wanted, lambda index, docs: index.outline_rows(docs))
-    rows = [(index.collection, row) for index, found in read for row in found]
-    return await cpu.on_cpu(_group, hit_ranges, rows, where.settings.max_section_chars, limit)
+    """The first `limit` sections of the ranges, the placements they need read first."""
+    rows = await _placement_rows(where, section.documents(hit_ranges, limit))
+    return await cpu.on_cpu(
+        _group, hit_ranges, rows, where.settings.max_section_chars, limit, where.scope.section_ids
+    )
 
 
 async def probe_gaps(
@@ -732,7 +845,8 @@ async def probe_gaps(
     With a reranker on, what the search finds is judged as the ranked chunks were (`_judged`):
     scored against each question whose words are missing, dropped under the floor, tagged with
     the questions it clears it for. Without one, its BM25 score is on another scale than the
-    ranked passages', so it scores 0 and is tagged by the words it holds (`probe.tags`)."""
+    ranked passages', so it scores 0 and tags no question: holding a missing word is not an
+    answer."""
     # inline, not in a worker thread: stems are cached (`probe.stem`), see `probe.vocabulary`
     wanted = probe.missing(questions, probe.covered(groups))
     if not wanted:
@@ -741,7 +855,7 @@ async def probe_gaps(
     depth = probe.PROBE_SCAN + len(held)  # enough rows that the best new one is among them
     lexical = msgspec.structs.replace(where, vector=None)
     found = await fan_out(lexical, " ".join(wanted), depth, vectors=False)  # it only wants chunks
-    pool = merge(found, where.settings.rrf_k, depth)
+    pool = merge(found, where.settings, depth)
     hits = [hit for hit in scan(pool, depth).hits if chunk_key(hit) not in held]
     reranked = where.settings.reranker != Reranker.NONE
     scores: dict[str, dict[ChunkKey, float]] = {}
@@ -757,7 +871,6 @@ async def probe_gaps(
             fresh[0],
             hits=[msgspec.structs.replace(hit, score=0.0) for hit in fresh[0].hits],
             score=0.0,
-            aspects=probe.tags(fresh[0], wanted),
         )
     if fresh:
         (one,) = await _grouped([best], where, 1)
@@ -797,9 +910,13 @@ async def _judged(
 
 
 def _group(
-    hit_ranges: list[passage.HitRange], rows: list[tuple[str, dict]], max_chars: int, limit: int
+    hit_ranges: list[passage.HitRange],
+    rows: list[tuple[str, dict]],
+    max_chars: int,
+    limit: int,
+    kept: frozenset[str],
 ) -> list[section.Group]:
-    return section.group(hit_ranges, section.outlines(rows), max_chars, limit)
+    return section.group(hit_ranges, section.placements(rows), max_chars, limit, kept)
 
 
 CHARS_PER_TOKEN = 4  # a rough English average: what an excerpt's length is judged against
@@ -851,11 +968,9 @@ async def rerank_excerpts(
 
 async def _reads(model: str) -> int:
     """How many tokens of a pair `model` reads: what the catalogue says it takes, or less where
-    its loader cuts shorter (the MLX rerankers read `mlx_models.MAX_PAIR_TOKENS`)."""
+    its loaders cut every pair shorter (`onnx_models.MAX_PAIR_TOKENS`, which MLX reads too)."""
     context = (await catalogue.rerankers())[model].context_tokens
-    if hardware.runtime(model) == Runtime.MLX:
-        return min(context, mlx_models.MAX_PAIR_TOKENS)
-    return context
+    return min(context, onnx_models.MAX_PAIR_TOKENS)
 
 
 async def read_excerpts(groups: list[section.Group]) -> list[Excerpt]:
@@ -871,7 +986,7 @@ async def _texts_of(hit_ranges: list[passage.HitRange]) -> list[str]:
 
     One worker thread for the whole search and one open file per document, however many ranges
     each holds. Measured: ten ranges cost 166us in a single hop against 717us fanned out one hop
-    per document - a hop costs more than the few kilobytes it would overlap.
+    per document. A hop costs more than the few kilobytes it would overlap.
     """
     return await anyio.to_thread.run_sync(_read_texts, hit_ranges)
 
@@ -897,28 +1012,102 @@ def _read_texts(hit_ranges: list[passage.HitRange]) -> list[str]:
         return texts
 
 
-async def shortlist(
-    hits: list[Hit], where: Plan, limit: int, sections: int, how: ScoreFold
-) -> Sources:
-    """Which documents these hits came from, one row per document, and the collections to select
-    to read them.
+async def map_sections(scanned: Scanned, where: Plan, limit: int) -> section_map.SectionMap:
+    """The `limit` sections the scanned hits cover the topic with (`section_map`), each with its
+    descriptors, the documents every hit read points at hardest, and the collections to select to
+    read them.
 
-    Its score folds every chunk it matched by `how` (`passage.fold`), `sections` says where in it
-    the answer sits, and `collections` names
-    which of the searched collections hold it, but for one it is on its way out of
-    (`Collection.holding`), where a follow-up search would not find it. `Sources.collections` is the
-    cover: the fewest collections a follow-up search has to select to reach every row.
-    """
-    # the shortlist is cut first: only a document that made it is worth a membership and a
-    # description, and both are one query for the whole of it
-    kept = passage.top_documents(hits, limit, how)
-    docs = {group[0].document for group in kept}
-    held, described = await asyncio.gather(
-        Collection.holding(docs, where.names), document.descriptions_of(docs)
+    Reads at once the chunk placements of every document the scan reached (one query per
+    collection) and the corpus mean to centre on; then, at once, the picks' descriptors, the
+    listed documents' descriptions and their memberships. The selection runs in one worker-thread
+    hop."""
+    hits, searched = scanned.hits, where.names
+    if not hits:
+        return section_map.SectionMap(sections=[], documents=[], collections=[], searched=searched)
+    places = {(hit.collection, hit.document_id) for hit in hits}
+    vectored = all(one is not None for one in scanned.vectors)
+    embedding = where.embedding if vectored else None
+    rows, centre = await asyncio.gather(
+        _placement_rows(where, places),
+        Collection.centre(where.names, embedding.cache_name if embedding else None),
     )
-    found = passage.fold_sources(kept, held, sections, how)
-    document.fill_descriptions(found.documents, described)
-    return found
+    candidates, picked = await cpu.on_cpu(
+        _map, scanned, rows, centre, where.settings, limit, embedding is not None
+    )
+    how = where.settings.score_fold
+    # the related sections too: a follow-up search scoped to `collections` has to reach them
+    listed = [*picked.picks, *(at for near in picked.related.values() for at, _ in near)]
+    picked_docs = {candidates[at].document_id for at in listed}
+    groups = section_map.listed(passage.top_documents(hits, how), picked_docs)
+    books = {group[0].document_id for group in groups}
+    described, held, about = await asyncio.gather(
+        _descriptors([candidates[at] for at in picked.picks]),
+        Collection.holding(books, where.names),
+        document.descriptions_of(books),
+    )
+    found = section_map.mapped(candidates, picked, described)
+    documents = section_map.documents(groups, found, held, about, how)
+    _log.info(
+        "search_map",
+        chunks=len(hits),
+        candidates=len(candidates),
+        picked=len(found),
+        documents=len(picked_docs),
+        coverage=[round(share, 3) for share in picked.coverage],
+        centred=centre is not None,
+        vectors=embedding is not None,
+        lifted=picked.lifted,
+        # picks their cache entry holds no section of: a document reconverted since it was indexed
+        sections_missing=sorted(
+            {one.document for one in found if (one.collection, one.id) not in described}
+        ),
+    )
+    # every listed section's document has its row (`section_map.listed`), so its cover is theirs
+    memberships = {one.document_id: one.collections for one in documents}
+    return section_map.SectionMap(
+        sections=found,
+        documents=documents,
+        collections=passage.min_cover(memberships),
+        searched=searched,
+    )
+
+
+async def _descriptors(picks: list[section_map.Candidate]) -> dict[tuple[str, str], list[str]]:
+    """Each pick's descriptors by (collection, section id), read from the cache entry its
+    collection indexed the document from: section ids are places in one chunking, so the same id
+    in another chunking names another section. Each entry's file is read once."""
+    entries = await Collection.indexed_entries((one.collection, one.document_id) for one in picks)
+    files = sorted({(doc, id) for (_, doc), id in entries.items()})
+    sections = await asyncio.gather(*(embed_cache.read_sections(*one) for one in files))
+    read = dict(zip(files, sections, strict=True))
+    return {
+        (collection, one.id): one.descriptors
+        for (collection, doc), id in entries.items()
+        for one in read[(doc, id)]
+    }
+
+
+def _map(
+    scanned: Scanned,
+    rows: list[tuple[str, dict]],
+    centre: np.ndarray | None,
+    settings: SearchSettings,
+    limit: int,
+    vectored: bool,
+) -> tuple[list[section_map.Candidate], section_map.Picked]:
+    """The sections the scan reached, and the ones picked."""
+    hits = scanned.hits
+    candidates = section_map.candidates(
+        hits, section.placements(rows), settings.max_section_chars, settings.score_fold
+    )
+    if vectored:
+        vectors = [vector for vector in scanned.vectors if vector is not None]
+        near = section_map.nearness(vectors, centre, candidates)
+        weights = np.maximum([hit.score for hit in hits], 0.0)
+        picked = section_map.cover(weights, near, candidates, limit)
+    else:
+        picked = section_map.by_rank([hit.text for hit in hits], candidates, limit)
+    return candidates, picked
 
 
 # --- which collections a search covers --------------------------------------------
@@ -928,8 +1117,8 @@ async def scope(session_id: str | None, collections: str | None) -> list[str]:
     """Which collections a search covers: the comma-separated `collections` if the caller named
     any, else the session's selection if it has one, else every collection.
 
-    A name nobody owns is a mistake in the request, not an empty result — unlike a session's
-    stale name, which `plan` skips, because the caller did not choose it just now.
+    A name nobody owns is a mistake in the request, not an empty result. A session's stale name
+    is different: `plan` skips it, because the caller did not choose it just now.
     """
     named = text.split_collections(collections)
     if named:

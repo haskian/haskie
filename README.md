@@ -75,8 +75,10 @@ shows where every answer came from.
 haskie is a fast, transparent, easy-to-manage library of the sources you trust. It steers your AI
 agents with your taste instead of the internet's average. Over MCP it aims to give the agent
 relevant evidence from several sources, with no repeats, and every piece says where it came from
-so the agent can dig deeper. The agent keeps the reasoning. haskie makes the small retrieval
-decisions, so the agent needs fewer round trips and fewer tokens.
+so the agent can dig deeper. Its tools follow how people learn. The agent first goes wide, with a
+diverse map of which sections of which documents touch a topic. Then it goes deep, with focused
+excerpts from the sections worth reading. The agent keeps the reasoning. haskie makes the small
+retrieval decisions, so the agent needs fewer round trips and fewer tokens.
 
 ## What that means in practice
 
@@ -91,30 +93,18 @@ decisions, so the agent needs fewer round trips and fewer tokens.
 - **The agent decides, haskie does the legwork.** One `search_excerpts` call searches every
   collection in scope, merges neighbouring hits and folds repeats. A question with several parts
   goes in one call: each part gets its share of the slots, and each excerpt names the parts it
-  answers. `search_sources` names the
-  documents and collections that cover a topic. Each excerpt links to its full markdown file.
+  answers. `search_sections` maps where a topic lives: the sections, the documents and the
+  collections that cover it. Each excerpt links to its full markdown file.
 - **Local and polite to your machine.** Your documents never leave it. Only the models download,
   once, from Hugging Face. Indexing runs in parallel within a CPU budget you set, and after a crash
   the run resumes at the step it was on.
-- **Sensible defaults, open to tuning.** The defaults are a small English embedding model, hybrid
+- **Sensible defaults, open to tuning.** The defaults are a small multilingual embedding model, hybrid
   search and 1,200-character chunks. Each collection can override the chunk and search settings.
 
 ## Status: early, and already useful
 
-haskie is young, with much still to add, but it already covers the whole path from import to
-cited answers in Claude Code. Not there yet:
+haskie covers the whole path from import to cited answers in Claude Code. Not there yet:
 
-- **More retrieval decisions made for the agent.** Today haskie merges neighbouring hits, grows
-  or drops passages too short to stand alone, folds repeats, groups passages by section, fills in
-  the text around and between them that answers too, and searches again for the words of a
-  question no excerpt holds. Next on the list, each one a round trip the agent would otherwise
-  spend:
-  - **Trimming** the sentences of a passage that do not answer. Today an excerpt keeps
-    every passage whole.
-  - **Cross-document merging**, so complementary passages from several documents arrive as one
-    answer with every source cited. Today only repeats are folded.
-  - **Distillation** of the results into a short, cited brief, for questions where the agent
-    needs the gist more than the quotes.
 - **OCR.** Scanned pages and images are stored but not searchable.
 - **Other MCP clients.** Any MCP client can use the tools over HTTP. Only Claude Code has a
   one-command setup.
@@ -127,17 +117,22 @@ Needs [uv](https://docs.astral.sh/uv/), which fetches Python 3.13 if you have no
 uv tool install haskie
 haskie run                  # web UI, REST API and MCP on http://127.0.0.1:8451; opens the first-run page
 haskie install claude       # MCP server, skill, rule and SessionStart hook for Claude Code
+haskie uninstall claude     # removes all four again; documents and collections stay
 ```
 
-- **macOS (Apple Silicon):** also installs MLX and llama.cpp for the Apple GPU. llama.cpp
-  compiles during the install, so run `xcode-select --install` first.
+- **macOS (Apple Silicon):** every model runs on the Apple GPU through ONNX Runtime's WebGPU
+  plugin. MLX and llama.cpp are installed too, for the `-mlx` and `-gguf` profiles, which are
+  faster still. llama.cpp compiles during the install, so run `xcode-select --install` first.
 - **Linux:** ONNX Runtime runs on an NVIDIA GPU with CUDA 13 and cuDNN 9, else on the CPU.
-- **First run:** pick an embedding model. The default, bge-small, is English and about 130 MB.
-  Changing it later means running *Index all* in each collection.
+- **First run:** pick an embedding model. The default, granite-97m-multilingual, reads 200+
+  languages and is about 390 MB. Changing it later means running *Index all* in each collection.
+  Pick the section descriptors too: c-tf-idf runs everywhere; llm (Gemma-4-E2B, 2.8 GB) writes
+  better ones on Apple Silicon.
 - **Smoke test:** import a file on *Documents*, add it to a collection, then ask about it on
   *Explore*.
 - **Other commands:** `haskie stop`, `haskie run --foreground` (for a supervisor),
-  `haskie destroy`. `--port` or `HASKIE_PORT` moves the port, `--home` or `HASKIE_HOME` the data.
+  `haskie destroy`, `haskie version`. `--port` or `HASKIE_PORT` moves the port, `--home` or
+  `HASKIE_HOME` the data.
 
 ## From files to answers
 
@@ -147,8 +142,10 @@ haskie install claude       # MCP server, skill, rule and SessionStart hook for 
    imported, and shows the nearest documents once done.
 2. **Collections.** Create one per topic and add its documents. Give it a one-line description.
    The agent reads it to choose where to look.
-3. **Explore.** Search and see exactly what your agent gets: *Excerpts* and *Sources*. Switch to
-   *Chunks* or *Passages* to see how haskie cut the documents and built each answer.
+3. **Explore.** Search and see what your agent finds: *Excerpts* and *Sections*, the map of the
+   sections a topic touches and the documents that cover it. Open a section to see what the map
+   said about it and the sections it covers, and its document at its heading. Switch to *Chunks*
+   or *Passages* to see how haskie cut the documents and built each answer.
 
 **Operations** shows background jobs with their progress, and cancels running ones. **Sessions**
 replays each agent conversation. **Gaps** lists the questions your sources did not answer, grouped
@@ -166,11 +163,12 @@ chunks over time. **Settings** describes every default.
 | rule | `~/.claude/rules/haskie.md` | loads into every session, so Claude searches your collections first, even for a plain "what is X?" that never triggers a skill |
 | SessionStart hook | `~/.claude/settings.json` | runs `haskie run --hook`: starts the server if it is down, and passes the session id so Sessions can record it |
 
-Run it again after adding a collection, to refresh the names. `--scope project` installs into
+haskie records where it installed and rewrites the skill and rule in the background whenever
+a collection is created, described, renamed or deleted. `--scope project` installs into
 `./.claude` of the directory you run it from. With `CLAUDE_CONFIG_DIR` set, the user scope
-installs there instead of `~/.claude`, as Claude Code reads it. The hook does not wait for the server, so a session
-that starts while nothing is serving, such as the first after a reboot, has no haskie tools. Run
-`haskie run` first if that session matters.
+installs there instead of `~/.claude`, as Claude Code reads it. The hook does not wait for the
+server, so a session that starts while nothing is serving, such as the first after a reboot, has
+no haskie tools. Run `haskie run` first if that session matters.
 
 A typical exchange: you ask *"How should a background job retry a failed HTTP call without
 charging twice?"* The rule sends Claude to `search_excerpts` before the web. haskie returns
@@ -186,14 +184,14 @@ change a document or collection take a `session_id`, so Sessions can replay the 
 
 | tool | what it does |
 | --- | --- |
-| `search_excerpts` | **The main search.** Passages ready to quote, best first (in turns for several parts), each with `header` and `location`. Repeats fold into `also_in`. Takes up to 5 parts of one question, and tags each excerpt with the parts it answers |
-| `search_sources` | Which documents and collections cover a topic. One row per document, with its best sections |
-| `set_session_collections` | Limits the rest of the conversation to the collections `search_sources` suggested |
+| `search_excerpts` | **The main search.** Passages ready to quote, best first (in turns for several parts), each with `header` and `location`. Repeats fold into `also_in`. Takes up to 5 parts of one question, and tags each excerpt with the parts it answers. `document_ids` and `section_ids` keep it to those documents and sections |
+| `search_sections` | A map of a topic: which sections of which documents touch it, near topics included, each with its descriptors and no text, and the documents and collections that cover it. Fast, for orientation before `search_excerpts`. Each section has an `id` to pass on as `section_ids` |
+| `set_session_collections` | Limits the rest of the conversation to the collections `search_sections` suggested |
 | `list_collections`, `get_collection`, `list_collection_documents` | Browse collections and their descriptions |
 | `list_documents`, `get_document` | Browse documents |
 | `add_document` | Import a local file by path |
 | `add_document_to_collection`, `remove_document_from_collection` | Attach or detach a document |
-| `describe_document` | Set what a document is about. `search_sources` shows it |
+| `describe_document` | Set what a document is about. `search_sections` shows it |
 | `report_gap` | Say a search just run did not answer a question. The Gaps page shows it |
 | `list_searches`, `list_gaps`, `replay_gaps`, `review_gaps` | Read the search log and the questions it did not answer, ask them again, resolve or dismiss them ([Gaps](docs/gaps.md)) |
 
@@ -217,11 +215,11 @@ search:    query ──► hybrid search ──► rerank ────► passag
 
 **Structure-Aware Chunking.** Chunks follow the author's structure. A chunk never spans two
 sections. It cuts at a blank line before it cuts inside a paragraph, and between sentences before
-it cuts inside one. A table or code block stays whole unless it is longer than a chunk. By default each
-chunk is embedded and indexed with its heading path in front, such as
+it cuts inside one. A table or code block stays whole unless it is longer than a chunk. By default
+each chunk is embedded and indexed with its heading path in front, such as
 `Part II > Replication > Leaders`. Context added to chunks cuts failed retrievals by 35%, and by
-67% with BM25 and a reranker on top [14]. There an LLM writes the context. haskie takes it from
-the headings at no model call, and has not measured its own gain yet. Chunking by document
+67% with BM25 and a reranker on top [14]. In that study an LLM writes the context. haskie takes it
+from the headings, with no model call, and has not measured its own gain yet. Chunking by document
 structure "largely improve[s]" retrieval-augmented generation (RAG) results [15]. Chunking by
 embedding similarity does not justify its compute cost [16].
 
@@ -230,21 +228,22 @@ vector and full-text (BM25) search in one table, on a columnar format built for 
 [17]. So hybrid search needs no server.
 
 **Hybrid search and reranking.** Vectors find meaning. BM25 finds exact terms, such as an error
-code. haskie fuses both by rank (reciprocal rank fusion, RRF). An optional cross-encoder reads the
-query and passage together and rescores the top candidates. Adding one takes the cut in failed
-retrievals from 49% to 67% [14]. It is off by default. Settings offers models from 23 million
-parameters up to multilingual ones.
+code. By default haskie fuses both by rank (reciprocal rank fusion, RRF). An optional
+cross-encoder reads the query and passage together and rescores the top candidates. Adding one
+takes the cut in failed retrievals from 49% to 67% [14]. It is off by default. Settings offers
+English models from 16 million parameters up to 150 million.
 
 **Repeats folded, passages whole.** Five books that make the same point would fill five of your
 agent's slots. Most rerankers score one passage at a time, so they cannot see repeats [18]. haskie
 merges hits on neighbouring chunks, then folds repeats with leader clustering. It walks the results
 best first and compares each one only with the results already kept, by wording and, for models with
-duplicate thresholds, by vector. The best result of each group keeps its place, so the ranking stays
-intact, where diversity rerankers such as maximal marginal relevance (MMR) reorder it. Comparing
-only with kept results stops chains, so A close to B and B close to C never merges A with C. The
-same input always gives the same output. A repeat stays citable as an `also_in` entry (`duplicate`,
-`contained` or `equivalent`), and its slot goes to the next distinct result. Repeated passages do not
-significantly improve answer correctness, while different documents improve it by 17–47% [19].
+duplicate thresholds, by vector. Each group keeps the place and score of its best result, so the
+ranking stays intact; a later result that holds the kept one whole takes that slot. Diversity
+rerankers such as maximal marginal relevance (MMR) reorder it instead. Comparing only with kept
+results stops chains, so A close to B and B close to C never merges A with C. The same input always
+gives the same output. A repeat stays citable as an `also_in` entry (`duplicate`, `contained` or
+`equivalent`), and its slot goes to the next distinct result. Repeated passages do not significantly
+improve answer correctness, while different documents improve it by 17–47% [19].
 
 **Async-first, with durable jobs.** Every IO is awaited, and CPU work runs in worker threads, so
 search and the UI stay responsive while the machine indexes. Imports, indexing, deletes,

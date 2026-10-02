@@ -1,8 +1,8 @@
 """Search over a live index: one collection, and a session that fans out over several.
 
 Both need a real index, which the pipeline writes, so every test here takes the `dbos` fixture
-and imports its documents through it. The session tests assert the mechanism - one query
-embedding, one model check, one cross-encoder pass over the merge - and not only the end state.
+and imports its documents through it. The session tests assert the mechanism (one query
+embedding, one model check, one cross-encoder pass over the merge) and not only the end state.
 """
 
 import math
@@ -19,6 +19,7 @@ from conftest import (
     legacy_index,
     one_part,
 )
+from sqlalchemy import update
 
 from haskie import db, home
 from haskie.catalogue import catalogue
@@ -35,6 +36,7 @@ from haskie.settings import (
     UserSettings,
     save_user_settings,
 )
+from haskie.tables import embedding_profiles
 
 pytestmark = pytest.mark.anyio
 
@@ -163,21 +165,24 @@ async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkey
     once per collection."""
     from haskie.collection.index import Row
 
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    compact = await catalogue.embedding_model(user)
-    assert compact is not None
+    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    model = await catalogue.embedding_model(user)
+    assert model is not None
     for name in ("a", "b", "c"):
         collection = await Collection.create(name)
         (chunk_,) = chunk.split(f"# {name}\n\nshared token {name}\n", ChunkSettings())
-        index = collection.index_with(compact)
+        index = collection.index_with(model)
         # a vector of its own per collection: three equal vectors would be one point, folded
-        vector = [0.1] * compact.dims
+        vector = [0.1] * model.dims
         vector["abc".index(name)] = 1.0
         row = Row(chunk=chunk_, vector=vector, seq=1)
         # a document name per collection: the merge keys on (document, seq), so one name
         # shared by all three would be one passage and this test would see a single hit
         await index.add_parts(
-            f"{name}.md", f"documents/{name}.md", f"documents/{name}.md.md", one_part(0, [row])
+            f"{name}.md",
+            f"documents/{name}.md",
+            f"documents/{name}.md.md",
+            one_part(0, [row]),
         )
         await index.finish()
     await session.set_collections("s", ["a", "b", "c"])
@@ -198,7 +203,7 @@ async def test_session_search_embeds_once_and_checks_the_model_once(dbos, monkey
 
     assert {h.collection for h in hits} == {"a", "b", "c"}
     assert embedded == ["shared"], "one embedding for the whole fan-out"
-    assert checked == [("embedding", compact.name)], "one check, not one per collection"
+    assert checked == [("embedding", model.name)], "one check, not one per collection"
 
 
 async def test_session_search_folds_a_near_duplicate_by_its_vector(
@@ -209,10 +214,19 @@ async def test_session_search_folds_a_near_duplicate_by_its_vector(
     rows lost their vectors, the search would fall back to words and keep both."""
     from haskie.collection.index import Row
 
-    user = await save_user_settings(UserSettings(embedding="compact"))
-    compact = await catalogue.embedding_model(user)
-    assert compact is not None
-    vector = [0.1] * compact.dims  # one point, embedded twice
+    # no seed profile folds by its vectors yet (`catalogue/seed.sql`), so this one is given the
+    # cosines a calibration would store
+    async with db.connect() as conn:
+        await conn.execute(
+            update(embedding_profiles)
+            .where(embedding_profiles.c.profile == "granite-97m-multilingual")
+            .values(duplicate_chunk=0.92, duplicate_passage=0.95)
+        )
+    monkeypatch.setattr(catalogue, "_embedders", {})  # profiles are read once per database
+    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    model = await catalogue.embedding_model(user)
+    assert model is not None and model.duplicate is not None
+    vector = [0.1] * model.dims  # one point, embedded twice
     bodies = {
         "a": "# Retries\n\nA retried call has to be idempotent, or it happens twice.\n",
         "b": "# Delivery\n\nMake each request safe to repeat: the job may send it again.\n",
@@ -220,7 +234,7 @@ async def test_session_search_folds_a_near_duplicate_by_its_vector(
     for name, body in bodies.items():
         collection = await Collection.create(name)
         (chunk_,) = chunk.split(body, ChunkSettings())
-        index = collection.index_with(compact)
+        index = collection.index_with(model)
         await index.add_parts(
             f"{name}.md",
             f"documents/{name}.md",
@@ -418,7 +432,7 @@ async def test_session_search_propagates_a_broken_collection(
         await attach_document(dbos, name, doc.name)
     await session.set_collections("s", ["a", "b"])
 
-    async def boom(self, query, vector, settings_, limit, vectors=True):
+    async def boom(self, query, vector, settings_, limit, vectors=True, fused=True):
         raise RuntimeError("index unreadable")
 
     monkeypatch.setattr(CollectionIndex, "search_rows", boom)

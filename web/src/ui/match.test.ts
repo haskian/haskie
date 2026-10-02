@@ -21,7 +21,9 @@ describe('fillOf', () => {
 // Three whole sentences, as the chunker packs them. The layout marks where each one starts.
 const CHUNK: Hit = {
   collection: 'A–E',
+  document_id: 'a1',
   document: 'area-lights.pdf',
+  id: 'c1', section_id: 's-soft', section_ids: ['s-doc', 's-soft'],
   source_path: 'documents/area-lights.pdf',
   markdown_path: 'markdown/area-lights.md',
   part: 0,
@@ -198,6 +200,7 @@ describe('also_in trees', () => {
   // a place as `/api/search/chunks` sends it, measured by words and by vectors
   const PLACE: Reference = {
     collection: 'A–E',
+    document_id: 'a1',
     document: 'notes.md',
     seq: 3,
     header: 'Delivery',
@@ -236,6 +239,7 @@ describe('excerpts', () => {
   // a place folded under a span, as `/api/search/excerpts` sends it
   const place = (document: string): Passage['also_in'][number] => ({
     collection: 'notes',
+    document_id: document,
     document,
     seq_start: 2,
     seq_end: 2,
@@ -252,6 +256,7 @@ describe('excerpts', () => {
   })
   const span = (also_in: Passage['also_in']): Excerpt['spans'][number] => ({
     header: 'Guide > Retries',
+    section_id: 's-retries',
     location: 'guide.md L5-7',
     seq_start: 1,
     seq_end: 2,
@@ -268,8 +273,10 @@ describe('excerpts', () => {
   })
   const EXCERPT: Excerpt = {
     collection: 'notes',
+    document_id: 'a1',
     document: 'guide.md',
     header: 'Guide',
+    section_id: 's-retries',
     location: 'guide.md L5-20',
     seq_start: 1,
     seq_end: 6,

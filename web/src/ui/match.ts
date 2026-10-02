@@ -1,11 +1,11 @@
-import type { Excerpt, Hit, Passage, Source } from '../api'
+import type { CSSProperties } from 'react'
+import type { Excerpt, Hit, Passage } from '../api'
 
-/** Any shape a search result arrives in: a chunk, a passage, an excerpt, or a document. */
-export type Match = Hit | Passage | Excerpt | Source
+/** Any shape a search result arrives in: a chunk, a passage or an excerpt. */
+export type Match = Hit | Passage | Excerpt
 
-/** A chunk carries its `seq`; a passage its sequence range; a source its hot sections. */
+/** A chunk carries its `seq`; a passage its sequence range; an excerpt its spans. */
 export const isHit = (match: Match): match is Hit => 'seq' in match
-export const isSource = (match: Match): match is Source => 'sections' in match
 export const isExcerpt = (match: Match): match is Excerpt => 'spans' in match
 
 /** Between two headings of a heading path, as the backend's `chunk.HEADING_SEP` joins them. */
@@ -14,8 +14,8 @@ export const HEADING_SEP = ' > '
 /** The last heading of a joined heading path (`header`): the one the text sits directly under. */
 export const lastHeading = (header: string): string => header.split(HEADING_SEP).at(-1) ?? ''
 
-/** The heading a result sits under: a chunk's is the last of its path, and a passage or a source
- *  only knows its header, whose last heading it is. */
+/** The heading a result sits under: a chunk's is the last of its path, and a passage or an
+ *  excerpt only knows its header, whose last heading it is. */
 export function headingOf(match: Match): string {
   return isHit(match) ? (match.headings.at(-1) ?? '') : lastHeading(match.header)
 }
@@ -113,10 +113,9 @@ export const RELATIONS: Record<Reference['relation'], string> = {
   equivalent: 'same meaning',
 }
 
-/** The places folded straight into a match; each holds the ones folded into it. A source folds
- *  none, and an excerpt's are those of its spans. */
+/** The places folded straight into a match; each holds the ones folded into it. An excerpt's are
+ *  those of its spans. */
 export function alsoOf(match: Match): Reference[] {
-  if (isSource(match)) return []
   return isExcerpt(match) ? match.spans.flatMap((span) => span.also_in) : match.also_in
 }
 
@@ -146,7 +145,7 @@ const overlapLines = (against: string, overlaps: Overlaps): string[] => [
 export const overlapHint = (place: Reference): string =>
   [`${place.relation}, query ${place.score.toFixed(2)}`, ...overlapLines('parent', place.to_parent), ...overlapLines('match', place.to_root)].join('\n')
 
-/** A hot section's citation without the document name it repeats: "p.3 L7-43" out of
+/** A section's citation without the document name it repeats: "p.3 L7-43" out of
  *  "doc.pdf p.3 L7-43". The block naming the section already names the document once. */
 export function cite(location: string, doc: string): string {
   return location.startsWith(doc) ? location.slice(doc.length).trim() : location
@@ -154,30 +153,33 @@ export function cite(location: string, doc: string): string {
 
 /** The chunks a match covers, by `seq` (the 1-based position in its document): one chunk's, or a
  *  passage's first and last. */
-const seqRange = (match: Hit | Passage | Excerpt): [number, number] => (isHit(match) ? [match.seq, match.seq] : [match.seq_start, match.seq_end])
+const seqRange = (match: Match): [number, number] => (isHit(match) ? [match.seq, match.seq] : [match.seq_start, match.seq_end])
 
 /** The chunks a quoted match covers, as a bare number for the bottom corner of the quote: one
- *  chunk's, a passage's run, or nothing for a source (which shows no quote). */
+ *  chunk's, or a passage's run. */
 export function seqLabel(match: Match): string {
-  if (isSource(match)) return ''
   const [first, last] = seqRange(match)
   return first === last ? `${first}` : `${first}–${last}`
 }
 
-const span = (unit: string, first: number, last: number): string => (first === last ? `${unit} ${first}` : `${unit}s ${first}–${last}`)
+/** What a section with no heading path is: the root of its document's tree. */
+export const WHOLE_DOCUMENT = 'The whole document'
+
+/** `line 4` or `lines 4–9`: one unit, or a run of them. */
+export const span = (unit: string, first: number, last: number): string => (first === last ? `${unit} ${first}` : `${unit}s ${first}–${last}`)
+
+/** `p. 3` or `p. 3–12`; empty where the document has no pages. */
+export function pagesOf(start: number | null, end: number | null): string {
+  if (start === null) return ''
+  return end === null || end === start ? `p. ${start}` : `p. ${start}–${end}`
+}
 
 /** Where the match sits in the document, in two parts: where to read it (its pages where the
- *  document has pages, and a passage's lines), then the chunks it
- *  is made of. A source covers no one run: its lines, and no chunks. Either part may be empty. */
+ *  document has pages, and a passage's lines), then the chunks it is made of. The first part may
+ *  be empty. */
 export function placeOf(match: Match): [string, string] {
-  if (isSource(match)) return [span('line', match.line_start, match.line_end), '']
   const [first, last] = seqRange(match)
-  const pages =
-    match.page_start === null
-      ? ''
-      : match.page_end === null || match.page_end === match.page_start
-        ? `p. ${match.page_start}`
-        : `p. ${match.page_start}–${match.page_end}`
+  const pages = pagesOf(match.page_start, match.page_end)
   const lines = isHit(match) ? '' : span('line', match.line_start, match.line_end)
   return [[pages, lines].filter(Boolean).join(' · '), span('chunk', first, last)]
 }
@@ -192,6 +194,12 @@ export function fillOf(score: number, best: number, worst: number): number {
   if (best === worst) return 1
   return MIN_FILL + (1 - MIN_FILL) * ((score - worst) / (best - worst))
 }
+
+/** The bar under a tile: `--score` is its fill (`fillOf`), not its raw score. */
+export const scoreStyle = (fill: number): CSSProperties => ({ '--score': fill }) as CSSProperties
+
+/** "1 chunk", "3 chunks". */
+export const plural = (n: number, unit: string): string => `${n} ${unit}${n === 1 ? '' : 's'}`
 
 /** The questions a result answers, each by its place in what was asked ("Q2"), with its text and
  *  how well the result matched it, formatted, when the search said. A question not asked this

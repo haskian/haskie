@@ -7,7 +7,7 @@ rows it skips; the document, collection and member listings use it. An offset cu
 operation history.
 
 The cursor is not signed: this is a single-user local app, the cursor never leaves the machine,
-and nothing inside it reaches SQL — columns come from the caller's whitelist only, the cursor
+and nothing inside it reaches SQL. Columns come from the caller's whitelist only, and the cursor
 contributes bound parameters, each typed to be one sqlite can bind.
 """
 
@@ -35,7 +35,7 @@ CURSOR_VERSION = 1
 
 def check_page_size(size: int, cap: int = MAX_PAGE_SIZE, field: str = "page_size") -> int:
     """The one page-size bound check. `cap` and `field` differ where a listing pages something
-    dearer than a metadata row (see `search.text`)."""
+    costlier than a metadata row (see `search.text`)."""
     if not 1 <= size <= cap:
         raise InvalidInput(f"{field} must be 1..{cap}, got {size}")
     return size

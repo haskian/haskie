@@ -80,8 +80,8 @@ async def test_operation_activity_counts_the_operation_queues_by_status(dbos, tm
     What remains is the maintenance run the collection index asked for, DELAYED on
     `operation.maintenance` until its debounce expires. That is not queued work: nobody is waiting
     on it, and it sits there for a whole `maintenance_idle_seconds`. Counting it made the indicator
-    read "1 queued" with an idle machine, while the Operations view - which counts `ACTIVE_STATUS`
-    - showed nothing.
+    read "1 queued" with an idle machine, while the Operations view (which counts `ACTIVE_STATUS`)
+    showed nothing.
     """
     from haskie import db
 
@@ -145,14 +145,15 @@ async def test_adopted_workflows_of_an_older_build_run_to_the_end(dbos, tmp_path
 
     stale = await sysdb.stale_active(workflows.APP_VERSION, limit=10)
 
-    assert import_id in dict(stale) and len(stale) == 4, (
-        "the import and its one convert slice, the embedding it warmed and that one's embed slice"
+    assert import_id in dict(stale) and len(stale) == 5, (
+        "the import and its one convert slice, the embedding it warmed, that one's embed slice and"
+        " its describe slice"
     )
     assert await sysdb.stale_active(workflows.APP_VERSION, limit=2) == stale[:2], "limit"
     assert await sysdb.stale_active("old-build", limit=10) == [], "this build's own workflows"
     assert all(queue is not None for _, queue in stale), "each waits on a queue of its own"
 
-    assert await workflows.adopt_orphans(batch=3) == 4, "one page, then the remainder"
+    assert await workflows.adopt_orphans(batch=3) == 5, "one page, then the remainder"
 
     assert await sysdb.stale_active(workflows.APP_VERSION, limit=10) == [], "all moved over"
     assert await wait_for(import_id) == "imported", "the adopted import runs to the end"

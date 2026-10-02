@@ -30,18 +30,18 @@ flowchart TB
   async form.
 - **CPU work is sync, in a thread.** `cpu.on_cpu` runs it in a worker thread and holds one slot of
   the `pipeline.cpu_budget` semaphore for as long as it runs. PDF page conversion and a PDF's
-  preview go one step further, to a process pool (`cpu.off_interpreter`), while the thread holds the slot. A pipeline
-  step holds a slot for its CPU part only, never for the IO around it. The pool is pebble's: a
-  parser that crashes its worker fails only its own call, and a new worker takes its place.
-  One exception runs on the event loop: stemming a search's answer (`probe.vocabulary`). It
-  remembers every word it stemmed, so it costs well under a millisecond once a server has seen
-  the words, and waiting for a slot that indexing holds would cost more. Another runs outside our
-  threads: maintenance has LanceDB train a vector index on its own runtime, where no slot can be
-  held (`maintenance.run`).
+  preview go one step further, to a process pool (`cpu.off_interpreter`), while the thread holds the
+  slot. A pipeline step holds a slot for its CPU part only, never for the IO around it. The pool is
+  pebble's: a parser that crashes its worker fails only its own call, and a new worker takes its
+  place. One exception runs on the event loop: stemming a search's answer (`probe.vocabulary`). It
+  remembers the last 32,768 words it stemmed (`probe.stem`), so it costs well under a millisecond
+  once a server has seen the words, and waiting for a slot that indexing holds would cost more.
+  Another runs outside our threads: maintenance has LanceDB train a vector index on its own
+  runtime, where no slot can be held (`maintenance.run`).
 - **A budget change applies to running work.** A resize counts the slots already held, so a
-  raise from 2 to 3 admits one more job, not three. The process pool has one worker per slot. A
-  pool of the old size takes no new work, finishes what it took, and exits. The next extraction
-  builds a pool of the new size.
+  raise from 2 to 3 admits one more piece of work, not three. The process pool has one worker per
+  slot. A pool of the old size takes no new work, finishes what it took, and exits. The next
+  extraction builds a pool of the new size.
 - **Two loops, nothing shared.** Litestar and DBOS each run an event loop. They share no
   loop-bound primitive, so the budget is a `threading` semaphore, each loop has its own thread
   limiter, and the search fan-out builds its semaphore per call.
@@ -60,14 +60,19 @@ Sync IO runs in worker threads wherever a library has no async form. The main ca
 
 ## Model loads
 
-ONNX Runtime holds the GIL while it builds a session. Every request waits for as long as the build
-takes, which can be seconds. ONNX models run on CUDA on Linux with an NVIDIA GPU, else on the
-CPU. On Apple Silicon the GPU is reached through MLX (`indexing/mlx_models.py`) and llama.cpp
-(`indexing/gguf_models.py`, the `-gguf` profiles), which load a model in under a second and release
-the GIL while they compute. llama.cpp's first load on a machine also compiles its Metal shaders,
-once, in about 8 s. MLX keeps its streams per thread, so every MLX load and forward pass runs on
-one thread of its own. CoreML runs ONNX models only when the hardware setting says `coreml`.
-It keeps compiled models under `cache/models`, so a model compiles once per home. Embedders and
+ONNX Runtime holds the global interpreter lock (GIL) while it builds a session. Every request
+waits for as long as the build takes, which can be seconds. haskie runs its ONNX models itself
+(`indexing/onnx_models.py`) on the ONNX Runtime build each platform needs: CUDA on Linux, which
+runs on an NVIDIA GPU or else the CPU, and on Apple Silicon the standard build with the WebGPU
+plugin, which reaches its GPU through Metal at about twice the CPU's speed, with the same vectors. Some models also have
+an MLX profile (`indexing/mlx_models.py`, the `-mlx` profiles) or a GGUF one on llama.cpp
+(`indexing/gguf_models.py`, the `-gguf` profiles), faster again on that GPU. Both load a model in
+under a second and release the GIL while they compute. llama.cpp's first load on a machine also
+compiles its Metal shaders, once, in about 8 s. MLX keeps its streams per thread, so every MLX
+load and forward pass runs on one thread of its own. CoreML runs an ONNX model only when the
+hardware setting says `coreml` and the model is in `hardware.COREML_RUNS`, which no catalogue
+model is today: each failed its first batch or the process. It keeps compiled models under
+`cache/models`, so a model compiles once per home. Embedders and
 rerankers follow the same hardware setting. `indexing/hardware.py` decides the device of each
 model. A model with no device here, such as an MLX model without Apple Silicon, is refused by its
 loader and left out of `/api/options`. Settings that would strand a model are rejected. Each model
@@ -80,7 +85,8 @@ download operation.
 
 ## Shutdown
 
-Every stage of a shutdown has a bound, and each stage past the first is harder than the last:
+Every stage of a shutdown has a bound, and each stage past the first is harder than the one
+before:
 
 1. **Requests drain.** SIGTERM or Ctrl-C stops new connections. Requests in flight get 10 seconds.
 2. **The pipeline stops.** DBOS waits up to 10 seconds for running workflows, then stops waiting.
