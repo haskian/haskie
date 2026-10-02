@@ -154,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--collection", default=COLLECTION)
     parser.add_argument(
         "--profile",
-        default=os.environ.get("HASKIE_EVAL_EMBED_PROFILE", "compact"),
+        default=os.environ.get("HASKIE_EVAL_EMBED_PROFILE", "granite-small-english"),
         help="the embedding profile a fresh instance's first run picks; vector modes need one",
     )
     parser.add_argument("--modes", nargs="+", choices=list(MODES), default=list(MODES))

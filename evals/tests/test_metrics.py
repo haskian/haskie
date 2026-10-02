@@ -177,9 +177,9 @@ def test_retrieved_credits_only_what_a_haskie_result_actually_disclosed() -> Non
 
 
 def test_retrieved_credits_a_document_named_without_a_path() -> None:
-    """`search_sources` lists documents by name, with no on-disk path - still a retrieval."""
+    """`search_sections` lists documents by name, with no on-disk path - still a retrieval."""
     transcript = _transcript(
-        _assistant("t1", f"{metrics.HASKIE_PREFIX}search_sources", {"q": "ledger"}),
+        _assistant("t1", f"{metrics.HASKIE_PREFIX}search_sections", {"q": "ledger"}),
         _result("t1", json.dumps({"documents": [{"name": "doc-s1-0003.md"}]})),
     )
 

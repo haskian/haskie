@@ -48,8 +48,9 @@ from haskie.indexing.segment import CutReason, Packed, PieceType, Span, SpanKind
 from haskie.settings import Chunker, ChunkSettings
 
 # see the module docstring; 3: e5's query and passage prefixes; 4: a part boundary is `part` or
-# `heading`, not `edge`; 5: parts cut where sections start (`pipeline.plan_embed`)
-CHUNK_VERSION = 5
+# `heading`, not `edge`; 5: parts cut where sections start (`pipeline.plan_embed`); 6: a text of
+# headings alone is chunked as text
+CHUNK_VERSION = 6
 HEADING_SEP = " > "  # between two headings of a heading path: "Part I > Chapter 2 > Retries"
 WORD = re.compile(r"\w")  # what a piece needs one of to say anything
 type Opened = tuple[int, str]  # a heading still open: its level, 1 to 6, and its text

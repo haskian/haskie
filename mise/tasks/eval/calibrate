@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-#MISE description="Retrieval only, no agent: where the synthetic target ranks per size and reference level, in both eval instances"
-set -euo pipefail
-uv run python -m evals.calibrate "$@"

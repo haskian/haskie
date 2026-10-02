@@ -79,7 +79,7 @@ def _post(url: str, rpc: dict) -> tuple[int, dict, dict]:
     ("name", "arguments", "expected"),
     [
         ("search_excerpts", {"q": ["x"]}, COLLECTION),
-        ("search_sources", {"q": "x", "collections": "eval-synth-s1-n500"}, COLLECTION),
+        ("search_sections", {"q": "x", "collections": "eval-synth-s1-n500"}, COLLECTION),
         ("set_session_collections", {"collections": ["a", "b"]}, [COLLECTION]),
     ],
 )
@@ -115,7 +115,7 @@ def test_another_tool_passes_untouched(proxy: scope.Proxy) -> None:
 def test_an_error_status_is_forwarded(proxy: scope.Proxy) -> None:
     Upstream.status = 400
 
-    status, _, _ = _post(proxy.url, _call("search_sources", {"q": "x"}))
+    status, _, _ = _post(proxy.url, _call("search_sections", {"q": "x"}))
 
     assert status == 400
 

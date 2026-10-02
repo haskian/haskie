@@ -69,7 +69,7 @@ HASKIE_TOOLS = (
     "mcp__haskie__describe_document",
     "mcp__haskie__get_document",
     "mcp__haskie__set_session_collections",
-    "mcp__haskie__search_sources",
+    "mcp__haskie__search_sections",
     "mcp__haskie__search_excerpts",
     "mcp__haskie__report_gap",
 )

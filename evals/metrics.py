@@ -131,8 +131,8 @@ def behaviour(transcript: str, doc_root: Path) -> Behaviour:
 
 def retrieved(transcript: str, evidence: list[str]) -> list[str]:
     """Which of a task's evidence documents a haskie call surfaced: its name appears in a haskie
-    result. By name rather than by disclosed path, since `search_sources` returns document rows
-    without on-disk paths. Separate from `behaviour`: this checks retrieval quality, not tool
+    result. By name rather than by disclosed path, since not every search result carries an
+    on-disk path. Separate from `behaviour`: this checks retrieval quality, not tool
     choice - a run can search correctly and still miss the right document, or vice versa."""
     surfaced = " ".join(call.result for call in calls(transcript) if is_haskie(call))
     return [name for name in evidence if name in surfaced]

@@ -22,7 +22,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-SEARCHES = {"search_excerpts", "search_sources"}
+SEARCHES = {"search_excerpts", "search_sections"}
 HOP = {"host", "content-length", "connection", "transfer-encoding", "accept-encoding"}
 
 

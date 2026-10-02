@@ -5,7 +5,7 @@ home="${HASKIE_EVAL_HOME:-$PWD/evals/.haskie-eval}"
 api="${HASKIE_EVAL_URL:-http://127.0.0.1:8123}"
 embed_home="${HASKIE_EVAL_EMBED_HOME:-$PWD/evals/.haskie-eval-embed}"
 embed_api="${HASKIE_EVAL_EMBED_URL:-http://127.0.0.1:8124}"
-embed_profile="${HASKIE_EVAL_EMBED_PROFILE:-compact}"
+embed_profile="${HASKIE_EVAL_EMBED_PROFILE:-granite-small-english}"
 collection="${HASKIE_EVAL_COLLECTION:-eval-programming-books}"
 # --no-browser: a home whose first run isn't done yet would otherwise open the web UI on it
 uv run haskie run --home "$home" --port "${api##*:}" --no-browser

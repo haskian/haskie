@@ -26,9 +26,15 @@ from collections.abc import Iterator
 import msgspec
 
 from evals import synth
-from evals.calibrate import INSTANCES, reference
 
 LIMIT = 10
+INSTANCES = {"fts": "http://127.0.0.1:8123", "hybrid": "http://127.0.0.1:8124"}
+
+
+def reference(target: synth.Service, level: int) -> str:
+    """The reference a level's tasks make to the target, bare: its name, its purpose in the
+    runbook's own words, or paraphrased."""
+    return target.name if level == 0 else synth.describe(target.purpose, level == 2)
 
 
 class Fold(msgspec.Struct):
