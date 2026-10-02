@@ -24,7 +24,7 @@ const DOC: Document = {
 const doc = (over: Partial<Document>): Document => ({ ...DOC, ...over })
 
 // `document_statuses` as `/api/options` sends it: the import pipeline's order.
-const STATUSES: DocumentStatus[] = ['queued', 'converting', 'embedding', 'imported', 'error', 'cancelled', 'deleting']
+const STATUSES: DocumentStatus[] = ['queued', 'converting', 'embedding', 'describing', 'imported', 'error', 'cancelled', 'deleting']
 
 // Both groupings answer with labels and names, which is what the gallery renders.
 const shape = (groups: Array<{ label: string; items: Document[] }>): Array<[string, string[]]> =>

@@ -1012,6 +1012,32 @@ async def test_an_import_describes_its_sections_in_a_stage_after_the_merge(
     assert describe.seconds is not None and operation.jobs[1].seconds is not None
 
 
+async def test_an_import_is_describing_while_its_sections_are_described(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The document reads `describing` from the moment its embedding run turns to the describe
+    stage, here held at the describer's wait, until the import ends."""
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+    monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(embed, "reply", lambda name, accelerator, prompt, max_tokens: "Topic")
+    user = await load_user_settings()
+    llm = msgspec.structs.replace(user.pipeline, descriptors=Descriptors.LLM)
+    await save_user_settings(msgspec.structs.replace(user, pipeline=llm))  # saved, not applied
+    doc = await import_row("a.md", MD, tmp_path)
+    job_id = await dbos.start_import(doc)
+    embedding = workflows.embed_id(job_id, doc.id)
+
+    async def waiting() -> bool:
+        return "describer_ready" in await _steps(embedding)
+
+    await until(waiting, "the run never waited for the describer")
+    assert (await document.named(doc.name)).status == "describing"
+    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER))
+
+    assert await wait_for(job_id) == "imported"
+    assert (await document.named(doc.name)).status == "imported"
+
+
 async def test_a_hit_another_strategy_described_is_described_again_from_the_cache(
     dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1043,6 +1069,7 @@ async def test_a_hit_another_strategy_described_is_described_again_from_the_cach
 
     await until(waiting, "the run never asked for the describer twice")
     assert prompts == [], "nothing asked while the describer was on its way"
+    assert (await document.named(doc.name)).status == "imported", "an index never moves it"
     models._mark_ready(describer)
     assert await wait_for(job_id) == "indexed"
 

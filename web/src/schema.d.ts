@@ -1082,7 +1082,7 @@ export interface components {
          * DocumentStatus
          * @enum {string}
          */
-        DocumentStatus: "queued" | "converting" | "embedding" | "imported" | "error" | "cancelled" | "deleting";
+        DocumentStatus: "queued" | "converting" | "embedding" | "describing" | "imported" | "error" | "cancelled" | "deleting";
         /** DuplicateCosine */
         DuplicateCosine: {
             chunk: number;
@@ -2489,7 +2489,7 @@ export interface operations {
                 sort?: string | null;
                 /** @description One of: asc, desc. */
                 order?: components["schemas"]["Order"] | null;
-                /** @description One of: queued, converting, embedding, imported, error, cancelled, deleting. */
+                /** @description One of: queued, converting, embedding, describing, imported, error, cancelled, deleting. */
                 status?: components["schemas"]["DocumentStatus"] | null;
             };
             header?: never;
