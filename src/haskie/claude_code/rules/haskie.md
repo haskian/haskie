@@ -14,8 +14,10 @@ Pass this conversation's haskie session id, announced at session start, to every
 takes one.
 
 1. Start with `search_sections` when you explore a topic, when the question is broad, or when you
-   want to see how well the sources cover the topic and which ones go deeper into it. It maps the
-   sections that touch the topic and the documents behind them, with no text. Call
+   want to see how well the sources cover the topic and which ones go deeper into it. Its answer, a
+   map of sections, lists the sections that touch the topic and the documents behind them, with
+   no text. Each section comes with its descriptors, so use the map to check that a section
+   covers every aspect of the current context. Call
    `search_excerpts` when the question and its context are well defined and you look for a
    specific answer.
 2. Write the query as a full question that carries its context: what is being built, the constraint
