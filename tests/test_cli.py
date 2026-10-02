@@ -1230,7 +1230,7 @@ def test_a_long_trigger_line_keeps_the_fixed_triggers() -> None:
     description = skill.split("description: >-\n", 1)[1].split("\n---\n", 1)[0]
     assert len(description) > SKILL_DESCRIPTION_CAP, "long enough to be cut"
     assert '"my documents"' in description[:SKILL_DESCRIPTION_CAP]
-    assert "cited to something they own" in description[:SKILL_DESCRIPTION_CAP]
+    assert "cite an answer to something they own" in description[:SKILL_DESCRIPTION_CAP]
 
 
 @pytest.mark.parametrize(

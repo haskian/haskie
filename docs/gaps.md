@@ -67,8 +67,10 @@ function.
 
 `report_gap` takes the session, the question as asked and a verdict, `insufficient` or `partial`,
 with a note on what the excerpts lacked. It lands on the newest question with those words in that
-session, within the last hour, and only on a search that ran. Its wording follows the
-sufficient-context test: could a careful reader answer from these excerpts alone?
+session, within the last hour, and only on a search that ran. A gap is a topic the collections
+do not cover, not a detail of one situation: an agent reports one only when nothing useful came
+back on the topic itself, or on a general part of it. Excerpts that cover the topic but not the
+question's specifics (a scale, a product, a deadline) are no gap.
 
 Gap questions are grouped into topics by leader clustering, newest first, as `collapse` folds
 results. Each joins the closest topic whose newest question it matches, so a chain of near matches
