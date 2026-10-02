@@ -250,7 +250,8 @@ DESCRIPTORS = Meta(
         "uses more than the sections beside it, reranked by the embedding model; fast, runs "
         "everywhere. llm: Gemma-4-E2B (2.8 GB download, Apache 2.0) reads each section and "
         "names its topics; judged far better on technical books, about half a second a "
-        "section, Apple Silicon only, with a model hardware other than cpu. A change applies to "
+        "section, Apple Silicon only, with a model hardware other than cpu. It also writes a "
+        "document without a description a few sentences on what it is about. A change applies to "
         'documents embedded or indexed afterwards; "Index all" in a collection re-describes the '
         "rest, for every collection that chunks them alike, as they share the descriptors."
     ),

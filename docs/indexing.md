@@ -82,7 +82,23 @@ section is about.
   terms, unless nothing else is left: asking the model to avoid the heading's words made it leave
   out the main topic. A blind judge scored it 4.04 of 5 on 200 sections of four technical books,
   against 2.13 for c-TF-IDF, at 0.51 s a section on an M4 Pro. Its model downloads like the others,
-  as a `describer`, and each batch waits for it.
+  as a `describer`, and each batch waits for it. Once the sections are described, a document with
+  no description gets one: two to five sentences the model writes from the outline (each heading
+  with its section's descriptors) and an excerpt spread over the book (`generated.summarize`). Each
+  sentence starts with a verb ("Explains how ..."), never with "This document is" or the book's
+  title, and the front and back matter are left out. One more prompt a document, in a
+  `summarize_document` operation the embedding run queues on `operation.describing` and does not
+  wait for, so indexing never waits on it. A description someone wrote, before or meanwhile, is
+  never replaced. *Describe with AI* in a document's Info tab asks for one on demand and replaces
+  what is there (`POST /api/documents/{name}/description/generate`), from the newest cache entry
+  llm described, else the newest. *Describe with AI* on a collection
+  (`POST /api/collections/{name}/description/generate`, a `summarize_collection` operation on the
+  same queue) first describes each member that has no description, one at a time, then writes
+  three to seven sentences on the collection as a whole from its members' descriptions, and
+  replaces its own. Each member it describes is one task of the operation's Describe job, and
+  the collection the last, so Operations shows how far it got. A member with no cached embedding
+  yet is left out. The model reads 10,000
+  characters of descriptions at most, so in a large collection each is cut to an equal share.
 - **c-tf-idf**, the default, runs everywhere. `ClassTfidf` weighs the sections of one depth against
   each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25 weighting: a chapter's words
   against the other chapters'. Unlike BERTopic, it counts how many sections use a term rather than
@@ -137,6 +153,7 @@ membership reads `removing` until it has run (see
 | `operation.indexing` | twice `cpu_budget`, at most 64 | one import or index orchestrator per document |
 | `operation.embedding` | same | `ensure_embedding`, one per cache id |
 | `operation.collection` | 2 | index all, delete a collection, delete a document |
+| `operation.describing` | 1 | a document's description, one an llm describe stage queues or one asked for with *Describe with AI*, and a collection's |
 | `operation.downloads` | 2 | model downloads |
 | `operation.maintenance` | 4 | maintenance orchestrators and nightly housekeeping |
 | `task.converting` | its weight's share of `cpu_budget` | convert slices |
@@ -145,7 +162,7 @@ membership reads `removing` until it has run (see
 | `task.indexing` | its weight's share, one per collection | index writes, compaction and index builds, removals |
 
 Most `operation.*` workflows orchestrate and wait on `task.*` children. Some do their own work:
-model downloads, deletes and the nightly housekeeping.
+model downloads, deletes, descriptions and the nightly housekeeping.
 
 ## The CPU budget
 

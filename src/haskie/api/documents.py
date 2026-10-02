@@ -361,3 +361,17 @@ async def describe_document(
     described = await documents.describe(await documents.id_of(document), data.description)
     await session.record(session_id, session.Action.DESCRIBE, document)
     return described
+
+
+@post("/api/documents/{document:str}/description/generate", status_code=202)
+@audit.audited("document.summarize")
+async def generate_description(document: str) -> BulkStarted:
+    """Queue a description the describer writes from the document's sections, replacing the one
+    it has. Poll the operation for the outcome.
+
+    `start_summarize_document` refuses with a conflict a document not imported or with no cached
+    embedding, and settings under which the describer cannot run.
+    """
+    operation_id = await workflows.start_summarize_document(await documents.named(document))
+    audit.attach(operation_id=operation_id)
+    return BulkStarted(operation_id=operation_id)

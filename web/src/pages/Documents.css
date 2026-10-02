@@ -10,3 +10,7 @@
 .staged .list-item > .mono { text-align: end; } /* each row is its own grid: a fixed size column lines the names up */
 /* A file's notices (a repeat, a refusal) run under its row, the whole width. */
 .staged .list-item > p { grid-column: 1 / -1; margin: 0; }
+
+/* The description box takes most of its pane's height: a written description runs to five
+   sentences, and the action below it keeps the rest. */
+#modal-import .pane-body > .textarea { height: 75%; }

@@ -76,9 +76,7 @@ export function Operations({ route, counts }: PageProps) {
           setOperations(merged)
           setHasMore(listings.some((listing) => listing.next_cursor !== null))
           setError(null)
-          return loadTasks(
-            merged.filter((one) => one.kind === 'document' && (active.includes(one.status) || stale.current.has(one.id))),
-          )
+          return loadTasks(merged.filter((one) => one.jobs.length > 0 && (active.includes(one.status) || stale.current.has(one.id))))
         }),
       )
       .catch((failure: unknown) => setError(errorText(failure)))
@@ -101,7 +99,7 @@ export function Operations({ route, counts }: PageProps) {
   // that unfolds it, and once more by the poll that sees it finish, or the last in-flight list
   // would stay on screen.
   const toggle = useCallback((operation: OperationRow, open: boolean): void => {
-    if (open && operation.kind === 'document') void loadTasks([operation])
+    if (open && operation.jobs.length > 0) void loadTasks([operation])
   }, [loadTasks])
 
   const cancel = useCallback(

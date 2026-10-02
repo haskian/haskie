@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import anyio
 import anyio.to_thread
+import msgspec
 import pytest
 from dbos import WorkflowStatusString
 
@@ -777,6 +778,38 @@ async def import_document(dbos, name: str, content: bytes | str, tmp_dir: Path):
     row = await import_row(name, content, tmp_dir)
     assert await wait_for(await dbos.start_import(row)) == "imported"
     return await document.get(row.id)
+
+
+def stand_in_describer(monkeypatch: pytest.MonkeyPatch, summary: Callable[[str], str]) -> list[str]:
+    """The llm describer stood in for, and loaded: a section gets two topics, a document or a
+    collection `summary(prompt)`. Returns the summary prompts it is asked, as they come."""
+    from haskie.indexing import embed, gguf_models, models
+    from haskie.sections import generated
+
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+    summaries: list[str] = []
+    # each prompt's opening words, up to its first field
+    prompts = (generated.SUMMARY_PROMPT, generated.COLLECTION_PROMPT)
+    asks = tuple(one.split("{")[0] for one in prompts)
+
+    def reply(model: str, accelerator, prompt: str, max_tokens: int) -> str:
+        if prompt.startswith(asks):
+            summaries.append(prompt)
+            return summary(prompt)
+        return "Topic one | Topic two"
+
+    monkeypatch.setattr(embed, "reply", reply)
+    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER))
+    return summaries
+
+
+async def save_llm_descriptors() -> None:
+    """The llm section descriptors, saved, not applied: applying would download the describer."""
+    from haskie.settings import Descriptors, load_user_settings, save_user_settings
+
+    user = await load_user_settings()
+    llm = msgspec.structs.replace(user.pipeline, descriptors=Descriptors.LLM)
+    await save_user_settings(msgspec.structs.replace(user, pipeline=llm))
 
 
 async def attach_document(dbos, collection: str, doc: str) -> None:

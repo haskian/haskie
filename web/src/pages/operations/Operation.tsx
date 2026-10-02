@@ -25,7 +25,7 @@ export const Operation = memo(function Operation({
   const { active_run_statuses: activeStatuses } = useOptions()
   const active = activeStatuses.includes(operation.status)
   const rows = tasks ?? []
-  const byTask = operation.kind === 'document' && rows.length > 0
+  const byTask = rows.length > 0
 
   return (
     <details className="operation" onToggle={(event) => onToggle(operation, event.currentTarget.open)}>

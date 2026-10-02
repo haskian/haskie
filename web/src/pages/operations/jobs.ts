@@ -21,12 +21,15 @@ const SINGLE: Record<Exclude<OperationKind, 'document' | 'collection'>, { tag: s
   download: { tag: 'Download', label: 'Download' },
   maintenance: { tag: 'Maintain', label: 'Maintenance' },
 }
-// The collection kind is three whole-thing operations: an index queues one document at a time, the
-// deletes have nothing to count. `detail.bulk` says which; a row without it is read as an index.
+// The collection kind is the whole-thing operations: an index queues one document at a time, the
+// deletes and a description have nothing to count. `detail.bulk` says which; a row without it is
+// read as an index.
 const BULK: Record<BulkKind, { tag: string; label: string }> = {
   index_collection: { tag: 'Index', label: 'Queue' },
   delete_collection: { tag: 'Delete', label: 'Delete' },
   delete_document: { tag: 'Delete', label: 'Delete' },
+  summarize_document: { tag: 'Describe', label: 'Describe' },
+  summarize_collection: { tag: 'Describe', label: 'Describe' },
 }
 const isBulkKind = (kind: unknown): kind is BulkKind => typeof kind === 'string' && kind in BULK
 export const bulkKind = (operation: Operation): BulkKind => (isBulkKind(operation.detail.bulk) ? operation.detail.bulk : 'index_collection')
@@ -109,9 +112,10 @@ export function endsOf<T>(rows: T[], each = TASKS_AT_EACH_END): { head: T[]; hid
   return { head: rows.slice(0, each), hidden: rows.length - each * 2, tail: rows.slice(-each) }
 }
 
-/** What one micro-batch covered: pages for a conversion, a part for an embed, sections for a
- *  description, parts for an index write. */
+/** What one task covered: pages for a conversion, a part for an embed, sections for a
+ *  description, parts for an index write, or the document or collection a task names. */
 export function taskText(task: Task): string {
+  if (task.name !== null) return task.name
   if (task.stage === 'convert') return `pages ${task.page_start + 1}–${task.page_end}`
   if (task.stage === 'embed') return `part ${task.page_start}`
   if (task.stage === 'describe') return `sections ${task.page_start + 1}–${task.page_end}`

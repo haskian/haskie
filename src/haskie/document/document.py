@@ -599,6 +599,19 @@ async def describe(id: str, description: str) -> Document:
     return from_row(row)
 
 
+async def describe_if_empty(id: str, description: str) -> bool:
+    """Set the document's description unless it has one; whether it did. One statement, so a
+    description someone writes meanwhile is never replaced."""
+    async with db.connect() as conn:
+        written = await conn.scalar(
+            update(documents)
+            .where(documents.c.id == id, documents.c.description == "")
+            .values(description=description)
+            .returning(documents.c.id)
+        )
+    return written is not None
+
+
 async def descriptions_of(docs: set[str]) -> dict[str, str]:
     """The descriptions of several documents in one query, keyed by id. A document with none
     is absent from the result. Batched because the caller is a search's list of documents."""

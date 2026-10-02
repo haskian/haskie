@@ -65,9 +65,11 @@ from conftest import (  # isort: skip
     document_names,
     forget_settings,
     get_page,
+    save_llm_descriptors,
     seed_chunks,
     seed_index,
     stage_and_import,
+    stand_in_describer,
     text_pdf,
     until,
     wait_event,
@@ -309,6 +311,22 @@ def _requested(lines: list[dict]) -> list[str]:
             "re-import a document that did not fail -> conflict",
             "POST", "/api/documents/guide.md/import", None, None,
             409, "only a queued, failed or cancelled import runs: guide.md",
+        ),
+        (
+            "describe an unknown document with AI -> not found",
+            "POST", "/api/documents/ghost.md/description/generate", None, None,
+            404, "document not found: ghost.md",
+        ),
+        (
+            # the route defers the rules to `start_summarize_document`
+            "describe with AI under the c-tf-idf descriptors -> conflict",
+            "POST", "/api/documents/guide.md/description/generate", None, None,
+            409, "describing with AI needs the llm section descriptors",
+        ),
+        (
+            "describe an unknown collection with AI -> not found",
+            "POST", "/api/collections/ghost/description/generate", None, None,
+            404, "collection not found: ghost",
         ),
         (
             "delete an unknown document -> not found",
@@ -3187,6 +3205,58 @@ async def test_the_original_opens_under_its_own_name_and_media_type(
     assert source.headers["content-type"] == "application/pdf"
     assert source.headers["content-disposition"] == 'inline; filename="paper.pdf"'
     assert source.content.startswith(b"%PDF-")
+
+
+async def test_describing_with_ai_replaces_the_description_in_the_background(
+    client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route answers 202 with an operation the modal polls; the run replaces the description,
+    and the audit line names the operation."""
+    await client.post("/api/init", json=NO_MODELS)
+    await stage_and_import(client, "guide.md", MD.encode())
+    await client.put("/api/documents/guide.md/description", json={"description": "the guide"})
+    await save_llm_descriptors()
+    stand_in_describer(monkeypatch, lambda prompt: "Covers LanceDB.")
+
+    started = await client.post("/api/documents/guide.md/description/generate")
+
+    assert started.status_code == 202, started.text
+    operation_id = started.json()["operation_id"]
+    assert operation_id.startswith("sum-doc:"), operation_id
+    assert await wait_for(operation_id) == 1
+    progress = (await client.get(f"/api/operations/{operation_id}/progress")).json()
+    assert (progress["kind"], progress["status"]) == ("summarize_document", "SUCCESS")
+    assert (await client.get("/api/documents/guide.md")).json()["description"] == "Covers LanceDB."
+    (line,) = [one for one in audit_lines() if one["event"] == "document.summarize"]
+    assert (line["outcome"], line["operation_id"]) == ("ok", operation_id)
+
+
+async def test_describing_a_collection_with_ai_describes_its_documents_first(
+    client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route answers 202; the run describes the member that has no description, then the
+    collection from it, and the audit line names the operation."""
+    await client.post("/api/init", json=NO_MODELS)
+    await client.post("/api/collections", json={"name": "notes", "description": "what I read"})
+    await stage_and_import(client, "guide.md", MD.encode())
+    await attach_via_api(client, "notes", "guide.md")
+    await save_llm_descriptors()
+
+    def summary(prompt: str) -> str:
+        return "Spans storage." if prompt.startswith("A person collected") else "Covers LanceDB."
+
+    stand_in_describer(monkeypatch, summary)
+
+    started = await client.post("/api/collections/notes/description/generate")
+
+    assert started.status_code == 202, started.text
+    operation_id = started.json()["operation_id"]
+    assert operation_id.startswith("sum-col:notes:"), operation_id
+    assert await wait_for(operation_id) == 1
+    assert (await client.get("/api/documents/guide.md")).json()["description"] == "Covers LanceDB."
+    assert (await client.get("/api/collections/notes")).json()["description"] == "Spans storage."
+    (line,) = [one for one in audit_lines() if one["event"] == "collection.summarize"]
+    assert (line["outcome"], line["operation_id"]) == ("ok", operation_id)
 
 
 # --- audit trail ---------------------------------------------------------------------
