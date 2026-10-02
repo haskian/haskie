@@ -162,6 +162,14 @@ mark { background: none; color: inherit; font-weight: 600; text-decoration: unde
 /* a low-poly cover behind the tile, faded out before the text */
 .tile-cover { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; mask-image: linear-gradient(to bottom, #000 20%, transparent 75%); opacity: 0.33; transition: opacity 160ms ease; }
 .tile:hover .tile-cover, .tile[aria-pressed="true"] .tile-cover { opacity: 0.45; }
+/* a sign top left, mirroring the icon; its own hint replaces the tile's while it is hovered */
+.tile-warning { position: absolute; top: var(--sp-2); left: var(--sp-2); width: 16px; height: 16px; }
+/* the sign's hint: light, under the icon row, edge to edge with the two icons;
+   `.tile >` outranks `.hint`, which comes later */
+.tile > .tile-warning-hint { top: calc(var(--sp-2) * 2 + 16px); bottom: auto; left: var(--sp-2); right: var(--sp-2); width: auto; max-width: none; transform: translateY(-4px); background: var(--paper); color: var(--ink); }
+.tile:hover > .tile-warning-hint { opacity: 0; } /* only the sign opens it, not the whole tile */
+.tile-warning:hover + .tile-warning-hint { opacity: 1; transform: translateY(0); }
+.tile:has(> .tile-warning:hover) > .hint:not(.tile-warning-hint) { opacity: 0; }
 .tile-text > .name { grid-column: 1 / -1; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; } /* real names are file names: three lines, then … */
 .tile-text > .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tile .sub { font-weight: 400; font-size: var(--fs-xs); opacity: 0.6; }

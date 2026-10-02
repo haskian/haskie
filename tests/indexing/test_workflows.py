@@ -1012,6 +1012,32 @@ async def test_an_import_describes_its_sections_in_a_stage_after_the_merge(
     assert describe.seconds is not None and operation.jobs[1].seconds is not None
 
 
+async def test_an_import_is_describing_while_its_sections_are_described(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The document reads `describing` from the moment its embedding run turns to the describe
+    stage, here held at the describer's wait, until the import ends."""
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+    monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(embed, "reply", lambda name, accelerator, prompt, max_tokens: "Topic")
+    user = await load_user_settings()
+    llm = msgspec.structs.replace(user.pipeline, descriptors=Descriptors.LLM)
+    await save_user_settings(msgspec.structs.replace(user, pipeline=llm))  # saved, not applied
+    doc = await import_row("a.md", MD, tmp_path)
+    job_id = await dbos.start_import(doc)
+    embedding = workflows.embed_id(job_id, doc.id)
+
+    async def waiting() -> bool:
+        return "describer_ready" in await _steps(embedding)
+
+    await until(waiting, "the run never waited for the describer")
+    assert (await document.named(doc.name)).status == "describing"
+    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER))
+
+    assert await wait_for(job_id) == "imported"
+    assert (await document.named(doc.name)).status == "imported"
+
+
 async def test_a_hit_another_strategy_described_is_described_again_from_the_cache(
     dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1043,6 +1069,7 @@ async def test_a_hit_another_strategy_described_is_described_again_from_the_cach
 
     await until(waiting, "the run never asked for the describer twice")
     assert prompts == [], "nothing asked while the describer was on its way"
+    assert (await document.named(doc.name)).status == "imported", "an index never moves it"
     models._mark_ready(describer)
     assert await wait_for(job_id) == "indexed"
 
@@ -2490,16 +2517,53 @@ async def test_the_pipeline_page_filters_by_collection_before_it_cuts_the_window
         await wait_for(await dbos.start_index_collection_document("noisy", doc.id))
 
     quiet = await operations._pipeline_page("quiet", page_size=2)
-    (run,) = quiet.items
+    run, embed = quiet.items
     assert (run.action, run.collection, run.document) == ("index", "quiet", "a.md")
     assert run.status == "SUCCESS"
+    assert embed.id == workflows.embed_id(run.id, doc.id), "the index's embed comes along"
     assert quiet.next_cursor is None, "the filtered listing has one page"
 
     noisy = await operations._pipeline_page("noisy", page_size=2)
-    assert [r.collection for r in noisy.items] == ["noisy", "noisy"], "newest first"
+    indexes = [r for r in noisy.items if r.action == "index"]
+    assert [r.collection for r in indexes] == ["noisy", "noisy"], "newest first"
     assert noisy.next_cursor is not None, "one more behind this page"
-    assert [r.collection for r in await _walk_runs("noisy")] == ["noisy"] * 3
+    walked = await _walk_runs("noisy")
+    assert [r.collection for r in walked if r.action == "index"] == ["noisy"] * 3
     assert {r.action for r in await _walk_runs()} == {"import", "embed", "index"}, "unfiltered"
+
+
+async def test_a_page_boundary_never_splits_an_import_from_its_embed(dbos, tmp_path: Path) -> None:
+    """An embedding run is created after the import that spawned it, so it is newer than that
+    import. The page is cut over imports and indexes only, and each embed comes with its parent:
+    a page of one holds one whole operation, convert included."""
+    for name in ("a.md", "b.md"):
+        await import_document(dbos, name, MD, tmp_path)
+
+    first = await operations.list_operations("document", page_size=1)
+    second = await operations.list_operations("document", page_size=1, cursor=first.next_cursor)
+
+    assert second.next_cursor is None, "two operations, two pages"
+    assert [(row.title, [j.stage for j in row.jobs]) for row in first.items + second.items] == [
+        ("b.md", ["convert", "embed", "describe"]),
+        ("a.md", ["convert", "embed", "describe"]),
+    ]
+
+
+async def test_an_index_all_lists_each_document_it_indexed(dbos, tmp_path: Path) -> None:
+    """An "index all" enqueues each document's index from inside its own workflow, so those runs
+    have a parent: the page is cut by what a run is, not by whether it has one."""
+    await Collection.create("all")
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await attach_document(dbos, "all", doc.name)
+    await wait_for(await dbos.start_index_collection("all"))
+    await _drain()
+
+    rows = (await operations.list_operations("document", collection="all")).items
+
+    assert [(row.title, [j.stage for j in row.jobs]) for row in rows] == [
+        ("all / a.md", ["embed", "index"]),
+        ("all / a.md", ["embed", "index"]),
+    ]
 
 
 async def test_the_pipeline_page_rejects_a_bad_cursor(dbos) -> None:
@@ -2549,21 +2613,23 @@ async def test_list_operations_pages_on_a_cursor_of_its_own(dbos) -> None:
 
 
 async def test_the_pipeline_page_never_loads_inputs(dbos, tmp_path: Path, monkeypatch) -> None:
-    """The collection and the document come out of the id, so a page of operations costs two
+    """The collection and the document come out of the id, so a page of operations costs three
     queries and no input payload at all."""
     await Collection.create("lean")
     doc = await import_document(dbos, "a.md", MD, tmp_path)
     await attach_document(dbos, "lean", doc.name)
     calls = counted_list_workflows(monkeypatch)
 
-    (run,) = (await operations._pipeline_page("lean")).items
+    run, _ = (await operations._pipeline_page("lean")).items
 
     assert (run.collection, run.document_id) == ("lean", doc.id), "read from the id"
-    parent, children = calls
+    parent, embeds, children = calls
     assert parent["load_input"] is False, "the parent listing never reads inputs"
     assert parent["workflow_id_prefix"] == "idx-col:lean:" and parent["sort_desc"] is True
+    assert parent["name"] == dbos_names.DOCUMENT_OPERATION_WORKFLOWS, "embeds come by id"
+    assert embeds["load_input"] is False, "one query for the embeds of the whole page"
     assert children["load_output"] is False, "one query for the children of the whole page"
-    assert len(calls) == 2, "no query per operation"
+    assert len(calls) == 3, "no query per operation"
 
 
 async def test_active_collection_workflows_use_the_id_prefix(
@@ -2636,7 +2702,7 @@ async def test_the_pipeline_page_stays_fast_over_a_long_history(dbos, tmp_path: 
     page = await operations._pipeline_page("quiet", page_size=100)
     elapsed = time.perf_counter() - started
 
-    assert [(r.collection, r.document) for r in page.items] == [("quiet", "a.md")]
+    assert [(r.collection, r.document) for r in page.items] == [("quiet", "a.md"), (None, "a.md")]
     assert page.next_cursor is None
     busy = (await operations._pipeline_page("noisy", page_size=100)).items
     assert len(busy) == 100, "the busy collection really is in the history"
@@ -2831,7 +2897,7 @@ def test_the_names_the_operations_view_spells_out_are_the_ones_dbos_records() ->
             get_dbos_func_name(workflows.daily_maintenance),
         ],
     }
-    assert set(operations.KIND_BY_NAME) == set(dbos_names.PIPELINE_WORKFLOWS) | {
+    assert set(operations.KIND_BY_NAME) == set(dbos_names.DOCUMENT_OPERATION_WORKFLOWS) | {
         name for names in operations.KIND_NAMES.values() for name in names
     }, "every kind counts the workflows it lists, and nothing else"
 

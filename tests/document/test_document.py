@@ -132,6 +132,7 @@ STAGED_NAMES = [
     ("an upper-case name", "Guide.MD", ".md", "guide.md"),
     ("a trailing dot", "report.md.", ".md", "report.md"),
     ("an editor backup tilde", "notes.md~", ".md", "notes.md"),
+    ("spaces and accents", "Résumé Final.MD", ".md", "resume-final.md"),
 ]
 
 
@@ -140,7 +141,8 @@ async def test_a_staged_upload_can_be_imported_whatever_its_raw_name(
     client, name: str, filename: str, suffix: str, imported_as: str
 ) -> None:
     """The staging id carries the suffix of the name the import will store, so every upload
-    staging accepts is one the import can find again."""
+    staging accepts is one the import can find again. The answer already names the upload as
+    the import will, so the import form shows that name before anyone confirms it."""
     await client.post("/api/init", json=NO_MODELS)
 
     staged = await client.post(
@@ -149,6 +151,7 @@ async def test_a_staged_upload_can_be_imported_whatever_its_raw_name(
     assert staged.status_code == 201, name
     staging_id = staged.json()["staging_id"]
     assert document.STAGING_ID.match(staging_id) and staging_id.endswith(suffix), name
+    assert (staged.json()["filename"], staged.json()["name"]) == (filename, imported_as), name
 
     imported = await client.post("/api/documents/import", json={"staging_id": staging_id})
 

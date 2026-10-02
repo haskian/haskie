@@ -56,10 +56,10 @@ from haskie.indexing.dbos_names import (
     COLLECTION_DOCUMENT_WORKFLOW,
     DAILY_MAINTENANCE_WORKFLOW,
     DELETE_DOCUMENT_WORKFLOW,
+    DOCUMENT_OPERATION_WORKFLOWS,
     DOWNLOAD_WORKFLOW,
     EMBED_WORKFLOW,
     MAINTAIN_PARTITION_WORKFLOW,
-    PIPELINE_WORKFLOWS,
     STAGE_STEP,
     STAGE_WORKFLOW,
     BulkWorkflow,
@@ -251,7 +251,8 @@ KIND_NAMES: dict[OperationKind, list[str]] = {
 
 # The same table read the other way, for counting active runs by kind in one query.
 KIND_BY_NAME: dict[str, OperationKind] = {
-    **dict.fromkeys(PIPELINE_WORKFLOWS, OperationKind.DOCUMENT),
+    # an embed run is a job of the import or index that asked for it, not an operation
+    **dict.fromkeys(DOCUMENT_OPERATION_WORKFLOWS, OperationKind.DOCUMENT),
     **{name: kind for kind, names in KIND_NAMES.items() for name in names},
 }
 
@@ -442,9 +443,8 @@ def fold_operations(runs: list[_StageRun]) -> list[Operation]:
     spawned folded in as that run's jobs rather than listed as an operation of its own.
 
     The child is found by id: `workflows._ensure_embedding` names it `emb:{doc}:{tail}` with the
-    tail of its parent's id. An embed whose parent is not on this page (a page boundary fell
-    between them, or the parent is gone) stays an operation of its own, because hiding it would
-    lose it.
+    tail of its parent's id. `_pipeline_page` reads every embed together with its parent. An
+    embed given without its parent stays an operation of its own, because hiding it would lose it.
     """
     embeds = {run.id: run for run in runs if run.action == PipelineAction.EMBED}
     folded = {
@@ -699,9 +699,14 @@ async def _pipeline_page(
     counted in one grouped query. `fold_operations` folds these into the document operations the API
     serves; nothing else reads them.
 
+    The page is cut over imports and indexes only, and the embedding run each asked for is read by
+    its id (`workflows.embed_id`) after the cut. An embedding run is created after its parent, so a
+    window over every run could hold it while its parent fell to the next page, and split one
+    operation in two.
+
     The collection filter is the id's prefix, so the database cuts the window after it has
     filtered: a busy collection can no longer push a quiet one out of the page. It keeps collection
-    index runs only; an import and an embed belong to no collection.
+    index runs only; an import belongs to no collection.
 
     A run that starts while the page is walked shifts the offsets behind it, so a row can repeat
     or be skipped across a page boundary. An offset cursor over a live history always makes that
@@ -710,7 +715,7 @@ async def _pipeline_page(
     offset = _decode_cursor(cursor, OperationKind.DOCUMENT)
     # one row more than the page: its presence is what tells us another page exists
     statuses = await DBOS.list_workflows_async(
-        name=PIPELINE_WORKFLOWS,
+        name=DOCUMENT_OPERATION_WORKFLOWS,
         workflow_id_prefix=(
             f"{workflows.COLLECTION_DOCUMENT_PREFIX}:{collection}:" if collection else None
         ),
@@ -719,11 +724,17 @@ async def _pipeline_page(
         offset=offset,
         load_input=False,
     )
+    if not statuses:
+        return Page(items=[], next_cursor=None)
     page = statuses[:page_size]
-    children, names = await asyncio.gather(
-        stage_children([s.workflow_id for s in page]),
-        _document_names(_pipeline_of(s.workflow_id)[2] for s in page),
+    docs = [_pipeline_of(s.workflow_id)[2] for s in page]
+    embed_ids = [workflows.embed_id(s.workflow_id, doc) for s, doc in zip(page, docs, strict=True)]
+    embeds, children, names = await asyncio.gather(
+        DBOS.list_workflows_async(workflow_ids=embed_ids, load_input=False),
+        stage_children([s.workflow_id for s in page] + embed_ids),
+        _document_names(docs),
     )
+    page += embeds
     done = await sysdb.step_counts(
         [c.workflow_id for group in children.values() for c in group], STAGE_STEP
     )

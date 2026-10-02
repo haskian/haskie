@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { Document, DocumentStatus, EmbeddingEntry, ImportedDocument, Staged } from '../api'
 import { embeddingLabel } from './documents/embedding'
-import { groupByDay, groupByStatus } from './documents/group'
+import { groupByDay, groupByStatus, unfiledFirst } from './documents/group'
 import { fresh, importedNames, importLabel, staged, waitingAfter, type StagedFile } from './documents/staged'
 
 // One real row, overridden per case: the listing hands the page whole documents, so the fixtures do too.
@@ -24,7 +24,7 @@ const DOC: Document = {
 const doc = (over: Partial<Document>): Document => ({ ...DOC, ...over })
 
 // `document_statuses` as `/api/options` sends it: the import pipeline's order.
-const STATUSES: DocumentStatus[] = ['queued', 'converting', 'embedding', 'imported', 'error', 'cancelled', 'deleting']
+const STATUSES: DocumentStatus[] = ['queued', 'converting', 'embedding', 'describing', 'imported', 'error', 'cancelled', 'deleting']
 
 // Both groupings answer with labels and names, which is what the gallery renders.
 const shape = (groups: Array<{ label: string; items: Document[] }>): Array<[string, string[]]> =>
@@ -78,6 +78,11 @@ describe('groupByDay', () => {
     { name: 'no documents, no bands', value: [], expected: [] },
     { name: 'one day, one band', value: [doc({ name: 'Area' })], expected: [['Sat 19 Jan', ['Area']]] },
     {
+      name: 'in a day, a document in no collection comes before a newer one in a collection',
+      value: [doc({ name: 'Area' }), doc({ name: 'Box', created_at: DOC.created_at - 60, collections: [] })],
+      expected: [['Sat 19 Jan', ['Box', 'Area']]],
+    },
+    {
       name: 'newest day first, newest import first within it',
       value: [doc({ name: 'Area' }), doc({ name: 'Box', created_at: DOC.created_at - DAY }), doc({ name: 'Cone', created_at: DOC.created_at + 60 })],
       expected: [
@@ -89,6 +94,32 @@ describe('groupByDay', () => {
   for (const testCase of cases) {
     test(testCase.name, () => {
       expect(shape(groupByDay(testCase.value))).toEqual(testCase.expected)
+    })
+  }
+})
+
+describe('unfiledFirst', () => {
+  const cases: Array<{ name: string; value: Document[]; expected: string[] }> = [
+    { name: 'no documents', value: [], expected: [] },
+    {
+      name: 'in no collection first, whatever the date',
+      value: [doc({ name: 'Filed', created_at: DOC.created_at + 60 }), doc({ name: 'Unfiled', collections: [] })],
+      expected: ['Unfiled', 'Filed'],
+    },
+    {
+      name: 'newest first among the filed and among the unfiled',
+      value: [
+        doc({ name: 'Old filed' }),
+        doc({ name: 'Old unfiled', collections: [] }),
+        doc({ name: 'New filed', created_at: DOC.created_at + 60 }),
+        doc({ name: 'New unfiled', created_at: DOC.created_at + 60, collections: [] }),
+      ],
+      expected: ['New unfiled', 'Old unfiled', 'New filed', 'Old filed'],
+    },
+  ]
+  for (const testCase of cases) {
+    test(testCase.name, () => {
+      expect([...testCase.value].sort(unfiledFirst).map((one) => one.name)).toEqual(testCase.expected)
     })
   }
 })
@@ -133,7 +164,7 @@ describe('embeddingLabel', () => {
 
 describe('staging several files', () => {
   // `POST /api/documents/staging` as it answers for a real upload.
-  const STAGED: Staged = { staging_id: '3f2b9c1e8a7d4b6f', filename: 'area-lights.pdf', size: 421_904, duplicate: null }
+  const STAGED: Staged = { staging_id: '3f2b9c1e8a7d4b6f', filename: 'Area Lights.PDF', name: 'area-lights.pdf', size: 421_904, duplicate: null }
   const file = (name: string) => new File(['%PDF-1.4'], name, { type: 'application/pdf' })
   const cases: Array<{
     name: string
@@ -143,17 +174,17 @@ describe('staging several files', () => {
   }> = [
     { name: 'nothing picked stages nothing', files: [], results: [], expected: { added: [], failures: [] } },
     {
-      name: 'each landed file is named after itself, a repeat keeps the document it already is',
-      files: [file('area-lights.pdf'), file('soft-shadows.pdf')],
+      name: 'each landed file takes the name the server normalized, a repeat keeps the document it already is',
+      files: [file('Area Lights.PDF'), file('Soft Shadows.pdf')],
       results: [
         { status: 'fulfilled', value: STAGED },
-        { status: 'fulfilled', value: { ...STAGED, staging_id: '9a1c', filename: 'soft-shadows.pdf', duplicate: 'shadows.pdf' } },
+        { status: 'fulfilled', value: { ...STAGED, staging_id: '9a1c', filename: 'Soft Shadows.pdf', name: 'soft-shadows.pdf', duplicate: 'shadows.pdf' } },
       ],
       expected: { added: [['area-lights.pdf', null], ['soft-shadows.pdf', 'shadows.pdf']], failures: [] },
     },
     {
       name: 'a refused file costs only itself, and says which one it was',
-      files: [file('area-lights.pdf'), file('huge.pdf')],
+      files: [file('Area Lights.PDF'), file('huge.pdf')],
       results: [
         { status: 'fulfilled', value: STAGED },
         { status: 'rejected', reason: new Error('Request Entity Too Large') },

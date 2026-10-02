@@ -38,6 +38,8 @@ IMPORT_WORKFLOW = "import_document"  # convert, then pre-warm the embedding cach
 EMBED_WORKFLOW = "ensure_embedding"  # one cached embedding of one document, deduplicated
 COLLECTION_DOCUMENT_WORKFLOW = "index_collection_document"  # cached rows into one collection
 PIPELINE_WORKFLOWS = [IMPORT_WORKFLOW, EMBED_WORKFLOW, COLLECTION_DOCUMENT_WORKFLOW]
+# The two that are document operations of their own; an embed run is a job of the one that asked.
+DOCUMENT_OPERATION_WORKFLOWS = [IMPORT_WORKFLOW, COLLECTION_DOCUMENT_WORKFLOW]
 STAGE_WORKFLOW = "stage_slice"  # workflows.stage_slice
 STAGE_STEP = "try_batch"  # workflows.try_batch
 

@@ -60,6 +60,7 @@ class DocumentStatus(StrEnum):
     QUEUED = "queued"
     CONVERTING = "converting"
     EMBEDDING = "embedding"
+    DESCRIBING = "describing"
     IMPORTED = "imported"
     ERROR = "error"
     CANCELLED = "cancelled"
@@ -72,6 +73,7 @@ ACTIVE_DOCUMENT_STATUSES: tuple[DocumentStatus, ...] = (
     DocumentStatus.QUEUED,
     DocumentStatus.CONVERTING,
     DocumentStatus.EMBEDDING,
+    DocumentStatus.DESCRIBING,
 )
 
 # Public sort name -> column. The whitelist is the only source of columns a listing can order by,
@@ -181,6 +183,7 @@ class Staged(msgspec.Struct):
 
     staging_id: str
     filename: str
+    name: str  # what the import stores it as unless renamed: `stored_name(filename)`
     size: int
     # the document these exact bytes already are, by name: importing them again is refused
     duplicate: str | None
@@ -295,7 +298,13 @@ async def stage(filename: str, content: bytes) -> Staged:
             )
         )
     duplicate = await identical(md5)
-    return Staged(staging_id=staging_id, filename=name, size=len(content), duplicate=duplicate)
+    return Staged(
+        staging_id=staging_id,
+        filename=name,
+        name=importable,
+        size=len(content),
+        duplicate=duplicate,
+    )
 
 
 async def sweep_staging(max_age_seconds: float) -> int:
@@ -553,6 +562,13 @@ async def set_status(
             .returning(documents.c.id)
         )
     return moved is not None
+
+
+async def mark_describing(id: str) -> None:
+    """Move an import from `embedding` to `describing`. Only an import is ever `embedding`, so the
+    embedding run an index asks for, of a document already `imported`, changes nothing."""
+    embedding = documents.c.status == DocumentStatus.EMBEDDING
+    await set_status(id, DocumentStatus.DESCRIBING, None, embedding)
 
 
 async def cancel_import(id: str) -> None:

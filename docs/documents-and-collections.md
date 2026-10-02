@@ -61,18 +61,23 @@ stateDiagram-v2
     [*] --> queued: import
     queued --> converting
     converting --> embedding: markdown written
+    embedding --> describing: chunks embedded
     embedding --> imported: default embedding cached
+    describing --> imported: sections described
     queued --> error
     converting --> error
     embedding --> error
+    describing --> error
     queued --> cancelled
     converting --> cancelled
     embedding --> cancelled
+    describing --> cancelled
     error --> queued: re-import
     cancelled --> queued: re-import
     queued --> deleting: delete
     converting --> deleting: delete
     embedding --> deleting: delete
+    describing --> deleting: delete
     imported --> deleting: delete
     error --> deleting: delete
     cancelled --> deleting: delete

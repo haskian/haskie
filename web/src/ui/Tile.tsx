@@ -1,3 +1,4 @@
+import { TriangleAlert } from 'lucide-react'
 import { useRef, type ComponentType, type MouseEvent, type ReactNode } from 'react'
 
 // Same rule as `design.js`: a hint that would run past the viewport flips to the tile's right edge.
@@ -6,9 +7,11 @@ const VIEWPORT_MARGIN = 16
 /** A gallery square: icon, name and one line of detail. On hover, `hint` shows below the same
  *  name and detail again, while `description` shows alone, and nothing shows when it is empty.
  *  `meta` is a date, set bottom right on the detail line, which goes mono beside it. `cover` is
- *  the URL of a picture shown behind it, fading out where the text sits. */
+ *  the URL of a picture shown behind it, fading out where the text sits. `warning` sets a sign top
+ *  left, whose hint says what is wrong. */
 export function Tile({
   icon: Icon,
+  warning,
   name,
   sub,
   meta,
@@ -20,6 +23,7 @@ export function Tile({
   add,
 }: {
   icon: ComponentType<{ className?: string }>
+  warning?: string
   name: string
   sub: ReactNode // text, or a small `.glyph` icon and a number
   meta?: string
@@ -54,6 +58,15 @@ export function Tile({
     <button className={add ? 'tile tile-add' : 'tile'} type="button" aria-pressed={pressed} onClick={onClick} onMouseEnter={flipIfClipped}>
       {cover !== undefined && <img className="tile-cover" src={cover} alt="" loading="lazy" />}
       <Icon className="icon" />
+      {warning !== undefined && (
+        <>
+          <TriangleAlert className="tile-warning" />
+          {/* the tile's child, not the sign's, so it spans the tile rather than the sign */}
+          <span className="hint tile-warning-hint" role="tooltip">
+            {warning}
+          </span>
+        </>
+      )}
       <span className="tile-text">
         <span className="name">{name}</span>
         <span className="sub">{sub}</span>

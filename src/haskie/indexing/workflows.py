@@ -1107,6 +1107,9 @@ async def ensure_embedding(
         if await described_by(doc, cache_id) != by:
             # a hit too checks the model: c-TF-IDF would rerank its vectors by another model's
             ctx = ctx or await _embedding_context(doc, params, by)
+            # not a step: a run recorded before this line resumes on the step log it has, and
+            # the guarded write is a no-op once the import has moved on
+            await document.mark_describing(doc)
             # here rather than in the slice, for the reason the embed's model wait is above
             _value(await _awaiting_model(partial(describer_ready, ctx)))
             count = len(await _stage(Stage.DESCRIBE, ctx))

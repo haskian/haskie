@@ -829,12 +829,13 @@ async def test_options_and_status_before_init(client: AsyncTestClient) -> None:
     ], "smallest first: MiniLM-L2, then ettin-17m, then the default"
     # the vocabularies the UI renders rows with, so it never spells a status out for itself
     assert (
-        options["document_statuses"][:3]
+        options["document_statuses"][:4]
         == options["active_document_statuses"]
         == [
             "queued",
             "converting",
             "embedding",
+            "describing",
         ]
     )
     assert options["active_run_statuses"] == ["ENQUEUED", "PENDING"]
