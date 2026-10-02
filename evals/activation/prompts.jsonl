@@ -1,0 +1,20 @@
+{"id": "raft-log", "activate": true, "why": "Raft: the books cover it, and Claude thinks it knows it", "prompt": "When does a Raft voter consider a candidate's log at least as up-to-date as its own?"}
+{"id": "raft-design", "activate": true, "why": "planning on a covered topic: the rule says planning counts", "prompt": "I'm adding leader election to a small replicated key-value store. What should I watch out for so a newly elected leader never loses committed writes?"}
+{"id": "git-history-split", "activate": true, "why": "newer than training: answering from memory is wrong", "prompt": "How do I use git history split to split one commit into two? Which flags does it take?"}
+{"id": "git-name-only", "activate": true, "why": "git basics: Claude knows it, the rule says search anyway", "prompt": "How can I see which files changed in a particular commit from the command line?"}
+{"id": "git-signed-tag", "activate": true, "why": "git basics", "prompt": "What's the command to create a GPG-signed tag in git?"}
+{"id": "github-api-2026", "activate": true, "why": "newer than training", "prompt": "In GitHub REST API version 2026-03-10, what does the contents endpoint report as the type of a submodule entry?"}
+{"id": "github-api-versions", "activate": true, "why": "newer than training, phrased as a plain question", "prompt": "Which GitHub REST API version was the first calendar version to ship breaking changes?"}
+{"id": "semaphore-barrier", "activate": true, "why": "concurrency: covered, and well known", "prompt": "How do you build a reusable barrier with semaphores so threads can't lap each other?"}
+{"id": "semaphore-why", "activate": true, "why": "a 'why' question on a covered topic", "prompt": "Why does a simple turnstile not work as a reusable barrier?"}
+{"id": "mlfq", "activate": true, "why": "OS scheduling: covered", "prompt": "How does a multi-level feedback queue scheduler keep long-running jobs from starving?"}
+{"id": "web-cache", "activate": true, "why": "web architecture: covered, phrased loosely", "prompt": "What are the usual ways to keep a growing web service's read path fast as traffic rises?"}
+{"id": "web-lb", "activate": true, "why": "web architecture", "prompt": "When does it make sense to use round robin DNS instead of a load balancer?"}
+{"id": "math", "activate": false, "why": "arithmetic: no collection covers it", "prompt": "What is 17 times 23?"}
+{"id": "haiku", "activate": false, "why": "creative writing: no collection covers it", "prompt": "Write a haiku about the first frost of autumn."}
+{"id": "capital", "activate": false, "why": "general trivia: no collection covers it", "prompt": "What is the capital of Australia?"}
+{"id": "rename-var", "activate": false, "why": "the current codebase's mechanics: the rule says not to search", "prompt": "Create a file counter.py with a function that counts the words in a string, then rename the function to word_count."}
+{"id": "fix-syntax", "activate": false, "why": "debugging code in front of it", "prompt": "Fix the syntax error in this Python and tell me what was wrong: print('hello'"}
+{"id": "json-yaml", "activate": false, "why": "a format conversion", "prompt": "Convert this JSON to YAML: {\"name\": \"app\", \"replicas\": 3, \"ports\": [80, 443]}"}
+{"id": "recipe", "activate": false, "why": "an unrelated topic", "prompt": "How long should I boil an egg for a jammy yolk?"}
+{"id": "regex", "activate": false, "why": "a generic coding question no collection covers", "prompt": "Write a regex that matches an ISO 8601 date like 2026-10-02."}

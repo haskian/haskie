@@ -4,4 +4,4 @@ set -euo pipefail
 uv run ruff check evals
 uv run ruff format --check evals
 uv run ty check
-uv run python -m pytest evals/tests -q
+uv run python -m pytest evals/tests evals/activation/tests -q

@@ -22,6 +22,7 @@ evals/results.md
 # the reviewed dataset, evals/bookqa/dataset.jsonl, is the one versioned
 evals/bookqa/candidates/
 evals/bookqa/reports/
+evals/activation/reports/
 
 library/
 

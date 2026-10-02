@@ -145,6 +145,31 @@ def write(outcomes: list[Outcome], out: Path) -> Path:
     return out / "report.md"
 
 
+def ready(
+    dataset: Path, corpus: Path, api: str, profile: str, collection: str
+) -> list[Record] | None:
+    """The reviewed records, with every source they cite indexed in `collection`; None, and why
+    on stderr, when the dataset is empty or fails review, or a source does not index."""
+    records, broken = schema.load(dataset)
+    if not records and not broken:
+        missing = f"{dataset} has no reviewed records: generate, review and --accept them"
+        print(f"{missing} (mise run eval:bookqa:generate)", file=sys.stderr)
+        return None
+    names = documents(records)
+    setup.fetch(tuple(s for s in setup.SOURCES if s.name in names), corpus)
+    issues = broken + schema.validate(records, corpus)
+    if issues:
+        for issue in issues:
+            print(f"{issue.record}: {issue.problem}", file=sys.stderr)
+        print("the dataset does not pass review (mise run eval:bookqa:review)", file=sys.stderr)
+        return None
+    setup.ensure_profile(profile, api)
+    if not setup.load([corpus / name for name in names], collection, DESCRIPTION, api):
+        print(f"not every source is indexed in {collection}", file=sys.stderr)
+        return None
+    return records
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, default=DATASET)
@@ -170,29 +195,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=REPORTS / stamp)
     args = parser.parse_args(argv)
 
-    records, broken = schema.load(args.dataset)
-    if not records and not broken:
-        missing = f"{args.dataset} has no reviewed records: generate, review and --accept them"
-        print(f"{missing} (mise run eval:bookqa:generate)", file=sys.stderr)
-        return 1
-    names = documents(records)
-    setup.fetch(tuple(s for s in setup.SOURCES if s.name in names), args.corpus)
-    issues = broken + schema.validate(records, args.corpus)
-    if issues:
-        for issue in issues:
-            print(f"{issue.record}: {issue.problem}", file=sys.stderr)
-        print("the dataset does not pass review (mise run eval:bookqa:review)", file=sys.stderr)
-        return 1
-    files = [args.corpus / name for name in names]
-    setup.ensure_profile(args.profile, args.api)
-    offered = known_rerankers(args.api)
+    offered = known_rerankers(args.api) if args.rerankers else []
     unknown = sorted(set(args.rerankers) - set(offered))
     if unknown:
         listing = "\n  ".join(offered)
         print(f"unknown reranker {', '.join(unknown)}; offered:\n  {listing}", file=sys.stderr)
         return 1
-    if not setup.load(files, args.collection, DESCRIPTION, args.api):
-        print(f"not every source is indexed in {args.collection}", file=sys.stderr)
+    records = ready(args.dataset, args.corpus, args.api, args.profile, args.collection)
+    if records is None:
         return 1
     modes = choose_modes(args.modes, args.rerankers)
     path = write(evaluate(records, args.api, args.collection, modes), args.out)
