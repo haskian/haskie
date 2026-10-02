@@ -241,7 +241,16 @@ describe('Tile', () => {
       name: 'pressed omitted leaves a plain button',
       element: <Tile icon={FileText} name="Area" sub="" hint="" onClick={noop} />,
       contains: ['class="tile"'],
-      missing: ['aria-pressed', 'tile-cover'],
+      missing: ['aria-pressed', 'tile-cover', 'tile-warning'],
+    },
+    {
+      name: 'a warning sets a sign with its own hint',
+      element: <Tile icon={FileText} name="Area" sub="" description="Notes." warning="Not searchable." onClick={noop} />,
+      contains: [
+        'lucide-triangle-alert lucide-alert-triangle tile-warning"',
+        '<span class="hint tile-warning-hint" role="tooltip">Not searchable.</span>',
+        '<span class="hint" role="tooltip">Notes.</span>',
+      ],
     },
     {
       name: 'a description shows alone on hover',

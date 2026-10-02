@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { Document, DocumentStatus, EmbeddingEntry, ImportedDocument, Staged } from '../api'
 import { embeddingLabel } from './documents/embedding'
-import { groupByDay, groupByStatus } from './documents/group'
+import { groupByDay, groupByStatus, unfiledFirst } from './documents/group'
 import { fresh, importedNames, importLabel, staged, waitingAfter, type StagedFile } from './documents/staged'
 
 // One real row, overridden per case: the listing hands the page whole documents, so the fixtures do too.
@@ -78,6 +78,11 @@ describe('groupByDay', () => {
     { name: 'no documents, no bands', value: [], expected: [] },
     { name: 'one day, one band', value: [doc({ name: 'Area' })], expected: [['Sat 19 Jan', ['Area']]] },
     {
+      name: 'in a day, a document in no collection comes before a newer one in a collection',
+      value: [doc({ name: 'Area' }), doc({ name: 'Box', created_at: DOC.created_at - 60, collections: [] })],
+      expected: [['Sat 19 Jan', ['Box', 'Area']]],
+    },
+    {
       name: 'newest day first, newest import first within it',
       value: [doc({ name: 'Area' }), doc({ name: 'Box', created_at: DOC.created_at - DAY }), doc({ name: 'Cone', created_at: DOC.created_at + 60 })],
       expected: [
@@ -89,6 +94,32 @@ describe('groupByDay', () => {
   for (const testCase of cases) {
     test(testCase.name, () => {
       expect(shape(groupByDay(testCase.value))).toEqual(testCase.expected)
+    })
+  }
+})
+
+describe('unfiledFirst', () => {
+  const cases: Array<{ name: string; value: Document[]; expected: string[] }> = [
+    { name: 'no documents', value: [], expected: [] },
+    {
+      name: 'in no collection first, whatever the date',
+      value: [doc({ name: 'Filed', created_at: DOC.created_at + 60 }), doc({ name: 'Unfiled', collections: [] })],
+      expected: ['Unfiled', 'Filed'],
+    },
+    {
+      name: 'newest first among the filed and among the unfiled',
+      value: [
+        doc({ name: 'Old filed' }),
+        doc({ name: 'Old unfiled', collections: [] }),
+        doc({ name: 'New filed', created_at: DOC.created_at + 60 }),
+        doc({ name: 'New unfiled', created_at: DOC.created_at + 60, collections: [] }),
+      ],
+      expected: ['New unfiled', 'Old unfiled', 'New filed', 'Old filed'],
+    },
+  ]
+  for (const testCase of cases) {
+    test(testCase.name, () => {
+      expect([...testCase.value].sort(unfiledFirst).map((one) => one.name)).toEqual(testCase.expected)
     })
   }
 })

@@ -41,10 +41,12 @@ import {
 } from "../ui";
 import "./Documents.css";
 import { embeddingLabel } from "./documents/embedding";
-import { groupByDay, groupByStatus } from "./documents/group";
+import { groupByDay, groupByStatus, unfiledFirst } from "./documents/group";
 import { SectionsTab } from "./documents/Sections";
 import { Duplicate, JustImported, SimilarDocuments } from "./documents/Similar";
 import { fresh, importedNames, importLabel, staged as stagedFrom, waitingAfter, type StagedFile } from "./documents/staged";
+
+const NOT_SEARCHABLE = "Not searchable until you add it to a collection.";
 
 type GroupBy = "status" | "name" | "day";
 const GROUPS: { id: GroupBy; label: string }[] = [
@@ -149,9 +151,10 @@ export function Documents({
   // page of 500 is what the gallery shows anyway.
   const needle = needleOf(search);
   const groups = useMemo(() => {
-    const visible = docs.items.filter((doc) =>
-      matchesText(needle, doc.name, doc.description),
-    );
+    // every grouping keeps this order inside its bands, but for the day it sorts by
+    const visible = docs.items
+      .filter((doc) => matchesText(needle, doc.name, doc.description))
+      .sort(unfiledFirst);
     if (groupBy === "status") return groupByStatus(visible, options.document_statuses);
     if (groupBy === "day") return groupByDay(visible);
     return groupByRange(visible, (doc) => doc.name);
@@ -199,6 +202,7 @@ export function Documents({
               <Tile
                 key={doc.name}
                 icon={documentIcon(doc.suffix)}
+                warning={doc.collections.length === 0 ? NOT_SEARCHABLE : undefined}
                 name={doc.name}
                 sub={
                   <>
