@@ -1797,6 +1797,7 @@ async def test_session_history_holds_every_action_newest_first(
         dict.fromkeys(hit["document"] for hit in hits)
     )
     assert by_action[("search", "text")]["detail"]["hits"] > 0
+    assert session_search["detail"]["questions"] == ["alpha"], "one question is still a list"
     assert by_action[("import", None)]["operation_id"] == history[-1]["operation_id"] is not None
     assert by_action[("attach", None)]["operation_id"] == attached.json()["operation_id"]
     assert by_action[("attach", None)]["detail"] == {"collection": "notes"}
@@ -1878,6 +1879,7 @@ async def test_every_search_is_logged_with_what_it_returned(ready: AsyncTestClie
                 "hits": 0,
                 "documents": [],
                 "error": "NotFound: collection not found: ghost",
+                "questions": ["alpha"],
             },
         ),
         (
@@ -1890,7 +1892,10 @@ async def test_every_search_is_logged_with_what_it_returned(ready: AsyncTestClie
                 "context": "notes",
             },
         ),
-        ("alpha", {"scope": "excerpts", "hits": 1, "documents": ["guide.md"]}),
+        (
+            "alpha",
+            {"scope": "excerpts", "hits": 1, "documents": ["guide.md"], "questions": ["alpha"]},
+        ),
     ], "a session's searches are its history, failed ones too"
 
 
