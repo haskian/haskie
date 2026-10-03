@@ -152,13 +152,15 @@ async def agent_search_excerpts(
     before any section's next one, and a passage that does not fit is left out whole.
     Cite the excerpt by its `header` (the section's heading path) and `location` (document, pages,
     lines), or one passage by its span's `header` and `location`. `spans` lists the passages, each
-    with its lines, its score and the places that repeat it.
+    with its lines, its score, the questions it answers and the places that repeat it.
     `markdown_file` is the whole document on disk when the excerpt is not enough.
 
     Several questions at once: when parts of a question may be answered in different places, pass
     each part as its own `q` (2 to 5), and the background they share once as `context`. Each part is
     searched on its own and the parts take turns at the `limit` slots, so one part cannot crowd out
-    the others. Each excerpt's `aspects` lists the questions it answers. With
+    the others. Each excerpt's `aspects` lists the questions it answers, and each span's `aspects`
+    the positions in that list of the ones its passage answers: `[1]` is the excerpt's second.
+    With
     a reranker on, a tag is its judgement: chunks it scores under the floor are dropped. Without
     one, a tag is rank, not a judgement: a vector or hybrid search finds a nearest passage for any
     question, so read the text before citing it as the answer to a part. A question in `uncovered`

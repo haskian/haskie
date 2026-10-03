@@ -463,7 +463,8 @@ def test_grouping_keeps_each_passages_place_in_the_ranking() -> None:
 
 
 def test_an_excerpt_costs_its_text_its_fields_and_each_question_once() -> None:
-    """Two passages answering one question: the excerpt names the question once."""
+    """Two passages answering one question: the excerpt names the question once, each span its
+    position in the excerpt's list."""
     question = "Where does a chunk live?"
     group = section.Group(
         COLLECTION,
@@ -476,7 +477,7 @@ def test_an_excerpt_costs_its_text_its_fields_and_each_question_once() -> None:
         section.EXCERPT_CHARS
         + len(question)
         + section.ASPECT_CHARS
-        + 2 * section.SPAN_CHARS
+        + 2 * (section.SPAN_CHARS + section.SPAN_ASPECTS_CHARS + 2)
         + 89
         + 93
     )

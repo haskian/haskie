@@ -193,10 +193,10 @@ async def test_the_tools_an_agent_is_offered(client: AsyncTestClient) -> None:
                 {one["document"]: one["aspects"] for one in found["excerpts"]}
                 == {"retries.md": [BY_RETRY], "ordering.md": [BY_CLOCK]}
                 and found["uncovered"] == []
-                and all(
-                    "aspects" not in span and "aspect_scores" not in span
-                    for one in found["excerpts"]
-                    for span in one["spans"]
+                and [span["aspects"] for one in found["excerpts"] for span in one["spans"]]
+                == [[0], [0]]
+                and not any(
+                    "aspect_scores" in span for one in found["excerpts"] for span in one["spans"]
                 )
             ),
         ),

@@ -35,8 +35,10 @@ as weak in `uncovered` when it scores under the bar its models were measured at.
   passage to last). `section_id` names the excerpt's section.
 - read: `score` is the best passage's. `collection` is whose index matched.
 - `spans`: one per passage, in document order, each with `header`, `section_id`, `location`,
-  `score`, and `also_in` when it has any. The excerpt's `aspects` names the questions it answers.
-  An empty list or map is left out of every answer: no `aspects` for one question.
+  `score`, and when there are any, `aspects` and `also_in`. The excerpt's `aspects` names the
+  questions it answers; a span's `aspects` holds the positions in that list of the ones its
+  passage answers (`[0, 2]`: the excerpt's first and third). An empty list or map is left out of
+  every answer: no `aspects` for one question.
 - The excerpts stay within `answer_budget_chars` (44,000 characters by default), short of the size
   Claude Code moves out of your context into a file; only the first section's best passage may go
   past it. Each section's best passage goes in before any section's next one; a passage that does

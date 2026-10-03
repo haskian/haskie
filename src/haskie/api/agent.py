@@ -37,15 +37,16 @@ class Place(_View):
 
 
 class Span(_View):
-    """One passage of an excerpt (`passage.Span`). Which questions it answers is left to the
-    excerpt's `aspects`: a span repeating each question in full cost an agent a fifth of a long
-    answer, and it cites the excerpt."""
+    """One passage of an excerpt (`passage.Span`). `aspects` holds the positions, in the excerpt's
+    `aspects`, of the questions it answers: each question written out in full on every span cost
+    an agent a fifth of a long answer."""
 
     header: str
     section_id: str
     location: str
     score: float
     also_in: list[Place] = []
+    aspects: list[int] = []
 
 
 class Excerpt(_View):
@@ -123,5 +124,11 @@ class SectionMap(msgspec.Struct):
 
 
 def view[T](found: object, as_type: type[T]) -> T:
-    """`found`, a full answer, as the view `as_type`: the fields it does not name are dropped."""
-    return msgspec.convert(msgspec.to_builtins(found), as_type)
+    """`found`, a full answer, as the view `as_type`: the fields it does not name are dropped, and
+    an excerpt's spans name its questions by position (`Span.aspects`)."""
+    raw = msgspec.to_builtins(found)
+    if as_type is Answer:
+        for excerpt in raw["excerpts"]:
+            for span in excerpt["spans"]:
+                span["aspects"] = [excerpt["aspects"].index(label) for label in span["aspects"]]
+    return msgspec.convert(raw, as_type)

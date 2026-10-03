@@ -539,8 +539,9 @@ high for: the part that picked it, every part that joined it or ranks it among i
 and those of every place folded into it; it keeps the score it was picked with. A vector or hybrid
 search finds nearest passages for any part, even one the sources say nothing about, so without a
 reranker a tag is not proof of an answer. An excerpt's `aspects` joins its spans', and its
-`aspect_scores` holds each part's best. An agent's answer keeps `aspects` on the excerpt alone:
-repeated on every span, each part written out in full took a fifth of a long answer. A part no
+`aspect_scores` holds each part's best. In an agent's answer a span names its parts by position
+in the excerpt's `aspects` (`[1]`), and carries no `aspect_scores`: each part written out in full
+on every span took a fifth of a long answer. A part no
 excerpt lists found nothing, and the answer's
 `uncovered` names it. One question, or a list that deduplicates to one, is the single search, its
 context read the same way, and its `aspects` is empty. A `limit` below the number of parts is
