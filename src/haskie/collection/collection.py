@@ -79,8 +79,9 @@ ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = (
 )
 
 # The moves that never change whether a collection answers a search (`Collection.searchable`): a
-# membership starts as pending, and one moving to indexing kept its standing. Every other move may,
-# so it rewrites the skill's list of collections, a new status included.
+# membership starts as pending, and one moving to indexing keeps its cache entry. Every other move
+# may, so it rewrites the skill's list of collections, a new status included. The entry itself
+# changes mid-index (`pipeline.prepare_index`), and the skill catches up at the move that ends it.
 _QUIET_MOVES = (MemberStatus.PENDING, MemberStatus.INDEXING)
 
 # The member listing selects a document row and its membership, which share `status`, `error`
@@ -265,20 +266,16 @@ class Collection:
     @staticmethod
     async def searchable(names: list[str]) -> list[str]:
         """Those of `names` a search can find anything in, in the order given: each holds a
-        document whose rows are in its table and not on their way out (`LEAVING`). That is an
-        `indexed` membership, or one being indexed again whose cache entry is named
-        (`set_member_entry`): its earlier rows answer until the write replaces them. A failed or
-        cancelled write does not count, since `prepare_index` drops the old rows before it names
-        the new entry, so its rows may be gone."""
+        document whose rows are in its table and not on their way out (`LEAVING`). A membership
+        names its cache entry exactly while rows of it stand (`pipeline.prepare_index`), whatever
+        its status: a re-index answers from its old rows until they are dropped, and a write that
+        failed from what it wrote. `indexed` counts too, for an entry the cache forgot."""
         member = collection_documents.c
         answering = (
             _MEMBERS.with_only_columns(member.document_id)
             .where(
                 member.collection == collections.c.name,
-                or_(
-                    member.status == MemberStatus.INDEXED,
-                    and_(member.status == MemberStatus.INDEXING, member.cache_id.is_not(None)),
-                ),
+                or_(member.status == MemberStatus.INDEXED, member.cache_id.is_not(None)),
                 *(not_(leaving) for leaving in LEAVING),
             )
             .exists()  # stops at a collection's first such membership
@@ -735,8 +732,9 @@ class Collection:
         cancelled again. Only its removal ends that status (see `fail_removal`)."""
         await self._move_member(doc, status, error, not_(_REMOVING))
 
-    async def set_member_entry(self, doc: str, cache_id: str) -> None:
-        """Record the embedding cache entry the membership's rows are indexed from."""
+    async def set_member_entry(self, doc: str, cache_id: str | None) -> None:
+        """Record the embedding cache entry the membership's rows in the table come from, or None
+        while it has none there (`pipeline.prepare_index`)."""
         async with db.connect() as conn:
             await conn.execute(
                 update(collection_documents).where(self._membership(doc)).values(cache_id=cache_id)

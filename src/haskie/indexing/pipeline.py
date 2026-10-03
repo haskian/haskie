@@ -25,7 +25,8 @@ where a section is longer, when there are pages to cut at (`parts.cuts`):
   consecutive parts read out of the cache file and written to that collection's LanceDB table in
   one commit (fast; one writer per collection). `prepare_index` clears the document's older rows
   once before the first of them; `finalize_index` builds the full-text index if the collection
-  has none yet.
+  has none yet. The membership names its cache entry exactly while rows of it stand in the table:
+  cleared before the old rows go, named again once a batch has written new ones.
 
 Everything that costs O(collection) rather than O(document) is deferred to
 `collection/maintenance.py`. `workflows.py` orchestrates these with DBOS; nothing here touches
@@ -412,13 +413,14 @@ async def prepare_index(
     collection: Collection, doc: Document, embedding: EmbeddingModel | None, cache_id: str
 ) -> None:
     """Make the collection's table ready to take one document's rows again: recreate a table an
-    older build or another embedding left behind, drop the rows the document already has there
-    (a previous attach, possibly under other chunk settings), and name the cache entry the new
-    rows come from, so a reader of their sections finds the ones their ids name."""
+    older build or another embedding left behind, and drop the rows the document already has there
+    (a previous attach, possibly under other chunk settings). The membership's cache entry is
+    cleared first, so it never names rows that are gone (`Collection.searchable`); `index_batch`
+    names the new one once its rows are in."""
     index = collection.index_with(embedding)
+    await collection.set_member_entry(doc.id, None)
     await index.reset_for_write()
     await index.delete_document(doc.id)
-    await collection.set_member_entry(doc.id, cache_id)
 
 
 async def index_batch(
@@ -432,15 +434,19 @@ async def index_batch(
     the row count. Idempotent: the range is deleted before it is added, so a repeat after a
     crash between the LanceDB commit and the step checkpoint rewrites exactly the same rows.
 
-    The document's older rows are gone before the first batch runs (see `prepare_index`)."""
+    The document's older rows are gone before the first batch runs (see `prepare_index`). Once
+    the batch's rows are in, the membership names the cache entry they come from, so a reader of
+    their sections finds the ones their ids name; a repeat names the same one."""
     index = collection.index_with(embedding)
     await index.delete_parts(doc.id, batch.start, batch.end)
-    return await index.add_parts(
+    written = await index.add_parts(
         doc.id,
         doc.relative(doc.source_path()),
         doc.relative(doc.markdown),
         embed_cache.read(doc.id, cache_id, batch.start, batch.end),
     )
+    await collection.set_member_entry(doc.id, cache_id)
+    return written
 
 
 async def finalize_index(collection: Collection, embedding: EmbeddingModel | None) -> None:

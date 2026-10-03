@@ -222,23 +222,15 @@ async def test_every_read_tool_answers(
     assert expected(found), f"{name}: {found}"
 
 
-# Each tool, its arguments, its REST twin with the same arguments, the view the tool answers with
-# (`api.agent`), and how the route's answer becomes it.
+# Each tool, its arguments, its REST twin with the same arguments, and how the route's answer
+# becomes the view the tool answers with (`api.agent`).
 VIEWS = [
-    (
-        "search_excerpts",
-        {"q": [BY_RETRY]},
-        "/api/search/excerpts",
-        {"q": BY_RETRY},
-        agent.Answer,
-        agent.answer,
-    ),
+    ("search_excerpts", {"q": [BY_RETRY]}, "/api/search/excerpts", {"q": BY_RETRY}, agent.answer),
     (
         "search_sections",
         {"q": BY_RETRY},
         "/api/search/sections",
         {"q": BY_RETRY},
-        agent.SectionMap,
         lambda served: agent.view(served, agent.SectionMap),
     ),
 ]
@@ -289,14 +281,13 @@ def test_a_span_names_its_questions_by_position_in_its_excerpt() -> None:
     assert [one.aspects for one in viewed.spans] == [[1], [0, 1], []]
 
 
-@pytest.mark.parametrize(("tool", "arguments", "route", "params", "view", "viewed"), VIEWS)
+@pytest.mark.parametrize(("tool", "arguments", "route", "params", "viewed"), VIEWS)
 async def test_a_tool_answers_with_fewer_fields_than_its_route(
     library: AsyncTestClient,
     tool: str,
     arguments: dict,
     route: str,
     params: dict,
-    view: Any,
     viewed: Callable[[Any], Any],
 ) -> None:
     """The same search, fewer fields: the agent reads the view, the web UI the whole answer. The
@@ -305,7 +296,8 @@ async def test_a_tool_answers_with_fewer_fields_than_its_route(
     served = (await library.get(route, params=params)).json()
 
     assert not error, found
-    assert msgspec.convert(found, view) == viewed(served), f"{tool}: the route's answer"
+    expected = viewed(served)
+    assert msgspec.convert(found, type(expected)) == expected, f"{tool}: the route's answer"
     told = _fields(found)
     assert told < _fields(served), f"{tool}: a subset of the route's fields"
     left_out = {"seq_start", "char_start", "line_start", "page_start", "source_file"}

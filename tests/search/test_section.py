@@ -477,7 +477,7 @@ def test_an_excerpt_costs_its_text_its_fields_and_each_question_once() -> None:
         section.EXCERPT_CHARS
         + len(question)
         + section.ASPECT_CHARS
-        + 2 * (section.SPAN_CHARS + section.SPAN_ASPECTS_CHARS + 2)
+        + 2 * (section.SPAN_CHARS + section.SPAN_ASPECTS_CHARS + section.SPAN_ASPECT_CHARS)
         + 89
         + 93
     )

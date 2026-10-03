@@ -133,6 +133,7 @@ def answer(found: object) -> Answer:
     questions by position in its excerpt's `aspects` (`Span.aspects`)."""
     raw = msgspec.to_builtins(found)
     for excerpt in raw["excerpts"]:
+        position = {label: at for at, label in enumerate(excerpt["aspects"])}
         for span in excerpt["spans"]:
-            span["aspects"] = [excerpt["aspects"].index(label) for label in span["aspects"]]
-    return view(raw, Answer)
+            span["aspects"] = [position[label] for label in span["aspects"]]
+    return msgspec.convert(raw, Answer)

@@ -154,9 +154,8 @@ class Group(msgspec.Struct):
 EXCERPT_CHARS = 600
 SPAN_CHARS = 300
 ASPECT_CHARS = 4  # a question's quotes and separator, on the excerpt
-# a span's `"aspects":[…],` naming its questions by position in the excerpt's: at most 5, one
-# digit and a separator each
-SPAN_ASPECTS_CHARS = len('"aspects":[],')
+SPAN_ASPECTS_CHARS = len('"aspects":[],')  # a span's list of its questions' positions (`Span`)
+SPAN_ASPECT_CHARS = 2  # one position in it: a digit, at most 5 questions, and a separator
 
 
 def excerpt_cost(ranges: list[HitRange]) -> int:
@@ -178,7 +177,9 @@ def passage_cost(hit_range: HitRange) -> int:
     positions of the questions it answers, and the places it folded in (`also_in`), counted as
     their full references encode, a bound on the agent's own, which keep fewer fields
     (`api.agent.Place`)."""
-    named = SPAN_ASPECTS_CHARS + 2 * len(hit_range.aspects) if hit_range.aspects else 0
+    named = (
+        SPAN_ASPECTS_CHARS + SPAN_ASPECT_CHARS * len(hit_range.aspects) if hit_range.aspects else 0
+    )
     folded = len(msgspec.json.encode(hit_range.also_in)) if hit_range.also_in else 0
     return SPAN_CHARS + hit_range.char_end - hit_range.char_start + named + folded
 
