@@ -17,26 +17,30 @@ const DOCUMENT_STAGES: Record<Stage, Omit<StageDef, 'stage'>> = {
 }
 
 // The word on the tag and the one bar that stands for an operation with no jobs of its own.
-const SINGLE: Record<Exclude<OperationKind, 'document' | 'collection'>, { tag: string; label: string }> = {
+const SINGLE: Record<Exclude<OperationKind, WholeKind | 'document'>, { tag: string; label: string }> = {
   download: { tag: 'Download', label: 'Download' },
   maintenance: { tag: 'Maintain', label: 'Maintenance' },
 }
-// The collection kind is the whole-thing operations: an index queues one document at a time, the
-// deletes and a description have nothing to count. `detail.bulk` says which; a row without it is
-// read as an index.
+// The collection and backup kinds are whole-thing operations: an index queues one document at a
+// time, a backup archives one file at a time, a restore, the deletes and a description have
+// nothing to count. `detail.bulk` says which; a row without it is read as an index.
+type WholeKind = 'collection' | 'backup'
+const isWhole = (kind: OperationKind): kind is WholeKind => kind === 'collection' || kind === 'backup'
 const BULK: Record<BulkKind, { tag: string; label: string }> = {
   index_collection: { tag: 'Index', label: 'Queue' },
   delete_collection: { tag: 'Delete', label: 'Delete' },
   delete_document: { tag: 'Delete', label: 'Delete' },
   summarize_document: { tag: 'Describe', label: 'Describe' },
   summarize_collection: { tag: 'Describe', label: 'Describe' },
+  create_backup: { tag: 'Backup', label: 'Archive' },
+  restore_backup: { tag: 'Restore', label: 'Restore' },
 }
 const isBulkKind = (kind: unknown): kind is BulkKind => typeof kind === 'string' && kind in BULK
 export const bulkKind = (operation: Operation): BulkKind => (isBulkKind(operation.detail.bulk) ? operation.detail.bulk : 'index_collection')
 
 /** The word on a row's tag: for a document, which operation it is; for the rest, the kind. */
 export function tagOf(operation: Operation): string {
-  if (operation.kind === 'collection') return BULK[bulkKind(operation)].tag
+  if (isWhole(operation.kind)) return BULK[bulkKind(operation)].tag
   if (operation.kind !== 'document') return SINGLE[operation.kind].tag
   const stages = operation.jobs.map((job) => job.stage)
   if (stages.includes('convert')) return 'Import'
@@ -76,7 +80,7 @@ export function jobsFor(operation: Operation, tasks: Task[] | null, active: read
   const state = runState(operation.status, active)
   // An operation with no jobs of its own is one run, so the bar lasted as long as the operation.
   const seconds = state === 'done' || state === 'error' ? operation.updated_at - operation.created_at : undefined
-  if (operation.kind === 'collection') {
+  if (isWhole(operation.kind)) {
     return [{ label: BULK[bulkKind(operation)].label, state, seconds, done: count(operation, 'done'), total: count(operation, 'total') }]
   }
   // one task is the whole operation: 1/1 once it is done, so the row reads like the others

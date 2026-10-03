@@ -100,7 +100,7 @@ export type FillValues = NonNullable<SearchSettings['fill_values']>
 export type OperationKind = Operation['kind']
 export type Stage = Job['stage']
 export type RunStatus = Operation['status']
-// The three whole-thing operations of the collection kind; `Operation.detail.bulk` carries it.
+// The whole-thing operations of the collection and backup kinds; `Operation.detail.bulk` carries it.
 export type BulkKind = OperationProgress['kind']
 // What a session can be seen doing; `collections` is the selection itself being set.
 export type SessionAction = SessionEvent['action']
@@ -269,6 +269,12 @@ export const api = {
     optionsOnce = undefined
     return stored
   },
+  // Every document, collection and setting into one archive, as an operation of its own.
+  backup: () => request<BulkStarted>('/api/backup', { method: 'POST' }),
+  backupFileUrl: (operationId: string) => `/api/backup/${operationId}/file`,
+  // The archive goes as the raw body: it can be far larger than an upload's form allows.
+  restore: (archive: File) =>
+    request<BulkStarted>('/api/restore', { method: 'POST', body: archive, headers: { 'content-type': 'application/zip' } }),
 
   collections: (q: PageRequest = {}) => request<Page<CollectionSummary>>(`/api/collections${pageQuery(q)}`),
   // Names alone, for a picker: one request, and the cap is the backend's largest page.

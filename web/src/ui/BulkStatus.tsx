@@ -8,6 +8,8 @@ const DOING: Record<BulkKind, string> = {
   delete_document: 'deleting',
   summarize_document: 'describing',
   summarize_collection: 'describing',
+  create_backup: 'backing up',
+  restore_backup: 'restoring',
 }
 
 /** How an operation started from a button stands: running, or how it ended and why. */

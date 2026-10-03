@@ -2,8 +2,9 @@
 
 An **operation** is the whole of what someone asked for: import a document, index one document
 into a collection, index, delete or describe a whole collection, delete or describe a document,
-maintain a collection, download a model. A **job** is one stage of an operation: convert, embed,
-describe or index. A **task** is one micro-batch: one durable step below a job.
+maintain a collection, download a model, back everything up or restore it. A **job** is one stage
+of an operation: convert, embed, describe or index. A **task** is one micro-batch: one durable
+step below a job.
 
 "Workflow" is DBOS's word for the thing that runs any of them, and it stays in the modules that
 talk to DBOS (`workflows`, `dbos_names`, `sysdb`, `models`). Nothing this module returns says it.
@@ -20,10 +21,10 @@ log (`sysdb`, one grouped query for the whole page).
 Counts are summed over the children, so how a stage was sliced never shows here.
 
 Every other kind of operation this app runs is listed through one generic read model instead:
-`list_operations` returns a page of `Operation` for a whole-collection operation, a model download
-or a maintenance run, so the Operations view has a section per kind. Documents are a kind there
-too, folded out of the pipeline listing below, because they alone also have jobs, tasks and a
-cancel.
+`list_operations` returns a page of `Operation` for a whole-collection operation, a model download,
+a maintenance run, a backup or a restore, so the Operations view has a section per kind. Documents
+are a kind there too, folded out of the pipeline listing below, because they alone also have jobs,
+tasks and a cancel.
 
 Reads only: cancelling an operation writes, so it lives in `workflows` beside the ids it writes by.
 
@@ -46,7 +47,7 @@ from enum import StrEnum
 import msgspec
 from dbos import DBOS, WorkflowStatus
 
-from haskie import sysdb
+from haskie import backup, sysdb
 from haskie.document import document as documents
 from haskie.errors import InvalidInput, NotFound
 from haskie.indexing import models, workflows
@@ -128,13 +129,18 @@ BULK_KINDS: tuple[BulkKind, ...] = BULK_WORKFLOWS
 # bulk operation works on is its title; the verb is the row's tag in the UI, so the title leaves
 # it out.
 DOCUMENT_BULK_KINDS = frozenset({BulkKind.DELETE_DOCUMENT, BulkKind.SUMMARIZE_DOCUMENT})
+# The backup section's; every other bulk kind is the collection section's.
+BACKUP_KINDS: tuple[BulkKind, ...] = (BulkKind.CREATE_BACKUP, BulkKind.RESTORE_BACKUP)
+# The two that publish their progress as an event (`workflows.PROGRESS_EVENT`) while they run.
+PUBLISHES_PROGRESS = frozenset({BulkKind.INDEX_COLLECTION, BulkKind.CREATE_BACKUP})
 
 
 class OperationProgress(msgspec.Struct):
-    """How far one whole-collection or whole-document operation got: what the 202 of an "index
-    all", a collection delete, a document delete or a description points at.
+    """How far one whole-thing operation got: what the 202 of an "index all", a collection delete,
+    a document delete, a description, a backup or a restore points at.
 
-    `collection` is None for a document's operation: it belongs to no one collection."""
+    `collection` is None for a document's operation, which belongs to no one collection, and for
+    a backup and a restore, which span them all."""
 
     id: str
     kind: BulkKind
@@ -151,6 +157,7 @@ class OperationKind(StrEnum):
     COLLECTION = "collection"
     DOWNLOAD = "download"
     MAINTENANCE = "maintenance"
+    BACKUP = "backup"
 
 
 KIND_ORDER: tuple[OperationKind, ...] = tuple(OperationKind)
@@ -159,6 +166,7 @@ KIND_LABELS: dict[OperationKind, str] = {
     OperationKind.COLLECTION: "Collections",
     OperationKind.DOWNLOAD: "Model downloads",
     OperationKind.MAINTENANCE: "Maintenance",
+    OperationKind.BACKUP: "Backup and restore",
 }
 
 
@@ -247,11 +255,12 @@ def _collection_of(kind: BulkKind, operation_id: str) -> str | None:
 # Kind -> the DBOS workflow names it lists. `document` is missing on purpose: it has a listing of
 # its own (`_pipeline_page`), because it is the only kind whose rows carry micro-batch counts.
 KIND_NAMES: dict[OperationKind, list[str]] = {
-    OperationKind.COLLECTION: list(BULK_KINDS),
+    OperationKind.COLLECTION: [kind for kind in BULK_KINDS if kind not in BACKUP_KINDS],
     OperationKind.DOWNLOAD: [DOWNLOAD_WORKFLOW],
     # `maintain_collection` is only the debounced handle that waits: the run itself is the child
     # on the collection's partition, so that is the one worth a row.
     OperationKind.MAINTENANCE: [MAINTAIN_PARTITION_WORKFLOW, DAILY_MAINTENANCE_WORKFLOW],
+    OperationKind.BACKUP: list(BACKUP_KINDS),
 }
 
 # The same table read the other way, for counting active runs by kind in one query.
@@ -611,35 +620,48 @@ def _title(kind: OperationKind, status, names: dict[str, str]) -> str:
     if kind == OperationKind.DOWNLOAD:
         download_kind, model = models.model_names(status.workflow_id)
         return f"{download_kind} {model}"
+    if kind == OperationKind.BACKUP:
+        return "every document, collection and setting"
     if status.name == DAILY_MAINTENANCE_WORKFLOW:  # the rest are maintenance runs
         return "daily housekeeping"
     return _second_segment(status.workflow_id) or "?"
 
 
 async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | None]:
-    """The numbers only this kind has. A collection operation names which of them it is
-    (`bulk`), since the kind alone does not. A bulk index also publishes its progress as a DBOS
-    event, which is read without waiting: an operation that has not finished its first page yet
-    has none.
+    """The numbers only this kind has. A collection or backup operation names which one it is
+    (`bulk`), since the kind alone does not. A bulk index and a backup also publish their progress
+    as a DBOS event while they run, which is read without waiting: an operation that has not
+    reported yet has none. A collection's description counts its tasks. A finished backup counts
+    from its output instead, and adds its archive's size and whether it still has it.
 
     Async because that read is one, even with no wait: the event lives in the system database."""
     if kind == OperationKind.DOWNLOAD:
         return {"warm": models.is_warm(status.workflow_id)}
-    if kind != OperationKind.COLLECTION:
+    if kind not in (OperationKind.COLLECTION, OperationKind.BACKUP):
         return {}
     bulk = _bulk_kind(status.name)
     if bulk == BulkKind.SUMMARIZE_COLLECTION:
         tasks = await description_tasks(status)
         done = sum(task.status == RunStatus.SUCCESS for task in tasks)
         return {"bulk": bulk, "done": done, "total": len(tasks)}
-    if bulk != BulkKind.INDEX_COLLECTION:
-        return {"bulk": bulk}
+    detail: dict[str, int | str | bool | None] = {"bulk": bulk}
+    made = status.output
+    if isinstance(made, backup.Backup):
+        # a newer backup replaces the archive, so a finished one says whether it still has one
+        available = await backup.archive(status.workflow_id) is not None
+        return (
+            detail
+            | {"done": made.files, "total": made.files, "size": made.size}
+            | {"available": available}
+        )
+    if bulk not in PUBLISHES_PROGRESS:
+        return detail
     progress = await DBOS.get_event_async(
         status.workflow_id, workflows.PROGRESS_EVENT, timeout_seconds=0
     )
     if isinstance(progress, workflows.BulkProgress):
-        return {"bulk": bulk, "done": progress.done, "total": progress.total}
-    return {"bulk": bulk}
+        detail |= {"done": progress.done, "total": progress.total}
+    return detail
 
 
 async def _document_names(ids: Iterable[str]) -> dict[str, str]:
@@ -968,9 +990,9 @@ def _step_outcome(step) -> tuple[int | None, str | None]:
 
 
 async def progress(operation_id: str) -> OperationProgress:
-    """The state of one whole-collection or whole-document operation: its status plus the progress
-    event a bulk index publishes after every page. `progress` stays None for a delete, which has
-    no pages, and for an index that has not finished its first page yet."""
+    """The state of one whole-thing operation: its status plus the progress event a bulk index
+    publishes after every page, or a backup once a second. `progress` stays None for a delete, a
+    description and a restore, which publish none, and before the first event."""
     status = await DBOS.get_workflow_status_async(operation_id)
     if status is None:
         raise NotFound(f"operation not found: {operation_id}")

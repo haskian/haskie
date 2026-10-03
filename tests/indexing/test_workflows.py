@@ -68,7 +68,7 @@ from dbos._error import DBOSAwaitedWorkflowCancelledError
 from dbos._registrations import get_dbos_func_name
 from sqlalchemy import func, insert, select, update
 
-from haskie import audit, db, home, paging, settings, shutdown
+from haskie import audit, backup, db, home, paging, settings, shutdown
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import maintenance
@@ -3198,6 +3198,10 @@ def test_the_names_the_operations_view_spells_out_are_the_ones_dbos_records() ->
         "maintenance": [
             get_dbos_func_name(workflows.maintain_on_partition),
             get_dbos_func_name(workflows.daily_maintenance),
+        ],
+        "backup": [
+            get_dbos_func_name(backup.create_backup),
+            get_dbos_func_name(backup.restore_backup),
         ],
     }
     assert set(operations.KIND_BY_NAME) == set(dbos_names.DOCUMENT_OPERATION_WORKFLOWS) | {

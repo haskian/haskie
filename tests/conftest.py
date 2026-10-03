@@ -134,7 +134,7 @@ def forget_settings() -> None:
     which the process cache (`settings._state`) cannot see."""
     from haskie import settings
 
-    settings._state = None
+    settings.forget_user_settings()
 
 
 @pytest.fixture(scope="session")

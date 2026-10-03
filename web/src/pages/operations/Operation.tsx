@@ -1,7 +1,7 @@
-import { Check, CircleDashed, X } from 'lucide-react'
+import { Check, CircleDashed, Download, X } from 'lucide-react'
 import { memo, type CSSProperties } from 'react'
-import type { Operation as OperationRow, Task } from '../../api'
-import { dateTime, duration } from '../../format'
+import { api, type Operation as OperationRow, type Task } from '../../api'
+import { bytes, dateTime, duration } from '../../format'
 import { useOptions } from '../../hooks/useOptions'
 import { Jobs, Kv } from '../../ui'
 import { bulkKind, count, endsOf, jobDefs, jobsFor, stageInfo, tagOf, taskState, taskText, type StageDef } from './jobs'
@@ -50,6 +50,14 @@ export const Operation = memo(function Operation({
         ) : (
           <div className="operation-stage">
             <Kv rows={summaryRows(operation)} />
+            {operation.detail.available === true && (
+              <div className="row">
+                <a className="btn btn-ghost" href={api.backupFileUrl(operation.id)} download>
+                  <Download className="icon" />
+                  Download
+                </a>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -81,6 +89,8 @@ function summaryRows(operation: OperationRow): [string, string][] {
   if (operation.kind === 'document') rows.push(['Tasks', `${count(operation, 'tasks_done')}/${count(operation, 'tasks_total')}`])
   if (operation.kind === 'collection' && bulkKind(operation) === 'index_collection')
     rows.push(['Queued', `${count(operation, 'done')} of ${count(operation, 'total')}`])
+  if (bulkKind(operation) === 'create_backup') rows.push(['Archived', `${count(operation, 'done')} of ${count(operation, 'total')} files`])
+  if (typeof operation.detail.size === 'number') rows.push(['Size', bytes.format(operation.detail.size)])
   return rows
 }
 

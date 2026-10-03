@@ -73,6 +73,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/backup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** CreateBackup */
+        post: operations["ApiBackupCreateBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backup/{operation_id}/file": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GetBackupFile */
+        get: operations["ApiBackupOperationIdFileGetBackupFile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** RestoreBackup */
+        post: operations["ApiRestoreRestoreBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/render": {
         parameters: {
             query?: never;
@@ -940,7 +991,7 @@ export interface components {
          * BulkWorkflow
          * @enum {string}
          */
-        BulkWorkflow: "index_collection" | "delete_collection" | "delete_document" | "summarize_document" | "summarize_collection";
+        BulkWorkflow: "index_collection" | "delete_collection" | "delete_document" | "summarize_document" | "summarize_collection" | "create_backup" | "restore_backup";
         /** ChunkSettings */
         ChunkSettings: {
             chunker?: components["schemas"]["Chunker"];
@@ -1548,7 +1599,7 @@ export interface components {
          * OperationKind
          * @enum {string}
          */
-        OperationKind: "document" | "collection" | "download" | "maintenance";
+        OperationKind: "document" | "collection" | "download" | "maintenance" | "backup";
         /** OperationKindSummary */
         OperationKindSummary: {
             kind: components["schemas"]["OperationKind"];
@@ -2402,6 +2453,85 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Options"];
+                };
+            };
+        };
+    };
+    ApiBackupCreateBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request accepted, processing continues off-line */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkStarted"];
+                };
+            };
+        };
+    };
+    ApiBackupOperationIdFileGetBackupFile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                operation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description File Download */
+            200: {
+                headers: {
+                    /** @description File size in bytes */
+                    "content-length"?: string;
+                    /** @description Last modified data-time in RFC 2822 format */
+                    "last-modified"?: string;
+                    /** @description Entity tag */
+                    etag?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "": string;
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
+    ApiRestoreRestoreBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request accepted, processing continues off-line */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkStarted"];
                 };
             };
         };
