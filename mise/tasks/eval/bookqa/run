@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Book QA eval, phase 2: search the reviewed dataset over haskie's HTTP API in each mode (fts, vector, hybrid, hybrid+rerank) and report recall, MRR, nDCG, size and latency. No Claude. Args: [--modes ...] [--rerankers MODEL ...] [--dataset PATH]"
+set -euo pipefail
+home="${HASKIE_EVAL_EMBED_HOME:-$PWD/evals/.haskie-eval-embed}"
+api="${HASKIE_EVAL_EMBED_URL:-http://127.0.0.1:8124}"
+# --no-browser: a home whose first run isn't done yet would otherwise open the web UI on it
+uv run haskie run --home "$home" --port "${api##*:}" --no-browser
+uv run python -m evals.bookqa.run --api "$api" "$@"
