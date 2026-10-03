@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.30.0 - 2026-10-03
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>(**search**) keep agent answers inline and skip empty collections (#41) - (af6c799) - Črtomir Majer
+
+- - -
+
 ## v0.29.0 - 2026-10-03
 #### Features
 - (**sessions**) tag context and each question in search history (#40) - (6c43ec6) - Črtomir Majer
