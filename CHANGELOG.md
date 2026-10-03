@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.28.0 - 2026-10-03
+#### Features
+- back up and restore every document, collection and setting (#39) - (ee0ac8e) - Črtomir Majer
+
+- - -
+
 ## v0.27.0 - 2026-10-02
 #### Features
 - describe documents and collections with the describer model (#38) - (c6114ad) - Črtomir Majer
