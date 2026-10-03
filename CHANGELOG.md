@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.29.0 - 2026-10-03
+#### Features
+- (**sessions**) tag context and each question in search history (#40) - (6c43ec6) - Črtomir Majer
+
+- - -
+
 ## v0.28.0 - 2026-10-03
 #### Features
 - back up and restore every document, collection and setting (#39) - (ee0ac8e) - Črtomir Majer
