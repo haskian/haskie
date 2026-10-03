@@ -7,7 +7,7 @@ import { Check, Field, GallerySection, Info, Modal, SearchBox, SearchPanel, Shel
 import './Sessions.css'
 import { errorText, matchesText, needleOf, relative } from '../format'
 import { groupByStatus, tileSub } from './sessions/group'
-import { historySub } from './sessions/history'
+import { historySub, searchLines } from './sessions/history'
 
 const ACTION_ICONS: Record<SessionAction, LucideIcon> = {
   search: Search,
@@ -194,6 +194,21 @@ function SessionBody({ id, chosen, onSaved }: { id: string; chosen: string[]; on
   )
 }
 
+/** A search's head: the tool that ran it, then its context and questions, each after its tag. */
+function SearchLines({ event }: { event: SessionEvent }) {
+  return (
+    <>
+      {event.detail.scope && <span className="label-mono muted">{event.detail.scope} search</span>}
+      {searchLines(event).map(({ tag, text, context }) => (
+        <span className="session-line" key={tag}>
+          <span className="descriptor">{tag}</span>
+          <span className={context ? 'sub session-query' : 'session-query'}>{text}</span>
+        </span>
+      ))}
+    </>
+  )
+}
+
 /** What the session did, newest first: each search, import, attach and selection, and what came of it. */
 function History({ id, version }: { id: string; version: number }) {
   const [loaded, setLoaded] = useState<{ events: SessionEvent[]; now: number } | null>(null)
@@ -219,7 +234,7 @@ function History({ id, version }: { id: string; version: number }) {
           <li className="list-item" key={`${event.ts}-${event.action}-${event.subject}`}>
             <Icon className="icon" />
             <span className="list-text">
-              <span className="session-query">{event.subject}</span>
+              {event.action === 'search' ? <SearchLines event={event} /> : <span className="session-query">{event.subject}</span>}
               <span className="sub">
                 {historySub(event)} · {relative(event.ts, loaded.now)}
               </span>

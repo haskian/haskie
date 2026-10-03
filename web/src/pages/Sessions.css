@@ -17,3 +17,10 @@
 .session-error {
   overflow-wrap: anywhere;
 }
+
+/* A search's context and each of its questions follow their tag (Context, Q1, Q2) on one line. */
+.session-line {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+}

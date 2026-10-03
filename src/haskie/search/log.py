@@ -484,9 +484,7 @@ async def history(session_id: str, limit: int) -> list[session.SessionEvent]:
                 hits=search.result_count,
                 documents=list(dict.fromkeys(result.document for result in results[search.id])),
                 error=search.error,
-                questions=[one.question for one in search.questions]
-                if len(search.questions) > 1
-                else None,
+                questions=[one.question for one in search.questions],
                 context=search.context,
             ),
             operation_id=None,
