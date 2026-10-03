@@ -68,7 +68,7 @@ class Trial(msgspec.Struct):
     turns: int
     usd: float
     seconds: float
-    limited: bool  # stopped by the account's session limit: not a result
+    limited: bool  # no result: the session limit stopped it, or it never ran (not a result)
 
     @property
     def consulted(self) -> bool:
@@ -82,9 +82,10 @@ def load(path: Path = PROMPTS) -> list[Prompt]:
 
 def read(transcript: str) -> tuple[list[str], int, float, bool]:
     """From a stream-json transcript: the tools called in order, the turns, the cost, and whether
-    the session limit stopped it."""
+    it ended without a result - stopped by the session limit, or never run at all (an empty
+    transcript), which must not count as "did not search"."""
     tools: list[str] = []
-    turns, usd, limited = 0, 0.0, False
+    turns, usd, limited = 0, 0.0, True
     for line in transcript.splitlines():
         try:
             event = json.loads(line)
@@ -95,7 +96,7 @@ def read(transcript: str) -> tuple[list[str], int, float, bool]:
             tools += [c["name"] for c in message.get("content", []) if c.get("type") == "tool_use"]
         if event.get("type") == "result":
             turns, usd = event.get("num_turns") or 0, event.get("total_cost_usd") or 0.0
-            limited = LIMIT_MARKER in str(event.get("result", ""))
+            limited = LIMIT_MARKER in str(event.get("result", ""))  # a result: ran, unless limited
     return tools, turns, usd, limited
 
 
@@ -112,6 +113,7 @@ def trial(
     prompt: Prompt, setup: str, sample: int, model: str, api: str, collection: str, out: Path
 ) -> Trial:
     rule, hook = SETUPS[setup]
+    out = out.resolve()  # Claude runs elsewhere: a relative settings path would not be found
     directory = out / setup / prompt.id / str(sample)
     if directory.exists():
         shutil.rmtree(directory)
@@ -200,7 +202,10 @@ def render(trials: list[Trial], setups: list[str]) -> str:
         )
     limited = len(trials) - len(counted)
     if limited:
-        lines += ["", f"{limited} runs hit the session limit and are left out: run them again."]
+        lines += [
+            "",
+            f"{limited} runs ended without a result (session limit, or never started): left out.",
+        ]
     return "\n".join(lines) + "\n"
 
 

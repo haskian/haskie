@@ -81,10 +81,18 @@ MATH = activation.Prompt("math", "What is 17 times 23?", False, "control")
     ],
 )
 def test_each_setup_hands_the_agent_its_rule_or_hook(
-    claude: None, haskie: str, tmp_path: Path, setup: str, searched: bool, nudged: bool
+    claude: None,
+    haskie: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    setup: str,
+    searched: bool,
+    nudged: bool,
 ) -> None:
-    trial = activation.trial(RAFT, setup, 0, "haiku", haskie, "books", tmp_path / "out")
+    monkeypatch.chdir(tmp_path)  # a relative --out must still reach Claude, which runs elsewhere
+    trial = activation.trial(RAFT, setup, 0, "haiku", haskie, "books", Path("out"))
 
+    assert not trial.limited
     assert (trial.searched, trial.nudged, trial.consulted) == (searched, nudged, searched or nudged)
     transcript = (tmp_path / "out" / setup / "raft" / "0" / "transcript.jsonl").read_text()
     assert ('"hooked"' in transcript) == nudged, "the hook is in the settings exactly when on"
@@ -114,6 +122,7 @@ def test_a_transcript_gives_the_tools_in_order_the_cost_and_the_limit() -> None:
     assert activation.read(text) == (["ToolSearch", "Write"], 2, 0.05, False)
     limited = text.replace('"done"', '"You\'ve hit your session limit"')
     assert activation.read(limited)[3] is True
+    assert activation.read("")[3] is True, "a run that never started is no result either"
 
 
 def test_the_report_counts_should_trigger_and_controls_apart_and_leaves_out_limited() -> None:
@@ -131,7 +140,7 @@ def test_the_report_counts_should_trigger_and_controls_apart_and_leaves_out_limi
 
     assert "| none | 0/1 | 0/1 | 0/0 | 0/0 | 0.010 |" in text
     assert "| rule | 1/1 | 1/1 | 1/1 | 1/1 | 0.010 |" in text, "a searched control is a false one"
-    assert "1 runs hit the session limit" in text
+    assert "1 runs ended without a result" in text
 
 
 def test_the_prompts_never_name_haskie_and_hold_both_kinds() -> None:
