@@ -10,14 +10,14 @@ export interface OperationFollower {
 }
 
 // Work the backend only accepts (202) and runs in the background. `start` sends the request and
-// follows the operation it returns until it ends, then hands the finished one to `onDone`. A
+// follows the operation it returns until it ends, then hands the finished one to `onDone`, if any. A
 // failed request rejects, so the caller decides what a failed start means; a failed poll has no
 // caller to answer to and goes to `onError`.
 //
 // The follower depends on the operation id, not on the object every tick replaces, so `usePoll`
 // keeps one interval for the life of the operation. Give `onDone` and `onError` a stable identity
 // (`useCallback`), or that interval is torn down and rebuilt on every tick.
-export function useOperation(onDone: (operation: OperationProgress) => void, onError: (message: string) => void): OperationFollower {
+export function useOperation(onDone: ((operation: OperationProgress) => void) | undefined, onError: (message: string) => void): OperationFollower {
   const { active_run_statuses } = useOptions()
   const [operation, setOperation] = useState<OperationProgress | null>(null)
   const running = operation !== null && active_run_statuses.includes(operation.status)
@@ -27,7 +27,7 @@ export function useOperation(onDone: (operation: OperationProgress) => void, onE
   const settle = useCallback(
     (next: OperationProgress) => {
       setOperation(next)
-      if (!active_run_statuses.includes(next.status)) onDone(next)
+      if (!active_run_statuses.includes(next.status)) onDone?.(next)
     },
     [active_run_statuses, onDone],
   )

@@ -1,9 +1,9 @@
 # Indexing
 
 Indexing a shelf of books takes minutes to hours. Closing the laptop mid-run should cost the
-current step, not the run. So imports, indexing, deletes, maintenance and model downloads run as
-[DBOS](https://docs.dbos.dev) workflows, recorded step by step in the same SQLite file as the rest
-of the app. Model warm-ups after boot are plain background tasks.
+current step, not the run. So imports, indexing, deletes, maintenance, model downloads, backups
+and restores run as [DBOS](https://docs.dbos.dev) workflows, recorded step by step in the same
+SQLite file as the rest of the app. Model warm-ups after boot are plain background tasks.
 
 ## Operations, jobs and tasks
 
@@ -156,13 +156,14 @@ membership reads `removing` until it has run (see
 | `operation.describing` | 1 | a document's description, one an llm describe stage queues or one asked for with *Describe with AI*, and a collection's |
 | `operation.downloads` | 2 | model downloads |
 | `operation.maintenance` | 4 | maintenance orchestrators and nightly housekeeping |
+| `operation.backup` | 1 | backups and restores (`backup.py`), never two at once |
 | `task.converting` | its weight's share of `cpu_budget` | convert slices |
 | `task.embedding` | its weight's share of `cpu_budget` | embed slices |
 | `task.describing` | the embed weight's share of `cpu_budget` | describe slices, one per document. The llm describer answers one prompt at a time behind its own lock, in a thread that holds no CPU slot |
 | `task.indexing` | its weight's share, one per collection | index writes, compaction and index builds, removals |
 
 Most `operation.*` workflows orchestrate and wait on `task.*` children. Some do their own work:
-model downloads, deletes, descriptions and the nightly housekeeping.
+model downloads, deletes, descriptions, backups and restores, and the nightly housekeeping.
 
 ## The CPU budget
 

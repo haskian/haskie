@@ -34,12 +34,12 @@ from litestar.types import (
 )
 from litestar_mcp import LitestarMCP, MCPConfig
 
-from haskie import APP_VERSION, claude, home, logs, shutdown
+from haskie import APP_VERSION, backup, claude, home, logs, shutdown
 from haskie.api import ROUTE_HANDLERS
 from haskie.api.settings import WEB_UI_STATE
 from haskie.audit import Actor
 from haskie.document.document import UPLOAD_MAX_BYTES
-from haskie.errors import Forbidden, HaskieError
+from haskie.errors import Forbidden, HaskieError, NotReady
 from haskie.indexing import workflows
 from haskie.search import flow
 
@@ -162,14 +162,16 @@ def _refusal(scope: HTTPScope, hosts: frozenset[str] | None, origins: frozenset[
 
 
 def guard_callers(app: ASGIApp) -> ASGIApp:
-    """Middleware refusing a request from a host or browser origin haskie does not serve."""
+    """Middleware refusing a request from a host or browser origin haskie does not serve, and
+    every write while a restore replaces the contents (`backup.restoring`)."""
     hosts, origins = served_hosts(), allowed_origins()
 
     async def guarded(scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and (
-            reason := _refusal(cast("HTTPScope", scope), hosts, origins)
-        ):
-            raise Forbidden(reason)
+        if scope["type"] == "http":
+            if reason := _refusal(cast("HTTPScope", scope), hosts, origins):
+                raise Forbidden(reason)
+            if scope["method"] not in READ_METHODS and backup.restoring:
+                raise NotReady("restoring a backup; try again once it is done")
         await app(scope, receive, send)
 
     return guarded

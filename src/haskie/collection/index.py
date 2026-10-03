@@ -299,6 +299,15 @@ def forget_schema(path: Path) -> None:
             del _schema_current[key]
 
 
+def forget_every_schema() -> None:
+    """`forget_schema` for every index directory at once: for a restore, which replaces the whole
+    collections folder (`backup`)."""
+    with _schema_lock:
+        for directory in {key[0] for key in _schema_current} | set(_schema_generation):
+            _schema_generation[directory] = _schema_generation.get(directory, 0) + 1
+        _schema_current.clear()
+
+
 def _fusion(settings: SearchSettings):
     """LanceDB "reranker" that merges the vector and BM25 rankings of a hybrid query."""
     from lancedb.rerankers import LinearCombinationReranker, RRFReranker

@@ -20,7 +20,8 @@ src/haskie/
                 the embedding cache
   catalogue/    models and embedding profiles, seeded into SQLite; loaders stay in indexing/
   claude_code/  skill and rule files installed into Claude Code
-  app.py        Litestar app; cli.py the CLI; claude.py the Claude Code install
+  app.py        Litestar app; cli.py the CLI; claude.py the Claude Code install;
+                backup.py backup and restore of the contents, as two workflows
   settings.py   settings; db.py SQLite; tables.py its schema (Core); home.py ~/.haskie; cpu.py CPU;
                 ids.py document, section and chunk ids, an MD5 in base58
   errors.py     typed errors, the contract between the domain and HTTP; paging.py cursors and sorts

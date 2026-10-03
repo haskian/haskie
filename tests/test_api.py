@@ -1249,6 +1249,7 @@ async def test_the_operations_listing_names_its_sections_and_its_activity(
         "collection",
         "download",
         "maintenance",
+        "backup",
     ]
     assert all(k["label"] and k["active"] >= 0 for k in kinds.json())
     assert activity.status_code == 200, activity.text

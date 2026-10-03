@@ -40,7 +40,8 @@ class InvalidInput(HaskieError, ValueError):
 
 
 class NotReady(HaskieError):
-    """Not ready yet: a model is still loading, or every preview builder is busy."""
+    """Not ready yet: a model is still loading, every preview builder is busy, or a restore is
+    replacing the contents (any request but a GET)."""
 
     status_code = 503
     headers = {"Retry-After": "2"}

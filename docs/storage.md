@@ -1,9 +1,10 @@
 # Storage
 
 Your data lives in one home directory, `~/.haskie` by default (`--home` or `HASKIE_HOME` moves
-it). You can back it up, inspect it or delete it. Downloaded model weights are the exception:
-they sit in the Hugging Face cache, outside the home: the ONNX models under `haskie-onnx` in it,
-as plain files, since ONNX Runtime refuses external data behind the cache's links.
+it). You can back it up ([Backup and restore](#backup-and-restore)), inspect it or delete it.
+Downloaded model weights are the exception: they sit in the Hugging Face cache, outside the home:
+the ONNX models under `haskie-onnx` in it, as plain files, since ONNX Runtime refuses external
+data behind the cache's links.
 
 ```
 ~/.haskie/
@@ -13,6 +14,9 @@ as plain files, since ONNX Runtime refuses external data behind the cache's link
   haskie.lock             the home lock, naming the process that holds it
   server.log              output of a server that `haskie run` started
   staging/                uploads not yet imported; the nightly run sweeps those over a day old
+  backups/                the newest backup archive
+  restoring/<key>/        a restore's upload, its unpacked archive and the contents it replaced,
+                          while it runs
   documents/<sh>/<id>/
     original.<ext>        the file as imported
     original.<ext>.md     the full conversion
@@ -212,6 +216,29 @@ delete set null`) until the member is indexed again.
 | LanceDB | async API; a collection's table: one writer per collection (`task.indexing`) | one writer per table keeps commits simple |
 | small files | `home.atomic_write`: a temp file, flushed to disk, then `os.replace` | a crash or a power cut leaves the old file or the new one, never half |
 | imported originals | moved or copied into place | removed again if the import raises |
+
+## Backup and restore
+
+*Back up* in the settings makes one zip of the contents, as an operation of its own: the rows of
+`settings`, `collections`, `documents`, `embeddings` and `collection_documents` (a database of
+their own, `haskie.db`), and each document's original, its markdown and its embedding cache. A
+document being deleted is left out. Only the newest archive is kept, under `backups/`.
+
+What a machine makes for itself stays out: the LanceDB indexes, previews, covers and convert
+parts, the model catalogue, and the history (DBOS's runs, sessions, the search log, the audit
+trail).
+
+*Restore* replaces the contents with an archive's and keeps the history. A session keeps the
+collections it chose that the archive holds. It is refused while other work runs, and for an
+archive of another schema version. The rows are replaced in one transaction and the folders
+swapped beside it, so a failure leaves what was there. While it runs, every request but a GET
+gets 503, MCP calls included. Every collection is then indexed again from the restored embedding
+cache, with nothing embedded again if the settings name the same model, and every document the
+backup caught mid-import is imported again. Both are durable workflows: after a crash they resume
+at the step they stopped in. The nightly round removes the upload of a restore that never ran,
+such as one cancelled while it waited.
+
+Code: `backup.py`.
 
 ## Schema changes
 

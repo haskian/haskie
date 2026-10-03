@@ -47,6 +47,8 @@ Layout:
   one an llm describe stage queues, and `summarize_collection_workflow` per collection description
   a person asks for, on `operation.describing`, one at a time: the describer answers one prompt at
   a time anyway, and a run waiting for it to download must not hold a slot another queue needs.
+- `backup.create_backup` / `backup.restore_backup` on `operation.backup`, one at a time: every
+  document, collection and setting into one archive, and back (see `backup`).
 - Model downloads live in `models.py` (`operation.downloads`), the operation/job/task read model in
   `operations.py`, and the grouped reads of DBOS's own tables it needs in `sysdb.py`.
 
@@ -71,15 +73,17 @@ document delete (and `{parent}:rm:{collection}` for each collection it leaves),
 `sum-doc:{doc}:{uuid}` for a description asked for (`sum-doc:{doc}:{uuid of the embedding run}`
 for one an embedding run queued), `sum-col:{collection}:{uuid}` for a collection's,
 `rm:{collection}:{doc}:{uuid}` for the removal a detach queues, `maint:{collection}:{parent}` for a
-maintenance run, and `dl:{kind}:{model}` for a model download (see `models`). A document id is
-base58 and `document.safe_name` keeps `:` out of a collection name, so a prefix is unambiguous: one
-query finds a whole operation. Child ids are deterministic, so a replay after a crash re-attaches to
-the child that already exists instead of starting a second one. Every workflow is registered under
-an explicit name (see `dbos_names`).
+maintenance run, and `dl:{kind}:{model}` for a model download (see `models`), and `backup:{uuid}`
+and `restore:{uuid}` for a backup and a restore (see `backup`). A document id is base58 and
+`document.safe_name` keeps `:` out of a collection name, so a prefix is unambiguous: one query finds
+a whole operation. Child ids are deterministic, so a replay after a crash re-attaches to the child
+that already exists instead of starting a second one. Every workflow is registered under an explicit
+name (see `dbos_names`).
 """
 
 import asyncio
 import contextlib
+import contextvars
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -160,6 +164,7 @@ COLLECTION_QUEUE = "operation.collection"  # whole-collection index/delete and d
 DESCRIBING_QUEUE = "operation.describing"  # a document's description the describer writes
 DESCRIBING_CONCURRENCY = 1  # the describer answers one prompt at a time (`GgufGenerator`)
 MAINTENANCE_QUEUE = "operation.maintenance"  # debounced maintenance and the nightly schedule
+BACKUP_QUEUE = "operation.backup"  # backups and restores, one at a time (see `backup`)
 CONVERT_QUEUE = "task.converting"  # convert slices; cap = the stage's share of the CPU budget
 EMBED_QUEUE = "task.embedding"  # embed slices; cap = the stage's share of the CPU budget
 DESCRIBE_QUEUE = "task.describing"  # describe slices; cap = the embed stage's share of the CPU
@@ -172,12 +177,13 @@ INDEX_QUEUE = "task.indexing"  # index children, maintenance and removals. Lance
 MAINTENANCE_CONCURRENCY = 4  # each waits on a child, so this bounds tasks, not LanceDB writers
 MAINTENANCE_TIMEOUT_SECONDS = 3600  # compaction of a very large collection, not a per-batch budget
 COLLECTION_CONCURRENCY = 2  # a whole-collection operation only enqueues or cancels; two is plenty
+BACKUP_CONCURRENCY = 1  # a restore replaces what a backup reads, so the two never overlap
 DOWNLOAD_CONCURRENCY = 2  # a download is network bound; two at a time saturates any link
 DOCUMENT_CONCURRENCY_CAP = 64  # an orchestrator is cheap now, but its children are not; keep a cap
 ADOPT_PAGE = 500  # stale workflows resumed per query at boot
 BULK_INDEX_PAGE = 500  # documents enqueued per durable page of a bulk index
 CANCEL_PAGE = 200  # pipelines cancelled per sweep of a bulk delete
-STAGING_TTL_SECONDS = 24 * 3600  # an upload nobody imported within a day is swept
+STAGING_TTL_SECONDS = 24 * 3600  # an upload nobody imported, or restored, within a day is swept
 
 MAINTENANCE_SCHEDULE = "daily-maintenance"  # housekeeping that costs nothing to skip for a day
 MAINTENANCE_CRON = "17 3 * * *"  # nightly, and off the hour: the only clock in this app
@@ -371,11 +377,16 @@ def stage_caps(indexing: PipelineSettings) -> dict[Stage, int]:
 # The backlog adoption in flight, if any. An event loop keeps only a weak reference to a task, so
 # the module holds the strong one and `stop` cancels it.
 _adoption: asyncio.Task[None] | None = None
+# The loop `start` ran on: Litestar's, or a test's. `apply_settings` belongs on it (see
+# `apply_settings_from_workflow`).
+_app_loop: asyncio.AbstractEventLoop | None = None
 
 
 async def start() -> None:
     """Bring the runtime up: migrations, DBOS, the queues, the schedules. Awaited by Litestar's
     startup hook, and by the tests."""
+    global _app_loop
+    _app_loop = asyncio.get_running_loop()
     logs.configure()
     open_pool()  # a runtime started again in the same process, after a `stop`
     await db.migrate_once()  # before DBOS opens the file: the one-time WAL switch needs exclusivity
@@ -563,6 +574,7 @@ _QUEUES: tuple[Queue, ...] = (
     Queue(DESCRIBING_QUEUE, lambda indexing, caps: DESCRIBING_CONCURRENCY),
     Queue(models.DOWNLOADS_QUEUE, lambda indexing, caps: DOWNLOAD_CONCURRENCY),
     Queue(MAINTENANCE_QUEUE, lambda indexing, caps: MAINTENANCE_CONCURRENCY),
+    Queue(BACKUP_QUEUE, lambda indexing, caps: BACKUP_CONCURRENCY),
     Queue(CONVERT_QUEUE, lambda indexing, caps: caps[Stage.CONVERT]),
     Queue(EMBED_QUEUE, lambda indexing, caps: caps[Stage.EMBED]),
     Queue(DESCRIBE_QUEUE, lambda indexing, caps: caps[Stage.EMBED]),
@@ -592,6 +604,20 @@ async def apply_settings(settings: UserSettings) -> None:
         )
     await models.ensure_models(settings)
     await schedule_pending_maintenance(indexing.maintenance_idle_seconds)
+
+
+async def apply_settings_from_workflow(settings: UserSettings) -> None:
+    """`apply_settings` for a workflow, which runs on DBOS's loop: the preview pool it resizes was
+    built on the app's loop, and the downloads it starts may not start inside a step. So it runs
+    on the loop `start` ran on, in a fresh context that carries no DBOS step, and this waits for
+    it there."""
+    if _app_loop is None:
+        raise RuntimeError("the runtime is not started")
+    # scheduled from an empty context, so the task copies no DBOS step context into the app loop
+    started = contextvars.Context().run(
+        asyncio.run_coroutine_threadsafe, apply_settings(settings), _app_loop
+    )
+    await asyncio.wrap_future(started)
 
 
 # --- steps (pure, retried) ----------------------------------------------------------
@@ -1161,7 +1187,7 @@ async def ensure_embedding(
                 # queued, not awaited: indexing never reads the description, and the describer
                 # answers one document at a time on a queue of its own
                 own = run_id(DBOS.workflow_id or "")  # derived, so a replay finds the same run
-                await _start(
+                await enqueue_operation(
                     DESCRIBING_QUEUE,
                     summarize_document_workflow,
                     doc,
@@ -1634,27 +1660,38 @@ async def sweep_staging() -> int:
     return await document.sweep_staging(STAGING_TTL_SECONDS)
 
 
+@retried_step
+async def sweep_restores() -> int:
+    """Delete restore uploads no restore will read (`backup.sweep_restores`)."""
+    from haskie import backup  # it imports this module
+
+    return await backup.sweep_restores(STAGING_TTL_SECONDS)
+
+
 @DBOS.workflow(name=DAILY_MAINTENANCE_WORKFLOW)
 async def daily_maintenance(scheduled_time: datetime, context: Any) -> None:
-    """Nightly housekeeping: the operation history, the audit trail, the search log and the
-    staging folder. Takes the two arguments every DBOS schedule passes."""
+    """Nightly housekeeping: the operation history, the audit trail, the search log, the staging
+    folder and the uploads of restores that never ran. Takes the two arguments every DBOS
+    schedule passes."""
     purged_before_ms = await purge_operation_history()
     deleted = await prune_audit()
     searches = await prune_searches()
     swept = await sweep_staging()
+    restores = await sweep_restores()  # last: a run recorded before it existed replays unchanged
     _log.info(
         "home_housekept",
         jobs_purged_before_ms=purged_before_ms,
         audit_files_pruned=deleted,
         searches_pruned=searches,
         staged_uploads_swept=swept,
+        restore_uploads_swept=restores,
     )
 
 
 # --- public API -------------------------------------------------------------------------
 
 
-async def _start(
+async def enqueue_operation(
     queue: str, workflow: Callable, *args: Any, workflow_id: str, dedup_id: str
 ) -> str:
     """Enqueue one workflow under an explicit id and return that id.
@@ -1690,12 +1727,20 @@ async def start_import(row: Document) -> str:
         raise Conflict(
             f"document is {row.status}; only a queued, failed or cancelled import runs: {row.name}"
         )
-    return await _start(
+    return await enqueue_import(row.id)
+
+
+async def enqueue_import(doc: str, key: str | None = None) -> str:
+    """Queue the import of one document, with no checks of its own: for a workflow that has just
+    read it as `queued` in a step of its own (`backup.restore_backup`). `key` ends the id in place
+    of a random one, derived from that workflow's own id, so a replay re-attaches to the run it
+    already started rather than asking an admission check the run has since moved past."""
+    return await enqueue_operation(
         INDEXING_QUEUE,
         import_document,
-        row.id,
-        workflow_id=f"{IMPORT_PREFIX}:{row.id}:{uuid4().hex}",
-        dedup_id=f"import:{row.id}",
+        doc,
+        workflow_id=f"{IMPORT_PREFIX}:{doc}:{key or uuid4().hex}",
+        dedup_id=f"import:{doc}",
     )
 
 
@@ -1703,7 +1748,7 @@ async def _enqueue_index(collection: str, doc: str, workflow_id: str | None = No
     """Queue the index of one member, with no checks of its own: for a caller that has just read
     the name out of that collection's membership table. `workflow_id` lets a bulk index derive
     the child's id from its own, so that a replay re-attaches to the run it already started."""
-    return await _start(
+    return await enqueue_operation(
         INDEXING_QUEUE,
         index_collection_document,
         collection,
@@ -1816,7 +1861,7 @@ async def start_summarize_document(row: Document) -> str:
     source = await _summary_source(row.id)
     if source is None:
         raise Conflict(f"document has no cached embedding to describe yet: {row.name}")
-    return await _start(
+    return await enqueue_operation(
         DESCRIBING_QUEUE,
         summarize_document_workflow,
         row.id,
@@ -1835,7 +1880,7 @@ async def start_summarize_collection(collection: str) -> str:
     if not await (await Collection.get(collection)).member_ids(limit=1):
         raise Conflict(f"collection has no documents to describe: {collection}")
     await _describer_runs()
-    return await _start(
+    return await enqueue_operation(
         DESCRIBING_QUEUE,
         summarize_collection_workflow,
         collection,
@@ -1869,7 +1914,7 @@ async def _summary_source(doc: str) -> str | None:
 async def start_delete_document(row: Document) -> str:
     """Queue the deletion of a document, as the caller has just read it, from everywhere; returns
     the id of the operation. A second call while one runs is deduplicated into it."""
-    return await _start(
+    return await enqueue_operation(
         COLLECTION_QUEUE,
         delete_document_workflow,
         row.id,
@@ -1885,11 +1930,17 @@ async def start_index_collection(collection: str) -> str:
     A second call while one runs is deduplicated into the operation already running, so an
     impatient "Index all" cannot queue the collection twice."""
     await Collection.get(collection)  # NotFound before anything is queued
-    return await _start(
+    return await enqueue_index_collection(collection)
+
+
+async def enqueue_index_collection(collection: str, key: str | None = None) -> str:
+    """`start_index_collection` with no checks of its own, for a workflow that has just read the
+    name in a step (`backup.restore_backup`); `key` as in `enqueue_import`."""
+    return await enqueue_operation(
         COLLECTION_QUEUE,
         index_collection_workflow,
         collection,
-        workflow_id=f"{BULK_INDEX_PREFIX}:{collection}:{uuid4().hex}",
+        workflow_id=f"{BULK_INDEX_PREFIX}:{collection}:{key or uuid4().hex}",
         dedup_id=f"index-collection:{collection}",
     )
 
@@ -1900,7 +1951,7 @@ async def start_delete_collection(collection: str) -> str:
     On the `operation.collection` queue rather than the collection's index partition: there it
     would wait behind every document it is about to cancel."""
     await Collection.get(collection)  # NotFound before anything is queued
-    return await _start(
+    return await enqueue_operation(
         COLLECTION_QUEUE,
         delete_collection_workflow,
         collection,

@@ -13,7 +13,7 @@ the storage shape is still moving: one readable schema is worth more than a hist
 import asyncio
 import sqlite3
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from importlib.resources import files
 from pathlib import Path
@@ -47,14 +47,15 @@ table, and rather than version each of them, the home is refused and rebuilt fro
 """
 
 
-def schema_ddl() -> str:
-    """The DDL of every table and index in `tables.metadata`, as one script.
+def schema_ddl(only: Sequence[Table] | None = None) -> str:
+    """The DDL of every table and index in `tables.metadata`, or of `only` those tables, as one
+    script.
 
     Every statement is `if not exists`, so a crash partway through leaves `user_version` at 0 and
     the next boot replays the script harmlessly."""
     dialect = sqlite.dialect()
     statements: list[Any] = []
-    for table in tables.metadata.sorted_tables:
+    for table in tables.metadata.sorted_tables if only is None else only:
         statements.append(CreateTable(table, if_not_exists=True))
         statements += [CreateIndex(index, if_not_exists=True) for index in table.indexes]
     return "".join(

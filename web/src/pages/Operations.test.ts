@@ -194,6 +194,18 @@ describe('jobsFor', () => {
       expected: [{ label: 'Describe', done: 0, total: 0, state: 'active', seconds: undefined }],
     },
     {
+      name: 'a backup counts the files it archived',
+      job: job({ kind: 'backup', title: 'every document, collection and setting', status: 'PENDING', detail: { bulk: 'create_backup', done: 50, total: 120 } }),
+      tasks: null,
+      expected: [{ label: 'Archive', done: 50, total: 120, state: 'active', seconds: undefined }],
+    },
+    {
+      name: 'a failed restore has nothing to count, and says it failed',
+      job: job({ kind: 'backup', title: 'every document, collection and setting', status: 'ERROR', detail: { bulk: 'restore_backup' } }),
+      tasks: null,
+      expected: [{ label: 'Restore', done: 0, total: 0, state: 'error', seconds: 38 }],
+    },
+    {
       name: 'a download is one task, done 1/1 and timed, and says whether the model is loaded',
       job: job({ kind: 'download', title: 'embedding BAAI/bge-small-en-v1.5', status: 'SUCCESS', detail: { warm: true } }),
       tasks: null,
@@ -400,6 +412,8 @@ describe('tagOf', () => {
     { name: 'a collection index', row: job({ kind: 'collection', jobs: [], detail: { bulk: 'index_collection' } }), expected: 'Index' },
     { name: 'a collection delete', row: job({ kind: 'collection', jobs: [], detail: { bulk: 'delete_collection' } }), expected: 'Delete' },
     { name: 'a collection row that does not say is an index', row: job({ kind: 'collection', jobs: [], detail: {} }), expected: 'Index' },
+    { name: 'a backup', row: job({ kind: 'backup', jobs: [], detail: { bulk: 'create_backup' } }), expected: 'Backup' },
+    { name: 'a restore', row: job({ kind: 'backup', jobs: [], detail: { bulk: 'restore_backup' } }), expected: 'Restore' },
   ]
   for (const one of cases) {
     test(one.name, () => {

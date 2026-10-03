@@ -112,11 +112,11 @@ class Document(msgspec.Struct):
 
     @property
     def original(self) -> Path:
-        return self.root / f"original{self.suffix}"
+        return original(self.id, self.suffix)
 
     @property
     def markdown(self) -> Path:
-        return self.root / f"original{self.suffix}.md"
+        return markdown(self.id, self.suffix)
 
     @property
     def preview_dir(self) -> Path:
@@ -201,6 +201,16 @@ async def identical(id: str) -> str | None:
 
 def root(id: str) -> Path:
     return home.DOCUMENT_ROOT / home.shard(id) / id
+
+
+def original(id: str, suffix: str) -> Path:
+    """The file as imported, for a caller that holds the id and the suffix rather than the row."""
+    return root(id) / f"original{suffix}"
+
+
+def markdown(id: str, suffix: str) -> Path:
+    """The markdown assembled from `original` at import."""
+    return root(id) / f"original{suffix}.md"
 
 
 def embeddings_dir(id: str) -> Path:

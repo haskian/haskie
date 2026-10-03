@@ -793,6 +793,14 @@ def settings_problem() -> str | None:
     return _state.problem if _state else None
 
 
+def forget_user_settings() -> None:
+    """Make the next load read the row again: for a writer that replaced it with SQL, as a
+    restore does (`backup`), which the cache cannot see."""
+    global _state
+    with _cache_lock:
+        _state = None
+
+
 def _store(settings: UserSettings) -> None:
     """Cache a struct this process just wrote: it decodes, so there is no problem to report."""
     global _state
