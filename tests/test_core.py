@@ -1393,6 +1393,50 @@ async def test_member_ids_walk_one_page_at_a_time() -> None:
     assert await collection.member_ids(after=second) == [third]
 
 
+async def _cache_entry(doc: Document) -> str:
+    """A real cache entry of `doc`, one row of its first chunk, written as the embed stage writes
+    one (`embed_cache.write`); returns its id."""
+    params = embed_cache.params(doc, ChunkSettings(), None)
+    rows = home.HOME / "rows" / "000000.rows.json"
+    rows.parent.mkdir(parents=True, exist_ok=True)
+    rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0], seq=1)]))
+    return await embed_cache.write(params, [rows], None)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "status", "entry", "leaving", "answers"),
+    [
+        ("an indexed member", MemberStatus.INDEXED, True, None, True),
+        ("an indexed member, its cache entry forgotten", MemberStatus.INDEXED, False, None, True),
+        ("one indexed again: its old rows stand", MemberStatus.INDEXING, True, None, True),
+        ("one indexed for the first time: no rows yet", MemberStatus.INDEXING, False, None, False),
+        ("a pending member", MemberStatus.PENDING, False, None, False),
+        ("a write that failed after its rows were dropped", MemberStatus.ERROR, False, None, False),
+        ("a write that failed with rows standing", MemberStatus.ERROR, True, None, True),
+        ("a write cancelled, its rows dropped", MemberStatus.CANCELLED, False, None, False),
+        ("an indexed member being detached", MemberStatus.INDEXED, True, "removing", False),
+        ("an indexed member being deleted", MemberStatus.INDEXED, True, "deleting", False),
+    ],
+)
+async def test_a_collection_answers_a_search_only_from_rows_it_still_has(
+    name: str, status: MemberStatus, entry: bool, leaving: str | None, answers: bool
+) -> None:
+    notes = await Collection.create("notes")
+    attached = await attachable("a.md")
+    doc = attached.id
+    await notes.add(doc)
+    if entry:
+        await notes.set_member_entry(doc, await _cache_entry(attached))
+    await notes.set_member_status(doc, status, "boom" if status == MemberStatus.ERROR else None)
+    if leaving == "removing":
+        await notes.start_removal(doc)
+    elif leaving == "deleting":
+        await document.set_status(doc, DocumentStatus.DELETING)
+
+    assert await Collection.searchable(["notes"]) == (["notes"] if answers else []), name
+
+
 @pytest.mark.anyio
 async def test_member_counts_group_by_status() -> None:
     collection = await Collection.create("counts")
@@ -1556,11 +1600,7 @@ async def test_one_document_sits_in_two_collections_and_a_detach_leaves_both_alo
     doc = await attachable("shared.md")
     for name in ("alpha", "beta"):
         await (await Collection.create(name)).add(doc.id)
-    params = embed_cache.params(doc, ChunkSettings(), None)
-    rows = home.HOME / "rows" / "000000.rows.json"
-    rows.parent.mkdir(parents=True, exist_ok=True)
-    rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0], seq=1)]))
-    cache_id = await embed_cache.write(params, [rows], None)
+    cache_id = await _cache_entry(doc)
 
     assert await document.collections_of(doc.id) == ["alpha", "beta"]
 
@@ -1568,6 +1608,7 @@ async def test_one_document_sits_in_two_collections_and_a_detach_leaves_both_alo
 
     assert await document.collections_of(doc.id) == ["beta"], "only that membership went"
     assert (await document.named(doc.name)).name == doc.name, "the document stays"
+    params = embed_cache.params(doc, ChunkSettings(), None)
     assert await embed_cache.lookup(params) == cache_id, "and so does what it costs to compute"
     assert await Collection("beta").member(doc.id) is not None
 
@@ -1591,11 +1632,7 @@ async def test_deleting_a_document_takes_every_membership_and_cache_row_with_it(
     doc = await attachable("gone.md")
     for name in ("alpha", "beta"):
         await (await Collection.create(name)).add(doc.id)
-    params = embed_cache.params(doc, ChunkSettings(), None)
-    rows = home.HOME / "rows" / "000000.rows.json"
-    rows.parent.mkdir(parents=True, exist_ok=True)
-    rows.write_bytes(msgspec.json.encode([Row(chunk=chunk.split(MD, SMALL)[0], seq=1)]))
-    await embed_cache.write(params, [rows], None)
+    await _cache_entry(doc)
 
     await document.remove_files(doc.id)
     await document.remove_row(doc.id)

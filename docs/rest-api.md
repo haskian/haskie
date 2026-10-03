@@ -70,7 +70,7 @@ Errors are part of the contract. Each type in `errors.py` carries its status cod
 | `HaskieError` | 400 | the base type, for example a home at another schema version |
 | `Forbidden` | 403 | a host haskie does not serve, or a browser origin it does not trust (see above) |
 | `NotFound` | 404 | no such collection, document or operation |
-| `Conflict` | 409 | the state does not allow it: a name taken, the same file already imported, a document not imported yet, a home already initialized |
+| `Conflict` | 409 | the state does not allow it: a name taken, the same file already imported, a document not imported yet, a home already initialized, a search naming a collection with no document to search |
 | `InvalidInput` | 422 | a bad argument |
 | `ValidationException` (Litestar's) | 422 | a parameter or body that does not decode: a wrong type, a missing field, a value out of bounds |
 | `PermanentError` | 422 | the file cannot be processed as it is |

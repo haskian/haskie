@@ -152,7 +152,7 @@ export function SettingsForm({
     max_passage_grow: searchNumber('max_passage_grow'),
     grow_bias: searchNumber('grow_bias'),
     max_section_chars: searchNumber('max_section_chars'),
-    max_answer_chars: searchNumber('max_answer_chars'),
+    answer_budget_chars: searchNumber('answer_budget_chars'),
   }
 
   return (

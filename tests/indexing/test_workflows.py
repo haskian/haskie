@@ -1822,6 +1822,35 @@ async def test_indexing_a_member_requests_maintenance_and_counts_pending(
     assert info.index.unindexed_rows == 0, "and folded every row written since into it"
 
 
+async def test_a_membership_names_its_cache_entry_only_while_its_rows_stand(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """The entry is cleared before a document's old rows are dropped and named once a batch wrote
+    new ones, so a collection whose only document is between the two answers no search
+    (`Collection.searchable`), for a first index and a re-index alike."""
+    await _use(dbos, workers=4, batch_pages=1, index_group_parts=1, maintenance_idle_seconds=NEVER)
+    await Collection.create("entries")
+    doc = await import_document(dbos, "p.pdf", text_pdf(["alpha", "beta"]), tmp_path)
+    place = [("entries", doc.id)]
+
+    for run in ("first index", "re-index"):
+        gate = Gate(seq=0)
+        monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
+        if run == "first index":
+            job_id = await dbos.attach("entries", doc.id)
+        else:
+            job_id = await workflows.start_index_collection_document("entries", doc.id)
+        assert await wait_event(gate.entered), f"{run}: the index step never started"
+
+        assert await Collection.indexed_entries(place) == {}, f"{run}: no rows, no entry"
+        assert await Collection.searchable(["entries"]) == [], f"{run}: nothing to search yet"
+
+        gate.release.set()
+        assert await wait_for(job_id) == "indexed", run
+        assert list(await Collection.indexed_entries(place)) == place, f"{run}: rows, entry"
+        assert await Collection.searchable(["entries"]) == ["entries"], run
+
+
 async def test_maintenance_runs_on_the_collection_partition(
     dbos, tmp_path: Path, monkeypatch
 ) -> None:

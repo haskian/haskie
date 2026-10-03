@@ -31,7 +31,7 @@ from sqlalchemy import update
 from haskie import app as app_module
 from haskie import audit, claude, db, errors, home, ids, logs
 from haskie.catalogue import catalogue
-from haskie.collection.collection import Collection, MemberStatus
+from haskie.collection.collection import Collection
 from haskie.collection.index import CollectionIndex
 from haskie.document import cover, document
 from haskie.document.document import DocumentStatus
@@ -39,7 +39,7 @@ from haskie.indexing import embed_cache, gguf_models, mlx_models
 from haskie.indexing.chunk import Chunk, Piece, split
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order
-from haskie.search import aspects, flow, gaps, log
+from haskie.search import aspects, flow, gaps, log, section
 from haskie.settings import (
     DEFAULT_RERANKER,
     Accelerator,
@@ -61,6 +61,8 @@ from conftest import (  # isort: skip
     attach_via_api,
     audit_lines,
     claude_installed,
+    holding_a_document,
+    indexed_member,
     refresh_settled,
     document_names,
     forget_settings,
@@ -103,9 +105,7 @@ async def ready(client: AsyncTestClient, tmp_path: Path) -> AsyncTestClient:
     (tmp_path / "pending.md").write_text("# pending\n")
     await document.import_path(str(tmp_path / "pending.md"))  # stays `queued`: nothing started it
 
-    notes = await Collection.get("notes")
-    await notes.add(imported.id)
-    await notes.set_member_status(imported.id, MemberStatus.INDEXED)
+    await indexed_member("notes", imported.id)
     await seed_index("notes", imported.name, "alpha body about lancedb")
 
     await client.put("/api/sessions/s1", json={"collections": ["notes"]})
@@ -206,8 +206,8 @@ def _requested(lines: list[dict]) -> list[str]:
         ),
         (
             "an answer budget of none -> unprocessable",
-            "PUT", "/api/collections/notes/overrides", {"search": {"max_answer_chars": 0}}, None,
-            422, "max_answer_chars must be >= 1, got 0",
+            "PUT", "/api/collections/notes/overrides", {"search": {"answer_budget_chars": 0}}, None,
+            422, "answer_budget_chars must be >= 1, got 0",
         ),
         (
             "a negative shortest passage -> unprocessable",
@@ -1203,7 +1203,11 @@ async def test_attach_list_and_detach_a_member(
     await until(gone, "the removal never took the membership")
     assert (await client.get("/api/collections/notes")).json()["counts"]["active"] == 0
     assert (await client.get("/api/documents/guide.md/collections")).json() == []
-    assert (await client.get("/api/search/explore", params=in_notes)).json() == []
+    emptied = await client.get("/api/search/explore", params=in_notes)
+    assert (emptied.status_code, emptied.json()["detail"]) == (
+        409,
+        "collection has no document to search: notes",
+    ), "its last member gone, the collection has nothing to search"
     assert (await client.get("/api/documents/guide.md")).json()["status"] == "imported", (
         "a detach takes nothing from the document"
     )
@@ -1384,14 +1388,6 @@ async def test_a_name_whose_delete_still_runs_can_be_taken(
     ("change", "method", "path", "body", "expect", "not_expect"),
     [
         (
-            "create",
-            "POST",
-            "/api/collections",
-            {"name": "adr", "description": "ADRs."},
-            "adr: ADRs",
-            None,
-        ),
-        (
             "describe",
             "PUT",
             "/api/collections/notes/description",
@@ -1420,6 +1416,7 @@ async def test_a_collection_change_refreshes_every_installation(
     await claude.record_installation(directory)
     for name in ("notes", "other"):
         await client.post("/api/collections", json={"name": name})
+        await holding_a_document(name)
     skill, rule = claude.skill_path(directory), claude.rule_path(directory)
 
     async def names(text: str) -> bool:
@@ -1436,6 +1433,35 @@ async def test_a_collection_change_refreshes_every_installation(
     if not_expect is not None:
         assert f"{not_expect};" not in skill.read_text(), f"{change}: the old name is gone"
         assert f"currently {not_expect}" not in rule.read_text(), f"{change}: the old name is gone"
+
+
+async def test_a_collection_is_named_from_its_first_indexed_document_to_its_last(
+    client: AsyncTestClient, tmp_path: Path
+) -> None:
+    """An empty collection answers every search with nothing, so the skill and rule leave it out:
+    a membership that indexes or leaves rewrites them, not only a change to the collection."""
+    await client.post("/api/init", json=NO_MODELS)
+    directory = claude_installed(tmp_path / "project" / ".claude")
+    await claude.record_installation(directory)
+    skill, rule = claude.skill_path(directory), claude.rule_path(directory)
+
+    async def named() -> bool:
+        return all("currently adr: ADRs" in path.read_text() for path in (skill, rule))
+
+    await client.post("/api/collections", json={"name": "adr", "description": "ADRs."})
+    await until(refresh_settled, "the create's refresh ended")
+    assert not await named(), "created empty, it is not named yet"
+
+    await holding_a_document("adr")
+    await until(named, "its first indexed document named it")
+
+    detached = await client.delete("/api/collections/adr/documents/adr.md")
+    assert detached.status_code == 204, detached.text
+
+    async def unnamed() -> bool:
+        return not any("adr" in path.read_text() for path in (skill, rule))
+
+    await until(unnamed, "its last document leaving unnamed it")
 
 
 async def test_deleting_a_document_removes_it_from_every_collection(
@@ -1456,10 +1482,9 @@ async def test_deleting_a_document_removes_it_from_every_collection(
     assert (await client.get("/api/documents/guide.md")).status_code == 404
     for name in ("alpha", "beta"):
         assert (await client.get(f"/api/collections/{name}/documents")).json()["items"] == []
-        assert (await client.get(f"/api/collections/{name}")).json()["counts"]["total"] == 0
-        scoped = {"q": "lancedb", "collections": name}
-        found = await client.get("/api/search/explore", params=scoped)
-        assert found.json() == [], "the rows go from every collection's index too"
+        info = (await client.get(f"/api/collections/{name}")).json()
+        assert info["counts"]["total"] == 0
+        assert info["index"]["num_rows"] == 0, "the rows go from every collection's index too"
 
 
 async def test_reading_one_document(client: AsyncTestClient) -> None:
@@ -1667,6 +1692,10 @@ async def test_session_search_returns_each_passage_once(client: AsyncTestClient)
     assert shared["collection"] == "alpha", "the first collection of the session is credited"
 
 
+# keep.md sits in both collections, so neither is left empty when guide.md goes (an empty one is
+# refused by name); its chunks answer once, from the first collection named
+KEPT_IN_OTHER = ("other", "keep.md")
+
 SEARCH_PATHS: dict[str, tuple[str, dict, str]] = {
     # name -> (route, extra arguments, key of the list of results in the answer; "" for the root)
     "explore chunks": ("/api/search/explore", {"granularity": "chunk"}, ""),
@@ -1684,14 +1713,14 @@ SEARCH_PATHS: dict[str, tuple[str, dict, str]] = {
         (
             "nothing",
             {("notes", "guide.md"), ("notes", "keep.md")},
-            {("notes", "guide.md"), ("other", "guide.md"), ("notes", "keep.md")},
+            {("notes", "guide.md"), ("other", "guide.md"), ("notes", "keep.md"), KEPT_IN_OTHER},
         ),
         (
             "guide.md removing from notes",
             {("other", "guide.md"), ("notes", "keep.md")},
-            {("other", "guide.md"), ("notes", "keep.md")},
+            {("other", "guide.md"), ("notes", "keep.md"), KEPT_IN_OTHER},
         ),
-        ("guide.md deleting", {("notes", "keep.md")}, {("notes", "keep.md")}),
+        ("guide.md deleting", {("notes", "keep.md")}, {("notes", "keep.md"), KEPT_IN_OTHER}),
     ],
 )
 async def test_a_document_on_its_way_out_answers_no_search(
@@ -1712,7 +1741,12 @@ async def test_a_document_on_its_way_out_answers_no_search(
         await client.post("/api/collections", json={"name": name})
     await stage_and_import(client, "guide.md", b"# Guide\n\nA guide to lancedb tables.\n")
     await stage_and_import(client, "keep.md", b"# Keep\n\nWhy lancedb keeps its old versions.\n")
-    for collection, name in (("notes", "guide.md"), ("other", "guide.md"), ("notes", "keep.md")):
+    for collection, name in (
+        ("notes", "guide.md"),
+        ("other", "guide.md"),
+        ("notes", "keep.md"),
+        KEPT_IN_OTHER,
+    ):
         await attach_via_api(client, collection, name)
     if leaving == "guide.md removing from notes":
         await Collection("notes").start_removal(await id_of("guide.md"))
@@ -1937,8 +1971,7 @@ async def test_gaps_group_review_and_replay(ready: AsyncTestClient, tmp_path: Pa
     source.write_text("# Zebra\n\nzebra stripes run across the flank\n")
     imported = await document.import_path(str(source))
     await document.set_status(imported.id, DocumentStatus.IMPORTED)
-    await Collection("notes").add(imported.id)
-    await Collection("notes").set_member_status(imported.id, MemberStatus.INDEXED)
+    await indexed_member("notes", imported.id)
     await seed_index("notes", imported.name, "zebra stripes run across the flank")
     await _converted(imported.name, "zebra stripes run across the flank\n")
     (closed,) = (await ready.post("/api/gaps/replay", json={"ids": [newest]})).json()
@@ -2120,9 +2153,7 @@ def _chunk(markdown: str, start: str, end: str, heading: str = "Retrieval") -> C
 async def _member(collection: str, doc: str) -> None:
     """Make an imported document a member of a collection without running its index; the chunks
     are seeded by hand right after (as the `ready` fixture does with `seed_index`)."""
-    found = await Collection.get(collection)
-    await found.add(await id_of(doc))
-    await found.set_member_status(await id_of(doc), MemberStatus.INDEXED)
+    await indexed_member(collection, await id_of(doc))
 
 
 async def _guide_with_two_chunks(client: AsyncTestClient) -> None:
@@ -2442,17 +2473,20 @@ async def test_a_word_no_excerpt_holds_is_searched_for_once_more(
     assert answer["missing_terms"] == []
 
 
-async def test_the_probed_excerpt_comes_past_the_budget_the_sections_were_cut_to(
+async def test_the_probed_excerpt_takes_its_room_in_the_budget_first(
     client: AsyncTestClient, caplog
 ) -> None:
-    """Two order sections rank, the budget keeps one of them, and "inventory" is in neither: the
-    probe's passage still joins, past the budget, since the cut came before it."""
+    """An order section and the stock note rank, and the budget keeps the order section alone, so
+    "inventory" is in nothing kept. The probe finds the stock note again: the only evidence for
+    that word, it takes its room first, where a ranked passage after the first would not fit."""
     await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "shop"})
     for name, body in (("orders.md", ORDERS_MD), ("stock.md", STOCK_MD)):
         await stage_and_import(client, name, body.encode())
         await attach_via_api(client, "shop", name)
-    overrides = {"search": {"max_answer_chars": 60}}
+    # one excerpt of a short passage fits, a second does not
+    room = section.EXCERPT_CHARS + section.SPAN_CHARS + 200
+    overrides = {"search": {"answer_budget_chars": room}}
     assert (await client.put("/api/collections/shop/overrides", json=overrides)).is_success
     question = "How does order reconciliation against the ledger keep inventory consistent?"
 
@@ -2462,8 +2496,9 @@ async def test_the_probed_excerpt_comes_past_the_budget_the_sections_were_cut_to
     assert response.status_code == 200, response.text
     answer = response.json()
     logged = {r.msg["event"]: r.msg for r in caplog.records if isinstance(r.msg, dict)}
-    assert logged["search_budget"]["cut"] == 1, "one order section cut to the budget"
-    assert (logged["search_probe"]["found"], logged["search_probe"]["joined"]) == (True, False)
+    assert logged["search_budget"]["cut"] == 1, "the stock note cut to the budget"
+    probe_log = logged["search_probe"]
+    assert (probe_log["found"], probe_log["joined"], probe_log["cut"]) == (True, False, 0)
     assert [one["document"] for one in answer["excerpts"]] == ["orders.md", "stock.md"]
     probed = answer["excerpts"][-1]
     assert probed["score"] == 0.0 and [one["score"] for one in probed["spans"]] == [0.0], (
@@ -2649,7 +2684,7 @@ async def test_the_answer_budget_cuts_the_last_sections(client: AsyncTestClient,
     await seed_chunks(
         "notes", "sections.md", split(markdown, ChunkSettings(chunk_size=200, chunk_merge_below=0))
     )
-    overrides = {"search": {"max_answer_chars": 100}}
+    overrides = {"search": {"answer_budget_chars": 100}}
     assert (await client.put("/api/collections/notes/overrides", json=overrides)).is_success
 
     with caplog.at_level(logging.INFO):
@@ -2660,7 +2695,8 @@ async def test_the_answer_budget_cuts_the_last_sections(client: AsyncTestClient,
     assert only["header"] == "Guide > Storage", "the best section, over the budget, stays"
     logged = [r.msg for r in caplog.records if isinstance(r.msg, dict)]
     (cut,) = [msg for msg in logged if msg["event"] == "search_budget"]
-    assert cut["cut"] == 1
+    assert (cut["cut"], cut["sections_cut"]) == (2, 1), "its second passage, and the next section"
+    assert len(only["spans"]) == 1
 
 
 async def test_one_question_with_a_context_is_the_single_search(client: AsyncTestClient) -> None:
@@ -3152,6 +3188,7 @@ async def test_a_growth_bias_at_either_end_is_saved_and_searched_with(
 ) -> None:
     await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
+    await holding_a_document("notes")
 
     body = {"search": {"grow_bias": bias}}
     saved = await client.put("/api/collections/notes/overrides", json=body)
@@ -3183,6 +3220,7 @@ async def test_a_refused_search_override_is_never_saved(
     otherwise be stored, and every later read of the collection would fail on it."""
     await client.post("/api/init", json=NO_MODELS)
     await client.post("/api/collections", json={"name": "notes"})
+    await holding_a_document("notes")
     await client.put("/api/collections/notes/overrides", json={"search": {"limit": 3}})
 
     refused = await client.put("/api/collections/notes/overrides", json={"search": search})
@@ -3635,6 +3673,7 @@ async def test_startup_refreshes_every_installation(
     """A change a crash lost before its refresh, or a template an upgrade changed, reaches the
     installations at the next start."""
     await Collection.create("roasting", "Coffee.")
+    await holding_a_document("roasting")
 
     await until(
         refresh_settled, "the create's own refresh ended"
@@ -3833,6 +3872,7 @@ async def test_text_search_validates_page_size_and_cursor(
     await client.post("/api/init", json=NO_MODELS)
     for collection in ("alpha", "beta"):  # the collections the cursors above were issued for
         await client.post("/api/collections", json={"name": collection})
+        await holding_a_document(collection)
 
     response = await client.get("/api/search/text", params={"q": "haskell", **params})
 

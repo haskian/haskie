@@ -6,9 +6,9 @@ placed" answered by five passages on orders, none with "inventory" in it. So aft
 kept, each question's words (`thin.terms`: no stopwords, no short ones) are looked for in their
 text and headings (`vocabulary`). The words none of them holds are searched for by full text,
 alone, and the best new passage that search finds joins the answer (`retrieval.probe_gaps`): in the
-kept section it belongs to, else as one excerpt past `limit` and the budget, which the sections
-were cut to before it (`section.within`). Taking a ranked section's slot instead would trade one
-gap for another: a search of one excerpt would lose its whole answer.
+kept section it belongs to, else as one excerpt past `limit`. Taking a ranked section's slot instead
+would trade one gap for another: a search of one excerpt would lose its whole answer. It is the
+only evidence for those words, so the answer's budget gives it room first (`section.within`).
 
 A synonym defeats this ("invariant" for "consistent"); it asks only for the words a question used,
 in any form the stemmer knows as the same word. What is still missing after that is part of the

@@ -35,8 +35,14 @@ as weak in `uncovered` when it scores under the bar its models were measured at.
   passage to last). `section_id` names the excerpt's section.
 - read: `score` is the best passage's. `collection` is whose index matched.
 - `spans`: one per passage, in document order, each with `header`, `section_id`, `location`,
-  `score`, and when there are any `aspects`, `aspect_scores` and `also_in`. An empty list or map
-  is left out of every answer: no `aspects` for one question.
+  `score`, and when there are any, `aspects` and `also_in`. The excerpt's `aspects` names the
+  questions it answers; a span's `aspects` holds the positions in that list of the ones its
+  passage answers (`[0, 2]`: the excerpt's first and third). An empty list or map is left out of
+  every answer: no `aspects` for one question.
+- The excerpts stay within `answer_budget_chars` (44,000 characters by default), short of the size
+  Claude Code moves out of your context into a file; only the first section's best passage may go
+  past it. Each section's best passage goes in before any section's next one; a passage that does
+  not fit is left out whole.
 - open: `markdown_file` (absolute path), at the lines `location` names (`L10-20`, 1-based).
 - `missing_terms`: with a reranker on, the full-text find joins only when the reranker judges it
   an answer, and scores what the reranker gave it. Without one, its span scores 0. It can also
@@ -145,8 +151,10 @@ A failed call is a tool error with a status code and a message that names the pr
   is not in the collection. Check the name with `list_collections` or `list_documents`. From
   `report_gap`: no search in this session asked that question, word for word, in the last hour.
 - **409**: the document name is taken, the same file is already imported (the message names that
-  document: use it), or the document is not `imported` yet. From `report_gap`:
-  that search failed, so there is nothing to judge.
+  document: use it), or the document is not `imported` yet. From a search: a collection named in
+  `collections` has no document to search yet (none indexed, or all on their way out); leave it
+  out. From
+  `report_gap`: that search failed, so there is nothing to judge.
 - **422**: a bad argument. For example: `limit` out of range or below the number of parts, no
   parts or more than 5, a question over 500 characters, a `context` over 200 characters, a page
   size over 1000, an unknown `status` or `sort`, a `path` that is relative or missing, or a file

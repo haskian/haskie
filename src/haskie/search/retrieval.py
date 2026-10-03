@@ -680,11 +680,15 @@ async def sections(
 
 
 def budget(groups: list[section.Group], where: Plan) -> list[section.Group]:
-    """The groups that fit the answer's budget (`section.within`), the last cut first."""
-    kept = section.within(groups, where.settings.max_answer_chars)
-    if len(kept) < len(groups):
+    """The passages that fit the answer's budget (`section.within`), each whole."""
+    kept = section.within(groups, where.settings.answer_budget_chars)
+    cut = section.passages(groups) - section.passages(kept)
+    if cut:
         _log.info(
-            "search_budget", cut=len(groups) - len(kept), chars=sum(one.chars for one in kept)
+            "search_budget",
+            cut=cut,
+            sections_cut=len(groups) - len(kept),
+            chars=sum(one.cost for one in kept),
         )
     return kept
 
@@ -709,7 +713,7 @@ async def fill(
     ]
     wanted = set().union(*nears, (chunk_key(hit) for one in groups for hit in one.hits))
     rows = await _rows_at(where, wanted)
-    budget = where.settings.max_answer_chars
+    budget = where.settings.answer_budget_chars
     # a question tags only what it judged an answer (`aspects.tagged`): what the fill adds was
     # valued against the passages kept, not judged, so it brings no tag of its own
     settings = where.settings
@@ -770,7 +774,7 @@ def _fill(
             at, group, {key: weighed[key] for key in nears[at] if key in weighed}, reach
         )
     ]
-    chosen = filling.choose(found, budget - sum(one.chars for one in groups))
+    chosen = filling.choose(found, budget - sum(one.cost for one in groups))
     taken: dict[int, list[filling.Candidate]] = {}
     for one in chosen:
         taken.setdefault(one.group, []).extend(one.chunks)
@@ -846,7 +850,8 @@ async def probe_gaps(
     scored against each question whose words are missing, dropped under the floor, tagged with
     the questions it clears it for. Without one, its BM25 score is on another scale than the
     ranked passages', so it scores 0 and tags no question: holding a missing word is not an
-    answer."""
+    answer. It is the only evidence for those words, so the answer's budget is spent again with it
+    first (`section.within`), which may cut the last passages kept."""
     # inline, not in a worker thread: stems are cached (`probe.stem`), see `probe.vocabulary`
     wanted = probe.missing(questions, probe.covered(groups))
     if not wanted:
@@ -872,11 +877,15 @@ async def probe_gaps(
             hits=[msgspec.structs.replace(hit, score=0.0) for hit in fresh[0].hits],
             score=0.0,
         )
+    cut = 0
     if fresh:
         (one,) = await _grouped([best], where, 1)
         placed = probe.placed(groups, one)
-        joined, groups = len(placed) == len(groups), placed
-    _log.info("search_probe", terms=list(wanted), found=bool(fresh), joined=joined)
+        joined = len(placed) == len(groups)
+        # the only evidence for its words, so it takes its room first
+        groups = section.within(placed, where.settings.answer_budget_chars, first=one.ranges[0])
+        cut = section.passages(placed) - section.passages(groups)
+    _log.info("search_probe", terms=list(wanted), found=bool(fresh), joined=joined, cut=cut)
     return groups
 
 
@@ -1117,11 +1126,18 @@ async def scope(session_id: str | None, collections: str | None) -> list[str]:
     """Which collections a search covers: the comma-separated `collections` if the caller named
     any, else the session's selection if it has one, else every collection.
 
-    A name nobody owns is a mistake in the request, not an empty result. A session's stale name
-    is different: `plan` skips it, because the caller did not choose it just now.
+    A name nobody owns, or one with no document to search, is a mistake in the request, not an
+    empty result. A session's selection is different: the caller did not choose it just now, so
+    a collection in it that is gone or has no document to search is skipped.
     """
     named = text.split_collections(collections)
     if named:
         return await text.checked_names(named)
     selected = await session.collections_for(session_id) if session_id else []
-    return selected or await text.checked_names(None)
+    if not selected:
+        return await text.checked_names(None)
+    searchable = await Collection.searchable(selected)
+    for name in selected:
+        if name not in searchable:
+            _log.info("session_collection_skipped", collection=name)
+    return searchable

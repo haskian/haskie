@@ -75,8 +75,9 @@ async def explore(
     what searches chunks and passages.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
-    `session_id`, else every collection. `limit` defaults to that collection's setting when one
-    collection is searched, else to the user's.
+    `session_id`, else every collection; only one with a document to search, and naming one that
+    has none is a 409. `limit` defaults to that collection's setting when one collection is
+    searched, else to the user's.
 
     Where it looks, narrower: `document_ids` keeps to these documents and `section_ids` to these
     sections and every section under them, by the ids `search_sections` and each result carry; both
@@ -137,8 +138,8 @@ async def agent_search_excerpts(
     (stopwords aside) that no excerpt's text or headings hold, a form of the word counting ("keeps"
     holds "keep"). Before answering, the search looks for those words once more by full text, and
     the best passage it finds joins the answer: in the section it belongs to, or as one excerpt past
-    `limit` and the budget. What is still missing after that is what the sources do not say in those
-    words; a synonym in the text does not count.
+    `limit`, and it takes its room in the answer first. What is still missing after that is what
+    the sources do not say in those words; a synonym in the text does not count.
 
     Each excerpt is one section of one document: the largest heading whose text is at most a few
     pages, with every passage of it the search matched, in document order, and the text around
@@ -146,7 +147,9 @@ async def agent_search_excerpts(
     passage opens with the headings it sits under below `header`, and `[…]` marks text skipped
     between two of them because it did not match. Chunks are cut at headings, blank lines,
     blocks and sentences, so each passage begins and ends where the author stopped. `limit`
-    counts excerpts, 10 by default, and the sections are cut to `max_answer_chars` characters.
+    counts excerpts, 10 by default. The excerpts stay within `answer_budget_chars` characters, but
+    for the first section's best passage, which always stays: each section's best passage goes in
+    before any section's next one, and a passage that does not fit is left out whole.
     Cite the excerpt by its `header` (the section's heading path) and `location` (document, pages,
     lines), or one passage by its span's `header` and `location`. `spans` lists the passages, each
     with its lines, its score, the questions it answers and the places that repeat it.
@@ -155,8 +158,9 @@ async def agent_search_excerpts(
     Several questions at once: when parts of a question may be answered in different places, pass
     each part as its own `q` (2 to 5), and the background they share once as `context`. Each part is
     searched on its own and the parts take turns at the `limit` slots, so one part cannot crowd out
-    the others. Each span's `aspects` lists the questions it answers and `aspect_scores` how well it
-    matched each (its best chunk for it), and an excerpt's the questions any of its spans does. With
+    the others. Each excerpt's `aspects` lists the questions it answers, and each span's `aspects`
+    the positions in that list of the ones its passage answers: `[1]` is the excerpt's second.
+    With
     a reranker on, a tag is its judgement: chunks it scores under the floor are dropped. Without
     one, a tag is rank, not a judgement: a vector or hybrid search finds a nearest passage for any
     question, so read the text before citing it as the answer to a part. A question in `uncovered`
@@ -179,7 +183,8 @@ async def agent_search_excerpts(
     second source.
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
-    `session_id`, else every collection; `searched` names them. Run `search_sections` first when
+    `session_id`, else every collection; only one with a document to search, and naming one that
+    has none is a 409. `searched` names them. Run `search_sections` first when
     the question is broad, when you lack the sources' words for it, or when it asks which
     documents cover a topic. No excerpts is an answer: the sources do not cover this. Say so
     rather than guess.
@@ -202,11 +207,10 @@ async def agent_search_excerpts(
             `rerank_with_context` setting is on).
         session_id: The conversation's id; the search then shows in that session's history.
     """
-    return agent.view(
+    return agent.answer(
         await _search_excerpts(
             q, context, session_id, collections, limit, document_ids, section_ids
-        ),
-        agent.Answer,
+        )
     )
 
 
@@ -302,7 +306,8 @@ async def agent_search_sections(
 
     Where it looks: the comma-separated `collections` if given, else the collections selected for
     `session_id`, else every collection, and only the documents `document_ids` names, when
-    given; `searched` names the collections. No sections means the collections hold nothing that
+    given; only a collection with a document to search, and naming one that has none is a 409.
+    `searched` names the collections. No sections means the collections hold nothing that
     matches, within `document_ids` when given.
 
     Args:
@@ -388,7 +393,8 @@ async def search_text(
     cursor: str | None = None,
     session_id: str | None = None,
 ) -> Page[Hit]:
-    """Full-text (BM25) search across all collections, or the comma-separated `collections`.
+    """Full-text (BM25) search across all collections, or the comma-separated `collections`:
+    only one with a document to search, and naming one that has none is a 409.
 
     No embedding model and no session needed. A chunk held by several collections is returned
     once. Pass the `next_cursor` of a response back as `cursor` for the next page; it is null on

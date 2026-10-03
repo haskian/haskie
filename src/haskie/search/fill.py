@@ -27,7 +27,7 @@ With a reranker on, `fill_values = absolute` (an experiment) values a chunk as d
 penalty. It needs no kept chunks to compare with, but it trusts the calibration: an uncalibrated
 reranker's curve is the identity.
 
-What is added is bounded by the room the answer's budget (`max_answer_chars`) leaves after its
+What is added is bounded by the room the answer's budget (`answer_budget_chars`) leaves after its
 sections (`section.within`), spent on the fills worth most per character first. No IO here:
 `retrieval.fill` reads and scores the chunks.
 """

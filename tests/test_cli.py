@@ -31,6 +31,7 @@ from conftest import (
     claude_installed,
     fresh_attribute,
     holding,
+    holding_a_document,
     refresh_settled,
     text_pdf,
     until,
@@ -889,9 +890,10 @@ def _with_claude(binaries: Path) -> None:
 class InstallCase:
     scope: Scope
     claude_on_path: bool
-    collections: list[tuple[str, str]]
+    collections: list[tuple[str, str]]  # each holds an indexed document
     expect_in_skill: list[str]
     expect_in_output: str
+    empty: list[str] = field(default_factory=list)  # collections holding none, left out
 
 
 INSTALL_CASES = {
@@ -901,6 +903,14 @@ INSTALL_CASES = {
         collections=[("roasting", "Three books on coffee roasting."), ("adr", "")],
         expect_in_skill=["roasting: Three books on coffee roasting", "adr"],
         expect_in_output="registered the haskie MCP server",
+    ),
+    "a collection holding no indexed document is left out": InstallCase(
+        scope=Scope.PROJECT,
+        claude_on_path=True,
+        collections=[("roasting", "Coffee.")],
+        expect_in_skill=["currently roasting: Coffee"],
+        expect_in_output="collections in the trigger: roasting\n",
+        empty=["Messaging-Systems"],
     ),
     "still writes the skill without the claude cli": InstallCase(
         scope=Scope.PROJECT,
@@ -923,12 +933,13 @@ INSTALL_CASES = {
         expect_in_skill=["Software-Architecture: DDD, event-driven."],
         expect_in_output="registered the haskie MCP server",
     ),
-    "an empty home still installs": InstallCase(
+    "a home of empty collections still installs, naming none": InstallCase(
         scope=Scope.PROJECT,
         claude_on_path=True,
         collections=[],
         expect_in_skill=["list_collections"],
         expect_in_output="collections in the trigger: none yet",
+        empty=["Messaging-Systems"],
     ),
 }
 
@@ -944,6 +955,9 @@ def test_install_claude(
     _make_home(elsewhere)
     for name, description in case.collections:
         asyncio.run(Collection.create(name, description))
+        asyncio.run(holding_a_document(name))
+    for name in case.empty:
+        asyncio.run(Collection.create(name, "Kafka, RabbitMQ."))
     if case.claude_on_path:
         _with_claude(claude_workspace)
     monkeypatch.setattr(cli_module, "_status", _serves(elsewhere))  # never start a real server
@@ -961,6 +975,8 @@ def test_install_claude(
     for expected in case.expect_in_skill:
         assert expected in written
         assert expected in rule, "the rule names the same collections as the trigger"
+    for name in case.empty:
+        assert name not in written and name not in rule, "an empty collection sends no agent there"
     assert "before answering from memory" in rule, "the rule fires on knowledge questions"
     hooks = json.loads(claude.settings_path(claude.claude_dir(case.scope)).read_text())["hooks"][
         "SessionStart"
@@ -983,11 +999,13 @@ def test_install_claude_refreshes_the_trigger_when_it_is_run_again(
     """Re-running is how the trigger is refreshed after a collection is added."""
     _make_home(elsewhere)
     asyncio.run(Collection.create("roasting", "Coffee."))
+    asyncio.run(holding_a_document("roasting"))
     monkeypatch.setattr(cli_module, "_status", _serves(elsewhere))
     arguments = ["install", "claude", "--home", str(elsewhere), "--scope", "project"]
 
     runner.invoke(cli, arguments)
     asyncio.run(Collection.create("adr", "Architecture decisions."))
+    asyncio.run(holding_a_document("adr"))
     again = runner.invoke(cli, arguments)
 
     assert again.exit_code == 0, again.output
@@ -1037,6 +1055,7 @@ async def test_refresh_installations(case: RefreshCase, tmp_path: Path) -> None:
     `uninstall` does that."""
     home.use((tmp_path / case.home_name).resolve())
     await Collection.create("roasting", "Three books on coffee roasting.")
+    await holding_a_document("roasting")
     hooked = None if case.hooked_home is None else tmp_path / case.hooked_home
     tested = claude_installed(tmp_path / "tested" / ".claude", hooked)
     beside = claude_installed(tmp_path / "beside" / ".claude")

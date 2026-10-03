@@ -21,9 +21,12 @@ flowchart LR
 
 ## The shared ranking
 
-1. **Scope.** The `collections` argument, else the session's collections, else all of them.
-   Narrower, when given: `document_ids` and `section_ids` (see "Keeping to documents and
-   sections" below).
+1. **Scope.** The `collections` argument, else the session's collections, else all of them, and
+   only collections with a document to search: an indexed member, or one being indexed again,
+   that is not on its way out. Naming one without any is refused (409), since its empty answer
+   would read as "the sources do not cover it". A session's or the default scope skips it, and
+   `searched` names what is left. Narrower, when given: `document_ids` and `section_ids` (see
+   "Keeping to documents and sections" below).
 2. **Retrieve.** Each collection runs `hybrid` (vector and BM25), `vector` or `fts`. A search of one
    collection lets LanceDB fuse the two halves; a search of several reads them apart, for the merge.
    Without an embedding model everything is `fts`. The query is embedded once, and up to 8
@@ -130,8 +133,9 @@ LanceDB's full-text index uses. So "keeps" holds "keep", "deployment" holds "dep
 "consistency" holds "consistent", while "category" does not hold "cat". The words none of them
 holds are searched for once more by BM25 alone, and the best passage that search finds that no
 section holds yet joins the answer. It joins the kept section it belongs to, or comes after the
-others as one excerpt past `limit` and past the budget, which the sections were cut to before it.
-Taking the last ranked section's slot instead would trade one gap for another, and a search of one
+others as one excerpt past `limit`. It is the only evidence for those words, so it takes its room
+in the budget first, which may cut the last passages kept (see "Excerpts" above). Taking the last
+ranked section's slot instead would trade one gap for another, and a search of one
 excerpt would lose its whole answer. With a reranker on, what the search finds is judged as the
 ranked chunks are: scored against each question whose words are missing, dropped under the
 reranker's floor (see "Several questions at once"), and tagged with the questions it clears.
@@ -191,10 +195,21 @@ worth taking, so passages grow further and more gaps fill. Below 0 only a strong
 even a chunk as good as the best is worth 0, so nothing grows. Under `fill_values = absolute` the
 bias moves dsRAG's penalty: 0.1 makes it 0.08. The same bias applies to short passages.
 
-`max_answer_chars` (36,000) bounds what one excerpts search returns. Right after grouping, a
-`budget` step cuts the sections to it, the last first, though the first section always stays
-(`search_budget` logs how many went). The fills then go in, worth most per character first, while
-they fit the room left. By default the fill does not ask the reranker even when one is on: scoring
+`answer_budget_chars` (44,000) bounds what one excerpts search returns: the text, and what each
+excerpt and passage carry beside it in the agent's answer (`section.Group.cost`, measured on real
+answers). The default keeps an answer short of the 50,000 characters past which Claude Code moves a
+tool result out of its context into a file. Right after grouping, a `budget` step spends it by
+passage, each kept whole: each section's best passage first, in the order the sections were
+picked, which takes the questions in turns; then the further passages of the kept sections, the
+next best across all of them first, so one section's weak passages never go in before another's
+strong one. One that does not fit is skipped and the next is tried, so a long section no longer
+takes a short answer to another question out with it. Repeats take no room: the passages come
+folded, a passage another says again sitting in its `also_in`. The first section's best passage always stays
+(`search_budget` logs what went). The probe for missing words then reads what was kept, and its
+passage, the only evidence for those words, takes its room first: the budget is spent again with
+it ahead of the rest (`search_probe` logs what that cut). The fills then go in, worth most per character first, while they fit the room left: a
+ranked passage always comes before a fill, which was valued against the kept passages, not judged
+against the question. By default the fill does not ask the reranker even when one is on: scoring
 every chunk near every section against every question would take seconds. Each search logs
 `search_fill` with the signal and what it added.
 
@@ -527,7 +542,10 @@ high for: the part that picked it, every part that joined it or ranks it among i
 and those of every place folded into it; it keeps the score it was picked with. A vector or hybrid
 search finds nearest passages for any part, even one the sources say nothing about, so without a
 reranker a tag is not proof of an answer. An excerpt's `aspects` joins its spans', and its
-`aspect_scores` holds each part's best. A part no excerpt lists found nothing, and the answer's
+`aspect_scores` holds each part's best. In an agent's answer a span names its parts by position
+in the excerpt's `aspects` (`[1]`), and carries no `aspect_scores`: each part written out in full
+on every span took a fifth of a long answer. A part no
+excerpt lists found nothing, and the answer's
 `uncovered` names it. One question, or a list that deduplicates to one, is the single search, its
 context read the same way, and its `aspects` is empty. A `limit` below the number of parts is
 refused (422).
@@ -545,10 +563,10 @@ building its first full-text index contributes nothing: LanceDB refuses a BM25 q
 `limit`, `candidates`, `mode`, `fusion`, `rrf_k`, `vector_weight`, `bm25_weight`, `nprobes`,
 `refine_factor`, `reranker`, `reranker_model`, `rerank_with_context`,
 `min_rerank_score`, `rerank_excerpts`, `score_fold`, `min_passage_chars`, `max_passage_grow`,
-`grow_bias`, `fill_values`, `max_section_chars` and `max_answer_chars` each have a user default and
+`grow_bias`, `fill_values`, `max_section_chars` and `answer_budget_chars` each have a user default and
 a description in the UI, and a collection can override them. The UI groups the ones that decide how
 passages expand under Expansion: `min_passage_chars`, `max_passage_grow`, `fill_values`,
-`grow_bias`, `max_section_chars` and `max_answer_chars`. In the shared ranking, each collection
+`grow_bias`, `max_section_chars` and `answer_budget_chars`. In the shared ranking, each collection
 retrieves with its own overrides: `mode`, `nprobes` and `refine_factor`. The settings of the merged
 ranking (`fusion`, `rrf_k`, the two weights, `candidates`, the reranker) and of every step after it
 come from the collection only when it is the one collection in scope, and from the user otherwise.
