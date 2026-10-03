@@ -695,6 +695,15 @@ def test_settings_stored_before_the_cpu_budget_still_decode(name: str, stored: s
     assert loaded.pipeline.cpu_budget == PipelineSettings().cpu_budget, "the new field defaults"
 
 
+def test_a_stored_text_budget_gives_way_to_the_answer_budget() -> None:
+    """`max_answer_chars` bounded the text alone; `answer_budget_chars` bounds the agent's whole
+    answer. The old key is dropped as unknown, so a home keeps no number meant for the other."""
+    loaded = settings._decode('{"search": {"max_answer_chars": 36000, "max_section_chars": 9000}}')
+
+    assert loaded.search.max_section_chars == 9000, "the fields that stayed are still read"
+    assert loaded.search.answer_budget_chars == SearchSettings().answer_budget_chars == 44000
+
+
 def test_retention_defaults_and_docs() -> None:
     """Four weeks of operation history, and one knob that says so."""
     assert RetentionSettings().operation_days == 28

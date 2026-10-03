@@ -32,7 +32,7 @@ from haskie.collection.index import (
     row_score,
     span_key,
 )
-from haskie.errors import InvalidInput, NotFound
+from haskie.errors import Conflict, InvalidInput, NotFound
 from haskie.paging import DEFAULT_PAGE_SIZE, OffsetCursor, Order, Page, check_page_size
 from haskie.search import log
 from haskie.settings import SearchMode, load_user_settings
@@ -80,19 +80,26 @@ def parse_cursor(cursor: str | None, q: str, collections: list[str], page_size: 
 
 async def checked_names(collections: list[str] | None) -> list[str]:
     """The collections a search covers: the names the caller gave, deduplicated and in its own
-    order, or every collection when it named none.
+    order, or every collection holding an indexed document when it named none
+    (`Collection.searchable`).
 
-    A name nobody owns is a mistake in the request, not an empty result. A session's stale name
-    is different: `retrieval.plan` skips it, because the caller did not choose it just now.
+    A name nobody owns is a mistake in the request, not an empty result, and so is a collection
+    with no indexed document: it answers with nothing, and an empty answer would read as "the
+    sources do not cover it". A session's stale name is different: `retrieval.plan` skips it,
+    because the caller did not choose it just now.
     """
     known = await Collection.names()
     if not collections:
-        return known
+        return await Collection.searchable(known)
     names = list(dict.fromkeys(collections))
     owned = set(known)
     unknown = next((name for name in names if name not in owned), None)
     if unknown is not None:
         raise NotFound(f"collection not found: {unknown}")
+    searchable = await Collection.searchable(names)
+    empty = next((name for name in names if name not in searchable), None)
+    if empty is not None:
+        raise Conflict(f"collection has no document to search: {empty}")
     return names
 
 

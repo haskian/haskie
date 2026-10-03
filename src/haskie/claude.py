@@ -355,7 +355,11 @@ def _session_start(settings: Any, settings_file: Path) -> list[dict[str, Any]]:
 
 
 async def read_collections() -> "list[CollectionSummary]":
-    """Straight from the database, not over HTTP: installing must work with the server stopped.
+    """The collections the trigger names: those a search can find anything in
+    (`Collection.searchable`). One with none answers every search with nothing, so naming it would
+    send an agent there for nothing.
+
+    Straight from the database, not over HTTP: installing must work with the server stopped.
 
     `collection` is imported here rather than at module level: it reaches LanceDB, and the CLI
     imports this module on every invocation for `MCP_URL`.
@@ -364,7 +368,8 @@ async def read_collections() -> "list[CollectionSummary]":
     from haskie.paging import MAX_PAGE_SIZE, PageRequest
 
     page = await Collection.page(PageRequest(page_size=MAX_PAGE_SIZE))
-    return page.items
+    searchable = set(await Collection.searchable([one.name for one in page.items]))
+    return [collection for collection in page.items if collection.name in searchable]
 
 
 # --- keeping installations in step with the collections ---------------------------------------

@@ -30,6 +30,7 @@ from sqlalchemy import (
     delete,
     func,
     not_,
+    or_,
     select,
     tuple_,
     union,
@@ -76,6 +77,10 @@ ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = (
     MemberStatus.INDEXING,
     MemberStatus.REMOVING,
 )
+
+# The moves after which a collection may start or stop answering a search (`Collection.searchable`),
+# so the skill's list of collections is rewritten: indexed, removing, and a failed removal's error.
+_NAMING_MOVES = (MemberStatus.INDEXED, MemberStatus.REMOVING, MemberStatus.ERROR)
 
 # The member listing selects a document row and its membership, which share `status`, `error`
 # and `updated_at`: the membership's are labelled, so a row maps each name to one column.
@@ -255,6 +260,30 @@ class Collection:
         instead, through `page` below."""
         async with db.read() as conn:
             return list(await conn.scalars(select(collections.c.name).order_by(collections.c.name)))
+
+    @staticmethod
+    async def searchable(names: list[str]) -> list[str]:
+        """Those of `names` a search can find anything in, in the order given: each holds a
+        document whose rows are in its table and not on their way out (`LEAVING`). That is an
+        `indexed` membership, or one whose rows an earlier write left (its cache entry named,
+        `set_member_entry`): a re-index, or one that failed, still answers from them."""
+        member = collection_documents.c
+        answering = (
+            _MEMBERS.with_only_columns(member.document_id)
+            .where(
+                member.collection == collections.c.name,
+                or_(member.status == MemberStatus.INDEXED, member.cache_id.is_not(None)),
+                *(not_(leaving) for leaving in LEAVING),
+            )
+            .exists()  # stops at a collection's first such membership
+        )
+        async with db.read() as conn:
+            found = set(
+                await conn.scalars(
+                    select(collections.c.name).where(collections.c.name.in_(names), answering)
+                )
+            )
+        return [name for name in names if name in found]
 
     @staticmethod
     async def page(request: PageRequest) -> Page[CollectionSummary]:
@@ -688,6 +717,8 @@ class Collection:
                 .values(status=status, error=error, updated_at=time.time())
                 .returning(collection_documents.c.document_id)
             )
+        if moved is not None and status in _NAMING_MOVES:
+            claude.refresh_in_background()  # the skill names only collections a search answers from
         return moved is not None
 
     async def set_member_status(
@@ -748,6 +779,7 @@ class Collection:
         """Detach only: the document, its files and its embedding cache stay."""
         async with db.connect() as conn:
             await conn.execute(delete(collection_documents).where(self._membership(doc)))
+        claude.refresh_in_background()
 
     @staticmethod
     async def holding(docs: set[str], names: list[str]) -> dict[str, list[str]]:

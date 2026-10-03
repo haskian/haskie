@@ -141,22 +141,96 @@ class Group(msgspec.Struct):
         return not all(hit_range.alone for hit_range in self.ranges)
 
     @property
-    def chars(self) -> int:
-        """How long its passages are together."""
-        return sum(hit_range.char_end - hit_range.char_start for hit_range in self.ranges)
+    def cost(self) -> int:
+        """What it costs an agent as an excerpt, in characters of the tool's JSON answer: what the
+        excerpt carries beside its text (`EXCERPT_CHARS`), each question it answers, which it names
+        in full, and each passage (`passage_cost`)."""
+        labels = {label for hit_range in self.ranges for label in hit_range.aspects}
+        return (
+            EXCERPT_CHARS
+            + sum(len(label) + ASPECT_CHARS for label in labels)
+            + sum(passage_cost(hit_range) for hit_range in self.ranges)
+        )
 
 
-def within(groups: list[Group], budget: int) -> list[Group]:
-    """The groups whose passages fit `budget` characters together, in order. The first always
-    stays: an answer of one section over the budget beats no answer."""
-    kept: list[Group] = []
+# Beside its text, what an excerpt and each of its passages (a span) cost in the tool's answer
+# (`api.agent.Excerpt`, `Span`): the field names, ids, citation, score and path every one carries.
+# Rounded up from 19 real excerpts of 24 spans: an excerpt's fields took at most 567 characters,
+# a span's 295. Text is counted raw, so the JSON escapes of its newlines and quotes (under 1%) and
+# the headings an excerpt opens its passages with ride on these too.
+EXCERPT_CHARS = 600
+SPAN_CHARS = 300
+ASPECT_CHARS = 4  # a question's quotes and separator
+
+
+def passage_cost(hit_range: HitRange) -> int:
+    """What one passage costs in the tool's answer: its fields (`SPAN_CHARS`), its text, and the
+    places it folded in (`also_in`), counted as their full references encode, a bound on the
+    agent's own, which keep fewer fields (`api.agent.Place`)."""
+    folded = len(msgspec.json.encode(hit_range.also_in)) if hit_range.also_in else 0
+    return SPAN_CHARS + hit_range.char_end - hit_range.char_start + folded
+
+
+def passages(groups: list[Group]) -> int:
+    """How many passages the groups hold together."""
+    return sum(len(one.ranges) for one in groups)
+
+
+def within(groups: list[Group], budget: int, first: HitRange | None = None) -> list[Group]:
+    """The passages of `groups` that fit `budget` characters of answer (`Group.cost`), each whole:
+    the ranking judged its chunks together.
+
+    Room goes by passage, not by section, so one long section no longer takes a short answer to
+    another question out with it. First `first`, the passage found for words nothing else holds
+    (`retrieval.probe_gaps`), the only evidence for them; then each section's best passage that
+    stands alone, in the groups' order, which already takes the questions in turns; then the
+    further passages of the sections kept, the next best across all of them first
+    (`HitRange.rank`), so a section's weak passages never go in before another's strong one. One
+    that does not fit is skipped and the next is tried. The first section's best passage always
+    stays: an answer over the budget beats no answer.
+
+    Repeats take no room: the ranges come folded (`collapse`), a passage another one says again
+    sitting in its `also_in`, never in the pool.
+    """
+    kept: list[set[int]] = [set() for _ in groups]
+    named: list[set[str]] = [set() for _ in groups]
     used = 0
-    for one in groups:
-        if kept and used + one.chars > budget:
-            break
-        kept.append(one)
-        used += one.chars
-    return kept
+
+    def take(at: int, index: int, always: bool = False) -> None:
+        nonlocal used
+        hit_range = groups[at].ranges[index]
+        added = (
+            passage_cost(hit_range)
+            + sum(len(label) + ASPECT_CHARS for label in set(hit_range.aspects) - named[at])
+            + (0 if kept[at] else EXCERPT_CHARS)
+        )
+        if always or used + added <= budget:
+            kept[at].add(index)
+            named[at].update(hit_range.aspects)
+            used += added
+
+    for at, one in enumerate(groups):
+        for index, hit_range in enumerate(one.ranges):
+            if hit_range is first:
+                take(at, index)
+    for at, one in enumerate(groups):
+        best = next(index for index, hit_range in enumerate(one.ranges) if not hit_range.alone)
+        if best not in kept[at]:
+            take(at, best, always=at == 0)
+    further = sorted(
+        ((at, index) for at, one in enumerate(groups) for index in range(len(one.ranges))),
+        key=lambda place: groups[place[0]].ranges[place[1]].rank,
+    )
+    for at, index in further:
+        if kept[at] and index not in kept[at]:
+            take(at, index)
+    return [
+        msgspec.structs.replace(
+            one, ranges=[each for index, each in enumerate(one.ranges) if index in kept[at]]
+        )
+        for at, one in enumerate(groups)
+        if kept[at]
+    ]
 
 
 def group(
@@ -182,8 +256,9 @@ def group(
             where = section_of(chunks, first.seq, max_chars, kept)
             placed.append(((first.collection, first.document_id, where), hit_range))
     groups: dict[tuple[str, str, Section], Group] = {}
-    for key, hit_range in placed:
-        groups.setdefault(key, Group(*key, ranges=[])).ranges.append(hit_range)
+    for rank, (key, hit_range) in enumerate(placed):
+        ranked = msgspec.structs.replace(hit_range, rank=rank)
+        groups.setdefault(key, Group(*key, ranges=[])).ranges.append(ranked)
     return [one for one in groups.values() if one.standing][:limit]
 
 

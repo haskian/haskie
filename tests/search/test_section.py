@@ -90,6 +90,11 @@ def _range(
     return msgspec.structs.replace(found, aspects=aspects or [])
 
 
+def _shape(groups: list[section.Group]) -> list[tuple[tuple[str, ...], list[int]]]:
+    """Each group's heading path and the first chunk of each passage it kept."""
+    return [(one.section.path, [hit_range.seq_start for hit_range in one.ranges]) for one in groups]
+
+
 def _text(seq: int) -> str:
     return CHUNKS[seq - 1].text
 
@@ -338,30 +343,143 @@ def test_passages_group_by_section_and_the_sections_take_the_slots(
 ) -> None:
     groups = section.group(found, placed, 1000, limit)
 
-    shape = [(one.section.path, [kept.seq_start for kept in one.ranges]) for one in groups]
-    assert shape == expected, name
+    assert _shape(groups) == expected, name
 
 
 # --- within -------------------------------------------------------------------------
 
 
+ONE = section.EXCERPT_CHARS + section.SPAN_CHARS  # an excerpt of one passage, beside its text
+
+
+def _chars(group: section.Group) -> int:
+    return sum(hit_range.char_end - hit_range.char_start for hit_range in group.ranges)
+
+
+def _longer(hit_range: HitRange, chars: int) -> HitRange:
+    """The passage as if it ran on for `chars` characters: the budget reads only its length."""
+    return msgspec.structs.replace(hit_range, char_end=hit_range.char_start + chars)
+
+
 @pytest.mark.parametrize(
-    ("name", "budget", "expected"),
+    ("name", "probed", "storage", "budget", "expected"),
     [
-        ("everything fits", 10_000, 3),
-        ("the sections past the budget go, the last first", 300, 2),
-        ("a later small section does not jump the queue", 200, 1),
-        ("the first stays even over the budget", 10, 1),
+        (
+            "everything fits",
+            False,
+            "two passages",
+            10_000,
+            [(SEARCH, [5]), (STORAGE, [2, 3]), (SEARCH, [7])],
+        ),
+        (
+            "each section's best passage goes in before any section's second",
+            False,
+            "two passages",
+            3 * ONE + 96 + 89 + 92,
+            [(SEARCH, [5]), (STORAGE, [2]), (SEARCH, [7])],
+        ),
+        (
+            "a passage that does not fit is skipped, and a shorter one after it still goes in",
+            False,
+            "one long passage",
+            2 * ONE + 96 + 92 + 50,
+            [(SEARCH, [5]), (SEARCH, [7])],
+        ),
+        (
+            "a passage found for missing words takes its room first",
+            True,
+            "two passages",
+            2 * ONE + 96 + 92,
+            [(SEARCH, [5]), (SEARCH, [7])],
+        ),
+        (
+            "a section opens on its best passage standing alone, not a short one ranked above it",
+            False,
+            "a short passage first",
+            3 * ONE + 96 + 93 + 92,
+            [(SEARCH, [5]), (STORAGE, [3]), (SEARCH, [7])],
+        ),
+        (
+            "the first section's best stays even over the budget",
+            False,
+            "two passages",
+            10,
+            [(SEARCH, [5])],
+        ),
     ],
 )
-def test_the_sections_are_cut_to_the_budget_in_order(name: str, budget: int, expected: int) -> None:
-    storage = section.Group(COLLECTION, DOC, Section(STORAGE, 2, 3), [_range(2), _range(3)])
-    ranking = section.Group(COLLECTION, DOC, Section(SEARCH, 4, 6), [_range(5)])
-    folding = section.Group(COLLECTION, DOC, Section(SEARCH, 7, 7), [_range(7)])
-    groups = [ranking, storage, folding]
+def test_the_answer_budget_is_spent_passage_by_passage(
+    name: str,
+    probed: bool,
+    storage: str,
+    budget: int,
+    expected: list[tuple[tuple[str, ...], list[int]]],
+) -> None:
+    storage_ranges = {
+        "two passages": [_range(2), _range(3)],
+        "one long passage": [_longer(_range(2), 400)],
+        "a short passage first": [msgspec.structs.replace(_range(2), alone=True), _range(3)],
+    }[storage]
+    folding_range = _range(7)
+    groups = [
+        section.Group(COLLECTION, DOC, Section(SEARCH, 4, 6), [_range(5)]),
+        section.Group(COLLECTION, DOC, Section(STORAGE, 2, 3), storage_ranges),
+        section.Group(COLLECTION, DOC, Section(SEARCH, 7, 7), [folding_range]),
+    ]
+    assert [_chars(one) for one in groups][::2] == [96, 92], "the fixture's passages"
 
-    assert [one.chars for one in groups] == [96, 89 + 93, 92], "the fixture's passages"
-    assert len(section.within(groups, budget)) == expected, name
+    kept = section.within(groups, budget, first=folding_range if probed else None)
+
+    assert _shape(kept) == expected, name
+    if len(kept) > 1:
+        assert sum(one.cost for one in kept) <= budget, f"{name}: within the budget"
+
+
+def test_a_sections_weak_passage_never_goes_in_before_anothers_strong_one() -> None:
+    """Room for one more passage after both sections opened, the two seconds alike in length: the
+    next best across both takes it, the storage section's (ranked 3rd), not the search section's
+    (ranked last), which a section-by-section walk would reach first."""
+    ranked = {
+        seq: _longer(msgspec.structs.replace(_range(seq), rank=rank), 80)
+        for rank, seq in enumerate([4, 2, 3, 6])
+    }
+    search = section.Group(COLLECTION, DOC, Section(SEARCH, 4, 6), [ranked[4], ranked[6]])
+    storage = section.Group(COLLECTION, DOC, Section(STORAGE, 2, 3), [ranked[2], ranked[3]])
+    opened = (
+        msgspec.structs.replace(search, ranges=[ranked[4]]).cost
+        + msgspec.structs.replace(storage, ranges=[ranked[2]]).cost
+    )
+
+    kept = section.within([search, storage], opened + section.SPAN_CHARS + 80)
+
+    assert _shape(kept) == [(SEARCH, [4]), (STORAGE, [2, 3])]
+
+
+def test_grouping_keeps_each_passages_place_in_the_ranking() -> None:
+    groups = section.group(BEST_FIRST, PLACEMENTS, 1000, 5)
+
+    placed = {hit_range.seq_start: hit_range.rank for one in groups for hit_range in one.ranges}
+    assert placed == {hit_range.seq_start: rank for rank, hit_range in enumerate(BEST_FIRST)}
+
+
+def test_an_excerpt_costs_its_text_its_fields_and_each_question_once() -> None:
+    """Two passages answering one question: the excerpt names the question once."""
+    question = "Where does a chunk live?"
+    group = section.Group(
+        COLLECTION,
+        DOC,
+        Section(STORAGE, 2, 3),
+        [_range(2, aspects=[question]), _range(3, aspects=[question])],
+    )
+
+    assert group.cost == (
+        section.EXCERPT_CHARS
+        + len(question)
+        + section.ASPECT_CHARS
+        + 2 * section.SPAN_CHARS
+        + 89
+        + 93
+    )
 
 
 # --- excerpt --------------------------------------------------------------------------

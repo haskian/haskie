@@ -37,15 +37,15 @@ class Place(_View):
 
 
 class Span(_View):
-    """One passage of an excerpt (`passage.Span`)."""
+    """One passage of an excerpt (`passage.Span`). Which questions it answers is left to the
+    excerpt's `aspects`: a span repeating each question in full cost an agent a fifth of a long
+    answer, and it cites the excerpt."""
 
     header: str
     section_id: str
     location: str
     score: float
     also_in: list[Place] = []
-    aspects: list[str] = []
-    aspect_scores: dict[str, float] = {}
 
 
 class Excerpt(_View):

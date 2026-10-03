@@ -21,7 +21,7 @@ export const SEARCH_BOUNDS: Record<NumericKeys<SearchSettings>, { min: number; m
   max_passage_grow: { min: 0, step: 1 },
   grow_bias: { min: -1, max: 1, step: 0.05 },
   max_section_chars: { min: 1, step: 500 },
-  max_answer_chars: { min: 1, step: 1000 },
+  answer_budget_chars: { min: 1, step: 1000 },
 }
 
 /**
@@ -50,7 +50,7 @@ export function effectiveSearch(overrides: SearchOverrides, defaults: SearchSett
     max_passage_grow: overrides.max_passage_grow ?? defaults.max_passage_grow,
     grow_bias: overrides.grow_bias ?? defaults.grow_bias,
     max_section_chars: overrides.max_section_chars ?? defaults.max_section_chars,
-    max_answer_chars: overrides.max_answer_chars ?? defaults.max_answer_chars,
+    answer_budget_chars: overrides.answer_budget_chars ?? defaults.answer_budget_chars,
   }
 }
 
@@ -85,6 +85,6 @@ export function visibleSearchFields(effective: SearchSettings): (keyof SearchSet
 export function visibleExpansionFields(effective: SearchSettings): (keyof SearchSettings)[] {
   const fields: (keyof SearchSettings)[] = ['min_passage_chars', 'max_passage_grow']
   if (effective.reranker === 'cross-encoder') fields.push('fill_values')
-  fields.push('grow_bias', 'max_section_chars', 'max_answer_chars')
+  fields.push('grow_bias', 'max_section_chars', 'answer_budget_chars')
   return fields
 }

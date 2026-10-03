@@ -22,6 +22,7 @@ from haskie.api import agent
 from haskie.app import MCP_PATH
 from haskie.collection.collection import Collection
 from haskie.document import document
+from haskie.search import section
 
 pytestmark = pytest.mark.anyio
 
@@ -192,6 +193,11 @@ async def test_the_tools_an_agent_is_offered(client: AsyncTestClient) -> None:
                 {one["document"]: one["aspects"] for one in found["excerpts"]}
                 == {"retries.md": [BY_RETRY], "ordering.md": [BY_CLOCK]}
                 and found["uncovered"] == []
+                and all(
+                    "aspects" not in span and "aspect_scores" not in span
+                    for one in found["excerpts"]
+                    for span in one["spans"]
+                )
             ),
         ),
         (
@@ -342,6 +348,92 @@ async def test_every_mistake_an_agent_makes_is_a_tool_error(
 
     assert error, f"{name}: {found}"
     assert message in json.dumps(found), f"{name}: {found}"
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("search_excerpts", {"q": [BY_RETRY], "collections": "notes,inbox"}),
+        ("search_sections", {"q": BY_RETRY, "collections": "inbox"}),
+    ],
+)
+async def test_an_empty_collection_named_is_refused_with_the_reason(
+    library: AsyncTestClient, tool: str, arguments: dict
+) -> None:
+    """An empty collection answers nothing, and an empty answer would read as "the sources do not
+    cover it": named, it is a conflict that says why."""
+    await library.post("/api/collections", json={"name": "inbox"})
+
+    error, found = await _call(library, tool, {**arguments, "session_id": SESSION})
+
+    assert error and "collection has no document to search: inbox" in json.dumps(found), found
+
+
+@pytest.mark.parametrize(
+    ("name", "selection", "searched"),
+    [
+        ("every collection means every one holding a document", None, ["notes"]),
+        ("a session's empty collection is skipped", ["inbox", "notes"], ["notes"]),
+        ("a session of empty collections searches none", ["inbox"], []),
+    ],
+)
+async def test_an_empty_collection_chosen_earlier_or_by_default_is_left_out(
+    library: AsyncTestClient, name: str, selection: list[str] | None, searched: list[str]
+) -> None:
+    await library.post("/api/collections", json={"name": "inbox"})
+    if selection is not None:
+        await _call(
+            library, "set_session_collections", {"session_id": SESSION, "collections": selection}
+        )
+
+    error, found = await _call(library, "search_excerpts", {"q": [BY_RETRY], "session_id": SESSION})
+
+    assert not error, f"{name}: {found}"
+    assert found["searched"] == searched, name
+    assert bool(found["excerpts"]) == bool(searched), f"{name}: only notes holds an answer"
+
+
+@pytest.mark.parametrize(
+    ("name", "copies"),
+    [
+        ("two notes, each its own excerpt", False),
+        ("a near copy of each note, folded into its `also_in`", True),
+    ],
+)
+async def test_the_answer_costs_no_more_than_the_budget_counts_for_it(
+    library: AsyncTestClient, monkeypatch: pytest.MonkeyPatch, name: str, copies: bool
+) -> None:
+    """What the budget counts for each section it keeps (`section.Group.cost`) is an upper bound
+    on what the agent's answer spends on its excerpt: field names, ids, the headings and `[…]`
+    the text gains, escapes and folded places included. The budget's promise that an answer stays
+    short of the size Claude Code moves into a file rests on it."""
+    from haskie.search import retrieval
+
+    if copies:  # one line more each, so the import is no copy of the same file
+        for note, body in (("retries-copy.md", RETRIES), ("ordering-copy.md", ORDERING)):
+            await stage_and_import(library, note, f"{body}\nCopied from the team wiki.\n".encode())
+            await attach_via_api(library, "notes", note)
+    quoted: list[section.Group] = []
+    read_excerpts = retrieval.read_excerpts
+
+    async def spy(groups: list[section.Group]) -> list:
+        quoted.extend(groups)
+        return await read_excerpts(groups)
+
+    monkeypatch.setattr(retrieval, "read_excerpts", spy)
+
+    error, found = await _call(
+        library,
+        "search_excerpts",
+        {"q": [BY_RETRY, BY_CLOCK], "session_id": SESSION, "limit": 4},
+    )
+
+    assert not error and len(found["excerpts"]) == len(quoted) == 2, f"{name}: {found}"
+    folded = [span.get("also_in") for one in found["excerpts"] for span in one["spans"]]
+    assert any(folded) == copies, f"{name}: the copies fold into `also_in`"
+    for group, one in zip(quoted, found["excerpts"], strict=True):
+        spent = len(json.dumps(one, ensure_ascii=False, separators=(",", ":")))
+        assert spent <= group.cost, f"{name}, {one['document']}: {spent} > {group.cost} counted"
 
 
 async def test_an_agent_imports_attaches_finds_and_detaches_a_document(

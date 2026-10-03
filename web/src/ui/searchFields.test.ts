@@ -24,7 +24,7 @@ const DEFAULTS: SearchSettings = {
   max_passage_grow: 3,
   grow_bias: 0,
   max_section_chars: 12000,
-  max_answer_chars: 36000,
+  answer_budget_chars: 36000,
 }
 
 // A collection that overrides nothing, as `/api/collections/{name}` sends it.
@@ -49,7 +49,7 @@ const NO_OVERRIDES: SearchOverrides = {
   max_passage_grow: null,
   grow_bias: null,
   max_section_chars: null,
-  max_answer_chars: null,
+  answer_budget_chars: null,
 }
 
 const search = (patch: Partial<SearchSettings>): SearchSettings => ({ ...DEFAULTS, ...patch })
@@ -135,17 +135,17 @@ describe('visibleExpansionFields', () => {
     {
       name: 'without a reranker: how passages grow and what they grow within',
       search: DEFAULTS,
-      expected: ['min_passage_chars', 'max_passage_grow', 'grow_bias', 'max_section_chars', 'max_answer_chars'],
+      expected: ['min_passage_chars', 'max_passage_grow', 'grow_bias', 'max_section_chars', 'answer_budget_chars'],
     },
     {
       name: 'a reranker adds how a chunk is valued',
       search: search({ reranker: 'cross-encoder' }),
-      expected: ['min_passage_chars', 'max_passage_grow', 'fill_values', 'grow_bias', 'max_section_chars', 'max_answer_chars'],
+      expected: ['min_passage_chars', 'max_passage_grow', 'fill_values', 'grow_bias', 'max_section_chars', 'answer_budget_chars'],
     },
     {
       name: 'no shortest passage still asks how far passages grow: every excerpt grows by it',
       search: search({ min_passage_chars: 0 }),
-      expected: ['min_passage_chars', 'max_passage_grow', 'grow_bias', 'max_section_chars', 'max_answer_chars'],
+      expected: ['min_passage_chars', 'max_passage_grow', 'grow_bias', 'max_section_chars', 'answer_budget_chars'],
     },
   ]
   for (const one of cases) {

@@ -40,10 +40,11 @@ directory with `--scope project`. With `CLAUDE_CONFIG_DIR` set, the user scope f
 Claude Code does. `--url` points them at another endpoint. The hook's full command is the
 absolute path of `haskie` with `run --home <home> --host <host> --port <port> --hook`.
 Re-installing replaces any haskie hook, including one in the older `ensure` form. The skill's
-trigger and the rule both name the home's collections, so they fire on the topics you collected.
+trigger and the rule both name the home's collections that hold an indexed document, so they fire
+on the topics you collected. An empty collection is left out: every search of it answers nothing.
 haskie records each directory it installed into (the `installations` table). Creating,
-describing, renaming or deleting a collection rewrites the skill and rule there in the background,
-and so does every server start: that covers a change a crash lost and a template an upgrade
+describing, renaming or deleting a collection, and any membership change, rewrites the skill and
+rule there in the background, and so does every server start: that covers a change a crash lost and a template an upgrade
 changed. A refresh skips an installation whose skill and rule are both gone, or whose
 SessionStart hook another home's install took: the last install into a directory owns it. Only
 uninstalling forgets one.

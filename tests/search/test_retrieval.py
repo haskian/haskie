@@ -661,7 +661,7 @@ def test_absolute_values_need_no_kept_chunks_to_compare_with() -> None:
     assert seen == [pytest.approx([0.72, -0.08])]
 
 
-def test_the_budget_cuts_the_last_sections_first() -> None:
+def test_the_budget_keeps_the_passages_that_fit_the_settings() -> None:
     groups = [
         section.Group(
             "backend",
@@ -671,8 +671,9 @@ def test_the_budget_cuts_the_last_sections_first() -> None:
         )
         for doc, text in [("a.md", "x" * 50), ("b.md", "y" * 50), ("c.md", "z" * 50)]
     ]
+    two = sum(one.cost for one in groups[:2])
     where = Plan(
-        settings=SearchSettings(max_answer_chars=120), indexes=[], vector=None, embedding=None
+        settings=SearchSettings(answer_budget_chars=two), indexes=[], vector=None, embedding=None
     )
 
     kept = retrieval.budget(groups, where)
