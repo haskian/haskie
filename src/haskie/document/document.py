@@ -60,6 +60,7 @@ class DocumentStatus(StrEnum):
     QUEUED = "queued"
     CONVERTING = "converting"
     EMBEDDING = "embedding"
+    DESCRIBING = "describing"
     IMPORTED = "imported"
     ERROR = "error"
     CANCELLED = "cancelled"
@@ -72,6 +73,7 @@ ACTIVE_DOCUMENT_STATUSES: tuple[DocumentStatus, ...] = (
     DocumentStatus.QUEUED,
     DocumentStatus.CONVERTING,
     DocumentStatus.EMBEDDING,
+    DocumentStatus.DESCRIBING,
 )
 
 # Public sort name -> column. The whitelist is the only source of columns a listing can order by,
@@ -110,11 +112,11 @@ class Document(msgspec.Struct):
 
     @property
     def original(self) -> Path:
-        return self.root / f"original{self.suffix}"
+        return original(self.id, self.suffix)
 
     @property
     def markdown(self) -> Path:
-        return self.root / f"original{self.suffix}.md"
+        return markdown(self.id, self.suffix)
 
     @property
     def preview_dir(self) -> Path:
@@ -181,6 +183,7 @@ class Staged(msgspec.Struct):
 
     staging_id: str
     filename: str
+    name: str  # what the import stores it as unless renamed: `stored_name(filename)`
     size: int
     # the document these exact bytes already are, by name: importing them again is refused
     duplicate: str | None
@@ -198,6 +201,16 @@ async def identical(id: str) -> str | None:
 
 def root(id: str) -> Path:
     return home.DOCUMENT_ROOT / home.shard(id) / id
+
+
+def original(id: str, suffix: str) -> Path:
+    """The file as imported, for a caller that holds the id and the suffix rather than the row."""
+    return root(id) / f"original{suffix}"
+
+
+def markdown(id: str, suffix: str) -> Path:
+    """The markdown assembled from `original` at import."""
+    return root(id) / f"original{suffix}.md"
 
 
 def embeddings_dir(id: str) -> Path:
@@ -295,7 +308,13 @@ async def stage(filename: str, content: bytes) -> Staged:
             )
         )
     duplicate = await identical(md5)
-    return Staged(staging_id=staging_id, filename=name, size=len(content), duplicate=duplicate)
+    return Staged(
+        staging_id=staging_id,
+        filename=name,
+        name=importable,
+        size=len(content),
+        duplicate=duplicate,
+    )
 
 
 async def sweep_staging(max_age_seconds: float) -> int:
@@ -555,6 +574,13 @@ async def set_status(
     return moved is not None
 
 
+async def mark_describing(id: str) -> None:
+    """Move an import from `embedding` to `describing`. Only an import is ever `embedding`, so the
+    embedding run an index asks for, of a document already `imported`, changes nothing."""
+    embedding = documents.c.status == DocumentStatus.EMBEDDING
+    await set_status(id, DocumentStatus.DESCRIBING, None, embedding)
+
+
 async def cancel_import(id: str) -> None:
     """Record a cancelled import as `cancelled`, but only while the document is still in the
     import pipeline. An import that ended between the cancel's read and this write keeps the status
@@ -581,6 +607,19 @@ async def describe(id: str, description: str) -> Document:
     if row is None:
         raise NotFound(f"document not found: {id}")
     return from_row(row)
+
+
+async def describe_if_empty(id: str, description: str) -> bool:
+    """Set the document's description unless it has one; whether it did. One statement, so a
+    description someone writes meanwhile is never replaced."""
+    async with db.connect() as conn:
+        written = await conn.scalar(
+            update(documents)
+            .where(documents.c.id == id, documents.c.description == "")
+            .values(description=description)
+            .returning(documents.c.id)
+        )
+    return written is not None
 
 
 async def descriptions_of(docs: set[str]) -> dict[str, str]:

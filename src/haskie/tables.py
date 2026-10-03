@@ -25,6 +25,9 @@ from sqlalchemy import (
 metadata = MetaData()
 
 ZERO = text("0")
+# What this machine works out from the rest, rather than what anyone put there: a backup copies the
+# column at its default, and the restored home works it out again (`backup`).
+DERIVED = {"derived": True}
 
 settings = Table(
     "settings",
@@ -46,16 +49,16 @@ collections = Table(
     Column("overrides", Text, nullable=False, server_default="{}"),
     Column("description", Text, nullable=False, server_default=""),
     Column("created_at", Float, nullable=False, server_default=ZERO),
-    Column("pending_documents", Integer, nullable=False, server_default=ZERO),
-    Column("last_write_at", Float),
-    Column("last_maintained_at", Float),
-    Column("vector_index_rows", Integer, nullable=False, server_default=ZERO),
+    Column("pending_documents", Integer, nullable=False, server_default=ZERO, info=DERIVED),
+    Column("last_write_at", Float, info=DERIVED),
+    Column("last_maintained_at", Float, info=DERIVED),
+    Column("vector_index_rows", Integer, nullable=False, server_default=ZERO, info=DERIVED),
     # the sum of the unit chunk vectors of its indexed documents under `vector_model`, and how
     # many chunks it sums (`embed_cache.corpus_sum`), set by maintenance: what a search centres
     # cosines on before it weighs them (`search.section_map`)
-    Column("vector_sum", LargeBinary),
-    Column("vector_rows", Integer, nullable=False, server_default=ZERO),
-    Column("vector_model", Text),
+    Column("vector_sum", LargeBinary, info=DERIVED),
+    Column("vector_rows", Integer, nullable=False, server_default=ZERO, info=DERIVED),
+    Column("vector_model", Text, info=DERIVED),
 )
 
 # a document belongs to no collection: `collection_documents` is the many-to-many, and each
@@ -73,7 +76,7 @@ documents = Table(
     Column("size", Integer, nullable=False),
     Column("status", Text, nullable=False, server_default="queued"),
     Column("error", Text),
-    Column("preview", Text),
+    Column("preview", Text, info=DERIVED),  # built on first open
     Column("parser", Text, nullable=False, server_default="anydoc"),
     Column("skip_ocr_pages", Integer, nullable=False, server_default=text("1")),
     Column("created_at", Float, nullable=False, server_default=ZERO),

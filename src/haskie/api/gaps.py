@@ -81,9 +81,11 @@ async def report_gap(session_id: RequiredSessionId, data: GapReport) -> gaps.Rep
     """Say that a search you just ran did not answer your question: the gap then shows to the
     user as one the collections should close.
 
-    Call it when the excerpts do not let a careful reader answer the question from them alone
-    (`insufficient`), or answer only part of it (`partial`). Not when they answer it in other
-    words, and not for a question you did not search. `question` is one of the questions you
+    Report gaps in topics, not in the details of one situation: call it only when nothing useful
+    came back on the topic itself (`insufficient`), or on a general part of it (`partial`). Not
+    when the excerpts cover the topic but not the specifics of the question (a scale, a product, a
+    deadline), not when they answer it in other words, and not for a question you did not
+    search. `question` is one of the questions you
     passed to `search_excerpts` (or `search_sections`) with this `session_id`, word for word, in
     the last hour. `missing` says in a sentence what the excerpts lacked, at most 300 characters.
     One call per miss; reporting again replaces the verdict.

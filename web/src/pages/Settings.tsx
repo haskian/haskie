@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   api,
+  type BulkStarted,
+  type OperationProgress,
   type Options,
   type PipelineSettings,
   type RetentionSettings,
@@ -8,7 +10,9 @@ import {
 } from '../api'
 import type { PageProps } from '../App'
 import { errorText } from '../format'
-import { choices, docFor, EmbedderFacts, Field, Num, Picker, profileOptions, SearchField, Shell, Toggle, visibleExpansionFields, visibleSearchFields, type NumericKeys } from '../ui'
+import { useOperation } from '../hooks/useOperation'
+import { href } from '../router'
+import { BulkStatus, choices, docFor, EmbedderFacts, Field, Num, Picker, profileOptions, SearchField, Shell, Toggle, visibleExpansionFields, visibleSearchFields, type NumericKeys } from '../ui'
 import { classicBackground, setBackground as storeBackground } from './settings/background'
 import './Settings.css'
 
@@ -22,6 +26,7 @@ const SECTIONS: { id: string; label: string }[] = [
   { id: 'maintenance', label: 'Maintenance' },
   { id: 'retention', label: 'Retention' },
   { id: 'appearance', label: 'Appearance' },
+  { id: 'backup', label: 'Backup' },
 ]
 
 interface NumberField<T> {
@@ -300,7 +305,75 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
           </div>
           {error !== null && <p className="muted">{error}</p>}
         </section>
+
+        <BackupSection onRestored={reload} />
       </div>
     </Shell>
+  )
+}
+
+/**
+ * Every document, collection and setting into one archive, and back. Both run as operations, so
+ * the Operations view lists them; both are followed here too, and each says how it stands, why it
+ * failed included (`BulkStatus`). A finished restore reloads the form, so a save cannot write the
+ * settings it replaced back.
+ */
+function BackupSection({ onRestored }: { onRestored: () => void }) {
+  const [error, setError] = useState<string | null>(null) // a request refused before it started
+  const picker = useRef<HTMLInputElement>(null)
+  const onRestoreDone = useCallback(
+    (done: OperationProgress) => {
+      if (done.status === 'SUCCESS') onRestored()
+    },
+    [onRestored],
+  )
+  const backup = useOperation(undefined, setError)
+  const restoring = useOperation(onRestoreDone, setError)
+  const made = backup.operation?.status === 'SUCCESS' ? backup.operation : null
+
+  const start = (follower: typeof backup, fn: () => Promise<BulkStarted>): void => {
+    setError(null)
+    follower.start(fn).catch((cause: unknown) => setError(errorText(cause)))
+  }
+
+  const restore = (file: File | undefined): void => {
+    if (picker.current) picker.current.value = '' // the same file may be picked again
+    const replaces =
+      'Replace every document, collection and setting with the backup? Search history and operations stay; sessions keep the collections the backup holds.'
+    if (file === undefined || !window.confirm(replaces)) return
+    start(restoring, () => api.restore(file))
+  }
+
+  return (
+    <section id="backup">
+      <span className="mono muted">Backup</span>
+      <span className="faint">
+        One file with every document, its markdown and embeddings, every collection and the settings. The indexes are rebuilt
+        after a restore.
+      </span>
+      <div className="row row-loose">
+        <button className="btn btn-primary" type="button" onClick={() => start(backup, api.backup)} disabled={backup.running}>
+          Back up
+        </button>
+        {backup.operation !== null && <BulkStatus operation={backup.operation} />}
+        {made !== null && (
+          <a className="btn btn-ghost" href={api.backupFileUrl(made.id)} download>
+            Download
+          </a>
+        )}
+      </div>
+      <div className="row row-loose">
+        <button className="btn btn-ghost" type="button" onClick={() => picker.current?.click()} disabled={restoring.running}>
+          Restore…
+        </button>
+        <input ref={picker} type="file" accept=".zip,application/zip" hidden aria-label="Backup file" onChange={(event) => restore(event.target.files?.[0])} />
+        {restoring.operation !== null && (
+          <span className="muted">
+            <BulkStatus operation={restoring.operation} />. The indexes rebuild in <a href={href({ name: 'operations' })}>Operations</a>.
+          </span>
+        )}
+      </div>
+      {error !== null && <p className="muted">{error}</p>}
+    </section>
   )
 }

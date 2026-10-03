@@ -1363,7 +1363,9 @@ async def test_rename_moves_the_folder_unless_a_member_is_being_deleted(
     assert await renamed.member_ids() == [doc.id], name
 
 
-@pytest.mark.parametrize("status", ["queued", "converting", "embedding", "error", "deleting"])
+@pytest.mark.parametrize(
+    "status", ["queued", "converting", "embedding", "describing", "error", "deleting"]
+)
 @pytest.mark.anyio
 async def test_add_refuses_a_document_that_is_not_imported(status: str) -> None:
     """The invariant lives in `add`: one still importing has no markdown to chunk yet, and one

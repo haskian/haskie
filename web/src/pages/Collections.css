@@ -37,3 +37,7 @@
 .also-in > .hint-below {
   top: calc(100% - 1px);
 }
+
+/* The description box takes most of its pane's height, as in the document modal: a written
+   description runs to seven sentences, and the action below it keeps the rest. */
+#collection-info .pane-body > .textarea { height: 75%; }

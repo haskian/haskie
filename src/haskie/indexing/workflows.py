@@ -20,7 +20,7 @@ Layout:
   the same one meanwhile waits on that run. This is the only place chunks and vectors are
   computed, and section descriptors written: a stage after the embed (`Stage.DESCRIBE`), and the
   only work a hit in the cache does, when another descriptor strategy wrote it than the one asked
-  for.
+  for. Under llm, it then queues the description of a document that has none.
 - `index_collection_document` per (collection, document), on `operation.indexing`: ensures the
   embedding the collection's chunk settings call for, then writes it from the cache into the
   collection's table. Moves the membership's status, never the document's.
@@ -43,6 +43,12 @@ Layout:
   `operation.collection`: whole-thing work the request only starts. A collection with ten thousand
   documents costs the caller one insert instead of ten thousand, and nothing blocks an HTTP
   request for minutes.
+- `summarize_document_workflow` per description the describer writes, one a person asks for or
+  one an llm describe stage queues, and `summarize_collection_workflow` per collection description
+  a person asks for, on `operation.describing`, one at a time: the describer answers one prompt at
+  a time anyway, and a run waiting for it to download must not hold a slot another queue needs.
+- `backup.create_backup` / `backup.restore_backup` on `operation.backup`, one at a time: every
+  document, collection and setting into one archive, and back (see `backup`).
 - Model downloads live in `models.py` (`operation.downloads`), the operation/job/task read model in
   `operations.py`, and the grouped reads of DBOS's own tables it needs in `sysdb.py`.
 
@@ -64,16 +70,20 @@ Workflow ids, every one starting with a prefix that names its kind and the names
 convert or embed child and `{parent}:index` for the index child, `bulk-index:{collection}:{uuid}`
 and `bulk-delete:{collection}:{uuid}` for the two bulk operations, `del-doc:{doc}:{uuid}` for a
 document delete (and `{parent}:rm:{collection}` for each collection it leaves),
+`sum-doc:{doc}:{uuid}` for a description asked for (`sum-doc:{doc}:{uuid of the embedding run}`
+for one an embedding run queued), `sum-col:{collection}:{uuid}` for a collection's,
 `rm:{collection}:{doc}:{uuid}` for the removal a detach queues, `maint:{collection}:{parent}` for a
-maintenance run, and `dl:{kind}:{model}` for a model download (see `models`). A document id is
-base58 and `document.safe_name` keeps `:` out of a collection name, so a prefix is unambiguous: one
-query finds a whole operation. Child ids are deterministic, so a replay after a crash re-attaches to
-the child that already exists instead of starting a second one. Every workflow is registered under
-an explicit name (see `dbos_names`).
+maintenance run, and `dl:{kind}:{model}` for a model download (see `models`), and `backup:{uuid}`
+and `restore:{uuid}` for a backup and a restore (see `backup`). A document id is base58 and
+`document.safe_name` keeps `:` out of a collection name, so a prefix is unambiguous: one query finds
+a whole operation. Child ids are deterministic, so a replay after a crash re-attaches to the child
+that already exists instead of starting a second one. Every workflow is registered under an explicit
+name (see `dbos_names`).
 """
 
 import asyncio
 import contextlib
+import contextvars
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -113,7 +123,7 @@ from haskie.cpu import configure_cpu_budget, open_pool, shutdown_pool
 from haskie.document import document
 from haskie.document.document import Document, DocumentStatus, configure_preview_slots
 from haskie.errors import Conflict, InvalidInput, NotFound, PermanentError, Unavailable
-from haskie.indexing import embed_cache, models, pipeline, serializer
+from haskie.indexing import embed_cache, gguf_models, hardware, models, pipeline, serializer
 from haskie.indexing.dbos_names import (
     ACTIVE_STATUS,
     COLLECTION_DOCUMENT_WORKFLOW,
@@ -127,6 +137,8 @@ from haskie.indexing.dbos_names import (
     MAINTAIN_WORKFLOW,
     REMOVE_FROM_INDEX_WORKFLOW,
     STAGE_WORKFLOW,
+    SUMMARIZE_COLLECTION_WORKFLOW,
+    SUMMARIZE_DOCUMENT_WORKFLOW,
     root_cause,
 )
 from haskie.indexing.pipeline import Batch
@@ -149,7 +161,10 @@ EMBEDDING_QUEUE = "operation.embedding"  # one `ensure_embedding` per cache id; 
 # because an orchestrator on `operation.indexing` waits on it, and a queue waiting on itself can
 # fill up and stop
 COLLECTION_QUEUE = "operation.collection"  # whole-collection index/delete and document delete
+DESCRIBING_QUEUE = "operation.describing"  # a document's description the describer writes
+DESCRIBING_CONCURRENCY = 1  # the describer answers one prompt at a time (`GgufGenerator`)
 MAINTENANCE_QUEUE = "operation.maintenance"  # debounced maintenance and the nightly schedule
+BACKUP_QUEUE = "operation.backup"  # backups and restores, one at a time (see `backup`)
 CONVERT_QUEUE = "task.converting"  # convert slices; cap = the stage's share of the CPU budget
 EMBED_QUEUE = "task.embedding"  # embed slices; cap = the stage's share of the CPU budget
 DESCRIBE_QUEUE = "task.describing"  # describe slices; cap = the embed stage's share of the CPU
@@ -162,12 +177,13 @@ INDEX_QUEUE = "task.indexing"  # index children, maintenance and removals. Lance
 MAINTENANCE_CONCURRENCY = 4  # each waits on a child, so this bounds tasks, not LanceDB writers
 MAINTENANCE_TIMEOUT_SECONDS = 3600  # compaction of a very large collection, not a per-batch budget
 COLLECTION_CONCURRENCY = 2  # a whole-collection operation only enqueues or cancels; two is plenty
+BACKUP_CONCURRENCY = 1  # a restore replaces what a backup reads, so the two never overlap
 DOWNLOAD_CONCURRENCY = 2  # a download is network bound; two at a time saturates any link
 DOCUMENT_CONCURRENCY_CAP = 64  # an orchestrator is cheap now, but its children are not; keep a cap
 ADOPT_PAGE = 500  # stale workflows resumed per query at boot
 BULK_INDEX_PAGE = 500  # documents enqueued per durable page of a bulk index
 CANCEL_PAGE = 200  # pipelines cancelled per sweep of a bulk delete
-STAGING_TTL_SECONDS = 24 * 3600  # an upload nobody imported within a day is swept
+STAGING_TTL_SECONDS = 24 * 3600  # an upload nobody imported, or restored, within a day is swept
 
 MAINTENANCE_SCHEDULE = "daily-maintenance"  # housekeeping that costs nothing to skip for a day
 MAINTENANCE_CRON = "17 3 * * *"  # nightly, and off the hour: the only clock in this app
@@ -178,6 +194,8 @@ COLLECTION_DOCUMENT_PREFIX = "idx-col"
 BULK_INDEX_PREFIX = "bulk-index"
 BULK_DELETE_PREFIX = "bulk-delete"
 DELETE_DOCUMENT_PREFIX = "del-doc"
+SUMMARIZE_DOCUMENT_PREFIX = "sum-doc"  # `sum-doc:{doc}:{uuid}`: a description the describer writes
+SUMMARIZE_COLLECTION_PREFIX = "sum-col"  # `sum-col:{collection}:{uuid}`: a collection's
 REMOVE_PREFIX = "rm"  # `rm:{collection}:{doc}:{uuid}`: the removal a detach queues
 MAINTAIN_PREFIX = "maint"  # `maint:{collection}:{parent}`: one collection's runs, one id prefix
 PROGRESS_EVENT = "progress"  # the DBOS event a bulk index publishes after every page
@@ -359,11 +377,16 @@ def stage_caps(indexing: PipelineSettings) -> dict[Stage, int]:
 # The backlog adoption in flight, if any. An event loop keeps only a weak reference to a task, so
 # the module holds the strong one and `stop` cancels it.
 _adoption: asyncio.Task[None] | None = None
+# The loop `start` ran on: Litestar's, or a test's. `apply_settings` belongs on it (see
+# `apply_settings_from_workflow`).
+_app_loop: asyncio.AbstractEventLoop | None = None
 
 
 async def start() -> None:
     """Bring the runtime up: migrations, DBOS, the queues, the schedules. Awaited by Litestar's
     startup hook, and by the tests."""
+    global _app_loop
+    _app_loop = asyncio.get_running_loop()
     logs.configure()
     open_pool()  # a runtime started again in the same process, after a `stop`
     await db.migrate_once()  # before DBOS opens the file: the one-time WAL switch needs exclusivity
@@ -548,8 +571,10 @@ _QUEUES: tuple[Queue, ...] = (
     Queue(INDEXING_QUEUE, lambda indexing, caps: document_concurrency(indexing)),
     Queue(EMBEDDING_QUEUE, lambda indexing, caps: document_concurrency(indexing)),
     Queue(COLLECTION_QUEUE, lambda indexing, caps: COLLECTION_CONCURRENCY),
+    Queue(DESCRIBING_QUEUE, lambda indexing, caps: DESCRIBING_CONCURRENCY),
     Queue(models.DOWNLOADS_QUEUE, lambda indexing, caps: DOWNLOAD_CONCURRENCY),
     Queue(MAINTENANCE_QUEUE, lambda indexing, caps: MAINTENANCE_CONCURRENCY),
+    Queue(BACKUP_QUEUE, lambda indexing, caps: BACKUP_CONCURRENCY),
     Queue(CONVERT_QUEUE, lambda indexing, caps: caps[Stage.CONVERT]),
     Queue(EMBED_QUEUE, lambda indexing, caps: caps[Stage.EMBED]),
     Queue(DESCRIBE_QUEUE, lambda indexing, caps: caps[Stage.EMBED]),
@@ -581,6 +606,20 @@ async def apply_settings(settings: UserSettings) -> None:
     await schedule_pending_maintenance(indexing.maintenance_idle_seconds)
 
 
+async def apply_settings_from_workflow(settings: UserSettings) -> None:
+    """`apply_settings` for a workflow, which runs on DBOS's loop: the preview pool it resizes was
+    built on the app's loop, and the downloads it starts may not start inside a step. So it runs
+    on the loop `start` ran on, in a fresh context that carries no DBOS step, and this waits for
+    it there."""
+    if _app_loop is None:
+        raise RuntimeError("the runtime is not started")
+    # scheduled from an empty context, so the task copies no DBOS step context into the app loop
+    started = contextvars.Context().run(
+        asyncio.run_coroutine_threadsafe, apply_settings(settings), _app_loop
+    )
+    await asyncio.wrap_future(started)
+
+
 # --- steps (pure, retried) ----------------------------------------------------------
 
 # Every step here touches SQLite or the file system, so every step may hit a transient lock.
@@ -602,6 +641,10 @@ async def load_context(doc: str, collection: str | None) -> Context:
     """The document row and the settings a pipeline runs under. `collection` names the one whose
     chunk settings apply; None takes the user defaults (an import's pre-warm, an embed run that
     substitutes its own params afterwards)."""
+    return await _context(doc, collection)
+
+
+async def _context(doc: str, collection: str | None) -> Context:
     row = await document.get(doc)
     user = await load_user_settings()
     chunking = (
@@ -789,6 +832,31 @@ async def try_finalize_describe(ctx: Context, count: int) -> BatchResult:
     """Put the descriptors every describe batch wrote on the sections (see `pipeline`)."""
     by = ctx.pipeline.descriptors
     return await _guarded(pipeline.finalize_describe(ctx.document, ctx.cache_id, by, count))
+
+
+async def _summarize(ctx: Context, replace: bool) -> int:
+    doc = ctx.document.id
+    summarize = partial(pipeline.summarize, ctx.document, ctx.cache_id, ctx.pipeline.accelerator)
+    if replace:
+        text = await summarize()
+        if not text:
+            raise PermanentError("the describer wrote no description of this document")
+        await document.describe(doc, text)
+    else:
+        if (await document.get(doc)).description:
+            return 0  # someone wrote one: it stands, and the describer is not asked
+        text = await summarize()
+        if not text or not await document.describe_if_empty(doc, text):
+            return 0
+    _log.info("document_summarized", chars=len(text), replace=replace)
+    return 1
+
+
+@retried_step
+async def try_summarize(ctx: Context, replace: bool) -> BatchResult:
+    """Write the document's description from its described sections (see
+    `pipeline.summarize`); 1 when it did. Only where it has none, unless `replace`."""
+    return await _guarded(_summarize(ctx, replace))
 
 
 @retried_step
@@ -1081,7 +1149,8 @@ async def ensure_embedding(
     """One cached embedding of one document, with its sections, computed when missing, and their
     descriptors by strategy `by`, written by a describe stage of their own when missing or written
     by another strategy; returns its cache id. `by` is None in a run recorded before it was an
-    argument, which describes by the settings.
+    argument, which describes by the settings. Described by llm, a document without a description
+    gets one: the run queues `summarize_document_workflow`, and does not wait for it.
 
     The chunk settings come from `params`, not from any collection: the collection's settings may
     change between the enqueue and the run, and what was asked for is what the id names. The
@@ -1107,11 +1176,104 @@ async def ensure_embedding(
         if await described_by(doc, cache_id) != by:
             # a hit too checks the model: c-TF-IDF would rerank its vectors by another model's
             ctx = ctx or await _embedding_context(doc, params, by)
+            # not a step: a run recorded before this line resumes on the step log it has, and
+            # the guarded write is a no-op once the import has moved on
+            await document.mark_describing(doc)
             # here rather than in the slice, for the reason the embed's model wait is above
             _value(await _awaiting_model(partial(describer_ready, ctx)))
             count = len(await _stage(Stage.DESCRIBE, ctx))
             _value(await try_finalize_describe(ctx, count))
+            if by == Descriptors.LLM:
+                # queued, not awaited: indexing never reads the description, and the describer
+                # answers one document at a time on a queue of its own
+                own = run_id(DBOS.workflow_id or "")  # derived, so a replay finds the same run
+                await enqueue_operation(
+                    DESCRIBING_QUEUE,
+                    summarize_document_workflow,
+                    doc,
+                    cache_id,
+                    False,
+                    workflow_id=f"{SUMMARIZE_DOCUMENT_PREFIX}:{doc}:{own}",
+                    dedup_id=f"summarize-doc-missing:{doc}",
+                )
         return cache_id
+
+
+@DBOS.workflow(name=SUMMARIZE_DOCUMENT_WORKFLOW)
+async def summarize_document_workflow(doc: str, cache_id: str, replace: bool) -> int:
+    """The document's description, written by the describer from the sections of one cached
+    embedding; 1 when it wrote one. With `replace` a person asked for it, and it replaces the one
+    there (`start_summarize_document`); without, an llm describe stage queued it, and it writes
+    one only where there is none (`ensure_embedding`). Waits for the describer like a describe
+    stage does."""
+    with logs.bound(workflow_id=DBOS.workflow_id, document_id=doc):
+        ctx = msgspec.structs.replace(await load_context(doc, None), cache_id=cache_id)
+        return _value(await _awaiting_model(partial(try_summarize, ctx, replace)))
+
+
+@DBOS.workflow(name=SUMMARIZE_COLLECTION_WORKFLOW)
+async def summarize_collection_workflow(collection: str) -> int:
+    """Replace the collection's description with the one the describer writes from its documents'
+    descriptions (`start_summarize_collection`). A member with none is described first, one at a
+    time, as `summarize_document_workflow` would without `replace`; one with no cached embedding
+    yet is left out. Returns how many members it described.
+
+    Each member is one step (`try_describe_member`), and the collection the last
+    (`try_summarize_collection`), after the step that lists the members (`undescribed_members`):
+    the Operations view reads them back as the tasks of a describe job
+    (`operations.description_tasks`)."""
+    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection):
+        described = 0
+        for doc in await undescribed_members(collection):
+            described += _value(await _awaiting_model(partial(try_describe_member, doc)))
+        _value(await _awaiting_model(partial(try_summarize_collection, collection)))
+        return described
+
+
+@retried_step
+async def undescribed_members(collection: str) -> list[str]:
+    """The collection's documents with no description, by id."""
+    docs = await Collection(collection).member_ids()
+    return sorted(set(docs) - (await document.descriptions_of(set(docs))).keys())
+
+
+async def _describe_member(doc: str) -> int:
+    source = await _summary_source(doc)
+    if source is None:
+        return 0  # no cached embedding yet: nothing to read
+    ctx = msgspec.structs.replace(await _context(doc, None), cache_id=source)
+    return await _summarize(ctx, False)
+
+
+@retried_step
+async def try_describe_member(doc: str) -> BatchResult:
+    """Describe one member of a collection being described, where it has no description (see
+    `_summarize`); 1 when it did."""
+    return await _guarded(_describe_member(doc))
+
+
+async def _summarize_collection(collection: str) -> int:
+    found = await Collection.get(collection)
+    descriptions = await document.descriptions_of(set(await found.member_ids()))
+    if not descriptions:
+        raise PermanentError("no document of the collection has a description to read")
+    accelerator = (await load_user_settings()).pipeline.accelerator
+    # by document id: the order the model reads them in is the same on every run
+    text = await pipeline.summarize_collection(
+        [descriptions[doc] for doc in sorted(descriptions)], accelerator
+    )
+    if not text:
+        raise PermanentError("the describer wrote no description of this collection")
+    await found.describe(text)
+    _log.info("collection_summarized", chars=len(text), documents=len(descriptions))
+    return 1
+
+
+@retried_step
+async def try_summarize_collection(collection: str) -> BatchResult:
+    """Write the collection's description from its documents' descriptions (see
+    `pipeline.summarize_collection`)."""
+    return await _guarded(_summarize_collection(collection))
 
 
 async def _embedding_context(
@@ -1275,9 +1437,9 @@ async def remove_from_collection_index(collection: str, doc: str) -> None:
 
 @retried_step
 async def cancel_document_work(doc: str) -> None:
-    """Cancel every import, embedding run and collection index of the document. One call: DBOS
-    writes CANCELLED for the whole list, children included, before it returns. Retried: it is a
-    series of DBOS writes, and cancelling again is a no-op."""
+    """Cancel every import, embedding run, description and collection index of the document. One
+    call: DBOS writes CANCELLED for the whole list, children included, before it returns.
+    Retried: it is a series of DBOS writes, and cancelling again is a no-op."""
     await DBOS.cancel_workflows_async(await _active_document_workflows(doc), cancel_children=True)
 
 
@@ -1390,10 +1552,13 @@ async def index_collection_workflow(collection: str) -> BulkResult:
 @retried_step
 async def cancel_active_batch(collection: str) -> int:
     """Cancel one sweep of the collection's active work: the bulk index that may still be queueing
-    documents, plus a page of collection index workflows. Returns how many were cancelled, so
-    the caller sweeps again until a sweep finds nothing."""
+    documents, a description of it, plus a page of collection index workflows. Returns how many
+    were cancelled, so the caller sweeps again until a sweep finds nothing."""
     ids = [
         *await _active_ids(INDEX_COLLECTION_WORKFLOW, f"{BULK_INDEX_PREFIX}:{collection}:"),
+        *await _active_ids(
+            SUMMARIZE_COLLECTION_WORKFLOW, f"{SUMMARIZE_COLLECTION_PREFIX}:{collection}:"
+        ),
         *await _active_collection_workflows(collection, limit=CANCEL_PAGE),
     ]
     if ids:
@@ -1495,27 +1660,38 @@ async def sweep_staging() -> int:
     return await document.sweep_staging(STAGING_TTL_SECONDS)
 
 
+@retried_step
+async def sweep_restores() -> int:
+    """Delete restore uploads no restore will read (`backup.sweep_restores`)."""
+    from haskie import backup  # it imports this module
+
+    return await backup.sweep_restores(STAGING_TTL_SECONDS)
+
+
 @DBOS.workflow(name=DAILY_MAINTENANCE_WORKFLOW)
 async def daily_maintenance(scheduled_time: datetime, context: Any) -> None:
-    """Nightly housekeeping: the operation history, the audit trail, the search log and the
-    staging folder. Takes the two arguments every DBOS schedule passes."""
+    """Nightly housekeeping: the operation history, the audit trail, the search log, the staging
+    folder and the uploads of restores that never ran. Takes the two arguments every DBOS
+    schedule passes."""
     purged_before_ms = await purge_operation_history()
     deleted = await prune_audit()
     searches = await prune_searches()
     swept = await sweep_staging()
+    restores = await sweep_restores()  # last: a run recorded before it existed replays unchanged
     _log.info(
         "home_housekept",
         jobs_purged_before_ms=purged_before_ms,
         audit_files_pruned=deleted,
         searches_pruned=searches,
         staged_uploads_swept=swept,
+        restore_uploads_swept=restores,
     )
 
 
 # --- public API -------------------------------------------------------------------------
 
 
-async def _start(
+async def enqueue_operation(
     queue: str, workflow: Callable, *args: Any, workflow_id: str, dedup_id: str
 ) -> str:
     """Enqueue one workflow under an explicit id and return that id.
@@ -1551,12 +1727,20 @@ async def start_import(row: Document) -> str:
         raise Conflict(
             f"document is {row.status}; only a queued, failed or cancelled import runs: {row.name}"
         )
-    return await _start(
+    return await enqueue_import(row.id)
+
+
+async def enqueue_import(doc: str, key: str | None = None) -> str:
+    """Queue the import of one document, with no checks of its own: for a workflow that has just
+    read it as `queued` in a step of its own (`backup.restore_backup`). `key` ends the id in place
+    of a random one, derived from that workflow's own id, so a replay re-attaches to the run it
+    already started rather than asking an admission check the run has since moved past."""
+    return await enqueue_operation(
         INDEXING_QUEUE,
         import_document,
-        row.id,
-        workflow_id=f"{IMPORT_PREFIX}:{row.id}:{uuid4().hex}",
-        dedup_id=f"import:{row.id}",
+        doc,
+        workflow_id=f"{IMPORT_PREFIX}:{doc}:{key or uuid4().hex}",
+        dedup_id=f"import:{doc}",
     )
 
 
@@ -1564,7 +1748,7 @@ async def _enqueue_index(collection: str, doc: str, workflow_id: str | None = No
     """Queue the index of one member, with no checks of its own: for a caller that has just read
     the name out of that collection's membership table. `workflow_id` lets a bulk index derive
     the child's id from its own, so that a replay re-attaches to the run it already started."""
-    return await _start(
+    return await enqueue_operation(
         INDEXING_QUEUE,
         index_collection_document,
         collection,
@@ -1654,19 +1838,83 @@ async def _active_document_workflows(doc: str) -> list[str]:
     A collection index id names the collection before the document, so one prefix query per
     collection the document is in filters them in the database instead of listing every active
     index workflow and splitting the ids here."""
-    ids = await _active_ids(  # the import and the embedding runs
-        [IMPORT_WORKFLOW, EMBED_WORKFLOW],
-        [f"{IMPORT_PREFIX}:{doc}:", f"{EMBED_PREFIX}:{doc}:"],
+    ids = await _active_ids(  # the import, the embedding runs and the descriptions
+        [IMPORT_WORKFLOW, EMBED_WORKFLOW, SUMMARIZE_DOCUMENT_WORKFLOW],
+        [f"{prefix}:{doc}:" for prefix in (IMPORT_PREFIX, EMBED_PREFIX, SUMMARIZE_DOCUMENT_PREFIX)],
     )
     for collection in await document.collections_of(doc):
         ids.extend(await _active_collection_workflows(collection, doc))
     return ids
 
 
+async def start_summarize_document(row: Document) -> str:
+    """Queue a description of the document by the describer, replacing the one it has; returns
+    the id of the operation, the one already running for the document if there is one.
+
+    Refused before anything is queued when no run could write one: a document that is not
+    imported has no sections to read, another descriptor strategy than llm never downloads the
+    describer, the hardware setting may leave it nowhere to run, and a document with no cached
+    embedding has no sections yet."""
+    if row.status != DocumentStatus.IMPORTED:
+        raise Conflict(f"document is {row.status}; only an imported one is described: {row.name}")
+    await _describer_runs()
+    source = await _summary_source(row.id)
+    if source is None:
+        raise Conflict(f"document has no cached embedding to describe yet: {row.name}")
+    return await enqueue_operation(
+        DESCRIBING_QUEUE,
+        summarize_document_workflow,
+        row.id,
+        source,
+        True,
+        workflow_id=f"{SUMMARIZE_DOCUMENT_PREFIX}:{row.id}:{uuid4().hex}",
+        dedup_id=f"summarize-doc:{row.id}",
+    )
+
+
+async def start_summarize_collection(collection: str) -> str:
+    """Queue a description of the collection by the describer, from its documents', replacing the
+    one it has; returns the id of the operation, the one already running for the collection if
+    there is one. Refused before anything is queued for a collection with no documents, and under
+    settings the describer cannot run under (`_describer_runs`)."""
+    if not await (await Collection.get(collection)).member_ids(limit=1):
+        raise Conflict(f"collection has no documents to describe: {collection}")
+    await _describer_runs()
+    return await enqueue_operation(
+        DESCRIBING_QUEUE,
+        summarize_collection_workflow,
+        collection,
+        workflow_id=f"{SUMMARIZE_COLLECTION_PREFIX}:{collection}:{uuid4().hex}",
+        dedup_id=f"summarize-col:{collection}",
+    )
+
+
+async def _describer_runs() -> None:
+    """Refuse a description no run could write: another descriptor strategy than llm never
+    downloads the describer, and the hardware setting may leave it nowhere to run."""
+    user = await load_user_settings()
+    describer = gguf_models.describer(user.pipeline.descriptors)
+    if describer is None:
+        raise Conflict("describing with AI needs the llm section descriptors, set in Settings")
+    if hardware.device(describer, user.pipeline.accelerator) is None:
+        raise Conflict(hardware.nowhere(describer))
+
+
+async def _summary_source(doc: str) -> str | None:
+    """The cached embedding whose sections a description is written from: the newest the llm
+    strategy described, else the newest, whose c-TF-IDF descriptors still outline the book. None
+    for a document with none yet."""
+    found = await embed_cache.entries(doc)
+    for entry in found:
+        if await embed_cache.described_by(doc, entry.id) == Descriptors.LLM:
+            return entry.id
+    return found[0].id if found else None
+
+
 async def start_delete_document(row: Document) -> str:
     """Queue the deletion of a document, as the caller has just read it, from everywhere; returns
     the id of the operation. A second call while one runs is deduplicated into it."""
-    return await _start(
+    return await enqueue_operation(
         COLLECTION_QUEUE,
         delete_document_workflow,
         row.id,
@@ -1682,11 +1930,17 @@ async def start_index_collection(collection: str) -> str:
     A second call while one runs is deduplicated into the operation already running, so an
     impatient "Index all" cannot queue the collection twice."""
     await Collection.get(collection)  # NotFound before anything is queued
-    return await _start(
+    return await enqueue_index_collection(collection)
+
+
+async def enqueue_index_collection(collection: str, key: str | None = None) -> str:
+    """`start_index_collection` with no checks of its own, for a workflow that has just read the
+    name in a step (`backup.restore_backup`); `key` as in `enqueue_import`."""
+    return await enqueue_operation(
         COLLECTION_QUEUE,
         index_collection_workflow,
         collection,
-        workflow_id=f"{BULK_INDEX_PREFIX}:{collection}:{uuid4().hex}",
+        workflow_id=f"{BULK_INDEX_PREFIX}:{collection}:{key or uuid4().hex}",
         dedup_id=f"index-collection:{collection}",
     )
 
@@ -1697,7 +1951,7 @@ async def start_delete_collection(collection: str) -> str:
     On the `operation.collection` queue rather than the collection's index partition: there it
     would wait behind every document it is about to cancel."""
     await Collection.get(collection)  # NotFound before anything is queued
-    return await _start(
+    return await enqueue_operation(
         COLLECTION_QUEUE,
         delete_collection_workflow,
         collection,
@@ -1723,6 +1977,7 @@ async def rename_collection(collection: str, name: str) -> Collection:
             COLLECTION_DOCUMENT_WORKFLOW,
             MAINTAIN_PARTITION_WORKFLOW,
             REMOVE_FROM_INDEX_WORKFLOW,
+            SUMMARIZE_COLLECTION_WORKFLOW,
         ],
         [
             f"{prefix}:{collection}:"
@@ -1732,6 +1987,7 @@ async def rename_collection(collection: str, name: str) -> Collection:
                 COLLECTION_DOCUMENT_PREFIX,
                 MAINTAIN_PREFIX,
                 REMOVE_PREFIX,
+                SUMMARIZE_COLLECTION_PREFIX,
             )
         ],
         limit=1,

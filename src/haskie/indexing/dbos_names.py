@@ -38,22 +38,38 @@ IMPORT_WORKFLOW = "import_document"  # convert, then pre-warm the embedding cach
 EMBED_WORKFLOW = "ensure_embedding"  # one cached embedding of one document, deduplicated
 COLLECTION_DOCUMENT_WORKFLOW = "index_collection_document"  # cached rows into one collection
 PIPELINE_WORKFLOWS = [IMPORT_WORKFLOW, EMBED_WORKFLOW, COLLECTION_DOCUMENT_WORKFLOW]
+# The two that are document operations of their own; an embed run is a job of the one that asked.
+DOCUMENT_OPERATION_WORKFLOWS = [IMPORT_WORKFLOW, COLLECTION_DOCUMENT_WORKFLOW]
 STAGE_WORKFLOW = "stage_slice"  # workflows.stage_slice
 STAGE_STEP = "try_batch"  # workflows.try_batch
+# The steps of `summarize_collection_workflow` its tasks are read from: the members it describes,
+# then one step a member, then the collection
+MEMBERS_STEP = "undescribed_members"
+MEMBER_STEP = "try_describe_member"
+COLLECTION_STEP = "try_summarize_collection"
 
 
-# Whole-collection and whole-document operations. Also the kind the API reports for them, so the
-# three names are a type: `operations.BulkKind` is this one.
+# Whole-thing operations a request only starts: whole-collection and whole-document work, and the
+# backup and restore of everything. Also the kind the API reports for them, so the names are a
+# type: `operations.BulkKind` is this one.
 class BulkWorkflow(StrEnum):
     INDEX_COLLECTION = "index_collection"
     DELETE_COLLECTION = "delete_collection"
     DELETE_DOCUMENT = "delete_document"
+    SUMMARIZE_DOCUMENT = "summarize_document"  # a document's description the describer writes
+    SUMMARIZE_COLLECTION = "summarize_collection"  # a collection's, from its documents'
+    CREATE_BACKUP = "create_backup"
+    RESTORE_BACKUP = "restore_backup"
 
 
 BULK_WORKFLOWS: tuple[BulkWorkflow, ...] = tuple(BulkWorkflow)
 INDEX_COLLECTION_WORKFLOW = BulkWorkflow.INDEX_COLLECTION
 DELETE_COLLECTION_WORKFLOW = BulkWorkflow.DELETE_COLLECTION
 DELETE_DOCUMENT_WORKFLOW = BulkWorkflow.DELETE_DOCUMENT
+SUMMARIZE_DOCUMENT_WORKFLOW = BulkWorkflow.SUMMARIZE_DOCUMENT
+SUMMARIZE_COLLECTION_WORKFLOW = BulkWorkflow.SUMMARIZE_COLLECTION
+CREATE_BACKUP_WORKFLOW = BulkWorkflow.CREATE_BACKUP
+RESTORE_BACKUP_WORKFLOW = BulkWorkflow.RESTORE_BACKUP
 
 MAINTAIN_WORKFLOW = "maintain_collection"  # the debounced handle that only waits
 MAINTAIN_PARTITION_WORKFLOW = "maintain_on_partition"  # the run itself, on the index partition

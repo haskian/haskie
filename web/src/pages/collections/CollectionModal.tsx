@@ -1,4 +1,4 @@
-import { Minus, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { Minus, Plus, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   api,
@@ -12,10 +12,9 @@ import {
 } from '../../api'
 import { errorText, matchesText, needleOf } from '../../format'
 import { useOperation } from '../../hooks/useOperation'
-import { useOptions } from '../../hooks/useOptions'
 import { usePoll } from '../../hooks/usePoll'
 import { useRun } from '../../hooks/useRun'
-import { DescriptionBox, documentIcon, Kv, Modal, RenameForm, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
+import { BulkStatus, DescriptionBox, documentIcon, Kv, Modal, RenameForm, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
 import { candidateDocuments } from './candidates'
 import { SettingsForm } from './SettingsForm'
 
@@ -102,8 +101,8 @@ function CollectionBody({
   }, [refreshInfo])
   usePoll((info?.counts.active ?? 0) > 0, poll)
 
-  // "Index all" and "Delete collection" are accepted (202) and run in the background, so the
-  // modal follows the operation. The callbacks keep one identity, or `useOperation` rebuilds its
+  // "Index all", "Describe with AI" and "Delete collection" are accepted (202) and run in the
+  // background, so the modal follows the operation. The callbacks keep one identity, or `useOperation` rebuilds its
   // poll on every tick. A deleted collection has nothing left to re-read, so that branch closes.
   const onBulkDone = useCallback(
     (operation: OperationProgress) => {
@@ -274,11 +273,29 @@ function CollectionBody({
           <section className="pane">
             <span className="pane-head mono muted">Description</span>
             <div className="pane-body">
+              {/* Keyed by the text: the box is uncontrolled, and a written description replaces
+                  what it shows. */}
               <DescriptionBox
+                key={info.description}
                 value={info.description}
                 placeholder="What this collection holds"
                 onSave={(next) => void run(() => api.describeCollection(name, next))}
               />
+              <div className="row">
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={bulk.running}
+                  onClick={() => {
+                    const replace = info.description === '' || window.confirm('Replace the description with one the AI writes from its documents?')
+                    if (replace) startBulk(() => api.generateCollectionDescription(name))
+                  }}
+                >
+                  <Sparkles className="icon" />
+                  Describe with AI
+                </button>
+                {bulk.operation?.kind === 'summarize_collection' && <BulkStatus operation={bulk.operation} />}
+              </div>
             </div>
           </section>
         </div>
@@ -304,18 +321,5 @@ function CollectionBody({
           beside the control that failed would be scrolled out of sight as often as not. */}
       {error !== null && <p className="muted collection-error">{error}</p>}
     </>
-  )
-}
-
-/** How a queued operation is going, beside the button that started it. */
-function BulkStatus({ operation }: { operation: OperationProgress }) {
-  const running = useOptions().active_run_statuses.includes(operation.status)
-  const what = operation.kind === 'index_collection' ? 'queueing documents' : 'deleting'
-  return (
-    <span className="muted">
-      {running ? `${what}…` : `${what}: ${operation.status.toLowerCase()}`}
-      {operation.progress !== null && ` ${operation.progress.done}/${operation.progress.total}`}
-      {operation.error !== null && ` — ${operation.error}`}
-    </span>
   )
 }

@@ -53,6 +53,7 @@ const TASK: Task = {
   status: 'SUCCESS',
   result: 2,
   error: null,
+  name: null,
 }
 
 const task = (patch: Partial<Task> & { stage: Stage }): Task => ({ ...TASK, ...patch, id: `${TASK.id}:${patch.stage}:${patch.seq ?? 0}` })
@@ -181,6 +182,30 @@ describe('jobsFor', () => {
       expected: [{ label: 'Delete', done: 0, total: 0, state: 'done', seconds: 38 }],
     },
     {
+      name: 'a collection described is a describe, not a queue',
+      job: job({ kind: 'collection', title: 'collection notes', status: 'SUCCESS', detail: { bulk: 'summarize_collection' } }),
+      tasks: null,
+      expected: [{ label: 'Describe', done: 0, total: 0, state: 'done', seconds: 38 }],
+    },
+    {
+      name: 'a description asked for is a describe, running',
+      job: job({ kind: 'collection', title: 'document guide.md', status: 'PENDING', detail: { bulk: 'summarize_document' } }),
+      tasks: null,
+      expected: [{ label: 'Describe', done: 0, total: 0, state: 'active', seconds: undefined }],
+    },
+    {
+      name: 'a backup counts the files it archived',
+      job: job({ kind: 'backup', title: 'every document, collection and setting', status: 'PENDING', detail: { bulk: 'create_backup', done: 50, total: 120 } }),
+      tasks: null,
+      expected: [{ label: 'Archive', done: 50, total: 120, state: 'active', seconds: undefined }],
+    },
+    {
+      name: 'a failed restore has nothing to count, and says it failed',
+      job: job({ kind: 'backup', title: 'every document, collection and setting', status: 'ERROR', detail: { bulk: 'restore_backup' } }),
+      tasks: null,
+      expected: [{ label: 'Restore', done: 0, total: 0, state: 'error', seconds: 38 }],
+    },
+    {
       name: 'a download is one task, done 1/1 and timed, and says whether the model is loaded',
       job: job({ kind: 'download', title: 'embedding BAAI/bge-small-en-v1.5', status: 'SUCCESS', detail: { warm: true } }),
       tasks: null,
@@ -235,6 +260,7 @@ describe('taskText', () => {
     { name: 'an embed names its one part', task: task({ stage: 'embed', page_start: 3, page_end: 4 }), expected: 'part 3' },
     { name: 'an index write names the range it wrote', task: task({ stage: 'index', page_start: 0, page_end: 50 }), expected: 'parts 0–50' },
     { name: 'a description names its sections, counted from one', task: task({ stage: 'describe', page_start: 16, page_end: 32 }), expected: 'sections 17–32' },
+    { name: "a collection's description names the document it describes", task: task({ stage: 'describe', page_start: 0, page_end: 0, name: 'guide.md' }), expected: 'guide.md' },
   ]
   for (const testCase of cases) {
     test(testCase.name, () => {
@@ -386,6 +412,8 @@ describe('tagOf', () => {
     { name: 'a collection index', row: job({ kind: 'collection', jobs: [], detail: { bulk: 'index_collection' } }), expected: 'Index' },
     { name: 'a collection delete', row: job({ kind: 'collection', jobs: [], detail: { bulk: 'delete_collection' } }), expected: 'Delete' },
     { name: 'a collection row that does not say is an index', row: job({ kind: 'collection', jobs: [], detail: {} }), expected: 'Index' },
+    { name: 'a backup', row: job({ kind: 'backup', jobs: [], detail: { bulk: 'create_backup' } }), expected: 'Backup' },
+    { name: 'a restore', row: job({ kind: 'backup', jobs: [], detail: { bulk: 'restore_backup' } }), expected: 'Restore' },
   ]
   for (const one of cases) {
     test(one.name, () => {

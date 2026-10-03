@@ -14,9 +14,9 @@ async def list_operations(
     page_size: int = DEFAULT_PAGE_SIZE,
     cursor: str | None = None,
 ) -> Page[operations.Operation]:
-    """One page of the operations of one `kind`, newest first: document, collection, download or
-    maintenance. `collection` keeps one collection's operations only, where the kind has a
-    collection at all.
+    """One page of the operations of one `kind`, newest first: document, collection, download,
+    maintenance or backup (backups and restores). `collection` keeps one collection's operations
+    only, where the kind has a collection at all.
 
     Pass the `next_cursor` of a response back as `cursor` to continue; a cursor belongs to the
     kind that issued it.
@@ -44,8 +44,8 @@ async def list_job_tasks(job_id: str) -> list[operations.Task]:
 
 @get("/api/operations/{operation_id:str}/progress")
 async def get_operation_progress(operation_id: str) -> operations.OperationProgress:
-    """How far a whole-collection index or delete, or a document delete, got; 404 for any other
-    operation id."""
+    """How far a whole-collection index or delete, a document delete, a description asked for of
+    either, a backup or a restore got; 404 for any other operation id."""
     return await operations.progress(operation_id)
 
 

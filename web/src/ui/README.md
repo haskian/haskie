@@ -46,6 +46,7 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `Skeleton` | `<Skeleton />` | The shape of a document while it loads |
 | `DescriptionBox` | `<DescriptionBox value={doc.description} placeholder="What is it about?" onSave={save} />` | Saves on blur and on unmount, only what changed |
 | `Info` | `<Info>In no collection yet.</Info>` | A line that says how things are, boxed in a gray tint with an info icon. Not for errors |
+| `BulkStatus` | `<BulkStatus operation={bulk.operation} />` | Beside the button that started an operation: running, or how it ended and why |
 | `RenameForm` | `<RenameForm key={name} name={name} label="Collection name" busy={busy} onRename={rename} />` | A name input with a Rename button; keyed by the name, so each rename starts a new draft |
 | `DropOverlay` | `<DropOverlay onFiles={upload} />` | Document-level drag listeners plus the overlay |
 | `ModelFacts` / `EmbedderFacts` | `<ModelFacts name={name} metadata={metadata} />`, `<EmbedderFacts model={model} metadata={metadata} />` | A model's facts under its picker; nothing for the full-text-only profile |

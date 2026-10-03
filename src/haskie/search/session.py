@@ -133,7 +133,7 @@ class EventDetail(msgspec.Struct, omit_defaults=True):
     error: str | None = None  # search: why it failed
     collection: str | None = None  # attach, detach
     collections: list[str] | None = None  # collections: the selection that was set
-    questions: list[str] | None = None  # search: the parts, when several were asked at once
+    questions: list[str] | None = None  # search: every question it asked, in order
     context: str | None = None  # search: the context an excerpts search sent
 
 

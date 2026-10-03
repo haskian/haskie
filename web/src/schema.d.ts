@@ -73,6 +73,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/backup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** CreateBackup */
+        post: operations["ApiBackupCreateBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backup/{operation_id}/file": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GetBackupFile */
+        get: operations["ApiBackupOperationIdFileGetBackupFile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** RestoreBackup */
+        post: operations["ApiRestoreRestoreBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/render": {
         parameters: {
             query?: never;
@@ -346,6 +397,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document}/description/generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** GenerateDescription */
+        post: operations["ApiDocumentsDescriptionGenerateGenerateDescription"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/collections": {
         parameters: {
             query?: never;
@@ -461,6 +529,23 @@ export interface paths {
         put?: never;
         /** IndexCollection */
         post: operations["ApiCollectionsIndexIndexCollection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/collections/{collection}/description/generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** GenerateCollectionDescription */
+        post: operations["ApiCollectionsDescriptionGenerateGenerateCollectionDescription"];
         delete?: never;
         options?: never;
         head?: never;
@@ -906,7 +991,7 @@ export interface components {
          * BulkWorkflow
          * @enum {string}
          */
-        BulkWorkflow: "index_collection" | "delete_collection" | "delete_document";
+        BulkWorkflow: "index_collection" | "delete_collection" | "delete_document" | "summarize_document" | "summarize_collection" | "create_backup" | "restore_backup";
         /** ChunkSettings */
         ChunkSettings: {
             chunker?: components["schemas"]["Chunker"];
@@ -1035,7 +1120,7 @@ export interface components {
         };
         /**
          * Descriptors
-         * @description How the words and phrases that say what each section is about are written, once per document and chunk settings, as a step after embedding. c-tf-idf: the terms a section uses more than the sections beside it, reranked by the embedding model; fast, runs everywhere. llm: Gemma-4-E2B (2.8 GB download, Apache 2.0) reads each section and names its topics; judged far better on technical books, about half a second a section, Apple Silicon only, with a model hardware other than cpu. A change applies to documents embedded or indexed afterwards; "Index all" in a collection re-describes the rest, for every collection that chunks them alike, as they share the descriptors.
+         * @description How the words and phrases that say what each section is about are written, once per document and chunk settings, as a step after embedding. c-tf-idf: the terms a section uses more than the sections beside it, reranked by the embedding model; fast, runs everywhere. llm: Gemma-4-E2B (2.8 GB download, Apache 2.0) reads each section and names its topics; judged far better on technical books, about half a second a section, Apple Silicon only, with a model hardware other than cpu. It also writes a document without a description a few sentences on what it is about. A change applies to documents embedded or indexed afterwards; "Index all" in a collection re-describes the rest, for every collection that chunks them alike, as they share the descriptors.
          * @default c-tf-idf
          * @enum {string}
          */
@@ -1082,7 +1167,7 @@ export interface components {
          * DocumentStatus
          * @enum {string}
          */
-        DocumentStatus: "queued" | "converting" | "embedding" | "imported" | "error" | "cancelled" | "deleting";
+        DocumentStatus: "queued" | "converting" | "embedding" | "describing" | "imported" | "error" | "cancelled" | "deleting";
         /** DuplicateCosine */
         DuplicateCosine: {
             chunk: number;
@@ -1514,7 +1599,7 @@ export interface components {
          * OperationKind
          * @enum {string}
          */
-        OperationKind: "document" | "collection" | "download" | "maintenance";
+        OperationKind: "document" | "collection" | "download" | "maintenance" | "backup";
         /** OperationKindSummary */
         OperationKindSummary: {
             kind: components["schemas"]["OperationKind"];
@@ -2181,6 +2266,7 @@ export interface components {
         Staged: {
             staging_id: string;
             filename: string;
+            name: string;
             size: number;
             duplicate: string | null;
         };
@@ -2205,6 +2291,7 @@ export interface components {
             status: components["schemas"]["RunStatus"];
             result: number | null;
             error: string | null;
+            name?: string | null;
         };
         /**
          * Tool
@@ -2370,6 +2457,85 @@ export interface operations {
             };
         };
     };
+    ApiBackupCreateBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request accepted, processing continues off-line */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkStarted"];
+                };
+            };
+        };
+    };
+    ApiBackupOperationIdFileGetBackupFile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                operation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description File Download */
+            200: {
+                headers: {
+                    /** @description File size in bytes */
+                    "content-length"?: string;
+                    /** @description Last modified data-time in RFC 2822 format */
+                    "last-modified"?: string;
+                    /** @description Entity tag */
+                    etag?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "": string;
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
+    ApiRestoreRestoreBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request accepted, processing continues off-line */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkStarted"];
+                };
+            };
+        };
+    };
     ApiDocumentsRenderRenderMarkdown: {
         parameters: {
             query?: never;
@@ -2488,7 +2654,7 @@ export interface operations {
                 sort?: string | null;
                 /** @description One of: asc, desc. */
                 order?: components["schemas"]["Order"] | null;
-                /** @description One of: queued, converting, embedding, imported, error, cancelled, deleting. */
+                /** @description One of: queued, converting, embedding, describing, imported, error, cancelled, deleting. */
                 status?: components["schemas"]["DocumentStatus"] | null;
             };
             header?: never;
@@ -2977,6 +3143,39 @@ export interface operations {
             };
         };
     };
+    ApiDocumentsDescriptionGenerateGenerateDescription: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request accepted, processing continues off-line */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkStarted"];
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
     ApiCollectionsListCollections: {
         parameters: {
             query?: {
@@ -3260,6 +3459,39 @@ export interface operations {
         };
     };
     ApiCollectionsIndexIndexCollection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request accepted, processing continues off-line */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkStarted"];
+                };
+            };
+            /** @description The request is invalid: a parameter or body that does not decode, or a value the handler refuses. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                    };
+                };
+            };
+        };
+    };
+    ApiCollectionsDescriptionGenerateGenerateCollectionDescription: {
         parameters: {
             query?: never;
             header?: never;

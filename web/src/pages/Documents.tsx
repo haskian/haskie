@@ -1,4 +1,4 @@
-import { ExternalLink, Library, Plus, Trash2, Upload, X } from "lucide-react";
+import { ExternalLink, Library, Plus, Sparkles, Trash2, Upload, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -13,6 +13,7 @@ import {
   type DocumentStatus,
   type Document,
   type EmbeddingEntry,
+  type OperationProgress,
   type Sections,
   type Similar,
 } from "../api";
@@ -25,6 +26,7 @@ import { usePoll } from "../hooks/usePoll";
 import { useRun } from "../hooks/useRun";
 import { href, navigate, type Route } from "../router";
 import {
+  BulkStatus,
   documentIcon,
   DescriptionBox,
   DocumentPanes,
@@ -41,10 +43,12 @@ import {
 } from "../ui";
 import "./Documents.css";
 import { embeddingLabel } from "./documents/embedding";
-import { groupByDay, groupByStatus } from "./documents/group";
+import { groupByDay, groupByStatus, unfiledFirst } from "./documents/group";
 import { SectionsTab } from "./documents/Sections";
 import { Duplicate, JustImported, SimilarDocuments } from "./documents/Similar";
 import { fresh, importedNames, importLabel, staged as stagedFrom, waitingAfter, type StagedFile } from "./documents/staged";
+
+const NOT_SEARCHABLE = "Not searchable until you add it to a collection.";
 
 type GroupBy = "status" | "name" | "day";
 const GROUPS: { id: GroupBy; label: string }[] = [
@@ -149,9 +153,10 @@ export function Documents({
   // page of 500 is what the gallery shows anyway.
   const needle = needleOf(search);
   const groups = useMemo(() => {
-    const visible = docs.items.filter((doc) =>
-      matchesText(needle, doc.name, doc.description),
-    );
+    // every grouping keeps this order inside its bands, but for the day it sorts by
+    const visible = docs.items
+      .filter((doc) => matchesText(needle, doc.name, doc.description))
+      .sort(unfiledFirst);
     if (groupBy === "status") return groupByStatus(visible, options.document_statuses);
     if (groupBy === "day") return groupByDay(visible);
     return groupByRange(visible, (doc) => doc.name);
@@ -199,6 +204,7 @@ export function Documents({
               <Tile
                 key={doc.name}
                 icon={documentIcon(doc.suffix)}
+                warning={doc.collections.length === 0 ? NOT_SEARCHABLE : undefined}
                 name={doc.name}
                 sub={
                   <>
@@ -411,6 +417,31 @@ function DocumentModal({
   }, [onClose, onChanged]);
   const deletion = useOperation(onDeleted, setError);
 
+  // A description is written in the background too: the modal follows it, and once it is
+  // written reads the row again, as the listing does, whose tile shows it. How a run that wrote
+  // none ended shows beside the button.
+  const onDescribed = useCallback(
+    (operation: OperationProgress) => {
+      if (operation.status !== "SUCCESS" || doc === null) return;
+      api.document(doc).then(setRow).catch((cause: unknown) => setError(errorText(cause)));
+      onChanged();
+    },
+    [doc, onChanged, setError],
+  );
+  const describing = useOperation(onDescribed, setError);
+
+  const generate = () => {
+    if (row === null) return;
+    if (
+      row.description !== "" &&
+      !window.confirm("Replace the description with one the AI writes?")
+    )
+      return;
+    describing
+      .start(() => api.generateDescription(row.name))
+      .catch((cause: unknown) => setError(errorText(cause)));
+  };
+
   const remove = () => {
     if (doc === null) return;
     if (!window.confirm(`Delete "${doc}" and remove it from every collection?`))
@@ -509,13 +540,32 @@ function DocumentModal({
             <span className="pane-head mono muted">Description</span>
             <div className="pane-body">
               {row !== null && (
-                <DescriptionBox
-                  value={row.description}
-                  placeholder="What this document is about"
-                  onSave={(next) =>
-                    void run(() => api.describeDocument(row.name, next))
-                  }
-                />
+                <>
+                  {/* Keyed by the text: the box is uncontrolled, and a written description
+                      replaces what it shows. */}
+                  <DescriptionBox
+                    key={row.description}
+                    value={row.description}
+                    placeholder="What this document is about"
+                    onSave={(next) =>
+                      void run(() => api.describeDocument(row.name, next))
+                    }
+                  />
+                  <div className="row">
+                    <button
+                      className="btn"
+                      type="button"
+                      disabled={busy || describing.running}
+                      onClick={generate}
+                    >
+                      <Sparkles className="icon" />
+                      Describe with AI
+                    </button>
+                    {describing.operation !== null && (
+                      <BulkStatus operation={describing.operation} />
+                    )}
+                  </div>
+                </>
               )}
             </div>
           </section>

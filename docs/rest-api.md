@@ -18,6 +18,7 @@ Each feature has one module under `src/haskie/api/`.
 | `/api/gaps` | `gaps.py` | questions that found no answer, grouped by topic; review (dismiss, resolve, reopen); replay against the collections as they are now; an agent's report that a search did not answer it |
 | `/api/operations`, `/api/jobs` | `operations.py` | history per kind, live activity, progress, a job's tasks, cancel |
 | `/api/status`, `/api/init`, `/api/settings`, `/api/options` | `settings.py` | first-run init, user settings, and the option catalogue the UI builds its forms from |
+| `/api/backup`, `/api/restore` | `backup.py` | start a backup, download its archive, restore one (the raw zip as the body) |
 
 A handler marked `mcp_tool="<name>"` is also an MCP tool. The search tools are separate handlers
 under `/api/agent/`, left out of this document, that answer with fewer fields. See
@@ -57,6 +58,9 @@ Nothing authenticates a caller, and the server binds loopback. A browser ignores
 Agents, MCP clients and scripts send no `Origin`, so they pass the origin check. A refused request
 answers `Forbidden`.
 
+While a restore runs, `guard_callers` also answers every request but a GET with `NotReady` (503),
+MCP calls included: each is a POST. GETs stay open, so the UI can follow the restore.
+
 ## Errors
 
 Errors are part of the contract. Each type in `errors.py` carries its status code.
@@ -70,7 +74,7 @@ Errors are part of the contract. Each type in `errors.py` carries its status cod
 | `InvalidInput` | 422 | a bad argument |
 | `ValidationException` (Litestar's) | 422 | a parameter or body that does not decode: a wrong type, a missing field, a value out of bounds |
 | `PermanentError` | 422 | the file cannot be processed as it is |
-| `NotReady` | 503, `Retry-After: 2` | a model is downloading or warming, or every preview builder is busy |
+| `NotReady` | 503, `Retry-After: 2` | a model is downloading or warming, every preview builder is busy, or a restore is running (any request but a GET) |
 | `Unavailable` | 503 | a model failed to load; it stays failed until a restart or a settings save |
 
 Each of these answers `{"detail": "<message>"}` and nothing else. Litestar documents a route that

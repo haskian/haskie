@@ -1,9 +1,9 @@
 import type { ImportedDocument, Staged } from '../../api'
 import { errorText } from '../../format'
 
-/** An upload waiting to be imported: the name the document will get (the filename until edited),
- *  and why the server refused it last time, if it did. */
-export type StagedFile = Staged & { name: string; error: string | null }
+/** An upload waiting to be imported: `name` is what the document will get (the server's
+ *  normalized name until edited), and `error` why the server refused it last time, if it did. */
+export type StagedFile = Staged & { error: string | null }
 
 /** Staging every picked file at once: the ones that landed, ready to name, and a line for each one
  *  that did not. A failure costs its own file only. */
@@ -14,7 +14,7 @@ export function staged(
   const added: StagedFile[] = []
   const failures: string[] = []
   results.forEach((result, at) => {
-    if (result.status === 'fulfilled') added.push({ ...result.value, name: result.value.filename, error: null })
+    if (result.status === 'fulfilled') added.push({ ...result.value, error: null })
     else failures.push(`${files[at].name}: ${errorText(result.reason)}`)
   })
   return { added, failures }

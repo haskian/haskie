@@ -22,9 +22,10 @@ PAGED = {"page": Provide(page_request, sync_to_thread=False)}
 
 
 class BulkStarted(msgspec.Struct):
-    """An operation was accepted and runs in the background. A whole-collection index or delete,
-    and a document delete, report their progress at /api/operations/{operation_id}/progress; every
-    operation is listed at /api/operations."""
+    """An operation was accepted and runs in the background. A whole-collection index or delete, a
+    document delete, a description asked for of either, a backup and a restore report their
+    progress at
+    /api/operations/{operation_id}/progress; every operation is listed at /api/operations."""
 
     operation_id: str
 

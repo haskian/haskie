@@ -19,7 +19,8 @@ where a section is longer, when there are pages to cut at (`parts.cuts`):
   descriptors another strategy wrote, see `embed_cache.described_by`) ->
   `embeddings/<id>.tmp/NNNNNN.descriptors.json`: the descriptors of a run of sections, sixteen a
   batch for the llm strategy, all of them in one for c-TF-IDF (`plan_describe`).
-  `finalize_describe` puts them on the sections file and drops the scratch files.
+  `finalize_describe` puts them on the sections file and drops the scratch files. After it, the llm
+  strategy writes what the whole document is about (`summarize`).
 - index (once per collection the document is attached to) -> rows of `index_group_parts`
   consecutive parts read out of the cache file and written to that collection's LanceDB table in
   one commit (fast; one writer per collection). `prepare_index` clears the document's older rows
@@ -331,7 +332,7 @@ async def describe_batch(
     span = slice(batch.start, batch.end)
     if by == Descriptors.LLM:
         found = await embed_cache.inputs(doc.id, cache_id, vectors=False)
-        strategy = generated.Generated(partial(embed.reply, gguf_models.DESCRIBER, accelerator))
+        strategy = generated.Generated(_describer_reply(accelerator))
         # a worker thread without a CPU slot: the describer runs on the GPU, one prompt at a time,
         # and documents waiting their turn there must not hold the slots searches need
         described = await anyio.to_thread.run_sync(
@@ -366,6 +367,31 @@ async def finalize_describe(doc: Document, cache_id: str, by: Descriptors, count
     await embed_cache.write_descriptors(doc.id, cache_id, described, by)
     await home.remove_tree(embed_cache.scratch_dir(doc.id, cache_id))
     return len(described)
+
+
+async def summarize(doc: Document, cache_id: str, accelerator: Accelerator) -> str:
+    """What the document is about, in a few sentences the describer writes from the sections of
+    one cached embedding, once the llm strategy described them (`generated.summarize`)."""
+    await describe_ready(None, Descriptors.LLM, accelerator)
+    found = await embed_cache.inputs(doc.id, cache_id, vectors=False)
+    # off the CPU budget, as `describe_batch` asks the describer
+    return await anyio.to_thread.run_sync(
+        generated.summarize, found.sections, found.prose, _describer_reply(accelerator)
+    )
+
+
+async def summarize_collection(descriptions: list[str], accelerator: Accelerator) -> str:
+    """What a collection is about, in a few sentences the describer writes from its documents'
+    descriptions (`generated.summarize_collection`)."""
+    await describe_ready(None, Descriptors.LLM, accelerator)
+    return await anyio.to_thread.run_sync(
+        generated.summarize_collection, descriptions, _describer_reply(accelerator)
+    )
+
+
+def _describer_reply(accelerator: Accelerator) -> generated.Reply:
+    """The llm strategy's model, asked one prompt at a time."""
+    return partial(embed.reply, gguf_models.DESCRIBER, accelerator)
 
 
 # --- index ----------------------------------------------------------------------
