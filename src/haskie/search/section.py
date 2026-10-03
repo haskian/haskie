@@ -142,15 +142,8 @@ class Group(msgspec.Struct):
 
     @property
     def cost(self) -> int:
-        """What it costs an agent as an excerpt, in characters of the tool's JSON answer: what the
-        excerpt carries beside its text (`EXCERPT_CHARS`), each question it answers, which it names
-        in full, and each passage (`passage_cost`)."""
-        labels = {label for hit_range in self.ranges for label in hit_range.aspects}
-        return (
-            EXCERPT_CHARS
-            + sum(len(label) + ASPECT_CHARS for label in labels)
-            + sum(passage_cost(hit_range) for hit_range in self.ranges)
-        )
+        """What it costs an agent as an excerpt (`excerpt_cost`)."""
+        return excerpt_cost(self.ranges)
 
 
 # Beside its text, what an excerpt and each of its passages (a span) cost in the tool's answer
@@ -164,6 +157,20 @@ ASPECT_CHARS = 4  # a question's quotes and separator, on the excerpt
 # a span's `"aspects":[…],` naming its questions by position in the excerpt's: at most 5, one
 # digit and a separator each
 SPAN_ASPECTS_CHARS = len('"aspects":[],')
+
+
+def excerpt_cost(ranges: list[HitRange]) -> int:
+    """What an excerpt of these passages costs an agent, in characters of the tool's JSON answer:
+    what it carries beside its text (`EXCERPT_CHARS`), each question it answers, which it names in
+    full, and each passage (`passage_cost`). None at all for no passages."""
+    if not ranges:
+        return 0
+    labels = {label for hit_range in ranges for label in hit_range.aspects}
+    return (
+        EXCERPT_CHARS
+        + sum(len(label) + ASPECT_CHARS for label in labels)
+        + sum(passage_cost(hit_range) for hit_range in ranges)
+    )
 
 
 def passage_cost(hit_range: HitRange) -> int:
@@ -198,20 +205,16 @@ def within(groups: list[Group], budget: int, first: HitRange | None = None) -> l
     sitting in its `also_in`, never in the pool.
     """
     kept: list[set[int]] = [set() for _ in groups]
-    named: list[set[str]] = [set() for _ in groups]
     used = 0
+
+    def chosen(at: int, indices: set[int]) -> list[HitRange]:
+        return [each for index, each in enumerate(groups[at].ranges) if index in indices]
 
     def take(at: int, index: int, always: bool = False) -> None:
         nonlocal used
-        hit_range = groups[at].ranges[index]
-        added = (
-            passage_cost(hit_range)
-            + sum(len(label) + ASPECT_CHARS for label in set(hit_range.aspects) - named[at])
-            + (0 if kept[at] else EXCERPT_CHARS)
-        )
+        added = excerpt_cost(chosen(at, kept[at] | {index})) - excerpt_cost(chosen(at, kept[at]))
         if always or used + added <= budget:
             kept[at].add(index)
-            named[at].update(hit_range.aspects)
             used += added
 
     for at, one in enumerate(groups):
@@ -230,9 +233,7 @@ def within(groups: list[Group], budget: int, first: HitRange | None = None) -> l
         if kept[at] and index not in kept[at]:
             take(at, index)
     return [
-        msgspec.structs.replace(
-            one, ranges=[each for index, each in enumerate(one.ranges) if index in kept[at]]
-        )
+        msgspec.structs.replace(one, ranges=chosen(at, kept[at]))
         for at, one in enumerate(groups)
         if kept[at]
     ]

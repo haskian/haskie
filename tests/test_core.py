@@ -1393,6 +1393,66 @@ async def test_member_ids_walk_one_page_at_a_time() -> None:
     assert await collection.member_ids(after=second) == [third]
 
 
+async def _cache_entry(doc: str) -> str:
+    """An `embeddings` row for `doc`, the entry a membership names once its rows are being written
+    (`pipeline.prepare_index`); no cache files, which `searchable` never reads."""
+    entry = f"entry-{doc}"
+    async with db.connect() as conn:
+        await conn.execute(
+            insert(tables.embeddings).values(
+                id=entry,
+                document_id=doc,
+                urn="urn",
+                model="model",
+                chunk_size=1,
+                chunk_merge_below=0,
+                chunk_frame=0,
+                chunker="chunker",
+                chunk_version=1,
+                parser="parser",
+                skip_ocr_pages=0,
+            )
+        )
+    return entry
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("name", "status", "entry", "leaving", "answers"),
+    [
+        ("an indexed member", MemberStatus.INDEXED, True, None, True),
+        ("one indexed again: its earlier rows answer", MemberStatus.INDEXING, True, None, True),
+        ("one indexed for the first time: no rows yet", MemberStatus.INDEXING, False, None, False),
+        ("a pending member", MemberStatus.PENDING, False, None, False),
+        ("a write that failed after dropping the old rows", MemberStatus.ERROR, True, None, False),
+        (
+            "a write cancelled after dropping the old rows",
+            MemberStatus.CANCELLED,
+            True,
+            None,
+            False,
+        ),
+        ("an indexed member being detached", MemberStatus.INDEXED, True, "removing", False),
+        ("an indexed member being deleted", MemberStatus.INDEXED, True, "deleting", False),
+    ],
+)
+async def test_a_collection_answers_a_search_only_from_rows_it_still_has(
+    name: str, status: MemberStatus, entry: bool, leaving: str | None, answers: bool
+) -> None:
+    notes = await Collection.create("notes")
+    doc = (await attachable("a.md")).id
+    await notes.add(doc)
+    if entry:
+        await notes.set_member_entry(doc, await _cache_entry(doc))
+    await notes.set_member_status(doc, status, "boom" if status == MemberStatus.ERROR else None)
+    if leaving == "removing":
+        await notes.start_removal(doc)
+    elif leaving == "deleting":
+        await document.set_status(doc, DocumentStatus.DELETING)
+
+    assert await Collection.searchable(["notes"]) == (["notes"] if answers else []), name
+
+
 @pytest.mark.anyio
 async def test_member_counts_group_by_status() -> None:
     collection = await Collection.create("counts")

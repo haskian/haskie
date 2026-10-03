@@ -207,11 +207,10 @@ async def agent_search_excerpts(
             `rerank_with_context` setting is on).
         session_id: The conversation's id; the search then shows in that session's history.
     """
-    return agent.view(
+    return agent.answer(
         await _search_excerpts(
             q, context, session_id, collections, limit, document_ids, section_ids
-        ),
-        agent.Answer,
+        )
     )
 
 

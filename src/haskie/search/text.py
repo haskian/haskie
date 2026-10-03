@@ -84,9 +84,9 @@ async def checked_names(collections: list[str] | None) -> list[str]:
     (`Collection.searchable`).
 
     A name nobody owns is a mistake in the request, not an empty result, and so is a collection
-    with no indexed document: it answers with nothing, and an empty answer would read as "the
-    sources do not cover it". A session's stale name is different: `retrieval.plan` skips it,
-    because the caller did not choose it just now.
+    with no document to search: it answers with nothing, and an empty answer would read as "the
+    sources do not cover it". A session's selection is different: `retrieval.scope` skips such a
+    name, because the caller did not choose it just now.
     """
     known = await Collection.names()
     if not collections:

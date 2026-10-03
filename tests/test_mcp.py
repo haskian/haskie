@@ -222,11 +222,25 @@ async def test_every_read_tool_answers(
     assert expected(found), f"{name}: {found}"
 
 
-# Each tool, its arguments, its REST twin with the same arguments, and the view the tool answers
-# with (`api.agent`).
+# Each tool, its arguments, its REST twin with the same arguments, the view the tool answers with
+# (`api.agent`), and how the route's answer becomes it.
 VIEWS = [
-    ("search_excerpts", {"q": [BY_RETRY]}, "/api/search/excerpts", {"q": BY_RETRY}, agent.Answer),
-    ("search_sections", {"q": BY_RETRY}, "/api/search/sections", {"q": BY_RETRY}, agent.SectionMap),
+    (
+        "search_excerpts",
+        {"q": [BY_RETRY]},
+        "/api/search/excerpts",
+        {"q": BY_RETRY},
+        agent.Answer,
+        agent.answer,
+    ),
+    (
+        "search_sections",
+        {"q": BY_RETRY},
+        "/api/search/sections",
+        {"q": BY_RETRY},
+        agent.SectionMap,
+        lambda served: agent.view(served, agent.SectionMap),
+    ),
 ]
 
 
@@ -240,9 +254,50 @@ def _fields(value: Any, at: str = "") -> set[str]:
     return {one for key, item in value.items() for one in {at + key, *_fields(item, f"{at}{key}.")}}
 
 
-@pytest.mark.parametrize(("tool", "arguments", "route", "params", "view"), VIEWS)
+def test_a_span_names_its_questions_by_position_in_its_excerpt() -> None:
+    """An excerpt answering two questions: one passage answers the second alone, one both, one
+    neither (a fill), each told by position in the excerpt's `aspects`."""
+    first, second = BY_RETRY, BY_CLOCK
+
+    def span(aspects: list[str]) -> dict:
+        return {
+            "header": "Retries",
+            "section_id": "s1",
+            "location": "retries.md L3-4",
+            "score": 1.0,
+            "aspects": aspects,
+        }
+
+    excerpt = {
+        "collection": "notes",
+        "document_id": "d1",
+        "document": "retries.md",
+        "header": "Retries",
+        "section_id": "s1",
+        "location": "retries.md L1-9",
+        "text": "A background job retries a failed call.",
+        "score": 1.0,
+        "markdown_file": "/home/retries.md",
+        "aspects": [first, second],
+        "spans": [span([second]), span([first, second]), span([])],
+    }
+    found = {"excerpts": [excerpt], "uncovered": [], "missing_terms": [], "searched": ["notes"]}
+
+    (viewed,) = agent.answer(found).excerpts
+
+    assert viewed.aspects == [first, second]
+    assert [one.aspects for one in viewed.spans] == [[1], [0, 1], []]
+
+
+@pytest.mark.parametrize(("tool", "arguments", "route", "params", "view", "viewed"), VIEWS)
 async def test_a_tool_answers_with_fewer_fields_than_its_route(
-    library: AsyncTestClient, tool: str, arguments: dict, route: str, params: dict, view: Any
+    library: AsyncTestClient,
+    tool: str,
+    arguments: dict,
+    route: str,
+    params: dict,
+    view: Any,
+    viewed: Callable[[Any], Any],
 ) -> None:
     """The same search, fewer fields: the agent reads the view, the web UI the whole answer. The
     offsets, chunk numbers and lines the tool leaves out are still on the route."""
@@ -250,7 +305,7 @@ async def test_a_tool_answers_with_fewer_fields_than_its_route(
     served = (await library.get(route, params=params)).json()
 
     assert not error, found
-    assert msgspec.convert(found, view) == agent.view(served, view), f"{tool}: the route's answer"
+    assert msgspec.convert(found, view) == viewed(served), f"{tool}: the route's answer"
     told = _fields(found)
     assert told < _fields(served), f"{tool}: a subset of the route's fields"
     left_out = {"seq_start", "char_start", "line_start", "page_start", "source_file"}

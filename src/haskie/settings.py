@@ -811,11 +811,12 @@ def _store(settings: UserSettings) -> None:
 
 
 def _decode(raw: str) -> UserSettings:
-    """Decode a stored settings row. No renames of old keys: a home written under other field
-    names is at another `db.SCHEMA_VERSION` and is refused before its settings are read. A key
-    this build does not know is dropped and its setting takes the default, which is how a setting
-    whose meaning changed leaves the old value behind (`answer_budget_chars`, which bounds the
-    agent's whole answer where `max_answer_chars` bounded the text alone)."""
+    """Decode a stored settings row. No renames of old keys: a field renamed for its name alone
+    bumps `db.SCHEMA_VERSION`, so a home written under the old name is refused before its
+    settings are read. A field renamed because its meaning changed bumps nothing: this build drops
+    the old key as unknown and the setting takes its default, so the old value, which meant
+    something else, is left behind (`answer_budget_chars`, which bounds the agent's whole answer
+    where `max_answer_chars` bounded the text alone)."""
     return msgspec.json.decode(raw, type=UserSettings)
 
 

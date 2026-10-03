@@ -21,9 +21,12 @@ flowchart LR
 
 ## The shared ranking
 
-1. **Scope.** The `collections` argument, else the session's collections, else all of them.
-   Narrower, when given: `document_ids` and `section_ids` (see "Keeping to documents and
-   sections" below).
+1. **Scope.** The `collections` argument, else the session's collections, else all of them, and
+   only collections with a document to search: an indexed member, or one being indexed again,
+   that is not on its way out. Naming one without any is refused (409), since its empty answer
+   would read as "the sources do not cover it". A session's or the default scope skips it, and
+   `searched` names what is left. Narrower, when given: `document_ids` and `section_ids` (see
+   "Keeping to documents and sections" below).
 2. **Retrieve.** Each collection runs `hybrid` (vector and BM25), `vector` or `fts`. A search of one
    collection lets LanceDB fuse the two halves; a search of several reads them apart, for the merge.
    Without an embedding model everything is `fts`. The query is embedded once, and up to 8

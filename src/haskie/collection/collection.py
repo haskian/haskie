@@ -78,9 +78,10 @@ ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = (
     MemberStatus.REMOVING,
 )
 
-# The moves after which a collection may start or stop answering a search (`Collection.searchable`),
-# so the skill's list of collections is rewritten: indexed, removing, and a failed removal's error.
-_NAMING_MOVES = (MemberStatus.INDEXED, MemberStatus.REMOVING, MemberStatus.ERROR)
+# The moves that never change whether a collection answers a search (`Collection.searchable`): a
+# membership starts as pending, and one moving to indexing kept its standing. Every other move may,
+# so it rewrites the skill's list of collections, a new status included.
+_QUIET_MOVES = (MemberStatus.PENDING, MemberStatus.INDEXING)
 
 # The member listing selects a document row and its membership, which share `status`, `error`
 # and `updated_at`: the membership's are labelled, so a row maps each name to one column.
@@ -265,14 +266,19 @@ class Collection:
     async def searchable(names: list[str]) -> list[str]:
         """Those of `names` a search can find anything in, in the order given: each holds a
         document whose rows are in its table and not on their way out (`LEAVING`). That is an
-        `indexed` membership, or one whose rows an earlier write left (its cache entry named,
-        `set_member_entry`): a re-index, or one that failed, still answers from them."""
+        `indexed` membership, or one being indexed again whose cache entry is named
+        (`set_member_entry`): its earlier rows answer until the write replaces them. A failed or
+        cancelled write does not count, since `prepare_index` drops the old rows before it names
+        the new entry, so its rows may be gone."""
         member = collection_documents.c
         answering = (
             _MEMBERS.with_only_columns(member.document_id)
             .where(
                 member.collection == collections.c.name,
-                or_(member.status == MemberStatus.INDEXED, member.cache_id.is_not(None)),
+                or_(
+                    member.status == MemberStatus.INDEXED,
+                    and_(member.status == MemberStatus.INDEXING, member.cache_id.is_not(None)),
+                ),
                 *(not_(leaving) for leaving in LEAVING),
             )
             .exists()  # stops at a collection's first such membership
@@ -717,7 +723,7 @@ class Collection:
                 .values(status=status, error=error, updated_at=time.time())
                 .returning(collection_documents.c.document_id)
             )
-        if moved is not None and status in _NAMING_MOVES:
+        if moved is not None and status not in _QUIET_MOVES:
             claude.refresh_in_background()  # the skill names only collections a search answers from
         return moved is not None
 

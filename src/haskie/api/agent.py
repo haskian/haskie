@@ -124,11 +124,15 @@ class SectionMap(msgspec.Struct):
 
 
 def view[T](found: object, as_type: type[T]) -> T:
-    """`found`, a full answer, as the view `as_type`: the fields it does not name are dropped, and
-    an excerpt's spans name its questions by position (`Span.aspects`)."""
+    """`found`, a full answer, as the view `as_type`: the fields it does not name are dropped."""
+    return msgspec.convert(msgspec.to_builtins(found), as_type)
+
+
+def answer(found: object) -> Answer:
+    """`found`, a full `search_excerpts` answer, as its view (`view`), each span naming its
+    questions by position in its excerpt's `aspects` (`Span.aspects`)."""
     raw = msgspec.to_builtins(found)
-    if as_type is Answer:
-        for excerpt in raw["excerpts"]:
-            for span in excerpt["spans"]:
-                span["aspects"] = [excerpt["aspects"].index(label) for label in span["aspects"]]
-    return msgspec.convert(raw, as_type)
+    for excerpt in raw["excerpts"]:
+        for span in excerpt["spans"]:
+            span["aspects"] = [excerpt["aspects"].index(label) for label in span["aspects"]]
+    return view(raw, Answer)
