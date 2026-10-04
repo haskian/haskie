@@ -3874,7 +3874,7 @@ def test_migrate_creates_the_schema_once_and_refuses_every_other_home(
 
 # The schema `tables.py` generates at this `SCHEMA_VERSION`: a SHA-256 of its DDL statements,
 # sorted, because a table's indexes are a set and come out in no fixed order.
-SCHEMA_PIN = (34, "10ceb8cab273eccf29630a23e7510f15bc99c76fa1ea4482890a616dfe6f90c7")
+SCHEMA_PIN = (35, "53c890d5eb3caee318cdc315dbf2524da0d6407667293fb15e112af824b990c2")
 
 
 def test_a_table_change_comes_with_a_new_schema_version() -> None:

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { CollectionSummary, Document, Member } from '../api'
-import { candidateDocuments } from './collections/candidates'
+import { candidateDocuments, otherCollections } from './collections/candidates'
 import { groupByName, tileSub } from './collections/group'
 
 // Real payloads: one document, one membership, one collection, as the API answers them.
@@ -16,6 +16,7 @@ const DOCUMENT: Document = {
   created_at: 1_547_901_120,
   updated_at: 1_547_901_180,
   description: 'Notes on area lights and soft shadow falloff.',
+  pages: 12,
   id: '9e107d9d372bb6826bd81d3542a419d6',
   collections: ['lighting'],
 }
@@ -107,6 +108,26 @@ describe('candidateDocuments', () => {
   for (const one of cases) {
     test(one.name, () => {
       expect(candidateDocuments(one.imported, one.members).map((doc) => doc.name)).toEqual(one.expected)
+    })
+  }
+})
+
+describe('otherCollections', () => {
+  const held = (name: string, collections: string[]): Document => ({ ...DOCUMENT, name, collections })
+  const cases: Array<{ name: string; imported: Document[]; expected: Array<[string, string[]]> }> = [
+    { name: 'nothing imported', imported: [], expected: [] },
+    { name: 'held by no collection', imported: [held('area.pdf', [])], expected: [['area.pdf', []]] },
+    { name: 'held only by this one', imported: [held('area.pdf', ['lighting'])], expected: [['area.pdf', []]] },
+    {
+      name: 'held by this one and others',
+      imported: [held('area.pdf', ['lighting', 'optics', 'render'])],
+      expected: [['area.pdf', ['optics', 'render']]],
+    },
+    { name: 'held only by others', imported: [held('box.pdf', ['optics'])], expected: [['box.pdf', ['optics']]] },
+  ]
+  for (const one of cases) {
+    test(one.name, () => {
+      expect([...otherCollections(one.imported, 'lighting')]).toEqual(one.expected)
     })
   }
 })

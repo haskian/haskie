@@ -105,6 +105,7 @@ class Document(msgspec.Struct):
     created_at: float = 0.0  # unix seconds
     updated_at: float = 0.0
     description: str = ""  # what the document is, in the importer's words
+    pages: int | None = None  # a PDF's page count, set by its conversion
 
     @property
     def root(self) -> Path:
@@ -588,6 +589,13 @@ async def cancel_import(id: str) -> None:
     await set_status(
         id, DocumentStatus.CANCELLED, None, documents.c.status.in_(ACTIVE_DOCUMENT_STATUSES)
     )
+
+
+async def set_pages(id: str, pages: int | None) -> None:
+    """Record the page count its conversion found. Not a change to the document, so
+    `updated_at` stays (see `set_status`)."""
+    async with db.connect() as conn:
+        await conn.execute(update(documents).where(documents.c.id == id).values(pages=pages))
 
 
 async def describe(id: str, description: str) -> Document:

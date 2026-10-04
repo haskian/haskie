@@ -82,6 +82,7 @@ documents = Table(
     Column("created_at", Float, nullable=False, server_default=ZERO),
     Column("updated_at", Float, nullable=False, server_default=ZERO),
     Column("description", Text, nullable=False, server_default=""),
+    Column("pages", Integer),  # a PDF's page count, set by its conversion; None for other formats
     # `id` last, so a search finds the documents being deleted without reading their rows
     Index("idx_documents_status", "status", "name", "id"),
     Index("idx_documents_updated", "updated_at", "name"),

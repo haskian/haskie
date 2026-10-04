@@ -1148,6 +1148,7 @@ export interface components {
             updated_at: number;
             /** @default  */
             description: string;
+            pages?: number | null;
         };
         /** DocumentCounts */
         DocumentCounts: {
@@ -1445,6 +1446,7 @@ export interface components {
             updated_at: number;
             /** @default  */
             description: string;
+            pages?: number | null;
             collections?: string[];
         };
         /** LoggedQuestion */

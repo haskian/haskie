@@ -792,8 +792,14 @@ async def try_batch(stage: Stage, batch: Batch, ctx: Context) -> BatchResult:
 @retried_step
 async def try_finalize_convert(batches: list[Batch], ocr_total: int, ctx: Context) -> BatchResult:
     """Assemble the markdown out of every part the convert slices wrote. A step of the parent
-    workflow, not of a child: it needs the OCR counts of all slices, which only the parent has."""
-    return await _guarded(pipeline.finalize_convert(ctx.document, batches, ocr_total))
+    workflow, not of a child: it needs the OCR counts of all slices, which only the parent has.
+    Records the page count on the document too."""
+
+    async def finalize() -> None:
+        pages = await pipeline.finalize_convert(ctx.document, batches, ocr_total)
+        await document.set_pages(ctx.document.id, pages)
+
+    return await _guarded(finalize())
 
 
 @retried_step

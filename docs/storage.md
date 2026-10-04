@@ -58,6 +58,7 @@ erDiagram
         text status
         text parser
         text description
+        int pages
     }
     collections {
         text name PK

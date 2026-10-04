@@ -3251,6 +3251,27 @@ async def test_the_original_opens_under_its_own_name_and_media_type(
     assert source.content.startswith(b"%PDF-")
 
 
+@pytest.mark.parametrize(
+    ("name", "body", "pages"),
+    [
+        ("a-pdf-counts-its-pages.pdf", text_pdf(["alpha one", "beta two", "gamma three"]), 3),
+        ("other-formats-have-none.md", MD.encode(), None),
+    ],
+    ids=["pdf", "markdown"],
+)
+async def test_the_listing_carries_the_page_count_the_conversion_found(
+    client: AsyncTestClient, name: str, body: bytes, pages: int | None
+) -> None:
+    """The collection's list of documents to add shows each one's page count."""
+    await client.post("/api/init", json=NO_MODELS)
+    await stage_and_import(client, name, body)
+
+    listed = await client.get("/api/documents", params={"status": "imported"})
+
+    assert listed.status_code == 200, listed.text
+    assert [(doc["name"], doc["pages"]) for doc in listed.json()["items"]] == [(name, pages)]
+
+
 async def test_describing_with_ai_replaces_the_description_in_the_background(
     client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

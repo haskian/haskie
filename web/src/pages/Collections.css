@@ -38,6 +38,17 @@
   top: calc(100% - 1px);
 }
 
+/* A document's description, under its name: above it, the pane's scroll would clip it on the
+   first row. */
+.document-name {
+  position: relative;
+}
+.document-name > .hint {
+  top: calc(100% + var(--sp-1));
+  bottom: auto;
+  transform: translateY(-4px);
+}
+
 /* The description box takes most of its pane's height, as in the document modal: a written
    description runs to seven sentences, and the action below it keeps the rest. */
 #collection-info .pane-body > .textarea { height: 75%; }
