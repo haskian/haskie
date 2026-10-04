@@ -24,6 +24,7 @@ work here (the preview build) through `cpu.off_interpreter` for a PDF and `cpu.o
 otherwise. The pure parts (paths, name cleaning, row decoding) stay sync.
 """
 
+import asyncio
 import re
 import shutil
 import time
@@ -38,15 +39,17 @@ from uuid import uuid4
 import anyio
 import anyio.to_thread
 import msgspec
-from sqlalchemy import ColumnElement, Row, delete, select, update
+from sqlalchemy import ColumnElement, Row, bindparam, delete, select, update
 from sqlalchemy.dialects.sqlite import insert
 
-from haskie import cpu, db, home, ids
+from haskie import cpu, db, home, ids, logs
 from haskie.document import convert
 from haskie.errors import Conflict, InvalidInput, NotFound, NotReady, PermanentError
 from haskie.paging import Page, PageRequest, count_of, keyset, resolve_sort
 from haskie.settings import Parser, PipelineSettings, load_user_settings
 from haskie.tables import collection_documents, documents, staging
+
+_log = logs.get_logger(__name__)
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 KEBAB_BREAK = re.compile(r"[^a-z0-9]+")  # what a document name's stem turns into one dash
@@ -591,11 +594,50 @@ async def cancel_import(id: str) -> None:
     )
 
 
-async def set_pages(id: str, pages: int | None) -> None:
+async def set_pages(id: str, pages: int) -> None:
     """Record the page count its conversion found. Not a change to the document, so
     `updated_at` stays (see `set_status`)."""
     async with db.connect() as conn:
         await conn.execute(update(documents).where(documents.c.id == id).values(pages=pages))
+
+
+async def fill_pages() -> int:
+    """Count the pages of every imported PDF with no count: one imported before the column
+    existed (`db.UPGRADES`), or restored from a backup made then. Returns how many it filled.
+
+    The counts run side by side, as many as the CPU budget allows, and go in one write. A PDF that
+    cannot be read keeps no count and is logged: it is a label in a list, not worth failing for."""
+    async with db.read() as conn:
+        uncounted = list(
+            await conn.scalars(
+                select(documents.c.id).where(
+                    documents.c.suffix == ".pdf",
+                    documents.c.pages.is_(None),
+                    documents.c.status == DocumentStatus.IMPORTED,
+                )
+            )
+        )
+    counts = await asyncio.gather(*(_page_count(id) for id in uncounted))
+    pairs = zip(uncounted, counts, strict=True)
+    found = [{"doc": id, "count": count} for id, count in pairs if count is not None]
+    if found:
+        async with db.connect() as conn:
+            await conn.execute(
+                update(documents)
+                .where(documents.c.id == bindparam("doc"))
+                .values(pages=bindparam("count")),
+                found,
+            )
+    return len(found)
+
+
+async def _page_count(id: str) -> int | None:
+    try:
+        marks = await cpu.off_interpreter(convert.pdf_bookmarks, original(id, ".pdf"))
+    except PermanentError as exc:
+        _log.warning("page_count_unreadable", document_id=id, error=str(exc))
+        return None
+    return marks.pages
 
 
 async def describe(id: str, description: str) -> Document:

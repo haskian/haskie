@@ -38,15 +38,13 @@
   top: calc(100% - 1px);
 }
 
-/* A document's description, under its name: above it, the pane's scroll would clip it on the
-   first row. */
+/* A document's description opens under its name: above it, the pane's scroll would clip it on
+   the first row. As narrow as a tile's hint, which `.hint-below` widens. */
 .document-name {
   position: relative;
 }
-.document-name > .hint {
-  top: calc(100% + var(--sp-1));
-  bottom: auto;
-  transform: translateY(-4px);
+.document-name > .hint-below {
+  max-width: 240px;
 }
 
 /* The description box takes most of its pane's height, as in the document modal: a written

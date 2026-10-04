@@ -5,9 +5,10 @@ The tables are SQLAlchemy Core (`tables.py`), and every query is a Core statemen
 event loop it runs on. Creating the schema is the exception: it stays on stdlib `sqlite3` in a
 worker thread, because the one-time switch to WAL needs an exclusive lock on the file.
 
-Schema evolution: edit `tables.py` and bump `SCHEMA_VERSION`. There is no upgrade path, so a home
-at any other version is refused and has to be destroyed (see `migrate`). A deliberate choice while
-the storage shape is still moving: one readable schema is worth more than a history of scripts.
+Schema evolution: edit `tables.py` and bump `SCHEMA_VERSION`. A change that only adds to the
+schema, such as a nullable column, also adds the statement that upgrades the version before it to
+`UPGRADES`, and a home at that version is upgraded in place. Any other change has no upgrade path,
+so a home at another version is refused and has to be destroyed (see `migrate`).
 """
 
 import asyncio
@@ -33,18 +34,26 @@ from haskie.errors import HaskieError
 SCHEMA_VERSION = 35
 """`pragma user_version` of the schema in `tables.py`.
 
-A home stamped with it has these tables and columns and is opened as it is. Any other stamp is a
-shape this build cannot read, so the home is refused (see `migrate`). The commit that bumps it says
-what changed.
+A home stamped with it has these tables and columns and is opened as it is. A stamp that
+`UPGRADES` leads from is upgraded first. Any other stamp is a shape this build cannot read, so the
+home is refused (see `migrate`). The commit that bumps it says what changed.
 
 A cache file or LanceDB table written the old way must never be read by this build. The seed
 (`catalogue/seed.sql`) runs only on a fresh file, so an edit to it reaches an existing home only
 with a bump.
 
-Before 1.0.0 this is the only migration there is, and it covers the stores this version does not
-stamp as well. A change to what a chunk holds retires the embedding cache and every collection's
-table, and rather than version each of them, the home is refused and rebuilt from the sources.
+Before 1.0.0 a bump without an upgrade step is the only other migration, and it covers the
+stores this version does not stamp as well. A change to what a chunk holds retires the embedding
+cache and every collection's table, and rather than version each of them, the home is refused and
+rebuilt from the sources.
 """
+
+UPGRADES: dict[int, str] = {
+    34: "alter table documents add column pages integer;",
+}
+"""The script that lifts a schema from each version to the next. Additive changes only: a column
+added this way comes last in its table, so `tables.py` declares it last too. A restore reads an
+archive of an older schema without them: its missing columns take their defaults (`backup`)."""
 
 
 def schema_ddl(only: Sequence[Table] | None = None) -> str:
@@ -77,21 +86,42 @@ BUSY_TIMEOUT_SECONDS = 30.0  # how long a writer waits for another writer before
 _migrate_lock = threading.Lock()  # both event loops get here through worker threads of their own
 
 
+def upgradable(version: int) -> bool:
+    """Whether `UPGRADES` leads from `version` to `SCHEMA_VERSION`, one step at a time."""
+    return version <= SCHEMA_VERSION and all(step in UPGRADES for step in _steps(version))
+
+
+def _steps(version: int) -> range:
+    """The versions `UPGRADES` lifts a schema at `version` through, in order."""
+    return range(version, SCHEMA_VERSION)
+
+
 def _refuse_other_schemas(version: int) -> None:
-    """A home stamped with a version other than this one's, or 0 for a fresh file, was written by
-    a build whose storage shape this one cannot read, and there is no path from it."""
-    if version not in (0, SCHEMA_VERSION):
+    """A home stamped with a version this build neither upgrades nor writes, other than 0 for a
+    fresh file, was written by a build whose storage shape this one cannot read."""
+    if version != 0 and not upgradable(version):
         raise HaskieError(INCOMPATIBLE_HOME_MESSAGE)
 
 
+def _upgrade(conn: sqlite3.Connection, version: int) -> None:
+    """Lift a schema at `version` to `SCHEMA_VERSION` and stamp it, in one transaction, so a crash
+    leaves the old version whole. `version` must be `upgradable`."""
+    steps = "".join(UPGRADES[step] for step in _steps(version))
+    conn.executescript(f"begin; {steps} pragma user_version = {SCHEMA_VERSION}; commit;")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
-    """Create the schema on a fresh file, and leave a file at `SCHEMA_VERSION` as it is.
+    """Create the schema on a fresh file, upgrade an older one `UPGRADES` leads from, and leave a
+    file at `SCHEMA_VERSION` as it is.
 
     Another schema is refused with `user_version` untouched and the user is told to destroy the
     home, rather than losing its rows to a silent drop."""
     (version,) = conn.execute("pragma user_version").fetchone()
     _refuse_other_schemas(version)
     if version == SCHEMA_VERSION:
+        return
+    if version != 0:
+        _upgrade(conn, version)
         return
     conn.execute("pragma journal_mode = wal")  # persistent; needs an exclusive lock, so once
     conn.executescript(schema_ddl())

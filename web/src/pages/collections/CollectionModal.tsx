@@ -321,7 +321,7 @@ function DocumentName({ document }: { document: Pick<Document, 'name' | 'descrip
     <span className="document-name">
       {document.name}
       {document.description && (
-        <span className="hint" role="tooltip">
+        <span className="hint hint-below" role="tooltip">
           {document.description}
         </span>
       )}

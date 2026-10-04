@@ -274,8 +274,9 @@ rest. A PDF with only scanned pages fails, with a clear message.
 
 - **One user, one machine.** haskie has no login. It listens on `127.0.0.1` by default. Do not
   expose it on a network.
-- **Pre-1.0 storage.** A release that changes the storage format refuses to start on an older
-  home and says so. Run `haskie destroy`, import your documents again, and run
+- **Pre-1.0 storage.** A release that only adds to the storage format upgrades an older home
+  when it starts. One that changes it in any other way refuses to start on an older home and
+  says so. Run `haskie destroy`, import your documents again, and run
   `haskie install claude` again.
 - **One server per home.** A second `haskie run` on the same home refuses to start and names the
   process that holds it.

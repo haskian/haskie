@@ -116,14 +116,20 @@ describe('otherCollections', () => {
   const held = (name: string, collections: string[]): Document => ({ ...DOCUMENT, name, collections })
   const cases: Array<{ name: string; imported: Document[]; expected: Array<[string, string[]]> }> = [
     { name: 'nothing imported', imported: [], expected: [] },
-    { name: 'held by no collection', imported: [held('area.pdf', [])], expected: [['area.pdf', []]] },
     { name: 'held only by this one', imported: [held('area.pdf', ['lighting'])], expected: [['area.pdf', []]] },
     {
       name: 'held by this one and others',
       imported: [held('area.pdf', ['lighting', 'optics', 'render'])],
       expected: [['area.pdf', ['optics', 'render']]],
     },
-    { name: 'held only by others', imported: [held('box.pdf', ['optics'])], expected: [['box.pdf', ['optics']]] },
+    {
+      name: 'held only by others, or by none',
+      imported: [held('box.pdf', ['optics']), held('cone.pdf', [])],
+      expected: [
+        ['box.pdf', ['optics']],
+        ['cone.pdf', []],
+      ],
+    },
   ]
   for (const one of cases) {
     test(one.name, () => {

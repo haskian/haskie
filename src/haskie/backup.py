@@ -20,8 +20,9 @@ they show in the Operations view and a crash resumes them. Every step can run tw
 The rows go through `sqlite3`, not `db.connect`: `ATTACH` is refused inside a transaction, and
 `db` opens one on every connection.
 
-An archive is a snapshot of one schema: a restore refuses one whose manifest names another
-`db.SCHEMA_VERSION` (no migrations before 1.0, see docs/storage.md).
+An archive is a snapshot of one schema. A restore takes one of this schema, or of an older one
+`db.UPGRADES` leads from: those only lack columns, which take their defaults (`_shared_columns`).
+It refuses any other (see docs/storage.md).
 """
 
 import asyncio
@@ -146,12 +147,11 @@ def download_name(created_at: float) -> str:
 # --- the snapshot ---------------------------------------------------------------------------
 
 
-def _columns(table: Table, derived: bool = True) -> str:
-    """The table's columns for a copy; without `derived`, those this machine works out
-    (`tables.DERIVED`), so the copy takes their default and the restored home works them out
-    again."""
+def _columns(table: Table) -> str:
+    """The table's columns for a backup, less those this machine works out (`tables.DERIVED`): the
+    copy takes their default, and the restored home works them out again."""
     return ", ".join(
-        f'"{column.name}"' for column in table.columns if derived or not column.info.get("derived")
+        f'"{column.name}"' for column in table.columns if not column.info.get("derived")
     )
 
 
@@ -178,7 +178,7 @@ def _snapshot_sync(target: Path) -> Manifest:
         conn.execute("attach database ? as live", (str(home.DB_FILE),))
         conn.execute("begin")
         for table in CONTENT_TABLES:
-            columns = _columns(table, derived=False)
+            columns = _columns(table)
             conn.execute(
                 f"insert into main.{table.name} ({columns})"
                 f" select {columns} from live.{table.name} {_copy_filter(table)}"
@@ -330,9 +330,9 @@ def _open(path: Path) -> zipfile.ZipFile:
 
 
 def _check(archive: zipfile.ZipFile) -> Manifest:
-    """The archive's manifest, once every name in it is one a backup writes, its format and schema
-    are this build's, and its rows hold only ids and names this build writes (`_check_rows`). A
-    trust boundary: nothing is unpacked before this passes."""
+    """The archive's manifest, once every name in it is one a backup writes, its format is this
+    build's, its schema is this build's or one it upgrades, and its rows hold only ids and names
+    this build writes (`_check_rows`). A trust boundary: nothing is unpacked before this passes."""
     names = archive.namelist()
     strange = next((name for name in names if not MEMBER.fullmatch(name)), None)
     if strange is not None:
@@ -347,10 +347,10 @@ def _check(archive: zipfile.ZipFile) -> Manifest:
         raise InvalidInput(
             f"backup format {manifest.format} is not supported; this build reads {FORMAT}"
         )
-    if manifest.schema_version != db.SCHEMA_VERSION:
+    if not db.upgradable(manifest.schema_version):
         raise Conflict(
             f"backup made by haskie {manifest.app_version} (schema {manifest.schema_version}); "
-            f"this build restores schema {db.SCHEMA_VERSION} only"
+            f"this build cannot restore that schema"
         )
     _check_rows(archive.read(DATABASE))
     return manifest
@@ -412,6 +412,13 @@ async def extract(key: str) -> None:
     await anyio.to_thread.run_sync(_extract_sync, key)
 
 
+def _shared_columns(conn: sqlite3.Connection, table: Table) -> str:
+    """The table's columns the restored database has too. An archive of an older schema lacks the
+    columns its upgrades added, and every one of them takes its default (`db.UPGRADES`)."""
+    held = {row[1] for row in conn.execute(f"pragma restored.table_info({table.name})")}
+    return ", ".join(f'"{column.name}"' for column in table.columns if column.name in held)
+
+
 def _replace_rows(restored: Path) -> list[str]:
     """`CONTENT_TABLES` replaced by the restored ones in one transaction; returns the collections.
 
@@ -428,7 +435,7 @@ def _replace_rows(restored: Path) -> list[str]:
             for table in reversed(CONTENT_TABLES):
                 conn.execute(f"delete from main.{table.name}")
             for table in CONTENT_TABLES:
-                columns = _columns(table)
+                columns = _shared_columns(conn, table)
                 conn.execute(
                     f"insert into main.{table.name} ({columns})"
                     f" select {columns} from restored.{table.name}"
@@ -499,6 +506,12 @@ def _swap_sync(key: str) -> list[str]:
 async def swap(key: str) -> list[str]:
     """The contents swapped in; returns the collections they hold."""
     return await anyio.to_thread.run_sync(_swap_sync, key)
+
+
+@retried_step
+async def fill_pages() -> None:
+    """The page counts an archive of an older schema lacks."""
+    await document.fill_pages()
 
 
 @retried_step
@@ -585,6 +598,7 @@ async def restore_backup() -> list[str]:
             raise PipelineError(root_cause(exc)) from exc
         finally:
             restoring = False
+        await fill_pages()
         # Not steps: DBOS starts no workflow inside one. The ids end with this restore's key, so a
         # replay re-attaches to the runs it already started, with no admission check to fail on
         # a run that has moved on since.

@@ -374,9 +374,9 @@ def stage_caps(indexing: PipelineSettings) -> dict[Stage, int]:
     return {stage: max(1, cap) for stage, cap in caps.items()}
 
 
-# The backlog adoption in flight, if any. An event loop keeps only a weak reference to a task, so
-# the module holds the strong one and `stop` cancels it.
-_adoption: asyncio.Task[None] | None = None
+# The boot's background chores in flight, if any (`_start_background`). An event loop keeps only a
+# weak reference to a task, so the module holds the strong one and `stop` cancels it.
+_background: asyncio.Task[None] | None = None
 # The loop `start` ran on: Litestar's, or a test's. `apply_settings` belongs on it (see
 # `apply_settings_from_workflow`).
 _app_loop: asyncio.AbstractEventLoop | None = None
@@ -411,7 +411,7 @@ async def start() -> None:
     # thread that calls it as the one queued async workflows run on. From a thread there is none,
     # so they run on DBOS's own background loop and never share Litestar's.
     await anyio.to_thread.run_sync(DBOS.launch)
-    _start_adoption()
+    _start_background()
     try:
         await apply_settings(await load_user_settings())
     except InvalidInput as exc:
@@ -436,9 +436,9 @@ async def stop() -> bool:
     True when DBOS stopped. False when a signal hurried the shutdown past it: DBOS is then still
     running workflows on its own threads until the process exits.
     """
-    global _adoption
-    if _adoption is not None:
-        adopting, _adoption = _adoption, None
+    global _background
+    if _background is not None:
+        adopting, _background = _background, None
         adopting.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await adopting
@@ -544,17 +544,26 @@ async def adopt_orphans(batch: int = ADOPT_PAGE) -> int:
         adopted += len(stale)
 
 
-def _start_adoption() -> None:
-    """Adopting a long backlog takes as long as the backlog is deep, and nothing waits for its
-    result: the boot hands it to a task on the loop it runs on and returns (see `_adoption`)."""
-    global _adoption
-    adopting = _housekeeping(
+async def _background_chores() -> None:
+    await _housekeeping(
         adopt_orphans(),
         "stale_workflow_adoption_failed",
         partial(_log.warning, "stale_workflows_resumed"),
         app_version=APP_VERSION,
     )
-    _adoption = asyncio.get_running_loop().create_task(adopting, name="haskie-adopt")
+    await _housekeeping(
+        document.fill_pages(), "page_count_failed", partial(_log.info, "page_counts_filled")
+    )
+
+
+def _start_background() -> None:
+    """Adopting a long backlog takes as long as the backlog is deep, and so does counting the
+    pages of every PDF an older build imported. Nothing waits for either: the boot hands them to a
+    task on the loop it runs on and returns (see `_background`)."""
+    global _background
+    _background = asyncio.get_running_loop().create_task(
+        _background_chores(), name="haskie-background"
+    )
 
 
 class Queue(msgspec.Struct, frozen=True):
@@ -792,14 +801,15 @@ async def try_batch(stage: Stage, batch: Batch, ctx: Context) -> BatchResult:
 @retried_step
 async def try_finalize_convert(batches: list[Batch], ocr_total: int, ctx: Context) -> BatchResult:
     """Assemble the markdown out of every part the convert slices wrote. A step of the parent
-    workflow, not of a child: it needs the OCR counts of all slices, which only the parent has.
-    Records the page count on the document too."""
+    workflow, not of a child: it needs the OCR counts of all slices, which only the parent has."""
+    return await _guarded(_finalize_convert(batches, ocr_total, ctx))
 
-    async def finalize() -> None:
-        pages = await pipeline.finalize_convert(ctx.document, batches, ocr_total)
+
+async def _finalize_convert(batches: list[Batch], ocr_total: int, ctx: Context) -> None:
+    """Assemble the markdown, and record a PDF's page count on the document."""
+    pages = await pipeline.finalize_convert(ctx.document, batches, ocr_total)
+    if pages is not None:
         await document.set_pages(ctx.document.id, pages)
-
-    return await _guarded(finalize())
 
 
 @retried_step

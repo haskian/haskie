@@ -2137,8 +2137,8 @@ async def test_adopt_orphans_runs_in_the_background_on_start(dbos, monkeypatch) 
 
     assert await wait_event(started), "adoption started"
     assert not release.is_set(), "start did not wait for it"
-    adopting = workflows._adoption
-    assert adopting is not None and adopting.get_name() == "haskie-adopt"
+    adopting = workflows._background
+    assert adopting is not None and adopting.get_name() == "haskie-background"
     assert not adopting.done(), "the boot returned while the adoption is still running"
     # the module holds the only strong reference, so a stuck adoption is still cancellable
     release.set()
