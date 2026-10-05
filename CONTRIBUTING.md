@@ -75,7 +75,7 @@ Timing knobs are module constants, not variables (`workflows.OPERATION_POLL`,
 | Near-duplicates folded after ranking | A pointwise reranker cannot see repeats. Folding keeps the citation and frees the slot | [Search](docs/search.md) |
 | One CPU budget for all work | Indexing never takes the whole machine. The UI stays responsive | [Runtime](docs/runtime.md) |
 | Exclusive lock on the home | One home is one SQLite file and one set of queues. Two servers would take each other's work | [Architecture](docs/architecture.md) |
-| No migrations before 1.0 | A storage change bumps `SCHEMA_VERSION`. An older home is refused, then destroyed and imported again | [Storage](docs/storage.md) |
+| Additive upgrades only before 1.0 | A storage change bumps `SCHEMA_VERSION`. An additive one ships its upgrade in `db.UPGRADES`. Any other leaves an older home refused, then destroyed and imported again | [Storage](docs/storage.md) |
 | Loopback by default, no auth | A home is one user's documents | `claude.py` (`DEFAULT_HOST`) |
 | Host and Origin checked on every request | A browser ignores the loopback bind: any page could post to the API, and a DNS-rebinding page could read it. Agents send no `Origin`, so they pass | `app.py` (`guard_callers`) |
 

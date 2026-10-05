@@ -51,6 +51,7 @@ from haskie.settings import (
     UserSettings,
     save_user_settings,
 )
+from haskie.tables import documents as documents_table
 from haskie.tables import searches
 
 from conftest import (  # isort: skip
@@ -3249,6 +3250,58 @@ async def test_the_original_opens_under_its_own_name_and_media_type(
     assert source.headers["content-type"] == "application/pdf"
     assert source.headers["content-disposition"] == 'inline; filename="paper.pdf"'
     assert source.content.startswith(b"%PDF-")
+
+
+@pytest.mark.parametrize(
+    ("name", "body", "pages"),
+    [
+        ("a-pdf-counts-its-pages.pdf", text_pdf(["alpha one", "beta two", "gamma three"]), 3),
+        ("other-formats-have-none.md", MD.encode(), None),
+    ],
+    ids=["pdf", "markdown"],
+)
+async def test_the_listing_carries_the_page_count_the_conversion_found(
+    client: AsyncTestClient, name: str, body: bytes, pages: int | None
+) -> None:
+    """The collection's list of documents to add shows each one's page count."""
+    await client.post("/api/init", json=NO_MODELS)
+    await stage_and_import(client, name, body)
+
+    listed = await client.get("/api/documents", params={"status": "imported"})
+
+    assert listed.status_code == 200, listed.text
+    assert [(doc["name"], doc["pages"]) for doc in listed.json()["items"]] == [(name, pages)]
+
+
+async def test_a_boot_counts_the_pages_of_pdfs_imported_before_the_count_was_stored(
+    client: AsyncTestClient,
+) -> None:
+    """An imported PDF with no count gets one. A PDF still importing, or any other format, keeps
+    none: its conversion records its own. One that cannot be read keeps none either, and does not
+    stop the rest."""
+    await client.post("/api/init", json=NO_MODELS)
+    for name, body in [
+        ("counted.pdf", text_pdf(["alpha", "beta", "gamma"])),
+        ("importing.pdf", text_pdf(["delta"])),
+        ("broken.pdf", text_pdf(["epsilon"])),
+        ("notes.md", MD.encode()),
+    ]:
+        await stage_and_import(client, name, body)
+    async with db.connect() as conn:
+        await conn.execute(update(documents_table).values(pages=None))
+    await document.set_status(await id_of("importing.pdf"), DocumentStatus.CONVERTING)
+    document.original(await id_of("broken.pdf"), ".pdf").write_bytes(b"not a pdf")
+
+    filled = await document.fill_pages()
+
+    listed = (await client.get("/api/documents")).json()["items"]
+    assert filled == 1
+    assert {doc["name"]: doc["pages"] for doc in listed} == {
+        "counted.pdf": 3,
+        "importing.pdf": None,
+        "broken.pdf": None,
+        "notes.md": None,
+    }
 
 
 async def test_describing_with_ai_replaces_the_description_in_the_background(

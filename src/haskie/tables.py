@@ -1,8 +1,9 @@
 """Every table haskie owns in ~/.haskie/haskie.db as SQLAlchemy Core: the one source of the schema.
 
 `db.migrate` generates the DDL from `metadata`, and every query is a Core statement over these
-tables, so a column is named once. Changing a table means bumping `db.SCHEMA_VERSION`. DBOS keeps
-its workflow tables in the same file and owns their schema; `sysdb.py` declares the ones it reads.
+tables, so a column is named once. Changing a table means bumping `db.SCHEMA_VERSION`, and adding
+its upgrade to `db.UPGRADES` when the change only adds. DBOS keeps its workflow tables in the same
+file and owns their schema; `sysdb.py` declares the ones it reads.
 
 SQLite has no date type: a `Float` timestamp holds the unix seconds `time.time()` returns. Flags
 stay `Integer` (0 or 1), the way sqlite stores them anyway.
@@ -82,6 +83,7 @@ documents = Table(
     Column("created_at", Float, nullable=False, server_default=ZERO),
     Column("updated_at", Float, nullable=False, server_default=ZERO),
     Column("description", Text, nullable=False, server_default=""),
+    Column("pages", Integer),  # a PDF's page count, set by its conversion; None for other formats
     # `id` last, so a search finds the documents being deleted without reading their rows
     Index("idx_documents_status", "status", "name", "id"),
     Index("idx_documents_updated", "updated_at", "name"),

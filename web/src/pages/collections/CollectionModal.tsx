@@ -15,7 +15,8 @@ import { useOperation } from '../../hooks/useOperation'
 import { usePoll } from '../../hooks/usePoll'
 import { useRun } from '../../hooks/useRun'
 import { BulkStatus, DescriptionBox, documentIcon, Kv, Modal, RenameForm, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
-import { candidateDocuments } from './candidates'
+import { plural } from '../../ui/match'
+import { candidateDocuments, otherCollections } from './candidates'
 import { SettingsForm } from './SettingsForm'
 
 const TABS: TabDef[] = [
@@ -136,6 +137,7 @@ function CollectionBody({
   }
 
   const candidates = useMemo(() => candidateDocuments(imported, members), [imported, members])
+  const elsewhere = useMemo(() => otherCollections(imported, name), [imported, name])
   const needle = needleOf(filter)
   const shownMembers = useMemo(
     () => members.filter((member) => matchesText(needle, member.document.name, member.document.description)),
@@ -174,9 +176,10 @@ function CollectionBody({
                     <li className="list-item" key={member.document.name}>
                       <Icon className="icon" />
                       <span className="list-text">
-                        {member.document.name}
+                        <DocumentName document={member.document} />
                         <span className="sub">{member.error === null ? member.status : `${member.status} · ${member.error}`}</span>
                       </span>
+                      <AlsoIn collections={elsewhere.get(member.document.name) ?? []} />
                       <button
                         className="btn btn-ghost"
                         type="button"
@@ -202,23 +205,10 @@ function CollectionBody({
                     <li className="list-item" key={doc.name}>
                       <Icon className="icon" />
                       <span className="list-text">
-                        {doc.name}
-                        <span className="sub">{doc.description || 'No description'}</span>
+                        <DocumentName document={doc} />
+                        {doc.pages != null && <span className="sub">{plural(doc.pages, 'page')}</span>}
                       </span>
-                      {doc.collections.length > 0 && (
-                        <span className="also-in" tabIndex={0}>
-                          <span className="tag">
-                            <span className="kind">also in</span>
-                            <span>{doc.collections.length}</span>
-                          </span>
-                          {/* flipped: the tag sits at the pane's right edge */}
-                          <span className="hint hint-below flip" role="tooltip">
-                            {doc.collections.map((collection) => (
-                              <span key={collection}>{collection}</span>
-                            ))}
-                          </span>
-                        </span>
-                      )}
+                      <AlsoIn collections={doc.collections} />
                       <button
                         className="btn btn-ghost"
                         type="button"
@@ -321,5 +311,39 @@ function CollectionBody({
           beside the control that failed would be scrolled out of sight as often as not. */}
       {error !== null && <p className="muted collection-error">{error}</p>}
     </>
+  )
+}
+
+/** A document's name, which shows its description on hover, as its tile does on the documents
+ *  page; nothing shows when it has none. */
+function DocumentName({ document }: { document: Pick<Document, 'name' | 'description'> }) {
+  return (
+    <span className="document-name">
+      {document.name}
+      {document.description && (
+        <span className="hint hint-below" role="tooltip">
+          {document.description}
+        </span>
+      )}
+    </span>
+  )
+}
+
+/** The other collections that hold a document, as a tag naming them on hover; nothing for none. */
+function AlsoIn({ collections }: { collections: string[] }) {
+  if (collections.length === 0) return null
+  return (
+    <span className="also-in" tabIndex={0}>
+      <span className="tag">
+        <span className="kind">also in</span>
+        <span>{collections.length}</span>
+      </span>
+      {/* flipped: the tag sits at the pane's right edge */}
+      <span className="hint hint-below flip" role="tooltip">
+        {collections.map((collection) => (
+          <span key={collection}>{collection}</span>
+        ))}
+      </span>
+    </span>
   )
 }

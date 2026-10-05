@@ -23,7 +23,7 @@ from haskie.indexing import workflows
 from haskie.indexing.workflows import BulkProgress
 from haskie.tables import documents
 
-from conftest import MD, attach_via_api, stage_and_import, until, wait_for  # isort: skip
+from conftest import MD, attach_via_api, stage_and_import, text_pdf, until, wait_for  # isort: skip
 
 pytestmark = pytest.mark.anyio
 
@@ -225,9 +225,9 @@ MANIFEST = {
         pytest.param(_archive(None), 422, "no manifest", id="no-manifest"),
         pytest.param(_archive({**MANIFEST, "format": 2}), 422, "format 2", id="other-format"),
         pytest.param(
-            _archive({**MANIFEST, "schema_version": db.SCHEMA_VERSION - 1}),
+            _archive({**MANIFEST, "schema_version": min(db.UPGRADES) - 1}),
             409,
-            "restores schema",
+            "cannot restore that schema",
             id="other-schema",
         ),
         pytest.param(
@@ -376,8 +376,9 @@ async def test_a_slow_backup_reports_its_progress_as_it_goes(client, monkeypatch
     assert final["done"] == final["total"] == 4, "two files of the document, two of its cache"
 
 
-def _tampered(archive: bytes, statement: str) -> bytes:
-    """A real archive with one statement run on its rows, as a crafted upload would be."""
+def _tampered(archive: bytes, statement: str, schema_version: int | None = None) -> bytes:
+    """A real archive with one statement run on its rows, as a crafted upload would be, or as an
+    older build would have written it when `schema_version` names its schema."""
     source = zipfile.ZipFile(io.BytesIO(archive))
     conn = sqlite3.connect(":memory:")
     conn.deserialize(source.read(backup.DATABASE))
@@ -385,11 +386,31 @@ def _tampered(archive: bytes, statement: str) -> bytes:
     conn.commit()
     rows = conn.serialize()
     conn.close()
+    replaced = {backup.DATABASE: rows}
+    if schema_version is not None:
+        manifest = msgspec.json.decode(source.read(backup.MANIFEST))
+        manifest["schema_version"] = schema_version
+        replaced[backup.MANIFEST] = msgspec.json.encode(manifest)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as tampered:
         for name in source.namelist():
-            tampered.writestr(name, rows if name == backup.DATABASE else source.read(name))
+            tampered.writestr(name, replaced[name] if name in replaced else source.read(name))
     return buffer.getvalue()
+
+
+async def test_a_backup_of_the_schema_before_page_counts_restores_and_counts_them(client) -> None:
+    """An archive an older build wrote restores: the column it lacks takes its default, and its
+    PDFs then get the page count that build never stored."""
+    row = await stage_and_import(client, "paper.pdf", text_pdf(["alpha", "beta", "gamma"]))
+    _, archive = await _backup(client)
+    older = _tampered(archive, "alter table documents drop column pages", 34)
+
+    restoring = await _restore(client, older)
+
+    assert restoring.status_code == 202, restoring.text
+    await wait_for(restoring.json()["operation_id"])
+    restored = (await client.get(f"/api/documents/{row['name']}")).json()
+    assert (restored["status"], restored["pages"]) == ("imported", 3)
 
 
 @pytest.mark.parametrize(

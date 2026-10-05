@@ -10,3 +10,8 @@ export function candidateDocuments(imported: Document[], members: Member[]): Doc
   const held = new Set(members.map((member) => member.document.name))
   return imported.filter((doc) => !held.has(doc.name))
 }
+
+/** The collections other than `collection` that hold each imported document, by its name. */
+export function otherCollections(imported: Document[], collection: string): Map<string, string[]> {
+  return new Map(imported.map((doc) => [doc.name, doc.collections.filter((one) => one !== collection)]))
+}

@@ -77,14 +77,14 @@ def _shelve(root: Path, name: str) -> None:
 
 
 def _pre_collection_home(root: Path) -> None:
-    """A home as an older build left it: a `libraries` table, stamped with the version before the
-    current schema. `db.migrate` is exactly what must refuse this file."""
+    """A home as an older build left it: a `libraries` table, stamped with a version older than
+    every upgrade. `db.migrate` is exactly what must refuse this file."""
     root.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(root / "haskie.db")
     try:
         conn.executescript("create table libraries (name text primary key);")
         conn.execute("insert into libraries (name) values ('notes')")
-        conn.execute(f"pragma user_version = {db.SCHEMA_VERSION - 1}")
+        conn.execute(f"pragma user_version = {min(db.UPGRADES) - 1}")
         conn.commit()
     finally:
         conn.close()
@@ -118,7 +118,7 @@ def test_run_refuses_a_home_from_before_collections(
     assert started == [], "no server started"
     with sqlite3.connect(elsewhere / "haskie.db") as conn:
         (version,) = conn.execute("pragma user_version").fetchone()
-    assert version == db.SCHEMA_VERSION - 1, "the refused home is left as it was"
+    assert version == min(db.UPGRADES) - 1, "the refused home is left as it was"
 
 
 def test_destroy_after_a_refused_run_lets_it_start_over(elsewhere: Path) -> None:

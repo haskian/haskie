@@ -3833,14 +3833,14 @@ def _tables(conn: sqlite3.Connection) -> set[str]:
     [
         ("a fresh file gets the schema", 0, "created"),
         ("a home this build wrote is opened as it is", db.SCHEMA_VERSION, "kept"),
-        ("a home from an older build is refused", db.SCHEMA_VERSION - 1, "refused"),
+        ("a home older than every upgrade is refused", min(db.UPGRADES) - 1, "refused"),
         ("a home from a newer build is refused too", db.SCHEMA_VERSION + 1, "refused"),
     ],
 )
 def test_migrate_creates_the_schema_once_and_refuses_every_other_home(
     tmp_path: Path, name: str, stamped: int, outcome: str
 ) -> None:
-    """One schema snapshot and no upgrade path, so a home is created, opened, or refused whole.
+    """A home is created, opened, or refused whole, unless `UPGRADES` leads from its version.
 
     A refused one keeps its rows: the user destroys it rather than losing them to a silent drop.
     """
@@ -3872,9 +3872,34 @@ def test_migrate_creates_the_schema_once_and_refuses_every_other_home(
     conn.close()
 
 
+def test_a_home_from_before_page_counts_is_upgraded_in_place(tmp_path: Path) -> None:
+    """Schema 34 had no `documents.pages`. The upgrade adds it and keeps every row, and the
+    upgraded file has the same columns, in the same order, as a fresh one."""
+    fresh = sqlite3.connect(str(tmp_path / "fresh.db"))
+    db.migrate(fresh)
+    older = sqlite3.connect(str(tmp_path / "older.db"))
+    db.migrate(older)
+    older.executescript(
+        "alter table documents drop column pages;"
+        "insert into documents (id, name, suffix, size) values ('a', 'a.pdf', '.pdf', 1);"
+        "drop table sessions;"  # only a second run of the schema script would rebuild it
+        "pragma user_version = 34;"
+    )
+
+    db.migrate(older)
+
+    assert older.execute("pragma user_version").fetchone() == (db.SCHEMA_VERSION,)
+    assert older.execute("select name, pages from documents").fetchall() == [("a.pdf", None)]
+    assert "sessions" not in _tables(older), "upgraded, not created again"
+    columns = "select name, type, \"notnull\", dflt_value from pragma_table_info('documents')"
+    assert older.execute(columns).fetchall() == fresh.execute(columns).fetchall()
+    fresh.close()
+    older.close()
+
+
 # The schema `tables.py` generates at this `SCHEMA_VERSION`: a SHA-256 of its DDL statements,
 # sorted, because a table's indexes are a set and come out in no fixed order.
-SCHEMA_PIN = (34, "10ceb8cab273eccf29630a23e7510f15bc99c76fa1ea4482890a616dfe6f90c7")
+SCHEMA_PIN = (35, "53c890d5eb3caee318cdc315dbf2524da0d6407667293fb15e112af824b990c2")
 
 
 def test_a_table_change_comes_with_a_new_schema_version() -> None:
