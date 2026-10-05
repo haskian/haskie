@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.31.0 - 2026-10-05
+#### Features
+- (**collections**) page counts, also-in tags and description hints in the document lists (#42) - (86bbabb) - Črtomir Majer
+
+- - -
+
 ## v0.30.0 - 2026-10-03
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>(**search**) keep agent answers inline and skip empty collections (#41) - (af6c799) - Črtomir Majer
