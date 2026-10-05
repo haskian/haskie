@@ -58,6 +58,7 @@ erDiagram
         text status
         text parser
         text description
+        int pages
     }
     collections {
         text name PK
@@ -230,8 +231,8 @@ trail).
 
 *Restore* replaces the contents with an archive's and keeps the history. A session keeps the
 collections it chose that the archive holds. It is refused while other work runs, and for an
-archive of another schema version. The rows are replaced in one transaction and the folders
-swapped beside it, so a failure leaves what was there. While it runs, every request but a GET
+archive of a schema version this build cannot upgrade. The rows are replaced in one transaction
+and the folders swapped beside it, so a failure leaves what was there. While it runs, every request but a GET
 gets 503, MCP calls included. Every collection is then indexed again from the restored embedding
 cache, with nothing embedded again if the settings name the same model, and every document the
 backup caught mid-import is imported again. Both are durable workflows: after a crash they resume
@@ -242,9 +243,16 @@ Code: `backup.py`.
 
 ## Schema changes
 
-Before 1.0 there are no migrations. A storage change edits `tables.py` and bumps `SCHEMA_VERSION`
-in `db.py`, which is stored in `PRAGMA user_version`. A home written with another version is
-refused at startup, with a message that says so. The fix is `haskie destroy` and a fresh import.
+A storage change edits `tables.py` and bumps `SCHEMA_VERSION` in `db.py`, which is stored in
+`PRAGMA user_version`. A change that only adds, such as a nullable column, also adds the statement
+that upgrades the version before it to `db.UPGRADES`. A home at that version is upgraded in place
+at startup, in one transaction. A restore takes a backup made then as it is: the columns it lacks
+take their defaults. Any other change has no upgrade path before 1.0. A home written with such a
+version is refused at startup, with a message that says so. The fix is `haskie destroy` and a fresh
+import.
+
+A value an older build never stored is worked out after the boot, in the background, and after a
+restore. Today that is a PDF's page count (`documents.pages`).
 
 A collection's LanceDB table records the embedding its vectors were made by (the `cache_name`, in
 its schema metadata). A table of another embedding, or one from before the record, is outdated:

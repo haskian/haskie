@@ -30,6 +30,7 @@ from sqlalchemy import (
     delete,
     func,
     not_,
+    or_,
     select,
     tuple_,
     union,
@@ -76,6 +77,12 @@ ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = (
     MemberStatus.INDEXING,
     MemberStatus.REMOVING,
 )
+
+# The moves that never change whether a collection answers a search (`Collection.searchable`): a
+# membership starts as pending, and one moving to indexing keeps its cache entry. Every other move
+# may, so it rewrites the skill's list of collections, a new status included. The entry itself
+# changes mid-index (`pipeline.prepare_index`), and the skill catches up at the move that ends it.
+_QUIET_MOVES = (MemberStatus.PENDING, MemberStatus.INDEXING)
 
 # The member listing selects a document row and its membership, which share `status`, `error`
 # and `updated_at`: the membership's are labelled, so a row maps each name to one column.
@@ -255,6 +262,31 @@ class Collection:
         instead, through `page` below."""
         async with db.read() as conn:
             return list(await conn.scalars(select(collections.c.name).order_by(collections.c.name)))
+
+    @staticmethod
+    async def searchable(names: list[str]) -> list[str]:
+        """Those of `names` a search can find anything in, in the order given: each holds a
+        document whose rows are in its table and not on their way out (`LEAVING`). A membership
+        names its cache entry exactly while rows of it stand (`pipeline.prepare_index`), whatever
+        its status: a re-index answers from its old rows until they are dropped, and a write that
+        failed from what it wrote. `indexed` counts too, for an entry the cache forgot."""
+        member = collection_documents.c
+        answering = (
+            _MEMBERS.with_only_columns(member.document_id)
+            .where(
+                member.collection == collections.c.name,
+                or_(member.status == MemberStatus.INDEXED, member.cache_id.is_not(None)),
+                *(not_(leaving) for leaving in LEAVING),
+            )
+            .exists()  # stops at a collection's first such membership
+        )
+        async with db.read() as conn:
+            found = set(
+                await conn.scalars(
+                    select(collections.c.name).where(collections.c.name.in_(names), answering)
+                )
+            )
+        return [name for name in names if name in found]
 
     @staticmethod
     async def page(request: PageRequest) -> Page[CollectionSummary]:
@@ -688,6 +720,8 @@ class Collection:
                 .values(status=status, error=error, updated_at=time.time())
                 .returning(collection_documents.c.document_id)
             )
+        if moved is not None and status not in _QUIET_MOVES:
+            claude.refresh_in_background()  # the skill names only collections a search answers from
         return moved is not None
 
     async def set_member_status(
@@ -698,8 +732,9 @@ class Collection:
         cancelled again. Only its removal ends that status (see `fail_removal`)."""
         await self._move_member(doc, status, error, not_(_REMOVING))
 
-    async def set_member_entry(self, doc: str, cache_id: str) -> None:
-        """Record the embedding cache entry the membership's rows are indexed from."""
+    async def set_member_entry(self, doc: str, cache_id: str | None) -> None:
+        """Record the embedding cache entry the membership's rows in the table come from, or None
+        while it has none there (`pipeline.prepare_index`)."""
         async with db.connect() as conn:
             await conn.execute(
                 update(collection_documents).where(self._membership(doc)).values(cache_id=cache_id)
@@ -748,6 +783,7 @@ class Collection:
         """Detach only: the document, its files and its embedding cache stay."""
         async with db.connect() as conn:
             await conn.execute(delete(collection_documents).where(self._membership(doc)))
+        claude.refresh_in_background()
 
     @staticmethod
     async def holding(docs: set[str], names: list[str]) -> dict[str, list[str]]:

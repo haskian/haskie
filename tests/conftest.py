@@ -307,6 +307,27 @@ def claude_installed(directory: Path, home_dir: Path | None = None) -> Path:
     return directory
 
 
+async def indexed_member(collection: str, doc: str) -> None:
+    """Make imported document `doc` (an id) an indexed member of `collection` without running its
+    index. Its chunks are seeded by hand, if the test needs any (`seed_index`)."""
+    from haskie.collection.collection import Collection, MemberStatus
+
+    found = await Collection.get(collection)
+    await found.add(doc)
+    await found.set_member_status(doc, MemberStatus.INDEXED)
+
+
+async def holding_a_document(collection: str) -> None:
+    """Give `collection` one indexed member and no chunk: a search covers, and the skill names,
+    only a collection that holds one (`Collection.searchable`)."""
+    from haskie.document import document
+    from haskie.document.document import DocumentStatus
+
+    imported = await import_row(f"{collection}.md", f"# {collection}\n\nIts one member.\n")
+    await document.set_status(imported.id, DocumentStatus.IMPORTED)
+    await indexed_member(collection, imported.id)
+
+
 async def refresh_settled() -> bool:
     """Whether no installation refresh is running; the task discards itself when it ends."""
     from haskie import claude

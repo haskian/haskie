@@ -282,12 +282,14 @@ MAX_SECTION_CHARS = Meta(
         "characters. The passages a search keeps under it come back together, in document order."
     ),
 )
-MAX_ANSWER_CHARS = Meta(
+ANSWER_BUDGET_CHARS = Meta(
     title="Largest answer (characters)",
     description=(
-        "How much text the sections of one excerpts search hold. Sections past it are left out, "
-        "the last first, and the text around and between passages that answers too is added "
-        "while it fits. One excerpt found for words no section holds may come past it."
+        "How long one excerpts search's answer may be, its text and what each excerpt and "
+        "passage carry beside it. The passage found for words no other holds goes in first, then "
+        "each section's best passage, then the rest, each whole and skipped when it does not fit; "
+        "the text around and between passages that answers too fills what room is left. The "
+        "default keeps an answer short of the size Claude Code moves out of its context."
     ),
 )
 MAX_PASSAGE_GROW = Meta(
@@ -493,7 +495,7 @@ def _check_search(search: "SearchSettings | SearchOverrides") -> None:
         "nprobes",
         "refine_factor",
         "max_section_chars",
-        "max_answer_chars",
+        "answer_budget_chars",
     )
     _at_least(1, **{name: given[name] for name in at_least_one if name in given})
     at_least_zero = ("vector_weight", "bm25_weight", "min_passage_chars", "max_passage_grow")
@@ -578,7 +580,7 @@ class SearchSettings(msgspec.Struct):
     max_passage_grow: Annotated[int, MAX_PASSAGE_GROW] = 3
     grow_bias: Annotated[float, GROW_BIAS] = 0.0
     max_section_chars: Annotated[int, MAX_SECTION_CHARS] = 12000
-    max_answer_chars: Annotated[int, MAX_ANSWER_CHARS] = 36000
+    answer_budget_chars: Annotated[int, ANSWER_BUDGET_CHARS] = 44000
 
     def __post_init__(self) -> None:
         # `reranker_model` is checked against the catalogue where settings are written
@@ -623,7 +625,7 @@ class SearchOverrides(msgspec.Struct):
     max_passage_grow: Annotated[int | None, MAX_PASSAGE_GROW] = None
     grow_bias: Annotated[float | None, GROW_BIAS] = None
     max_section_chars: Annotated[int | None, MAX_SECTION_CHARS] = None
-    max_answer_chars: Annotated[int | None, MAX_ANSWER_CHARS] = None
+    answer_budget_chars: Annotated[int | None, ANSWER_BUDGET_CHARS] = None
 
     def __post_init__(self) -> None:
         # checked as it is decoded, before it is saved: otherwise a value no search can run with
@@ -809,8 +811,12 @@ def _store(settings: UserSettings) -> None:
 
 
 def _decode(raw: str) -> UserSettings:
-    """Decode a stored settings row. No renames of old keys: a home written under other field
-    names is at another `db.SCHEMA_VERSION` and is refused before its settings are read."""
+    """Decode a stored settings row. No renames of old keys: a field renamed for its name alone
+    bumps `db.SCHEMA_VERSION`, so a home written under the old name is refused before its
+    settings are read. A field renamed because its meaning changed bumps nothing: this build drops
+    the old key as unknown and the setting takes its default, so the old value, which meant
+    something else, is left behind (`answer_budget_chars`, which bounds the agent's whole answer
+    where `max_answer_chars` bounded the text alone)."""
     return msgspec.json.decode(raw, type=UserSettings)
 
 

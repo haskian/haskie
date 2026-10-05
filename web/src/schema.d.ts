@@ -1148,6 +1148,7 @@ export interface components {
             updated_at: number;
             /** @default  */
             description: string;
+            pages?: number | null;
         };
         /** DocumentCounts */
         DocumentCounts: {
@@ -1445,6 +1446,7 @@ export interface components {
             updated_at: number;
             /** @default  */
             description: string;
+            pages?: number | null;
             collections?: string[];
         };
         /** LoggedQuestion */
@@ -2071,9 +2073,9 @@ export interface components {
             max_section_chars?: number | null;
             /**
              * Largest answer (characters)
-             * @description How much text the sections of one excerpts search hold. Sections past it are left out, the last first, and the text around and between passages that answers too is added while it fits. One excerpt found for words no section holds may come past it.
+             * @description How long one excerpts search's answer may be, its text and what each excerpt and passage carry beside it. The passage found for words no other holds goes in first, then each section's best passage, then the rest, each whole and skipped when it does not fit; the text around and between passages that answers too fills what room is left. The default keeps an answer short of the size Claude Code moves out of its context.
              */
-            max_answer_chars?: number | null;
+            answer_budget_chars?: number | null;
         };
         /** SearchSettings */
         SearchSettings: {
@@ -2173,10 +2175,10 @@ export interface components {
             max_section_chars: number;
             /**
              * Largest answer (characters)
-             * @description How much text the sections of one excerpts search hold. Sections past it are left out, the last first, and the text around and between passages that answers too is added while it fits. One excerpt found for words no section holds may come past it.
-             * @default 36000
+             * @description How long one excerpts search's answer may be, its text and what each excerpt and passage carry beside it. The passage found for words no other holds goes in first, then each section's best passage, then the rest, each whole and skipped when it does not fit; the text around and between passages that answers too fills what room is left. The default keeps an answer short of the size Claude Code moves out of its context.
+             * @default 44000
              */
-            max_answer_chars: number;
+            answer_budget_chars: number;
         };
         /** Section */
         Section: {

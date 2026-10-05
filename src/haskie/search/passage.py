@@ -113,6 +113,9 @@ class HitRange(msgspec.Struct):
     # too short to stand alone, but a run worth taking is next to it: an excerpts search judged it
     # and left the growing to the fill, which may take nothing after all (`thin.settle`)
     owed: bool = False
+    # its place in the ranking across every section of the answer, best first (`section.group`):
+    # the order the budget takes a section's further passages in (`section.within`)
+    rank: int = 0
 
     @property
     def best(self) -> Hit:

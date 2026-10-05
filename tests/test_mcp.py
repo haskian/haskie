@@ -22,6 +22,7 @@ from haskie.api import agent
 from haskie.app import MCP_PATH
 from haskie.collection.collection import Collection
 from haskie.document import document
+from haskie.search import section
 
 pytestmark = pytest.mark.anyio
 
@@ -192,6 +193,11 @@ async def test_the_tools_an_agent_is_offered(client: AsyncTestClient) -> None:
                 {one["document"]: one["aspects"] for one in found["excerpts"]}
                 == {"retries.md": [BY_RETRY], "ordering.md": [BY_CLOCK]}
                 and found["uncovered"] == []
+                and [span["aspects"] for one in found["excerpts"] for span in one["spans"]]
+                == [[0], [0]]
+                and not any(
+                    "aspect_scores" in span for one in found["excerpts"] for span in one["spans"]
+                )
             ),
         ),
         (
@@ -216,11 +222,17 @@ async def test_every_read_tool_answers(
     assert expected(found), f"{name}: {found}"
 
 
-# Each tool, its arguments, its REST twin with the same arguments, and the view the tool answers
-# with (`api.agent`).
+# Each tool, its arguments, its REST twin with the same arguments, and how the route's answer
+# becomes the view the tool answers with (`api.agent`).
 VIEWS = [
-    ("search_excerpts", {"q": [BY_RETRY]}, "/api/search/excerpts", {"q": BY_RETRY}, agent.Answer),
-    ("search_sections", {"q": BY_RETRY}, "/api/search/sections", {"q": BY_RETRY}, agent.SectionMap),
+    ("search_excerpts", {"q": [BY_RETRY]}, "/api/search/excerpts", {"q": BY_RETRY}, agent.answer),
+    (
+        "search_sections",
+        {"q": BY_RETRY},
+        "/api/search/sections",
+        {"q": BY_RETRY},
+        lambda served: agent.view(served, agent.SectionMap),
+    ),
 ]
 
 
@@ -234,9 +246,49 @@ def _fields(value: Any, at: str = "") -> set[str]:
     return {one for key, item in value.items() for one in {at + key, *_fields(item, f"{at}{key}.")}}
 
 
-@pytest.mark.parametrize(("tool", "arguments", "route", "params", "view"), VIEWS)
+def test_a_span_names_its_questions_by_position_in_its_excerpt() -> None:
+    """An excerpt answering two questions: one passage answers the second alone, one both, one
+    neither (a fill), each told by position in the excerpt's `aspects`."""
+    first, second = BY_RETRY, BY_CLOCK
+
+    def span(aspects: list[str]) -> dict:
+        return {
+            "header": "Retries",
+            "section_id": "s1",
+            "location": "retries.md L3-4",
+            "score": 1.0,
+            "aspects": aspects,
+        }
+
+    excerpt = {
+        "collection": "notes",
+        "document_id": "d1",
+        "document": "retries.md",
+        "header": "Retries",
+        "section_id": "s1",
+        "location": "retries.md L1-9",
+        "text": "A background job retries a failed call.",
+        "score": 1.0,
+        "markdown_file": "/home/retries.md",
+        "aspects": [first, second],
+        "spans": [span([second]), span([first, second]), span([])],
+    }
+    found = {"excerpts": [excerpt], "uncovered": [], "missing_terms": [], "searched": ["notes"]}
+
+    (viewed,) = agent.answer(found).excerpts
+
+    assert viewed.aspects == [first, second]
+    assert [one.aspects for one in viewed.spans] == [[1], [0, 1], []]
+
+
+@pytest.mark.parametrize(("tool", "arguments", "route", "params", "viewed"), VIEWS)
 async def test_a_tool_answers_with_fewer_fields_than_its_route(
-    library: AsyncTestClient, tool: str, arguments: dict, route: str, params: dict, view: Any
+    library: AsyncTestClient,
+    tool: str,
+    arguments: dict,
+    route: str,
+    params: dict,
+    viewed: Callable[[Any], Any],
 ) -> None:
     """The same search, fewer fields: the agent reads the view, the web UI the whole answer. The
     offsets, chunk numbers and lines the tool leaves out are still on the route."""
@@ -244,7 +296,8 @@ async def test_a_tool_answers_with_fewer_fields_than_its_route(
     served = (await library.get(route, params=params)).json()
 
     assert not error, found
-    assert msgspec.convert(found, view) == agent.view(served, view), f"{tool}: the route's answer"
+    expected = viewed(served)
+    assert msgspec.convert(found, type(expected)) == expected, f"{tool}: the route's answer"
     told = _fields(found)
     assert told < _fields(served), f"{tool}: a subset of the route's fields"
     left_out = {"seq_start", "char_start", "line_start", "page_start", "source_file"}
@@ -342,6 +395,92 @@ async def test_every_mistake_an_agent_makes_is_a_tool_error(
 
     assert error, f"{name}: {found}"
     assert message in json.dumps(found), f"{name}: {found}"
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("search_excerpts", {"q": [BY_RETRY], "collections": "notes,inbox"}),
+        ("search_sections", {"q": BY_RETRY, "collections": "inbox"}),
+    ],
+)
+async def test_an_empty_collection_named_is_refused_with_the_reason(
+    library: AsyncTestClient, tool: str, arguments: dict
+) -> None:
+    """An empty collection answers nothing, and an empty answer would read as "the sources do not
+    cover it": named, it is a conflict that says why."""
+    await library.post("/api/collections", json={"name": "inbox"})
+
+    error, found = await _call(library, tool, {**arguments, "session_id": SESSION})
+
+    assert error and "collection has no document to search: inbox" in json.dumps(found), found
+
+
+@pytest.mark.parametrize(
+    ("name", "selection", "searched"),
+    [
+        ("every collection means every one holding a document", None, ["notes"]),
+        ("a session's empty collection is skipped", ["inbox", "notes"], ["notes"]),
+        ("a session of empty collections searches none", ["inbox"], []),
+    ],
+)
+async def test_an_empty_collection_chosen_earlier_or_by_default_is_left_out(
+    library: AsyncTestClient, name: str, selection: list[str] | None, searched: list[str]
+) -> None:
+    await library.post("/api/collections", json={"name": "inbox"})
+    if selection is not None:
+        await _call(
+            library, "set_session_collections", {"session_id": SESSION, "collections": selection}
+        )
+
+    error, found = await _call(library, "search_excerpts", {"q": [BY_RETRY], "session_id": SESSION})
+
+    assert not error, f"{name}: {found}"
+    assert found["searched"] == searched, name
+    assert bool(found["excerpts"]) == bool(searched), f"{name}: only notes holds an answer"
+
+
+@pytest.mark.parametrize(
+    ("name", "copies"),
+    [
+        ("two notes, each its own excerpt", False),
+        ("a near copy of each note, folded into its `also_in`", True),
+    ],
+)
+async def test_the_answer_costs_no_more_than_the_budget_counts_for_it(
+    library: AsyncTestClient, monkeypatch: pytest.MonkeyPatch, name: str, copies: bool
+) -> None:
+    """What the budget counts for each section it keeps (`section.Group.cost`) is an upper bound
+    on what the agent's answer spends on its excerpt: field names, ids, the headings and `[…]`
+    the text gains, escapes and folded places included. The budget's promise that an answer stays
+    short of the size Claude Code moves into a file rests on it."""
+    from haskie.search import retrieval
+
+    if copies:  # one line more each, so the import is no copy of the same file
+        for note, body in (("retries-copy.md", RETRIES), ("ordering-copy.md", ORDERING)):
+            await stage_and_import(library, note, f"{body}\nCopied from the team wiki.\n".encode())
+            await attach_via_api(library, "notes", note)
+    quoted: list[section.Group] = []
+    read_excerpts = retrieval.read_excerpts
+
+    async def spy(groups: list[section.Group]) -> list:
+        quoted.extend(groups)
+        return await read_excerpts(groups)
+
+    monkeypatch.setattr(retrieval, "read_excerpts", spy)
+
+    error, found = await _call(
+        library,
+        "search_excerpts",
+        {"q": [BY_RETRY, BY_CLOCK], "session_id": SESSION, "limit": 4},
+    )
+
+    assert not error and len(found["excerpts"]) == len(quoted) == 2, f"{name}: {found}"
+    folded = [span.get("also_in") for one in found["excerpts"] for span in one["spans"]]
+    assert any(folded) == copies, f"{name}: the copies fold into `also_in`"
+    for group, one in zip(quoted, found["excerpts"], strict=True):
+        spent = len(json.dumps(one, ensure_ascii=False, separators=(",", ":")))
+        assert spent <= group.cost, f"{name}, {one['document']}: {spent} > {group.cost} counted"
 
 
 async def test_an_agent_imports_attaches_finds_and_detaches_a_document(

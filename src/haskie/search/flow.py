@@ -23,9 +23,10 @@ into the hit it repeats (`collapse`). `passages` and `answers` merge the chunks 
 sit next to each other into one readable span, grow a span too short to stand alone by the
 neighbours that match the question or drop it (`thin`), fold near-duplicate spans the same way, and
 read only the spans they answer with. `answers` then groups the spans by the section they sit in, so
-`limit` counts sections, searches once more for the words of the question no section holds
-(`probe`), adds the text around and between the passages that answers too (`fill`), and writes each
-section out as one excerpt. `sections` groups the same hits by section and picks the sections
+`limit` counts sections, cuts the passages to the answer's budget (`budget`), searches once more
+for the words of the question no section kept holds (`probe`), adds the text around and between
+the passages that answers too (`fill`), and writes each section out as one excerpt. `sections`
+groups the same hits by section and picks the sections
 that cover the most of what the scan found (`section_map`): a map is wide, so its reranker
 weighs what the scan found rather than cutting it.
 
@@ -294,8 +295,8 @@ async def group(ctx: StepContext[Search, None, list[HitRange]]) -> list[section.
 
 
 async def budget(ctx: StepContext[Search, None, list[section.Group]]) -> list[section.Group]:
-    """The sections that fit the answer's budget, the last cut first. The probe's passage comes
-    after this cut, and the fill spends what room is left."""
+    """The passages that fit the answer's budget, each section's best first. The probe's passage
+    then takes its room first, and the fill spends what room is left."""
     return retrieval.budget(ctx.inputs, ctx.state.plan)
 
 

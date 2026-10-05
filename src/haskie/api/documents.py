@@ -67,7 +67,7 @@ class Head(msgspec.Struct):
     kind: Literal["head"] = "head"
 
 
-MAX_RENDERED = 100_000  # characters: an excerpt is at most a few sections (`max_answer_chars`)
+MAX_RENDERED = 100_000  # characters: an excerpt is at most a few sections (`answer_budget_chars`)
 
 
 class Markdown(msgspec.Struct):
