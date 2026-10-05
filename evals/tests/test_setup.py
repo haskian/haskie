@@ -186,3 +186,25 @@ def test_attach_all_attaches_a_document_not_yet_in_the_collection(monkeypatch) -
     setup.attach_all(["a.pdf"], "books", "http://x")
 
     assert _posts(server) == [("POST", "/api/collections/books/documents", {"document": "a.pdf"})]
+
+
+def _maintenance(pending: int, written: float | None, maintained: float | None) -> dict:
+    state = {"pending_documents": pending, "last_write_at": written}
+    return {"name": "books", "maintenance": state | {"last_maintained_at": maintained}}
+
+
+def test_await_maintained_waits_for_the_run_after_the_last_write(monkeypatch) -> None:
+    states = iter([_maintenance(7, 100.0, None), _maintenance(0, 100.0, 160.0)])
+    monkeypatch.setattr(setup, "call", lambda method, path, api, body=None: next(states))
+    monkeypatch.setattr(setup, "POLL_SECONDS", 0)
+
+    assert setup.await_maintained("books", "http://x")
+    assert next(states, None) is None, "returned before the maintained state"
+
+
+def test_await_maintained_returns_at_once_for_a_collection_never_written(monkeypatch) -> None:
+    server = FakeServer(collections={"books": _maintenance(0, None, None)})
+    _install(monkeypatch, server)
+
+    assert setup.await_maintained("books", "http://x")
+    assert len(server.calls) == 1

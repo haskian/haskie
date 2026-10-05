@@ -230,6 +230,19 @@ def await_indexed(expected: int, collection: str, api: str, limit: float = 1800)
     return False
 
 
+def await_maintained(collection: str, api: str, limit: float = 600) -> bool:
+    """Wait for the maintenance run that follows indexing: it compacts the index, and search
+    rankings differ before and after it, so a run that starts earlier measures two indexes."""
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        state = call("GET", f"/api/collections/{collection}", api)["maintenance"]
+        written, maintained = state["last_write_at"], state["last_maintained_at"]
+        if state["pending_documents"] == 0 and (written is None or (maintained or 0) >= written):
+            return True
+        time.sleep(POLL_SECONDS)
+    return False
+
+
 def load(
     files: list[Path], collection: str, description: str, api: str, chunking: dict | None = None
 ) -> bool:
@@ -239,7 +252,7 @@ def load(
     names = import_all(files, api)
     ready = await_status(names, "imported", api)
     attach_all(ready, collection, api)
-    ok = await_indexed(len(ready), collection, api)
+    ok = await_indexed(len(ready), collection, api) and await_maintained(collection, api)
     print(f"{collection}: {len(ready)}/{len(files)} imported and indexed", flush=True)
     return ok and len(ready) == len(files)
 
