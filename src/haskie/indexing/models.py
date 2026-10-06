@@ -65,6 +65,8 @@ class ModelKind(StrEnum):
     EMBEDDING = "embedding"
     RERANKER = "reranker"
     DESCRIBER = "describer"  # writes section descriptors (`gguf_models.DESCRIBER`)
+    # embeds them for a collection's vocabulary (`gguf_models.VOCABULARY_EMBEDDER`)
+    VOCABULARY = "vocabulary"
 
 
 class ModelState(StrEnum):
@@ -99,6 +101,7 @@ async def warm_model(kind: ModelKind, name: str) -> None:
         ModelKind.EMBEDDING: embed.warm,
         ModelKind.RERANKER: embed.warm_reranker,
         ModelKind.DESCRIBER: embed.warm_generator,
+        ModelKind.VOCABULARY: embed.warm,
     }[kind]
     await cpu.on_cpu(warm, name, accelerator)
 
@@ -149,6 +152,8 @@ async def required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
     wanted.extend((ModelKind.RERANKER, name) for name in await _collection_rerankers(settings))
     if describer := gguf_models.describer(settings.pipeline.descriptors):
         wanted.append((ModelKind.DESCRIBER, describer))
+        # the describer judges the vocabulary's pairs too, and this embeds its descriptors
+        wanted.append((ModelKind.VOCABULARY, gguf_models.VOCABULARY_EMBEDDER))
     return list(dict.fromkeys(wanted))
 
 

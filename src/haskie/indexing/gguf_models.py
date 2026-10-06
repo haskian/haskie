@@ -25,6 +25,11 @@ llama.cpp computes attention over a whole micro-batch, every token against every
 larger micro-batch costs more: 512 tokens ran fastest, 1024 cost 12% more, 8192 was 17x slower.
 So texts are read at up to `MAX_TOKENS`, as the MLX embedders read theirs.
 
+One GGUF embedder serves no embedding profile: Qwen3-Embedding-0.6B (`VOCABULARY_EMBEDDER`),
+which embeds the descriptors of a collection's vocabulary (`sections.vocabulary`). Qwen's own Q8_0
+file, on 184 descriptor pairs labelled by hand, told synonyms from other concepts at AUC 0.87 and
+from antonyms at 0.96, against 0.85 and 0.43 for granite-97m.
+
 One GGUF file is a generator, not an embedder: Gemma-4-E2B-it (`DESCRIBER`), which writes a
 section's descriptors when the settings ask for them (`sections.generated`). Its ggml-org Q4_0 file
 was judged blind on 200 book sections against the Q8_0 file and the mlx-community 4-bit build:
@@ -70,6 +75,13 @@ PINS: dict[str, Pin] = {
         "a1f45469b2b9b3a2d0df7150fad56f65a37b8937", "F2LLM-v2-160M.f16.gguf", 40960
     ),
 }
+# what a collection's vocabulary embeds its descriptors with (see above): no embedding profile's
+VOCABULARY_EMBEDDER = "Qwen/Qwen3-Embedding-0.6B-GGUF"
+HELPERS: dict[str, Pin] = {
+    VOCABULARY_EMBEDDER: Pin(
+        "370f27d7550e0def9b39c1f16d3fbaa13aa67728", "Qwen3-Embedding-0.6B-Q8_0.gguf", 32768
+    ),
+}
 DESCRIBER = "ggml-org/gemma-4-E2B-it-GGUF"  # the generator that writes descriptors (see above)
 GENERATORS: dict[str, Pin] = {
     DESCRIBER: Pin("b4243c156154b6dca9324415f8c7ccc098b4aed1", "gemma-4-E2B-it-Q4_0.gguf", 131072),
@@ -85,11 +97,13 @@ def describer(by: Descriptors) -> str | None:
 # about 1,500 tokens of prose; a longer prompt is cut to fit (`GgufGenerator.reply`)
 GENERATOR_TOKENS = 4096
 CHAT_TOKENS = 32  # what the chat template wraps a prompt in (Gemma's takes 10)
+ANSWER_TOKENS = 4  # of a yes-or-no reply read for the answer (`GgufGenerator.yes`)
+ANSWER_CHOICES = 10  # the likeliest tokens at one of them a yes or a no must be among
 
 
 def pin(name: str) -> Pin | None:
     """The pinned file of GGUF model `name`, an embedder or a generator; None for any other."""
-    return PINS.get(name) or GENERATORS.get(name)
+    return PINS.get(name) or HELPERS.get(name) or GENERATORS.get(name)
 
 
 @functools.cache
@@ -122,7 +136,9 @@ class GgufEmbedder:
         path = _download(name)  # first: it says what to install when llama.cpp is missing
         from llama_cpp import Llama
 
-        tokens = min(PINS[name].tokens, MAX_TOKENS)
+        found = pin(name)
+        assert found is not None, f"{name} is no GGUF model"
+        tokens = min(found.tokens, MAX_TOKENS)
         self._model = Llama(
             model_path=str(path),
             embedding=True,
@@ -169,8 +185,19 @@ class GgufEmbedder:
             keep -= 8
 
 
+def leaning(logits: np.ndarray, yes: np.ndarray, no: np.ndarray) -> float | None:
+    """P(yes) / (P(yes) + P(no)) from one token's logits, the likeliest spelling of each word,
+    when a yes or a no is among the `ANSWER_CHOICES` likeliest tokens; None when neither is, and
+    the reply leans neither way yet."""
+    likeliest = np.argpartition(-logits, ANSWER_CHOICES)[:ANSWER_CHOICES]
+    if not (np.isin(likeliest, yes).any() or np.isin(likeliest, no).any()):
+        return None
+    return float(1 / (1 + np.exp(logits[no].max() - logits[yes].max())))
+
+
 class GgufGenerator:
-    """A GGUF chat model, answering one prompt at a time with its greedy reply."""
+    """A GGUF chat model, answering one prompt at a time with its greedy reply, or with how
+    likely its answer to a yes-or-no question is yes."""
 
     def __init__(self, name: str) -> None:
         path = _download(name)
@@ -180,6 +207,52 @@ class GgufGenerator:
             model_path=str(path), n_gpu_layers=-1, n_ctx=GENERATOR_TOKENS, verbose=False
         )
         self._lock = threading.Lock()  # one context, as `GgufEmbedder`'s
+
+    def yes(self, prompt: str) -> float:
+        """P(yes) / (P(yes) + P(no)) at the first token of the greedy reply to `prompt` that leans
+        either way (`leaning`): a reply may open with a mark ("**Yes**"), so up to
+        `ANSWER_TOKENS` tokens are read. 0.5 when none did."""
+        from llama_cpp import llama_get_logits_ith
+
+        chat, yes, no = self._answers
+        text = chat(messages=[{"role": "user", "content": prompt}]).prompt
+        with self._lock:
+            tokens = self._model.tokenize(text.encode(), add_bos=False, special=True)
+            self._model.reset()
+            self._model.eval(tokens)
+            for _ in range(ANSWER_TOKENS):
+                # the last token's, the one row llama.cpp keeps without `logits_all`, which would
+                # keep one per prompt token, on every prompt `reply` asks too
+                logits = np.ctypeslib.as_array(
+                    llama_get_logits_ith(self._model.ctx, -1), shape=(self._model.n_vocab(),)
+                )
+                found = leaning(logits, yes, no)
+                if found is not None:
+                    return found
+                self._model.eval([int(logits.argmax())])
+        return 0.5
+
+    @functools.cached_property
+    def _answers(self) -> tuple[Any, np.ndarray, np.ndarray]:
+        """The chat template `create_chat_completion` applies, the file's own as llama-cpp-python
+        reads it, for the prompts `yes` evaluates itself; and the tokens that read "yes" and "no"
+        in any spelling ("Yes", " yes"). Once, on the first question: the vocabulary is read a
+        token at a time."""
+        from llama_cpp.llama_chat_format import Jinja2ChatFormatter
+
+        model = self._model
+        chat = Jinja2ChatFormatter(
+            template=model.metadata["tokenizer.chat_template"],
+            eos_token=model._model.token_get_text(model.token_eos()),
+            bos_token=model._model.token_get_text(model.token_bos()),
+        )
+        words = [
+            model.detokenize([token]).decode(errors="ignore").strip().lower()
+            for token in range(model.n_vocab())
+        ]
+        yes = np.array([token for token, word in enumerate(words) if word == "yes"])
+        no = np.array([token for token, word in enumerate(words) if word == "no"])
+        return chat, yes, no
 
     def reply(self, prompt: str, max_tokens: int) -> str:
         """The greedy reply to `prompt`, cut at its end to what the context holds beside the

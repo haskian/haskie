@@ -4,7 +4,7 @@ import { errorText } from '../../format'
 import { useOptions } from '../../hooks/useOptions'
 import { usePoll } from '../../hooks/usePoll'
 import { href } from '../../router'
-import { documentIcon, Info } from '../../ui'
+import { documentIcon, ModalStatus } from '../../ui'
 
 const link = (name: string) => <a href={href({ name: 'documents', document: name })}>{name}</a>
 const suffixOf = (name: string) => name.slice(name.lastIndexOf('.'))
@@ -12,9 +12,9 @@ const suffixOf = (name: string) => name.slice(name.lastIndexOf('.'))
 /** The document a staged file already is, as a link: the file is not imported again. */
 export function Duplicate({ name }: { name: string }) {
   return (
-    <p className="notice">
+    <ModalStatus tone="warning">
       The same file is already imported as {link(name)}. It is not imported again.
-    </p>
+    </ModalStatus>
   )
 }
 
@@ -24,7 +24,7 @@ export function SimilarDocuments({ similar }: { similar: Similar }) {
   return (
     <>
       {similar.nearest.length === 0 ? (
-        <Info>Nothing to compare with: no other document has a vector under the current embedding model.</Info>
+        <ModalStatus>Nothing to compare with: no other document has a vector under the current embedding model.</ModalStatus>
       ) : (
         <ul className="list">
           {similar.nearest.map((one) => {
@@ -70,10 +70,10 @@ export function JustImported({ name }: { name: string }) {
         Imported · {link(name)}
         {row !== null && !imported && ` · ${row.status}`}
       </span>
-      {row?.error != null && <p className="muted">{row.error}</p>}
-      {!imported && row?.error == null && <p className="muted">The nearest documents show once it is converted and embedded.</p>}
+      {row?.error != null && <ModalStatus tone="error">{name}: {row.error}</ModalStatus>}
+      {!imported && row?.error == null && <ModalStatus>{name}: The nearest documents show once it is converted and embedded.</ModalStatus>}
       {similar !== null && <SimilarDocuments similar={similar} />}
-      {error !== null && <p className="muted">{error}</p>}
+      {error !== null && <ModalStatus tone="error">{error}</ModalStatus>}
     </div>
   )
 }

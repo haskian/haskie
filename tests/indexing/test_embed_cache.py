@@ -11,6 +11,7 @@ from pathlib import Path
 
 import msgspec
 import numpy as np
+import pyarrow.parquet as pq
 import pytest
 from conftest import id_of, import_row
 from sqlalchemy import delete, select
@@ -604,12 +605,39 @@ async def test_written_descriptors_round_trip_with_their_strategy(tmp_path: Path
     assert await embed_cache.described_by(doc.id, cache_id) == Descriptors.C_TF_IDF
     assert (await embed_cache.read_sections(doc.id, cache_id))[2].descriptors == ["saga steps"]
 
-    again = [msgspec.structs.replace(one, descriptors=["Compensating steps"]) for one in found]
+    again = [
+        msgspec.structs.replace(
+            one, descriptors=["Compensating steps"], description="Explains saga compensation."
+        )
+        for one in found
+    ]
     await embed_cache.write_descriptors(doc.id, cache_id, again, Descriptors.LLM)
     assert await embed_cache.described_by(doc.id, cache_id) == Descriptors.LLM
     read = await embed_cache.read_sections(doc.id, cache_id)
     assert [one.descriptors for one in read] == [["Compensating steps"]] * 4
+    assert [one.description for one in read] == ["Explains saga compensation."] * 4
     assert [one.id for one in read] == [one.id for one in found], "the sections stay"
+
+
+@pytest.mark.parametrize("by", [Descriptors.C_TF_IDF, Descriptors.LLM])
+async def test_old_sections_read_without_descriptions_and_llm_needs_refresh(
+    tmp_path: Path, by: Descriptors
+) -> None:
+    doc = await import_row(DOC, BODY)
+    params = msgspec.structs.replace(BASE, document_id=doc.id)
+    cache_id = await embed_cache.write(params, _parts(tmp_path / "scratch", [_book()]), 4)
+    found = await embed_cache.read_sections(doc.id, cache_id)
+    described = [msgspec.structs.replace(one, descriptors=["Compensating steps"]) for one in found]
+    await embed_cache.write_descriptors(doc.id, cache_id, described, by)
+    path = embed_cache.sections_path(doc.id, cache_id)
+    old = pq.read_table(path).drop(["description"])
+    pq.write_table(old, path)
+
+    assert await embed_cache.read_sections(doc.id, cache_id) == described
+    assert await embed_cache.lookup(params) == cache_id, "chunk embeddings remain reusable"
+    assert await embed_cache.described_by(doc.id, cache_id) == (
+        None if by == Descriptors.LLM else by
+    )
 
 
 async def test_each_chunking_keeps_its_own_sections(tmp_path: Path) -> None:

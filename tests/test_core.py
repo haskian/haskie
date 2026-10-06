@@ -78,6 +78,7 @@ from haskie.indexing import chunk, embed, embed_cache, onnx_models, pipeline
 from haskie.indexing.chunk import Chunk, Piece, Position
 from haskie.indexing.segment import CutReason, PieceType
 from haskie.paging import Order, PageRequest
+from haskie.sections import generated
 from haskie.sections.build import Section
 from haskie.settings import (
     DEFAULT_RERANKER,
@@ -2733,6 +2734,10 @@ async def _describe(
 ) -> int:
     """The describe stage as the workflow runs it: plan, every batch, then the finalizer."""
     batches = await pipeline.plan_describe(doc, cache_id, by)
+    if by == Descriptors.LLM:
+        for batch in batches:
+            await pipeline.describe_sections_batch(doc, cache_id, accelerator, batch)
+        await pipeline.finalize_section_descriptions(doc, cache_id, len(batches))
     for batch in batches:
         await pipeline.describe_batch(doc, cache_id, embedding, by, accelerator, batch)
     return await pipeline.finalize_describe(doc, cache_id, by, len(batches))
@@ -2946,6 +2951,39 @@ async def test_finalize_embed_requires_the_rows_of_every_part() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("by", [Descriptors.LLM, Descriptors.C_TF_IDF])
+async def test_finalizing_resumed_batches_keeps_both_old_and_new_metadata(
+    dbos, by: Descriptors
+) -> None:
+    doc = await import_row("g.md")
+    await _convert(doc)
+    cache_id = await _embed(doc, SMALL)
+    found = await embed_cache.read_sections(doc.id, cache_id)
+    old = embed_cache.descriptors_path(doc.id, cache_id, 0)
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(msgspec.json.encode([["Saga steps"]]))
+    fresh = embed_cache.descriptors_path(doc.id, cache_id, 1)
+    fresh.write_bytes(
+        msgspec.json.encode(
+            [
+                {"descriptors": ["Compensation"], "description": "Explains saga recovery."}
+                for _ in found[1:]
+            ]
+        )
+    )
+
+    assert await pipeline.finalize_describe(doc, cache_id, by, 2) == len(found)
+
+    read = await embed_cache.read_sections(doc.id, cache_id)
+    assert (read[0].descriptors, read[0].description) == (["Saga steps"], "")
+    assert all(one.description == "Explains saga recovery." for one in read[1:])
+    assert await embed_cache.described_by(doc.id, cache_id) == (
+        None if by == Descriptors.LLM else by
+    )
+    assert not old.parent.exists()
+
+
+@pytest.mark.anyio
 async def test_describe_writes_the_descriptors_by_the_strategy_asked_for(
     dbos, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2968,6 +3006,8 @@ async def test_describe_writes_the_descriptors_by_the_strategy_asked_for(
     def reply(name: str, accelerator: Accelerator, prompt: str, max_tokens: int) -> str:
         assert (name, accelerator) == (gguf_models.DESCRIBER, Accelerator.AUTO)
         prompts.append(prompt)
+        if max_tokens == generated.SECTION_TOKENS:
+            return "Explains the two topics."
         return "Topic one | Topic two"
 
     monkeypatch.setattr(embed, "reply", reply)
@@ -2987,8 +3027,11 @@ async def test_describe_writes_the_descriptors_by_the_strategy_asked_for(
     described = await embed_cache.read_sections(doc.id, cache_id)
     assert count == len(described) == len(by_weight)
     assert await embed_cache.described_by(doc.id, cache_id) == Descriptors.LLM
-    assert len(prompts) == sum(bool(one.descriptors) for one in described) > 0
+    assert len(prompts) == 2 * sum(bool(one.descriptors) for one in described) > 0
     assert {tuple(one.descriptors) for one in described} <= {("Topic one", "Topic two"), ()}
+    assert all(
+        one.description == "Explains the two topics." for one in described if one.descriptors
+    )
     assert not embed_cache.scratch_dir(doc.id, cache_id).exists(), "the batches' files are gone"
 
 

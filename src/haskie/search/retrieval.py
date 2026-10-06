@@ -24,6 +24,7 @@ import numpy as np
 from haskie import cpu
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import UNCALIBRATED, EmbeddingModel, RerankerCalibration
+from haskie.collection import vocabulary as collection_vocabulary
 from haskie.collection.collection import Collection
 from haskie.collection.index import (
     EVERYTHING,
@@ -59,6 +60,8 @@ from haskie.search import (
 )
 from haskie.search import fill as filling
 from haskie.search.passage import Excerpt, Passage
+from haskie.sections import vocabulary
+from haskie.sections.descriptors import Description
 from haskie.settings import (
     FillValues,
     Fusion,
@@ -1081,16 +1084,25 @@ async def map_sections(scanned: Scanned, where: Plan, limit: int) -> section_map
     )
 
 
-async def _descriptors(picks: list[section_map.Candidate]) -> dict[tuple[str, str], list[str]]:
+async def _descriptors(picks: list[section_map.Candidate]) -> dict[tuple[str, str], Description]:
     """Each pick's descriptors by (collection, section id), read from the cache entry its
     collection indexed the document from: section ids are places in one chunking, so the same id
-    in another chunking names another section. Each entry's file is read once."""
+    in another chunking names another section. Each entry's file is read once. Each in its
+    collection's preferred terms, once the collection has a vocabulary
+    (`collection/vocabulary.py`)."""
     entries = await Collection.indexed_entries((one.collection, one.document_id) for one in picks)
     files = sorted({(doc, id) for (_, doc), id in entries.items()})
-    sections = await asyncio.gather(*(embed_cache.read_sections(*one) for one in files))
+    names = sorted({collection for collection, _ in entries})
+    sections, terms = await asyncio.gather(
+        asyncio.gather(*(embed_cache.read_sections(*one) for one in files)),
+        asyncio.gather(*(collection_vocabulary.preferred(name) for name in names)),
+    )
     read = dict(zip(files, sections, strict=True))
+    preferred = dict(zip(names, terms, strict=True))
     return {
-        (collection, one.id): one.descriptors
+        (collection, one.id): Description(
+            vocabulary.compact(one.descriptors, preferred[collection]), one.description
+        )
         for (collection, doc), id in entries.items()
         for one in read[(doc, id)]
     }

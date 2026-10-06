@@ -26,13 +26,13 @@ const cases: Array<{ name: string; element: ReactElement; contains: string[]; mi
   {
     name: 'nothing embedded to compare with: says so',
     element: <SimilarDocuments similar={{ nearest: [] }} />,
-    contains: ['<p class="info"><svg', '<span>Nothing to compare with'],
+    contains: ['<div class="modal-message modal-message-info" role="status"><svg', '<span>Nothing to compare with'],
     missing: ['notice', '<ul'],
   },
   {
     name: 'at staging, the same file names the document it already is, and is not imported',
     element: <Duplicate name="ddd.pdf" />,
-    contains: ['<a href="#/documents/ddd.pdf">ddd.pdf</a>. It is not imported again.</p>'],
+    contains: ['<a href="#/documents/ddd.pdf">ddd.pdf</a>. It is not imported again.</span></div>'],
   },
 ]
 

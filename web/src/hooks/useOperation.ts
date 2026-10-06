@@ -1,12 +1,13 @@
-import { useCallback, useState } from 'react'
-import { api, type BulkStarted, type OperationProgress } from '../api'
+import { useCallback, useRef, useState } from 'react'
+import { api, type BulkKind, type BulkStarted, type OperationProgress } from '../api'
 import { useOptions } from './useOptions'
 import { usePoll } from './usePoll'
 
 export interface OperationFollower {
   operation: OperationProgress | null // the last answer it gave, finished ones included
   running: boolean
-  start: (fn: () => Promise<BulkStarted>) => Promise<void>
+  kind: BulkKind | null
+  start: (kind: BulkKind, fn: () => Promise<BulkStarted>) => Promise<void>
 }
 
 // Work the backend only accepts (202) and runs in the background. `start` sends the request and
@@ -20,8 +21,11 @@ export interface OperationFollower {
 export function useOperation(onDone: ((operation: OperationProgress) => void) | undefined, onError: (message: string) => void): OperationFollower {
   const { active_run_statuses } = useOptions()
   const [operation, setOperation] = useState<OperationProgress | null>(null)
-  const running = operation !== null && active_run_statuses.includes(operation.status)
-  const id = running ? operation.id : null
+  const [starting, setStarting] = useState<BulkKind | null>(null)
+  const pending = useRef(false)
+  const active = operation !== null && active_run_statuses.includes(operation.status)
+  const running = starting !== null || active
+  const id = active ? operation.id : null
 
   // one answer from the operation, whoever asked for it: keep it on the page, and report the last
   const settle = useCallback(
@@ -42,12 +46,21 @@ export function useOperation(onDone: ((operation: OperationProgress) => void) | 
   usePoll(id !== null, follow)
 
   const start = useCallback(
-    async (fn: () => Promise<BulkStarted>) => {
-      const { operation_id } = await fn()
-      settle(await api.operationProgress(operation_id))
+    async (kind: BulkKind, fn: () => Promise<BulkStarted>) => {
+      if (pending.current || active) return
+      pending.current = true
+      setStarting(kind)
+      setOperation(null)
+      try {
+        const { operation_id } = await fn()
+        settle(await api.operationProgress(operation_id))
+      } finally {
+        pending.current = false
+        setStarting(null)
+      }
     },
-    [settle],
+    [active, settle],
   )
 
-  return { operation, running, start }
+  return { operation, running, kind: starting ?? operation?.kind ?? null, start }
 }

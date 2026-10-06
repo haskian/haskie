@@ -26,7 +26,8 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `Statusbar` | `<Statusbar status={status} />` | Fixed strip; polls `/api/operations/activity` itself |
 | `Picker` | `<Picker options={scopes} value={scope} onChange={setScope} />` | `<details>` dropdown, each option a label plus a `sub` |
 | `Tabs` | `<Tabs tabs={[{ id: 'match', label: 'Match' }]} selected={tab} onSelect={setTab} />` | The strip only; the caller renders the panels |
-| `Modal` | `<Modal open={open} onClose={close} title={doc} subtitle="collection">{panels}</Modal>` | Native `<dialog>` |
+| `Modal` | `<Modal open={open} onClose={close} title={doc} subtitle="collection">{panels}</Modal>` | Native `<dialog>` with reserved bottom status space |
+| `ModalStatus` | `<ModalStatus tone="error">{error}</ModalStatus>` | Message and severity icon in the owning modal’s footer; inline outside modals. Render panel-specific messages only while that panel is selected |
 | `Tile` | `<Tile icon={FileText} name={doc.name} sub={sub} description={doc.description} cover={api.coverUrl(doc.name)} onClick={open} />` | One card in a gallery, with an optional cover behind it. On hover, `hint` shows below the name and detail, `description` alone |
 | `GallerySection` | `<GallerySection label="A–E" large>{tiles}</GallerySection>` | One lettered band of tiles |
 | `SearchBox` | `<SearchBox value={q} onChange={setQ} onSubmit={run} placeholder="Search" scope={<Picker … />} />` | The one search or filter box; a filter passes `onChange` alone |
@@ -44,9 +45,10 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `Mark` | `<Mark text={hit.text} query={q} />` | Wraps the query's terms in `<mark>` |
 | `DocumentPanes` | `<DocumentPanes doc={name} preview={doc.preview} />` | Source pane plus streamed markdown |
 | `Skeleton` | `<Skeleton />` | The shape of a document while it loads |
-| `DescriptionBox` | `<DescriptionBox value={doc.description} placeholder="What is it about?" onSave={save} />` | Saves on blur and on unmount, only what changed |
+| `DescriptionBox` | `<DescriptionBox value={doc.description} placeholder="What is it about?" onSave={save} />` | Saves on blur and on unmount, only what changed; border appears on hover or focus |
 | `Info` | `<Info>In no collection yet.</Info>` | A line that says how things are, boxed in a gray tint with an info icon. Not for errors |
-| `BulkStatus` | `<BulkStatus operation={bulk.operation} />` | Beside the button that started an operation: running, or how it ended and why |
+| `BusyButton` | `<BusyButton busy={running} busyLabel="Describing ...">Describe with AI</BusyButton>` | Disables immediately while work runs and replaces its contents with a spinner, action label and optional progress |
+| `BulkStatus` | `<BulkStatus operation={bulk.operation} />` | Terminal operation result and icon; uses the modal footer inside a dialog |
 | `RenameForm` | `<RenameForm key={name} name={name} label="Collection name" busy={busy} onRename={rename} />` | A name input with a Rename button; keyed by the name, so each rename starts a new draft |
 | `DropOverlay` | `<DropOverlay onFiles={upload} />` | Document-level drag listeners plus the overlay |
 | `ModelFacts` / `EmbedderFacts` | `<ModelFacts name={name} metadata={metadata} />`, `<EmbedderFacts model={model} metadata={metadata} />` | A model's facts under its picker; nothing for the full-text-only profile |

@@ -9,6 +9,7 @@ import { MarkdownQuote } from './MarkdownQuote'
 import { CUT_REASONS, PIECE_NAMES, RELATIONS, alsoOf, chunkSizes, cite, everyPlace, overlapHint, frameOf, headingOf, isHit, pieceMeta, piecesOf, position, seqLabel, type ChunkPiece, type Match, type Reference, type Size, isExcerpt, questionLabels } from './match'
 import { errorText } from '../format'
 import { Modal } from './Modal'
+import { ModalStatus } from './ModalStatus'
 import { Tabs, type TabDef } from './Tabs'
 
 const MATCH_TAB = 'modal-match'
@@ -183,7 +184,7 @@ type Read = null | 'loading' | { text: string } | { error: string }
 
 /** One place in `also_in`: a row naming it, which opens on click to the lines it points at,
  *  read from the document the first time rather than carried by every search result. */
-function AlsoRow({ reference, query }: { reference: Reference; query: string }) {
+function AlsoRow({ reference, query, active }: { reference: Reference; query: string; active: boolean }) {
   const [read, setRead] = useState<Read>(null)
   const opened = (open: boolean) => {
     if (!open || read !== null) return // one read per row, however often it is opened
@@ -205,7 +206,7 @@ function AlsoRow({ reference, query }: { reference: Reference; query: string }) 
         <span className="mono muted">{cite(reference.location, reference.document)}</span>
       </summary>
       <blockquote className="match-text also-text">
-        {read === null || read === 'loading' ? 'Loading…' : 'error' in read ? read.error : <Mark text={read.text} query={query} />}
+        {read === null || read === 'loading' ? 'Loading…' : 'error' in read ? (active && <ModalStatus tone="error">{reference.document}: {read.error}</ModalStatus>) : <Mark text={read.text} query={query} />}
       </blockquote>
     </details>
   )
@@ -213,14 +214,14 @@ function AlsoRow({ reference, query }: { reference: Reference; query: string }) 
 
 /** A place and, indented under it, the places folded into it: the tree the search built. Keyed
  *  by position, since two places may cite the same lines and the order is fixed. */
-function AlsoPlace({ reference, query }: { reference: Reference; query: string }) {
+function AlsoPlace({ reference, query, active }: { reference: Reference; query: string; active: boolean }) {
   return (
     <>
-      <AlsoRow reference={reference} query={query} />
+      <AlsoRow reference={reference} query={query} active={active} />
       {reference.also_in.length > 0 && (
         <div className="also-nested">
           {reference.also_in.map((child, at) => (
-            <AlsoPlace key={at} reference={child} query={query} />
+            <AlsoPlace key={at} reference={child} query={query} active={active} />
           ))}
         </div>
       )}
@@ -230,7 +231,7 @@ function AlsoPlace({ reference, query }: { reference: Reference; query: string }
 
 /** The other places that say what the match says, folded into it by the search: how close each
  *  one is, where it sits, what it repeats, and how many there are at every level. */
-function AlsoIn({ match, query }: { match: Match; query: string }) {
+function AlsoIn({ match, query, active }: { match: Match; query: string; active: boolean }) {
   const places = alsoOf(match)
   const count = everyPlace(places).length
   if (count === 0) return null
@@ -243,7 +244,7 @@ function AlsoIn({ match, query }: { match: Match; query: string }) {
         </span>
       </div>
       {places.map((reference, at) => (
-        <AlsoPlace key={at} reference={reference} query={query} />
+        <AlsoPlace key={at} reference={reference} query={query} active={active} />
       ))}
     </div>
   )
@@ -292,7 +293,7 @@ function MatchBody({ match, query, scoring, asked }: { match: Match; query: stri
             <span className="match-seq" title={`chunk ${seqLabel(match)}`}>{seqLabel(match)}</span>
           </blockquote>
         )}
-        <AlsoIn match={match} query={query} />
+        <AlsoIn match={match} query={query} active={tab === MATCH_TAB} />
       </div>
       <div id={DOCUMENT_TAB} role="tabpanel" hidden={tab !== DOCUMENT_TAB}>
         {/* The whole document, not the preview, streamed from the moment the modal opens so it

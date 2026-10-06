@@ -1,5 +1,6 @@
 import { X } from 'lucide-react'
-import { useLayoutEffect, useRef, type ReactNode } from 'react'
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { ModalStatusTarget } from './modalStatusTarget'
 
 /**
  * Native `<dialog>`: `showModal()` gives the backdrop, the focus trap and Escape for free. The
@@ -20,6 +21,7 @@ export function Modal({
   children: ReactNode
 }) {
   const dialog = useRef<HTMLDialogElement>(null)
+  const [statusTarget, setStatusTarget] = useState<HTMLDivElement | null>(null)
 
   // Layout, not passive: the dialog is open before the browser paints or loads anything in it. A
   // PDF viewer that starts inside a closed (display: none) dialog stays blank in Chrome.
@@ -57,7 +59,10 @@ export function Modal({
               </button>
             </form>
           </div>
-          {children}
+          <ModalStatusTarget.Provider value={statusTarget}>
+            {children}
+          </ModalStatusTarget.Provider>
+          <div className="modal-statusbar" ref={setStatusTarget} />
         </div>
       )}
     </dialog>

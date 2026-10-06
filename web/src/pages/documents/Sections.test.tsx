@@ -23,6 +23,7 @@ const WHOLE: Section = {
   page_start: 1,
   page_end: 30,
   descriptors: ['aggregates', 'bounded contexts'],
+  description: '',
 }
 const CHAPTER: Section = {
   ...WHOLE,
@@ -52,10 +53,15 @@ const FOUND: Sections = { sections: [WHOLE, CHAPTER, RULE], described_by: 'c-tf-
 
 const cases: Array<{ name: string; element: ReactElement; contains: string[]; missing?: string[] }> = [
   {
+    name: 'a generated description appears beside the descriptors',
+    element: <SectionsTab found={{ sections: [{ ...CHAPTER, description: 'Explains consistency boundaries.' }], described_by: 'llm' }} />,
+    contains: ['<p>Explains consistency boundaries.</p>', '<span class="descriptor">invariants</span>'],
+  },
+  {
     name: 'each section by its heading, indented by its depth, with its descriptors as tags',
     element: <SectionsTab found={FOUND} />,
     contains: [
-      '<span>Descriptors by c-tf-idf.</span></p>',
+      '<span>Descriptors by c-tf-idf.</span></div>',
       '<li style="--depth:0"><span class="section-toc-head"><span class="section-heading">The whole document</span><span class="mono muted">p. 1–30</span></span><div class="descriptors"><span class="descriptor">aggregates</span>',
       '<li style="--depth:0"><span class="section-toc-head"><span class="section-heading">Aggregates</span>',
       '<li style="--depth:1"><span class="section-toc-head"><span class="section-heading">Rule: Design Small Aggregates</span><span class="mono muted">p. 5</span></span></li>',
@@ -64,7 +70,7 @@ const cases: Array<{ name: string; element: ReactElement; contains: string[]; mi
   {
     name: 'nothing cached yet: says so, and names no strategy',
     element: <SectionsTab found={{ sections: [], described_by: null }} />,
-    contains: ['<p class="info"><svg', '<span>No sections yet'],
+    contains: ['<div class="modal-message modal-message-info" role="status"><svg', '<span>No sections yet'],
     missing: ['<ol', 'Descriptors by'],
   },
   {

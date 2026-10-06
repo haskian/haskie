@@ -13,8 +13,7 @@
 
 /* A query, a document name and an API message are whatever the agent sent: they wrap, never widen. */
 .session-query,
-.session-docs,
-.session-error {
+.session-docs {
   overflow-wrap: anywhere;
 }
 

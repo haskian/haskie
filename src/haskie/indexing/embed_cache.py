@@ -145,9 +145,14 @@ def rows_path(doc: str, id: str, seq: int) -> Path:
 
 
 def descriptors_path(doc: str, id: str, seq: int) -> Path:
-    """The descriptors one describe batch wrote, one list per section of the batch; gathered and
-    deleted by `pipeline.finalize_describe`."""
+    """Each section's descriptors and description from one batch; gathered and deleted by
+    `pipeline.finalize_describe`."""
     return scratch_dir(doc, id) / f"{home.part_name(seq)}.descriptors.json"
+
+
+def descriptions_path(doc: str, id: str, seq: int) -> Path:
+    """The prose descriptions one section batch wrote, before descriptors are extracted."""
+    return scratch_dir(doc, id) / f"{home.part_name(seq)}.descriptions.json"
 
 
 def sections_path(doc: str, id: str) -> Path:
@@ -230,6 +235,7 @@ _SECTIONS = pa.schema(
         ("page_start", pa.int32()),
         ("page_end", pa.int32()),
         ("descriptors", pa.list_(pa.string())),
+        ("description", pa.string()),
     ]
 )
 
@@ -356,12 +362,15 @@ async def write(p: Params, parts: list[Path], dims: int | None) -> str:
 
 
 def _described_by(path: Path) -> Descriptors | None:
-    found = (pq.read_schema(path).metadata or {}).get(_DESCRIBED_BY)
+    schema = pq.read_schema(path)
+    found = (schema.metadata or {}).get(_DESCRIBED_BY)
+    if found == Descriptors.LLM.encode() and "description" not in schema.names:
+        return None  # the next index fills descriptions without re-embedding the chunks
     return None if found is None else Descriptors(found.decode())
 
 
 async def described_by(doc: str, id: str) -> Descriptors | None:
-    """The strategy the descriptors of one cached embedding were written by; None before any."""
+    """The completed strategy; None before describing or for llm files needing descriptions."""
     return await anyio.to_thread.run_sync(_described_by, sections_path(doc, id))
 
 
@@ -402,7 +411,7 @@ async def inputs(doc: str, id: str, vectors: bool) -> Described:
 
 
 async def write_descriptors(
-    doc: str, id: str, described: list[build.Section], by: Descriptors
+    doc: str, id: str, described: list[build.Section], by: Descriptors | None
 ) -> None:
     """Replace the sections of one cached embedding with `described`, written by `by`."""
     await anyio.to_thread.run_sync(_write_sections, sections_path(doc, id), described, by)

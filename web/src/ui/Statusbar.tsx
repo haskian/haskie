@@ -34,8 +34,9 @@ export function Statusbar({ status }: { status: Status }) {
   const embedding = status.models.filter((model) => model.kind === 'embedding')
   // a reranker is in the list only when one is on, in the settings or a collection's overrides
   const rerankers = status.models.filter((model) => model.kind === 'reranker')
-  // the describer only when the settings ask a language model for section descriptors
-  const describers = status.models.filter((model) => model.kind === 'describer')
+  // the describer only when the settings ask a language model for section descriptors, with the
+  // embedder of the collections' vocabularies, whose pairs the describer judges
+  const describers = status.models.filter((model) => model.kind === 'describer' || model.kind === 'vocabulary')
 
   return (
     <div className="statusbar" role="status">

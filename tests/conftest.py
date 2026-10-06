@@ -817,6 +817,8 @@ def stand_in_describer(monkeypatch: pytest.MonkeyPatch, summary: Callable[[str],
         if prompt.startswith(asks):
             summaries.append(prompt)
             return summary(prompt)
+        if prompt.startswith(generated.SECTION_PROMPT.split("{")[0]):
+            return "Explains alpha and beta."
         return "Topic one | Topic two"
 
     monkeypatch.setattr(embed, "reply", reply)

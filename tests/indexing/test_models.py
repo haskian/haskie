@@ -353,6 +353,7 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
             [
                 ("embedding", "ibm-granite/granite-embedding-97m-multilingual-r2"),
                 ("describer", "ggml-org/gemma-4-E2B-it-GGUF"),
+                ("vocabulary", "Qwen/Qwen3-Embedding-0.6B-GGUF"),
             ],
         ),
     ],
@@ -374,21 +375,29 @@ async def test_required_models_follow_the_settings(
 
 
 async def test_the_describer_is_downloaded_by_its_own_loader(dbos, monkeypatch) -> None:
-    """The llm descriptor strategy needs its generator: a download record of its own kind, loaded
-    by the generator's loader, after which describing can ask it."""
+    """The llm descriptor strategy needs its generator and the vocabulary's embedder: a download
+    record of each kind, each loaded by its own loader, after which a run can ask them."""
     loaded: list[str] = []
     monkeypatch.setattr(embed, "warm_generator", lambda name, accelerator: loaded.append(name))
+    monkeypatch.setattr(embed, "warm", lambda name, accelerator: loaded.append(f"embed {name}"))
     user = await save_user_settings(
         UserSettings(embedding="none", pipeline=PipelineSettings(descriptors=Descriptors.LLM))
     )
 
-    (status,) = await models.ensure_models(user)
+    statuses = await models.ensure_models(user)
 
-    assert (status.kind, status.name) == ("describer", gguf_models.DESCRIBER)
-    workflow_id = models._model_id(ModelKind.DESCRIBER, gguf_models.DESCRIBER)
-    await await_terminal([workflow_id])
-    assert loaded == [gguf_models.DESCRIBER]
-    await models.require_ready(ModelKind.DESCRIBER, gguf_models.DESCRIBER)  # no raise
+    assert [(status.kind, status.name) for status in statuses] == [
+        ("describer", gguf_models.DESCRIBER),
+        ("vocabulary", gguf_models.VOCABULARY_EMBEDDER),
+    ]
+    wanted = [(ModelKind.DESCRIBER, gguf_models.DESCRIBER)]
+    wanted.append((ModelKind.VOCABULARY, gguf_models.VOCABULARY_EMBEDDER))
+    await await_terminal([models._model_id(kind, name) for kind, name in wanted])
+    assert sorted(loaded) == sorted(
+        [gguf_models.DESCRIBER, f"embed {gguf_models.VOCABULARY_EMBEDDER}"]
+    )
+    for kind, name in wanted:
+        await models.require_ready(kind, name)  # no raise
 
 
 async def test_a_downloaded_model_nothing_requires_warms_when_asked_for(dbos, monkeypatch) -> None:
@@ -397,6 +406,7 @@ async def test_a_downloaded_model_nothing_requires_warms_when_asked_for(dbos, mo
     it, so the run's wait ends rather than loops."""
     loaded: list[str] = []
     monkeypatch.setattr(embed, "warm_generator", lambda name, accelerator: loaded.append(name))
+    monkeypatch.setattr(embed, "warm", lambda name, accelerator: None)  # the vocabulary's
     user = await save_user_settings(
         UserSettings(embedding="none", pipeline=PipelineSettings(descriptors=Descriptors.LLM))
     )

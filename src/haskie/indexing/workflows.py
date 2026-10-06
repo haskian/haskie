@@ -39,6 +39,10 @@ Layout:
 - `maintain_collection` per collection, debounced, on `operation.maintenance`: compaction and index
   (re)build, handed to the collection's index partition. See `collection/maintenance.py`; a burst of
   documents coalesces into one run. The nightly housekeeping schedule sits there too.
+- `build_vocabulary` per collection, debounced like maintenance, on `operation.vocabulary`, one at
+  a time: under the llm strategy, a burst of documents indexed into a collection or taken out of
+  it rebuilds its preferred terms (`collection/vocabulary.py`). Its embed and judge steps take
+  turns at the describer with the descriptions, a prompt at a time.
 - `index_collection_workflow` / `delete_collection_workflow` / `delete_document_workflow` on
   `operation.collection`: whole-thing work the request only starts. A collection with ten thousand
   documents costs the caller one insert instead of ten thousand, and nothing blocks an HTTP
@@ -70,11 +74,12 @@ Workflow ids, every one starting with a prefix that names its kind and the names
 convert or embed child and `{parent}:index` for the index child, `bulk-index:{collection}:{uuid}`
 and `bulk-delete:{collection}:{uuid}` for the two bulk operations, `del-doc:{doc}:{uuid}` for a
 document delete (and `{parent}:rm:{collection}` for each collection it leaves),
-`sum-doc:{doc}:{uuid}` for a description asked for (`sum-doc:{doc}:{uuid of the embedding run}`
-for one an embedding run queued), `sum-col:{collection}:{uuid}` for a collection's,
+`sum-doc:{doc}:{uuid}` for a requested document description,
+`sum-col:{collection}:{uuid}` for a collection's,
 `rm:{collection}:{doc}:{uuid}` for the removal a detach queues, `maint:{collection}:{parent}` for a
-maintenance run, and `dl:{kind}:{model}` for a model download (see `models`), and `backup:{uuid}`
-and `restore:{uuid}` for a backup and a restore (see `backup`). A document id is base58 and
+maintenance run, `vocab:{collection}:{the run that asked}` for a vocabulary run, and
+`dl:{kind}:{model}` for a model download (see `models`), and `backup:{uuid}` and
+`restore:{uuid}` for a backup and a restore (see `backup`). A document id is base58 and
 `document.safe_name` keeps `:` out of a collection name, so a prefix is unambiguous: one query finds
 a whole operation. Child ids are deterministic, so a replay after a crash re-attaches to the child
 that already exists instead of starting a second one. Every workflow is registered under an explicit
@@ -118,6 +123,7 @@ from haskie.audit import Actor, Outcome
 from haskie.catalogue import catalogue
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import maintenance
+from haskie.collection import vocabulary as collection_vocabulary
 from haskie.collection.collection import Collection, MemberStatus
 from haskie.cpu import configure_cpu_budget, open_pool, shutdown_pool
 from haskie.document import document
@@ -139,11 +145,13 @@ from haskie.indexing.dbos_names import (
     STAGE_WORKFLOW,
     SUMMARIZE_COLLECTION_WORKFLOW,
     SUMMARIZE_DOCUMENT_WORKFLOW,
+    VOCABULARY_WORKFLOW,
     root_cause,
 )
 from haskie.indexing.pipeline import Batch
 from haskie.search import log
 from haskie.settings import (
+    Accelerator,
     ChunkSettings,
     Descriptors,
     PipelineSettings,
@@ -164,6 +172,8 @@ COLLECTION_QUEUE = "operation.collection"  # whole-collection index/delete and d
 DESCRIBING_QUEUE = "operation.describing"  # a document's description the describer writes
 DESCRIBING_CONCURRENCY = 1  # the describer answers one prompt at a time (`GgufGenerator`)
 MAINTENANCE_QUEUE = "operation.maintenance"  # debounced maintenance and the nightly schedule
+VOCABULARY_QUEUE = "operation.vocabulary"  # debounced vocabulary runs, one at a time: the GPU
+# answers one prompt at a time, and a run of a large collection asks for an hour
 BACKUP_QUEUE = "operation.backup"  # backups and restores, one at a time (see `backup`)
 CONVERT_QUEUE = "task.converting"  # convert slices; cap = the stage's share of the CPU budget
 EMBED_QUEUE = "task.embedding"  # embed slices; cap = the stage's share of the CPU budget
@@ -174,6 +184,7 @@ INDEX_QUEUE = "task.indexing"  # index children, maintenance and removals. Lance
 # writer per collection, so this queue is partitioned by collection and admits one workflow per
 # partition (see `index_partition`)
 
+VOCABULARY_CONCURRENCY = 1
 MAINTENANCE_CONCURRENCY = 4  # each waits on a child, so this bounds tasks, not LanceDB writers
 MAINTENANCE_TIMEOUT_SECONDS = 3600  # compaction of a very large collection, not a per-batch budget
 COLLECTION_CONCURRENCY = 2  # a whole-collection operation only enqueues or cancels; two is plenty
@@ -198,6 +209,7 @@ SUMMARIZE_DOCUMENT_PREFIX = "sum-doc"  # `sum-doc:{doc}:{uuid}`: a description t
 SUMMARIZE_COLLECTION_PREFIX = "sum-col"  # `sum-col:{collection}:{uuid}`: a collection's
 REMOVE_PREFIX = "rm"  # `rm:{collection}:{doc}:{uuid}`: the removal a detach queues
 MAINTAIN_PREFIX = "maint"  # `maint:{collection}:{parent}`: one collection's runs, one id prefix
+VOCABULARY_PREFIX = "vocab"  # `vocab:{collection}:{parent}`: a collection's vocabulary runs
 PROGRESS_EVENT = "progress"  # the DBOS event a bulk index publishes after every page
 
 
@@ -249,7 +261,9 @@ TASK_POLL = 0.25
 class Stage(StrEnum):
     CONVERT = "convert"
     EMBED = "embed"
+    DESCRIBE_SECTIONS = "describe_sections"
     DESCRIBE = "describe"
+    DESCRIBE_DOCUMENT = "describe_document"
     INDEX = "index"
 
 
@@ -257,7 +271,9 @@ STAGE_ORDER: tuple[Stage, ...] = tuple(Stage)
 STAGE_QUEUE: dict[Stage, str] = {
     Stage.CONVERT: CONVERT_QUEUE,
     Stage.EMBED: EMBED_QUEUE,
+    Stage.DESCRIBE_SECTIONS: DESCRIBE_QUEUE,
     Stage.DESCRIBE: DESCRIBE_QUEUE,
+    Stage.DESCRIBE_DOCUMENT: DESCRIBE_QUEUE,
     Stage.INDEX: INDEX_QUEUE,
 }
 
@@ -583,6 +599,7 @@ _QUEUES: tuple[Queue, ...] = (
     Queue(DESCRIBING_QUEUE, lambda indexing, caps: DESCRIBING_CONCURRENCY),
     Queue(models.DOWNLOADS_QUEUE, lambda indexing, caps: DOWNLOAD_CONCURRENCY),
     Queue(MAINTENANCE_QUEUE, lambda indexing, caps: MAINTENANCE_CONCURRENCY),
+    Queue(VOCABULARY_QUEUE, lambda indexing, caps: VOCABULARY_CONCURRENCY),
     Queue(BACKUP_QUEUE, lambda indexing, caps: BACKUP_CONCURRENCY),
     Queue(CONVERT_QUEUE, lambda indexing, caps: caps[Stage.CONVERT]),
     Queue(EMBED_QUEUE, lambda indexing, caps: caps[Stage.EMBED]),
@@ -726,6 +743,10 @@ async def plan(stage: Stage, ctx: Context) -> list[Batch]:
         return await pipeline.plan_convert(ctx.document, ctx.pipeline.batch_pages)
     if stage == Stage.EMBED:
         return await pipeline.plan_embed(ctx.document, ctx.pipeline.batch_pages)
+    if stage == Stage.DESCRIBE_SECTIONS:
+        return await pipeline.plan_describe(ctx.document, ctx.cache_id, Descriptors.LLM)
+    if stage == Stage.DESCRIBE_DOCUMENT:
+        return [Batch(seq=0, start=0, end=1)]
     if stage == Stage.DESCRIBE:
         return await pipeline.plan_describe(ctx.document, ctx.cache_id, ctx.pipeline.descriptors)
     return await pipeline.plan_index(ctx.document, ctx.cache_id, ctx.pipeline.index_group_parts)
@@ -783,6 +804,14 @@ async def try_batch(stage: Stage, batch: Batch, ctx: Context) -> BatchResult:
         return await _guarded(
             pipeline.embed_batch(ctx.document, batch, ctx.cache_id, ctx.chunking, ctx.embedding)
         )
+    if stage == Stage.DESCRIBE_SECTIONS:
+        return await _guarded(
+            pipeline.describe_sections_batch(
+                ctx.document, ctx.cache_id, ctx.pipeline.accelerator, batch
+            )
+        )
+    if stage == Stage.DESCRIBE_DOCUMENT:
+        return await _guarded(_summarize(ctx, False))
     if stage == Stage.DESCRIBE:
         # its model, the embedding model or the describer, can still be on its way (`run_batch`)
         return await _guarded(
@@ -841,6 +870,11 @@ async def describer_ready(ctx: Context) -> BatchResult:
     """Whether this process can describe by the run's strategy yet (see `_awaiting_model`)."""
     by = ctx.pipeline.descriptors
     return await _guarded(pipeline.describe_ready(ctx.embedding, by, ctx.pipeline.accelerator))
+
+
+@retried_step
+async def try_finalize_section_descriptions(ctx: Context, count: int) -> BatchResult:
+    return await _guarded(pipeline.finalize_section_descriptions(ctx.document, ctx.cache_id, count))
 
 
 @retried_step
@@ -1015,7 +1049,7 @@ def embed_id(parent_id: str, doc: str) -> str:
 def _slice_count(stage: Stage, ctx: Context) -> int:
     """Slices this stage may be cut into. The index stage is never sliced (see `INDEX_QUEUE`), nor
     is describe: c-TF-IDF is one batch, and the llm describer answers one prompt at a time."""
-    if stage in (Stage.INDEX, Stage.DESCRIBE):
+    if stage in (Stage.INDEX, Stage.DESCRIBE_SECTIONS, Stage.DESCRIBE, Stage.DESCRIBE_DOCUMENT):
         return 1
     return resolve_parallelism(ctx.pipeline, stage)
 
@@ -1166,7 +1200,7 @@ async def ensure_embedding(
     descriptors by strategy `by`, written by a describe stage of their own when missing or written
     by another strategy; returns its cache id. `by` is None in a run recorded before it was an
     argument, which describes by the settings. Described by llm, a document without a description
-    gets one: the run queues `summarize_document_workflow`, and does not wait for it.
+    gets one in the same operation, after the section descriptions and descriptors are saved.
 
     The chunk settings come from `params`, not from any collection: the collection's settings may
     change between the enqueue and the run, and what was asked for is what the id names. The
@@ -1197,21 +1231,13 @@ async def ensure_embedding(
             await document.mark_describing(doc)
             # here rather than in the slice, for the reason the embed's model wait is above
             _value(await _awaiting_model(partial(describer_ready, ctx)))
+            if by == Descriptors.LLM:
+                count = len(await _stage(Stage.DESCRIBE_SECTIONS, ctx))
+                _value(await try_finalize_section_descriptions(ctx, count))
             count = len(await _stage(Stage.DESCRIBE, ctx))
             _value(await try_finalize_describe(ctx, count))
             if by == Descriptors.LLM:
-                # queued, not awaited: indexing never reads the description, and the describer
-                # answers one document at a time on a queue of its own
-                own = run_id(DBOS.workflow_id or "")  # derived, so a replay finds the same run
-                await enqueue_operation(
-                    DESCRIBING_QUEUE,
-                    summarize_document_workflow,
-                    doc,
-                    cache_id,
-                    False,
-                    workflow_id=f"{SUMMARIZE_DOCUMENT_PREFIX}:{doc}:{own}",
-                    dedup_id=f"summarize-doc-missing:{doc}",
-                )
+                await _stage(Stage.DESCRIBE_DOCUMENT, ctx)
         return cache_id
 
 
@@ -1219,8 +1245,8 @@ async def ensure_embedding(
 async def summarize_document_workflow(doc: str, cache_id: str, replace: bool) -> int:
     """The document's description, written by the describer from the sections of one cached
     embedding; 1 when it wrote one. With `replace` a person asked for it, and it replaces the one
-    there (`start_summarize_document`); without, an llm describe stage queued it, and it writes
-    one only where there is none (`ensure_embedding`). Waits for the describer like a describe
+    there (`start_summarize_document`); without, a previously queued automatic run writes
+    one only where there is none. Waits for the describer like a describe
     stage does."""
     with logs.bound(workflow_id=DBOS.workflow_id, document_id=doc):
         ctx = msgspec.structs.replace(await load_context(doc, None), cache_id=cache_id)
@@ -1333,6 +1359,7 @@ async def index_collection_document(collection: str, doc: str) -> MemberStatus:
             await _stage(Stage.INDEX, ctx)
             pending = await note_indexed_step(collection, doc)
             await request_maintenance(collection, pending, ctx.pipeline)
+            await request_vocabulary(collection, ctx.pipeline)
         return MemberStatus.INDEXED
 
 
@@ -1409,6 +1436,103 @@ async def schedule_pending_maintenance(idle_seconds: int) -> None:
         await MAINTAIN.debounce_async(name, float(idle_seconds), name)
 
 
+# --- vocabulary ---------------------------------------------------------------------------
+
+
+@retried_step
+async def pipeline_settings() -> PipelineSettings:
+    return (await load_user_settings()).pipeline
+
+
+@contextlib.asynccontextmanager
+async def vocabulary_write(collection: str) -> AsyncIterator[bool]:
+    """Hold the collection's write lock for one step of a vocabulary run, and report whether the
+    collection is still there once the lock is ours: a delete takes the lock to move the folder
+    aside, and a write after it would make the folder again under the old name. A step holds it
+    for its batch, a few seconds of the models' time, which an index write of the collection
+    waits out; a run starts only once the collection has been idle a while anyway."""
+    async with collection_lock(collection):
+        yield await Collection(collection).maintenance_state() is not None
+
+
+@retried_step
+async def collect_vocabulary(collection: str) -> int | None:
+    """Gather the indexed members' descriptors; how many variants, None once the collection is
+    gone (see `collection_vocabulary.collect`)."""
+    async with vocabulary_write(collection) as present:
+        return await collection_vocabulary.collect(collection) if present else None
+
+
+async def _vocabulary_step(collection: str, call: Callable[[], Awaitable[int]]) -> int:
+    """One write of a vocabulary run (see `vocabulary_write`); 0 once the collection is gone,
+    which ends the run's loops."""
+    async with vocabulary_write(collection) as present:
+        return await call() if present else 0
+
+
+@retried_step
+async def try_embed_vocabulary(collection: str, accelerator: Accelerator) -> BatchResult:
+    embed = partial(pipeline.embed_vocabulary, collection, accelerator)
+    return await _guarded(_vocabulary_step(collection, embed))
+
+
+@retried_step
+async def plan_vocabulary(collection: str, accelerator: Accelerator) -> int:
+    plan = partial(pipeline.plan_vocabulary, collection, accelerator)
+    return await _vocabulary_step(collection, plan)
+
+
+@retried_step
+async def try_judge_vocabulary(collection: str, accelerator: Accelerator) -> BatchResult:
+    judge = partial(pipeline.judge_vocabulary, collection, accelerator)
+    return await _guarded(_vocabulary_step(collection, judge))
+
+
+@retried_step
+async def finish_vocabulary(collection: str, accelerator: Accelerator) -> int:
+    build = partial(pipeline.build_vocabulary, collection, accelerator)
+    return await _vocabulary_step(collection, build)
+
+
+@DBOS.workflow(name=VOCABULARY_WORKFLOW)
+async def build_vocabulary(collection: str) -> int:
+    """Rebuild one collection's preferred terms from its indexed members' descriptors; returns
+    how many terms. A step embeds a batch of the variants no earlier run embedded, another asks
+    the describer about a batch of the pairs no earlier run asked about, each until none is left,
+    so a crash or a restart repeats one batch, and a run after one more document pays for what it
+    brought. 0 for a collection deleted while the run waited."""
+    with logs.bound(workflow_id=DBOS.workflow_id, collection=collection):
+        accelerator = (await pipeline_settings()).accelerator
+        if await collect_vocabulary(collection) is None:
+            return 0
+        embed = partial(try_embed_vocabulary, collection, accelerator)
+        while _value(await _awaiting_model(embed)):
+            pass
+        await plan_vocabulary(collection, accelerator)
+        judge = partial(try_judge_vocabulary, collection, accelerator)
+        while _value(await _awaiting_model(judge)):
+            pass
+        return await finish_vocabulary(collection, accelerator)
+
+
+# The debounce key is the collection name, so a burst of documents coalesces into one run, as
+# maintenance's does (`MAINTAIN`).
+VOCABULARY = Debouncer.create_async(build_vocabulary, queue=VOCABULARY_QUEUE)
+
+
+async def request_vocabulary(collection: str, indexing: PipelineSettings) -> None:
+    """Ask for a vocabulary run once the collection has been idle for `maintenance_idle_seconds`;
+    only under the llm strategy, whose describer judges the pairs. Called in a workflow body:
+    the run's id names the collection and the run that asked, so a replay asks for the same one,
+    and the Operations view filters it by collection like maintenance."""
+    if indexing.descriptors != Descriptors.LLM:
+        return
+    with SetWorkflowID(f"{VOCABULARY_PREFIX}:{collection}:{DBOS.workflow_id}"):
+        await VOCABULARY.debounce_async(
+            collection, float(indexing.maintenance_idle_seconds), collection
+        )
+
+
 # --- removal ------------------------------------------------------------------------------
 
 
@@ -1449,6 +1573,7 @@ async def remove_from_collection_index(collection: str, doc: str) -> None:
             message = _failure(exc)
             await fail_removal(collection, doc, f"removal failed: {message}")
             raise PipelineError(message) from exc
+        await request_vocabulary(collection, await pipeline_settings())
 
 
 @retried_step
@@ -1978,11 +2103,11 @@ async def start_delete_collection(collection: str) -> str:
 
 async def rename_collection(collection: str, name: str) -> Collection:
     """Rename one collection; the same name is a no-op, and any other is refused while work of
-    the collection runs. Each such run holds the old name: an index write or a maintenance run
-    would put the old folder back, a bulk index or delete would go on queueing under it, and a
-    detach's removal would find no membership under it and leave the moved one `removing`. A
-    run queued after this check is the window left open; the rename itself is one transaction
-    and a folder move."""
+    the collection runs. Each such run holds the old name: an index write, a maintenance run or a
+    vocabulary run would put the old folder back, a bulk index or delete would go on queueing
+    under it, and a detach's removal would find no membership under it and leave the moved one
+    `removing`. A run queued after this check is the window left open; the rename itself is one
+    transaction and a folder move."""
     found = await Collection.get(collection)  # NotFound before anything else
     if document.safe_name(name) == found.name:
         return found
@@ -1994,6 +2119,7 @@ async def rename_collection(collection: str, name: str) -> Collection:
             MAINTAIN_PARTITION_WORKFLOW,
             REMOVE_FROM_INDEX_WORKFLOW,
             SUMMARIZE_COLLECTION_WORKFLOW,
+            VOCABULARY_WORKFLOW,
         ],
         [
             f"{prefix}:{collection}:"
@@ -2004,6 +2130,7 @@ async def rename_collection(collection: str, name: str) -> Collection:
                 MAINTAIN_PREFIX,
                 REMOVE_PREFIX,
                 SUMMARIZE_COLLECTION_PREFIX,
+                VOCABULARY_PREFIX,
             )
         ],
         limit=1,

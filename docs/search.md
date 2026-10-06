@@ -321,13 +321,19 @@ for `set_session_collections`.
 
 `descriptors` say what each section is about. They are fixed at indexing
 ([Indexing](indexing.md#the-three-workflows)) and read by the section's id from the cache entry
-the collection indexed the document from: by default one to five of the section's terms (a word,
+the collection indexed the document from: by default one to six of the section's terms (a word,
 or two words side by side) weighed against the other sections of its depth by c-TF-IDF [10], less
-the terms more than half of them use or its header holds (unless nothing else is left), and
-reranked by meaning [11]; under the llm setting, up to five topics a small language model names
-after reading the section. They never decide what is picked: in the studies we follow, clusters
+the terms more than half of them use (unless nothing else is left), and
+reranked by meaning [11]; under the llm setting, up to six topics a small language model names
+after reading the section, each shown as the collection's preferred term for it
+([Indexing](indexing.md#the-vocabulary)). They never decide what is picked: in the studies we follow, clusters
 of the pool used as aspects gained nothing, and terms mined from it only re-weighted the aspects
 already on top.
+
+Under llm, each section also carries a `description`: one or two sentences generated alongside
+its descriptors. REST and MCP section search return it. The UI shows it only beside the tags in
+the document's Sections tab. It is empty for c-TF-IDF, sections without prose,
+and older caches until their next index. Vocabulary compaction changes only the descriptors.
 
 Measured on three books (1.9 MB of markdown, bge-small), eight questions: the whole search took
 35 to 50 ms warm, `map_sections` 12 to 17 ms of it. Against the top sections by relevance on the

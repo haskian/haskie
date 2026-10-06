@@ -4,11 +4,14 @@ import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { EmbedderMetadata, Excerpt, Hit, MappedDocument, MappedSection, Passage, RerankerMetadata, Status } from '../api'
 import { Field } from './Field'
+import { BusyButton } from './BusyButton'
 import { Info } from './Info'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
 import { Kv } from './Kv'
 import { MatchModal } from './MatchModal'
+import { Modal } from './Modal'
+import { ModalStatus } from './ModalStatus'
 import { ModelFacts } from './ModelFacts'
 import { SectionsModal } from './SectionsModal'
 import { MapDocuments, OpenedDetail, SectionGrid } from './SectionGrid'
@@ -40,6 +43,57 @@ function check(cases: MarkupCase[]): void {
 }
 
 const noop = (): void => {}
+
+describe('modal status space', () => {
+  check([
+    {
+      name: 'every open modal reserves a footer even without a message',
+      element: <Modal open onClose={noop} title="New collection"><input aria-label="Name" /></Modal>,
+      contains: ['<div class="modal-statusbar"></div>'],
+      missing: ['role="alert"', 'role="status"'],
+    },
+    {
+      name: 'a closed modal unmounts its content and status space',
+      element: <Modal open={false} onClose={noop} title="Collection"><ModalStatus tone="error">Save failed</ModalStatus></Modal>,
+      contains: ['<dialog class="modal"></dialog>'],
+      missing: ['modal-statusbar', 'Save failed'],
+    },
+    ...(['info', 'success', 'warning', 'error'] as const).map((tone) => ({
+      name: `${tone} messages remain accessible outside a modal too`,
+      element: <ModalStatus tone={tone}>Operation result</ModalStatus>,
+      contains: [`modal-message-${tone}`, `role="${tone === 'error' ? 'alert' : 'status'}"`, 'aria-hidden="true"', '<span>Operation result</span>'],
+    })),
+  ])
+})
+
+describe('BusyButton', () => {
+  check([
+    {
+      name: 'an idle action keeps its label and icon',
+      element: <BusyButton className="btn" type="button" busy={false} busyLabel="Describing ..."><FileText className="icon" />Describe with AI</BusyButton>,
+      contains: ['type="button"', 'lucide-file-text', 'Describe with AI'],
+      missing: ['disabled', 'aria-busy', 'Describing ...', 'lucide-loader-circle'],
+    },
+    {
+      name: 'a running action disables itself and replaces its contents with a spinner and label',
+      element: <BusyButton busy busyLabel="Describing ..." disabled={false}><FileText />Describe with AI</BusyButton>,
+      contains: ['disabled=""', 'aria-busy="true"', 'lucide-loader-circle', 'icon spin spin-fast', 'Describing ...'],
+      missing: ['Describe with AI', 'lucide-file-text'],
+    },
+    {
+      name: 'progress remains inside the running button, including a zero count',
+      element: <BusyButton busy busyLabel="Backing up ..." progress={{ done: 0, total: 16, last: null }}>Back up</BusyButton>,
+      contains: ['Backing up ... 0/16</button>'],
+      missing: ['<span'],
+    },
+    {
+      name: 'another action can disable this button without making it look busy',
+      element: <BusyButton busy={false} busyLabel="Deleting ..." disabled>Delete</BusyButton>,
+      contains: ['disabled=""', '>Delete</button>'],
+      missing: ['aria-busy', 'Deleting ...', 'lucide-loader-circle'],
+    },
+  ])
+})
 
 const HIT: Hit = {
   collection: 'A–E',
@@ -931,6 +985,7 @@ const SAGAS: MappedSection = {
   chars: 5210,
   chunks: 3,
   descriptors: ['saga', 'compensating step', 'orchestrator'],
+  description: 'Explains how compensating steps undo a failed saga.',
   related: [
     { collection: 'patterns', document_id: 'c2', document: 'ddia.pdf', header: 'Sagas', id: 's-ddia-sagas', location: 'ddia.pdf L10-40', line_start: 10, line_end: 40, score: 0.4, similarity: 0.93 },
     { collection: 'patterns', document_id: 'b1', document: 'iddd.pdf', header: 'Sagas > Retries', id: 's-retries', location: 'iddd.pdf L361-380', line_start: 361, line_end: 380, score: 0.3, similarity: 0.88 },
@@ -945,6 +1000,7 @@ describe('SectionGrid', () => {
       name: 'a pick names its section, what it is about and where to read it',
       element: <SectionGrid sections={[SAGAS]} />,
       contains: ['iddd.pdf', 'patterns', '0.82', 'Sagas &gt; Compensation', 'descriptor">compensating step', 'descriptor">saga', 'p.12-14 L300-360', '5210 chars · 3 matched chunks'],
+      missing: [SAGAS.description],
     },
     {
       name: 'the sections it covers best, another document named, its own not',
@@ -954,9 +1010,9 @@ describe('SectionGrid', () => {
     },
     {
       name: 'the whole document, no descriptors, nothing related: one chunk',
-      element: <SectionGrid sections={[{ ...SAGAS, header: '', descriptors: [], related: [], chunks: 1 }]} />,
+      element: <SectionGrid sections={[{ ...SAGAS, header: '', description: '', descriptors: [], related: [], chunks: 1 }]} />,
       contains: ['The whole document', '1 matched chunk<'],
-      missing: ['class="descriptors', 'Related sections'],
+      missing: ['class="descriptors', 'Related sections', 'Explains how'],
     },
   ])
 })
@@ -1034,6 +1090,7 @@ describe('SectionsModal', () => {
       name: 'open: the section first, what the map said about it, then its document',
       element: <SectionsModal section={SAGAS} onClose={noop} />,
       contains: ['iddd.pdf', '>Section<', '>Document<', 'Sagas &gt; Compensation', '>p.12-14 L300-360<', 'class="descriptors"', 'score 0.82 · 3 matched chunks', 'Related sections'],
+      missing: [SAGAS.description],
     },
   ])
 })

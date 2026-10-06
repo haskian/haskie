@@ -5,7 +5,7 @@ import type { PageProps } from '../App'
 import { errorText } from '../format'
 import { useRun } from '../hooks/useRun'
 import { navigate, type Route } from '../router'
-import { GallerySection, Info, Modal, Shell, Tabs, Tile, type TabDef } from '../ui'
+import { GallerySection, Info, Modal, ModalStatus, Shell, Tabs, Tile, type TabDef } from '../ui'
 import './Gaps.css'
 import { bands, nearText, questionSub, replayText, topicHint, topicId, topicSub } from './gaps/group'
 
@@ -133,8 +133,8 @@ function TopicBody({ topic, review, now, onReviewed }: { topic: GapTopic; review
         )}
       </div>
       <div className="gap-panel modal-scroll">
-        {error !== null && <p className="muted">{error}</p>}
-        <Info>Replay asks each question again over every collection. Nothing is recorded.</Info>
+        {error !== null && <ModalStatus tone="error">{error}</ModalStatus>}
+        <ModalStatus>Replay asks each question again over every collection. Nothing is recorded.</ModalStatus>
         <ul className="list">
           {topic.questions.map((question) => {
             const near = nearText(question.near_misses)

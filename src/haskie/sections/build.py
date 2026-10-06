@@ -56,6 +56,7 @@ class Section(msgspec.Struct, frozen=True):
     page_start: int | None  # 1-based PDF pages; None for a document without pages
     page_end: int | None
     descriptors: list[str] = []  # what it is about, as written, best first (`describe`)
+    description: str = ""  # a short prose summary, written by the section description stage
 
     @property
     def depth(self) -> int:
@@ -132,7 +133,7 @@ def describe(
     embed: descriptors.Embed | None,
     strategy: descriptors.Strategy = descriptors.CLASS_TFIDF,
 ) -> list[Section]:
-    """One document's sections, each with its descriptors. `texts` holds each chunk's `prose` in
+    """Sections with their descriptors and descriptions. `texts` holds each chunk's `prose` in
     `seq` order, `vectors` each section's unit vector, None without a model."""
     picked = strategy.pick(
         texts,
@@ -141,8 +142,8 @@ def describe(
         embed,
     )
     return [
-        msgspec.structs.replace(one, descriptors=words)
-        for one, words in zip(found, picked, strict=True)
+        msgspec.structs.replace(one, descriptors=about.descriptors, description=about.description)
+        for one, about in zip(found, picked, strict=True)
     ]
 
 

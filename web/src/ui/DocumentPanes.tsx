@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, type Document, type Head, type Preview } from '../api'
 import { errorText } from '../format'
 import { anchorIndex, headingPath, type Anchor } from './anchor'
+import { ModalStatus } from './ModalStatus'
 import { Skeleton } from './Skeleton'
 
 // The server numbers heading ids by position (`render.to_html`), so the nth entry of the table of
@@ -65,7 +66,7 @@ export function DocumentByName({ name, anchor, shown }: { name: string; anchor: 
     }
   }, [name])
 
-  if (error !== null) return <p className="muted">{error}</p>
+  if (error !== null) return shown ? <ModalStatus tone="error">{error}</ModalStatus> : null
   return row === null ? null : <DocumentPanes doc={name} preview={row.preview} full anchor={anchor} shown={shown} />
 }
 
@@ -164,7 +165,7 @@ export function DocumentPanes({
       <section className="pane">
         <PaneHead label="Markdown" crumb={crumb} />
         <div className="pane-body" onScroll={onScroll}>
-          {error !== null && <p className="muted">{error}</p>}
+          {shown && error !== null && <ModalStatus tone="error">{error}</ModalStatus>}
           {head === null && error === null && <Skeleton />}
           {head !== null && head.toc.length > 0 && (
             <details className="toc" open>

@@ -215,7 +215,8 @@ MAINTENANCE_DOCUMENTS = Meta(
 MAINTENANCE_IDLE = Meta(
     title="Maintenance when idle (seconds)",
     description=(
-        "Also run maintenance once a collection has had no document indexed for this long."
+        "Also run maintenance once a collection has had no document indexed for this long. Under "
+        "llm descriptors, its vocabulary is rebuilt then too."
     ),
 )
 ANN_MIN_ROWS = Meta(

@@ -1,6 +1,6 @@
 /* page layout only; tokens live in design/design.css */
-.operation-tasks { display: flex; gap: var(--sp-8); padding: var(--sp-4) var(--sp-6); border: var(--border); border-top: 0; }
-.operation-stage { flex: var(--weight, 1); min-width: 0; display: grid; gap: var(--sp-1); align-content: start; }
+.operation-tasks { gap: var(--sp-8); padding: var(--sp-4) var(--sp-6); border: var(--border); border-top: 0; }
+.operation-stage { min-width: 0; display: grid; gap: var(--sp-1); align-content: start; }
 .operation-info { font-size: var(--fs-xs); color: var(--text-muted); }
 .tasks { list-style: none; margin: var(--sp-2) 0 0; padding: 0; display: grid; gap: var(--sp-1); }
 .task { display: flex; align-items: center; gap: var(--sp-2); font-family: var(--font-mono); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -14,3 +14,16 @@
 
 /* a backend error is one long line, often with no spaces in it */
 .operation-stage .md { overflow-wrap: anywhere; }
+
+/* Twelve tracks fit balanced rows of two, three or four stages without empty columns. */
+.operation { container-type: inline-size; }
+.operation .stages, .operation-tasks { display: flex; grid-template-columns: repeat(12, minmax(0, 1fr)); }
+.operation .stage, .operation-stage { flex: 1; min-width: 0; grid-column: span var(--stage-span, 12); }
+.operation .stages:has(> :nth-child(7)), .operation-tasks:has(> :nth-child(7)) { display: grid; }
+@container (width < 60rem) {
+  .operation .stages, .operation-tasks { display: grid; }
+}
+@container (width < 30rem) {
+  .operation .stages, .operation-tasks { grid-template-columns: minmax(0, 1fr); }
+  .operation .stage, .operation-stage { grid-column: 1 / -1; }
+}

@@ -1538,6 +1538,8 @@ export interface components {
             chars: number;
             chunks: number;
             descriptors: string[];
+            /** @default  */
+            description: string;
             related?: components["schemas"]["Related"][];
         };
         /** Markdown */
@@ -1563,7 +1565,7 @@ export interface components {
          * ModelKind
          * @enum {string}
          */
-        ModelKind: "embedding" | "reranker" | "describer";
+        ModelKind: "embedding" | "reranker" | "describer" | "vocabulary";
         /**
          * ModelState
          * @enum {string}
@@ -1806,7 +1808,7 @@ export interface components {
             maintenance_documents: number;
             /**
              * Maintenance when idle (seconds)
-             * @description Also run maintenance once a collection has had no document indexed for this long.
+             * @description Also run maintenance once a collection has had no document indexed for this long. Under llm descriptors, its vocabulary is rebuilt then too.
              * @default 60
              */
             maintenance_idle_seconds: number;
@@ -2196,6 +2198,8 @@ export interface components {
             page_start: number | null;
             page_end: number | null;
             descriptors?: string[];
+            /** @default  */
+            description: string;
         };
         /** SectionMap */
         SectionMap: {
@@ -2263,7 +2267,7 @@ export interface components {
          * Stage
          * @enum {string}
          */
-        Stage: "convert" | "embed" | "describe" | "index";
+        Stage: "convert" | "embed" | "describe_sections" | "describe" | "describe_document" | "index";
         /** Staged */
         Staged: {
             staging_id: string;

@@ -236,6 +236,26 @@ VIEWS = [
 ]
 
 
+@pytest.mark.parametrize("description", ["Explains how sagas compensate failed steps.", ""])
+def test_the_section_view_keeps_generated_descriptions(description: str) -> None:
+    section = {
+        "document_id": "book",
+        "header": "Sagas",
+        "id": "sagas",
+        "location": "book.md L1-8",
+        "score": 0.9,
+        "chars": 500,
+        "chunks": 2,
+        "descriptors": ["Compensating steps"],
+        "description": description,
+    }
+    viewed = agent.view(section, agent.MappedSection)
+    assert viewed.description == description
+    encoded = msgspec.json.decode(msgspec.json.encode(viewed))
+    assert encoded.get("description", "") == description
+    assert ("description" in encoded) == bool(description)
+
+
 def _fields(value: Any, at: str = "") -> set[str]:
     """Every field of a JSON answer as a dotted path, lists flattened: `excerpts.spans.header`.
     A map keyed by data (`aspect_scores`, by question) is one field."""

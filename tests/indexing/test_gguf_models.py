@@ -200,3 +200,30 @@ def test_the_generator_fits_its_prompt_to_the_context(
     ((sent,), asked) = generator._model.calls[0]
     assert (len(sent), sent.startswith("Write descriptors.")) == (read, True), name
     assert (asked["max_tokens"], asked["temperature"]) == (60, 0), "greedy"
+
+
+YES, YES_SPACED, NO, MARK = 0, 1, 2, 3  # token ids: two spellings of yes, a no, a "**"
+
+
+def logits(**by_token: float) -> np.ndarray:
+    """A vocabulary of 20 tokens, all at 0 but those given, by their name above."""
+    found = np.zeros(20, dtype=np.float32)
+    for name, value in by_token.items():
+        found[{"yes": YES, "yes_spaced": YES_SPACED, "no": NO, "mark": MARK}[name]] = value
+    return found
+
+
+@pytest.mark.parametrize(
+    ("name", "found", "expected"),
+    [
+        ("yes and no among the likeliest", logits(yes=3.0, no=1.0), 1 / (1 + np.exp(-2.0))),
+        ("no alone among them still decides", logits(no=8.0), 0.5 / (0.5 + 0.5 * np.exp(8.0)) * 1),
+        ("the likelier spelling of yes counts", logits(yes=1.0, yes_spaced=4.0, no=4.0), 0.5),
+        ("neither among the likeliest: no leaning yet", logits(mark=9.0) - 5, None),
+    ],
+)
+def test_leaning(name: str, found: np.ndarray, expected: float | None) -> None:
+    """P(yes) / (P(yes) + P(no)), read from the first token of a reply that leans either way."""
+    yes, no = np.array([YES, YES_SPACED]), np.array([NO])
+    leaned = gguf_models.leaning(found, yes, no)
+    assert leaned == (None if expected is None else pytest.approx(expected)), name

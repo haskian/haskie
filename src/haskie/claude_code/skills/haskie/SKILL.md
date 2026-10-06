@@ -63,8 +63,8 @@ chunk and drops none. `document_ids` keeps it to those documents.
   on the topic left.
 - Per section: `id`, `document_id`, `header`, `location` (it names the document), `chars` (its
   length), `chunks` (how many of its chunks matched), `score`.
-- `descriptors`: one to five words or phrases for what the section is about, and not what its
-  `header` already says unless it has no other words.
+- `descriptors`: up to six words or phrases for what the section is about. They may repeat
+  topics named in its `header`.
 - Picks come by coverage, not by score, so `score` does not fall down the list. The fewer the
   documents, the more picks are back matter or, with no reranker, sections that share only a word
   with the topic.

@@ -97,6 +97,7 @@ class MappedSection(_View):
     chars: int
     chunks: int
     descriptors: list[str] = []
+    description: str = ""
     related: list[Related] = []
 
 

@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import type { Chunker, ChunkSettings, CollectionOverrides, FillValues, Fusion, Options, Reranker, ScoreFold, SearchMode, SearchSettings } from '../../api'
-import { effectiveSearch, Field, Info, Picker, rerankerOption, SEARCH_BOUNDS, visibleExpansionFields, visibleSearchFields, type KeysOf, type NumericKeys, type PickerOption } from '../../ui'
+import { effectiveSearch, Field, ModalStatus, Picker, rerankerOption, SEARCH_BOUNDS, visibleExpansionFields, visibleSearchFields, type KeysOf, type NumericKeys, type PickerOption } from '../../ui'
 
 type SearchField = keyof SearchSettings
 
@@ -34,6 +34,7 @@ export function SettingsForm({
   searchDefaults,
   options,
   outdated,
+  active = true,
   busy,
   onSave,
   children,
@@ -43,6 +44,7 @@ export function SettingsForm({
   searchDefaults: SearchSettings // what the search overrides resolve to
   options: Options
   outdated: boolean
+  active?: boolean
   busy: boolean
   onSave: (next: CollectionOverrides) => void
   children?: ReactNode // the actions that are not "Save": index, and how it is going
@@ -157,7 +159,7 @@ export function SettingsForm({
 
   return (
     <div className="collection-settings">
-      {outdated && <Info>The index was built by an older version. Use Index all to rebuild it.</Info>}
+      {active && outdated && <ModalStatus tone="warning">The index was built by an older version. Use Index all to rebuild it.</ModalStatus>}
       <span className="mono muted">Chunking</span>
       <div className="collection-fields">
         {enumInput('chunker', 'conversion.chunker', options.chunkers, draft.chunker, effective.chunker, (next) =>

@@ -31,6 +31,7 @@ import anyio
 import anyio.from_thread
 import anyio.to_thread
 import msgspec
+import pyarrow.parquet as pq
 import pytest
 from conftest import (
     MD,
@@ -97,6 +98,7 @@ from haskie.indexing.pipeline import Batch
 from haskie.indexing.workflows import Stage
 from haskie.paging import Order
 from haskie.search import log
+from haskie.sections import generated
 from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
@@ -1040,10 +1042,27 @@ async def test_an_import_is_describing_while_its_sections_are_described(
 
     assert await wait_for(job_id) == "imported"
     assert (await document.named(doc.name)).status == "imported"
+    (operation,) = (await operations.list_operations("document")).items
+    assert [job.stage for job in operation.jobs] == [
+        Stage.CONVERT,
+        Stage.EMBED,
+        Stage.DESCRIBE_SECTIONS,
+        Stage.DESCRIBE,
+        Stage.DESCRIBE_DOCUMENT,
+    ]
+    assert all(job.status == "SUCCESS" for job in operation.jobs)
+    assert await _workflow_ids(dbos_names.SUMMARIZE_DOCUMENT_WORKFLOW) == []
+    tasks = [
+        task
+        for job_id in {job.id for job in operation.jobs}
+        for task in await operations.list_tasks(job_id)
+    ]
+    assert {task.stage for task in tasks} == set(Stage) - {Stage.INDEX}
 
 
+@pytest.mark.parametrize("legacy_llm", [False, True], ids=["another-strategy", "old-llm-cache"])
 async def test_a_hit_another_strategy_described_is_described_again_from_the_cache(
-    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_llm: bool
 ) -> None:
     """A changed descriptor strategy re-describes an entry on its next index, from the cache: the
     run waits for the describer, then writes its descriptors, and embeds nothing again."""
@@ -1051,11 +1070,22 @@ async def test_a_hit_another_strategy_described_is_described_again_from_the_cach
     spy = _spy_embed(monkeypatch)
     monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
     doc = await import_document(dbos, "a.md", MD, tmp_path)
+    if legacy_llm:
+        (entry,) = await embed_cache.entries(doc.id)
+        path = embed_cache.sections_path(doc.id, entry.id)
+        old = (
+            pq.read_table(path)
+            .drop(["description"])
+            .replace_schema_metadata({b"descriptors": b"llm"})
+        )
+        pq.write_table(old, path)
     await (await Collection.create("again")).add(doc.id)
     prompts: list[str] = []
 
     def reply(name: str, accelerator, prompt: str, max_tokens: int) -> str:
         prompts.append(prompt)
+        if max_tokens == generated.SECTION_TOKENS:
+            return "Explains the topics."
         return "Topic one | Topic two"
 
     monkeypatch.setattr(embed, "reply", reply)
@@ -1073,15 +1103,16 @@ async def test_a_hit_another_strategy_described_is_described_again_from_the_cach
     assert (await document.named(doc.name)).status == "imported", "an index never moves it"
     models._mark_ready(describer)
     assert await wait_for(job_id) == "indexed"
-    await _drain()  # the description the run queued, not waited for
+    await _drain()
 
     (entry,) = await embed_cache.entries(doc.id)
     assert sum(spy.calls.values()) == 1, "nothing embedded again"
     assert await embed_cache.described_by(doc.id, entry.id) == Descriptors.LLM
     described = await embed_cache.read_sections(doc.id, entry.id)
     assert {tuple(one.descriptors) for one in described} <= {("Topic one", "Topic two"), ()}
-    # one prompt a section with prose, and one for the document's missing description
-    assert len(prompts) - 1 == sum(bool(one.descriptors) for one in described) > 0
+    assert {one.description for one in described if one.descriptors} == {"Explains the topics."}
+    # two prompts per section with prose, and one for the document's missing description
+    assert len(prompts) - 1 == 2 * sum(bool(one.descriptors) for one in described) > 0
 
 
 async def test_an_embedding_run_describes_by_the_strategy_it_was_asked_for(
@@ -1155,7 +1186,7 @@ async def test_an_llm_run_describes_a_document_without_a_description(
     after: str,
     asked: int,
 ) -> None:
-    """After the sections, the describer writes the document's description from its outline,
+    """After the sections, the describer writes the document's description from their metadata,
     only where it has none: one someone wrote stands, before the model is asked or while it
     answers, and the model is not asked for another."""
     doc = await import_document(dbos, "a.md", MD, tmp_path)
@@ -1175,10 +1206,11 @@ async def test_an_llm_run_describes_a_document_without_a_description(
         await wait_for(one)
 
     assert (await document.named(doc.name)).description == after, name
-    assert len(queued) == (by == Descriptors.LLM), "queued by the llm describe stage alone"
+    assert queued == [], "document description stays in the embedding operation"
     assert len(summaries) == asked, name
     if summaries:
-        assert "- Alpha (Topic one, Topic two)" in summaries[0], "the outline with descriptors"
+        assert "Descriptors: Topic one | Topic two" in summaries[0]
+        assert "Description: Explains alpha and beta." in summaries[0]
 
 
 @pytest.mark.parametrize(
@@ -3227,6 +3259,7 @@ def test_the_names_the_operations_view_spells_out_are_the_ones_dbos_records() ->
         "maintenance": [
             get_dbos_func_name(workflows.maintain_on_partition),
             get_dbos_func_name(workflows.daily_maintenance),
+            get_dbos_func_name(workflows.build_vocabulary),
         ],
         "backup": [
             get_dbos_func_name(backup.create_backup),

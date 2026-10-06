@@ -55,6 +55,7 @@ from haskie.collection.index import Hit, SpanKey, location
 from haskie.indexing.chunk import HEADING_SEP
 from haskie.search import collapse, section
 from haskie.search.passage import document_score, fold, pages
+from haskie.sections.descriptors import Description
 from haskie.settings import ScoreFold
 
 PER_DOCUMENT = 2  # sections of one document while others have some left: Google's site cap
@@ -99,6 +100,7 @@ class MappedSection(Placed, kw_only=True):
     chars: int  # how long it is: what reading it with `search_excerpts` costs at most
     chunks: int  # how many of its chunks the search matched
     descriptors: list[str]  # what it is about (`pipeline.descriptors`)
+    description: str = ""
     related: list[Related] = []
 
 
@@ -301,13 +303,14 @@ def _repeat(
 def mapped(
     candidates: Sequence[Candidate],
     picked: Picked,
-    described: Mapping[tuple[str, str], list[str]],
+    described: Mapping[tuple[str, str], Description],
 ) -> list[MappedSection]:
     """The picks as the answer lists them, each with its descriptors (`described`, by collection
     and section id; none when the collection's cache entry has no such section)."""
     found: list[MappedSection] = []
     for pick in picked.picks:
         one = candidates[pick]
+        about = described.get((one.collection, one.id), Description())
         found.append(
             MappedSection(
                 **_placed(one),
@@ -316,7 +319,8 @@ def mapped(
                 seq_end=one.placements[-1].seq,
                 chars=one.placements[-1].char_end - one.placements[0].char_start,
                 chunks=len(one.at),
-                descriptors=described.get((one.collection, one.id), []),
+                descriptors=about.descriptors,
+                description=about.description,
                 related=[
                     Related(**_placed(candidates[at]), similarity=round(closeness, 4))
                     for at, closeness in picked.related[pick]

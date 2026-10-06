@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { Job, Operation, OperationKind, OperationKindSummary, RunStatus, Stage, Task } from '../api'
 import type { JobState } from '../ui'
 import { dayGroup, groupOperations, statusGroup, type GroupBy } from './operations/group'
-import { endsOf, jobDefs, jobsFor, runState, stageInfo, tagOf, taskState, taskText } from './operations/jobs'
+import { endsOf, jobDefs, jobsFor, runState, stageInfo, stageRows, tagOf, taskState, taskText } from './operations/jobs'
 
 // `active_run_statuses` as `/api/options` sends it.
 const ACTIVE: RunStatus[] = ['ENQUEUED', 'PENDING']
@@ -191,7 +191,7 @@ describe('jobsFor', () => {
       name: 'a description asked for is a describe, running',
       job: job({ kind: 'collection', title: 'document guide.md', status: 'PENDING', detail: { bulk: 'summarize_document' } }),
       tasks: null,
-      expected: [{ label: 'Describe', done: 0, total: 0, state: 'active', seconds: undefined }],
+      expected: [{ label: 'Describe document', done: 0, total: 0, state: 'active', seconds: undefined }],
     },
     {
       name: 'a backup counts the files it archived',
@@ -234,6 +234,31 @@ describe('jobsFor', () => {
   for (const testCase of cases) {
     test(testCase.name, () => {
       expect(jobsFor(testCase.job, testCase.tasks, ACTIVE)).toEqual(testCase.expected)
+    })
+  }
+})
+
+test('an import shows all three description stages in one operation', () => {
+  const stages: Stage[] = ['describe_sections', 'describe', 'describe_document']
+  const operation = job({ jobs: stages.map((stage) => ({ ...OPERATION.jobs[0], stage })) })
+  const labels = ['Describe sections', 'Section descriptors', 'Describe document']
+  expect(jobDefs(operation).map((one) => one.label)).toEqual(labels)
+  expect(jobsFor(operation, null, ACTIVE).map((one) => one.label)).toEqual(labels)
+  expect(taskText(task({ stage: 'describe_sections', page_start: 0, page_end: 16 }))).toBe('sections 1–16')
+  expect(taskText(task({ stage: 'describe_document' }))).toBe('document')
+  expect(stageInfo('describe_sections', [task({ stage: 'describe_sections', result: 16 })])).toBe('16 sections')
+  expect(stageInfo('describe_document', [task({ stage: 'describe_document', result: 1 })])).toBe('1 documents')
+})
+
+describe('stageRows', () => {
+  const cases: [number, number[]][] = [
+    [0, []], [1, [1]], [2, [2]], [3, [3]], [4, [2, 2]],
+    [5, [3, 2]], [6, [3, 3]], [7, [4, 3]], [8, [4, 4]],
+    [9, [3, 3, 3]], [10, [4, 3, 3]], [11, [4, 4, 3]], [12, [4, 4, 4]],
+  ]
+  for (const [count, expected] of cases) {
+    test(`${count} stages form ${expected.join('/') || 'no rows'}`, () => {
+      expect(stageRows(count)).toEqual(expected)
     })
   }
 })

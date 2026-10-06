@@ -60,7 +60,7 @@ that hold it ([Storage](storage.md#sections-and-their-ids)). `embed_cache.write`
 sections into their own file beside the chunks', before the entry's row. So a cache hit has both.
 Each cache entry, so each chunking, has its own sections and descriptors.
 
-**Descriptors.** A stage of its own after the merge, `describe`, writes up to five descriptors
+**Descriptors.** A stage of its own after the merge, `describe`, writes up to six descriptors
 for each section that has prose, by the strategy the settings name (`pipeline.descriptors`). It
 reads both files back, so describing again costs no embedding. It runs as one child workflow on
 `task.describing` with a durable step per batch (`pipeline.describe_batch`), once the run has
@@ -68,27 +68,31 @@ waited for the model its strategy needs: sixteen sections a
 batch for llm, which asks about one section at a time, and every section in one batch for
 c-tf-idf, which weighs each section against the others. Each batch writes its descriptors to a
 scratch file, and a last step puts them all on the sections file (`pipeline.finalize_describe`).
-So the Operations view shows a describe job and how many of its batches are done, and a crash
+So the Operations view shows a Section descriptors job and how many of its batches are done, and a crash
 repeats one batch, not the whole document. The sections file's metadata names the strategy that
 wrote it. A cache hit whose strategy differs from
 the settings' is described again, so *Index all* applies a changed setting to a whole collection.
 Every strategy reads prose only: code blocks and tables name identifiers and values, not what a
 section is about.
 
-- **llm.** Gemma-4-E2B (ggml-org's Q4_0 GGUF, 2.8 GB, on llama.cpp on the Apple GPU) reads each
-  section's heading path and up to 6,000 characters of its prose, and names up to five topics
-  (`sections/generated.py`). A longer section is read as six of its chunks, spread from its first to
-  its last. A phrase whose every word the heading path holds is dropped, as c-TF-IDF drops such
-  terms, unless nothing else is left: asking the model to avoid the heading's words made it leave
-  out the main topic. A blind judge scored it 4.04 of 5 on 200 sections of four technical books,
+- **llm.** Gemma-4-E2B (ggml-org's Q4_0 GGUF, 2.8 GB, on llama.cpp on the Apple GPU) runs
+  three stages in the same import or index operation: **Describe sections**, **Section
+  descriptors**, then **Describe document**. The first writes one-to-two-sentence descriptions;
+  the second writes up to six topics. They use separate prompts with reply budgets of 120
+  and 90 tokens. Both read the section's heading path and up to 6,000 characters of its prose
+  (`sections/generated.py`). A longer section is read as six chunks spread over its span.
+  Both fields are saved in the sections cache. Each section stage checkpoints batches of
+  sixteen sections and shows its own progress. Topics already named in the heading remain
+  eligible descriptors in both strategies.
+  The earlier five-descriptor prompt scored 4.04 of 5 on 200 sections of four technical books,
   against 2.13 for c-TF-IDF, at 0.51 s a section on an M4 Pro. Its model downloads like the others,
-  as a `describer`, and each batch waits for it. Once the sections are described, a document with
-  no description gets one: two to five sentences the model writes from the outline (each heading
-  with its section's descriptors) and an excerpt spread over the book (`generated.summarize`). Each
-  sentence starts with a verb ("Explains how ..."), never with "This document is" or the book's
-  title, and the front and back matter are left out. One more prompt a document, in a
-  `summarize_document` operation the embedding run queues on `operation.describing` and does not
-  wait for, so indexing never waits on it. A description someone wrote, before or meanwhile, is
+  as a `describer`, and each batch waits for it. The document stage uses the saved section
+  descriptions and descriptors to write two to five sentences (`generated.summarize`). Long
+  documents are summarized in groups of at most sixteen sections and 10,000 characters, then
+  those summaries are combined until one remains. Every section with metadata contributes.
+  Each sentence starts with a verb ("Explains how ..."), never with "This document is" or the
+  book's title, and front and back matter are left out. The automatic document description
+  completes within the original operation. A description someone wrote, before or meanwhile, is
   never replaced. *Describe with AI* in a document's Info tab asks for one on demand and replaces
   what is there (`POST /api/documents/{name}/description/generate`), from the newest cache entry
   llm described, else the newest. *Describe with AI* on a collection
@@ -99,14 +103,15 @@ section is about.
   the collection the last, so Operations shows how far it got. A member with no cached embedding
   yet is left out. The model reads 10,000
   characters of descriptions at most, so in a large collection each is cut to an equal share.
+  Each collection then keeps a vocabulary of its own, so one concept gets one name across its
+  books ([The vocabulary](#the-vocabulary)).
 - **c-tf-idf**, the default, runs everywhere. `ClassTfidf` weighs the sections of one depth against
   each other by c-TF-IDF, BERTopic's class-based TF-IDF with BM25 weighting: a chapter's words
   against the other chapters'. Unlike BERTopic, it counts how many sections use a term rather than
   how often the whole book does. A term more than half the sections of a depth use is the book's
   topic, so it is no descriptor there. In one book on Domain-Driven Design, "model", "design" and
   "chapter" had been descriptors of 31 sections, and are of none. The whole document's section keeps
-  them. Nor is a term whose every word the section's header already holds: "aggregates" under
-  `Aggregates > Rule: Design Small Aggregates` says nothing new. With an embedding model, each
+  them. Heading terms remain eligible. With an embedding model, each
   section's best 20 candidates are embedded in one call for the whole document. They are reranked
   against the section's vector (the mean of its chunks' unit vectors, scaled to length one, never
   stored), as BERTopic's `KeyBERTInspired` does. Each descriptor is a word or a word pair. One a
@@ -115,6 +120,59 @@ section is about.
   Measured once on one book (1.4 MB of markdown, 1,776 chunks, bge-small, on the dev machine): the
   descriptors took 2.4 s, the chunk embeddings 50 s. In technical books it often picks code
   identifiers and names, which the judge scored low.
+
+### The vocabulary
+
+The describer reads one section at a time, so one concept comes back in several forms:
+"Event-driven architecture" and "event-driven architectures", "architecture trade-offs" and
+"architectural trade-offs", "performance enhancement" and "performance improvement". Across 26
+books, 33,270 descriptors held 23,122 distinct forms, 87% of them used once. Under llm, each
+collection therefore keeps a controlled vocabulary, as a thesaurus does: one preferred term per
+concept, and every variant pointing at it (`sections/vocabulary.py`). A search of the collection
+shows each section's descriptors in its preferred terms. The cache entries keep what the
+describer wrote, since every collection that chunks a document alike shares them.
+
+A `build_vocabulary` operation on `operation.vocabulary`, one at a time, rebuilds it. A document
+indexed into the collection or taken out of it asks for one, debounced by
+`maintenance_idle_seconds` like maintenance, so a burst of documents makes one run. The
+Operations view lists it under Maintenance, as "<collection> vocabulary".
+
+1. **Collect.** Every descriptor of the indexed members' sections, with the section it describes.
+   Its variant is its lowercase form.
+2. **Embed.** Each variant no earlier run embedded, by Qwen3-Embedding-0.6B (Qwen's Q8_0 GGUF,
+   640 MB, on llama.cpp) with its similarity prompt ("Retrieve semantically similar text"), 1,024
+   variants a step.
+3. **Judge.** Each pair of the 32 nearest neighbours at a cosine of 0.93 or more whose words differ
+   by more than their stems, and that no earlier run judged, is asked of the describer, in both
+   orders: do the two name the same concept? Not if one is broader or narrower, related but
+   distinct, or opposite. The pair is one concept when the mean of the two P(yes) is 0.15 or more.
+   32 pairs a step, about 6 s.
+4. **Cluster.** Variants in order of use, most used first. Each joins the nearest preferred term
+   it is one concept with, or becomes one. Variants whose words are the same once hyphens and
+   blanks go ("time-out", "timeout"), or the same word for word by stem ("system call", "system
+   calls"), are one concept with no model asked. Unicode letters and meaningful punctuation
+   remain distinct: "C++" and "C#" are not spelling variants. Empty normalized phrases never
+   match automatically. The term is shown in the form the collection
+   writes it in most often.
+
+How each choice was measured, on 184 pairs labelled by hand (40 synonyms, 144 other concepts) and
+74 antonym pairs:
+
+- The collections' own granite-97m ranks antonyms above synonyms ("synchronous calls" and
+  "asynchronous calls" at cosine 0.99), so no bar on its cosine separates them. Qwen3-0.6B with
+  its similarity prompt ranks synonyms above other concepts at AUC 0.87, and above antonyms at
+  0.96. Without the prompt it scored 0.76. Ten wordings of the prompt, Qwen3-4B (2,560
+  dimensions), Harrier-0.6B, and centring or whitening the vectors did no better.
+- A string distance merges different concepts at every bar that merges anything: "block
+  ordering" into "lock ordering", "decoupling" into "coupling". Stems and separators merge none.
+- Gemma asked "same concept?" alone said yes to 73% of other concepts and 96% of antonyms. Told
+  what is not the same, it ranks at AUC 0.84. Combined with the cosine bar, 78% of synonyms merge,
+  17% of other concepts (close neighbours such as "data validation" and "input validation"), and
+  no antonym.
+
+The first run of the largest collection measured, 12,754 variants, asks about 14,579 pairs: about
+45 minutes at 93 ms a prompt on an M4 Pro. One of 1,113 variants asks about 640, in 2 minutes. A later run asks only about the pairs its new variants
+make. The vocabulary lives in the collection's folder ([Storage](storage.md)).
 
 **Batches.** Work is cut where the document's sections start (`indexing/parts.py`), so a section
 is whole in one batch wherever it can be. Batches are packed greedily: a batch holds as many whole
@@ -137,7 +195,7 @@ them. A section longer than that is cut at a page inside it, and a PDF without s
 **Slices.** Convert and embed cut their batches into contiguous slices, at most
 `document_parallelism` of them and never more than the stage's share of the CPU budget (0 means
 that share). Each slice is one child workflow with one durable step per batch, so a large PDF
-spreads over the free slots. The describe and index stages are one child each and are never
+spreads over the free slots. The three description stages and the index stage are one child each and are never
 sliced.
 
 **One writer per table.** Every index child runs on `task.indexing`, partitioned by collection
@@ -153,7 +211,7 @@ membership reads `removing` until it has run (see
 | `operation.indexing` | twice `cpu_budget`, at most 64 | one import or index orchestrator per document |
 | `operation.embedding` | same | `ensure_embedding`, one per cache id |
 | `operation.collection` | 2 | index all, delete a collection, delete a document |
-| `operation.describing` | 1 | a document's description, one an llm describe stage queues or one asked for with *Describe with AI*, and a collection's |
+| `operation.describing` | 1 | document or collection descriptions requested with *Describe with AI* |
 | `operation.downloads` | 2 | model downloads |
 | `operation.maintenance` | 4 | maintenance orchestrators and nightly housekeeping |
 | `operation.backup` | 1 | backups and restores (`backup.py`), never two at once |

@@ -73,6 +73,7 @@ RESTORE_BACKUP_WORKFLOW = BulkWorkflow.RESTORE_BACKUP
 
 MAINTAIN_WORKFLOW = "maintain_collection"  # the debounced handle that only waits
 MAINTAIN_PARTITION_WORKFLOW = "maintain_on_partition"  # the run itself, on the index partition
+VOCABULARY_WORKFLOW = "build_vocabulary"  # a collection's preferred terms, debounced
 REMOVE_FROM_INDEX_WORKFLOW = "remove_from_collection_index"
 DAILY_MAINTENANCE_WORKFLOW = "daily_maintenance"  # the nightly housekeeping round
 DOWNLOAD_WORKFLOW = "ensure_model"  # models.ensure_model; one record per model

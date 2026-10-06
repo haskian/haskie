@@ -237,6 +237,12 @@ def reply(name: str, accelerator: Accelerator, prompt: str, max_tokens: int) -> 
     return _generator(name, accelerator).reply(prompt, max_tokens)
 
 
+def yes(name: str, accelerator: Accelerator, prompt: str) -> float:
+    """How likely the generator's answer to a yes-or-no question is yes
+    (`gguf_models.GgufGenerator.yes`)."""
+    return _generator(name, accelerator).yes(prompt)
+
+
 def rerank_scores(
     model_name: str, accelerator: Accelerator, query: str, texts: list[str]
 ) -> list[float]:

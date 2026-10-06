@@ -4,7 +4,7 @@ import { api, type Operation as OperationRow, type Task } from '../../api'
 import { bytes, dateTime, duration } from '../../format'
 import { useOptions } from '../../hooks/useOptions'
 import { Jobs, Kv } from '../../ui'
-import { bulkKind, count, endsOf, jobDefs, jobsFor, stageInfo, tagOf, taskState, taskText, type StageDef } from './jobs'
+import { bulkKind, count, endsOf, jobDefs, jobsFor, stageInfo, stageRows, tagOf, taskState, taskText, type StageDef } from './jobs'
 
 const TASK_ICONS = { done: Check, error: X, todo: CircleDashed } as const
 
@@ -26,6 +26,7 @@ export const Operation = memo(function Operation({
   const active = activeStatuses.includes(operation.status)
   const rows = tasks ?? []
   const byTask = rows.length > 0
+  const spans = stageRows(operation.jobs.length).flatMap((columns) => Array.from({ length: columns }, () => 12 / columns))
 
   return (
     <details className="operation" onToggle={(event) => onToggle(operation, event.currentTarget.open)}>
@@ -42,11 +43,11 @@ export const Operation = memo(function Operation({
             {dateTime(operation.created_at)} · {duration(operation.updated_at - operation.created_at)}
           </span>
         </div>
-        <Jobs jobs={jobsFor(operation, tasks, activeStatuses)} variant={active ? 'glass' : 'line'} stripes={active} />
+        <Jobs spans={spans} jobs={jobsFor(operation, tasks, activeStatuses)} variant={active ? 'glass' : 'line'} stripes={active} />
       </summary>
       <div className="operation-tasks">
         {byTask ? (
-          jobDefs(operation).map((def) => <TaskColumn key={def.stage} def={def} rows={rows.filter((task) => task.stage === def.stage)} />)
+          jobDefs(operation).map((def, index) => <TaskColumn span={spans[index]} key={def.stage} def={def} rows={rows.filter((task) => task.stage === def.stage)} />)
         ) : (
           <div className="operation-stage">
             <Kv rows={summaryRows(operation)} />
@@ -94,12 +95,12 @@ function summaryRows(operation: OperationRow): [string, string][] {
   return rows
 }
 
-function TaskColumn({ def, rows }: { def: StageDef; rows: Task[] }) {
+function TaskColumn({ def, rows, span }: { def: StageDef; rows: Task[]; span: number }) {
   const info = stageInfo(def.stage, rows)
   const { head, hidden, tail } = endsOf(rows)
 
   return (
-    <div className="operation-stage" style={{ '--weight': def.weight } as CSSProperties}>
+    <div className="operation-stage" style={{ '--stage-span': span } as CSSProperties}>
       <span className="label">{def.label}</span>
       <span className="operation-info">{info}</span>
       <ul className="tasks">

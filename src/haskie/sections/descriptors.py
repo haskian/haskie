@@ -31,8 +31,6 @@ place of a topic:
   alone left 103: a short section's candidates are the few words it repeats, and the rerank
   below reads meaning, not weight. Leaving them out leaves 6, and no section without descriptors.
   A pair keeps the word ("separate Aggregates"), and the whole document, one class, keeps them all.
-  Nor is a term whose every word the section's header holds (`said`): "Aggregates" says nothing
-  under "Aggregates > Rule: Design Small Aggregates". On that book 295 descriptors were such terms.
 - **Rerank** (`rerank`). The best terms by that weight are the candidates; each is embedded, and
   the ones closest to the section's own vector win, one at a time, each against the ones already
   taken (maximal marginal relevance), so "aggregate" and "aggregates" do not both take a slot.
@@ -54,6 +52,7 @@ from collections.abc import Callable, Iterable, Sequence
 from operator import itemgetter
 from typing import NamedTuple, Protocol
 
+import msgspec
 import numpy as np
 
 from haskie.search.collapse import unit_rows
@@ -211,7 +210,7 @@ def rerank(candidates: np.ndarray, section: np.ndarray, k: int) -> list[int]:
 
 # --- strategies ---------------------------------------------------------------------
 
-DESCRIPTORS = 5  # at most, per section: enough to tell it apart, few enough to read at a glance
+DESCRIPTORS = 6  # at most, per section: enough to tell it apart, few enough to read at a glance
 CANDIDATES = 20  # terms per section the embedding model reranks (`rerank`)
 
 type Embed = Callable[[list[str]], list[list[float]]]  # document-side embeddings, one per text
@@ -230,11 +229,11 @@ class Run(NamedTuple):
         return len(self.headings)
 
 
-def said(headings: Iterable[str]) -> set[str]:
-    """The words of `headings`, as `terms` keys them. A term all of whose words they hold the
-    header already says, so as a descriptor it adds nothing: "small aggregates" under "Rule: Design
-    Small Aggregates", while "separate aggregates" still adds "separate"."""
-    return {key for heading in headings for key, _ in terms(heading) if " " not in key}
+class Description(msgspec.Struct, frozen=True):
+    """What a section covers: its topics and, when generated, a short prose summary."""
+
+    descriptors: list[str] = []
+    description: str = ""
 
 
 class Strategy(Protocol):
@@ -246,8 +245,8 @@ class Strategy(Protocol):
         runs: Sequence[Run],
         vectors: np.ndarray | None,
         embed: Embed | None,
-    ) -> list[list[str]]:
-        """Each run's descriptors as written, best first.
+    ) -> list[Description]:
+        """Each run's descriptors as written, best first, and its description when generated.
 
         `texts` are the document's chunks in order. `vectors` holds one unit vector per run, and
         `embed` embeds any text the same way; both are None without an embedding model."""
@@ -270,7 +269,7 @@ class ClassTfidf:
         runs: Sequence[Run],
         vectors: np.ndarray | None,
         embed: Embed | None,
-    ) -> list[list[str]]:
+    ) -> list[Description]:
         forms: Counter[Term] = Counter()
         per_chunk = [counted(terms(text), forms) for text in texts]
         counts = [summed(per_chunk[run.first : run.last + 1]) for run in runs]
@@ -279,18 +278,10 @@ class ClassTfidf:
             at = [n for n, run in enumerate(runs) if run.depth == depth]
             common = widespread([counts[n] for n in at])
             for n, weighed in zip(at, ctfidf([counts[n] for n in at]), strict=True):
-                # every use weighs how common a term is; only a term of the section's own, that
-                # its header does not already say, used enough, is a candidate
-                header = said(runs[n].headings)
-                own = Counter(
-                    {
-                        key: uses
-                        for key, uses in counts[n].items()
-                        if key not in common and not set(key.split()) <= header
-                    }
-                )
+                # Every use weighs how common a term is; candidates exclude widespread terms.
+                own = Counter({key: uses for key, uses in counts[n].items() if key not in common})
                 # at least one descriptor while the section has a word: its best, even one the
-                # header or the whole document already says
+                # whole document already says
                 kept = frequent(own, DESCRIPTORS) or set(counts[n])
                 weights[n] = {key: weight for key, weight in weighed.items() if key in kept}
         if embed is None or vectors is None:
@@ -298,7 +289,7 @@ class ClassTfidf:
         else:
             chosen = _reranked(vectors, weights, forms, embed)
         written = shown([key for keys in chosen for key in keys], forms)
-        return [[written[key] for key in keys] for keys in chosen]
+        return [Description(descriptors=[written[key] for key in keys]) for keys in chosen]
 
 
 def _reranked(
