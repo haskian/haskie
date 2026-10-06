@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="Open corpora: start their own haskie instance, download every book in evals/corpora/manifest.json, check its hash, and index one collection per subject (idempotent). Args: [--collection NAME ...]"
+set -euo pipefail
+home="${HASKIE_EVAL_CORPORA_HOME:-$PWD/evals/.haskie-eval-corpora}"
+api="${HASKIE_EVAL_CORPORA_URL:-http://127.0.0.1:8126}"
+uv run haskie run --home "$home" --port "${api##*:}" --no-browser
+uv run python -m evals.corpora.corpus --api "$api" "$@"

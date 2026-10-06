@@ -1,0 +1,289 @@
+{
+  "source": "https://raw.githubusercontent.com/EbookFoundation/free-programming-books/0ddd8749a993efeac1644ea9f47af0bb6f47b955/books/free-programming-books-subjects.md",
+  "collections": [
+    {
+      "name": "open-machine-learning",
+      "subject": "Machine Learning",
+      "documents": [
+        {
+          "name": "a-brief-introduction-to-machine-learning-for-engineers.pdf",
+          "title": "A Brief Introduction to Machine Learning for Engineers",
+          "url": "https://arxiv.org/pdf/1709.02840.pdf",
+          "sha256": "7d71e919986b8bfb6ae0946defa48609698e1befc91142ae584cc5e38c59a876",
+          "bytes": 2234389,
+          "page": ""
+        },
+        {
+          "name": "a-course-in-machine-learning.pdf",
+          "title": "A Course in Machine Learning",
+          "url": "http://ciml.info/dl/v0_9/ciml-v0_9-all.pdf",
+          "sha256": "730418d6bbd03c72583fccd8ed3896b9bef20228840cecf9cfb9b90635a311ef",
+          "bytes": 2636899,
+          "page": ""
+        },
+        {
+          "name": "introduction-to-machine-learning-systems.pdf",
+          "title": "Introduction to Machine Learning Systems",
+          "url": "https://mlsysbook.ai/vol1/assets/downloads/Machine-Learning-Systems-Vol1.pdf",
+          "sha256": "ca92acf0edf78ef8cf09936dc8dbec6f822f317231b6ab892baf4107f8bcf3f8",
+          "bytes": 12197035,
+          "page": ""
+        },
+        {
+          "name": "mathematics-for-machine-learning.pdf",
+          "title": "Mathematics for Machine Learning",
+          "url": "https://gwthomas.github.io/docs/math4ml.pdf",
+          "sha256": "773206cb9c6d3b203c433c3859b3fb9fe1666c1d11f6f8f8e7c3fdfda7543fb2",
+          "bytes": 711243,
+          "page": ""
+        },
+        {
+          "name": "pattern-recognition-and-machine-learning.pdf",
+          "title": "Pattern Recognition and Machine Learning",
+          "url": "https://www.microsoft.com/en-us/research/uploads/prod/2006/01/Bishop-Pattern-Recognition-and-Machine-Learning-2006.pdf",
+          "sha256": "4ee767e0a6b04fa05ba7e599e9dbb4637a94a4407ccedf0b4d316b1fd7c8ec64",
+          "bytes": 18090775,
+          "page": ""
+        },
+        {
+          "name": "patterns-predictions-and-actions-a-story-about-machine-learning.pdf",
+          "title": "Patterns, Predictions, And Actions: A story about machine learning",
+          "url": "https://mlstory.org/pdf/patterns.pdf",
+          "sha256": "0e5a127787d1e94e4b6828ee30fee5f8d5e1b14a2e8938a1b069f20454c32093",
+          "bytes": 2002212,
+          "page": ""
+        },
+        {
+          "name": "practitioners-guide-to-mlops.pdf",
+          "title": "Practitioners guide to MLOps",
+          "url": "https://services.google.com/fh/files/misc/practitioners_guide_to_mlops_whitepaper.pdf",
+          "sha256": "0c4dda5c88e8ef5d3f9967684a5faa910d595960e10a39ac07a93c2b667c4873",
+          "bytes": 8371235,
+          "page": ""
+        },
+        {
+          "name": "probabilistic-machine-learning-an-introduction.pdf",
+          "title": "Probabilistic Machine Learning - An Introduction",
+          "url": "https://github.com/probml/pml-book/releases/latest/download/book1.pdf",
+          "sha256": "89749245bc8065d7575f990815c621a091de3facca1585168fc0369542742dcf",
+          "bytes": 92323940,
+          "page": ""
+        },
+        {
+          "name": "reinforcement-learning-an-introduction.pdf",
+          "title": "Reinforcement Learning: An Introduction",
+          "url": "http://incompleteideas.net/book/RLbook2020.pdf",
+          "sha256": "2dd0d71d9ee883fbeb99f9b888c65ac3255fae2512203d11b18e838befffe9a6",
+          "bytes": 73129769,
+          "page": ""
+        },
+        {
+          "name": "speech-and-language-processing-3rd-edition-draft.pdf",
+          "title": "Speech and Language Processing (3rd Edition Draft)",
+          "url": "https://web.stanford.edu/~jurafsky/slp3/ed3book.pdf",
+          "sha256": "88d0362c3bcb62a0cd09403fb80fd15e778dd53566943912ab1047cda3ff5c79",
+          "bytes": 26506144,
+          "page": ""
+        }
+      ]
+    },
+    {
+      "name": "open-operating-systems",
+      "subject": "Operating Systems",
+      "documents": [
+        {
+          "name": "computer-science-from-the-bottom-up.pdf",
+          "title": "Computer Science from the Bottom Up",
+          "url": "https://www.bottomupcs.com/csbu.pdf",
+          "sha256": "298ab2dbaadf6c07f928efbcccf72d3a1a584bdff3fd022ba648518afe6a7159",
+          "bytes": 1119951,
+          "page": "https://www.bottomupcs.com"
+        },
+        {
+          "name": "operating-systems-from-0-to-1.pdf",
+          "title": "Operating Systems: From 0 to 1",
+          "url": "https://github.com/tuhdo/os01/files/4711780/Operating_Systems_From_0_to_1.pdf",
+          "sha256": "5a38b58a0ce679ed4b6083afdc3641059f6173733535db59980a8161e812839e",
+          "bytes": 6301293,
+          "page": "https://github.com/tuhdo/os01/releases/tag/0.0.1"
+        },
+        {
+          "name": "practical-file-system-design-the-be-file-system.pdf",
+          "title": "Practical File System Design: The Be File System",
+          "url": "https://www.nobius.org/~dbg/practical-file-system-design.pdf",
+          "sha256": "8ccde4a26047827f75da52f286a7711815641add6795cc3b5162ec9439871f47",
+          "bytes": 1156619,
+          "page": ""
+        },
+        {
+          "name": "project-oberon-the-design-of-an-operating-system-a-compiler-and-a-computer.pdf",
+          "title": "Project Oberon: The Design of an Operating System, a Compiler, and a Computer",
+          "url": "https://people.inf.ethz.ch/wirth/ProjectOberon/PO.System.pdf",
+          "sha256": "1bce71b2e0a291f2757f22a24a4a04100ef66d1dc7b802df97c53e50cb3110f9",
+          "bytes": 617928,
+          "page": "https://people.inf.ethz.ch/wirth/ProjectOberon/index.html"
+        },
+        {
+          "name": "the-little-book-of-semaphores.pdf",
+          "title": "The Little Book of Semaphores",
+          "url": "http://greenteapress.com/semaphores/LittleBookOfSemaphores.pdf",
+          "sha256": "a2423e5f4f1713def91809acf6897303455b8a601c8b63e99c280158325ef3b0",
+          "bytes": 1153090,
+          "page": "https://greenteapress.com/semaphores/"
+        },
+        {
+          "name": "think-os-a-brief-introduction-to-operating-systems.pdf",
+          "title": "Think OS: A Brief Introduction to Operating Systems",
+          "url": "https://www.greenteapress.com/thinkos/thinkos.pdf",
+          "sha256": "a2fc778e3e8bb763d245c9d299e93c88b218cbd891a68b0575e4a5db4b64afc6",
+          "bytes": 368105,
+          "page": "https://www.greenteapress.com/thinkos/index.html"
+        }
+      ]
+    },
+    {
+      "name": "open-software-architecture",
+      "subject": "Software Architecture",
+      "documents": [
+        {
+          "name": "code-simplicity-the-fundamentals-of-software.pdf",
+          "title": "Code Simplicity: The Fundamentals of Software",
+          "url": "https://www.codesimplicity.com/book.pdf",
+          "sha256": "0277c1831d5c4c1f8280220234ec3e373b4121d339305aea55a5e9c565d58ba7",
+          "bytes": 658981,
+          "page": ""
+        },
+        {
+          "name": "designing-event-driven-systems-concepts-and-patterns-for-streaming-services-with.pdf",
+          "title": "Designing Event-Driven Systems. Concepts and Patterns for Streaming Services with Apache Kafka",
+          "url": "https://assets.confluent.io/m/7a91acf41502a75e/original/20180328-EB-Confluent_Designing_Event_Driven_Systems.pdf",
+          "sha256": "c9bb3e324d93529a25563fd25447a11549dcca8e61d36b9665fff0c8de2cdd41",
+          "bytes": 6010418,
+          "page": ""
+        }
+      ]
+    }
+  ],
+  "skipped": [
+    {
+      "subject": "Machine Learning",
+      "title": "A Comprehensive Guide to Machine Learning",
+      "url": "https://www.eecs189.org/static/resources/comprehensive-guide.pdf",
+      "reason": "download failed: HTTPError: HTTP Error 404: Not Found"
+    },
+    {
+      "subject": "Machine Learning",
+      "title": "A First Encounter with Machine Learning",
+      "url": "https://web.archive.org/web/20210420163002/https://www.ics.uci.edu/~welling/teaching/ICS273Afall11/IntroMLBook.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Machine Learning",
+      "title": "A Selective Overview of Deep Learning",
+      "url": "https://arxiv.org/abs/1904.05526",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Machine Learning",
+      "title": "Algorithms for Reinforcement Learning",
+      "url": "https://sites.ualberta.ca/~szepesva/papers/RLAlgsInMDPs.pdf",
+      "reason": "download failed: URLError: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1032)>"
+    },
+    {
+      "subject": "Machine Learning",
+      "title": "Approaching Almost Any Machine Learning Problem",
+      "url": "https://github.com/abhishekkrthakur/approachingalmost",
+      "reason": "not a PDF or EPUB: starts b'\\n\\n\\n\\n  \\n\\n<!DOCTY'"
+    },
+    {
+      "subject": "Machine Learning",
+      "title": "Learning Deep Architectures for AI",
+      "url": "https://mila.quebec/wp-content/uploads/2019/08/TR1312.pdf",
+      "reason": "download failed: HTTPError: HTTP Error 404: Not Found"
+    },
+    {
+      "subject": "Machine Learning",
+      "title": "Neural Network Design (2nd Edition)",
+      "url": "https://hagan.okstate.edu/NNDesign.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Machine Learning",
+      "title": "Probabilistic Machine Learning: Advanced Topics",
+      "url": "https://probml.github.io/pml-book/book2.html",
+      "reason": "not a PDF or EPUB: starts b'\\n\\n\\n\\n  \\n\\n<!DOCTY'"
+    },
+    {
+      "subject": "Software Architecture",
+      "title": "Building Secure & Reliable Systems",
+      "url": "https://static.googleusercontent.com/media/landing.google.com/en//sre/static/pdf/Building_Secure_and_Reliable_Systems.pdf",
+      "reason": "download failed: HTTPError: HTTP Error 404: Not Found"
+    },
+    {
+      "subject": "Software Architecture",
+      "title": "Evidence-based Software Engineering",
+      "url": "http://knosof.co.uk/ESEUR",
+      "reason": "download failed: HTTPError: HTTP Error 404: Not Found"
+    },
+    {
+      "subject": "Software Architecture",
+      "title": "Microservices AntiPatterns and Pitfalls",
+      "url": "http://web.archive.org/web/20210205164251/https://www.oreilly.com/programming/free/files/microservices-antipatterns-and-pitfalls.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Software Architecture",
+      "title": "Migrating to Cloud-Native Application Architectures",
+      "url": "https://developers.redhat.com/books/migrating-microservice-databases-relational-monolith-distributed-data/",
+      "reason": "download failed: HTTPError: HTTP Error 403: Forbidden"
+    },
+    {
+      "subject": "Software Architecture",
+      "title": "Naked objects",
+      "url": "http://downloads.nakedobjects.net/resources/Pawson%20thesis.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Software Architecture",
+      "title": "Shape Up - Stop Running in Circles and Ship Work that Matters",
+      "url": "https://basecamp.com/shapeup",
+      "reason": "not a PDF or EPUB: starts b'<!doctype html>'"
+    },
+    {
+      "subject": "Software Architecture",
+      "title": "Web API Design",
+      "url": "https://pages.apigee.com/rs/apigee/images/api-design-ebook-2012-03.pdf",
+      "reason": "download failed: HTTPError: HTTP Error 404: Not Found"
+    },
+    {
+      "subject": "Operating Systems",
+      "title": "A short introduction to operating systems (2001)",
+      "url": "https://markburgess.org/os/os.pdf",
+      "reason": "haskie finds no text: all 140 pages need OCR"
+    },
+    {
+      "subject": "Operating Systems",
+      "title": "Flexible Operating System Internals: The Design and Implementation of the Anykernel and Rump Kernels",
+      "url": "https://aaltodoc.aalto.fi/handle/123456789/6318",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Operating Systems",
+      "title": "Operating Systems: Three Easy Pieces",
+      "url": "https://pages.cs.wisc.edu/~remzi/OSTEP/",
+      "reason": "not a PDF or EPUB: starts b'<html>\\n\\n<head>\\n'"
+    },
+    {
+      "subject": "Operating Systems",
+      "title": "UNIX Application and System Programming, lecture notes",
+      "url": "http://www.compsci.hunter.cuny.edu/~sweiss/course_materials/unix_lecture_notes.php",
+      "reason": "download failed: URLError: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1032)>"
+    },
+    {
+      "subject": "Operating Systems",
+      "title": "Writing a Simple Operating System from Scratch",
+      "url": "https://www.cs.bham.ac.uk/~exr/lectures/opsys/10_11/lectures/os-dev.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!doctype html>'"
+    }
+  ]
+}

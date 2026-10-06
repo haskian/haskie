@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="Open corpora (by hand, downloads): pick books from free-programming-books' pinned subject list into evals/corpora/manifest.json. Args: [--subject NAME ...] [--per-collection N]"
+set -euo pipefail
+uv run python -m evals.corpora.build "$@"
