@@ -13,7 +13,7 @@ from typing import Any
 import msgspec
 
 from evals.bookqa import schema, sources
-from evals.bookqa.schema import Generation, Passage, QueryType, Record
+from evals.bookqa.schema import Generation, Passage, QueryType, Record, Relation
 from evals.synth import to_pdf
 
 PDF = "book.pdf"
@@ -71,5 +71,20 @@ def unanswerable(corpus: Path, **changes: Any) -> Record:
         expected_facts=[],
         relevant_documents=[],
         relevant_passages=[],
+    )
+    return msgspec.structs.replace(base, **changes)
+
+
+def relationship(corpus: Path, **changes: Any) -> Record:
+    """A relationship question with one passage per side: worker 3 on page 1, worker 65 on 2."""
+    base = record(
+        corpus,
+        id="book-000000-03",
+        query="How does worker 65's retry budget compare with worker 3's?",
+        query_type=QueryType.RELATIONSHIP,
+        expected_answer="Worker 65 may retry 455 times, far more than worker 3's 21.",
+        expected_facts=["worker 65: 455 attempts", "worker 3: 21 attempts"],
+        relevant_passages=[Passage(PDF, LINES[3], 1, ""), Passage(PDF, LINES[65], 2, "")],
+        relation=Relation.CORRELATES_POSITIVELY,
     )
     return msgspec.structs.replace(base, **changes)

@@ -20,7 +20,17 @@ import msgspec
 from evals.bookqa import metrics, qrels, schema
 from evals.bookqa.metrics import K, Outcome
 
-ANSWERABLE = ["n", *(f"R@{k}" for k in K), "MRR", "nDCG@10", "doc@10", "empty", "kB", "ms p50"]
+ANSWERABLE = [
+    "n",
+    *(f"R@{k}" for k in K),
+    "all@10",
+    "MRR",
+    "nDCG@10",
+    "doc@10",
+    "empty",
+    "kB",
+    "ms p50",
+]
 UNANSWERABLE = ["n", "abstained", "top score", "kB", "ms p50"]
 JUDGED = ["n", *(f"S@{k}" for k in K), "MRR", "nDCG@10", "judged@10"]
 
@@ -34,6 +44,7 @@ def _answerable_row(group: list[Outcome]) -> list[str]:
     return [
         str(len(group)),
         *(f"{_mean([s.recall[k] for s in scored]):.2f}" for k in K),
+        f"{_mean([float(s.recall[max(K)] == 1) for s in scored]):.2f}",
         f"{_mean([s.mrr for s in scored]):.2f}",
         f"{_mean([s.ndcg for s in scored]):.2f}",
         f"{_mean([float(s.document_hit) for s in scored]):.2f}",
@@ -101,7 +112,8 @@ def render(outcomes: list[Outcome], grades: qrels.Grades | None = None) -> str:
     unanswerable = [o for o in outcomes if not o.answerable]
     parts = [
         "# Book query retrieval",
-        "Passage-level recall of the gold quotes in haskie's top 10 (`metrics.py`). `doc@10`: a "
+        "Passage-level recall of the gold quotes in haskie's top 10 (`metrics.py`). `all@10`: "
+        "every gold quote of a question in the top 10 - both sides of a relationship. `doc@10`: a "
         "relevant document anywhere in the top 10. `empty`: no result at all. `abstained`: an "
         "unanswerable question that got no result - the right answer.",
     ]

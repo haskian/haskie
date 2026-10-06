@@ -26,6 +26,26 @@ class QueryType(StrEnum):
     PARAPHRASE = "paraphrase"  # asks the same in other words than the passage's
     MULTI_FACT = "multi_fact"  # needs several facts, possibly from several passages
     NEARBY_SECTIONS = "nearby_sections"  # needs a passage and one in a neighbouring section
+    RELATIONSHIP = "relationship"  # asks how two things relate, each side in its own passage
+
+
+class Relation(StrEnum):
+    """How the two sides of a relationship question relate: X is one side, Y the other."""
+
+    SOLVES = "solves"  # X is a solution to the problem Y
+    MITIGATES = "mitigates"  # X reduces the impact of Y but does not eliminate it
+    CAUSES = "causes"  # X introduces or leads to the problem Y
+    TRADES_OFF = "trades_off"  # choosing X sacrifices Y; both cannot be maximized
+    ALTERNATIVE_TO = "alternative_to"  # X and Y are competing approaches to the same goal
+    REQUIRES = "requires"  # X only works correctly if Y is in place
+    IMPLEMENTED_VIA = "implemented_via"  # X is typically implemented using the technique Y
+    COMPLEMENTS = "complements"  # X is commonly used together with Y
+    FAILS_WHEN = "fails_when"  # X breaks down or becomes a bad choice under condition Y
+    CHALLENGES = "challenges"  # X contradicts or undermines the assumptions of Y
+    GENERALIZES = "generalizes"  # X is a more general form of Y
+    CORRELATES_POSITIVELY = "correlates_positively"  # as X increases, Y tends to increase
+    CORRELATES_NEGATIVELY = "correlates_negatively"  # as X increases, Y tends to decrease
+    ANALOGOUS = "analogous"  # X plays the same role in one domain as Y does in another
 
 
 class Passage(msgspec.Struct, forbid_unknown_fields=True):
@@ -56,6 +76,7 @@ class Record(msgspec.Struct, forbid_unknown_fields=True):
     relevant_documents: list[str]
     relevant_passages: list[Passage]
     meta: Generation
+    relation: Relation | None = None  # a relationship question's only
 
 
 class Issue(msgspec.Struct, frozen=True):
@@ -124,6 +145,15 @@ def check(record: Record) -> list[str]:
             problems.append("its own source is not among its relevant documents")
     elif record.relevant_passages or record.relevant_documents:
         problems.append("unanswerable but cites a document or passage")
+    if record.query_type is QueryType.RELATIONSHIP:
+        if record.relation is None:
+            problems.append("a relationship question names no relation")
+        if not record.answerable:
+            problems.append("a relationship question is unanswerable")
+        if len({(p.document, p.quote) for p in record.relevant_passages}) < 2:
+            problems.append("a relationship question cites under two passages, one per side")
+    elif record.relation is not None:
+        problems.append(f"names a relation but is a {record.query_type} question")
     for passage in record.relevant_passages:
         if passage.document not in record.relevant_documents:
             problems.append(f"cites {passage.document}, not among its relevant documents")

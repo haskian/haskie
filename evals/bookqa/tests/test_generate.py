@@ -1,6 +1,7 @@
 """`generate.py` without Claude: a fake `ask` stands in for `claude -p`, so these prove what is
 asked, what is kept, what is cached, and that nothing becomes gold without `accept`."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -221,3 +222,48 @@ def test_accept_moves_only_the_candidates_that_pass_review(corpus: Path) -> None
     assert [i.problem for i in issues] == [f"quote is on page 2 of {books.PDF}, not 1"]
     again, _ = generate.accept([good, bad], dataset, corpus)
     assert again == [] and len(schema.load(dataset)[0]) == 2, "accepting twice adds nothing"
+
+
+RELATION_DRAFTS = [
+    {
+        "query": "How does worker 65's retry budget compare with worker 3's?",
+        "query_type": "relationship",
+        "relation": "correlates_positively",
+        "answerable": True,
+        "expected_answer": "Worker 65 may retry 455 times, far more than worker 3's 21.",
+        "expected_facts": ["worker 65: 455 attempts", "worker 3: 21 attempts"],
+        "passages": [
+            {"quote": books.LINES[3], "page": 1, "section": ""},
+            {"quote": books.LINES[65], "page": 2, "section": ""},
+        ],
+    }
+]
+
+
+def test_the_facts_key_is_the_one_it_was_before_relations() -> None:
+    parts = ["a" * 64, "p001-012", "1", "sonnet", "v1", "5"]
+    before = hashlib.sha256("\0".join(parts).encode()).hexdigest()
+
+    assert generate.generation_key("a" * 64, "p001-012", 1, "sonnet", 5) == before
+    relations = generate.generation_key(
+        "a" * 64, "p001-012", 1, "sonnet", 5, generate.RELATIONSHIPS
+    )
+    assert relations != before, "the two kinds never share a key"
+
+
+def test_relations_ask_the_relate_prompt_and_keep_the_relation(corpus: Path) -> None:
+    ask = FakeClaude(json.dumps(RELATION_DRAFTS))
+    dataset = corpus.parent / "relations.jsonl"
+
+    (path,) = generate.generate(
+        corpus / books.PDF, 0, 2, 1, "sonnet", dataset, ask, kind=generate.RELATIONSHIPS
+    )
+
+    prompt, _ = ask.prompts[0]
+    assert "`trades_off`" in prompt and "`analogous`" in prompt
+    assert path.name.startswith("relate-")
+    (made,) = schema.load(path)[0]
+    assert made.relation is schema.Relation.CORRELATES_POSITIVELY
+    assert made.meta.prompt_version == f"relate-{generate.RELATE_VERSION}"
+    assert schema.validate([made], corpus) == []
+    assert not dataset.exists(), "candidates are never gold until accepted"

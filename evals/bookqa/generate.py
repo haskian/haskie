@@ -32,19 +32,48 @@ import msgspec
 
 from evals import setup
 from evals.bookqa import schema, sources
-from evals.bookqa.schema import Generation, Passage, QueryType, Record
+from evals.bookqa.schema import Generation, Passage, QueryType, Record, Relation
 from evals.run import claude_binary, subprocess_environment
 
 HERE = Path(__file__).resolve().parent
 PROMPT_VERSION = "v1"
+RELATE_VERSION = "v2"
 CANDIDATES = HERE / "candidates"
 DATASET = HERE / "dataset.jsonl"
+RELATIONS = HERE / "relations.jsonl"
 
 type Ask = Callable[[str, str], tuple[str, str]]  # (prompt, model) -> (reply, model that answered)
 
 
 class GenerationError(RuntimeError):
     pass
+
+
+class Kind(msgspec.Struct, frozen=True):
+    """A kind of question: the prompt that asks for it and the dataset it is accepted into. The
+    facts prompt's version is the bare `PROMPT_VERSION`, as it was before relations, so its
+    generation keys and the candidates already on disk stay valid."""
+
+    name: str
+    prompt: str  # the template's stem in `prompts/`, before its version
+
+    @property
+    def version(self) -> str:
+        return PROMPT_VERSION if self.name == "facts" else f"{self.prompt}-{RELATE_VERSION}"
+
+    @property
+    def template(self) -> Path:
+        version = PROMPT_VERSION if self.name == "facts" else RELATE_VERSION
+        return HERE / "prompts" / f"{self.prompt}-{version}.md"
+
+    @property
+    def dataset(self) -> Path:
+        return DATASET if self.name == "facts" else RELATIONS
+
+
+FACTS = Kind("facts", "generate")
+RELATIONSHIPS = Kind("relations", "relate")
+KINDS = {kind.name: kind for kind in (FACTS, RELATIONSHIPS)}
 
 
 class DraftPassage(msgspec.Struct):
@@ -62,10 +91,11 @@ class Draft(msgspec.Struct):
     expected_answer: str
     expected_facts: list[str] = []
     passages: list[DraftPassage] = []
+    relation: Relation | None = None
 
 
-def prompt(source: str, segment: sources.Segment, count: int, seed: int) -> str:
-    template = (HERE / "prompts" / f"generate-{PROMPT_VERSION}.md").read_text(encoding="utf-8")
+def prompt(source: str, segment: sources.Segment, count: int, seed: int, kind: Kind = FACTS) -> str:
+    template = kind.template.read_text(encoding="utf-8")
     if segment.first_page is None:
         note = f"part {segment.label}, no page numbers"
         page_rule = "null - this document has no pages."
@@ -84,14 +114,17 @@ def prompt(source: str, segment: sources.Segment, count: int, seed: int) -> str:
     )
 
 
-def generation_key(sha: str, segment: str, seed: int, model: str, count: int) -> str:
+def generation_key(
+    sha: str, segment: str, seed: int, model: str, count: int, kind: Kind = FACTS
+) -> str:
     """Everything a generation's output depends on, as one hash."""
-    parts = [sha, segment, str(seed), model, PROMPT_VERSION, str(count)]
+    parts = [sha, segment, str(seed), model, kind.version, str(count)]
     return hashlib.sha256("\0".join(parts).encode()).hexdigest()
 
 
-def candidate_path(source: str, segment: str, key: str) -> Path:
-    return CANDIDATES / Path(source).stem / f"{segment}-{key[:8]}.jsonl"
+def candidate_path(source: str, segment: str, key: str, kind: Kind = FACTS) -> Path:
+    prefix = "" if kind is FACTS else f"{kind.prompt}-"
+    return CANDIDATES / Path(source).stem / f"{prefix}{segment}-{key[:8]}.jsonl"
 
 
 def select(segments: list[sources.Segment], count: int, seed: int) -> list[sources.Segment]:
@@ -122,10 +155,9 @@ def records(
     model: str,
     key: str,
     generated_at: str,
+    kind: Kind = FACTS,
 ) -> list[Record]:
-    meta = Generation(
-        schema.SCHEMA_VERSION, sha, model, PROMPT_VERSION, seed, segment, generated_at
-    )
+    meta = Generation(schema.SCHEMA_VERSION, sha, model, kind.version, seed, segment, generated_at)
     stem = re.sub(r"[^a-z0-9]+", "-", Path(source).stem.lower()).strip("-")
     made = []
     for number, draft in enumerate(drafts, start=1):
@@ -142,6 +174,7 @@ def records(
                 relevant_documents=[source] if draft.answerable or passages else [],
                 relevant_passages=passages,
                 meta=meta,
+                relation=draft.relation,
             )
         )
     return made
@@ -189,6 +222,7 @@ def generate(
     dataset: Path = DATASET,
     ask: Ask = ask_claude,
     dry_run: bool = False,
+    kind: Kind = FACTS,
 ) -> list[Path]:
     """The candidate files of one source for the chosen segments, asking Claude only for those
     not already on disk. A question already in the dataset or another candidate is dropped."""
@@ -196,16 +230,17 @@ def generate(
     files = []
     seen = known_questions(dataset)
     for segment in select(sources.segments(path), segments, seed):
-        key = generation_key(sha, segment.label, seed, model, per_segment)
-        target = candidate_path(path.name, segment.label, key)
+        key = generation_key(sha, segment.label, seed, model, per_segment, kind)
+        target = candidate_path(path.name, segment.label, key, kind)
         cached = target.exists()
         print(f"{path.name} {segment.label}: {'cached' if cached else 'to generate'} {target.name}")
         if cached or dry_run:
             files += [target] if cached else []
             continue
-        reply, answered_by = ask(prompt(path.name, segment, per_segment, seed), model)
+        reply, answered_by = ask(prompt(path.name, segment, per_segment, seed, kind), model)
         now = datetime.now(UTC).isoformat(timespec="seconds")
-        made = records(parse(reply), path.name, sha, segment.label, seed, answered_by, key, now)
+        drafts = parse(reply)
+        made = records(drafts, path.name, sha, segment.label, seed, answered_by, key, now, kind)
         fresh = [r for r in made if schema.question_key(r.query) not in seen]
         seen |= {schema.question_key(r.query) for r in fresh}
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -254,7 +289,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--per-segment", type=int, default=5, help="questions per segment")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--model", default=os.environ.get("BOOKQA_MODEL", "sonnet"))
-    parser.add_argument("--dataset", type=Path, default=DATASET)
+    parser.add_argument(
+        "--kind",
+        choices=list(KINDS),
+        default=FACTS.name,
+        help=f"facts: {DATASET.name}; relations: how two things relate, into {RELATIONS.name}",
+    )
+    parser.add_argument("--dataset", type=Path, help="default: the kind's dataset")
     parser.add_argument("--corpus", type=Path, default=setup.CORPUS_DIR)
     parser.add_argument("--dry-run", action="store_true", help="list what would be generated")
     parser.add_argument(
@@ -263,6 +304,8 @@ def main(argv: list[str] | None = None) -> int:
         help="move the candidates that pass review into the dataset",
     )
     args = parser.parse_args(argv)
+    kind = KINDS[args.kind]
+    args.dataset = args.dataset or kind.dataset
     wanted = [s for s in setup.SOURCES if s.name in (args.source or names)]
     setup.fetch(tuple(wanted), args.corpus)
     files = []
@@ -275,6 +318,7 @@ def main(argv: list[str] | None = None) -> int:
             args.model,
             args.dataset,
             dry_run=args.dry_run,
+            kind=kind,
         )
     if not args.accept or args.dry_run:
         print(f"candidates are unreviewed; review them, then re-run with --accept ({CANDIDATES})")
