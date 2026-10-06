@@ -219,7 +219,12 @@ def logits(**by_token: float) -> np.ndarray:
         ("yes and no among the likeliest", logits(yes=3.0, no=1.0), 1 / (1 + np.exp(-2.0))),
         ("no alone among them still decides", logits(no=8.0), 0.5 / (0.5 + 0.5 * np.exp(8.0)) * 1),
         ("the likelier spelling of yes counts", logits(yes=1.0, yes_spaced=4.0, no=4.0), 0.5),
-        ("neither among the likeliest: no leaning yet", logits(mark=9.0) - 5, None),
+        # Answer tokens must rank below the cutoff: argpartition does not order ties stably.
+        (
+            "neither among the likeliest: no leaning yet",
+            logits(yes=-5.0, yes_spaced=-5.0, no=-5.0, mark=9.0),
+            None,
+        ),
     ],
 )
 def test_leaning(name: str, found: np.ndarray, expected: float | None) -> None:
