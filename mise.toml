@@ -5,6 +5,7 @@ bun = "latest"
 "aqua:cocogitto/cocogitto" = "7.0.0"  # cog: conventional-commit version bumps in CI
 
 [env]
+UV_PYTHON = "3.13"
 _.python.venv = { path = ".venv", create = true }
 # Every task works on its own home, so development never touches the data of an installed haskie.
 HASKIE_HOME = "{{env.HOME}}/haskie-dev"

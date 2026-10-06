@@ -73,7 +73,10 @@ target-version = "py313"
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.ty.src]
-include = ["src", "tests"]
+include = ["src", "tests", "evals"]
+# A task's test_task.py imports the module the agent is asked to write, which never exists in
+# this repo - it exists only in the workspace `run.py` grades.
+exclude = ["evals/tasks"]
 
 [tool.ty.analysis]
 # Installed on Apple Silicon only, so Linux, and CI on Linux, have none of them.

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Print the latest eval report"
+set -euo pipefail
+report="evals/runs/report.txt"
+test -f "$report" || { echo "No report yet. Run: mise run eval:run" >&2; exit 1; }
+cat "$report"

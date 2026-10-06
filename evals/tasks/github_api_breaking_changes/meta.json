@@ -1,0 +1,4 @@
+{
+  "module": "github_api_breaking_changes",
+  "evidence": ["github-api-breaking-changes.md"]
+}
