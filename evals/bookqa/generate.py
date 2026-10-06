@@ -37,7 +37,7 @@ from evals.run import claude_binary, subprocess_environment
 
 HERE = Path(__file__).resolve().parent
 PROMPT_VERSION = "v1"
-RELATE_VERSION = "v1"
+RELATE_VERSION = "v2"
 CANDIDATES = HERE / "candidates"
 DATASET = HERE / "dataset.jsonl"
 RELATIONS = HERE / "relations.jsonl"

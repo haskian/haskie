@@ -264,6 +264,6 @@ def test_relations_ask_the_relate_prompt_and_keep_the_relation(corpus: Path) -> 
     assert path.name.startswith("relate-")
     (made,) = schema.load(path)[0]
     assert made.relation is schema.Relation.CORRELATES_POSITIVELY
-    assert made.meta.prompt_version == "relate-v1"
+    assert made.meta.prompt_version == f"relate-{generate.RELATE_VERSION}"
     assert schema.validate([made], corpus) == []
     assert not dataset.exists(), "candidates are never gold until accepted"
