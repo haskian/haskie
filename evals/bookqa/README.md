@@ -72,6 +72,35 @@ asked again, so the same inputs give the same records, ids included. A new seed,
 version (`prompts/generate-vN.md`, `PROMPT_VERSION`) is a new generation. A question already in
 the dataset or another candidate is dropped.
 
+## Relationship questions
+
+A second, separate dataset asks how two things in a book relate: what problem a technique
+solves, what a choice trades off, when an approach fails, what has to be in place for another to
+work. Each question names one of 14 relations (`schema.Relation`: `solves`, `mitigates`,
+`causes`, `trades_off`, `alternative_to`, `requires`, `implemented_via`, `complements`,
+`fails_when`, `challenges`, `generalizes`, `correlates_positively`, `correlates_negatively`,
+`analogous`) and cites at least two passages, at least one for each side, preferably from
+different sections. It is answered only when both sides are found, which `all@10` measures.
+
+```sh
+mise run eval:bookqa:generate -- --kind relations --segments 2 --per-segment 3   # candidates
+mise run eval:bookqa:review -- --candidates                                      # check them
+mise run eval:bookqa:generate -- --kind relations --segments 2 --per-segment 3 --accept
+mise run eval:bookqa:run -- --dataset evals/bookqa/relations.jsonl
+mise run eval:bookqa:sections -- --dataset evals/bookqa/relations.jsonl
+mise run eval:bookqa:judge -- evals/bookqa/reports/<run>/outcomes.jsonl --dataset evals/bookqa/relations.jsonl
+uv run python -m evals.bookqa.report evals/bookqa/reports/<run>/outcomes.jsonl --dataset evals/bookqa/relations.jsonl
+```
+
+The judge and the report's re-render read `dataset.jsonl` unless told otherwise, and a re-render
+scores only the questions of the dataset it reads, so pass `--dataset` to both.
+
+Claude drafts them from one segment at a time with `prompts/relate-v1.md`, so both sides come
+from one chapter of one book. The candidates are named `relate-<segment>-<key>.jsonl` beside the
+fact candidates, and `--accept` moves them into `relations.jsonl`, never `dataset.jsonl`, so the
+fact reports stay comparable across runs. Review them as the fact questions are, and check one
+thing more: that the book itself states the relation, rather than general knowledge supplying it.
+
 ## Record schema
 
 One JSON object per line (`schema.Record`, `SCHEMA_VERSION` 1):
@@ -96,7 +125,9 @@ One JSON object per line (`schema.Record`, `SCHEMA_VERSION` 1):
 }
 ```
 
-- `query_type` is `direct`, `paraphrase`, `multi_fact` or `nearby_sections`.
+- `query_type` is `direct`, `paraphrase`, `multi_fact`, `nearby_sections` or `relationship`.
+- `relation` is set on a `relationship` record only, one of `schema.Relation`. Records written
+  before it have none, and still load.
 - `page` is the 1-based physical PDF page the quote starts on, the page haskie's `page_start`
   counts. It is `null` for a source without pages.
 - An unanswerable record has `answerable: false`, no documents and no passages. Its
@@ -109,6 +140,8 @@ the quote's four-word runs, compared letters and digits only. That makes it immu
 ligatures and haskie's markup. It also covers a quote that haskie cut at a chunk boundary.
 
 - **Recall@1/5/10**: the share of a question's gold passages matched in the top k.
+- **all@10**: every gold passage of a question in the top 10, the share of questions. For a
+  relationship question, both sides found.
 - **MRR**: the reciprocal rank of the first match.
 - **nDCG@10**: binary gains, each gold passage credited once.
 - **doc@10**: a relevant document anywhere in the top 10.
@@ -184,6 +217,7 @@ records: the book may answer them after all.
 | --- | --- |
 | `generate.py` | phase 1: segments, prompt, `claude -p`, candidates, `--accept` |
 | `prompts/generate-v1.md` | the generation prompt, versioned by file name |
+| `prompts/relate-v1.md` | the relationship-question prompt (`--kind relations`) |
 | `sources.py` | the books as text: hash, pages, segments, where a quote sits |
 | `schema.py` | the record, JSONL load/dump, every validation |
 | `review.py` | phase 1's checks, standalone |
@@ -193,6 +227,7 @@ records: the book may answer them after all.
 | `judge.py`, `prompts/judge-v1.md` | graded judgments of returned passages, by Claude |
 | `qrels.py` | the judgments: storage, keys, lookup |
 | `dataset.jsonl` | the reviewed dataset: gold, versioned |
+| `relations.jsonl` | the reviewed relationship questions: gold, versioned |
 | `judgments.jsonl` | graded judgments, versioned |
 | `candidates/` | unreviewed generations, local only: what is accepted is versioned in `dataset.jsonl` |
 | `reports/` | run output, not versioned |

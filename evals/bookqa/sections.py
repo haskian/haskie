@@ -10,6 +10,8 @@ collection as `run.py`:
 - **S@k, gold**: a section in the top k holds one of the question's gold quotes. A section's text
   is read back through haskie's `/lines`, and a quote counts as in it the way `metrics.matches`
   counts it in a passage.
+- **all@10, gold**: every gold quote of the question is in a section of the top 10 - for a
+  relationship question, both sides.
 - **S@k, judged**: a section in the top k holds a passage judged to state the answer
   (`qrels.py`, grade 2), so an answer the book gives outside the gold quotes counts too.
 - **descriptors**: the answer's own terms - the words of its expected facts that the question
@@ -74,6 +76,7 @@ class Scored(msgspec.Struct):
     terms: list[str]  # the answer's terms the question does not use
     in_descriptors: float | None  # share of `terms` in the first answering section's descriptors
     in_header: float | None  # the same share in its heading
+    complete: int | None = None  # 1-based rank by which every gold quote is in a section
 
 
 def search(api: str, collection: str, query: str) -> tuple[list[Section], float, int]:
@@ -151,6 +154,22 @@ def score(
     return first(gold), first(judged), either
 
 
+def complete(record: Record, sections: list[Section], text: Texts) -> int | None:
+    """The rank by which every gold quote is in a section of `sections`, or None when one never
+    is: a relationship question is answered only when both sides are found."""
+    ranks = []
+    for passage in record.relevant_passages:
+        found = [
+            metrics.matches(Found(document=s.document, text=text(s), score=s.score), passage)
+            for s in sections
+        ]
+        rank = first(found)
+        if rank is None:
+            return None
+        ranks.append(rank)
+    return max(ranks, default=None)
+
+
 def evaluate(records: list[Record], api: str, collection: str) -> list[Scored]:
     text = Texts(api)
     judgments = qrels.load(qrels.JUDGMENTS)
@@ -176,6 +195,7 @@ def evaluate(records: list[Record], api: str, collection: str) -> list[Scored]:
                 terms=terms,
                 in_descriptors=share(terms, " ".join(hit.descriptors)) if hit and terms else None,
                 in_header=share(terms, hit.header) if hit and terms else None,
+                complete=complete(record, sections, text),
             )
         )
     return scored
@@ -190,23 +210,36 @@ def _row(group: list[Scored]) -> str:
         return _mean([float((getattr(s, rank_of) or 99) <= k) for s in group])
 
     gold = [hits("gold", k) for k in K]
+    whole = hits("complete", max(K))
     judged = [hits("judged", k) for k in K]
     rr = _mean([1 / s.judged if s.judged else 0.0 for s in group])
     described = [s.in_descriptors for s in group if s.in_descriptors is not None]
     headed = [s.in_header for s in group if s.in_header is not None]
     kb = _mean([s.bytes / 1000 for s in group])
     ms = statistics.median(s.seconds * 1000 for s in group)
-    cells = [str(len(group)), *gold, *judged, rr, _mean(described), _mean(headed), kb, f"{ms:.0f}"]
+    cells = [
+        str(len(group)),
+        *gold,
+        whole,
+        *judged,
+        rr,
+        _mean(described),
+        _mean(headed),
+        kb,
+        f"{ms:.0f}",
+    ]
     return " | ".join(cells)
 
 
 def render(scored: list[Scored]) -> str:
-    columns = ["n", *(f"S@{k} gold" for k in K), *(f"S@{k} judged" for k in K), "MRR judged"]
+    columns = ["n", *(f"S@{k} gold" for k in K), f"all@{max(K)} gold"]
+    columns += [*(f"S@{k} judged" for k in K), "MRR judged"]
     columns += ["terms in descriptors", "terms in heading", "kB", "ms p50"]
     lines = [
         "# Section search",
         "S@k: a section in the top k holds the answer - by its gold quote, or a passage judged to "
-        "state it. Terms: the share of the answer's own words (not the question's) in the "
+        "state it. all@10: every gold quote is in a top-10 section, both sides of a relationship. "
+        "Terms: the share of the answer's own words (not the question's) in the "
         "descriptors, and in the heading, of the first section that holds it.",
     ]
     for title, field in (("All", None), ("By source", "source"), ("By query type", "query_type")):

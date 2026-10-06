@@ -58,8 +58,21 @@ def test_answerable_questions_are_averaged_per_mode_source_and_query_type() -> N
     text = report.render(outcomes)
 
     by_mode = _section(text, "Answerable, by mode")
-    # n, R@1, R@5, R@10, MRR, nDCG@10, doc@10, empty, kB, ms p50
-    expected = ["fts", "3", "0.33", "0.67", "0.67", "0.42", "0.33", "0.67", "1", "3.0", "20"]
+    # n, R@1, R@5, R@10, all@10, MRR, nDCG@10, doc@10, empty, kB, ms p50
+    expected = [
+        "fts",
+        "3",
+        "0.33",
+        "0.67",
+        "0.67",
+        "0.67",
+        "0.42",
+        "0.33",
+        "0.67",
+        "1",
+        "3.0",
+        "20",
+    ]
     assert _row(by_mode, "| fts |") == expected
     assert _row(by_mode, "| hybrid |")[:3] == ["hybrid", "1", "1.00"]
     by_source = _section(text, "Answerable, by mode and source")
@@ -91,3 +104,23 @@ def test_a_run_without_unanswerable_questions_has_no_table_for_them() -> None:
     text = report.render([_outcome("fts", "raft.pdf")])
 
     assert "## Answerable, by mode" in text and "Unanswerable" not in text
+
+
+def test_all_at_10_counts_only_questions_with_every_gold_quote_found() -> None:
+    half = _outcome("fts", "raft.pdf", query_type="relationship")
+    assert half.scores is not None
+    half.scores.recall = {1: 0.5, 5: 0.5, 10: 0.5}  # one side of two found
+    whole = _outcome("fts", "raft.pdf", rank=2, query_type="relationship")
+
+    by_type = _section(report.render([half, whole]), "Answerable, by mode and query type")
+
+    # mode, query type, n, R@1, R@5, R@10, all@10
+    assert _row(by_type, "| fts | relationship |")[:7] == [
+        "fts",
+        "relationship",
+        "2",
+        "0.25",
+        "0.75",
+        "0.75",
+        "0.50",
+    ]

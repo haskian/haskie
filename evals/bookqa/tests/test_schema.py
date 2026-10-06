@@ -211,3 +211,37 @@ def test_a_passage_must_cite_a_relevant_document(corpus: Path) -> None:
     assert _problems(record, corpus) == [
         f"cites {books.MARKDOWN}, not among its relevant documents"
     ]
+
+
+def test_a_relationship_question_with_a_passage_per_side_passes(corpus: Path) -> None:
+    assert _problems(books.relationship(corpus), corpus) == []
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({"relation": None}, "a relationship question names no relation"),
+        ({"relevant_passages": [Passage(books.PDF, books.LINES[65], 2, "")]}, "under two passages"),
+    ],
+)
+def test_a_relationship_question_needs_a_relation_and_both_sides(
+    corpus: Path, changes: dict, expected: str
+) -> None:
+    problems = _problems(books.relationship(corpus, **changes), corpus)
+
+    assert any(expected in p for p in problems), problems
+
+
+def test_a_relation_on_another_kind_of_question_is_an_issue(corpus: Path) -> None:
+    record = books.record(corpus, relation=schema.Relation.SOLVES)
+
+    assert _problems(record, corpus) == ["names a relation but is a direct question"]
+
+
+def test_a_record_written_before_relations_still_loads(corpus: Path, tmp_path: Path) -> None:
+    line = msgspec.to_builtins(books.record(corpus))
+    del line["relation"]
+    path = tmp_path / "dataset.jsonl"
+    path.write_text(msgspec.json.encode(line).decode() + "\n", encoding="utf-8")
+
+    assert schema.load(path) == ([books.record(corpus)], [])

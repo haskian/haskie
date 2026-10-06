@@ -136,3 +136,18 @@ def test_unanswerable_questions_are_left_out(corpus: Path, haskie: str) -> None:
     Haskie.map = []
 
     assert sections.evaluate([books.unanswerable(corpus)], haskie, "books") == []
+
+
+def test_a_relationship_is_complete_only_once_both_sides_are_in_a_section(
+    corpus: Path, haskie: str
+) -> None:
+    Haskie.map = [
+        _section(60, 70, "Workers 59-69", []),  # worker 65's side
+        _section(1, 10, "Workers 0-9", []),  # worker 3's side
+    ]
+    record = books.relationship(corpus)
+    found = sections.search(haskie, "books", record.query)[0]
+    text = sections.Texts(haskie)
+
+    assert sections.complete(record, found, text) == 2
+    assert sections.complete(record, found[:1], text) is None
