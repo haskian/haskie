@@ -33,6 +33,7 @@ import msgspec
 from evals import setup
 from evals.bookqa import schema, sources
 from evals.bookqa.schema import Generation, Passage, QueryType, Record
+from evals.corpora import corpus as corpora
 from evals.run import claude_binary, subprocess_environment
 
 HERE = Path(__file__).resolve().parent
@@ -248,14 +249,18 @@ def accept(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    names = [s.name for s in setup.SOURCES]
-    parser.add_argument("--source", action="append", choices=names, help="default: every book")
+    parser.add_argument(
+        "--collection",
+        help="an open-corpora collection (evals/corpora/manifest.json): ask about its books, "
+        "not the bookqa sources, into its own dataset",
+    )
+    parser.add_argument("--source", action="append", help="a book's file name; default: every one")
     parser.add_argument("--segments", type=int, default=3, help="segments per source; 0 for all")
     parser.add_argument("--per-segment", type=int, default=5, help="questions per segment")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--model", default=os.environ.get("BOOKQA_MODEL", "sonnet"))
-    parser.add_argument("--dataset", type=Path, default=DATASET)
-    parser.add_argument("--corpus", type=Path, default=setup.CORPUS_DIR)
+    parser.add_argument("--dataset", type=Path, help="default: dataset.jsonl, or the collection's")
+    parser.add_argument("--corpus", type=Path, help="default: where the books are downloaded")
     parser.add_argument("--dry-run", action="store_true", help="list what would be generated")
     parser.add_argument(
         "--accept",
@@ -263,12 +268,30 @@ def main(argv: list[str] | None = None) -> int:
         help="move the candidates that pass review into the dataset",
     )
     args = parser.parse_args(argv)
-    wanted = [s for s in setup.SOURCES if s.name in (args.source or names)]
-    setup.fetch(tuple(wanted), args.corpus)
+    if args.collection:
+        collection = corpora.find(args.collection)
+        args.corpus = args.corpus or corpora.DIRECTORY / collection.name
+        args.dataset = args.dataset or corpora.questions(collection.name)
+        names = [d.name for d in collection.documents]
+    else:
+        args.corpus = args.corpus or setup.CORPUS_DIR
+        args.dataset = args.dataset or DATASET
+        names = [s.name for s in setup.SOURCES]
+    unknown = sorted(set(args.source or []) - set(names))
+    if unknown:
+        print(
+            f"no such source: {', '.join(unknown)}; there are {', '.join(names)}", file=sys.stderr
+        )
+        return 1
+    wanted = args.source or names
+    if args.collection:
+        corpora.fetch(collection, args.corpus.parent)
+    else:
+        setup.fetch(tuple(s for s in setup.SOURCES if s.name in wanted), args.corpus)
     files = []
-    for source in wanted:
+    for name in wanted:
         files += generate(
-            args.corpus / source.name,
+            args.corpus / name,
             args.segments,
             args.per_segment,
             args.seed,
@@ -279,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.accept or args.dry_run:
         print(f"candidates are unreviewed; review them, then re-run with --accept ({CANDIDATES})")
         return 0
+    args.dataset.parent.mkdir(parents=True, exist_ok=True)
     accepted, issues = accept(files, args.dataset, args.corpus)
     for issue in issues:
         print(f"  left out {issue.record}: {issue.problem}", file=sys.stderr)

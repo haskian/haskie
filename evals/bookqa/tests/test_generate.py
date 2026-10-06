@@ -221,3 +221,24 @@ def test_accept_moves_only_the_candidates_that_pass_review(corpus: Path) -> None
     assert [i.problem for i in issues] == [f"quote is on page 2 of {books.PDF}, not 1"]
     again, _ = generate.accept([good, bad], dataset, corpus)
     assert again == [] and len(schema.load(dataset)[0]) == 2, "accepting twice adds nothing"
+
+
+def test_a_collection_asks_about_its_own_books(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from evals.corpora import corpus as corpora
+
+    shelf = books.corpus(tmp_path / "open" / "open-x")
+    pdf = shelf / books.PDF
+    document = corpora.Document(books.PDF, "A Book", "https://x/b.pdf", sources.sha256(pdf), 1)
+    manifest = corpora.Manifest("list", [corpora.Collection("open-x", "X", [document])])
+    corpora.dump(manifest, tmp_path / "manifest.json")
+    monkeypatch.setattr(corpora, "MANIFEST", tmp_path / "manifest.json")
+    monkeypatch.setattr(corpora, "DIRECTORY", tmp_path / "open")
+    monkeypatch.setattr(generate, "CANDIDATES", tmp_path / "candidates")
+
+    assert generate.main(["--collection", "open-x", "--segments", "0", "--dry-run"]) == 0
+
+    out = capsys.readouterr().out
+    assert f"{books.PDF} p001-002: to generate" in out
+    assert books.MARKDOWN not in out, "only the manifest's books, not every file in the folder"

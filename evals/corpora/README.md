@@ -46,6 +46,26 @@ hash no longer matches the manifest, since questions written from it would no lo
 manifest collection becomes one haskie collection, named `open-<subject>`. Like every eval setup,
 it waits for each collection's post-index maintenance before it returns.
 
+## Questions
+
+Each collection gets its own bookqa dataset, `questions/<collection>.jsonl`, made and scored with
+the bookqa tools pointed at it (`--collection`): the generator asks about the collection's books
+instead of the bookqa sources, review checks its candidates against its own folder, and the
+search runs take the instance, collection, books and dataset:
+
+```sh
+mise run eval:bookqa:generate -- --collection open-machine-learning --segments 2 --per-segment 3
+mise run eval:bookqa:review -- --collection open-machine-learning --candidates
+mise run eval:bookqa:generate -- --collection open-machine-learning --segments 2 --per-segment 3 --accept
+uv run python -m evals.bookqa.run --api http://127.0.0.1:8126 --collection open-machine-learning \
+  --corpus evals/corpus/open/open-machine-learning --dataset evals/corpora/questions/open-machine-learning.jsonl
+```
+
+The generator reads a PDF through pypdf, so its quotes are pypdf's text, while a search returns
+haskie's. Where the two differ a gold quote can never match: leave such a book out with
+`--source`. On the pilot, `computer-science-from-the-bottom-up.pdf` comes out of pypdf as mostly
+symbols, and haskie reads it fine.
+
 ## Layout
 
 | file | what |
@@ -53,3 +73,4 @@ it waits for each collection's post-index maintenance before it returns.
 | `build.py` | the list, the candidates, the checks, landing pages, the manifest |
 | `corpus.py` | the manifest's types, downloads checked by hash, indexing |
 | `manifest.json` | the books: collections, files, hashes, and the links left out; versioned |
+| `questions/` | each collection's reviewed bookqa dataset; versioned |

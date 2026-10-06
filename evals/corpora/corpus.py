@@ -23,6 +23,7 @@ from evals import setup
 HERE = Path(__file__).resolve().parent
 MANIFEST = HERE / "manifest.json"
 DIRECTORY = setup.CORPUS_DIR / "open"
+QUESTIONS = HERE / "questions"  # one reviewed bookqa dataset per collection, versioned
 USER_AGENT = "Mozilla/5.0 (haskie eval corpora)"  # some hosts refuse urllib's default agent
 
 
@@ -64,6 +65,25 @@ def load(path: Path = MANIFEST) -> Manifest:
 
 def dump(manifest: Manifest, path: Path = MANIFEST) -> None:
     path.write_bytes(msgspec.json.format(msgspec.json.encode(manifest), indent=2) + b"\n")
+
+
+def find(name: str, path: Path | None = None) -> Collection:
+    """The manifest's collection `name`; `KeyError` naming the ones there are."""
+    path = path or MANIFEST
+    collections = {c.name: c for c in load(path).collections}
+    if name not in collections:
+        raise KeyError(f"no collection {name} in {path}; there are {', '.join(collections)}")
+    return collections[name]
+
+
+def questions(name: str) -> Path:
+    """Where the reviewed questions on collection `name` live: a bookqa dataset."""
+    return QUESTIONS / f"{name}.jsonl"
+
+
+def stems(collection: Collection) -> set[str]:
+    """Its books' file names without extension: the names of their bookqa candidate folders."""
+    return {Path(d.name).stem for d in collection.documents}
 
 
 def sha256(data: bytes) -> str:
