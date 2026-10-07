@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.32.0 - 2026-10-07
+#### Features
+- (**cli**) add Codex installation (#46) - (2dd7805) - Črtomir Majer
+
+- - -
+
 ## v0.31.0 - 2026-10-05
 #### Features
 - (**collections**) page counts, also-in tags and description hints in the document lists (#42) - (86bbabb) - Črtomir Majer
