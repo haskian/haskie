@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.32.1 - 2026-10-07
+#### Bug Fixes
+- (**cli**) enable Codex MCP protocol and load search rules (#47) - (3cf691a) - Črtomir Majer
+
+- - -
+
 ## v0.32.0 - 2026-10-07
 #### Features
 - (**cli**) add Codex installation (#46) - (2dd7805) - Črtomir Majer
