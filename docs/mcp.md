@@ -61,20 +61,33 @@ writes into `CODEX_HOME`, defaulting to `~/.codex`; project scope writes into `.
 
 | file under that directory | purpose |
 | --- | --- |
-| `config.toml` | `[mcp_servers.haskie]` with the HTTP endpoint |
+| `config.toml` | `[mcp_servers.haskie]` with the HTTP endpoint and `[features] mcp_2026_07_28 = true` |
 | `skills/haskie/SKILL.md` | the same collection-aware tool reference as Claude Code |
-| `rules/haskie.md` | the same search-first rule, read by the hook |
+| `rules/haskie.md` | the same search-first rule, linked from Codex's instructions |
 | `hooks.json` | a SessionStart hook running `haskie run --hook --hook-rules <rule path>` |
 
 The skill uses Codex's supported configuration-layer skill directory. This keeps custom
 `CODEX_HOME` profiles separate. The installer edits TOML directly, so the Codex CLI need not
 be on PATH. Other servers, settings, comments and hooks remain intact.
 
-Codex does not load prose from `rules/` itself. The SessionStart hook reads this rule and emits
-it alongside the session id. Codex adds that output to the session's context, leaving existing
-`AGENTS.md` files untouched. Codex requires review and trust of each new or changed hook before
-it runs. Project configuration also requires a trusted project. Review the hook in Codex, then
-start a new session. See the [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks).
+Codex defaults to the older MCP handshake. The installer enables its `mcp_2026_07_28` feature
+so it sends the metadata haskie requires. Without it, the connection fails with
+`Missing or invalid params._meta`. For an existing installation, run `haskie install codex`
+again or `codex features enable mcp_2026_07_28`, then restart Codex. Uninstall leaves this
+shared protocol feature enabled because other servers may use it.
+
+Codex does not load prose from `rules/` itself. The installer prepends a managed block to
+`AGENTS.md` that tells Codex to read the full rule at session start. User scope uses the file
+under `CODEX_HOME`; project scope uses the file in the working directory, outside `.codex`.
+If `AGENTS.override.md` takes precedence, the block goes there instead. Existing instructions
+remain intact. Reinstall replaces only this block; uninstall removes it from both files.
+See [Codex instruction discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md).
+
+The SessionStart hook also emits the rule alongside the session id. Codex requires review and
+trust of each new or changed hook before it runs. The instruction reference works even when
+the hook does not run, and supplies a fallback session id policy. Project configuration also
+requires a trusted project. Review the hook in Codex, then start a new session.
+See the [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks).
 
 The installer starts haskie and waits for it, as the Claude installer does. Later hooks start
 it without waiting. Run `haskie run` before the first session after a reboot to ensure the tools
