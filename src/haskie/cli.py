@@ -134,6 +134,7 @@ def run(
         # so without this line every search is recorded against no session at all.
         typer.echo(claude.session_announcement(session_id))
     if hook and hook_rules is not None:
+        # Older Codex installations emitted the rule here. New ones link it from AGENTS.md.
         typer.echo(hook_rules.read_text(encoding="utf-8"))
     url = f"http://{host}:{port}"
     status = _serve(url, wait=not hook)
@@ -497,15 +498,15 @@ def install_codex(
     directory = codex.codex_dir(scope)
     try:
         asyncio.run(db.migrate_once())
-        codex.validate(directory)
+        codex.validate(directory, scope)
         codex.register_mcp(directory, url)
         typer.echo(f"registered the haskie MCP server at {url} ({scope} scope)")
+        typer.echo("enabled MCP 2026-07-28 support in Codex")
         found = asyncio.run(claude.read_collections())
         for written in claude.write_instructions(directory, found):
             typer.echo(f"wrote {written}")
-        claude.install_hook(
-            directory, home.HOME, url, filename="hooks.json", rules=claude.rule_path(directory)
-        )
+        typer.echo(f"linked the search rule from {codex.install_rule_reference(directory, scope)}")
+        claude.install_hook(directory, home.HOME, url, filename="hooks.json")
         typer.echo(f"wrote the SessionStart hook in {directory / 'hooks.json'}")
         asyncio.run(claude.record_installation(directory, "codex"))
         _serve(url, wait=True)
@@ -582,13 +583,15 @@ def uninstall_codex(
     _use_home(home_dir)
     directory = codex.codex_dir(scope)
     try:
-        codex.validate(directory)
+        codex.validate(directory, scope)
         if home.DB_FILE.is_file() and asyncio.run(claude.forget_installation(directory, "codex")):
             typer.echo(f"stopped refreshing {directory}")
         if codex.register_mcp(directory, None):
             typer.echo(f"removed the haskie MCP server ({scope} scope)")
         if claude.uninstall_hook(directory, filename="hooks.json"):
             typer.echo(f"removed the SessionStart hook from {directory / 'hooks.json'}")
+        for changed in codex.remove_rule_reference(directory, scope):
+            typer.echo(f"removed the search rule reference from {changed}")
         for removed in claude.remove_instructions(directory):
             typer.echo(f"removed {removed}")
     except (HaskieError, OSError) as exc:

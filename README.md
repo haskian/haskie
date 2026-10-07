@@ -174,8 +174,11 @@ no haskie tools. Run `haskie run` first if that session matters.
 
 `haskie install codex` provides the same tools, skill, search rule and startup hook for Codex.
 It writes into `~/.codex` (or `CODEX_HOME`), or `./.codex` with `--scope project`.
-The MCP entry goes in `config.toml` and the hook in `hooks.json`. The hook loads the search
-rule into session context. Review and trust the hook in Codex, then start a new session.
+The MCP entry goes in `config.toml` and the hook in `hooks.json`. A managed block in `AGENTS.md`
+(or the active `AGENTS.override.md`) tells Codex to read the search rule even without the hook.
+Project scope puts that block in the working directory's instructions.
+The installer also enables Codex's `mcp_2026_07_28` feature, which
+haskie's protocol requires. Restart Codex, review and trust the hook, then start a new session.
 Project scope also requires a trusted project. `--home` and `--url` work as for Claude Code.
 See [MCP](docs/mcp.md#what-haskie-install-codex-adds) for paths and removal.
 

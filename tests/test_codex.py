@@ -16,6 +16,7 @@ from haskie import cli as cli_module
 from haskie.claude import Scope
 from haskie.cli import cli
 from haskie.collection.collection import Collection
+from haskie.errors import InvalidInput
 from haskie.tables import installations
 
 
@@ -27,6 +28,9 @@ def test_codex_install_and_uninstall(
     directory = tmp_path / ("profile" if scope == "user" else ".codex")
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "profile"))
     directory.mkdir()
+    instructions = (directory if scope == "user" else tmp_path) / "AGENTS.md"
+    original_instructions = "# My instructions\n\nKeep changes small.\n"
+    instructions.write_text(original_instructions)
     config = directory / "config.toml"
     original = '# Keep my settings\nmodel = "gpt-5.4"\n[mcp_servers.docs]\nurl = "https://docs.example/mcp"\n'
     config.write_text(original)
@@ -42,22 +46,28 @@ def test_codex_install_and_uninstall(
         assert result.exit_code == 0, result.output
     assert served == [(cli_module.MCP_URL, True)] * 2
     assert tomllib.loads(config.read_text())["mcp_servers"]["haskie"] == {"url": cli_module.MCP_URL}
+    assert tomllib.loads(config.read_text())["features"]["mcp_2026_07_28"] is True
     assert "# Keep my settings" in config.read_text()
     matchers = json.loads(hooks.read_text())["hooks"]["SessionStart"]
     assert matchers[0] == user_hook
     assert len(matchers) == 2
     assert "--hook" in matchers[1]["hooks"][0]["command"]
-    assert "--hook-rules" in matchers[1]["hooks"][0]["command"]
+    assert "--hook-rules" not in matchers[1]["hooks"][0]["command"]
     assert (directory / "skills/haskie/SKILL.md").is_file()
     assert (directory / "rules/haskie.md").is_file()
+    assert instructions.read_text().count("<!-- haskie:start -->") == 1
+    assert str(directory / "rules/haskie.md") in instructions.read_text()
+    assert instructions.read_text().endswith(original_instructions)
     assert "trust" in result.output
     for _ in range(2):
         result = runner.invoke(cli, ["uninstall", "codex", *options])
         assert result.exit_code == 0, result.output
-    assert tomllib.loads(config.read_text()) == tomllib.loads(original)
+    expected = {**tomllib.loads(original), "features": {"mcp_2026_07_28": True}}
+    assert tomllib.loads(config.read_text()) == expected
     assert json.loads(hooks.read_text()) == {"hooks": {"SessionStart": [user_hook]}}
     assert not (directory / "skills/haskie").exists()
     assert not (directory / "rules/haskie.md").exists()
+    assert instructions.read_text() == original_instructions
 
 
 @pytest.mark.parametrize(
@@ -65,8 +75,11 @@ def test_codex_install_and_uninstall(
     [
         ("config.toml", "[broken", "not valid TOML"),
         ("config.toml", 'mcp_servers = "wrong"', "as a table"),
+        ("config.toml", 'features = "wrong"', "as a table"),
         ("hooks.json", "{broken", "not valid JSON"),
         ("hooks.json", '{"hooks": null}', "as a list of hooks"),
+        ("AGENTS.md", "<!-- haskie:start -->\nunfinished", "haskie instruction block"),
+        ("AGENTS.override.md", "<!-- haskie:end -->", "haskie instruction block"),
     ],
 )
 @pytest.mark.parametrize("command", ["install", "uninstall"])
@@ -101,7 +114,79 @@ def test_uninstall_absent_codex_does_not_create_files(
     assert not (tmp_path / "data").exists()
 
 
-def test_generated_codex_hook_supplies_session_and_search_rule(
+@pytest.mark.parametrize("scope", [Scope.USER, Scope.PROJECT])
+@pytest.mark.parametrize("override_text", [None, "", "\n ", "Use project conventions.\n"])
+def test_rule_reference_respects_codex_instruction_precedence(
+    scope: Scope, override_text: str | None, tmp_path: Path
+) -> None:
+    directory = tmp_path / "profile with spaces"
+    directory.mkdir()
+    agents, override = codex.instruction_paths(directory, scope)
+    agents.write_text("Existing instructions without a final newline")
+    if override_text is not None:
+        override.write_text(override_text)
+    expected = agents
+    if override_text is not None and (scope == Scope.PROJECT or override_text.strip()):
+        expected = override
+    before = {path: path.read_text() for path in (agents, override) if path.exists()}
+    for _ in range(2):
+        assert codex.install_rule_reference(directory, scope) == expected
+    assert expected.read_text().count(codex.RULE_START) == 1
+    assert f"(<{directory / 'rules/haskie.md'}>)" in expected.read_text()
+    assert "even when you know the answer" in expected.read_text()
+    assert codex.remove_rule_reference(directory, scope) == [expected]
+    assert codex.remove_rule_reference(directory, scope) == []
+    assert {path: path.read_text() for path in before} == before
+
+
+def test_rule_reference_preserves_symlink_permissions_and_later_edits(tmp_path: Path) -> None:
+    target = tmp_path / "dotfiles.md"
+    original = "# Personal instructions\n"
+    target.write_text(original)
+    target.chmod(0o600)
+    agents = tmp_path / "AGENTS.md"
+    agents.symlink_to(target)
+    codex.install_rule_reference(tmp_path, Scope.USER)
+    target.write_text("Before\n" + target.read_text() + "\nAfter")
+    codex.remove_rule_reference(tmp_path, Scope.USER)
+    assert agents.is_symlink()
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert target.read_text() == "Before\n" + original + "\nAfter"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        codex.RULE_START,
+        codex.RULE_END,
+        codex.RULE_END + codex.RULE_START,
+        codex.RULE_START * 2 + codex.RULE_END,
+        codex.RULE_START + codex.RULE_END * 2,
+    ],
+)
+def test_rule_reference_rejects_ambiguous_markers(text: str, tmp_path: Path) -> None:
+    path = tmp_path / "AGENTS.md"
+    path.write_text(text)
+    with pytest.raises(InvalidInput, match="haskie instruction block"):
+        codex.install_rule_reference(tmp_path, Scope.USER)
+    assert path.read_text() == text
+
+
+def test_rule_reference_removes_blocks_after_override_changes(tmp_path: Path) -> None:
+    codex.install_rule_reference(tmp_path, Scope.USER)
+    (tmp_path / "AGENTS.override.md").write_text("New override\n")
+    codex.install_rule_reference(tmp_path, Scope.USER)
+    assert codex.remove_rule_reference(tmp_path, Scope.USER) == [
+        tmp_path / "AGENTS.md",
+        tmp_path / "AGENTS.override.md",
+    ]
+    assert (tmp_path / "AGENTS.md").read_text() == ""
+    assert (tmp_path / "AGENTS.override.md").read_text() == "New override\n"
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["current hook", "older installed hook"])
+def test_codex_hook_supplies_session_and_preserves_older_rule_output(
+    legacy: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -125,6 +210,8 @@ def test_generated_codex_hook_supplies_session_and_search_rule(
     assert result.exit_code == 0, result.output
     settings = json.loads((directory / "hooks.json").read_text())
     hook = settings["hooks"]["SessionStart"][0]["hooks"][0]
+    if legacy:
+        hook["command"] += " " + shlex.join(["--hook-rules", str(claude.rule_path(directory))])
     result = runner.invoke(
         cli,
         shlex.split(hook["command"])[1:],
@@ -132,7 +219,7 @@ def test_generated_codex_hook_supplies_session_and_search_rule(
     )
     assert result.exit_code == 0, result.output
     assert "session id is codex-123" in result.output
-    assert claude.render_rule([]) in result.output
+    assert (claude.render_rule([]) in result.output) == legacy
     assert served == [("http://localhost:9234/mcp", True), ("http://localhost:9234", False)]
 
 
@@ -210,4 +297,24 @@ def test_mcp_edits_preserve_toml_shapes(original: str, tmp_path: Path) -> None:
         "http://localhost:9234/mcp"
     )
     assert codex.register_mcp(tmp_path, None)
-    assert tomllib.loads(config.read_text()) == tomllib.loads(original)
+    expected = {**tomllib.loads(original), "features": {"mcp_2026_07_28": True}}
+    assert tomllib.loads(config.read_text()) == expected
+
+
+@pytest.mark.parametrize("enabled", [None, False, True])
+def test_install_enables_codex_protocol_without_changing_other_features(
+    enabled: bool | None, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.toml"
+    original = "[features]\n# Keep this setting\nshell_snapshot = false\n"
+    if enabled is not None:
+        original += f"mcp_2026_07_28 = {str(enabled).lower()}\n"
+    config.write_text(original)
+    codex.register_mcp(tmp_path, "http://localhost:9234/mcp")
+    assert tomllib.loads(config.read_text())["features"] == {
+        "shell_snapshot": False,
+        "mcp_2026_07_28": True,
+    }
+    assert "# Keep this setting" in config.read_text()
+    codex.register_mcp(tmp_path, None)
+    assert tomllib.loads(config.read_text())["features"]["mcp_2026_07_28"] is True
