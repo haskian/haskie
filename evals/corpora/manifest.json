@@ -2,6 +2,200 @@
   "source": "https://raw.githubusercontent.com/EbookFoundation/free-programming-books/0ddd8749a993efeac1644ea9f47af0bb6f47b955/books/free-programming-books-subjects.md",
   "collections": [
     {
+      "name": "open-algorithms-data-structures",
+      "subject": "Algorithms & Data Structures",
+      "documents": [
+        {
+          "name": "algorithms.pdf",
+          "title": "Algorithms",
+          "url": "https://jeffe.cs.illinois.edu/teaching/algorithms/book/Algorithms-JeffE.pdf",
+          "sha256": "00295b82ff725c52a71351a0bb1ee1bdb1584e594a62395d3fb382aefd0f4d42",
+          "bytes": 25055430,
+          "page": ""
+        },
+        {
+          "name": "data-structures.pdf",
+          "title": "Data Structures",
+          "url": "https://adityacse.weebly.com/uploads/2/4/0/7/24078687/data-structures.pdf",
+          "sha256": "5b7fe4d610d4c01754537056ec136bdd48f0706680d29ac34ab41faabd701880",
+          "bytes": 9848533,
+          "page": ""
+        },
+        {
+          "name": "elementary-algorithms.pdf",
+          "title": "Elementary Algorithms",
+          "url": "https://github.com/user-attachments/files/18287890/algoxy-en.pdf",
+          "sha256": "4bf3c28609001c07ee7d0c5cfde149ef1431d5f773cb546b062e499497b9c5b6",
+          "bytes": 9147831,
+          "page": "https://github.com/liuxinyu95/AlgoXY"
+        },
+        {
+          "name": "learning-algorithm.pdf",
+          "title": "Learning Algorithm",
+          "url": "https://riptutorial.com/Download/algorithm.pdf",
+          "sha256": "8e6db33737c0027bd0dfa8633e3f0cadbbbf720315a865f3daaaacd9d407eaf5",
+          "bytes": 3791552,
+          "page": ""
+        },
+        {
+          "name": "purely-functional-data-structures.pdf",
+          "title": "Purely Functional Data Structures",
+          "url": "https://www.cs.cmu.edu/~rwh/students/okasaki.pdf",
+          "sha256": "f4b92ed7ea425f6f1019f20a4ef40df505327fbc5f1346ed6b7a2e28ab56d072",
+          "bytes": 628877,
+          "page": ""
+        }
+      ]
+    },
+    {
+      "name": "open-artificial-intelligence",
+      "subject": "Artificial Intelligence",
+      "documents": [
+        {
+          "name": "getting-started-with-artificial-intelligence-2nd-edition.pdf",
+          "title": "Getting Started with Artificial Intelligence , 2nd Edition",
+          "url": "https://www.ibm.com/downloads/cas/OJ6WX73V",
+          "sha256": "820779ee4fbd09f909187c5c6402313961959337a9c9b5232b37fa9d2d97401a",
+          "bytes": 4172591,
+          "page": ""
+        },
+        {
+          "name": "machine-learning-for-dummies-ibm-limited-edition.pdf",
+          "title": "Machine Learning For Dummies®, IBM Limited Edition",
+          "url": "https://www.ibm.com/downloads/cas/GB8ZMQZ3",
+          "sha256": "7f8996ec5c52a49536ad3ee4679a5f321d9e0ceb7af4e7e500ed8592c512c86c",
+          "bytes": 1866480,
+          "page": ""
+        }
+      ]
+    },
+    {
+      "name": "open-blockchain",
+      "subject": "Blockchain",
+      "documents": [
+        {
+          "name": "blockchain-for-dummies-2nd-ibm-limited-edition.pdf",
+          "title": "Blockchain for Dummies, 2nd IBM Limited Edition",
+          "url": "https://www.ibm.com/downloads/cas/36KBMBOG",
+          "sha256": "bf158801bbedba599cb6022ecf88a9d925a55ab7a343f4aea9ea5d0453f1c4d1",
+          "bytes": 1784049,
+          "page": ""
+        },
+        {
+          "name": "getting-started-with-enterprise-blockchain-a-guide-to-design-and-development.pdf",
+          "title": "Getting Started with Enterprise Blockchain: A Guide to Design and Development",
+          "url": "https://www.ibm.com/downloads/cas/RYWXAR0M",
+          "sha256": "f05b125e80c9cf6b8d21c3fd6606f5d4c6720375fc2518932621b791fc70c01a",
+          "bytes": 2654992,
+          "page": ""
+        },
+        {
+          "name": "ibm-blockchain-the-founder-s-handbook-third-edition.pdf",
+          "title": "IBM Blockchain: The Founder’s Handbook, Third Edition",
+          "url": "https://www.ibm.com/downloads/cas/GZPPMWM5",
+          "sha256": "79d5d8ebf6bab95b8b6ffff9eb536a00774ea8fd5bcc47e599cf0954d6a5881e",
+          "bytes": 7778650,
+          "page": ""
+        }
+      ]
+    },
+    {
+      "name": "open-cloud-computing",
+      "subject": "Cloud Computing",
+      "documents": [
+        {
+          "name": "how-to-optimize-storage-costs-using-amazon-s3.pdf",
+          "title": "How to optimize storage costs using Amazon S3",
+          "url": "https://d1.awsstatic.com/product-marketing/S3/Amazon_S3_eBook_Cost_Optimization.pdf",
+          "sha256": "6be1b34fd5582efb020801d7a0dfdabeb47f19f0a78163b3dd39a10087537e60",
+          "bytes": 835672,
+          "page": "https://aws.amazon.com/s3/cloud-storage-cost-optimization-ebook/"
+        }
+      ]
+    },
+    {
+      "name": "open-compiler-design",
+      "subject": "Compiler Design",
+      "documents": [
+        {
+          "name": "compiler-design-in-c-1990.pdf",
+          "title": "Compiler Design in C (1990)",
+          "url": "https://holub.com/goodies/compiler/compilerDesignInC.pdf",
+          "sha256": "69a419cc3fdb5d0828e8afae6837889c42e4458e9fee9aed4ea9ad76c21c23e0",
+          "bytes": 19148153,
+          "page": ""
+        }
+      ]
+    },
+    {
+      "name": "open-computer-science",
+      "subject": "Computer Science",
+      "documents": [
+        {
+          "name": "computational-thinking.pdf",
+          "title": "Computational Thinking",
+          "url": "https://www.cs.cmu.edu/~15110-s13/Wing06-ct.pdf",
+          "sha256": "d90ec080e5d0848b672bb6906b52a1690ad9f4ddfc00e640a5dd5b7e673c917e",
+          "bytes": 66288,
+          "page": ""
+        },
+        {
+          "name": "computer-science-class-xi.pdf",
+          "title": "Computer Science Class XI",
+          "url": "https://cbseacademic.nic.in/web_material/doc/cs/1_Computer-Science-Python-Book-Class-XI.pdf",
+          "sha256": "709336e350db441a1723a9ba3d78702a00dc7b06d10db3a9aa80cf31b72f7536",
+          "bytes": 14638561,
+          "page": ""
+        },
+        {
+          "name": "computer-science-class-xii.pdf",
+          "title": "Computer Science Class XII",
+          "url": "https://cbseacademic.nic.in/web_material/doc/cs/2_Computer_Science_Python_ClassXII.pdf",
+          "sha256": "8190aa95bd583fa0e0498c372c5eaa4396749aef1408a6d3f4eda9d70794fa3e",
+          "bytes": 13876928,
+          "page": ""
+        }
+      ]
+    },
+    {
+      "name": "open-data-science",
+      "subject": "Data Science",
+      "documents": [
+        {
+          "name": "data-mining-concepts-and-techniques.pdf",
+          "title": "Data Mining Concepts and Techniques",
+          "url": "https://ia800702.us.archive.org/7/items/datamining_201811/DS-book%20u5.pdf",
+          "sha256": "464f5386b70d41cacefbb488ea6d32221bc23252eb797dc4f6451ee3ad806457",
+          "bytes": 12585336,
+          "page": ""
+        },
+        {
+          "name": "foundations-of-data-science.pdf",
+          "title": "Foundations of Data Science",
+          "url": "https://www.cs.cornell.edu/jeh/book.pdf",
+          "sha256": "7412c43877d8f460ba73739e0e5da8d5a3d8b0262475d10bb4897fe569b449f8",
+          "bytes": 2493724,
+          "page": ""
+        },
+        {
+          "name": "high-dimensional-data-analysis-with-low-dimensional-models-principles-computatio.pdf",
+          "title": "High-Dimensional Data Analysis with Low-Dimensional Models: Principles, Computation, and Applications",
+          "url": "https://book-wright-ma.github.io/Book-WM-20210422.pdf",
+          "sha256": "7baadc93bf417ad9d3b9ec2c1e5d83c9afc075e02c2bd37978c7c3759ff398a1",
+          "bytes": 73582614,
+          "page": ""
+        },
+        {
+          "name": "internet-advertising-an-interplay-among-advertisers-online-publishers-ad-exchang.pdf",
+          "title": "Internet Advertising: An Interplay among Advertisers, Online Publishers, Ad Exchanges and Web Users",
+          "url": "https://arxiv.org/pdf/1206.1754v2.pdf",
+          "sha256": "d4ad51ae567c4dbf97ce2c408ff2b29870826af0cd60d476f48bcdd10e231cae",
+          "bytes": 1717115,
+          "page": ""
+        }
+      ]
+    },
+    {
       "name": "open-machine-learning",
       "subject": "Machine Learning",
       "documents": [
@@ -88,6 +282,190 @@
       ]
     },
     {
+      "name": "open-mathematics",
+      "subject": "Mathematics",
+      "documents": [
+        {
+          "name": "book-of-proof.pdf",
+          "title": "Book of Proof",
+          "url": "https://richardhammack.github.io/BookOfProof/Main.pdf",
+          "sha256": "e0e471ca794ddda7bc46704b22885e1582350b7fc5881f8ba9a61b3747ec79fd",
+          "bytes": 1841432,
+          "page": ""
+        },
+        {
+          "name": "computational-mathematics-with-sagemath.pdf",
+          "title": "Computational Mathematics with SageMath",
+          "url": "http://dl.lateralis.org/public/sagebook/sagebook-ba6596d.pdf",
+          "sha256": "6ae2ad2e9da6ed4d47cc45eda4454c4c17e2e9ebe44ab95c0c696c1cf27fc17b",
+          "bytes": 8823864,
+          "page": "https://www.sagemath.org/sagebook/"
+        },
+        {
+          "name": "foundations-of-constructive-probability-theory.pdf",
+          "title": "Foundations of Constructive Probability Theory",
+          "url": "https://arxiv.org/pdf/1906.01803.pdf",
+          "sha256": "a7c36ee5168f071ca861fdcaf59d5a9f1a388e53204bea33967ab84b3a361d01",
+          "bytes": 4459623,
+          "page": ""
+        },
+        {
+          "name": "introduction-to-probability.pdf",
+          "title": "Introduction to Probability",
+          "url": "https://math.dartmouth.edu/~prob/prob/prob.pdf",
+          "sha256": "763eab9894983ddfd6cd7f84685548d1515a9326a2d9fd015474534460551a5e",
+          "bytes": 2993135,
+          "page": ""
+        },
+        {
+          "name": "lies-damned-lies-or-statistics-how-to-tell-the-truth-with-statistics.pdf",
+          "title": "Lies, Damned Lies, or Statistics: How to Tell the Truth with Statistics",
+          "url": "https://www.poritz.net/jonathan/share/ldlos.pdf",
+          "sha256": "11dc6db7b378392fd1c4fe7575d5792cd51ed170679c045e4a9d23cdada09bbb",
+          "bytes": 1859205,
+          "page": ""
+        },
+        {
+          "name": "seven-sketches-in-compositionality-an-invitation-to-applied-category-theory.pdf",
+          "title": "Seven Sketches in Compositionality: An Invitation to Applied Category Theory",
+          "url": "https://arxiv.org/pdf/1803.05316.pdf",
+          "sha256": "f764f23020ee5ca45faa68b4e50257a7b5a69cb5e6baede696d2394baca33ce8",
+          "bytes": 3032448,
+          "page": ""
+        },
+        {
+          "name": "the-open-logic-text.pdf",
+          "title": "The Open Logic Text",
+          "url": "https://builds.openlogicproject.org/open-logic-complete.pdf",
+          "sha256": "e17ac6f54723999b727b56b60f864a969f2b7c883be5ce7149f13472a0ee14ae",
+          "bytes": 4063129,
+          "page": ""
+        },
+        {
+          "name": "yet-another-introductory-number-theory-textbook.pdf",
+          "title": "Yet Another Introductory Number Theory Textbook",
+          "url": "https://www.poritz.net/jonathan/share/yaintt.pdf",
+          "sha256": "44ae6b2b3dd3c44ee4a6c59c57b623861cabae2a33d1d057df99a1e5c6dcb09f",
+          "bytes": 881013,
+          "page": ""
+        },
+        {
+          "name": "a-quick-steep-climb-up-linear-algebra.pdf",
+          "title": "A Quick Steep Climb Up Linear Algebra",
+          "url": "http://stephendavies.org/quick.pdf",
+          "sha256": "d80b99ba3be3e999c8a183e583e65b26096f5e72178db491d9876af038ceee26",
+          "bytes": 32979116,
+          "page": ""
+        },
+        {
+          "name": "course-of-linear-algebra-and-multidimensional-geometry.pdf",
+          "title": "Course Of Linear Algebra And Multidimensional Geometry",
+          "url": "https://arxiv.org/pdf/math/0405323",
+          "sha256": "aa178aa1397479895eece4efc17097dd647170eafaaa60e9518e0100a7ab1321",
+          "bytes": 977469,
+          "page": ""
+        }
+      ]
+    },
+    {
+      "name": "open-misc",
+      "subject": "Misc",
+      "documents": [
+        {
+          "name": "barcode-overview.pdf",
+          "title": "Barcode Overview",
+          "url": "https://www.tec-it.com/download/PDF/Barcode_Reference_EN.pdf",
+          "sha256": "367bbb7429487ed54a5076c9f503be78b001fc8f7dc211d58c637a7e17406283",
+          "bytes": 2071439,
+          "page": ""
+        },
+        {
+          "name": "devops-for-dummies-3rd-ibm-limited-edition.pdf",
+          "title": "DevOps For Dummies, 3rd IBM Limited Edition",
+          "url": "https://www.ibm.com/downloads/cas/P9NYOK3B",
+          "sha256": "5b196c1728f4a426d82e91379c07ebdbca21549b3e69a58e6741098547ea1c55",
+          "bytes": 2742970,
+          "page": ""
+        },
+        {
+          "name": "software-technical-writing-a-guidebook.pdf",
+          "title": "Software Technical Writing: A Guidebook",
+          "url": "https://jamesg.blog/book.pdf",
+          "sha256": "4465fea6259740410e4cdc387e4e589a8297e6dc71fc4e55293b2472cccd9ff9",
+          "bytes": 4180912,
+          "page": ""
+        }
+      ]
+    },
+    {
+      "name": "open-networking",
+      "subject": "Networking",
+      "documents": [
+        {
+          "name": "code-connected-vol-1.pdf",
+          "title": "Code Connected vol.1",
+          "url": "https://hintjens.wdfiles.com/local--files/main%3Afiles/cc1pe.pdf",
+          "sha256": "a9a2b081d58dc1d01f1efbf35977170108e295c25365f11a8c7629d2e0711dcf",
+          "bytes": 20228164,
+          "page": ""
+        },
+        {
+          "name": "kafka-the-definitive-guide.pdf",
+          "title": "Kafka, The definitive Guide",
+          "url": "https://assets.confluent.io/m/1b509accf21490f0/original/20170707-EB-Confluent_Kafka_Definitive-Guide_Complete.pdf",
+          "sha256": "17b730a82e9db9e4d1963eb9c79440b38206ef9a394ce0e2699a5e20e52e2dcc",
+          "bytes": 6614389,
+          "page": ""
+        },
+        {
+          "name": "linux-networking.pdf",
+          "title": "Linux Networking",
+          "url": "https://linux-training.be/linuxnet.pdf",
+          "sha256": "3bb708a28cf093b221fa46b96e8475c72d5a46590951788d6aee98d08bc3ef70",
+          "bytes": 6095941,
+          "page": ""
+        },
+        {
+          "name": "understanding-ip-addressing-everything-you-ever-wanted-to-know.pdf",
+          "title": "Understanding IP Addressing: Everything you ever wanted to know",
+          "url": "http://pages.di.unipi.it/ricci/501302.pdf",
+          "sha256": "80b56d9d06e286e24e079edcca2bcbaa547760eaee08c560706ca5c17c2cc29b",
+          "bytes": 1143048,
+          "page": ""
+        }
+      ]
+    },
+    {
+      "name": "open-open-source-ecosystem",
+      "subject": "Open Source Ecosystem",
+      "documents": [
+        {
+          "name": "free-as-in-freedom-richard-stallman-and-the-free-software-revolution.epub",
+          "title": "Free as in Freedom: Richard Stallman and the free software revolution",
+          "url": "https://archive.org/download/faif-2.0/faif-2.0.epub",
+          "sha256": "4fa6c44656b9433ac9ac5cd17eedd7f8d52f1a1337265b50dd5a2f787c12b8ce",
+          "bytes": 996716,
+          "page": "https://archive.org/details/faif-2.0"
+        },
+        {
+          "name": "getting-started-with-open-source-development.pdf",
+          "title": "Getting started with Open source development",
+          "url": "https://public.dhe.ibm.com/software/dw/db2/express-c/wiki/Getting_started_with_open_source_development_p2.pdf",
+          "sha256": "3b96d0ceb4692fe44fb7240702b17bd9a5dbe91cad0851711cbb5bdf09620837",
+          "bytes": 3445390,
+          "page": ""
+        },
+        {
+          "name": "open-source-essentials.pdf",
+          "title": "Open Source Essentials",
+          "url": "https://learning.lpi.org/pdfstore/LPI-Learning-Material-050-100-en.pdf",
+          "sha256": "01ef9a2908de291ebf168154f0cbe8f2f984b8f9924a6020614ec87074141877",
+          "bytes": 6401361,
+          "page": "https://learning.lpi.org/en/learning-materials/050-100/"
+        }
+      ]
+    },
+    {
       "name": "open-operating-systems",
       "subject": "Operating Systems",
       "documents": [
@@ -142,6 +520,58 @@
       ]
     },
     {
+      "name": "open-quantum-computing",
+      "subject": "Quantum Computing",
+      "documents": [
+        {
+          "name": "introduction-to-quantum-information.pdf",
+          "title": "Introduction to Quantum Information",
+          "url": "https://www.gla.ac.uk/media/Media_344957_smxx.pdf",
+          "sha256": "b83e7828dc063347e86c2814b36b96c6c01d3cf43df484c084c7ec437bf8d5b6",
+          "bytes": 702355,
+          "page": ""
+        },
+        {
+          "name": "quantum-algorithms.pdf",
+          "title": "Quantum Algorithms",
+          "url": "https://arxiv.org/pdf/0808.0369v1",
+          "sha256": "e7c4e15e5ea3ac952a2d4c5e62fa9cd97dbde7d40761efde56dc4df6a67241f6",
+          "bytes": 515548,
+          "page": ""
+        },
+        {
+          "name": "quantum-information-theory.pdf",
+          "title": "Quantum Information Theory",
+          "url": "https://markwilde.com/qit-notes.pdf",
+          "sha256": "9202b75859436d7dd89a98b95cf413025feb557a6020d65d4697509703a6c1ae",
+          "bytes": 6699338,
+          "page": ""
+        }
+      ]
+    },
+    {
+      "name": "open-security-privacy",
+      "subject": "Security & Privacy",
+      "documents": [
+        {
+          "name": "security-essentials.pdf",
+          "title": "Security Essentials",
+          "url": "https://learning.lpi.org/pdfstore/LPI-Learning-Material-020-100-en.pdf",
+          "sha256": "75491d76c86cb5d74dd48b67b4884c48fac40065404f660cff1be297bc4cf721",
+          "bytes": 7716224,
+          "page": "https://learning.lpi.org/en/learning-materials/020-100/"
+        },
+        {
+          "name": "the-joy-of-cryptography-2021.pdf",
+          "title": "The Joy of Cryptography (2021)",
+          "url": "https://joyofcryptography.com/pdf/book.pdf",
+          "sha256": "68fcdc7cf0874fd535daa78700029c5b7ad46c22b078d3f0dbe3eb8a988245c1",
+          "bytes": 5015374,
+          "page": ""
+        }
+      ]
+    },
+    {
       "name": "open-software-architecture",
       "subject": "Software Architecture",
       "documents": [
@@ -160,6 +590,28 @@
           "sha256": "c9bb3e324d93529a25563fd25447a11549dcca8e61d36b9665fff0c8de2cdd41",
           "bytes": 6010418,
           "page": ""
+        }
+      ]
+    },
+    {
+      "name": "open-theoretical-computer-science",
+      "subject": "Theoretical Computer Science",
+      "documents": [
+        {
+          "name": "homotopy-type-theory-univalent-foundations-of-mathematics.pdf",
+          "title": "Homotopy Type Theory: Univalent Foundations of Mathematics",
+          "url": "https://homotopytypetheory.org/wp-content/uploads/2013/03/cover-letter.pdf",
+          "sha256": "058fd82568de36b6be17586b223a98fc8c2f8752a3cc0d83c0f241ac4f0677fa",
+          "bytes": 3028388,
+          "page": "https://homotopytypetheory.org/book/"
+        },
+        {
+          "name": "learning-lean-through-architecture-volume-2-the-curry-howard-correspondence.pdf",
+          "title": "Learning Lean Through Architecture \\| Volume 2: The Curry-Howard Correspondence",
+          "url": "https://zenodo.org/records/23073218/files/CH_Leantext_Dhiman%20(2).pdf",
+          "sha256": "abd086418ef6cca8b1c9daa1f609d7ce1e6b7d9a359cbafeeb97a729a03a37e1",
+          "bytes": 5568184,
+          "page": "https://zenodo.org/records/23073217"
         }
       ]
     }
@@ -283,6 +735,606 @@
       "subject": "Operating Systems",
       "title": "Writing a Simple Operating System from Scratch",
       "url": "https://www.cs.bham.ac.uk/~exr/lectures/opsys/10_11/lectures/os-dev.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!doctype html>'"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "A Computational Logic (1979)",
+      "url": "https://www.cs.utexas.edu/users/boyer/acl.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "A Cool Brisk Walk Through Discrete Mathematics",
+      "url": "http://stephendavies.org/brisk.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "A First Course in Complex Analysis",
+      "url": "https://matthbeck.github.io/papers/complexorth.pdf",
+      "reason": "download failed: HTTPError: HTTP Error 404: Not Found"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "An Infinite Descent into Pure Mathematics",
+      "url": "https://infinitedescent.xyz/dl/infdesc.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "An Introduction to the Theory of Numbers",
+      "url": "http://www.trillia.com/moser-number.html",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Analytic Geometry (1922)",
+      "url": "http://djm.cc/library/Analytic_Geometry_Siceloff_Wentworth_Smith_edited.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Applied Quantitative Finance: Theory and Computational Tools",
+      "url": "http://inis.jinr.ru/sl/M_Mathematics/MV_Probability/MVspf_Stochastics%20in%20finance/Haerdle%20et%20al.%20Applied%20Quantitative%20Finance%20(Springer",
+      "reason": "download failed: HTTPError: HTTP Error 404: Not Found"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Category Theory for the Sciences",
+      "url": "https://math.mit.edu/~dspivak/CT4S.pdf",
+      "reason": "download failed: HTTPError: HTTP Error 404: Not Found"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "College Trigonometry",
+      "url": "https://open.umn.edu/opentextbooks/textbooks/college-trigonometry",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Coordinate Geometry (1911)",
+      "url": "http://djm.cc/library/Coordinate_Geometry_Fine_Thompson_edited03.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Differential Equations (1922)",
+      "url": "http://djm.cc/library/Differential_Equations_Phillips_edited.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Elementary Differential Equations",
+      "url": "http://ramanujan.math.trinity.edu/wtrench/texts/TRENCH_DIFF_EQNS_I.PDF",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Guide to Discrete Mathematics",
+      "url": "https://core.ac.uk/download/pdf/326762636.pdf",
+      "reason": "download failed: HTTPError: HTTP Error 403: Forbidden"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Magic Squares and Cubes (1917)",
+      "url": "http://djm.cc/library/Magic_Squares_Cubes_Andrews_edited.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Mathematical Logic - an Introduction",
+      "url": "https://www.ii.uib.no/~michal/und/i227/book/book.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Non-Uniform Random Variate Generation",
+      "url": "http://luc.devroye.org/rnbookindex.html",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Plane Geometry (1913)",
+      "url": "http://djm.cc/library/Plane_Geometry_Wentworth_Smith_edited.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Planes and Spherical Trigonometry (1915)",
+      "url": "http://djm.cc/library/Plane_Spherical_Trigonometry_Wentworth_Smith_edited_2.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Recreations in Math",
+      "url": "http://djm.cc/library/Recreations_in_Mathematics_Licks_edited.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Advanced Algebra",
+      "url": "https://www.math.stonybrook.edu/~aknapp/download/a2-alg-inside.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Algebra: An Elementary Text-Book, Part I (1904)",
+      "url": "http://djm.cc/library/Algebra_Elementary_Text-Book_Part_I_Chrystal_edited.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Algebra: An Elementary Text-Book, Part II (1900)",
+      "url": "http://djm.cc/library/Algebra_Elementary_Text-Book_Part_II_Chrystal_edited02.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Algebraic Topology",
+      "url": "https://pi.math.cornell.edu/~hatcher/AT/ATpage.html",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Basic Algebra",
+      "url": "https://www.math.stonybrook.edu/~aknapp/download/b2-alg-inside.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Mathematics",
+      "title": "Basics of Algebra, Topology, and Differential Calculus",
+      "url": "https://www.cis.upenn.edu/~jean/math-basics.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "A Common-Sense Guide to Data Structures & Algorithms",
+      "url": "https://github.com/GauravWalia19/Free-Algorithms-Books/blob/main/Library/src/JAVASCRIPT/A-Common-Sense-Guide-to-Data-Structures-and-Algorithms-Level-Up-Your-Core-Programming-Skills.pdf",
+      "reason": "download failed: HTTPError: HTTP Error 404: Not Found"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "A Field Guide To Genetic Programming",
+      "url": "https://web.archive.org/web/20191020195105/http://www0.cs.ucl.ac.uk/staff/W.Langdon/ftp/papers/poli08_fieldguide.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "Algorithmic Graph Theory",
+      "url": "https://code.google.com/p/graphbook/",
+      "reason": "not a PDF or EPUB: starts b'\\x1f\\x8b\\x08\\x00\\x00\\x00\\x00\\x00\\x02\\xff\\xb4VQo\\xdb'"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "Algorithms and Complexity",
+      "url": "https://www.math.upenn.edu/~wilf/AlgoComp.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "Algorithms and Data Structures",
+      "url": "https://textbookequity.org/Textbooks/Nievergelt_Algorithms%20and%20Data%20Structures08.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "Algorithms Notes for Professionals",
+      "url": "https://goalkicker.com/AlgorithmsBook",
+      "reason": "download failed: HTTPError: HTTP Error 404: Not Found"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "An Open Guide to Data Structures and Algorithms",
+      "url": "https://open.umn.edu/opentextbooks/textbooks/an-open-guide-to-data-structures-and-algorithms",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "Binary Trees",
+      "url": "https://web.archive.org/web/20260429190107/http://cslibrary.stanford.edu/110/BinaryTrees.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "Data Structures and Algorithm Analysis in C++",
+      "url": "https://people.cs.vt.edu/~shaffer/Book/C++3elatest.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "Data Structures and Algorithm Analysis in Java",
+      "url": "https://people.cs.vt.edu/~shaffer/Book/JAVA3elatest.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "Linked List Basics",
+      "url": "https://web.archive.org/web/20260602012858/http://cslibrary.stanford.edu/103/LinkedListBasics.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "Linked List Problems",
+      "url": "https://web.archive.org/web/20260429190109/http://cslibrary.stanford.edu/105/LinkedListProblems.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "Matters Computational: Ideas, Algorithms, Source Code",
+      "url": "https://www.jjj.de/fxt/fxtbook.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "Text Algorithms",
+      "url": "http://igm.univ-mlv.fr/~mac/REC/text-algorithms.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "The Design of Approximation Algorithms",
+      "url": "https://www.designofapproxalgs.com/book.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Algorithms & Data Structures",
+      "title": "The Great Tree List Recursion Problem",
+      "url": "https://web.archive.org/web/20260429190115/http://cslibrary.stanford.edu/109/TreeListRecursion.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Misc",
+      "title": "10 Keys to Great Landing Pages",
+      "url": "https://ithemes.com/wp-content/uploads/downloads/2012/09/10-keys-to-great-landing-pages-eBook.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Misc",
+      "title": "A MACHINE MADE THIS BOOK ten sketches of computer science",
+      "url": "https://ocaml-book.com/s/popbook.pdf",
+      "reason": "download failed: URLError: <urlopen error [SSL: TLSV1_ALERT_INTERNAL_ERROR] tlsv1 alert internal error (_ssl.c:1032)>"
+    },
+    {
+      "subject": "Misc",
+      "title": "Communicating Sequential Processes",
+      "url": "http://www.usingcsp.com/cspbook.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Misc",
+      "title": "Culture \\& Empire: Digital Revolution",
+      "url": "http://hintjens.com/books",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Misc",
+      "title": "Foundations of Programming",
+      "url": "https://openmymind.net/FoundationsOfProgramming.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Misc",
+      "title": "How to Become a Programmer",
+      "url": "http://softwarebyrob.wpengine.netdna-cdn.com/assets/Software_by_Rob%20_How_to_Become_a%20_Programmer_1.0.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Misc",
+      "title": "Information Technology and the Networked Economy",
+      "url": "https://web.archive.org/web/20200731035935/https://florida.theorangegrove.org/og/file/49843a6a-9a9d-4bad-b4d4-d053f9cdf73e/1/InfoTechNetworkedEconomy.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Misc",
+      "title": "Introduction to Scientific Programming in C++ and Fortran",
+      "url": "https://github.com/VictorEijkhout/TheArtofHPC_pdfs/blob/main/vol3/EijkhoutIntroSciProgramming-book.pdf",
+      "reason": "not a PDF or EPUB: starts b'\\n\\n\\n\\n\\n\\n<!DOCTYPE'"
+    },
+    {
+      "subject": "Misc",
+      "title": "Philosophy of Computer Science",
+      "url": "https://www.cse.buffalo.edu/~rapaport/Papers/phics.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Misc",
+      "title": "Pointers And Memory",
+      "url": "https://web.archive.org/web/20260518211016/http://cslibrary.stanford.edu/102/PointersAndMemory.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Misc",
+      "title": "Signal Computing: Digital Signals in the Software Domain",
+      "url": "http://faculty.washington.edu/stiber/pubs/Signal-Computing/Signal%20Computing.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Misc",
+      "title": "Software-Defined Radio for Engineers",
+      "url": "https://www.analog.com/media/en/training-seminars/design-handbooks/Software-Defined-Radio-for-Engineers-2018/SDR4Engineers.pdf",
+      "reason": "download failed: TimeoutError: The read operation timed out"
+    },
+    {
+      "subject": "Misc",
+      "title": "The Art of High Perfomance Computing - Volume 3: Introduction to Scientific Programming",
+      "url": "https://github.com/VictorEijkhout/TheArtofHPC_pdfs/blob/main/vol3/EijkhoutIntroSciProgramming-book.pdf",
+      "reason": "not a PDF or EPUB: starts b'\\n\\n\\n\\n\\n\\n<!DOCTYPE'"
+    },
+    {
+      "subject": "Misc",
+      "title": "The Art of High Perfomance Computing - Volume 4: HPC Carpentry",
+      "url": "https://github.com/VictorEijkhout/TheArtofHPC_pdfs/blob/main/vol4/EijkhoutHPCtutorials.pdf",
+      "reason": "not a PDF or EPUB: starts b'\\n\\n\\n\\n\\n\\n<!DOCTYPE'"
+    },
+    {
+      "subject": "Misc",
+      "title": "Using Z Specification, Refinement, and Proof",
+      "url": "http://www.usingz.com/usingz.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Misc",
+      "title": "Web Almanac",
+      "url": "https://almanac.httparchive.org/static/pdfs/web_almanac_2019_en.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Artificial Intelligence",
+      "title": "Artificial Intelligence, 3rd Edition (1993)",
+      "url": "https://courses.csail.mit.edu/6.034f/ai3/rest.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Artificial Intelligence",
+      "title": "Artificial Intelligence and the Future for Teaching and Learning",
+      "url": "https://www2.ed.gov/documents/ai-report/ai-report.pdf",
+      "reason": "download failed: HTTPError: HTTP Error 403: Forbidden"
+    },
+    {
+      "subject": "Artificial Intelligence",
+      "title": "Clever Algorithms Nature-Inspired Programming Recipes",
+      "url": "https://bjpcjp.github.io/pdfs/ruby/Clever-Algorithms.pdf",
+      "reason": "download failed: HTTPError: HTTP Error 404: Not Found"
+    },
+    {
+      "subject": "Artificial Intelligence",
+      "title": "Generative AI in Higher Education: The ChatGPT Effect",
+      "url": "https://www.taylorfrancis.com/books/oa-mono/10.4324/9781003459026/generative-ai-higher-education-cecilia-ka-yuk-chan-tom-colloton",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Artificial Intelligence",
+      "title": "Graph Representational Learning Book",
+      "url": "https://www.cs.mcgill.ca/~wlh/grl_book/",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Artificial Intelligence",
+      "title": "Introduction to Autonomous Robots",
+      "url": "https://github.com/correll/Introduction-to-Autonomous-Robots/releases",
+      "reason": "not a PDF or EPUB: starts b'\\n\\n\\n\\n\\n  \\n\\n<!DOCT'"
+    },
+    {
+      "subject": "Artificial Intelligence",
+      "title": "Mastering Generative AI and Prompt Engineering: A Practical Guide for Data Scientists",
+      "url": "https://datasciencehorizons.com/pub/Mastering_Generative_AI_Prompt_Engineering_Data_Science_Horizons_v2.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Artificial Intelligence",
+      "title": "The History of Artificial Intelligence",
+      "url": "https://courses.cs.washington.edu/courses/csep590/06au/projects/history-ai.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE HTML '"
+    },
+    {
+      "subject": "Artificial Intelligence",
+      "title": "The Quest for Artificial Intelligence: A History of Ideas and Achievements",
+      "url": "https://ai.stanford.edu/~nilsson/QAI/qai.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Theoretical Computer Science",
+      "title": "Category Theory for Computing Science",
+      "url": "http://www.tac.mta.ca/tac/reprints/articles/22/tr22.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Theoretical Computer Science",
+      "title": "Category Theory for Programmers",
+      "url": "https://github.com/hmemcpy/milewski-ctfp-pdf",
+      "reason": "not a PDF or EPUB: starts b'\\n\\n\\n\\n  \\n\\n<!DOCTY'"
+    },
+    {
+      "subject": "Theoretical Computer Science",
+      "title": "Delftse Foundations of Computation",
+      "url": "https://textbooks.open.tudelft.nl/textbooks/catalog/book/13",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Theoretical Computer Science",
+      "title": "Introduction to Theoretical Computer Science",
+      "url": "https://files.boazbarak.org/introtcs/lnotes_book.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Theoretical Computer Science",
+      "title": "Introduction to Theory of Computation",
+      "url": "https://cglab.ca/~michiel/TheoryOfComputation/",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Theoretical Computer Science",
+      "title": "Programming Languages: Theory and Practice",
+      "url": "http://people.cs.uchicago.edu/~blume/classes/aut2008/proglang/text/offline.pdf",
+      "reason": "download failed: HTTPError: HTTP Error 403: Forbidden"
+    },
+    {
+      "subject": "Theoretical Computer Science",
+      "title": "Semantics with Applications: A Formal Introduction",
+      "url": "https://www.cs.ru.nl/~herman/onderwijs/semantics2019/wiley.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Security & Privacy",
+      "title": "Gray Hat Hacking: The Ethical Hacker's Handbook",
+      "url": "https://pages.cs.wisc.edu/~ace/media/gray-hat-hacking.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Security & Privacy",
+      "title": "Information Security Management",
+      "url": "https://www.infosecuritybook.com",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Security & Privacy",
+      "title": "Intrusion Detection Systems with Snort",
+      "url": "https://ptgmedia.pearsoncmg.com/images/0131407333/downloads/0131407333.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Security & Privacy",
+      "title": "Network Security",
+      "url": "https://www.open.edu/openlearn/digital-computing/network-security/altformat-printable",
+      "reason": "download failed: HTTPError: HTTP Error 403: Forbidden"
+    },
+    {
+      "subject": "Security & Privacy",
+      "title": "SecOps Bit By Bit: Roadmap for First-Time CTOs and Startup Founders",
+      "url": "https://leanpub.com/secops-bit-by-bit",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Security & Privacy",
+      "title": "The SELINUX Coloring Book",
+      "url": "https://github.com/mairin/selinux-coloring-book",
+      "reason": "not a PDF or EPUB: starts b'\\n\\n\\n\\n  \\n\\n<!DOCTY'"
+    },
+    {
+      "subject": "Compiler Design",
+      "title": "Compiler Construction using C# (SLANGFOR.NET)",
+      "url": "https://github.com/mmj-the-fighter/slang_for_dot_net_revision/blob/main/bookA4Desk.pdf",
+      "reason": "not a PDF or EPUB: starts b'\\n\\n\\n\\n\\n\\n<!DOCTYPE'"
+    },
+    {
+      "subject": "Compiler Design",
+      "title": "Compiler Design: Theory, Tools, and Examples, C/C++ Edition",
+      "url": "https://web.archive.org/web/20230816024714/http://elvis.rowan.edu/~bergmann/books/Compiler_Design/c_cpp/Text/C_CppEd.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Compiler Design",
+      "title": "Compiler Design: Theory, Tools, and Examples, Java Edition",
+      "url": "https://web.archive.org/web/20230816024714/http://elvis.rowan.edu/~bergmann/books/Compiler_Design/java/CompilerDesignBook.pdf",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Compiler Design",
+      "title": "Compiling Scala for the Java Virtual Machine",
+      "url": "https://lampwww.epfl.ch/~schinz/thesis-final-A4.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Compiler Design",
+      "title": "Introduction to Compilers and Language Design",
+      "url": "https://www3.nd.edu/~dthain/compilerbook/compilerbook.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Compiler Design",
+      "title": "Let's Build a Compiler",
+      "url": "https://www.stack.nl/~marcov/compiler.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Networking",
+      "title": "IPv6 for IPv4 Experts",
+      "url": "https://sites.google.com/site/yartikhiy/home/ipv6book",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Networking",
+      "title": "Networking! ACK!",
+      "url": "https://wizardzines.com/zines/networking/",
+      "reason": "0 characters of text in 15 pages: a scan?"
+    },
+    {
+      "subject": "Quantum Computing",
+      "title": "Introduction to Classical and Quantum Computing",
+      "url": "https://www.thomaswong.net/introduction-to-classical-and-quantum-computing-1e3p.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Quantum Computing",
+      "title": "The Functional Analysis of Quantum Information Theory",
+      "url": "https://arxiv.org/abs/1410.7188",
+      "reason": "not a PDF or EPUB: starts b'<!DOCTYPE html>'"
+    },
+    {
+      "subject": "Open Source Ecosystem",
+      "title": "Introduction to Networking",
+      "url": "https://do1.dr-chuck.net/net-intro/EN_us/net-intro.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Open Source Ecosystem",
+      "title": "The Art of Community",
+      "url": "https://artofcommunityonline.org/Art_of_Community_Second_Edition.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Data Science",
+      "title": "Mining of Massive Datasets",
+      "url": "http://infolab.stanford.edu/~ullman/mmds/book.pdf",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Computer Science",
+      "title": "Computer Science I",
+      "url": "https://cse.unl.edu/~cbourke/ComputerScienceOne.pdf",
+      "reason": "download failed: URLError: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1032)>"
+    },
+    {
+      "subject": "Computer Science",
+      "title": "Computer Science II",
+      "url": "https://cse.unl.edu/~cbourke/ComputerScienceTwo.pdf",
+      "reason": "download failed: URLError: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1032)>"
+    },
+    {
+      "subject": "Cloud Computing",
+      "title": "Azure for Architects, Third Edition",
+      "url": "https://azure.microsoft.com/en-us/resources/azure-for-architects/",
+      "reason": "not a PDF or EPUB: starts b'\\n<!DOCTYPE html'"
+    },
+    {
+      "subject": "Cloud Computing",
+      "title": "Building Serverless Applications with Google Cloud Run",
+      "url": "https://www.cockroachlabs.com/guides/oreilly-building-serverless-applications-with-google-cloud-run/",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Cloud Computing",
+      "title": "Kubernetes Hardening Guidance",
+      "url": "https://media.defense.gov/2022/Aug/29/2003066362/-1/-1/0/CTR_KUBERNETES_HARDENING_GUIDANCE_1.2_20220829.PDF",
+      "reason": "download failed: HTTPError: HTTP Error 403: Forbidden"
+    },
+    {
+      "subject": "Cloud Computing",
+      "title": "Learn Azure in a Month of Lunches",
+      "url": "https://clouddamcdnprodep.azureedge.net/gdc/2014519/original",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Blockchain",
+      "title": "Bitcoin and Cryptocurrency Technologies",
+      "url": "https://bitcoinbook.cs.princeton.edu",
+      "reason": "download failed: URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+    },
+    {
+      "subject": "Blockchain",
+      "title": "Playtime with Hyperledger Composer",
+      "url": "https://schadokar.dev/ebooks/playtime-with-hyperledger-composer/",
       "reason": "not a PDF or EPUB: starts b'<!doctype html>'"
     }
   ]
