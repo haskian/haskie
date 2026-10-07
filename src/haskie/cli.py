@@ -99,10 +99,13 @@ def run(
     hook: Annotated[
         bool,
         typer.Option(
-            help="Run as Claude Code's SessionStart hook: read its payload, do not wait.",
+            help="Run as an agent's SessionStart hook: read its payload, do not wait.",
             hidden=True,
         ),
     ] = False,
+    hook_rules: Annotated[
+        Path | None, typer.Option(hidden=True, help="Instructions to emit in hook context.")
+    ] = None,
 ) -> None:
     """Serve the web UI, the REST API and the MCP server, and finish the first run in the browser.
 
@@ -130,6 +133,8 @@ def run(
         # place the conversation's own id can reach the tools: nothing in an MCP call carries it,
         # so without this line every search is recorded against no session at all.
         typer.echo(claude.session_announcement(session_id))
+    if hook and hook_rules is not None:
+        typer.echo(hook_rules.read_text(encoding="utf-8"))
     url = f"http://{host}:{port}"
     status = _serve(url, wait=not hook)
     if status is not None and not hook:
@@ -477,6 +482,42 @@ def _install_claude(url: str, scope: Scope) -> None:
     typer.echo("haskie rewrites the skill and rule whenever a collection changes")
 
 
+@install.command("codex")
+def install_codex(
+    home_dir: HomeOption = None,
+    url: Annotated[str, typer.Option(help="MCP endpoint of this haskie.")] = MCP_URL,
+    scope: Annotated[Scope, typer.Option(help="Where Codex records it.")] = Scope.USER,
+) -> None:
+    """Register the MCP server with Codex, write search instructions and a SessionStart hook."""
+    import asyncio
+
+    from haskie import codex, db
+
+    _use_home(home_dir)
+    directory = codex.codex_dir(scope)
+    try:
+        asyncio.run(db.migrate_once())
+        codex.validate(directory)
+        codex.register_mcp(directory, url)
+        typer.echo(f"registered the haskie MCP server at {url} ({scope} scope)")
+        found = asyncio.run(claude.read_collections())
+        for written in claude.write_instructions(directory, found):
+            typer.echo(f"wrote {written}")
+        claude.install_hook(
+            directory, home.HOME, url, filename="hooks.json", rules=claude.rule_path(directory)
+        )
+        typer.echo(f"wrote the SessionStart hook in {directory / 'hooks.json'}")
+        asyncio.run(claude.record_installation(directory, "codex"))
+        _serve(url, wait=True)
+    except (HaskieError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo("haskie rewrites the skill and rule whenever a collection changes")
+    typer.echo("In Codex, review and trust the haskie SessionStart hook, then start a new session.")
+    if scope == Scope.PROJECT:
+        typer.echo("Codex loads project configuration only in trusted projects.")
+
+
 uninstall = typer.Typer(
     name="uninstall",
     help="Remove haskie from an MCP client.",
@@ -526,6 +567,33 @@ def _uninstall_claude(scope: Scope) -> None:
         typer.echo(f"removed the SessionStart hook from {settings_file}")
     for removed in claude.remove_instructions(directory):
         typer.echo(f"removed {removed}")
+
+
+@uninstall.command("codex")
+def uninstall_codex(
+    home_dir: HomeOption = None,
+    scope: Annotated[Scope, typer.Option(help="Where Codex recorded it.")] = Scope.USER,
+) -> None:
+    """Remove haskie's Codex MCP entry, instructions and hook. Keep documents and collections."""
+    import asyncio
+
+    from haskie import codex
+
+    _use_home(home_dir)
+    directory = codex.codex_dir(scope)
+    try:
+        codex.validate(directory)
+        if home.DB_FILE.is_file() and asyncio.run(claude.forget_installation(directory, "codex")):
+            typer.echo(f"stopped refreshing {directory}")
+        if codex.register_mcp(directory, None):
+            typer.echo(f"removed the haskie MCP server ({scope} scope)")
+        if claude.uninstall_hook(directory, filename="hooks.json"):
+            typer.echo(f"removed the SessionStart hook from {directory / 'hooks.json'}")
+        for removed in claude.remove_instructions(directory):
+            typer.echo(f"removed {removed}")
+    except (HaskieError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @cli.command()

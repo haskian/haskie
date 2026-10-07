@@ -3899,7 +3899,7 @@ def test_a_home_from_before_page_counts_is_upgraded_in_place(tmp_path: Path) -> 
 
 # The schema `tables.py` generates at this `SCHEMA_VERSION`: a SHA-256 of its DDL statements,
 # sorted, because a table's indexes are a set and come out in no fixed order.
-SCHEMA_PIN = (35, "53c890d5eb3caee318cdc315dbf2524da0d6407667293fb15e112af824b990c2")
+SCHEMA_PIN = (36, "86b85d5044c0ffcb35ac0a0451fa9bb738472b3c22b89d48085d29fb8526a55d")
 
 
 def test_a_table_change_comes_with_a_new_schema_version() -> None:

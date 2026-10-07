@@ -118,6 +118,8 @@ uv tool install haskie
 haskie run                  # web UI, REST API and MCP on http://127.0.0.1:8451; opens the first-run page
 haskie install claude       # MCP server, skill, rule and SessionStart hook for Claude Code
 haskie uninstall claude     # removes all four again; documents and collections stay
+haskie install codex        # the same integration for Codex; review its hook in Codex
+haskie uninstall codex      # removes the Codex integration; documents and collections stay
 ```
 
 - **macOS (Apple Silicon):** every model runs on the Apple GPU through ONNX Runtime's WebGPU
@@ -152,7 +154,7 @@ replays each agent conversation. **Gaps** lists the questions your sources did n
 by topic, and replays them once you add a document. **Insights** charts searches and indexed
 chunks over time. **Settings** describes every default.
 
-## How it works with Claude Code
+## How it works with Claude Code and Codex
 
 `haskie install claude` adds four things:
 
@@ -169,6 +171,13 @@ a collection is created, described, renamed or deleted. `--scope project` instal
 installs there instead of `~/.claude`, as Claude Code reads it. The hook does not wait for the
 server, so a session that starts while nothing is serving, such as the first after a reboot, has
 no haskie tools. Run `haskie run` first if that session matters.
+
+`haskie install codex` provides the same tools, skill, search rule and startup hook for Codex.
+It writes into `~/.codex` (or `CODEX_HOME`), or `./.codex` with `--scope project`.
+The MCP entry goes in `config.toml` and the hook in `hooks.json`. The hook loads the search
+rule into session context. Review and trust the hook in Codex, then start a new session.
+Project scope also requires a trusted project. `--home` and `--url` work as for Claude Code.
+See [MCP](docs/mcp.md#what-haskie-install-codex-adds) for paths and removal.
 
 A typical exchange: you ask *"How should a background job retry a failed HTTP call without
 charging twice?"* The rule sends Claude to `search_excerpts` before the web. haskie returns
