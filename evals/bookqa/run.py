@@ -164,7 +164,9 @@ def ready(
         print("the dataset does not pass review (mise run eval:bookqa:review)", file=sys.stderr)
         return None
     setup.ensure_profile(profile, api)
-    if not setup.load([corpus / name for name in names], collection, DESCRIPTION, api):
+    existing = setup.get_or_none(f"/api/collections/{collection}", api)
+    description = (existing or {}).get("description") or DESCRIPTION  # keep a collection's own
+    if not setup.load([corpus / name for name in names], collection, description, api):
         print(f"not every source is indexed in {collection}", file=sys.stderr)
         return None
     return records

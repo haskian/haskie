@@ -3,6 +3,7 @@ duplicate id or question, the citations an answerable record needs, the source f
 unchanged, and every quote on the page it claims. Exits 1 on any issue.
 
 Reads `dataset.jsonl` by default; `--candidates` checks the unreviewed candidate files instead.
+`--collection` checks an open-corpora collection's dataset, or its books' candidates.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from evals import setup
 from evals.bookqa import generate, schema
+from evals.corpora import corpus as corpora
 
 
 def review(files: list[Path], corpus: Path) -> tuple[list[schema.Record], list[schema.Issue]]:
@@ -28,12 +30,23 @@ def review(files: list[Path], corpus: Path) -> tuple[list[schema.Record], list[s
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", type=Path, default=generate.DATASET)
+    parser.add_argument("--collection", help="an open-corpora collection: its dataset and books")
+    parser.add_argument("--dataset", type=Path, help="default: dataset.jsonl, or the collection's")
     parser.add_argument("--candidates", action="store_true", help="check the candidates instead")
-    parser.add_argument("--corpus", type=Path, default=setup.CORPUS_DIR)
+    parser.add_argument("--corpus", type=Path, help="default: where the books are downloaded")
     args = parser.parse_args(argv)
-    files = sorted(generate.CANDIDATES.glob("*/*.jsonl")) if args.candidates else [args.dataset]
-    records, issues = review(files, args.corpus)
+    if args.collection:
+        collection = corpora.find(args.collection)
+        corpus = args.corpus or corpora.DIRECTORY / collection.name
+        dataset = args.dataset or corpora.questions(collection.name)
+        books = corpora.stems(collection)
+    else:
+        corpus = args.corpus or setup.CORPUS_DIR
+        dataset = args.dataset or generate.DATASET
+        books = {Path(s.name).stem for s in setup.SOURCES}
+    candidates = [f for f in generate.CANDIDATES.glob("*/*.jsonl") if f.parent.name in books]
+    files = sorted(candidates) if args.candidates else [dataset]
+    records, issues = review(files, corpus)
     for issue in issues:
         print(f"{issue.record}: {issue.problem}", file=sys.stderr)
     answerable = sum(r.answerable for r in records)
