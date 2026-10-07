@@ -52,7 +52,7 @@ def test_codex_install_and_uninstall(
     assert matchers[0] == user_hook
     assert len(matchers) == 2
     assert "--hook" in matchers[1]["hooks"][0]["command"]
-    assert "--hook-rules" in matchers[1]["hooks"][0]["command"]
+    assert "--hook-rules" not in matchers[1]["hooks"][0]["command"]
     assert (directory / "skills/haskie/SKILL.md").is_file()
     assert (directory / "rules/haskie.md").is_file()
     assert instructions.read_text().count("<!-- haskie:start -->") == 1
@@ -184,7 +184,9 @@ def test_rule_reference_removes_blocks_after_override_changes(tmp_path: Path) ->
     assert (tmp_path / "AGENTS.override.md").read_text() == "New override\n"
 
 
-def test_generated_codex_hook_supplies_session_and_search_rule(
+@pytest.mark.parametrize("legacy", [False, True], ids=["current hook", "older installed hook"])
+def test_codex_hook_supplies_session_and_preserves_older_rule_output(
+    legacy: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -208,6 +210,8 @@ def test_generated_codex_hook_supplies_session_and_search_rule(
     assert result.exit_code == 0, result.output
     settings = json.loads((directory / "hooks.json").read_text())
     hook = settings["hooks"]["SessionStart"][0]["hooks"][0]
+    if legacy:
+        hook["command"] += " " + shlex.join(["--hook-rules", str(claude.rule_path(directory))])
     result = runner.invoke(
         cli,
         shlex.split(hook["command"])[1:],
@@ -215,7 +219,7 @@ def test_generated_codex_hook_supplies_session_and_search_rule(
     )
     assert result.exit_code == 0, result.output
     assert "session id is codex-123" in result.output
-    assert claude.render_rule([]) in result.output
+    assert (claude.render_rule([]) in result.output) == legacy
     assert served == [("http://localhost:9234/mcp", True), ("http://localhost:9234", False)]
 
 

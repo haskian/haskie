@@ -1,7 +1,7 @@
 """Installing haskie into Claude Code: the MCP entry, the SessionStart hook, the skill and the rule.
 
 Codex reuses the instruction templates, hook format, atomic writes and installation registry.
-Its TOML configuration lives in `codex.py`; its hook emits the rule as session context.
+Its TOML configuration and AGENTS.md rule reference live in `codex.py`.
 
 Everything about Claude Code's own configuration lives here: where its files are, the argv its
 CLI takes, the shape of a hook in its settings. So `cli` stays the way in and never a second way
@@ -275,7 +275,6 @@ def install_hook(
     url: str,
     *,
     filename: str = "settings.json",
-    rules: Path | None = None,
 ) -> bool:
     """Make the agent start haskie when a session starts.
 
@@ -284,13 +283,10 @@ def install_hook(
     one loopback request when the server is already up, which is the usual case.
 
     Returns whether this call added the hook. Reads and rewrites the file as a whole, so an
-    existing settings file keeps everything else in it. Codex uses `hooks.json` and needs
-    the rule emitted by the hook because it does not load prose from `rules/` itself.
+    existing settings file keeps everything else in it. Codex uses `hooks.json`.
     """
     settings_file = directory / filename
     command = hook_command(home_dir, url)
-    if rules is not None:
-        command += " " + shlex.join(["--hook-rules", str(rules)])
     settings = _read_settings(settings_file)
     matchers = _session_start(settings, settings_file)
     ours = [hook for matcher in matchers for hook in matcher.get("hooks", []) if _is_ours(hook)]

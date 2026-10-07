@@ -134,6 +134,7 @@ def run(
         # so without this line every search is recorded against no session at all.
         typer.echo(claude.session_announcement(session_id))
     if hook and hook_rules is not None:
+        # Older Codex installations emitted the rule here. New ones link it from AGENTS.md.
         typer.echo(hook_rules.read_text(encoding="utf-8"))
     url = f"http://{host}:{port}"
     status = _serve(url, wait=not hook)
@@ -505,9 +506,7 @@ def install_codex(
         for written in claude.write_instructions(directory, found):
             typer.echo(f"wrote {written}")
         typer.echo(f"linked the search rule from {codex.install_rule_reference(directory, scope)}")
-        claude.install_hook(
-            directory, home.HOME, url, filename="hooks.json", rules=claude.rule_path(directory)
-        )
+        claude.install_hook(directory, home.HOME, url, filename="hooks.json")
         typer.echo(f"wrote the SessionStart hook in {directory / 'hooks.json'}")
         asyncio.run(claude.record_installation(directory, "codex"))
         _serve(url, wait=True)

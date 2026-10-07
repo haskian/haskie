@@ -54,6 +54,9 @@ and every haskie SessionStart hook in the settings file, leaving the user's own 
 settings. It forgets the installation first, so a running server does not write the files back.
 Documents and collections stay.
 
+Claude Code loads this unscoped rule at launch, independently of the hook. It needs no
+`CLAUDE.md` reference to it; see [Claude Code rules](https://code.claude.com/docs/en/memory#organize-rules-with-clauderules).
+
 ## What `haskie install codex` adds
 
 The Codex install has the same `--home`, `--url` and `--scope user|project` options. User scope
@@ -64,7 +67,7 @@ writes into `CODEX_HOME`, defaulting to `~/.codex`; project scope writes into `.
 | `config.toml` | `[mcp_servers.haskie]` with the HTTP endpoint and `[features] mcp_2026_07_28 = true` |
 | `skills/haskie/SKILL.md` | the same collection-aware tool reference as Claude Code |
 | `rules/haskie.md` | the same search-first rule, linked from Codex's instructions |
-| `hooks.json` | a SessionStart hook running `haskie run --hook --hook-rules <rule path>` |
+| `hooks.json` | a SessionStart hook running `haskie run --hook` |
 
 The skill uses Codex's supported configuration-layer skill directory. This keeps custom
 `CODEX_HOME` profiles separate. The installer edits TOML directly, so the Codex CLI need not
@@ -83,10 +86,12 @@ If `AGENTS.override.md` takes precedence, the block goes there instead. Existing
 remain intact. Reinstall replaces only this block; uninstall removes it from both files.
 See [Codex instruction discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md).
 
-The SessionStart hook also emits the rule alongside the session id. Codex requires review and
-trust of each new or changed hook before it runs. The instruction reference works even when
-the hook does not run, and supplies a fallback session id policy. Project configuration also
-requires a trusted project. Review the hook in Codex, then start a new session.
+The SessionStart hook starts the server and supplies the session id. It does not repeat the
+rule already linked from `AGENTS.md`. Older installed hooks with `--hook-rules` still work;
+reinstall to replace them. Codex requires review and trust of each new or changed hook before
+it runs. The instruction reference works even when the hook does not run, and supplies a
+fallback session id policy. Project configuration also requires a trusted project.
+Review the hook in Codex, then start a new session.
 See the [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks).
 
 The installer starts haskie and waits for it, as the Claude installer does. Later hooks start
