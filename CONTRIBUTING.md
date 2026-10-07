@@ -48,7 +48,7 @@ Environment variables. Each has a working default:
 | variable | default | purpose |
 | --- | --- | --- |
 | `HASKIE_HOME` | `~/.haskie` | the home directory, same as `--home`. `mise.toml` sets `~/haskie-dev`, so development never touches an installed haskie's data |
-| `HASKIE_PORT` | `8451` | the default port of `run` and `install claude`. `mise.toml` sets `8452`, so development serves beside the installed haskie |
+| `HASKIE_PORT` | `8451` | the default port of `run`, `install claude` and `install codex`. `mise.toml` sets `8452`, so development serves beside the installed haskie |
 | `HASKIE_LOG_LEVEL` | `INFO` | level for every logger, DBOS included |
 | `HASKIE_LOG_FORMAT` | `json` | `console` for readable logs |
 | `HASKIE_ADDRESS` | unset | set by `run` itself, so a second start can name the server that holds the home, and the app can serve the host it was bound to |

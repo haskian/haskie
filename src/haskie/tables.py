@@ -319,6 +319,6 @@ staging = Table(
 installations = Table(
     "installations",
     metadata,
-    Column("agent", Text, CheckConstraint("agent in ('claude')"), primary_key=True),
+    Column("agent", Text, CheckConstraint("agent in ('claude', 'codex')"), primary_key=True),
     Column("directory", Text, primary_key=True),
 )

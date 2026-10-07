@@ -31,7 +31,7 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from haskie import home, tables
 from haskie.errors import HaskieError
 
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 """`pragma user_version` of the schema in `tables.py`.
 
 A home stamped with it has these tables and columns and is opened as it is. A stamp that
@@ -47,13 +47,6 @@ stores this version does not stamp as well. A change to what a chunk holds retir
 cache and every collection's table, and rather than version each of them, the home is refused and
 rebuilt from the sources.
 """
-
-UPGRADES: dict[int, str] = {
-    34: "alter table documents add column pages integer;",
-}
-"""The script that lifts a schema from each version to the next. Additive changes only: a column
-added this way comes last in its table, so `tables.py` declares it last too. A restore reads an
-archive of an older schema without them: its missing columns take their defaults (`backup`)."""
 
 
 def schema_ddl(only: Sequence[Table] | None = None) -> str:
@@ -71,6 +64,21 @@ def schema_ddl(only: Sequence[Table] | None = None) -> str:
         f"{str(statement.compile(dialect=dialect)).strip()};\n" for statement in statements
     )
 
+
+UPGRADES: dict[int, str] = {
+    34: "alter table documents add column pages integer;",
+    # SQLite cannot widen a CHECK in place. Rebuild only this registry inside the upgrade
+    # transaction, retaining every installation and leaving the document tables untouched.
+    35: (
+        "alter table installations rename to installations_v35;"
+        + schema_ddl([tables.installations])
+        + "insert into installations select agent, directory from installations_v35;"
+        "drop table installations_v35;"
+    ),
+}
+"""The script that lifts a schema from each version to the next. Additive changes only: a column
+added this way comes last in its table, so `tables.py` declares it last too. A restore reads an
+archive of an older schema without them: its missing columns take their defaults (`backup`)."""
 
 # The rows a fresh home starts with. A data file of the `catalogue` feature, read rather than
 # imported, so this module stays a leaf.

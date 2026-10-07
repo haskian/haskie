@@ -37,6 +37,7 @@ dependencies = [
     "dbos>=3.0.0",
     "structlog>=25.1.0",
     "typer>=0.15.0",
+    "tomlkit>=0.13.0",
     "unicode-segmentation-rs>=0.3.3",
     "numpy>=2.0",
     "pebble>=5.2.2",

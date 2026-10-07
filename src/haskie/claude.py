@@ -1,5 +1,8 @@
 """Installing haskie into Claude Code: the MCP entry, the SessionStart hook, the skill and the rule.
 
+Codex reuses the instruction templates, hook format, atomic writes and installation registry.
+Its TOML configuration lives in `codex.py`; its hook emits the rule as session context.
+
 Everything about Claude Code's own configuration lives here: where its files are, the argv its
 CLI takes, the shape of a hook in its settings. So `cli` stays the way in and never a second way
 of doing the work. Failures are `HaskieError`, not Typer's: this module knows nothing about a
@@ -46,7 +49,7 @@ if TYPE_CHECKING:
     from haskie.collection.collection import CollectionSummary
 
 
-class Scope(StrEnum):  # where Claude Code keeps a setting: this user, or this project
+class Scope(StrEnum):  # where an agent keeps a setting: this user, or this project
     USER = "user"
     PROJECT = "project"
 
@@ -266,18 +269,28 @@ def hook_command(home_dir: Path, url: str) -> str:
     return shlex.join(run_command(home_dir, url, "--hook"))
 
 
-def install_hook(directory: Path, home_dir: Path, url: str) -> bool:
-    """Make Claude Code start haskie when a session starts.
+def install_hook(
+    directory: Path,
+    home_dir: Path,
+    url: str,
+    *,
+    filename: str = "settings.json",
+    rules: Path | None = None,
+) -> bool:
+    """Make the agent start haskie when a session starts.
 
     The MCP entry is HTTP, so a session that starts while nothing is serving gets no haskie tools
     at all, and nothing says why. A SessionStart hook running `haskie run` fixes that: it costs
     one loopback request when the server is already up, which is the usual case.
 
     Returns whether this call added the hook. Reads and rewrites the file as a whole, so an
-    existing settings file keeps everything else in it.
+    existing settings file keeps everything else in it. Codex uses `hooks.json` and needs
+    the rule emitted by the hook because it does not load prose from `rules/` itself.
     """
-    settings_file = settings_path(directory)
+    settings_file = directory / filename
     command = hook_command(home_dir, url)
+    if rules is not None:
+        command += " " + shlex.join(["--hook-rules", str(rules)])
     settings = _read_settings(settings_file)
     matchers = _session_start(settings, settings_file)
     ours = [hook for matcher in matchers for hook in matcher.get("hooks", []) if _is_ours(hook)]
@@ -291,11 +304,11 @@ def install_hook(directory: Path, home_dir: Path, url: str) -> bool:
     return not ours
 
 
-def uninstall_hook(directory: Path) -> bool:
+def uninstall_hook(directory: Path, *, filename: str = "settings.json") -> bool:
     """Remove every haskie SessionStart hook from the settings file, whichever home it starts,
     and leave every other hook and setting as it was. A matcher that held only haskie's goes with
     it. Returns whether there was one."""
-    settings_file = settings_path(directory)
+    settings_file = directory / filename
     settings = _read_settings(settings_file)
     matchers = _session_start(settings, settings_file)
     removed = False
@@ -385,7 +398,7 @@ _refresh_lock = threading.Lock()
 _refresh_tasks: set[asyncio.Task[None]] = set()  # the loop keeps only a weak reference
 
 
-async def record_installation(directory: Path) -> None:
+async def record_installation(directory: Path, agent: str = AGENT) -> None:
     """Remember that the skill and rule live in `directory`, so a collection change reaches them."""
     from sqlalchemy.dialects.sqlite import insert
 
@@ -395,12 +408,12 @@ async def record_installation(directory: Path) -> None:
     async with db.connect() as conn:
         await conn.execute(
             insert(installations)
-            .values(agent=AGENT, directory=str(directory))
+            .values(agent=agent, directory=str(directory))
             .on_conflict_do_nothing()
         )
 
 
-async def forget_installation(directory: Path) -> bool:
+async def forget_installation(directory: Path, agent: str = AGENT) -> bool:
     """Stop rewriting the skill and rule in `directory`; returns whether it was recorded."""
     from sqlalchemy import delete
 
@@ -410,17 +423,17 @@ async def forget_installation(directory: Path) -> bool:
     async with db.connect() as conn:
         result = await conn.execute(
             delete(installations)
-            .where(installations.c.agent == AGENT)
+            .where(installations.c.agent == agent)
             .where(installations.c.directory == str(directory))
         )
         return result.rowcount == 1
 
 
-def _hooks_this_home(directory: Path) -> bool:
+def _hooks_this_home(directory: Path, *, filename: str = "settings.json") -> bool:
     """Whether the SessionStart hook in `directory` starts this home. The last install into a
     directory takes its MCP entry and its hook, so it takes the skill and rule too: a home that
     kept rewriting them would name collections the registered server does not serve."""
-    settings_file = settings_path(directory)
+    settings_file = directory / filename
     matchers = _session_start(_read_settings(settings_file), settings_file)
     return any(
         _is_ours(hook) and ("--home", str(home.HOME)) in pairwise(shlex.split(hook["command"]))
@@ -429,12 +442,14 @@ def _hooks_this_home(directory: Path) -> bool:
     )
 
 
-def _refresh_directory(directory: Path, collections: "list[CollectionSummary]") -> None:
+def _refresh_directory(
+    directory: Path, collections: "list[CollectionSummary]", filename: str = "settings.json"
+) -> None:
     """Rewrite one installation while it is still this home's: not when the skill and rule are
     gone (removed by hand, or with the whole project), which writing would bring back, and not
     when another home's install took the directory over."""
     installed = skill_path(directory).is_file() or rule_path(directory).is_file()
-    if installed and _hooks_this_home(directory):
+    if installed and _hooks_this_home(directory, filename=filename):
         write_instructions(directory, collections)
 
 
@@ -451,16 +466,21 @@ async def refresh_installations() -> None:
 
     async with db.read() as conn:
         recorded = list(
-            await conn.scalars(
-                select(installations.c.directory).where(installations.c.agent == AGENT)
+            await conn.execute(
+                select(installations.c.agent, installations.c.directory).where(
+                    installations.c.agent.in_([AGENT, "codex"])
+                )
             )
         )
     if not recorded:
         return
     collections = await read_collections()
-    for directory in recorded:
+    for agent, directory in recorded:
         try:
-            await anyio.to_thread.run_sync(_refresh_directory, Path(directory), collections)
+            filename = "hooks.json" if agent == "codex" else "settings.json"
+            await anyio.to_thread.run_sync(
+                _refresh_directory, Path(directory), collections, filename
+            )
         except (OSError, InvalidInput) as exc:  # unwritable, or a settings file we cannot follow
             _log.warning(
                 "installation_refresh_failed",

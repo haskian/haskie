@@ -1,4 +1,4 @@
-# MCP and Claude Code
+# MCP, Claude Code and Codex
 
 haskie serves the Model Context Protocol (MCP) at `http://127.0.0.1:8451/mcp`, over HTTP. The tools
 are the REST handlers marked `mcp_tool=`, so both surfaces share one contract, with one exception.
@@ -53,6 +53,38 @@ uninstalling forgets one.
 and every haskie SessionStart hook in the settings file, leaving the user's own hooks and
 settings. It forgets the installation first, so a running server does not write the files back.
 Documents and collections stay.
+
+## What `haskie install codex` adds
+
+The Codex install has the same `--home`, `--url` and `--scope user|project` options. User scope
+writes into `CODEX_HOME`, defaulting to `~/.codex`; project scope writes into `./.codex`.
+
+| file under that directory | purpose |
+| --- | --- |
+| `config.toml` | `[mcp_servers.haskie]` with the HTTP endpoint |
+| `skills/haskie/SKILL.md` | the same collection-aware tool reference as Claude Code |
+| `rules/haskie.md` | the same search-first rule, read by the hook |
+| `hooks.json` | a SessionStart hook running `haskie run --hook --hook-rules <rule path>` |
+
+The skill uses Codex's supported configuration-layer skill directory. This keeps custom
+`CODEX_HOME` profiles separate. The installer edits TOML directly, so the Codex CLI need not
+be on PATH. Other servers, settings, comments and hooks remain intact.
+
+Codex does not load prose from `rules/` itself. The SessionStart hook reads this rule and emits
+it alongside the session id. Codex adds that output to the session's context, leaving existing
+`AGENTS.md` files untouched. Codex requires review and trust of each new or changed hook before
+it runs. Project configuration also requires a trusted project. Review the hook in Codex, then
+start a new session. See the [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks).
+
+The installer starts haskie and waits for it, as the Claude installer does. Later hooks start
+it without waiting. Run `haskie run` before the first session after a reboot to ensure the tools
+are ready when Codex connects.
+
+Collection changes refresh both Codex and Claude installations. An installation taken over by
+another home or whose instruction files were removed is skipped. `haskie uninstall codex`
+with the same scope removes haskie's entry, instructions and hook, and stops refreshing it.
+Documents, collections and unrelated configuration remain intact. Schema 36 widens the
+installation registry to accept Codex and preserves existing Claude installations on upgrade.
 
 ## A session, end to end
 
