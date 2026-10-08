@@ -12,6 +12,12 @@ SUCCESS record still has cold caches. `_ready` holds the ids this process has lo
 `ensure_models` warms the rest in a background task (a local read, no network), and
 `require_ready` (which every search calls) answers from `_ready`, not from the record alone.
 
+Two groups (`ModelGroup`). The search models (the embedding model, the rerankers) are warmed at
+boot and stay loaded: a search needs them at once. The knowledge models (the describer, the
+vocabulary's embedder) serve indexing alone: downloaded at boot but loaded on first use, and freed
+once idle for `IDLE_SECONDS` (`free_idle`, which `workflows` runs every `SWEEP_SECONDS`). A freed
+one is `downloaded`, and the next run that asks loads it again through the same wait.
+
 Loading a model is CPU work, not IO, so it goes through `cpu.on_cpu`: a worker thread, under one
 slot of the CPU budget, whichever event loop asked for it.
 
@@ -26,6 +32,8 @@ import asyncio
 import threading
 from enum import StrEnum
 
+import anyio
+import anyio.to_thread
 import msgspec
 from dbos import DBOS, SetWorkflowID
 from dbos import WorkflowStatus as DbosWorkflowStatus
@@ -64,13 +72,32 @@ class ModelLoading(NotReady):
 class ModelKind(StrEnum):
     EMBEDDING = "embedding"
     RERANKER = "reranker"
-    DESCRIBER = "describer"  # writes section descriptors (`gguf_models.DESCRIBER`)
+    DESCRIBER = "describer"  # writes section descriptors (`gguf_models.DESCRIBERS`)
+    # embeds them for a collection's vocabulary (`gguf_models.VOCABULARY_EMBEDDER`)
+    VOCABULARY = "vocabulary"
+
+
+class ModelGroup(StrEnum):
+    SEARCH = "search"  # loaded for the life of the process
+    KNOWLEDGE = "knowledge"  # loaded on first use, freed once idle
+
+
+GROUPS: dict[ModelKind, ModelGroup] = {
+    ModelKind.EMBEDDING: ModelGroup.SEARCH,
+    ModelKind.RERANKER: ModelGroup.SEARCH,
+    ModelKind.DESCRIBER: ModelGroup.KNOWLEDGE,
+    ModelKind.VOCABULARY: ModelGroup.KNOWLEDGE,
+}
+
+IDLE_SECONDS = 300  # a knowledge model nobody used for this long is freed
+SWEEP_SECONDS = 30  # how often `free_idle` looks
 
 
 class ModelState(StrEnum):
     PENDING = "pending"
-    LOADING = "loading"
-    READY = "ready"
+    LOADING = "loading"  # downloading, or loading into memory
+    DOWNLOADED = "downloaded"  # a knowledge model on disk, not in memory: loaded when asked
+    READY = "ready"  # in memory
     ERROR = "error"
 
 
@@ -78,6 +105,7 @@ class ModelStatus(msgspec.Struct):
     kind: ModelKind
     name: str
     state: ModelState
+    group: ModelGroup
     error: str | None = None
     # where it runs under the hardware setting (`hardware.device`); None where it cannot
     device: Device | None = None
@@ -99,6 +127,7 @@ async def warm_model(kind: ModelKind, name: str) -> None:
         ModelKind.EMBEDDING: embed.warm,
         ModelKind.RERANKER: embed.warm_reranker,
         ModelKind.DESCRIBER: embed.warm_generator,
+        ModelKind.VOCABULARY: embed.warm,
     }[kind]
     await cpu.on_cpu(warm, name, accelerator)
 
@@ -147,8 +176,10 @@ async def required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
     if settings.search.reranker == Reranker.CROSS_ENCODER:
         wanted.append((ModelKind.RERANKER, settings.search.reranker_model))
     wanted.extend((ModelKind.RERANKER, name) for name in await _collection_rerankers(settings))
-    if describer := gguf_models.describer(settings.pipeline.descriptors):
+    if describer := gguf_models.describer(settings.pipeline):
         wanted.append((ModelKind.DESCRIBER, describer))
+        # the describer judges the vocabulary's pairs too, and this embeds its descriptors
+        wanted.append((ModelKind.VOCABULARY, gguf_models.VOCABULARY_EMBEDDER))
     return list(dict.fromkeys(wanted))
 
 
@@ -202,7 +233,8 @@ async def ensure_models(settings: UserSettings) -> list[ModelStatus]:
         existing = records.get(workflow_id)
         status = existing.status if existing else None
         if status == RunStatus.SUCCESS:
-            _warm_in_background(kind, name)  # on disk already; this process's caches may be cold
+            if GROUPS[kind] == ModelGroup.SEARCH:  # a knowledge model waits for its first use
+                _warm_in_background(kind, name)  # on disk already; this process's caches are cold
             continue
         if status in ACTIVE_STATUS:
             continue  # on its way: the record is the download
@@ -265,6 +297,27 @@ def is_warm(workflow_id: str) -> bool:
     return workflow_id in _ready
 
 
+def free_idle() -> list[str]:
+    """Free the knowledge models nobody used for `IDLE_SECONDS`, and forget they were loaded, so
+    the next `require_ready` loads them again; their names. Sync: a worker thread's work."""
+    freed = embed.free_idle(IDLE_SECONDS)
+    knowledge = [kind for kind, group in GROUPS.items() if group == ModelGroup.KNOWLEDGE]
+    with _warm_lock:
+        for name in freed:
+            for kind in knowledge:
+                _ready.discard(_model_id(kind, name))
+    for name in freed:
+        _log.info("model_freed", model=name, idle_seconds=IDLE_SECONDS)
+    return freed
+
+
+async def free_idle_forever() -> None:
+    """`free_idle` every `SWEEP_SECONDS`, until cancelled (`workflows.stop`)."""
+    while True:
+        await anyio.sleep(SWEEP_SECONDS)
+        await anyio.to_thread.run_sync(free_idle)
+
+
 _STATE: dict[RunStatus, ModelState] = {
     RunStatus.SUCCESS: ModelState.READY,
     RunStatus.ERROR: ModelState.ERROR,
@@ -275,16 +328,20 @@ _STATE: dict[RunStatus, ModelState] = {
 def _model_status(kind: ModelKind, name: str, workflow) -> ModelStatus:
     """The one DBOS-status -> model-state mapping. `workflow` is None when never started.
 
-    A downloaded model this process has not loaded yet is `loading` with no error: it is warming
-    up, which takes seconds rather than the minutes a download takes, but a search still cannot
-    use it yet."""
+    A downloaded search model this process has not loaded yet is `loading` with no error: the boot
+    warms it, which takes seconds rather than the minutes a download takes, but a search still
+    cannot use it yet. A downloaded knowledge model not in memory is `downloaded`, unless a warm
+    task is loading it: it waits for its first use. One a run loaded on its own, past
+    `require_ready`, is in memory all the same (`embed.loaded`)."""
     state = ModelState.PENDING
     if workflow is not None:
         state = _STATE.get(workflow.status, ModelState.LOADING)
-    if state == ModelState.READY and not is_warm(_model_id(kind, name)):
-        state = ModelState.LOADING
+    workflow_id = _model_id(kind, name)
+    if state == ModelState.READY and not (is_warm(workflow_id) or embed.loaded(name)):
+        idle = GROUPS[kind] == ModelGroup.KNOWLEDGE and workflow_id not in _warming
+        state = ModelState.DOWNLOADED if idle else ModelState.LOADING
     error = str(workflow.error) if workflow is not None and workflow.error else None
-    return ModelStatus(kind=kind, name=name, state=state, error=error)
+    return ModelStatus(kind=kind, name=name, state=state, group=GROUPS[kind], error=error)
 
 
 async def model_statuses() -> list[ModelStatus]:
@@ -313,8 +370,9 @@ def _statuses(
 async def require_ready(kind: ModelKind, name: str) -> None:
     """Fail fast with a clear message instead of blocking a request on a download.
 
-    Called on every search, so a model this process has loaded is not looked up again: nothing
-    takes that answer back, because a loaded model stays loaded for the life of the process."""
+    Called on every search, so a model this process has loaded is not looked up again: a search
+    model stays loaded for the life of the process, and a knowledge model `free_idle` frees is
+    forgotten there, so it is looked up and loaded again."""
     workflow_id = _model_id(kind, name)
     if is_warm(workflow_id):
         return
@@ -325,8 +383,9 @@ async def require_ready(kind: ModelKind, name: str) -> None:
     if status.state == ModelState.PENDING:
         raise ModelLoading(f"{kind} model {name} is not loaded yet; check /api/status")
     if found and found[0].status == RunStatus.SUCCESS:
-        # downloaded, warming up (see `_model_status`); warmed here too, since the boot warms only
-        # what the settings require now, and a run resumed after a change may ask for another
+        # downloaded, warming up or waiting for its first use (see `_model_status`); warmed here,
+        # since the boot warms only the search models the settings require now, and a run
+        # resumed after a change may ask for another
         _warm_in_background(kind, name)
         raise ModelLoading(f"{kind} model {name} is loading in this process; retry in a moment")
     raise ModelLoading(

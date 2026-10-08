@@ -31,8 +31,10 @@ import anyio
 import anyio.from_thread
 import anyio.to_thread
 import msgspec
+import pyarrow.parquet as pq
 import pytest
 from conftest import (
+    DESCRIBER,
     MD,
     WAIT,
     WAITING_STATUS,
@@ -97,9 +99,11 @@ from haskie.indexing.pipeline import Batch
 from haskie.indexing.workflows import Stage
 from haskie.paging import Order
 from haskie.search import log
+from haskie.sections import generated
 from haskie.settings import (
     ChunkSettings,
     CollectionOverrides,
+    Describer,
     Descriptors,
     PipelineSettings,
     RetentionSettings,
@@ -1036,14 +1040,67 @@ async def test_an_import_is_describing_while_its_sections_are_described(
 
     await until(waiting, "the run never waited for the describer")
     assert (await document.named(doc.name)).status == "describing"
-    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER))
+    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, DESCRIBER))
 
     assert await wait_for(job_id) == "imported"
     assert (await document.named(doc.name)).status == "imported"
+    (operation,) = (await operations.list_operations("document")).items
+    assert [job.stage for job in operation.jobs] == [
+        Stage.CONVERT,
+        Stage.EMBED,
+        Stage.DESCRIBE_SECTIONS,
+        Stage.DESCRIBE,
+        Stage.DESCRIBE_DOCUMENT,
+    ]
+    assert all(job.status == "SUCCESS" for job in operation.jobs)
+    assert await _workflow_ids(dbos_names.SUMMARIZE_DOCUMENT_WORKFLOW) == []
+    tasks = [
+        task
+        for job_id in {job.id for job in operation.jobs}
+        for task in await operations.list_tasks(job_id)
+    ]
+    assert {task.stage for task in tasks} == set(Stage) - {Stage.INDEX}
 
 
-async def test_a_hit_another_strategy_described_is_described_again_from_the_cache(
+async def test_a_hit_another_describer_wrote_is_described_again_with_the_one_set(
     dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Switching the describer re-describes an entry on its next index, from the cache, with the
+    model the settings now name; indexing again under the same one asks nothing."""
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await (await Collection.create("switch")).add(doc.id)
+    asked: list[str] = []
+
+    def reply(name: str, accelerator, prompt: str, max_tokens: int) -> str:
+        asked.append(name)
+        return "Explains the topics." if max_tokens == generated.SECTION_TOKENS else "Topic one"
+
+    monkeypatch.setattr(embed, "reply", reply)
+    for describer in Describer:
+        name = gguf_models.DESCRIBERS[describer].name
+        models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, name))
+    user = await load_user_settings()
+
+    for describer, expected in (
+        (Describer.GEMMA_4_E2B, "ggml-org/gemma-4-E2B-it-GGUF"),
+        (Describer.QWEN_3_5_4B, "unsloth/Qwen3.5-4B-GGUF"),
+        (Describer.QWEN_3_5_4B, None),  # the same describer again: nothing to describe
+    ):
+        llm = msgspec.structs.replace(
+            user.pipeline, descriptors=Descriptors.LLM, describer=describer
+        )
+        await save_user_settings(msgspec.structs.replace(user, pipeline=llm))
+        asked.clear()
+        job_id = await dbos.start_index_collection_document("switch", doc.id)
+        assert await wait_for(job_id) == "indexed"
+        await _drain()
+        assert set(asked) == ({expected} if expected else set()), describer
+
+
+@pytest.mark.parametrize("legacy_llm", [False, True], ids=["another-strategy", "old-llm-cache"])
+async def test_a_hit_another_strategy_described_is_described_again_from_the_cache(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_llm: bool
 ) -> None:
     """A changed descriptor strategy re-describes an entry on its next index, from the cache: the
     run waits for the describer, then writes its descriptors, and embeds nothing again."""
@@ -1051,18 +1108,29 @@ async def test_a_hit_another_strategy_described_is_described_again_from_the_cach
     spy = _spy_embed(monkeypatch)
     monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
     doc = await import_document(dbos, "a.md", MD, tmp_path)
+    if legacy_llm:
+        (entry,) = await embed_cache.entries(doc.id)
+        path = embed_cache.sections_path(doc.id, entry.id)
+        old = (
+            pq.read_table(path)
+            .drop(["description"])
+            .replace_schema_metadata({b"descriptors": b"llm"})
+        )
+        pq.write_table(old, path)
     await (await Collection.create("again")).add(doc.id)
     prompts: list[str] = []
 
     def reply(name: str, accelerator, prompt: str, max_tokens: int) -> str:
         prompts.append(prompt)
+        if max_tokens == generated.SECTION_TOKENS:
+            return "Explains the topics."
         return "Topic one | Topic two"
 
     monkeypatch.setattr(embed, "reply", reply)
     await save_llm_descriptors()
 
     job_id = await dbos.start_index_collection_document("again", doc.id)
-    describer = models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER)
+    describer = models._model_id(models.ModelKind.DESCRIBER, DESCRIBER)
     embedding = workflows.embed_id(job_id, doc.id)
 
     async def waiting() -> bool:
@@ -1073,15 +1141,16 @@ async def test_a_hit_another_strategy_described_is_described_again_from_the_cach
     assert (await document.named(doc.name)).status == "imported", "an index never moves it"
     models._mark_ready(describer)
     assert await wait_for(job_id) == "indexed"
-    await _drain()  # the description the run queued, not waited for
+    await _drain()
 
     (entry,) = await embed_cache.entries(doc.id)
     assert sum(spy.calls.values()) == 1, "nothing embedded again"
     assert await embed_cache.described_by(doc.id, entry.id) == Descriptors.LLM
     described = await embed_cache.read_sections(doc.id, entry.id)
     assert {tuple(one.descriptors) for one in described} <= {("Topic one", "Topic two"), ()}
-    # one prompt a section with prose, and one for the document's missing description
-    assert len(prompts) - 1 == sum(bool(one.descriptors) for one in described) > 0
+    assert {one.description for one in described if one.descriptors} == {"Explains the topics."}
+    # two prompts per section with prose, and one for the document's missing description
+    assert len(prompts) - 1 == 2 * sum(bool(one.descriptors) for one in described) > 0
 
 
 async def test_an_embedding_run_describes_by_the_strategy_it_was_asked_for(
@@ -1095,7 +1164,7 @@ async def test_an_embedding_run_describes_by_the_strategy_it_was_asked_for(
     row = await document.named(doc.name)
     params = embed_cache.params(row, (await load_user_settings()).conversion.chunking, None)
     monkeypatch.setattr(embed, "reply", lambda name, accelerator, prompt, tokens: "Topic one")
-    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER))
+    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, DESCRIBER))
     assert (await load_user_settings()).pipeline.descriptors == Descriptors.C_TF_IDF
 
     described = await _steps(await _embedding_run(row, params, Descriptors.LLM))
@@ -1155,7 +1224,7 @@ async def test_an_llm_run_describes_a_document_without_a_description(
     after: str,
     asked: int,
 ) -> None:
-    """After the sections, the describer writes the document's description from its outline,
+    """After the sections, the describer writes the document's description from their metadata,
     only where it has none: one someone wrote stands, before the model is asked or while it
     answers, and the model is not asked for another."""
     doc = await import_document(dbos, "a.md", MD, tmp_path)
@@ -1175,10 +1244,11 @@ async def test_an_llm_run_describes_a_document_without_a_description(
         await wait_for(one)
 
     assert (await document.named(doc.name)).description == after, name
-    assert len(queued) == (by == Descriptors.LLM), "queued by the llm describe stage alone"
+    assert queued == [], "document description stays in the embedding operation"
     assert len(summaries) == asked, name
     if summaries:
-        assert "- Alpha (Topic one, Topic two)" in summaries[0], "the outline with descriptors"
+        assert "Descriptors: Topic one | Topic two" in summaries[0]
+        assert "Description: Explains alpha and beta." in summaries[0]
 
 
 @pytest.mark.parametrize(
@@ -3227,6 +3297,7 @@ def test_the_names_the_operations_view_spells_out_are_the_ones_dbos_records() ->
         "maintenance": [
             get_dbos_func_name(workflows.maintain_on_partition),
             get_dbos_func_name(workflows.daily_maintenance),
+            get_dbos_func_name(workflows.build_vocabulary),
         ],
         "backup": [
             get_dbos_func_name(backup.create_backup),

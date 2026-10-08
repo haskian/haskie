@@ -1,11 +1,12 @@
 """The descriptors and summaries a language model writes (`sections.generated`): what it reads,
 and how its answer is read back."""
 
+import msgspec
 import pytest
 
 from haskie.sections import generated
 from haskie.sections.build import Section
-from haskie.sections.descriptors import Run
+from haskie.sections.descriptors import Description, Run
 
 SAGAS = (
     "A saga splits a long transaction into local steps. When a step fails, the saga runs the "
@@ -38,9 +39,10 @@ QUORUMS = "A quorum write waits for a majority of replicas, and a quorum read as
             ["Quorum reads", "Majority writes"],
         ),
         (
-            "more than five phrases",
-            "a | b | c | d | e | f | g",
-            ["a", "b", "c", "d", "e"],
+            "more than six phrases",
+            "Sagas | Quorums | Replication | Consensus | Transactions | Recovery | Logging | "
+            "Sharding",
+            ["Sagas", "Quorums", "Replication", "Consensus", "Transactions", "Recovery"],
         ),
         ("one phrase without a separator", "Replica staleness", ["Replica staleness"]),
         ("an empty answer", "", []),
@@ -51,37 +53,22 @@ def test_parse_reads_the_first_list_line(name: str, answer: str, expected: list[
     assert generated.parse(answer) == expected, name
 
 
-@pytest.mark.parametrize(
-    ("name", "phrases", "expected"),
-    [
-        (
-            "a phrase whose every word the path holds goes",
-            ["Saga orchestration", "Sagas", "Compensating steps"],
-            ["Saga orchestration", "Compensating steps"],
-        ),
-        (
-            "a stem the path holds in another form",
-            ["Saga", "Compensation"],
-            ["Compensation"],
-        ),
-        (
-            "a phrase with a word of its own stays",
-            ["Book sagas", "Saga failures"],
-            ["Saga failures"],
-        ),
-        (
-            "a stopword or a short word adds nothing to keep it",
-            ["The sagas", "Of a Book"],
-            [],
-        ),
-        ("a phrase of no words stays", ["--", "Saga steps"], ["--", "Saga steps"]),
-        ("nothing to drop", ["Quorum reads"], ["Quorum reads"]),
-    ],
-)
-def test_unsaid_drops_what_the_heading_path_says(
-    name: str, phrases: list[str], expected: list[str]
-) -> None:
-    assert generated.unsaid(phrases, ["Book", "Sagas"]) == expected, name
+@pytest.mark.parametrize("empty", [False, True])
+def test_section_descriptions_read_only_the_sections_prose(empty: bool) -> None:
+    prompts: list[str] = []
+
+    def reply(prompt: str, max_tokens: int) -> str:
+        prompts.append(prompt)
+        assert max_tokens == generated.SECTION_TOKENS
+        return "Description: Explains sagas. Covers compensation. Shows retries."
+
+    text = "  " if empty else SAGAS
+    result = generated.describe_section(Run(("Book", "Sagas"), 1, 1), [QUORUMS, text], reply)
+    assert result == ("" if empty else "Explains sagas. Covers compensation.")
+    assert len(prompts) == (not empty)
+    if prompts:
+        assert "Heading path: Book > Sagas" in prompts[0]
+        assert SAGAS in prompts[0] and QUORUMS not in prompts[0]
 
 
 def test_a_short_section_is_read_whole() -> None:
@@ -129,26 +116,130 @@ def test_each_section_is_one_prompt_with_its_heading_path() -> None:
 
     picked = generated.Generated(reply).pick(texts, runs, None, None)
 
-    assert picked == [["Topic one", "Topic two"], ["Topic one", "Topic two"], []]
+    assert picked == [Description(["Topic one", "Topic two"])] * 2 + [Description()]
     assert len(prompts) == 2, "the code-only section was not asked about"
     assert "Heading path: (the whole document)" in prompts[0]
+    assert "up to 6 descriptors" in prompts[0]
+    assert "even when the heading already names them" in prompts[0]
     assert SAGAS in prompts[0] and QUORUMS in prompts[0]
     assert "Heading path: Book > Sagas" in prompts[1]
     assert SAGAS in prompts[1] and QUORUMS not in prompts[1], "its own chunks only"
 
 
+# A chapter of chunks 0 to 3: two sections, the first with a subsection, and a sibling chapter.
+CHAPTER = Run(("Book", "Sagas"), 0, 3)
+ORCHESTRATION = Run(("Book", "Sagas", "Orchestration"), 0, 1)
+TIMEOUTS = Run(("Book", "Sagas", "Orchestration", "Timeouts"), 1, 1)
+RECOVERY = Run(("Book", "Sagas", "Recovery"), 2, 3)
+QUORUM = Run(("Book", "Quorums"), 4, 4)
+
+
+@pytest.mark.parametrize(
+    ("name", "run", "known", "expected"),
+    [
+        (
+            "every section under it, at any depth, in document order",
+            CHAPTER,
+            [(RECOVERY, []), (TIMEOUTS, []), (QUORUM, []), (ORCHESTRATION, [])],
+            [ORCHESTRATION, TIMEOUTS, RECOVERY],
+        ),
+        ("not itself, nor a sibling", ORCHESTRATION, [(ORCHESTRATION, []), (RECOVERY, [])], []),
+        ("a leaf has none", TIMEOUTS, [(CHAPTER, []), (ORCHESTRATION, [])], []),
+        (
+            "the whole document holds every section",
+            Run((), 0, 4),
+            [(QUORUM, []), (CHAPTER, [])],
+            [CHAPTER, QUORUM],
+        ),
+        ("nothing known", CHAPTER, [], []),
+    ],
+)
+def test_subsections(name: str, run: Run, known: list, expected: list[Run]) -> None:
+    assert [one for one, _ in generated.subsections(run, known)] == expected, name
+
+
+def test_an_outline_indents_by_depth_and_names_each_subsections_topics() -> None:
+    below = [
+        (ORCHESTRATION, ["Saga coordinator"]),
+        (TIMEOUTS, ["Step deadlines", "Retries"]),
+        (RECOVERY, []),
+    ]
+    assert generated.subsection_outline(CHAPTER, below) == (
+        "- Orchestration (Saga coordinator)\n  - Timeouts (Step deadlines, Retries)\n- Recovery"
+    )
+
+
+@pytest.mark.parametrize(
+    ("topics", "cut"),
+    [
+        pytest.param(1600, False, id="too long whole: the deeper headings go first"),
+        pytest.param(4000, True, id="too long even so: cut at the limit"),
+    ],
+)
+def test_an_outline_too_long_drops_depth_then_cuts(topics: int, cut: bool) -> None:
+    long = "x" * topics
+    below: list[generated.Described] = [
+        (ORCHESTRATION, [long]),
+        (TIMEOUTS, [long]),
+        (RECOVERY, ["Undo"]),
+    ]
+    outline = generated.subsection_outline(CHAPTER, below)
+    if cut:
+        assert len(outline) == generated.OUTLINE_CHARS
+        assert outline.startswith("- Orchestration (")
+    else:
+        assert outline.splitlines() == [f"- Orchestration ({long})", "- Recovery (Undo)"]
+
+
+def test_a_long_section_with_subsections_reads_their_outline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deepest first, as the pipeline orders them: a leaf gets the plain prompt, and a section
+    above it, longer than `OUTLINE_FROM_CHARS`, the outline of what was described under it, in this
+    pick or before it (`known`)."""
+    monkeypatch.setattr(generated, "OUTLINE_FROM_CHARS", 0)
+    prompts: dict[str, str] = {}
+
+    def reply(prompt: str, max_tokens: int) -> str:
+        heading = prompt.split("Heading path: ", 1)[1].split("\n", 1)[0]
+        prompts[heading] = prompt
+        return f"{heading.rsplit(' > ', 1)[-1]} topic"
+
+    texts = [SAGAS, QUORUMS, SAGAS, QUORUMS]
+    known = [(RECOVERY, ["Compensation"])]  # described by an earlier batch
+
+    picked = generated.Generated(reply, known).pick(
+        texts, [TIMEOUTS, ORCHESTRATION, CHAPTER], None, None
+    )
+
+    assert picked == [Description(["Timeouts topic"]), Description(["Orchestration topic"]),
+                      Description(["Sagas topic"])]  # fmt: skip
+    assert "Outline of its subsections" not in prompts["Book > Sagas > Orchestration > Timeouts"]
+    assert "- Timeouts (Timeouts topic)" in prompts["Book > Sagas > Orchestration"]
+    chapter = prompts["Book > Sagas"]
+    assert "Name what the section as a whole is about" in chapter
+    assert chapter.split("Outline of its subsections:\n", 1)[1].split("\n\n", 1)[0] == (
+        "- Orchestration (Orchestration topic)\n"
+        "  - Timeouts (Timeouts topic)\n"
+        "- Recovery (Compensation)"
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "answer", "expected"),
     [
-        ("an echo of the path goes", "Sagas | Compensating steps", ["Compensating steps"]),
+        ("heading terms stay", "Sagas | Compensating steps", ["Sagas", "Compensating steps"]),
+        ("heading stems stay", "Saga | Compensation", ["Saga", "Compensation"]),
         ("echoes alone are kept rather than nothing", "Sagas | Book", ["Sagas", "Book"]),
     ],
 )
-def test_a_section_keeps_what_its_heading_path_does_not_say(
+def test_a_section_keeps_descriptors_already_in_its_heading_path(
     name: str, answer: str, expected: list[str]
 ) -> None:
     pick = generated.Generated(lambda prompt, max_tokens: answer).pick
-    assert pick([SAGAS], [Run(("Book", "Sagas"), 0, 0)], None, None) == [expected], name
+    assert pick([SAGAS], [Run(("Book", "Sagas"), 0, 0)], None, None) == [Description(expected)], (
+        name
+    )
 
 
 def _section(headings: list[str], descriptors: list[str]) -> Section:
@@ -177,42 +268,6 @@ BOOK = [
     _section(["Sagas", "Orchestration"], ["Central coordinator"]),
     _section(["Quorums"], []),
 ]
-
-
-@pytest.mark.parametrize(
-    ("name", "sections", "expected"),
-    [
-        ("no sections", [], ""),
-        ("the whole document alone has no heading", BOOK[:1], ""),
-        (
-            "every depth, indented, with descriptors where there are some",
-            BOOK,
-            "- Sagas (Compensating steps, Local transactions)\n"
-            "  - Orchestration (Central coordinator)\n"
-            "- Quorums",
-        ),
-        (
-            "too long: the deeper headings go first",
-            [
-                *BOOK[:2],
-                *(_section(["Sagas", f"Step {n}"], ["x" * 40]) for n in range(100)),
-                BOOK[3],
-            ],
-            "- Sagas (Compensating steps, Local transactions)\n- Quorums",
-        ),
-    ],
-)
-def test_the_outline_is_every_heading_with_its_descriptors(
-    name: str, sections: list[Section], expected: str
-) -> None:
-    assert generated.outline(sections) == expected, name
-
-
-def test_an_outline_too_long_at_its_first_depth_is_cut() -> None:
-    chapters = [_section([f"Chapter {n}"], ["y" * 60]) for n in range(100)]
-    text = generated.outline(chapters)
-    assert len(text) == generated.OUTLINE_CHARS
-    assert text.startswith("- Chapter 0 (y")
 
 
 @pytest.mark.parametrize(
@@ -246,31 +301,68 @@ def test_sentences_read_the_summary_back(name: str, answer: str, expected: str) 
     assert generated.sentences(answer) == expected, name
 
 
-@pytest.mark.parametrize(
-    ("name", "sections", "texts", "asked", "in_prompt"),
-    [
-        ("headings and prose", BOOK, [SAGAS, QUORUMS], True, ["- Sagas (Compensating", SAGAS]),
-        ("prose without headings", BOOK[:1], [SAGAS], True, ["Outline (each heading", "(none)"]),
-        ("headings without prose", BOOK, ["\n\n"], True, ["  - Orchestration"]),
-        ("neither: nothing to read", BOOK[:1], ["\n\n"], False, []),
-    ],
-)
-def test_a_document_is_summarized_from_its_outline_and_an_excerpt(
-    name: str, sections: list[Section], texts: list[str], asked: bool, in_prompt: list[str]
-) -> None:
+@pytest.mark.parametrize("kind", ["both", "description", "descriptors", "empty"])
+def test_a_document_reads_saved_section_descriptions_and_descriptors(kind: str) -> None:
+    section = _section([], ["Compensating steps"] if kind in ("both", "descriptors") else [])
+    section = msgspec.structs.replace(
+        section, description="Explains saga recovery." if kind in ("both", "description") else ""
+    )
     prompts: list[str] = []
 
     def reply(prompt: str, max_tokens: int) -> str:
         prompts.append(prompt)
         assert max_tokens == generated.SUMMARY_TOKENS
-        return "Summary: It covers sagas. It covers quorums."
+        return "Summary: Explains transactions. Covers recovery."
 
-    summary = generated.summarize(sections, texts, reply)
+    result = generated.summarize([section], reply)
+    assert result == ("" if kind == "empty" else "Explains transactions. Covers recovery.")
+    assert len(prompts) == (kind != "empty")
+    if prompts:
+        assert "Heading: (the whole document)" in prompts[0]
+        assert f"Description: {section.description}" in prompts[0]
+        assert f"Descriptors: {' | '.join(section.descriptors)}" in prompts[0]
 
-    assert summary == ("It covers sagas. It covers quorums." if asked else ""), name
-    assert len(prompts) == asked, name
-    for part in in_prompt:
-        assert part in prompts[0], (name, part)
+
+def test_long_section_metadata_is_grouped_without_losing_descriptors() -> None:
+    sections = [
+        msgspec.structs.replace(_section([f"Chapter {n}"], [f"Topic {n}"]), description="x" * 1500)
+        for n in range(20)
+    ]
+    prompts: list[str] = []
+    generated.summarize(
+        sections, lambda prompt, tokens: prompts.append(prompt) or "Covers transactions."
+    )
+    for n in range(20):
+        assert any(
+            f"Description: {'x' * 1500}\nDescriptors: Topic {n}\n" in prompt + "\n"
+            for prompt in prompts
+        )
+    assert all(
+        len(prompt.split("Section information:\n")[1]) <= generated.SUMMARY_CHARS
+        for prompt in prompts
+    )
+
+
+@pytest.mark.parametrize("empty_group", [False, True])
+def test_long_documents_reduce_all_sections_in_bounded_groups(empty_group: bool) -> None:
+    sections = [_section([f"Chapter {n}"], [f"Topic {n}"]) for n in range(260)]
+    prompts: list[str] = []
+
+    def reply(prompt: str, max_tokens: int) -> str:
+        text = prompt.split("Section information:\n", 1)[1]
+        assert len(text) <= generated.SUMMARY_CHARS
+        prompts.append(text)
+        return "" if empty_group and len(prompts) == 2 else "Covers transactions."
+
+    result = generated.summarize(sections, reply)
+    assert result == ("" if empty_group else "Covers transactions.")
+    if empty_group:
+        assert len(prompts) == 2
+    else:
+        assert len(prompts) == 17 + 2 + 1
+        for n in range(260):
+            assert any(f"Descriptors: Topic {n}\n" in text + "\n" for text in prompts[:17])
+        assert prompts[-1] == "Covers transactions.\n\nCovers transactions."
 
 
 @pytest.mark.parametrize(
@@ -312,3 +404,33 @@ def test_a_collection_too_large_reads_each_description_cut_to_its_share() -> Non
     )
     share = generated.COLLECTION_CHARS // 100
     assert f"1. Book 0 {'x' * (share - len('Book 0 '))}\n2. Book 1" in prompts[0]
+
+
+@pytest.mark.parametrize(
+    ("over", "outline"),
+    [
+        pytest.param(0, False, id="at the bar: the excerpt alone"),
+        pytest.param(1, True, id="one character over it: the outline too"),
+    ],
+)
+def test_the_outline_starts_past_its_bar(
+    monkeypatch: pytest.MonkeyPatch, over: int, outline: bool
+) -> None:
+    """Below `OUTLINE_FROM_CHARS` the outline gained nothing when judged: the plain prompt."""
+    texts = [SAGAS, QUORUMS, SAGAS, QUORUMS]
+    monkeypatch.setattr(generated, "OUTLINE_FROM_CHARS", len("".join(texts)) - over)
+    prompts: list[str] = []
+
+    def reply(prompt: str, max_tokens: int) -> str:
+        prompts.append(prompt)
+        return "Topic"
+
+    generated.Generated(reply, [(RECOVERY, ["Compensation"])]).pick(texts, [CHAPTER], None, None)
+
+    (prompt,) = prompts
+    assert ("- Recovery (Compensation)" in prompt) is outline
+    assert ("Outline of its subsections" in prompt) is outline
+
+
+def test_the_outline_bar_is_eight_excerpts() -> None:
+    assert generated.OUTLINE_FROM_CHARS == 8 * generated.EXCERPT_CHARS == 48_000

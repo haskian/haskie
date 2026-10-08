@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { api, type EmbeddingProfile, type Options, type PipelineSettings, type SearchSettings } from '../api'
-import { choices, docFor, EmbedderFacts, Field, Logo, Picker, profileOptions, SearchField } from '../ui'
+import { api, type EmbeddingProfile, type Options, type SearchSettings } from '../api'
+import { DescriberFields, docFor, EmbedderFacts, Field, Logo, Picker, profileOptions, SearchField, type Describing } from '../ui'
 import { errorText } from '../format'
 
 
@@ -10,7 +10,7 @@ export function Init({ onDone }: { onDone: () => void }) {
   const [options, setOptions] = useState<Options | null>(null)
   const [profile, setProfile] = useState<EmbeddingProfile>('granite-97m-multilingual')
   const [search, setSearch] = useState<SearchSettings | null>(null) // the server's defaults, then the picks
-  const [descriptors, setDescriptors] = useState<PipelineSettings['descriptors'] | null>(null)
+  const [describing, setDescribing] = useState<Describing | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -19,7 +19,7 @@ export function Init({ onDone }: { onDone: () => void }) {
       .then(([offered, defaults]) => {
         setOptions(offered)
         setSearch(defaults.search)
-        setDescriptors(defaults.pipeline.descriptors)
+        setDescribing({ descriptors: defaults.pipeline.descriptors, describer: defaults.pipeline.describer })
       })
       .catch((cause: unknown) => setError(errorText(cause)))
   }, [])
@@ -28,11 +28,11 @@ export function Init({ onDone }: { onDone: () => void }) {
   const embedded = profile !== 'none'
 
   const submit = async () => {
-    if (search === null || descriptors === null) return
+    if (search === null || describing === null) return
     setBusy(true)
     setError(null)
     try {
-      await api.init({ profile, search: embedded ? search : { ...search, mode: 'fts' }, descriptors })
+      await api.init({ profile, search: embedded ? search : { ...search, mode: 'fts' }, ...describing })
       onDone()
     } catch (cause) {
       setError(errorText(cause))
@@ -59,14 +59,12 @@ export function Init({ onDone }: { onDone: () => void }) {
             <Picker options={profiles} value={profile} onChange={setProfile} ariaLabel="Embedding profile" />
             <EmbedderFacts model={options?.embedding_profiles[profile]} metadata={options?.embedding_metadata[profile]} />
           </Field>
-          {options !== null && search !== null && descriptors !== null && (
+          {options !== null && search !== null && describing !== null && (
             <>
               {embedded && <SearchField name="mode" search={search} options={options} onChange={setSearch} />}
               <SearchField name="reranker" search={search} options={options} onChange={setSearch} />
               {search.reranker === 'cross-encoder' && <SearchField name="reranker_model" search={search} options={options} onChange={setSearch} />}
-              <Field label={doc('pipeline.descriptors').title} help={doc('pipeline.descriptors').description}>
-                <Picker ariaLabel={doc('pipeline.descriptors').title} options={choices(options.descriptors)} value={descriptors} onChange={setDescriptors} />
-              </Field>
+              <DescriberFields value={describing} options={options} onChange={setDescribing} />
             </>
           )}
           <button className="btn btn-primary" type="button" onClick={submit} disabled={busy || options === null}>

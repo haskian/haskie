@@ -17,5 +17,5 @@ export function DescriptionBox({ value, placeholder, onSave }: { value: string; 
     if (next !== undefined && next !== latest.current.value) latest.current.onSave(next)
   }
   useEffect(() => save, [])
-  return <textarea ref={box} className="textarea" aria-label="Description" defaultValue={value} placeholder={placeholder} onBlur={save} />
+  return <textarea ref={box} className="textarea description-box" aria-label="Description" defaultValue={value} placeholder={placeholder} onBlur={save} />
 }

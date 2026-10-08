@@ -117,9 +117,6 @@ async def test_every_model_has_a_loader_and_every_pin_a_model() -> None:
     assert (embedders, rerankers) == (pinned_embedders, pinned_rerankers)
     # a generator is no catalogue model, and no embedder pin either: one name, one runtime role
     assert set(gguf_models.GENERATORS).isdisjoint(embedders | rerankers | pinned_embedders)
-    assert {gguf_models.describer(one) for one in Descriptors} - {None} == set(
-        gguf_models.GENERATORS
-    ), "every generator is some strategy's describer"
     # each loader cuts a text at the model's own context (a GGUF file holds no positions past
     # it, a BERT none past 512), which the catalogue also states: the two must agree
     metadata = await catalogue.embedding_metadata()
@@ -358,7 +355,7 @@ async def stand_ins(monkeypatch: pytest.MonkeyPatch) -> None:
             UserSettings(
                 pipeline=PipelineSettings(accelerator=Accelerator.CPU, descriptors=Descriptors.LLM)
             ),
-            "ggml-org/gemma-4-E2B-it-GGUF runs on gguf on the Apple GPU",
+            "unsloth/Qwen3.5-4B-GGUF runs on gguf on the Apple GPU",
         ),
         (
             "descriptors an llm writes, where llama.cpp runs",

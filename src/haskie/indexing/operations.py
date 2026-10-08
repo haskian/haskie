@@ -67,6 +67,7 @@ from haskie.indexing.dbos_names import (
     STAGE_STEP,
     STAGE_WORKFLOW,
     SUMMARIZE_COLLECTION_WORKFLOW,
+    VOCABULARY_WORKFLOW,
     BulkWorkflow,
     RunStatus,
 )
@@ -259,7 +260,11 @@ KIND_NAMES: dict[OperationKind, list[str]] = {
     OperationKind.DOWNLOAD: [DOWNLOAD_WORKFLOW],
     # `maintain_collection` is only the debounced handle that waits: the run itself is the child
     # on the collection's partition, so that is the one worth a row.
-    OperationKind.MAINTENANCE: [MAINTAIN_PARTITION_WORKFLOW, DAILY_MAINTENANCE_WORKFLOW],
+    OperationKind.MAINTENANCE: [
+        MAINTAIN_PARTITION_WORKFLOW,
+        DAILY_MAINTENANCE_WORKFLOW,
+        VOCABULARY_WORKFLOW,  # a collection's preferred terms: upkeep of the collection too
+    ],
     OperationKind.BACKUP: list(BACKUP_KINDS),
 }
 
@@ -279,7 +284,10 @@ _COLLECTION_PREFIX: dict[OperationKind, list[str]] = {
         f"{workflows.BULK_DELETE_PREFIX}:",
         f"{workflows.SUMMARIZE_COLLECTION_PREFIX}:",
     ],
-    OperationKind.MAINTENANCE: [f"{workflows.MAINTAIN_PREFIX}:"],
+    OperationKind.MAINTENANCE: [
+        f"{workflows.MAINTAIN_PREFIX}:",
+        f"{workflows.VOCABULARY_PREFIX}:",
+    ],
 }
 
 
@@ -622,9 +630,10 @@ def _title(kind: OperationKind, status, names: dict[str, str]) -> str:
         return f"{download_kind} {model}"
     if kind == OperationKind.BACKUP:
         return "every document, collection and setting"
-    if status.name == DAILY_MAINTENANCE_WORKFLOW:  # the rest are maintenance runs
+    if status.name == DAILY_MAINTENANCE_WORKFLOW:  # the rest are runs of one collection
         return "daily housekeeping"
-    return _second_segment(status.workflow_id) or "?"
+    collection = _second_segment(status.workflow_id) or "?"
+    return f"{collection} vocabulary" if status.name == VOCABULARY_WORKFLOW else collection
 
 
 async def _detail(kind: OperationKind, status) -> dict[str, int | str | bool | None]:

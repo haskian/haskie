@@ -1,5 +1,6 @@
 import type { BulkKind, OperationProgress } from '../api'
 import { useOptions } from '../hooks/useOptions'
+import { ModalStatus } from './ModalStatus'
 
 // What a whole-thing operation is doing while it runs, in the words of the button that started it.
 const DOING: Record<BulkKind, string> = {
@@ -12,15 +13,16 @@ const DOING: Record<BulkKind, string> = {
   restore_backup: 'restoring',
 }
 
-/** How an operation started from a button stands: running, or how it ended and why. */
+/** How an operation ended and why. Its button shows progress while it runs. */
 export function BulkStatus({ operation }: { operation: OperationProgress }) {
   const running = useOptions().active_run_statuses.includes(operation.status)
+  if (running) return null
   const what = DOING[operation.kind]
   return (
-    <span className="muted">
-      {running ? `${what}…` : `${what}: ${operation.status.toLowerCase()}`}
+    <ModalStatus tone={operation.status === 'SUCCESS' ? 'success' : operation.status === 'ERROR' ? 'error' : 'warning'}>
+      {`${what}: ${operation.status.toLowerCase()}`}
       {operation.progress !== null && ` ${operation.progress.done}/${operation.progress.total}`}
       {operation.error !== null && ` — ${operation.error}`}
-    </span>
+    </ModalStatus>
   )
 }

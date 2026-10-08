@@ -30,6 +30,7 @@ import pyarrow as pa
 import pytest
 import structlog
 from conftest import (
+    DESCRIBER,
     MD,
     collection_hits,
     document_names,
@@ -74,11 +75,13 @@ from haskie.errors import (
     NotReady,
     PermanentError,
 )
-from haskie.indexing import chunk, embed, embed_cache, onnx_models, pipeline
+from haskie.indexing import chunk, embed, embed_cache, gguf_models, onnx_models, pipeline
 from haskie.indexing.chunk import Chunk, Piece, Position
 from haskie.indexing.segment import CutReason, PieceType
 from haskie.paging import Order, PageRequest
+from haskie.sections import generated
 from haskie.sections.build import Section
+from haskie.sections.descriptors import Description
 from haskie.settings import (
     DEFAULT_RERANKER,
     Accelerator,
@@ -2732,10 +2735,16 @@ async def _describe(
     accelerator: Accelerator,
 ) -> int:
     """The describe stage as the workflow runs it: plan, every batch, then the finalizer."""
+    settings = PipelineSettings(descriptors=by, accelerator=accelerator)
     batches = await pipeline.plan_describe(doc, cache_id, by)
+    if by == Descriptors.LLM:
+        for batch in batches:
+            await pipeline.describe_sections_batch(doc, cache_id, settings, batch)
+        await pipeline.finalize_section_descriptions(doc, cache_id, len(batches))
     for batch in batches:
-        await pipeline.describe_batch(doc, cache_id, embedding, by, accelerator, batch)
-    return await pipeline.finalize_describe(doc, cache_id, by, len(batches))
+        await pipeline.describe_batch(doc, cache_id, embedding, settings, batch)
+    describer = gguf_models.describer(settings)
+    return await pipeline.finalize_describe(doc, cache_id, by, len(batches), describer)
 
 
 async def _index(
@@ -2946,6 +2955,39 @@ async def test_finalize_embed_requires_the_rows_of_every_part() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("by", [Descriptors.LLM, Descriptors.C_TF_IDF])
+async def test_finalizing_resumed_batches_keeps_both_old_and_new_metadata(
+    dbos, by: Descriptors
+) -> None:
+    doc = await import_row("g.md")
+    await _convert(doc)
+    cache_id = await _embed(doc, SMALL)
+    found = await embed_cache.read_sections(doc.id, cache_id)
+    old = embed_cache.descriptors_path(doc.id, cache_id, 0)
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(msgspec.json.encode([["Saga steps"]]))
+    fresh = embed_cache.descriptors_path(doc.id, cache_id, 1)
+    fresh.write_bytes(
+        msgspec.json.encode(
+            [
+                {"descriptors": ["Compensation"], "description": "Explains saga recovery."}
+                for _ in found[1:]
+            ]
+        )
+    )
+
+    assert await pipeline.finalize_describe(doc, cache_id, by, 2) == len(found)
+
+    read = await embed_cache.read_sections(doc.id, cache_id)
+    assert (read[0].descriptors, read[0].description) == (["Saga steps"], "")
+    assert all(one.description == "Explains saga recovery." for one in read[1:])
+    assert await embed_cache.described_by(doc.id, cache_id) == (
+        None if by == Descriptors.LLM else by
+    )
+    assert not old.parent.exists()
+
+
+@pytest.mark.anyio
 async def test_describe_writes_the_descriptors_by_the_strategy_asked_for(
     dbos, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2966,8 +3008,10 @@ async def test_describe_writes_the_descriptors_by_the_strategy_asked_for(
     prompts: list[str] = []
 
     def reply(name: str, accelerator: Accelerator, prompt: str, max_tokens: int) -> str:
-        assert (name, accelerator) == (gguf_models.DESCRIBER, Accelerator.AUTO)
+        assert (name, accelerator) == (DESCRIBER, Accelerator.AUTO)
         prompts.append(prompt)
+        if max_tokens == generated.SECTION_TOKENS:
+            return "Explains the two topics."
         return "Topic one | Topic two"
 
     monkeypatch.setattr(embed, "reply", reply)
@@ -2981,15 +3025,113 @@ async def test_describe_writes_the_descriptors_by_the_strategy_asked_for(
         Descriptors.C_TF_IDF
     ), "nothing asked, nothing written"
 
-    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER))
+    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, DESCRIBER))
     count = await describe()
 
     described = await embed_cache.read_sections(doc.id, cache_id)
     assert count == len(described) == len(by_weight)
     assert await embed_cache.described_by(doc.id, cache_id) == Descriptors.LLM
-    assert len(prompts) == sum(bool(one.descriptors) for one in described) > 0
+    assert len(prompts) == 2 * sum(bool(one.descriptors) for one in described) > 0
     assert {tuple(one.descriptors) for one in described} <= {("Topic one", "Topic two"), ()}
+    assert all(
+        one.description == "Explains the two topics." for one in described if one.descriptors
+    )
     assert not embed_cache.scratch_dir(doc.id, cache_id).exists(), "the batches' files are gone"
+
+
+NESTED = (
+    "# Book\n\nbook intro text\n\n"
+    "## Sagas\n\nsagas intro text\n\n"
+    "### Orchestration\n\norchestration body text\n\n"
+    "### Recovery\n\nrecovery body text\n\n"
+    "## Quorums\n\nquorums body text\n"
+)
+
+
+@pytest.mark.anyio
+async def test_the_llm_describes_a_section_after_its_subsections_from_their_outline(
+    dbos, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Batches of one section, deepest first: each section above another reads the outline of
+    what earlier batches wrote under it, and every section gets its own descriptors back, though
+    the batches ran out of document order."""
+    from haskie.indexing import gguf_models, models
+
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, DESCRIBER))
+    monkeypatch.setattr(pipeline, "DESCRIBE_SECTIONS", 1)
+    monkeypatch.setattr(generated, "OUTLINE_FROM_CHARS", 0)  # a short book: every parent long
+    asked: list[str] = []
+    prompts: dict[str, str] = {}
+
+    def reply(name: str, accelerator: Accelerator, prompt: str, max_tokens: int) -> str:
+        if max_tokens == generated.SECTION_TOKENS:
+            return "Explains it."
+        heading = prompt.split("Heading path: ", 1)[1].split("\n", 1)[0]
+        asked.append(heading)
+        prompts[heading] = prompt
+        return f"{heading.rsplit(' > ', 1)[-1]} topic"
+
+    monkeypatch.setattr(embed, "reply", reply)
+    doc = await import_row("nested.md", NESTED)
+    await _convert(doc)
+    cache_id = await _embed(doc, SMALL)
+
+    await _describe(doc, cache_id, None, Descriptors.LLM, Accelerator.AUTO)
+
+    assert asked == [
+        "Book > Sagas > Orchestration",
+        "Book > Sagas > Recovery",
+        "Book > Sagas",
+        "Book > Quorums",
+        "Book",
+        "(the whole document)",
+    ], "deepest first, one batch each"
+    assert "Outline of its subsections" not in prompts["Book > Quorums"], "a leaf: no outline"
+    outline = prompts["Book > Sagas"].split("Outline of its subsections:\n", 1)[1]
+    assert outline.split("\n\n", 1)[0] == "- Orchestration (Orchestration topic)\n" + (
+        "- Recovery (Recovery topic)"
+    ), "read from the scratch files of the batches before"
+    assert "  - Orchestration (Orchestration topic)" in prompts["Book"]
+    described = await embed_cache.read_sections(doc.id, cache_id)
+    assert [(one.header, one.descriptors) for one in described] == [
+        ("", ["(the whole document) topic"]),
+        ("Book", ["Book topic"]),
+        ("Book > Sagas", ["Sagas topic"]),
+        ("Book > Sagas > Orchestration", ["Orchestration topic"]),
+        ("Book > Sagas > Recovery", ["Recovery topic"]),
+        ("Book > Quorums", ["Quorums topic"]),
+    ], "each back on its own section, in document order"
+
+
+@pytest.mark.anyio
+async def test_a_describe_resumed_over_an_older_builds_batches_puts_each_on_its_section(
+    dbos,
+) -> None:
+    """An older build's batches are lists in document order, and they come first; the batches this
+    build writes after them name their sections by id. Too few sections described is an error,
+    never a shifted list."""
+    doc = await import_row("resumed.md", NESTED)
+    await _convert(doc)
+    cache_id = await _embed(doc, SMALL)
+    found = await embed_cache.read_sections(doc.id, cache_id)
+    old = embed_cache.descriptors_path(doc.id, cache_id, 0)
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(msgspec.json.encode([["Old first"], ["Old second"]]))
+    fresh = embed_cache.descriptors_path(doc.id, cache_id, 1)
+    # this build's order: the last section first
+    keyed = {one.id: Description([f"New {one.header}"]) for one in reversed(found[2:])}
+    fresh.write_bytes(msgspec.json.encode(dict(list(keyed.items())[1:])))
+
+    with pytest.raises(ValueError, match="5 sections described of 6"):
+        await pipeline.finalize_describe(doc, cache_id, Descriptors.LLM, 2)
+
+    fresh.write_bytes(msgspec.json.encode(keyed))
+    assert await pipeline.finalize_describe(doc, cache_id, Descriptors.LLM, 2) == len(found)
+    read = await embed_cache.read_sections(doc.id, cache_id)
+    assert [one.descriptors for one in read] == [["Old first"], ["Old second"]] + [
+        [f"New {one.header}"] for one in found[2:]
+    ]
 
 
 @pytest.mark.anyio

@@ -18,9 +18,11 @@ import logging
 import math
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 from urllib.parse import unquote
 
+import anyio
 import msgspec
 import pytest
 import structlog
@@ -55,9 +57,11 @@ from haskie.tables import documents as documents_table
 from haskie.tables import searches
 
 from conftest import (  # isort: skip
+    DESCRIBER,
     LOOPBACK_URL,
     Gate,
     NO_MODELS,
+    WAITING_STATUS,
     api_app,
     attach_via_api,
     audit_lines,
@@ -76,9 +80,9 @@ from conftest import (  # isort: skip
     text_pdf,
     until,
     wait_event,
-    wait_for,
     wait_import,
     walk_pages,
+    wait_for,
 )
 
 pytestmark = pytest.mark.anyio
@@ -904,8 +908,9 @@ async def test_the_options_offer_gguf_models_only_where_they_run(
     offered = set(options["embedding_profiles"]) & gguf
     assert offered == (gguf if offer else set()), name
     assert gguf <= set(options["embedding_metadata"]), "metadata, offered or not"
-    # the llm descriptors' describer is a GGUF model too
+    # the llm descriptors' describers are GGUF models too
     assert options["descriptors"] == (["c-tf-idf", "llm"] if offer else ["c-tf-idf"]), name
+    assert options["describers"] == (["qwen3.5-4b", "gemma-4-e2b"] if offer else []), name
 
 
 @pytest.mark.parametrize(
@@ -979,6 +984,7 @@ async def test_init_stores_what_was_picked(
     monkeypatch.setattr(gguf_models, "available", lambda: llama_cpp)
     loaded: list[str] = []
     monkeypatch.setattr(embed, "warm_generator", lambda name, accelerator: loaded.append(name))
+    monkeypatch.setattr(embed, "warm", lambda name, accelerator: loaded.append(name))
 
     response = await client.post("/api/init", json=body)
 
@@ -988,8 +994,11 @@ async def test_init_stores_what_was_picked(
     picked = (search["mode"], search["reranker"], search["reranker_model"])
     assert (*picked, settings["pipeline"]["descriptors"]) == expected, name
     if expected[-1] == "llm":
-        await wait_for(f"dl:describer:{gguf_models.DESCRIBER}")
-        assert loaded == [gguf_models.DESCRIBER], f"{name}: the first run starts its download"
+        await wait_for(f"dl:describer:{DESCRIBER}")
+        await wait_for(f"dl:vocabulary:{gguf_models.VOCABULARY_EMBEDDER}")
+        assert sorted(loaded) == sorted([DESCRIBER, gguf_models.VOCABULARY_EMBEDDER]), (
+            f"{name}: the first run starts the downloads of the describer and the vocabulary's"
+        )
 
 
 async def test_init_refuses_llm_descriptors_where_their_model_cannot_run(
@@ -1002,7 +1011,7 @@ async def test_init_refuses_llm_descriptors_where_their_model_cannot_run(
     response = await client.post("/api/init", json={**NO_MODELS, "descriptors": "llm"})
 
     assert response.status_code == 422, response.text
-    assert gguf_models.DESCRIBER in response.json()["detail"]
+    assert DESCRIBER in response.json()["detail"]
     assert (await client.get("/api/status")).json()["initialized"] is False
     retried = await client.post("/api/init", json={**NO_MODELS, "descriptors": "c-tf-idf"})
     assert retried.status_code == 201, retried.text
@@ -1098,12 +1107,16 @@ async def test_import_by_path_copies_the_file(client: AsyncTestClient, tmp_path:
 
 async def test_a_failed_import_can_be_re_run(client: AsyncTestClient, tmp_path: Path) -> None:
     await client.post("/api/init", json=NO_MODELS)
-    row = await stage_and_import(client, "guide.md", MD.encode())
+    row = await stage_and_import(client, "guide.md", MD.encode(), wait=False)
+    listing = (await client.get("/api/operations", params={"kind": "document"})).json()
+    operation_id = listing["items"][0]["id"]
+    assert await wait_for(operation_id) == "imported"
     await document.set_status(await id_of(row["name"]), DocumentStatus.ERROR, "converter fell over")
 
     again = await client.post(f"/api/documents/{row['name']}/import")
 
     assert again.status_code == 202, again.text
+    assert again.json()["operation_id"] != operation_id
     assert await wait_for(again.json()["operation_id"]) == "imported"
     assert (await client.get(f"/api/documents/{row['name']}")).json()["error"] is None
 
@@ -2951,7 +2964,7 @@ async def test_sections_map_a_topic_with_what_each_section_is_about(
     assert sagas["depth"] == 1 and sagas["location"].startswith("book.md L")
     assert sagas["chars"] > 0 and sagas["chunks"] >= 1
     assert "compensating" in sagas["descriptors"], "its own, against the other chapter"
-    assert "saga" not in sagas["descriptors"], "not what its header says"
+    assert "saga" in sagas["descriptors"], "a heading term remains eligible"
     assert "distinct" not in sagas
 
     searches = (await client.get("/api/searches", params={"session_id": "m1"})).json()
@@ -3354,6 +3367,228 @@ async def test_describing_a_collection_with_ai_describes_its_documents_first(
     assert (await client.get("/api/collections/notes")).json()["description"] == "Spans storage."
     (line,) = [one for one in audit_lines() if one["event"] == "collection.summarize"]
     assert (line["outcome"], line["operation_id"]) == ("ok", operation_id)
+
+
+# what the stand-in describer says each section is about, by its heading
+VOCABULARY_SECTIONS = {
+    "Events": "Event sourcing | Domain events",
+    "Calls": "Synchronous calls | Performance improvement",
+    "Logs": "Event-sourcing | Domain event",
+    "Speed": "Asynchronous calls | Performance enhancement",
+    "Sagas": "Saga orchestration | Performance improvement",
+}
+
+
+def _plane(axis: int, degrees: float = 0.0) -> list[float]:
+    """A unit vector in the plane of axes `axis` and `axis + 1`, at `degrees` from the first."""
+    vector = [0.0] * 8
+    vector[axis], vector[axis + 1] = (
+        math.cos(math.radians(degrees)),
+        math.sin(math.radians(degrees)),
+    )
+    return vector
+
+
+# The stand-in vocabulary embedder's vectors: each concept in a plane of its own, its variants
+# close. Antonyms close too, as Qwen puts them, so only the describer's verdict keeps them apart.
+VOCABULARY_VECTORS = {
+    "event sourcing": _plane(0),
+    "event-sourcing": _plane(0),
+    "domain events": _plane(2),
+    "domain event": _plane(2, 1),
+    "synchronous calls": _plane(4),
+    "asynchronous calls": _plane(4, 5),  # cosine 0.996
+    "performance improvement": _plane(6),
+    "performance enhancement": _plane(6, 10),  # cosine 0.985
+    "saga orchestration": _plane(0, 90),
+}
+
+
+async def test_a_collection_under_llm_names_its_sections_in_preferred_terms(
+    client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Indexing under the llm strategy rebuilds the collection's vocabulary once it is idle, and
+    the section map then names each section's topics by their preferred terms: a plural, a hyphen
+    and a synonym the describer confirmed fold into one term, an antonym it denied stays apart. A
+    run after one more document embeds and judges only what that document brought, and a detach
+    rebuilds the vocabulary without it."""
+    from dbos import DBOS
+
+    from haskie.collection import vocabulary as collection_vocabulary
+    from haskie.indexing import dbos_names, embed, models
+    from haskie.sections import generated, vocabulary
+    from haskie.settings import Descriptors, load_user_settings
+
+    # sections this small make every heading under the title an excerpt's section of its own
+    small = {"profile": "none", "search": {"reranker": "none", "max_section_chars": 40}}
+    await client.post("/api/init", json=small)
+    user = await load_user_settings()
+    llm = msgspec.structs.replace(
+        user.pipeline, descriptors=Descriptors.LLM, maintenance_idle_seconds=1
+    )
+    await save_user_settings(msgspec.structs.replace(user, pipeline=llm))  # saved, not applied
+    stand_in_describer(monkeypatch, lambda prompt: "Covers events.")
+    summary = generated.SUMMARY_PROMPT.split("{")[0]
+
+    def reply(model: str, accelerator, prompt: str, max_tokens: int) -> str:
+        if prompt.startswith(summary):
+            return "Covers events."
+        path = prompt.split("Heading path: ", 1)[1].split("\n", 1)[0]
+        heading = path.rsplit(" > ", 1)[-1]
+        if max_tokens == generated.SECTION_TOKENS:
+            return f"Covers {heading.lower()}."
+        return VOCABULARY_SECTIONS.get(heading, "")
+
+    embedded: list[str] = []
+    real_embed = embed.embed_texts
+
+    def embed_texts(model, texts: list[str]) -> list[list[float]]:
+        if model.name != gguf_models.VOCABULARY_EMBEDDER:
+            return real_embed(model, texts)
+        assert model.document_prefix == vocabulary.INSTRUCTION
+        embedded.extend(texts)
+        return [VOCABULARY_VECTORS[text] for text in texts]
+
+    asked: list[str] = []
+
+    def yes(model: str, accelerator, prompt: str) -> float:
+        asked.append(prompt)
+        return 0.6 if "performance" in prompt else 0.02
+
+    monkeypatch.setattr(embed, "reply", reply)
+    monkeypatch.setattr(embed, "embed_texts", embed_texts)
+    monkeypatch.setattr(embed, "yes", yes)
+    models._mark_ready(
+        models._model_id(models.ModelKind.VOCABULARY, gguf_models.VOCABULARY_EMBEDDER)
+    )
+
+    async def built() -> None:
+        """Wait for every vocabulary run asked for so far, debounced or running."""
+        while await DBOS.list_workflows_async(
+            name=dbos_names.VOCABULARY_WORKFLOW, status=WAITING_STATUS, load_output=False
+        ):
+            await anyio.sleep(0.05)
+        runs = await DBOS.list_workflows_async(name=dbos_names.VOCABULARY_WORKFLOW)
+        assert runs and {run.status for run in runs} == {"SUCCESS"}, [run.error for run in runs]
+
+    async def topics() -> dict[str, list[str]]:
+        mapped = await client.get(
+            "/api/search/sections", params={"q": "body", "collections": "terms", "limit": 40}
+        )
+        assert mapped.status_code == 200, mapped.text
+        for one in mapped.json()["sections"]:
+            heading = one["header"].rsplit(" > ", 1)[-1]
+            assert one["description"] == f"Covers {heading.lower()}."
+        return {
+            one["header"].rsplit(" > ", 1)[-1]: one["descriptors"]
+            for one in mapped.json()["sections"]
+            if one["header"].rsplit(" > ", 1)[-1] in VOCABULARY_SECTIONS
+        }
+
+    await client.post("/api/collections", json={"name": "terms"})
+    for name, headings in (("a.md", ("Events", "Calls")), ("b.md", ("Logs", "Speed"))):
+        body = "# Book\n\n" + "".join(f"## {one}\n\n{one.lower()} body\n\n" for one in headings)
+        await stage_and_import(client, name, body.encode())
+        await attach_via_api(client, "terms", name)
+    await built()
+
+    sections = (await client.get("/api/documents/a.md/sections")).json()["sections"]
+    assert (
+        next(one for one in sections if one["headings"][-1:] == ["Events"])["description"]
+        == "Covers events."
+    )
+
+    assert await topics() == {
+        "Events": ["Event sourcing", "Domain event"],
+        "Calls": ["Synchronous calls", "Performance enhancement"],
+        "Logs": ["Event sourcing", "Domain event"],
+        "Speed": ["Asynchronous calls", "Performance enhancement"],
+    }
+    pairs = [frozenset(line[3:] for line in prompt.split("\n")[1:3]) for prompt in asked]
+    assert Counter(pairs) == {
+        frozenset({"asynchronous calls", "synchronous calls"}): 2,
+        frozenset({"performance enhancement", "performance improvement"}): 2,
+    }, "only the close pairs the stems do not decide, in both orders, once"
+    assert sorted(embedded) == sorted(VOCABULARY_VECTORS.keys() - {"saga orchestration"})
+
+    embedded.clear()
+    asked.clear()
+    sagas = b"# Book\n\n## Sagas\n\nsagas body\n\n## Notes\n\nnotes body\n"
+    await stage_and_import(client, "c.md", sagas)
+    await attach_via_api(client, "terms", "c.md")
+    await built()
+    assert embedded == ["saga orchestration"], "only the variant the new document brought"
+    assert asked == [], "every pair was judged before"
+    mapped = await topics()
+    # the term follows use: two sections now say improvement, one enhancement
+    assert mapped["Sagas"] == ["Saga orchestration", "Performance improvement"], mapped
+    assert mapped["Speed"] == ["Asynchronous calls", "Performance improvement"], mapped
+
+    detached = await client.delete("/api/collections/terms/documents/b.md")
+    assert detached.status_code == 204, detached.text
+    (removal,) = await DBOS.list_workflows_async(name=dbos_names.REMOVE_FROM_INDEX_WORKFLOW)
+    await wait_for(removal.workflow_id)  # the removal asks for the run as it ends
+    await built()
+    assert (await topics())["Events"] == ["Event sourcing", "Domain events"], (
+        "without b.md, nothing says Domain event: the term is the variant a.md uses"
+    )
+    preferred = await collection_vocabulary.preferred("terms")
+    assert "domain event" not in preferred and "performance enhancement" not in preferred
+    listed = (await client.get("/api/operations", params={"kind": "maintenance"})).json()
+    assert "terms vocabulary" in {row["title"] for row in listed["items"]}
+
+
+@pytest.mark.parametrize("release", ["delete", "rename"])
+@pytest.mark.parametrize("legacy", [False, True], ids=["current-table", "legacy-table"])
+async def test_a_renamed_collection_keeps_its_own_vocabulary(
+    client: AsyncTestClient, monkeypatch: pytest.MonkeyPatch, release: str, legacy: bool
+) -> None:
+    """Two tables can have the same version. Reusing a searched collection's name must read
+    the new owner's vocabulary, including a table built before build identities existed."""
+    import lancedb
+    import pyarrow as pa
+
+    from haskie import ids
+    from haskie.collection import vocabulary
+
+    monkeypatch.setattr(vocabulary, "_preferred", {})
+    await client.post("/api/init", json=NO_MODELS)
+    for name, phrases in (
+        ("old", ["System calls", "System calls", "System call"]),
+        ("other", ["System call", "System call", "System calls"]),
+    ):
+        assert (await client.post("/api/collections", json={"name": name})).status_code == 201
+        conn = await lancedb.connect_async(str(vocabulary.path(name)))
+        data = pa.table(
+            {
+                "document_id": [ids.md5(name.encode())] * len(phrases),
+                "section_id": [ids.md5(f"{name}:{i}".encode()) for i in range(len(phrases))],
+                "descriptor": phrases,
+                "variant": [phrase.lower() for phrase in phrases],
+            }
+        )
+        await conn.create_table(vocabulary.DESCRIPTORS, data=data)
+        await vocabulary.embed_missing(name, "test", lambda texts: [[1.0, 0.0]] * len(texts), 10)
+        assert await vocabulary.build(name, "test", "judge", 0.5) == 1
+        if legacy:
+            table = await conn.open_table(vocabulary.TERMS)
+            old = (await table.query().to_arrow()).replace_schema_metadata(None)
+            await conn.create_table(vocabulary.TERMS, data=old, mode="overwrite")
+        assert set((await vocabulary.preferred(name)).values()) == {phrases[0]}
+
+    if release == "delete":
+        deleted = await client.delete("/api/collections/old")
+        assert deleted.status_code == 202, deleted.text
+        await wait_for(deleted.json()["operation_id"])
+    else:
+        renamed = await client.put("/api/collections/old/name", json={"name": "retired"})
+        assert renamed.status_code == 200, renamed.text
+    renamed = await client.put("/api/collections/other/name", json={"name": "old"})
+    assert renamed.status_code == 200, renamed.text
+    assert await vocabulary.preferred("old") == {
+        "system call": "System call",
+        "system calls": "System call",
+    }
 
 
 # --- audit trail ---------------------------------------------------------------------

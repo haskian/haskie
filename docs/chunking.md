@@ -192,7 +192,26 @@ that study a large language model (LLM) writes 50-100 tokens of context per chun
 document's own heading path is the context, so it costs no model call. The source leaves chunk
 size, boundaries and overlap as tuning choices, and gives no figure for overlap.
 
+Those percentages belong to Anthropic's experiment. haskie has not measured the same gain from
+heading frames alone. Heading context and model-generated chunk context are different methods.
+
+## Why document structure
+
+Jimeno Yepes and colleagues found improved RAG results from chunking financial reports by their
+structural elements [2]. That supports testing boundaries that retain the author's organization;
+it does not establish one best chunk size for every document type.
+
+Qu, Tu and Bao compared semantic chunking with simpler fixed-size methods on document retrieval,
+evidence retrieval and answer generation. Their results did not show consistent gains that
+justified semantic chunking's extra computation [3]. haskie uses visible document structure to
+choose boundaries. This is a design choice informed by that evidence, not proof that semantic
+chunking can never help another collection.
+
 ## References
 
 1. Anthropic. "Introducing Contextual Retrieval." September 2024.
-   https://www.anthropic.com/news/contextual-retrieval
+   [Study and methodology](https://www.anthropic.com/engineering/contextual-retrieval).
+2. Jimeno Yepes, A. et al. "Financial Report Chunking for Effective Retrieval Augmented
+   Generation." 2024. [Paper](https://arxiv.org/abs/2402.05131).
+3. Qu, R., Tu, R. and Bao, F. "Is Semantic Chunking Worth the Computational Cost?" 2024.
+   [Paper](https://arxiv.org/abs/2410.13070).

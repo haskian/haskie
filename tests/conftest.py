@@ -37,6 +37,8 @@ DELAY_SWEEP_SECONDS = 0.05  # how often a debounced workflow is promoted (see `_
 # The first run of a home that needs no model: full-text search, no reranker. The suite downloads
 # nothing, so a test that searches starts here unless it is about a model.
 NO_MODELS = {"profile": "none", "search": {"reranker": "none"}}
+# the model the default settings write llm descriptors with
+DESCRIBER = "unsloth/Qwen3.5-4B-GGUF"
 
 # Still on its way, including a debounced run waiting out its period (DELAYED). Only the suite
 # waits on that: the app counts `dbos_names.ACTIVE_STATUS`, where a debounce is not yet work.
@@ -817,10 +819,12 @@ def stand_in_describer(monkeypatch: pytest.MonkeyPatch, summary: Callable[[str],
         if prompt.startswith(asks):
             summaries.append(prompt)
             return summary(prompt)
+        if prompt.startswith(generated.SECTION_PROMPT.split("{")[0]):
+            return "Explains alpha and beta."
         return "Topic one | Topic two"
 
     monkeypatch.setattr(embed, "reply", reply)
-    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER))
+    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, DESCRIBER))
     return summaries
 
 

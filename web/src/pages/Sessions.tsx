@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { api, MAX_PAGE_SIZE, type CollectionSummary, type SessionAction, type SessionEvent, type SessionSummary } from '../api'
 import type { PageProps } from '../App'
 import { navigate, type Route } from '../router'
-import { Check, Field, GallerySection, Info, Modal, SearchBox, SearchPanel, Shell, Tabs, Tile, type TabDef } from '../ui'
+import { Check, Field, GallerySection, Modal, ModalStatus, SearchBox, SearchPanel, Shell, Tabs, Tile, type TabDef } from '../ui'
 import './Sessions.css'
 import { errorText, matchesText, needleOf, relative } from '../format'
 import { groupByStatus, tileSub } from './sessions/group'
@@ -93,7 +93,7 @@ export function Sessions({ route, counts }: PageProps<Extract<Route, { name: 'se
       <SessionModal id={route.session} chosen={chosen} onClose={close} onSaved={refresh} />
       <Modal open={creating} onClose={() => setCreating(false)} title="New session" subtitle="session">
         {/* A form, so Enter creates the way the browser already does it. */}
-        <form className="session-panel" onSubmit={create}>
+        <form className="session-panel modal-scroll" onSubmit={create}>
           <Field label="Session id">
             <input className="input" value={newId} placeholder="Session id" autoFocus onChange={(event) => setNewId(event.target.value)} />
           </Field>
@@ -102,10 +102,10 @@ export function Sessions({ route, counts }: PageProps<Extract<Route, { name: 'se
               Create
             </button>
           </div>
-          {createError !== null && <p className="muted session-error">{createError}</p>}
-          <Info>
+          {createError !== null && <ModalStatus tone="error">{createError}</ModalStatus>}
+          <ModalStatus>
             Agents call <span className="code">set_session_collections</span> then <span className="code">search</span> with the same id.
-          </Info>
+          </ModalStatus>
         </form>
       </Modal>
     </Shell>
@@ -165,7 +165,7 @@ function SessionBody({ id, chosen, onSaved }: { id: string; chosen: string[]; on
       <Tabs tabs={TABS} selected={tab} onSelect={setTab} />
 
       <div id={TABS[0].id} role="tabpanel" className="session-panel" hidden={tab !== TABS[0].id}>
-        {error !== null && <p className="muted">{error}</p>}
+        {error !== null && <ModalStatus tone="error">{error}</ModalStatus>}
         <ul className="list">
           {collections.map((collection) => (
             <li className="list-item" key={collection.name}>
@@ -184,7 +184,7 @@ function SessionBody({ id, chosen, onSaved }: { id: string; chosen: string[]; on
       </div>
 
       <div id={TABS[1].id} role="tabpanel" className="session-panel" hidden={tab !== TABS[1].id}>
-        <SearchPanel run={run} placeholder="Search this session" plural="chunks" />
+        <SearchPanel active={tab === TABS[1].id} run={run} placeholder="Search this session" plural="chunks" />
       </div>
 
       <div id={TABS[2].id} role="tabpanel" className="session-panel" hidden={tab !== TABS[2].id}>
@@ -222,9 +222,9 @@ function History({ id, version }: { id: string; version: number }) {
       .catch((cause: unknown) => setError(errorText(cause)))
   }, [id, version])
 
-  if (error !== null) return <p className="muted">{error}</p>
+  if (error !== null) return <ModalStatus tone="error">{error}</ModalStatus>
   if (loaded === null) return null
-  if (loaded.events.length === 0) return <Info>Nothing yet.</Info>
+  if (loaded.events.length === 0) return <ModalStatus>Nothing yet.</ModalStatus>
   return (
     <ul className="list">
       {loaded.events.map((event) => {

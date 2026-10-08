@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   api,
   MAX_PAGE_SIZE,
+  type BulkKind,
   type BulkStarted,
   type CollectionInfo,
   type Document,
@@ -14,7 +15,7 @@ import { errorText, matchesText, needleOf } from '../../format'
 import { useOperation } from '../../hooks/useOperation'
 import { usePoll } from '../../hooks/usePoll'
 import { useRun } from '../../hooks/useRun'
-import { BulkStatus, DescriptionBox, documentIcon, Kv, Modal, RenameForm, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
+import { BulkStatus, BusyButton, DescriptionBox, documentIcon, Kv, Modal, ModalStatus, RenameForm, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
 import { plural } from '../../ui/match'
 import { candidateDocuments, otherCollections } from './candidates'
 import { SettingsForm } from './SettingsForm'
@@ -107,7 +108,7 @@ function CollectionBody({
   // poll on every tick. A deleted collection has nothing left to re-read, so that branch closes.
   const onBulkDone = useCallback(
     (operation: OperationProgress) => {
-      if (operation.kind === 'delete_collection') {
+      if (operation.kind === 'delete_collection' && operation.status === 'SUCCESS') {
         void onChanged()
         onClose()
         return
@@ -118,9 +119,9 @@ function CollectionBody({
   )
   const bulk = useOperation(onBulkDone, setError)
 
-  const startBulk = (start: () => Promise<BulkStarted>): void => {
+  const startBulk = (kind: BulkKind, start: () => Promise<BulkStarted>): void => {
     setError(null)
-    bulk.start(start).catch((cause: unknown) => setError(errorText(cause)))
+    bulk.start(kind, start).catch((cause: unknown) => setError(errorText(cause)))
   }
 
   // Not through `run`: its re-read would ask for the old name. The route moves to the new one,
@@ -147,7 +148,7 @@ function CollectionBody({
 
   // Nothing to show until the collection answers. The one exception is why it did not answer,
   // for a name that is in the hash but not in the home any more.
-  if (info === null) return error === null ? null : <p className="muted collection-error">{error}</p>
+  if (info === null) return error === null ? null : <ModalStatus tone="error">{error}</ModalStatus>
 
   const index = info.index
   const facts: [string, string | number][] = [
@@ -228,7 +229,7 @@ function CollectionBody({
       </div>
 
       <div id={TABS[1].id} role="tabpanel" className="collection-panel" hidden={tab !== TABS[1].id}>
-        <SearchPanel run={(query) => api.explore(query, 'passage', { collections: [name] })} placeholder="Search this collection" plural="passages" />
+        <SearchPanel active={tab === TABS[1].id} run={(query) => api.explore(query, 'passage', { collections: [name] })} placeholder="Search this collection" plural="passages" />
       </div>
 
       <div id={TABS[2].id} role="tabpanel" className="collection-panel" hidden={tab !== TABS[2].id}>
@@ -239,14 +240,22 @@ function CollectionBody({
             searchDefaults={info.search}
             options={options}
             outdated={info.index_outdated}
+            active={tab === TABS[2].id}
             busy={busy}
             onSave={(next) => void run(() => api.saveCollectionOverrides(name, next))}
           >
-            <button className="btn" type="button" disabled={bulk.running} onClick={() => startBulk(() => api.indexCollection(name))}>
+            <BusyButton
+              busy={bulk.running && bulk.kind === 'index_collection'}
+              busyLabel="Queueing documents ..."
+              progress={bulk.operation?.kind === 'index_collection' ? bulk.operation.progress : null}
+              className="btn"
+              type="button"
+              disabled={bulk.running}
+              onClick={() => startBulk('index_collection', () => api.indexCollection(name))}
+            >
               <RefreshCw className="icon" />
               Index all
-            </button>
-            {bulk.operation?.kind === 'index_collection' && <BulkStatus operation={bulk.operation} />}
+            </BusyButton>
           </SettingsForm>
         )}
       </div>
@@ -272,44 +281,47 @@ function CollectionBody({
                 onSave={(next) => void run(() => api.describeCollection(name, next))}
               />
               <div className="row">
-                <button
+                <BusyButton
+                  busy={bulk.running && bulk.kind === 'summarize_collection'}
+                  busyLabel="Describing ..."
+                  progress={bulk.operation?.kind === 'summarize_collection' ? bulk.operation.progress : null}
                   className="btn"
                   type="button"
                   disabled={bulk.running}
                   onClick={() => {
                     const replace = info.description === '' || window.confirm('Replace the description with one the AI writes from its documents?')
-                    if (replace) startBulk(() => api.generateCollectionDescription(name))
+                    if (replace) startBulk('summarize_collection', () => api.generateCollectionDescription(name))
                   }}
                 >
                   <Sparkles className="icon" />
                   Describe with AI
-                </button>
-                {bulk.operation?.kind === 'summarize_collection' && <BulkStatus operation={bulk.operation} />}
+                </BusyButton>
               </div>
             </div>
           </section>
         </div>
         <div className="row row-loose">
-          <button
+          <BusyButton
+            busy={bulk.running && bulk.kind === 'delete_collection'}
+            busyLabel="Deleting ..."
+            progress={bulk.operation?.kind === 'delete_collection' ? bulk.operation.progress : null}
             className="btn btn-ghost"
             type="button"
             disabled={bulk.running}
             onClick={() => {
               if (window.confirm(`Delete collection "${name}"? Its documents stay; only this index goes.`)) {
-                startBulk(() => api.deleteCollection(name))
+                startBulk('delete_collection', () => api.deleteCollection(name))
               }
             }}
           >
             <Trash2 className="icon" />
             Delete collection
-          </button>
-          {bulk.operation?.kind === 'delete_collection' && <BulkStatus operation={bulk.operation} />}
+          </BusyButton>
         </div>
       </div>
 
-      {/* One line for whatever the modal last failed at: the panels are tall, and a message
-          beside the control that failed would be scrolled out of sight as often as not. */}
-      {error !== null && <p className="muted collection-error">{error}</p>}
+      {bulk.operation !== null && <BulkStatus operation={bulk.operation} />}
+      {error !== null && <ModalStatus tone="error">{error}</ModalStatus>}
     </>
   )
 }

@@ -32,14 +32,19 @@ export default function App() {
     () =>
       api
         .status()
-        .then(setStatus)
+        // the same answer keeps the old object, so a poll that finds nothing new renders nothing
+        .then((next) => setStatus((now) => (JSON.stringify(now) === JSON.stringify(next) ? now : next)))
         .catch(() => undefined),
     [],
   )
   useEffect(() => void refresh(), [refresh])
-  // A model download is the only thing that changes the status on its own. A save that changes
-  // which models are needed (the embedding profile, a reranker) asks for it through `refreshStatus`.
-  const downloading = status?.models.some((model) => model.state === 'loading' || model.state === 'pending') ?? false
+  // A search model's download changes the status on its own. A knowledge model's state changes
+  // with the work that loads it, which the status bar watches. A save that changes which models
+  // are needed (the embedding profile, a reranker) asks for it through `refreshStatus`.
+  const downloading =
+    status?.models.some(
+      (model) => model.group === 'search' && (model.state === 'loading' || model.state === 'pending'),
+    ) ?? false
   usePoll(downloading, refresh, STATUS_POLL_MS)
 
   // Nav counts are re-read on every route change, rather than through a refresh context: the
@@ -60,7 +65,7 @@ export default function App() {
   return (
     <>
       <Page route={route} counts={counts} refreshStatus={refresh} dropped={dropped} onDropHandled={dropHandled} />
-      <Statusbar status={status} />
+      <Statusbar status={status} refreshStatus={refresh} />
       <DropOverlay onFiles={drop} />
     </>
   )

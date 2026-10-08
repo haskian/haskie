@@ -6,6 +6,12 @@ Downloaded model weights are the exception: they sit in the Hugging Face cache, 
 the ONNX models under `haskie-onnx` in it, as plain files, since ONNX Runtime refuses external
 data behind the cache's links.
 
+Each collection has a local LanceDB table for vector and full-text search. This keeps hybrid
+retrieval in an embedded store with no separate database server to operate. Lance's columnar
+format is designed for efficient random access; its authors describe the encoding trade-offs in
+[Lance: Efficient Random Access in Columnar Storage through Adaptive Structural Encodings](https://arxiv.org/abs/2504.15247).
+The choice of one table per collection and a single writer is haskie's own design.
+
 ```
 ~/.haskie/
   haskie.db               SQLite (WAL): settings, documents, collections, memberships,
@@ -29,12 +35,21 @@ data behind the cache's links.
     embeddings/<id>.tmp/               partial results while an embedding is computed
   collections/<sh>/<name>/
     index/                the LanceDB table "chunks"
+    vocabulary/           under llm descriptors, the LanceDB tables of its vocabulary:
+                          "descriptors" (each with its section and variant), "vectors" (each
+                          variant's), "verdicts" (each judged pair) and "terms" (the preferred
+                          terms, their variants and vectors)
   cache/models/           compiled CoreML models
   audit/                  one JSON line per action
 ```
 
 `<sh>` is the first byte of the SHA-1 of the entry's key, in hex (`home.shard`): a document's id,
 a collection's name. So 10,000 documents spread over 256 directories instead of filling one.
+
+The vocabulary's `terms` table stores a unique build identity in its schema metadata. The
+preferred-term cache uses that identity, so renaming a collection into a previously used name
+cannot reuse the former owner's terms. Older tables without an identity remain readable and
+are read uncached until the next vocabulary build.
 
 ## The metadata database
 
@@ -199,7 +214,10 @@ document in order.
 - The `s` and `c` keep the two kinds apart: section 2 and chunk 2 of one document are two ids.
 
 The sections go into their own file beside the chunks (`<id>.sections.parquet`), each with its
-id, parent, headings, where it runs and its descriptors. The file is written before the entry's
+id, parent, headings, where it runs, its descriptors and its `description`. The description is
+empty under c-TF-IDF and for sections without prose. Older files without this column read with
+empty descriptions; older llm files are described again on their next index, without recomputing
+chunk embeddings. The file is written before the entry's
 row, so a cache hit has both. Its schema metadata names the strategy that wrote the descriptors
 (`descriptors`); a file the merge just wrote has none, until the describe step rewrites it. Each chunking of a document keeps its own, as its section ids are
 its own. A membership names the entry its rows were indexed from

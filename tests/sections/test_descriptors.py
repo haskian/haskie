@@ -230,33 +230,16 @@ def test_a_term_most_sections_use_is_no_descriptor_even_where_a_short_section_re
         "domain, saga, compensation. saga, compensation.",
         "domain, ledger. domain, ledger. domain.",
         "domain, replica, quorum. replica, quorum.",
-        "domain, partition, hashing. partition, hashing.",
+        "domain, partition, hashing, snapshots. partition, hashing, snapshots.",
     ]
     runs = [descriptors.Run((), 0, 3)] + [descriptors.Run((f"Ch{n}",), n, n) for n in range(4)]
     whole, _, second, *_ = descriptors.ClassTfidf().pick(texts, runs, None, None)
-    assert "domain" in whole, "the document's own topic names the document"
-    assert list(second) == ["ledger"], "the short chapter keeps only its own word"
+    assert "domain" in whole.descriptors, "the document's own topic names the document"
+    assert second.descriptors == ["ledger"], "the short chapter keeps only its own word"
 
 
-@pytest.mark.parametrize(
-    ("name", "headings", "expected"),
-    [
-        ("the whole document: no heading", (), set()),
-        ("each word by its stem", ("Sagas",), {"saga"}),
-        (
-            "the whole path, stopwords and short words aside, pairs not words",
-            ("Part I", "Rule: Design Small Aggregates"),
-            {"part", "rule", "design", "small", "aggreg"},
-        ),
-    ],
-)
-def test_said(name: str, headings: tuple[str, ...], expected: set[str]) -> None:
-    assert descriptors.said(headings) == expected, name
-
-
-def test_a_term_the_header_already_says_is_no_descriptor() -> None:
-    """Two sections under "Aggregates": the header's words, and a pair of them, are no descriptor of
-    either; the word a pair adds to them still is, alone or in the pair."""
+def test_heading_terms_remain_candidates() -> None:
+    """Heading terms remain eligible; terms widespread across sibling sections still go."""
     texts = [
         "aggregates, separate aggregates. aggregates, separate aggregates. invariants, invariants.",
         "aggregates, rules. aggregates, rules. transactions, transactions.",
@@ -264,21 +247,25 @@ def test_a_term_the_header_already_says_is_no_descriptor() -> None:
     runs = [descriptors.Run(("Aggregates", "Small Aggregates"), 0, 0)]
     runs += [descriptors.Run(("Aggregates", "Rules"), 1, 1)]
     small, rules = descriptors.ClassTfidf().pick(texts, runs, None, None)
-    assert "aggregates" not in small and "aggregates" not in rules, "the path's words"
-    assert "rules" not in rules, "the section's own heading"
-    assert any("separate" in descriptor for descriptor in small), "a pair adds a word of its own"
-    assert "invariants" in small and "transactions" in rules
+    assert "aggregates" not in small.descriptors and "aggregates" not in rules.descriptors, (
+        "widespread across both sections"
+    )
+    assert "rules" in rules.descriptors, "the section's own heading remains eligible"
+    assert any("separate" in descriptor for descriptor in small.descriptors), (
+        "a pair adds a word of its own"
+    )
+    assert "invariants" in small.descriptors and "transactions" in rules.descriptors
 
 
-def test_a_section_with_words_gets_one_to_five_descriptors() -> None:
+def test_a_section_with_words_gets_one_to_six_descriptors() -> None:
     """The first section says only what its header says: it still gets its best word. The second
-    repeats seven words of its own: it gets five."""
+    repeats eight words of its own: it gets six."""
     texts = [
         "sagas, saga.",
-        "ledger, quorum, replica, leader, follower, partition, hashing. "
-        "ledger, quorum, replica, leader, follower, partition, hashing.",
+        "ledger, quorum, replica, leader, follower, partition, hashing, snapshots. "
+        "ledger, quorum, replica, leader, follower, partition, hashing, snapshots.",
     ]
     runs = [descriptors.Run(("Sagas",), 0, 0), descriptors.Run(("Storage",), 1, 1)]
     sagas, storage = descriptors.ClassTfidf().pick(texts, runs, None, None)
-    assert list(sagas) == ["sagas"], "one descriptor, though its header says it"
-    assert len(storage) == descriptors.DESCRIPTORS == 5
+    assert sagas.descriptors == ["sagas"], "one descriptor, though its header says it"
+    assert len(storage.descriptors) == descriptors.DESCRIPTORS == 6

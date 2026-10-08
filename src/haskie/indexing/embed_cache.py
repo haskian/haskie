@@ -55,11 +55,11 @@ from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection.collection import MemberStatus
 from haskie.collection.index import Row, vector_field
 from haskie.document import document
-from haskie.indexing import chunk
+from haskie.indexing import chunk, gguf_models
 from haskie.indexing.chunk import CHUNK_VERSION, Chunk, Piece
 from haskie.search import collapse
 from haskie.sections import build
-from haskie.settings import Chunker, ChunkSettings, Descriptors, Parser
+from haskie.settings import Chunker, ChunkSettings, Describer, Descriptors, Parser
 from haskie.tables import collection_documents, documents, embeddings
 
 NO_MODEL = "none"  # the `model` of a profile without an embedding model: chunks only, no vectors
@@ -145,9 +145,14 @@ def rows_path(doc: str, id: str, seq: int) -> Path:
 
 
 def descriptors_path(doc: str, id: str, seq: int) -> Path:
-    """The descriptors one describe batch wrote, one list per section of the batch; gathered and
-    deleted by `pipeline.finalize_describe`."""
+    """Each section's descriptors and description from one batch; gathered and deleted by
+    `pipeline.finalize_describe`."""
     return scratch_dir(doc, id) / f"{home.part_name(seq)}.descriptors.json"
+
+
+def descriptions_path(doc: str, id: str, seq: int) -> Path:
+    """The prose descriptions one section batch wrote, before descriptors are extracted."""
+    return scratch_dir(doc, id) / f"{home.part_name(seq)}.descriptions.json"
 
 
 def sections_path(doc: str, id: str) -> Path:
@@ -230,6 +235,7 @@ _SECTIONS = pa.schema(
         ("page_start", pa.int32()),
         ("page_end", pa.int32()),
         ("descriptors", pa.list_(pa.string())),
+        ("description", pa.string()),
     ]
 )
 
@@ -288,13 +294,21 @@ def _merge(document_id: str, parts: list[Path], target: Path, dims: int | None) 
     return Merged(bytes=target.stat().st_size, rows=count, sections=found, summed=summed)
 
 
-# The key of the sections file's schema metadata that names the strategy its descriptors were
-# written by (`Descriptors`); a file the merge wrote has none yet.
+# The keys of the sections file's schema metadata that name the strategy its descriptors were
+# written by (`Descriptors`), and for llm the model; a file the merge wrote has neither yet. An llm
+# file written before the model was named was written by Gemma-4-E2B, the one describer then.
 _DESCRIBED_BY = b"descriptors"
+_DESCRIBED_WITH = b"describer"
+_FIRST_DESCRIBER = gguf_models.DESCRIBERS[Describer.GEMMA_4_E2B].name
 
 
-def _write_sections(path: Path, found: list[build.Section], by: Descriptors | None) -> None:
-    schema = _SECTIONS if by is None else _SECTIONS.with_metadata({_DESCRIBED_BY: by.encode()})
+def _write_sections(
+    path: Path, found: list[build.Section], by: Descriptors | None, describer: str | None = None
+) -> None:
+    metadata = {} if by is None else {_DESCRIBED_BY: by.encode()}
+    if by is not None and describer is not None:
+        metadata[_DESCRIBED_WITH] = describer.encode()
+    schema = _SECTIONS.with_metadata(metadata) if metadata else _SECTIONS
     table = pa.Table.from_pylist([msgspec.to_builtins(one) for one in found], schema=schema)
     with home.atomic_replace(path) as tmp:
         pq.write_table(table, tmp)
@@ -355,14 +369,22 @@ async def write(p: Params, parts: list[Path], dims: int | None) -> str:
     return id
 
 
-def _described_by(path: Path) -> Descriptors | None:
-    found = (pq.read_schema(path).metadata or {}).get(_DESCRIBED_BY)
+def _described_by(path: Path, describer: str | None) -> Descriptors | None:
+    schema = pq.read_schema(path)
+    metadata = schema.metadata or {}
+    found = metadata.get(_DESCRIBED_BY)
+    if found == Descriptors.LLM.encode() and "description" not in schema.names:
+        return None  # the next index fills descriptions without re-embedding the chunks
+    written_with = metadata.get(_DESCRIBED_WITH, _FIRST_DESCRIBER.encode()).decode()
+    if found == Descriptors.LLM.encode() and describer is not None and written_with != describer:
+        return None  # another describer wrote them: the next index describes them again
     return None if found is None else Descriptors(found.decode())
 
 
-async def described_by(doc: str, id: str) -> Descriptors | None:
-    """The strategy the descriptors of one cached embedding were written by; None before any."""
-    return await anyio.to_thread.run_sync(_described_by, sections_path(doc, id))
+async def described_by(doc: str, id: str, describer: str | None = None) -> Descriptors | None:
+    """The completed strategy; None before describing, for llm files needing descriptions, and,
+    when `describer` names the model llm should write with, for llm files another one wrote."""
+    return await anyio.to_thread.run_sync(_described_by, sections_path(doc, id), describer)
 
 
 class Described(msgspec.Struct):
@@ -402,10 +424,16 @@ async def inputs(doc: str, id: str, vectors: bool) -> Described:
 
 
 async def write_descriptors(
-    doc: str, id: str, described: list[build.Section], by: Descriptors
+    doc: str,
+    id: str,
+    described: list[build.Section],
+    by: Descriptors | None,
+    describer: str | None = None,
 ) -> None:
-    """Replace the sections of one cached embedding with `described`, written by `by`."""
-    await anyio.to_thread.run_sync(_write_sections, sections_path(doc, id), described, by)
+    """Replace the sections of one cached embedding with `described`, written by `by`, and for llm
+    by the model `describer`."""
+    path = sections_path(doc, id)
+    await anyio.to_thread.run_sync(_write_sections, path, described, by, describer)
 
 
 def _read_sections(path: Path) -> list[build.Section]:

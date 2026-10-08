@@ -11,9 +11,10 @@ import numpy as np
 import pytest
 
 from haskie.indexing import embed, gguf_models
-from haskie.settings import Accelerator
+from haskie.settings import Accelerator, Describer
 
 SHORT, LONG = "test/short-GGUF", "test/long-GGUF"
+DESCRIBER = gguf_models.DESCRIBERS[Describer.QWEN_3_5_4B].name
 
 
 @pytest.fixture(autouse=True)
@@ -55,7 +56,7 @@ class Llama:
     # or, `by_char`, one token a character with none around it (the generator's prompt)
     by_char = False
 
-    def tokenize(self, text: bytes, add_bos: bool = True) -> list[int]:
+    def tokenize(self, text: bytes, add_bos: bool = True, special: bool = False) -> list[int]:
         if self.by_char:
             return list(text)
         words = [7] * len(text.split())
@@ -69,9 +70,33 @@ class Llama:
             return bytes(tokens)
         return b" ".join(b"w" for _ in range(len(tokens) * self.grows))
 
-    def create_chat_completion(self, messages: list[dict], **options: object) -> dict:
-        self.calls.append(([messages[0]["content"]], options))
-        return {"choices": [{"message": {"content": "Topic one | Topic two"}}]}
+    # what the generator renders its prompts with (`GgufGenerator._chat`)
+    metadata = {"tokenizer.chat_template": "{{ messages[0]['content'] }}"}
+    _model = types.SimpleNamespace(token_get_text=lambda token: "</s>")
+
+    def token_eos(self) -> int:
+        return 2
+
+    def token_bos(self) -> int:
+        return -1  # as Qwen's file, which names no start token
+
+    def create_completion(self, tokens: list[int], **options: object) -> dict:
+        self.calls.append(([self.detokenize(tokens).decode()], options))
+        return {"choices": [{"text": "<think>\n\n</think>\n\nTopic one | Topic two"}]}
+
+
+class Formatter:
+    """`Jinja2ChatFormatter`, stood in for with the llama_cpp module: the prompt as it is, and the
+    flags it was rendered with."""
+
+    def __init__(self, template: str, eos_token: str, bos_token: str) -> None:
+        self.bos_token = bos_token
+
+    def __call__(self, messages: list[dict], **flags: object) -> types.SimpleNamespace:
+        Formatter.flags = flags
+        return types.SimpleNamespace(prompt=messages[0]["content"])
+
+    flags: dict[str, object] = {}
 
 
 @pytest.fixture
@@ -79,6 +104,8 @@ def llama(monkeypatch) -> type[Llama]:
     """The extra may not be installed where the suite runs: the module is stood in for whole."""
     Llama.built = []
     monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(Llama=Llama))
+    chat_format = types.SimpleNamespace(Jinja2ChatFormatter=Formatter)
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_chat_format", chat_format)
     monkeypatch.setattr(gguf_models, "_download", lambda repo: Path(f"/models/{repo}.gguf"))
     return Llama
 
@@ -190,13 +217,46 @@ def test_the_generator_fits_its_prompt_to_the_context(
     """An excerpt is bounded in characters, and digits take a token each: llama.cpp refuses a
     prompt past the context, so it is cut, keeping the instructions at its start."""
     monkeypatch.setattr(llama, "by_char", True)
-    generator = gguf_models.GgufGenerator(gguf_models.DESCRIBER)
+    generator = gguf_models.GgufGenerator(DESCRIBER)
     prompt = "Write descriptors. " + "7" * (length - 19)
 
-    assert generator.reply(prompt, 60) == "Topic one | Topic two", name
+    assert generator.reply(prompt, 60) == "Topic one | Topic two", f"{name}: thinking dropped"
+    assert Formatter.flags == {"enable_thinking": False}, "rendered with thinking off"
 
     (options,) = llama.built
     assert (options["n_ctx"], options["n_gpu_layers"]) == (gguf_models.GENERATOR_TOKENS, -1)
     ((sent,), asked) = generator._model.calls[0]
     assert (len(sent), sent.startswith("Write descriptors.")) == (read, True), name
     assert (asked["max_tokens"], asked["temperature"]) == (60, 0), "greedy"
+
+
+YES, YES_SPACED, NO, MARK = 0, 1, 2, 3  # token ids: two spellings of yes, a no, a "**"
+
+
+def logits(**by_token: float) -> np.ndarray:
+    """A vocabulary of 20 tokens, all at 0 but those given, by their name above."""
+    found = np.zeros(20, dtype=np.float32)
+    for name, value in by_token.items():
+        found[{"yes": YES, "yes_spaced": YES_SPACED, "no": NO, "mark": MARK}[name]] = value
+    return found
+
+
+@pytest.mark.parametrize(
+    ("name", "found", "expected"),
+    [
+        ("yes and no among the likeliest", logits(yes=3.0, no=1.0), 1 / (1 + np.exp(-2.0))),
+        ("no alone among them still decides", logits(no=8.0), 0.5 / (0.5 + 0.5 * np.exp(8.0)) * 1),
+        ("the likelier spelling of yes counts", logits(yes=1.0, yes_spaced=4.0, no=4.0), 0.5),
+        # Answer tokens must rank below the cutoff: argpartition does not order ties stably.
+        (
+            "neither among the likeliest: no leaning yet",
+            logits(yes=-5.0, yes_spaced=-5.0, no=-5.0, mark=9.0),
+            None,
+        ),
+    ],
+)
+def test_leaning(name: str, found: np.ndarray, expected: float | None) -> None:
+    """P(yes) / (P(yes) + P(no)), read from the first token of a reply that leans either way."""
+    yes, no = np.array([YES, YES_SPACED]), np.array([NO])
+    leaned = gguf_models.leaning(found, yes, no)
+    assert leaned == (None if expected is None else pytest.approx(expected)), name

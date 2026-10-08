@@ -220,9 +220,8 @@ def test_descriptors_weigh_a_section_against_its_siblings() -> None:
     assert "compensating" in sagas, "the form written most of compensating/compensation"
     assert "saga" not in replication and "quorum" in replication
     orchestration = described["Sagas > Orchestration"].descriptors
-    assert "orchestrator tells" in orchestration, "a section against its siblings at its depth"
-    assert "orchestrator" not in orchestration, "its header says it: Orchestration, one stem"
-    assert "replication" not in replication, "nor does a chapter repeat its own heading"
+    assert "orchestrator" in orchestration, "a heading's stem remains eligible"
+    assert replication == ["quorum", "read", "write", "followers", "leader", "log"]
     assert described["Sagas"].id == {one.header: one.id for one in _sections()[0]}["Sagas"]
 
 
@@ -287,9 +286,12 @@ def test_the_strategy_given_picks_the_descriptors() -> None:
     seen: list[tuple[list[descriptors.Run], np.ndarray | None]] = []
 
     class Headers:
-        def pick(self, texts, runs, vectors, embed) -> list[list[str]]:
+        def pick(self, texts, runs, vectors, embed) -> list[descriptors.Description]:
             seen.append((list(runs), vectors))
-            return [[f"depth {run.depth}: {run.last - run.first + 1} chunks"] for run in runs]
+            return [
+                descriptors.Description([f"depth {run.depth}: {run.last - run.first + 1} chunks"])
+                for run in runs
+            ]
 
     found, _ = _sections()
     vectors = np.ones((len(found), 2))
@@ -322,9 +324,9 @@ def test_code_blocks_and_tables_give_no_descriptors() -> None:
     seen: list[list[str]] = []
 
     class Texts:
-        def pick(self, texts, runs, vectors, embed) -> list[list[str]]:
+        def pick(self, texts, runs, vectors, embed) -> list[descriptors.Description]:
             seen.append(list(texts))
-            return [[] for _ in runs]
+            return [descriptors.Description() for _ in runs]
 
     build.describe(found, _prose(chunks), None, None, Texts())
     (texts,) = seen

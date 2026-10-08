@@ -5,7 +5,7 @@ import type { PageProps } from '../App'
 import { usePaged } from '../hooks/usePaged'
 import { usePoll } from '../hooks/usePoll'
 import { navigate, type Route } from '../router'
-import { Field, GallerySection, Modal, SearchBox, Shell, Tile } from '../ui'
+import { Field, GallerySection, Modal, ModalStatus, SearchBox, Shell, Tile } from '../ui'
 import './Collections.css'
 import { CollectionModal } from './collections/CollectionModal'
 import { groupByName, tileSub } from './collections/group'
@@ -91,7 +91,7 @@ export function Collections({ route, counts, refreshStatus }: PageProps<Extract<
       <CollectionModal name={route.collection} onClose={close} onChanged={changed} onRenamed={renamed} />
       <Modal open={creating} onClose={() => setCreating(false)} title="New collection" subtitle="collection">
         {/* A form, so Enter creates the way the browser already does it. */}
-        <form className="collection-panel" onSubmit={create}>
+        <form className="collection-panel modal-scroll" onSubmit={create}>
           <Field label="Name">
             <input className="input" value={name} placeholder="Collection name" autoFocus onChange={(event) => setName(event.target.value)} />
           </Field>
@@ -103,7 +103,7 @@ export function Collections({ route, counts, refreshStatus }: PageProps<Extract<
               Create
             </button>
           </div>
-          {createError !== null && <p className="muted collection-error">{createError}</p>}
+          {createError !== null && <ModalStatus tone="error">{createError}</ModalStatus>}
         </form>
       </Modal>
     </Shell>

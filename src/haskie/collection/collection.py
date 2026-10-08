@@ -757,6 +757,20 @@ class Collection:
             )
         return {(collection, doc): cache_id for collection, doc, cache_id in rows}
 
+    async def indexed_caches(self) -> dict[str, str]:
+        """The cache entry each indexed member is indexed from, by document id: the members a
+        search answers from, without those on their way out."""
+        member = collection_documents.c
+        async with db.read() as conn:
+            rows = await conn.execute(
+                select(member.document_id, member.cache_id).where(
+                    member.collection == self.name,
+                    member.status == MemberStatus.INDEXED,
+                    member.cache_id.is_not(None),
+                )
+            )
+        return {doc: cache_id for doc, cache_id in rows}
+
     async def cancel_index(self, doc: str) -> None:
         """Record a cancelled index as `cancelled`, but only while the membership is still being
         indexed. An index that ended between the cancel's read and this write keeps the status it

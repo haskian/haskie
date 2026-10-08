@@ -56,6 +56,7 @@ class Section(msgspec.Struct, frozen=True):
     page_start: int | None  # 1-based PDF pages; None for a document without pages
     page_end: int | None
     descriptors: list[str] = []  # what it is about, as written, best first (`describe`)
+    description: str = ""  # a short prose summary, written by the section description stage
 
     @property
     def depth(self) -> int:
@@ -125,6 +126,11 @@ def chunk_id(document_id: str, seq: int) -> str:
     return _hashed(f"{document_id}/c/{seq}")
 
 
+def run(section: Section) -> descriptors.Run:
+    """A section as a strategy sees it: its headings and its chunks, 0-based, both ends in."""
+    return descriptors.Run(tuple(section.headings), section.seq_start - 1, section.seq_end - 1)
+
+
 def describe(
     found: Sequence[Section],
     texts: Sequence[str],
@@ -132,17 +138,12 @@ def describe(
     embed: descriptors.Embed | None,
     strategy: descriptors.Strategy = descriptors.CLASS_TFIDF,
 ) -> list[Section]:
-    """One document's sections, each with its descriptors. `texts` holds each chunk's `prose` in
+    """Sections with their descriptors and descriptions. `texts` holds each chunk's `prose` in
     `seq` order, `vectors` each section's unit vector, None without a model."""
-    picked = strategy.pick(
-        texts,
-        [descriptors.Run(tuple(one.headings), one.seq_start - 1, one.seq_end - 1) for one in found],
-        vectors,
-        embed,
-    )
+    picked = strategy.pick(texts, [run(one) for one in found], vectors, embed)
     return [
-        msgspec.structs.replace(one, descriptors=words)
-        for one, words in zip(found, picked, strict=True)
+        msgspec.structs.replace(one, descriptors=about.descriptors, description=about.description)
+        for one, about in zip(found, picked, strict=True)
     ]
 
 

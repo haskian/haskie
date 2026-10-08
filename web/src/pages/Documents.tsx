@@ -27,14 +27,15 @@ import { useRun } from "../hooks/useRun";
 import { href, navigate, type Route } from "../router";
 import {
   BulkStatus,
+  BusyButton,
   documentIcon,
   DescriptionBox,
   DocumentPanes,
   GallerySection,
   groupByRange,
-  Info,
   Kv,
   Modal,
+  ModalStatus,
   Shell,
   SearchBox,
   Tabs,
@@ -289,7 +290,7 @@ export function Documents({
                     {one.duplicate !== null && (
                       <Duplicate name={one.duplicate} />
                     )}
-                    {one.error !== null && <p className="muted">{one.error}</p>}
+                    {one.error !== null && <ModalStatus tone="error">{one.name}: {one.error}</ModalStatus>}
                   </li>
                 ))}
               </ul>
@@ -327,7 +328,7 @@ export function Documents({
               </button>
             </div>
           </form>
-          {error !== null && <p className="muted">{error}</p>}
+          {error !== null && <ModalStatus tone="error">{error}</ModalStatus>}
         </div>
       </Modal>
       {/* Keyed by name: another document starts its panels and its reads over. */}
@@ -411,7 +412,8 @@ function DocumentModal({
 
   // A deletion is accepted (202) and runs in the background: the modal follows it, then
   // closes and lets the listing re-read itself.
-  const onDeleted = useCallback(() => {
+  const onDeleted = useCallback((operation: OperationProgress) => {
+    if (operation.status !== "SUCCESS") return;
     onClose();
     onChanged();
   }, [onClose, onChanged]);
@@ -419,7 +421,7 @@ function DocumentModal({
 
   // A description is written in the background too: the modal follows it, and once it is
   // written reads the row again, as the listing does, whose tile shows it. How a run that wrote
-  // none ended shows beside the button.
+  // none ended shows in the modal footer.
   const onDescribed = useCallback(
     (operation: OperationProgress) => {
       if (operation.status !== "SUCCESS" || doc === null) return;
@@ -437,8 +439,9 @@ function DocumentModal({
       !window.confirm("Replace the description with one the AI writes?")
     )
       return;
+    setError(null);
     describing
-      .start(() => api.generateDescription(row.name))
+      .start("summarize_document", () => api.generateDescription(row.name))
       .catch((cause: unknown) => setError(errorText(cause)));
   };
 
@@ -446,8 +449,9 @@ function DocumentModal({
     if (doc === null) return;
     if (!window.confirm(`Delete "${doc}" and remove it from every collection?`))
       return;
+    setError(null);
     deletion
-      .start(() => api.deleteDocument(doc))
+      .start("delete_document", () => api.deleteDocument(doc))
       .catch((cause: unknown) => setError(errorText(cause)));
   };
 
@@ -457,18 +461,7 @@ function DocumentModal({
       : [
           ["Imported", dateTime(row.created_at)],
           ["Updated", dateTime(row.updated_at)],
-          [
-            "Status",
-            <>
-              {row.status}
-              {row.error !== null && (
-                <>
-                  {" "}
-                  · <span className="code">{row.error}</span>
-                </>
-              )}
-            </>,
-          ],
+          ["Status", row.status],
           ["Source", `${row.suffix} · ${bytes.format(row.size)}`],
           ["Parser", row.parser],
           ["Skip OCR pages", row.skip_ocr_pages ? "yes" : "no"],
@@ -491,6 +484,7 @@ function DocumentModal({
         row === null ? undefined : `${bytes.format(row.size)} · ${row.suffix}`
       }
     >
+      {row?.error != null && <ModalStatus tone="error">{row.error}</ModalStatus>}
       <Tabs tabs={MODAL_TABS} selected={tab} onSelect={setTab} />
       <div
         id={CONTENT_TAB}
@@ -498,18 +492,18 @@ function DocumentModal({
         className="modal-panel"
         hidden={tab !== CONTENT_TAB}
       >
-        {row !== null && <DocumentPanes doc={row.name} preview={row.preview} />}
+        {row !== null && <DocumentPanes doc={row.name} preview={row.preview} shown={tab === CONTENT_TAB} />}
       </div>
       <div id={SECTIONS_TAB} role="tabpanel" hidden={tab !== SECTIONS_TAB}>
-        {sections !== null && <SectionsTab found={sections} />}
+        {tab === SECTIONS_TAB && sections !== null && <SectionsTab found={sections} />}
       </div>
       <div
         id={COLLECTIONS_TAB}
         role="tabpanel"
         hidden={tab !== COLLECTIONS_TAB}
       >
-        {collections.length === 0 ? (
-          <Info>In no collection yet.</Info>
+        {tab === COLLECTIONS_TAB && collections.length === 0 ? (
+          <ModalStatus>In no collection yet.</ModalStatus>
         ) : (
           <ul className="list">
             {collections.map((name) => (
@@ -526,7 +520,7 @@ function DocumentModal({
         )}
       </div>
       <div id={SIMILAR_TAB} role="tabpanel" hidden={tab !== SIMILAR_TAB}>
-        {similar !== null && <SimilarDocuments similar={similar} />}
+        {tab === SIMILAR_TAB && similar !== null && <SimilarDocuments similar={similar} />}
       </div>
       <div id={IMPORT_TAB} role="tabpanel" hidden={tab !== IMPORT_TAB}>
         <div className="split">
@@ -552,7 +546,9 @@ function DocumentModal({
                     }
                   />
                   <div className="row">
-                    <button
+                    <BusyButton
+                      busy={describing.running}
+                      busyLabel="Describing ..."
                       className="btn"
                       type="button"
                       disabled={busy || describing.running}
@@ -560,7 +556,7 @@ function DocumentModal({
                     >
                       <Sparkles className="icon" />
                       Describe with AI
-                    </button>
+                    </BusyButton>
                     {describing.operation !== null && (
                       <BulkStatus operation={describing.operation} />
                     )}
@@ -591,7 +587,9 @@ function DocumentModal({
                 Retry import
               </button>
             )}
-            <button
+            <BusyButton
+              busy={deletion.running}
+              busyLabel="Deleting ..."
               className="btn btn-ghost"
               type="button"
               disabled={busy || deletion.running}
@@ -599,11 +597,11 @@ function DocumentModal({
             >
               <Trash2 className="icon" />
               Delete
-            </button>
-            {deletion.running && <span className="muted">deleting…</span>}
+            </BusyButton>
+            {deletion.operation !== null && <BulkStatus operation={deletion.operation} />}
           </div>
         )}
-        {error !== null && <p className="muted">{error}</p>}
+        {error !== null && <ModalStatus tone="error">{error}</ModalStatus>}
       </div>
     </Modal>
   );

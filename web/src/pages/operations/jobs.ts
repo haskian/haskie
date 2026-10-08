@@ -1,9 +1,8 @@
 import type { BulkKind, Operation, OperationKind, RunStatus, Stage, Task } from '../../api'
 import type { JobBar, JobState } from '../../ui'
 
-// A document operation runs some of four stages: an import converts, embeds and describes, an
-// index embeds, describes and writes, where its embedding is missing. The stages cost different
-// amounts of time. Embedding dominates, so its bar is the widest one.
+// A document operation runs some of these stages: an import converts, embeds and describes, an
+// index embeds, describes and writes, where its embedding is missing.
 export interface StageDef {
   stage: Stage
   label: string
@@ -12,8 +11,20 @@ export interface StageDef {
 const DOCUMENT_STAGES: Record<Stage, Omit<StageDef, 'stage'>> = {
   convert: { label: 'Convert', weight: 1 },
   embed: { label: 'Embed', weight: 2.2 },
-  describe: { label: 'Describe', weight: 1.4 },
+  describe_sections: { label: 'Describe sections', weight: 1.4 },
+  describe: { label: 'Section descriptors', weight: 1.4 },
+  describe_document: { label: 'Describe document', weight: 1 },
   index: { label: 'Index', weight: 1 },
+}
+
+/** Balanced row sizes when stages wrap, with at most four stages in a row. */
+export function stageRows(count: number): number[] {
+  if (count === 0) return []
+  if (count < 4) return [count]
+  const rows = Math.max(2, Math.ceil(count / 4))
+  const smaller = Math.floor(count / rows)
+  const extra = count % rows
+  return Array.from({ length: rows }, (_, row) => smaller + (row < extra ? 1 : 0))
 }
 
 // The word on the tag and the one bar that stands for an operation with no jobs of its own.
@@ -30,7 +41,7 @@ const BULK: Record<BulkKind, { tag: string; label: string }> = {
   index_collection: { tag: 'Index', label: 'Queue' },
   delete_collection: { tag: 'Delete', label: 'Delete' },
   delete_document: { tag: 'Delete', label: 'Delete' },
-  summarize_document: { tag: 'Describe', label: 'Describe' },
+  summarize_document: { tag: 'Describe', label: 'Describe document' },
   summarize_collection: { tag: 'Describe', label: 'Describe' },
   create_backup: { tag: 'Backup', label: 'Archive' },
   restore_backup: { tag: 'Restore', label: 'Restore' },
@@ -50,7 +61,11 @@ export function tagOf(operation: Operation): string {
 /** The jobs an operation's strip and task columns show, in the pipeline's order, which is the
  *  order the backend lists them in. */
 export function jobDefs(operation: Operation): StageDef[] {
-  return operation.jobs.map((job) => ({ stage: job.stage, ...DOCUMENT_STAGES[job.stage] }))
+  return operation.jobs.map((job) => ({
+    stage: job.stage,
+    ...DOCUMENT_STAGES[job.stage],
+    ...(isWhole(operation.kind) ? { label: BULK[bulkKind(operation)].label } : {}),
+  }))
 }
 
 /** One of an operation's own counters, or zero where it never reported it. */
@@ -122,7 +137,8 @@ export function taskText(task: Task): string {
   if (task.name !== null) return task.name
   if (task.stage === 'convert') return `pages ${task.page_start + 1}–${task.page_end}`
   if (task.stage === 'embed') return `part ${task.page_start}`
-  if (task.stage === 'describe') return `sections ${task.page_start + 1}–${task.page_end}`
+  if (task.stage === 'describe_document') return 'document'
+  if (task.stage === 'describe' || task.stage === 'describe_sections') return `sections ${task.page_start + 1}–${task.page_end}`
   return `parts ${task.page_start}–${task.page_end}`
 }
 
@@ -131,7 +147,7 @@ export function taskState(task: Task): 'done' | 'error' | 'todo' {
   return task.status === 'ERROR' ? 'error' : 'todo'
 }
 
-const RESULT_UNITS: Record<Stage, string> = { convert: 'OCR pages', embed: 'chunks', describe: 'sections', index: 'chunks' }
+const RESULT_UNITS: Record<Stage, string> = { convert: 'OCR pages', embed: 'chunks', describe: 'sections', describe_sections: 'sections', describe_document: 'documents', index: 'chunks' }
 
 /** What a job produced, summed over its tasks: OCR pages for a conversion, sections for a
  *  description, chunks otherwise. */

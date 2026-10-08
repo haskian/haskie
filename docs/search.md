@@ -21,6 +21,13 @@ flowchart LR
 
 ## The shared ranking
 
+Vectors retrieve by meaning; BM25 retrieves by words, including identifiers an embedding may
+miss. A cross-encoder can then score each query and candidate together. Anthropic's contextual
+retrieval experiment combined these ideas with model-generated chunk context. Its top-20
+retrieval failure rate fell from 5.7% to 2.9% with contextual embeddings and contextual BM25,
+then to 1.9% with reranking [12]. These are that experiment's results. haskie uses heading frames
+and its own models, so those gains are not a haskie benchmark.
+
 1. **Scope.** The `collections` argument, else the session's collections, else all of them, and
    only collections with a document to search: an indexed member, or one being indexed again,
    that is not on its way out. Naming one without any is refused (409), since its empty answer
@@ -321,13 +328,19 @@ for `set_session_collections`.
 
 `descriptors` say what each section is about. They are fixed at indexing
 ([Indexing](indexing.md#the-three-workflows)) and read by the section's id from the cache entry
-the collection indexed the document from: by default one to five of the section's terms (a word,
+the collection indexed the document from: by default one to six of the section's terms (a word,
 or two words side by side) weighed against the other sections of its depth by c-TF-IDF [10], less
-the terms more than half of them use or its header holds (unless nothing else is left), and
-reranked by meaning [11]; under the llm setting, up to five topics a small language model names
-after reading the section. They never decide what is picked: in the studies we follow, clusters
+the terms more than half of them use (unless nothing else is left), and
+reranked by meaning [11]; under the llm setting, up to six topics a small language model names
+after reading the section, each shown as the collection's preferred term for it
+([Indexing](indexing.md#the-vocabulary)). They never decide what is picked: in the studies we follow, clusters
 of the pool used as aspects gained nothing, and terms mined from it only re-weighted the aspects
 already on top.
+
+Under llm, each section also carries a `description`: one or two sentences generated alongside
+its descriptors. REST and MCP section search return it. The UI shows it only beside the tags in
+the document's Sections tab. It is empty for c-TF-IDF, sections without prose,
+and older caches until their next index. Vocabulary compaction changes only the descriptors.
 
 Measured on three books (1.9 MB of markdown, bge-small), eight questions: the whole search took
 35 to 50 ms warm, `map_sections` 12 to 17 ms of it. Against the top sections by relevance on the
@@ -425,6 +438,16 @@ stand. Each search logs `search_rerank_excerpts` with whether it ran and how lon
 off until an evaluation shows it returns more answer per character than the fold.
 
 ## Folding repeats
+
+The goal is to reserve result slots for distinct evidence while retaining every folded place's
+citation. Ross and colleagues tested exact duplicates, paraphrases and diverse document genres
+on the synthetic FictionalQA dataset. Their 2026 preprint found no significant correctness gain
+from duplicates or paraphrases, while diverse documents improved correctness by 17–47% [13].
+This motivates evaluating diversity; it does not guarantee the same gain for real collections.
+
+Folding differs from a diversity reranker such as maximal marginal relevance: it keeps the
+ranked result's slot and groups repeats under it rather than reordering for novelty. The same
+ordered inputs and settings produce the same groups. The following rules describe how.
 
 A pointwise reranker scores one passage at a time, so it cannot see that two results repeat each
 other [1]. `search/collapse.py` folds them in the chunk and passage pipelines, once per search, as
@@ -604,3 +627,7 @@ Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/coll
 11. Grootendorst, M. "Representation models": `KeyBERTInspired` and `MaximalMarginalRelevance`.
     BERTopic documentation, 2026.
     https://maartengr.github.io/BERTopic/getting_started/representation/representation.html
+12. Anthropic. "Introducing Contextual Retrieval." September 2024.
+    [Study and methodology](https://www.anthropic.com/engineering/contextual-retrieval).
+13. Ross, J. J. et al. "How retriever redundancy and diversity impact RAG effectiveness."
+    2026, preprint. [Paper](https://arxiv.org/abs/2608.13956).

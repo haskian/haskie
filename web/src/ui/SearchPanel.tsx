@@ -3,6 +3,7 @@ import type { Timed } from '../api'
 import { HitGrid } from './HitGrid'
 import type { Match } from './match'
 import { MatchModal } from './MatchModal'
+import { ModalStatus } from './ModalStatus'
 import { SearchBox } from './SearchBox'
 import { SearchTook } from './SearchTook'
 import { errorText } from '../format'
@@ -21,7 +22,7 @@ const NOTHING: Shown = { body: [], steps: [], scoring: [], asked: '', took: null
  * the steps the search took and how it scored. The caller decides which search `run` asks, and
  * `plural` names what it answers with.
  */
-export function SearchPanel({ run, placeholder, plural }: { run: (query: string) => Promise<Timed<Match[]>>; placeholder: string; plural: string }) {
+export function SearchPanel({ run, placeholder, plural, active = true }: { active?: boolean; run: (query: string) => Promise<Timed<Match[]>>; placeholder: string; plural: string }) {
   const [query, setQuery] = useState('')
   const [shown, setShown] = useState<Shown>(NOTHING)
   const [error, setError] = useState<string | null>(null)
@@ -52,7 +53,7 @@ export function SearchPanel({ run, placeholder, plural }: { run: (query: string)
   return (
     <>
       <SearchBox value={query} onChange={setQuery} placeholder={placeholder} onSubmit={submit} onClear={clear} busy={busy} />
-      {error !== null && <p className="muted">{error}</p>}
+      {active && error !== null && <ModalStatus tone="error">{error}</ModalStatus>}
       <SearchTook counts={`${shown.body.length} ${plural}`} ms={shown.took} steps={shown.steps} />
       <HitGrid results={shown.body} query={shown.asked} onOpen={setOpen} />
       <MatchModal match={open} query={shown.asked} scoring={shown.scoring} onClose={() => setOpen(null)} />

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   api,
+  type BulkKind,
   type BulkStarted,
   type OperationProgress,
   type Options,
@@ -12,7 +13,7 @@ import type { PageProps } from '../App'
 import { errorText } from '../format'
 import { useOperation } from '../hooks/useOperation'
 import { href } from '../router'
-import { BulkStatus, choices, docFor, EmbedderFacts, Field, Num, Picker, profileOptions, SearchField, Shell, Toggle, visibleExpansionFields, visibleSearchFields, type NumericKeys } from '../ui'
+import { BulkStatus, BusyButton, choices, DescriberFields, docFor, EmbedderFacts, Field, Num, Picker, profileOptions, SearchField, Shell, Toggle, visibleExpansionFields, visibleSearchFields, type NumericKeys } from '../ui'
 import { classicBackground, setBackground as storeBackground } from './settings/background'
 import './Settings.css'
 
@@ -188,14 +189,7 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
             />
             <span className="faint">{skipOcr.description}</span>
           </div>
-          <Field label={docFor(docs, 'pipeline.descriptors').title} help={docFor(docs, 'pipeline.descriptors').description}>
-            <Picker
-              ariaLabel={docFor(docs, 'pipeline.descriptors').title}
-              options={choices(options.descriptors)}
-              value={settings.pipeline.descriptors}
-              onChange={(descriptors) => pipeline({ descriptors })}
-            />
-          </Field>
+          <DescriberFields value={settings.pipeline} options={options} onChange={pipeline} />
         </section>
 
         <section id="chunking">
@@ -331,9 +325,9 @@ function BackupSection({ onRestored }: { onRestored: () => void }) {
   const restoring = useOperation(onRestoreDone, setError)
   const made = backup.operation?.status === 'SUCCESS' ? backup.operation : null
 
-  const start = (follower: typeof backup, fn: () => Promise<BulkStarted>): void => {
+  const start = (follower: typeof backup, kind: BulkKind, fn: () => Promise<BulkStarted>): void => {
     setError(null)
-    follower.start(fn).catch((cause: unknown) => setError(errorText(cause)))
+    follower.start(kind, fn).catch((cause: unknown) => setError(errorText(cause)))
   }
 
   const restore = (file: File | undefined): void => {
@@ -341,7 +335,7 @@ function BackupSection({ onRestored }: { onRestored: () => void }) {
     const replaces =
       'Replace every document, collection and setting with the backup? Search history and operations stay; sessions keep the collections the backup holds.'
     if (file === undefined || !window.confirm(replaces)) return
-    start(restoring, () => api.restore(file))
+    start(restoring, 'restore_backup', () => api.restore(file))
   }
 
   return (
@@ -352,9 +346,9 @@ function BackupSection({ onRestored }: { onRestored: () => void }) {
         after a restore.
       </span>
       <div className="row row-loose">
-        <button className="btn btn-primary" type="button" onClick={() => start(backup, api.backup)} disabled={backup.running}>
+        <BusyButton busy={backup.running} busyLabel="Backing up ..." progress={backup.operation?.progress} className="btn btn-primary" type="button" onClick={() => start(backup, 'create_backup', api.backup)} disabled={backup.running}>
           Back up
-        </button>
+        </BusyButton>
         {backup.operation !== null && <BulkStatus operation={backup.operation} />}
         {made !== null && (
           <a className="btn btn-ghost" href={api.backupFileUrl(made.id)} download>
@@ -363,11 +357,11 @@ function BackupSection({ onRestored }: { onRestored: () => void }) {
         )}
       </div>
       <div className="row row-loose">
-        <button className="btn btn-ghost" type="button" onClick={() => picker.current?.click()} disabled={restoring.running}>
+        <BusyButton busy={restoring.running} busyLabel="Restoring ..." progress={restoring.operation?.progress} className="btn btn-ghost" type="button" onClick={() => picker.current?.click()} disabled={restoring.running}>
           Restore…
-        </button>
+        </BusyButton>
         <input ref={picker} type="file" accept=".zip,application/zip" hidden aria-label="Backup file" onChange={(event) => restore(event.target.files?.[0])} />
-        {restoring.operation !== null && (
+        {restoring.operation !== null && !restoring.running && (
           <span className="muted">
             <BulkStatus operation={restoring.operation} />. The indexes rebuild in <a href={href({ name: 'operations' })}>Operations</a>.
           </span>

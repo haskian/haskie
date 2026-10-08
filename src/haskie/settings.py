@@ -52,6 +52,11 @@ class Descriptors(StrEnum):  # the strategies of `sections.descriptors`
     LLM = "llm"
 
 
+class Describer(StrEnum):  # the language model the llm strategy writes with (`gguf_models`)
+    GEMMA_4_E2B = "gemma-4-e2b"
+    QWEN_3_5_4B = "qwen3.5-4b"
+
+
 class SearchMode(StrEnum):
     HYBRID = "hybrid"
     VECTOR = "vector"
@@ -215,7 +220,8 @@ MAINTENANCE_DOCUMENTS = Meta(
 MAINTENANCE_IDLE = Meta(
     title="Maintenance when idle (seconds)",
     description=(
-        "Also run maintenance once a collection has had no document indexed for this long."
+        "Also run maintenance once a collection has had no document indexed for this long. Under "
+        "llm descriptors, its vocabulary is rebuilt then too."
     ),
 )
 ANN_MIN_ROWS = Meta(
@@ -248,12 +254,23 @@ DESCRIPTORS = Meta(
         "How the words and phrases that say what each section is about are written, once per "
         "document and chunk settings, as a step after embedding. c-tf-idf: the terms a section "
         "uses more than the sections beside it, reranked by the embedding model; fast, runs "
-        "everywhere. llm: Gemma-4-E2B (2.8 GB download, Apache 2.0) reads each section and "
-        "names its topics; judged far better on technical books, about half a second a "
-        "section, Apple Silicon only, with a model hardware other than cpu. It also writes a "
-        "document without a description a few sentences on what it is about. A change applies to "
+        "everywhere. llm: a small language model (the describer below) reads each section and "
+        "names its topics; judged far better on technical books, Apple Silicon only, with a "
+        "model hardware other than cpu. It also writes a document without a description a few "
+        "sentences on what it is about. A change applies to "
         'documents embedded or indexed afterwards; "Index all" in a collection re-describes the '
         "rest, for every collection that chunks them alike, as they share the descriptors."
+    ),
+)
+DESCRIBER = Meta(
+    title="Describer",
+    description=(
+        "The language model the llm descriptors are written with, on llama.cpp on the Apple GPU. "
+        "qwen3.5-4b: Qwen3.5-4B (2.6 GB download, 2.8 GB in memory, Apache 2.0); judged best, "
+        "+0.6 of 5 over gemma-4-e2b on 60 sections, about 1.4 s a section. gemma-4-e2b: "
+        "Gemma-4-E2B (2.8 GB download, 3.0 GB in memory, Apache 2.0); twice as fast, about 0.7 s "
+        "a section. A change re-describes a document the next time it is embedded or indexed; "
+        '"Index all" re-describes a collection.'
     ),
 )
 # How deep any search reads. A passage or a document row is folded from several chunks, so the scan
@@ -668,6 +685,7 @@ class PipelineSettings(msgspec.Struct):
     preview_workers: Annotated[int, PREVIEW_WORKERS] = 2
     accelerator: Annotated[Accelerator, ACCELERATOR] = Accelerator.AUTO
     descriptors: Annotated[Descriptors, DESCRIPTORS] = Descriptors.C_TF_IDF
+    describer: Annotated[Describer, DESCRIBER] = Describer.QWEN_3_5_4B
 
     def __post_init__(self) -> None:
         _at_least(

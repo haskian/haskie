@@ -86,9 +86,9 @@ body[data-bg="classic"]::before, body:has(#bg-classic:checked)::before { content
 .picker > summary, .input-group, .btn, .tile, .nav-item, .tab, .input, .textarea { transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease; }
 
 /* app shell: page frame, sticky sidebar, and the section stacks in the content column */
-.page { min-height: 100vh; padding: 18px 40px 36px; display: grid; grid-template-rows: 1fr; }
-.body { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: var(--sp-12); padding: 40px 0 60px; }
-.side { padding-left: 60px; align-self: start; position: sticky; top: 72px; display: grid; gap: var(--sp-8); }
+.page { min-height: 100vh; padding: 18px clamp(16px, 2.8vw, 40px) 36px; display: grid; grid-template-rows: 1fr; }
+.body { --side-inset: clamp(0px, calc(10vw - 84px), 60px); display: grid; grid-template-columns: calc(clamp(216px, 17vw, 240px) + var(--side-inset)) minmax(0, 1fr); gap: clamp(16px, 3.333vw, 48px); padding: 40px 0 60px; }
+.side { padding-left: var(--side-inset); align-self: start; position: sticky; top: 72px; display: grid; gap: var(--sp-8); }
 .side .label { display: block; margin-bottom: var(--sp-4); }
 .logo { display: flex; align-items: center; gap: var(--sp-2); margin-left: 1.5em; color: var(--ink); text-decoration: none; }
 .logo svg { height: 20px; width: auto; }
@@ -244,6 +244,11 @@ body:has(.modal[open]) { overflow: hidden; }
 .modal-body > [role="tabpanel"], .modal-body > .modal-scroll { flex: 1 1 0; min-height: 0; overflow: auto; padding-right: var(--sp-4); } /* room for an overlay scrollbar, which would otherwise sit on the tiles */
 .modal-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: var(--sp-3); }
 .modal-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--sp-4); }
+.modal-statusbar { display: grid; align-content: safe center; min-height: 30px; max-height: 25%; overflow: auto; margin: auto calc(-1 * var(--sp-6)) calc(-1 * var(--sp-6)); padding: var(--sp-1) var(--sp-6); background: var(--ink); color: var(--paper); }
+.modal-message { display: flex; align-items: center; gap: var(--sp-2); font: 400 var(--fs-xs)/1.6 var(--font-mono); overflow-wrap: anywhere; }
+.modal-message .icon { flex: none; width: 12px; height: 12px; }
+.modal-message > span { min-width: 0; }
+.modal-message-success > .icon { color: var(--ok); }
 
 /* match panel: the one search result a modal is opened on, shown by every page that searches */
 .match { display: grid; gap: var(--sp-6); align-content: start; padding: var(--sp-6) 0; }
@@ -433,6 +438,7 @@ body.over .drop-overlay { opacity: 1; }
 .statusbar-counts b + b::before { content: "/"; margin-right: var(--sp-1); color: rgba(255, 255, 255, 0.4); }
 .statusbar-counts .running, .statusbar-counts .done { color: var(--ok); }
 .statusbar-counts .queued { color: rgba(255, 255, 255, 0.5); }
+.statusbar-counts .idle { color: var(--paper); } /* a model on disk, not in memory */
 .statusbar .hint { top: calc(100% + var(--sp-2)); bottom: auto; left: auto; right: 0; max-width: none; transform: translateY(-4px); background: var(--paper); color: var(--ink); font-family: var(--font-sans); text-transform: none; letter-spacing: 0; gap: var(--sp-3); }
 .statusbar-item:hover > .hint { transform: translateY(0); }
 .statusbar-item:has(~ .spacer) > .hint { left: 0; right: auto; } /* left of the gap: opens rightwards, into the page */
@@ -490,6 +496,8 @@ input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; d
    its background is put off for good instead, and the text keeps the input's colour */
 .input:-webkit-autofill, .input:-webkit-autofill:focus { transition: background-color 0s 600000s, color 0s 600000s; -webkit-text-fill-color: var(--text); caret-color: var(--text); }
 .textarea { min-height: 96px; resize: vertical; }
+.description-box { border-color: transparent; }
+.description-box:hover, .description-box:focus { border-color: var(--line); }
 
 .check, .toggle { display: inline-flex; align-items: center; gap: var(--sp-3); font-size: var(--fs-sm); font-weight: 500; color: var(--text-muted); cursor: pointer; }
 .check input, .toggle input { -webkit-appearance: none; appearance: none; margin: 0; flex: none; border: var(--border); background: transparent; cursor: inherit; }

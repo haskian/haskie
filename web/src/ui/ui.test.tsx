@@ -4,11 +4,14 @@ import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { EmbedderMetadata, Excerpt, Hit, MappedDocument, MappedSection, Passage, RerankerMetadata, Status } from '../api'
 import { Field } from './Field'
+import { BusyButton } from './BusyButton'
 import { Info } from './Info'
 import { GallerySection } from './GallerySection'
 import { HitGrid } from './HitGrid'
 import { Kv } from './Kv'
 import { MatchModal } from './MatchModal'
+import { Modal } from './Modal'
+import { ModalStatus } from './ModalStatus'
 import { ModelFacts } from './ModelFacts'
 import { SectionsModal } from './SectionsModal'
 import { MapDocuments, OpenedDetail, SectionGrid } from './SectionGrid'
@@ -40,6 +43,57 @@ function check(cases: MarkupCase[]): void {
 }
 
 const noop = (): void => {}
+
+describe('modal status space', () => {
+  check([
+    {
+      name: 'every open modal reserves a footer even without a message',
+      element: <Modal open onClose={noop} title="New collection"><input aria-label="Name" /></Modal>,
+      contains: ['<div class="modal-statusbar"></div>'],
+      missing: ['role="alert"', 'role="status"'],
+    },
+    {
+      name: 'a closed modal unmounts its content and status space',
+      element: <Modal open={false} onClose={noop} title="Collection"><ModalStatus tone="error">Save failed</ModalStatus></Modal>,
+      contains: ['<dialog class="modal"></dialog>'],
+      missing: ['modal-statusbar', 'Save failed'],
+    },
+    ...(['info', 'success', 'warning', 'error'] as const).map((tone) => ({
+      name: `${tone} messages remain accessible outside a modal too`,
+      element: <ModalStatus tone={tone}>Operation result</ModalStatus>,
+      contains: [`modal-message-${tone}`, `role="${tone === 'error' ? 'alert' : 'status'}"`, 'aria-hidden="true"', '<span>Operation result</span>'],
+    })),
+  ])
+})
+
+describe('BusyButton', () => {
+  check([
+    {
+      name: 'an idle action keeps its label and icon',
+      element: <BusyButton className="btn" type="button" busy={false} busyLabel="Describing ..."><FileText className="icon" />Describe with AI</BusyButton>,
+      contains: ['type="button"', 'lucide-file-text', 'Describe with AI'],
+      missing: ['disabled', 'aria-busy', 'Describing ...', 'lucide-loader-circle'],
+    },
+    {
+      name: 'a running action disables itself and replaces its contents with a spinner and label',
+      element: <BusyButton busy busyLabel="Describing ..." disabled={false}><FileText />Describe with AI</BusyButton>,
+      contains: ['disabled=""', 'aria-busy="true"', 'lucide-loader-circle', 'icon spin spin-fast', 'Describing ...'],
+      missing: ['Describe with AI', 'lucide-file-text'],
+    },
+    {
+      name: 'progress remains inside the running button, including a zero count',
+      element: <BusyButton busy busyLabel="Backing up ..." progress={{ done: 0, total: 16, last: null }}>Back up</BusyButton>,
+      contains: ['Backing up ... 0/16</button>'],
+      missing: ['<span'],
+    },
+    {
+      name: 'another action can disable this button without making it look busy',
+      element: <BusyButton busy={false} busyLabel="Deleting ..." disabled>Delete</BusyButton>,
+      contains: ['disabled=""', '>Delete</button>'],
+      missing: ['aria-busy', 'Deleting ...', 'lucide-loader-circle'],
+    },
+  ])
+})
 
 const HIT: Hit = {
   collection: 'A–E',
@@ -836,28 +890,54 @@ describe('also_in', () => {
 
 describe('Statusbar', () => {
   const status = (models: Status['models']): Status => ({ initialized: true, home: '/home/ada/.haskie', embedding: null, models, settings_error: null, web_ui: true })
-  const bge = { kind: 'embedding' as const, name: 'BAAI/bge-small-en-v1.5', state: 'ready' as const, error: null, device: 'cpu' as const }
-  const minilm = { kind: 'reranker' as const, name: 'Xenova/ms-marco-MiniLM-L-6-v2', state: 'loading' as const, error: null, device: 'cpu' as const }
+  const bge = { kind: 'embedding' as const, name: 'BAAI/bge-small-en-v1.5', state: 'ready' as const, group: 'search' as const, error: null, device: 'cpu' as const }
+  const minilm = { kind: 'reranker' as const, name: 'Xenova/ms-marco-MiniLM-L-6-v2', state: 'loading' as const, group: 'search' as const, error: null, device: 'cpu' as const }
+  const qwen = { kind: 'describer' as const, name: 'unsloth/Qwen3.5-4B-GGUF', state: 'ready' as const, group: 'knowledge' as const, error: null, device: 'apple_silicon' as const }
+  const embedder = { kind: 'vocabulary' as const, name: 'Qwen/Qwen3-Embedding-0.6B-GGUF', state: 'downloaded' as const, group: 'knowledge' as const, error: null, device: 'apple_silicon' as const }
   check([
     {
-      name: 'a ready embedding is a green check, its name in the hint only',
+      name: 'a loaded search model is a turning green gear and its count, its name in the hint only',
       element: <Statusbar status={status([bge])} />,
       contains: [
-        '<span class="muted">Embedding</span><span class="statusbar-counts"><b class="done" aria-label="ready">',
-        '<span class="hint" role="tooltip"><span class="hint-rows"><span>BAAI/bge-small-en-v1.5</span><span class="muted"></span><span class="code">ready</span>',
+        '<span class="muted">Search</span><span class="statusbar-counts"><b class="running" aria-label="loaded"><svg',
+        'icon spin',
+        '</svg>1</b>',
+        '<span class="hint" role="tooltip"><span class="hint-rows"><span>BAAI/bge-small-en-v1.5</span><span class="muted">embedding</span><span class="code">loaded</span>',
       ],
-      missing: ['Reranker', 'bge-small-en-v1.5 ·'],
+      missing: ['Knowledge', 'bge-small-en-v1.5 ·'],
     },
     {
-      name: 'a reranker shows only when one is on, and a loading one spins',
+      name: 'one loaded and one loading: 1 loading, then 1 loaded, each model with its own state in the hint',
       element: <Statusbar status={status([bge, minilm])} />,
-      contains: ['<span class="muted">Reranker</span><span class="statusbar-counts"><b class="running" aria-label="loading">', '<span>Xenova/ms-marco-MiniLM-L-6-v2</span>'],
+      contains: [
+        '<span class="statusbar-counts"><b class="queued" aria-label="loading">',
+        'spin-fast',
+        '</svg>1</b><b class="running" aria-label="loaded">',
+        '<span>Xenova/ms-marco-MiniLM-L-6-v2</span>',
+        'downloading or loading',
+        '<span class="code">loaded</span>',
+      ],
     },
     {
-      name: 'no embedding model: full-text only, no hint',
+      name: 'knowledge models, one loaded and one on disk: 1 downloaded, then 1 loaded',
+      element: <Statusbar status={status([bge, qwen, embedder])} />,
+      contains: [
+        '<span class="muted">Knowledge</span><span class="statusbar-counts"><b class="idle" aria-label="downloaded">',
+        '</svg>1</b><b class="running" aria-label="loaded">',
+        'downloaded, loaded when used',
+        '<span class="muted">vocabulary</span>',
+      ],
+    },
+    {
+      name: 'a failed model is a cross with its count, first, and the hint shows its error',
+      element: <Statusbar status={status([bge, { ...qwen, state: 'error' as const, error: 'no Metal' }, embedder])} />,
+      contains: ['<b aria-label="error">', '</svg>1</b><b class="idle" aria-label="downloaded">', '<span class="muted">no Metal</span><span class="code">failed</span>'],
+    },
+    {
+      name: 'no search model: full-text only, no hint, no knowledge group',
       element: <Statusbar status={status([])} />,
-      contains: ['<span class="muted">Embedding</span><span class="statusbar-counts"><b>full-text only</b></span></span>'],
-      missing: ['role="tooltip"'],
+      contains: ['<span class="muted">Search</span><span class="statusbar-counts"><b>full-text only</b></span></span>'],
+      missing: ['role="tooltip"', 'Knowledge'],
     },
   ])
 })
@@ -931,6 +1011,7 @@ const SAGAS: MappedSection = {
   chars: 5210,
   chunks: 3,
   descriptors: ['saga', 'compensating step', 'orchestrator'],
+  description: 'Explains how compensating steps undo a failed saga.',
   related: [
     { collection: 'patterns', document_id: 'c2', document: 'ddia.pdf', header: 'Sagas', id: 's-ddia-sagas', location: 'ddia.pdf L10-40', line_start: 10, line_end: 40, score: 0.4, similarity: 0.93 },
     { collection: 'patterns', document_id: 'b1', document: 'iddd.pdf', header: 'Sagas > Retries', id: 's-retries', location: 'iddd.pdf L361-380', line_start: 361, line_end: 380, score: 0.3, similarity: 0.88 },
@@ -945,6 +1026,7 @@ describe('SectionGrid', () => {
       name: 'a pick names its section, what it is about and where to read it',
       element: <SectionGrid sections={[SAGAS]} />,
       contains: ['iddd.pdf', 'patterns', '0.82', 'Sagas &gt; Compensation', 'descriptor">compensating step', 'descriptor">saga', 'p.12-14 L300-360', '5210 chars · 3 matched chunks'],
+      missing: [SAGAS.description],
     },
     {
       name: 'the sections it covers best, another document named, its own not',
@@ -954,9 +1036,9 @@ describe('SectionGrid', () => {
     },
     {
       name: 'the whole document, no descriptors, nothing related: one chunk',
-      element: <SectionGrid sections={[{ ...SAGAS, header: '', descriptors: [], related: [], chunks: 1 }]} />,
+      element: <SectionGrid sections={[{ ...SAGAS, header: '', description: '', descriptors: [], related: [], chunks: 1 }]} />,
       contains: ['The whole document', '1 matched chunk<'],
-      missing: ['class="descriptors', 'Related sections'],
+      missing: ['class="descriptors', 'Related sections', 'Explains how'],
     },
   ])
 })
@@ -1034,6 +1116,7 @@ describe('SectionsModal', () => {
       name: 'open: the section first, what the map said about it, then its document',
       element: <SectionsModal section={SAGAS} onClose={noop} />,
       contains: ['iddd.pdf', '>Section<', '>Document<', 'Sagas &gt; Compensation', '>p.12-14 L300-360<', 'class="descriptors"', 'score 0.82 · 3 matched chunks', 'Related sections'],
+      missing: [SAGAS.description],
     },
   ])
 })

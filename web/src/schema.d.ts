@@ -1119,8 +1119,15 @@ export interface components {
             description: string;
         };
         /**
+         * Describer
+         * @description The language model the llm descriptors are written with, on llama.cpp on the Apple GPU. qwen3.5-4b: Qwen3.5-4B (2.6 GB download, 2.8 GB in memory, Apache 2.0); judged best, +0.6 of 5 over gemma-4-e2b on 60 sections, about 1.4 s a section. gemma-4-e2b: Gemma-4-E2B (2.8 GB download, 3.0 GB in memory, Apache 2.0); twice as fast, about 0.7 s a section. A change re-describes a document the next time it is embedded or indexed; "Index all" re-describes a collection.
+         * @default qwen3.5-4b
+         * @enum {string}
+         */
+        Describer: "gemma-4-e2b" | "qwen3.5-4b";
+        /**
          * Descriptors
-         * @description How the words and phrases that say what each section is about are written, once per document and chunk settings, as a step after embedding. c-tf-idf: the terms a section uses more than the sections beside it, reranked by the embedding model; fast, runs everywhere. llm: Gemma-4-E2B (2.8 GB download, Apache 2.0) reads each section and names its topics; judged far better on technical books, about half a second a section, Apple Silicon only, with a model hardware other than cpu. It also writes a document without a description a few sentences on what it is about. A change applies to documents embedded or indexed afterwards; "Index all" in a collection re-describes the rest, for every collection that chunks them alike, as they share the descriptors.
+         * @description How the words and phrases that say what each section is about are written, once per document and chunk settings, as a step after embedding. c-tf-idf: the terms a section uses more than the sections beside it, reranked by the embedding model; fast, runs everywhere. llm: a small language model (the describer below) reads each section and names its topics; judged far better on technical books, Apple Silicon only, with a model hardware other than cpu. It also writes a document without a description a few sentences on what it is about. A change applies to documents embedded or indexed afterwards; "Index all" in a collection re-describes the rest, for every collection that chunks them alike, as they share the descriptors.
          * @default c-tf-idf
          * @enum {string}
          */
@@ -1407,6 +1414,7 @@ export interface components {
             profile: string;
             search?: components["schemas"]["SearchSettings"];
             descriptors?: components["schemas"]["Descriptors"];
+            describer?: components["schemas"]["Describer"];
         };
         /** Job */
         Job: {
@@ -1538,6 +1546,8 @@ export interface components {
             chars: number;
             chunks: number;
             descriptors: string[];
+            /** @default  */
+            description: string;
             related?: components["schemas"]["Related"][];
         };
         /** Markdown */
@@ -1560,20 +1570,26 @@ export interface components {
          */
         MemberStatus: "pending" | "indexing" | "indexed" | "error" | "cancelled" | "removing";
         /**
+         * ModelGroup
+         * @enum {string}
+         */
+        ModelGroup: "search" | "knowledge";
+        /**
          * ModelKind
          * @enum {string}
          */
-        ModelKind: "embedding" | "reranker" | "describer";
+        ModelKind: "embedding" | "reranker" | "describer" | "vocabulary";
         /**
          * ModelState
          * @enum {string}
          */
-        ModelState: "pending" | "loading" | "ready" | "error";
+        ModelState: "pending" | "loading" | "downloaded" | "ready" | "error";
         /** ModelStatus */
         ModelStatus: {
             kind: components["schemas"]["ModelKind"];
             name: string;
             state: components["schemas"]["ModelState"];
+            group: components["schemas"]["ModelGroup"];
             error?: string | null;
             device?: components["schemas"]["Device"] | null;
         };
@@ -1623,6 +1639,7 @@ export interface components {
             chunkers: components["schemas"]["Chunker"][];
             accelerators: components["schemas"]["Accelerator"][];
             descriptors: components["schemas"]["Descriptors"][];
+            describers: components["schemas"]["Describer"][];
             search_modes: components["schemas"]["SearchMode"][];
             fusions: components["schemas"]["Fusion"][];
             score_folds: components["schemas"]["ScoreFold"][];
@@ -1806,7 +1823,7 @@ export interface components {
             maintenance_documents: number;
             /**
              * Maintenance when idle (seconds)
-             * @description Also run maintenance once a collection has had no document indexed for this long.
+             * @description Also run maintenance once a collection has had no document indexed for this long. Under llm descriptors, its vocabulary is rebuilt then too.
              * @default 60
              */
             maintenance_idle_seconds: number;
@@ -1824,6 +1841,7 @@ export interface components {
             preview_workers: number;
             accelerator?: components["schemas"]["Accelerator"];
             descriptors?: components["schemas"]["Descriptors"];
+            describer?: components["schemas"]["Describer"];
         };
         /** Position */
         Position: {
@@ -2196,6 +2214,8 @@ export interface components {
             page_start: number | null;
             page_end: number | null;
             descriptors?: string[];
+            /** @default  */
+            description: string;
         };
         /** SectionMap */
         SectionMap: {
@@ -2263,7 +2283,7 @@ export interface components {
          * Stage
          * @enum {string}
          */
-        Stage: "convert" | "embed" | "describe" | "index";
+        Stage: "convert" | "embed" | "describe_sections" | "describe" | "describe_document" | "index";
         /** Staged */
         Staged: {
             staging_id: string;

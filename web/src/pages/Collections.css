@@ -21,8 +21,7 @@
 }
 
 /* An import error and an API message are one unbroken string: they wrap, never widen. */
-.collection-panel .list-text .sub,
-.collection-error {
+.collection-panel .list-text .sub {
   overflow-wrap: anywhere;
 }
 

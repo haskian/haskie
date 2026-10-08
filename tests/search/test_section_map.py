@@ -20,6 +20,7 @@ from haskie.search import section_map
 from haskie.search.passage import top_documents
 from haskie.search.section import Placement
 from haskie.search.section_map import Candidate
+from haskie.sections.descriptors import Description
 from haskie.settings import ChunkSettings, ScoreFold
 
 SAGAS = """# Sagas
@@ -268,8 +269,12 @@ def test_mapped_cites_each_pick_with_its_descriptors() -> None:
     )
     orchestration = candidates[0].placements
     described = {
-        ("notes", "orchestration"): ["orchestrator", "compensation"],
-        ("beta", "choreography"): ["events"],  # the same id in another collection's chunking
+        ("notes", "orchestration"): Description(
+            ["orchestrator", "compensation"], "Explains compensation."
+        ),
+        ("beta", "choreography"): Description(
+            ["events"], "Covers events."
+        ),  # the same id in another collection's chunking
     }
     picked = section_map.Picked(picks=[0, 1], related={0: [(1, 0.4)], 1: []}, coverage=[], lifted=0)
 
@@ -286,6 +291,8 @@ def test_mapped_cites_each_pick_with_its_descriptors() -> None:
     assert first.chars == orchestration[-1].char_end - orchestration[0].char_start
     assert (first.chunks, first.score) == (1, 0.5)
     assert first.descriptors == ["orchestrator", "compensation"]
+    assert first.description == "Explains compensation."
+    assert second.description == ""
     assert [one.header for one in first.related] == ["Sagas > Choreography"]
     assert first.related[0].similarity == 0.4
     assert second.descriptors == [], "described in another collection only: nothing to say"
