@@ -4,6 +4,7 @@ and every refusal, which leaves the contents as they were."""
 import io
 import os
 import sqlite3
+import threading
 import time
 import zipfile
 from datetime import UTC, datetime
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 import msgspec
 import pytest
 from dbos import DBOS
+from dbos import _dbos as dbos_core
 from sqlalchemy import update
 
 from haskie import backup, db, home, sysdb
@@ -354,16 +356,21 @@ async def test_a_second_restore_while_one_waits_is_refused(client, monkeypatch) 
     assert list(home.RESTORE_ROOT.iterdir()) == [], "the second upload is not kept"
 
 
-async def test_a_slow_backup_reports_its_progress_as_it_goes(client, monkeypatch) -> None:
-    await stage_and_import(client, "notes.md", MD.encode())
+def _slow_archive(monkeypatch) -> None:
+    """An archive slow enough to write for a few progress events to go out meanwhile."""
     write = backup._write_archive_sync
 
     def slowly(key: str, manifest: backup.Manifest, members: list, progress) -> int:
-        time.sleep(0.3)  # long enough for a few progress events, so one is published mid-step
+        time.sleep(0.3)
         return write(key, manifest, members, progress)
 
     monkeypatch.setattr(backup, "PROGRESS_SECONDS", 0.05)
     monkeypatch.setattr(backup, "_write_archive_sync", slowly)
+
+
+async def test_a_slow_backup_reports_its_progress_as_it_goes(client, monkeypatch) -> None:
+    await stage_and_import(client, "notes.md", MD.encode())
+    _slow_archive(monkeypatch)
     started = (await client.post("/api/backup")).json()["operation_id"]
 
     async def reported() -> bool:
@@ -374,6 +381,29 @@ async def test_a_slow_backup_reports_its_progress_as_it_goes(client, monkeypatch
     await wait_for(started)
     final = (await client.get(f"/api/operations/{started}/progress")).json()["progress"]
     assert final["done"] == final["total"] == 4, "two files of the document, two of its cache"
+
+
+async def test_a_slow_progress_write_never_lands_after_the_last_count(client, monkeypatch) -> None:
+    await stage_and_import(client, "notes.md", MD.encode())
+    _slow_archive(monkeypatch)
+    store = dbos_core.set_event
+    last_landed = threading.Event()
+
+    def stale(dbos, context, key: str, value: BulkProgress, **options) -> None:
+        """The write in its worker thread, which a cancel of its caller does not stop: a partial
+        count waits for the last one to land, or half a second."""
+        count = msgspec.structs.replace(value)
+        if count.done < count.total:
+            last_landed.wait(timeout=0.5)
+        store(dbos, context, key, count, **options)
+        if count.done == count.total:
+            last_landed.set()
+
+    monkeypatch.setattr(dbos_core, "set_event", stale)
+    started = (await client.post("/api/backup")).json()["operation_id"]
+    await wait_for(started)
+    final = (await client.get(f"/api/operations/{started}/progress")).json()["progress"]
+    assert final["done"] == final["total"] == 4, "the last count stays the last one"
 
 
 def _tampered(archive: bytes, statement: str, schema_version: int | None = None) -> bytes:

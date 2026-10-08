@@ -260,18 +260,24 @@ async def write_archive(key: str, manifest: Manifest) -> Backup:
     reports how far it got, once a second."""
     members = await anyio.to_thread.run_sync(_members, home.BACKUP_ROOT / f"{key}.db")
     progress = BulkProgress(done=0, total=len(members))
+    written = anyio.Event()
 
     async def report() -> None:
         while True:
-            await anyio.sleep(PROGRESS_SECONDS)
+            with anyio.move_on_after(PROGRESS_SECONDS):
+                await written.wait()
+                return
             await DBOS.set_event_async(PROGRESS_EVENT, progress)
 
-    # a task, not a task group: a group would wrap the step's own failure in an ExceptionGroup
+    # a task, not a task group: a group would wrap the step's own failure in an ExceptionGroup.
+    # Stopped and awaited, never cancelled: a cancel leaves the write in flight in its thread, and
+    # that older count could land after the last one.
     reporting = asyncio.create_task(report())
     try:
         size = await anyio.to_thread.run_sync(_write_archive_sync, key, manifest, members, progress)
     finally:
-        reporting.cancel()
+        written.set()
+        await reporting
     await DBOS.set_event_async(PROGRESS_EVENT, progress)  # the last count, for the progress route
     return Backup(size=size, files=len(members))
 
