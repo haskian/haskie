@@ -1,16 +1,20 @@
-import { Activity, Bot, Check, Clock, Settings, X } from 'lucide-react'
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Activity, Bot, Check, Clock, LoaderCircle, Settings, X } from 'lucide-react'
+import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
 import { api, type Activity as ActivityCounts, type ModelStatus, type Status } from '../api'
 import { usePoll } from '../hooks/usePoll'
+import { onWorkStarted } from '../hooks/workStarted'
 import { href, useRoute } from '../router'
 
 const BUSY_MS = 1500
 const IDLE_MS = 5000
 
+const isBusy = (counts: ActivityCounts) =>
+  Object.values(counts).some((queue) => queue.queued + queue.running > 0)
+
 // The design's statusbar hints list the running and queued work by name.
 // `/api/operations/activity` answers counts only, and the listing is a page away, so the hints
 // are dropped rather than faked.
-export function Statusbar({ status }: { status: Status }) {
+export function Statusbar({ status, refreshStatus }: { status: Status; refreshStatus?: () => void }) {
   const route = useRoute()
   const [sessions, setSessions] = useState<number | null>(null)
   const [counts, setCounts] = useState<ActivityCounts | null>(null)
@@ -24,19 +28,28 @@ export function Statusbar({ status }: { status: Status }) {
       .catch(() => undefined)
   }, [route.name])
 
-  const refresh = useCallback(() => {
-    api.activity().then(setCounts).catch(() => undefined)
-  }, [])
-  useEffect(refresh, [refresh])
-  const busy = counts !== null && Object.values(counts).some((queue) => queue.queued + queue.running > 0)
-  usePoll(true, refresh, busy ? BUSY_MS : IDLE_MS)
+  // search: the embedding model and a reranker when one is on, loaded for the life of the server;
+  // knowledge: the models indexing asks (the describer, the vocabulary's embedder), loaded on
+  // first use and freed once idle, and only there when the settings ask a language model
+  const search = status.models.filter((model) => model.group === 'search')
+  const knowledge = status.models.filter((model) => model.group === 'knowledge')
 
-  const embedding = status.models.filter((model) => model.kind === 'embedding')
-  // a reranker is in the list only when one is on, in the settings or a collection's overrides
-  const rerankers = status.models.filter((model) => model.kind === 'reranker')
-  // the describer only when the settings ask a language model for section descriptors, with the
-  // embedder of the collections' vocabularies, whose pairs the describer judges
-  const describers = status.models.filter((model) => model.kind === 'describer' || model.kind === 'vocabulary')
+  // A knowledge model changes state with the work that loads it, and is freed once idle: the
+  // models are read again with the queues while work runs, or while one is in memory or on its way.
+  const knowledgeMoving = knowledge.some((model) => model.state !== 'downloaded' && model.state !== 'error')
+  const watchKnowledge = knowledge.length > 0
+  const refresh = useCallback(() => {
+    api
+      .activity()
+      .then((fresh) => {
+        setCounts(fresh)
+        if (watchKnowledge && (knowledgeMoving || isBusy(fresh))) refreshStatus?.()
+      })
+      .catch(() => undefined)
+  }, [watchKnowledge, knowledgeMoving, refreshStatus])
+  useEffect(refresh, [refresh])
+  useEffect(() => onWorkStarted(refresh), [refresh])
+  usePoll(true, refresh, counts !== null && isBusy(counts) ? BUSY_MS : IDLE_MS)
 
   return (
     <div className="statusbar" role="status">
@@ -47,9 +60,8 @@ export function Statusbar({ status }: { status: Status }) {
           <b>{sessions ?? '—'}</b>
         </span>
       </span>
-      <Models label="Embedding" models={embedding} none="full-text only" />
-      {rerankers.length > 0 && <Models label="Reranker" models={rerankers} />}
-      {describers.length > 0 && <Models label="Describer" models={describers} />}
+      <Models label="Search" models={search} none="full-text only" />
+      {knowledge.length > 0 && <Models label="Knowledge" models={knowledge} />}
       <span className="spacer" />
       <a className="statusbar-item" href={href({ name: 'operations' })}>
         <Activity className="icon" />
@@ -61,19 +73,47 @@ export function Statusbar({ status }: { status: Status }) {
   )
 }
 
-// The worst state of a kind's models is the one its icon shows: one reranker still loading
-// means a search that asks for it waits.
-const WORST_FIRST: ModelStatus['state'][] = ['error', 'loading', 'pending', 'ready']
+// Each state a model can be in, least advanced first, the order a group lists them in: what the
+// hint says after the model's name, and its icon. In memory, a turning green gear; on disk and
+// loaded when used, a white check; on its way, a grey spinner; failed, a cross.
+const STATES: [ModelStatus['state'], { words: string; className?: string; icon: ReactNode }][] = [
+  ['error', { words: 'failed', icon: <X className="icon" /> }],
+  ['pending', { words: 'waiting', className: 'queued', icon: <LoaderCircle className="icon spin spin-fast" /> }],
+  [
+    'loading',
+    { words: 'downloading or loading', className: 'queued', icon: <LoaderCircle className="icon spin spin-fast" /> },
+  ],
+  ['downloaded', { words: 'downloaded, loaded when used', className: 'idle', icon: <Check className="icon" /> }],
+  ['ready', { words: 'loaded', className: 'running', icon: <Settings className="icon spin" /> }],
+]
+const WORDS = Object.fromEntries(STATES.map(([state, { words }]) => [state, words])) as Record<
+  ModelStatus['state'],
+  string
+>
 
-/** One kind of model as an icon: a check once ready, a spinner while it loads, a cross on an
- *  error. The names and each one's state are in the hint, which opens downwards. */
+/** One group of models: an icon per state its models are in, each with how many are in it, the
+ *  least advanced first (one loaded and one downloading reads "1 downloading / 1 loaded"). The
+ *  hint, which opens downwards, names each model with its own state, kind and error. */
 function Models({ label, models, none }: { label: string; models: ModelStatus[]; none?: string }) {
-  const state = WORST_FIRST.find((one) => models.some((model) => model.state === one))
+  const present = STATES.map(([state, look]) => ({
+    state,
+    look,
+    count: models.filter((model) => model.state === state).length,
+  })).filter(({ count }) => count > 0)
   return (
     <span className="statusbar-item" tabIndex={0}>
       <span className="muted">{label}</span>
       <span className="statusbar-counts">
-        {state === undefined ? <b>{none}</b> : <StateIcon state={state} />}
+        {present.length === 0 ? (
+          <b>{none}</b>
+        ) : (
+          present.map(({ state, look, count }) => (
+            <b key={state} className={look.className} aria-label={state === 'ready' ? 'loaded' : state}>
+              {look.icon}
+              {count}
+            </b>
+          ))
+        )}
       </span>
       {models.length > 0 && (
         <span className="hint" role="tooltip">
@@ -81,34 +121,14 @@ function Models({ label, models, none }: { label: string; models: ModelStatus[];
             {models.map((model) => (
               <Fragment key={model.name}>
                 <span>{model.name}</span>
-                <span className="muted">{model.error ?? ''}</span>
-                <span className="code">{model.state}</span>
+                <span className="muted">{model.error ?? model.kind}</span>
+                <span className="code">{WORDS[model.state]}</span>
               </Fragment>
             ))}
           </span>
         </span>
       )}
     </span>
-  )
-}
-
-function StateIcon({ state }: { state: ModelStatus['state'] }) {
-  if (state === 'ready')
-    return (
-      <b className="done" aria-label="ready">
-        <Check className="icon" />
-      </b>
-    )
-  if (state === 'error')
-    return (
-      <b aria-label="error">
-        <X className="icon" />
-      </b>
-    )
-  return (
-    <b className="running" aria-label={state}>
-      <Settings className="icon spin" />
-    </b>
   )
 }
 

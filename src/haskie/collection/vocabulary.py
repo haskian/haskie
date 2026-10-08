@@ -10,7 +10,8 @@ at a time. What a preferred term is, and how variants find theirs, is `sections.
   embeds only the variants a new member brought (`embed_missing`).
 - `verdicts`: each pair of neighbours the describer is asked about, and its answer, the mean
   P(yes) of both orders; null until asked. Kept across runs too: a run asks only the new pairs
-  (`plan`, `judge_missing`).
+  (`plan`, `judge_missing`). Each describer reads P(yes) on a scale of its own, so the table
+  names the one that judged it, and another describer starts it over.
 - `terms`: the preferred terms, each with its variants and its vector (`build`). What the
   collection's search reads (`preferred`).
 
@@ -42,7 +43,7 @@ DESCRIPTORS = "descriptors"
 VECTORS = "vectors"
 VERDICTS = "verdicts"
 TERMS = "terms"
-MODEL_KEY = b"haskie.model"  # the vectors table's metadata: which model made its vectors
+MODEL_KEY = b"haskie.model"  # a table's metadata: the model that made its vectors or verdicts
 BUILD_KEY = b"haskie.vocabulary-build"  # unique across collections, renames and rebuilds
 
 type Embed = Callable[[list[str]], list[list[float]]]  # one vector per text
@@ -125,15 +126,22 @@ async def _variants(conn: lancedb.AsyncConnection) -> tuple[list[str], list[int]
     return variants, uses, shown
 
 
+async def _made_by(
+    conn: lancedb.AsyncConnection, name: str, model: str
+) -> lancedb.AsyncTable | None:
+    """Table `name`, None and dropped when another model than `model` made its rows."""
+    table = await _table(conn, name)
+    if table is None or ((await table.schema()).metadata or {}).get(MODEL_KEY) == model.encode():
+        return table
+    await conn.drop_table(name)
+    return None
+
+
 async def _vectors(conn: lancedb.AsyncConnection, model: str) -> lancedb.AsyncTable | None:
     """The vectors table, dropped first when another model made its vectors."""
-    table = await _table(conn, VECTORS)
-    if table is not None and ((await table.schema()).metadata or {}).get(MODEL_KEY) != (
-        model.encode()
-    ):
-        await conn.drop_table(VECTORS)
+    table = await _made_by(conn, VECTORS, model)
+    if table is None:
         await conn.drop_table(VERDICTS, ignore_missing=True)  # judged pairs of other neighbours
-        table = None
     return table
 
 
@@ -183,14 +191,20 @@ async def _matrix(
     return variants, uses, shown, matrix
 
 
-async def plan(collection: str, model: str) -> int:
+async def _verdict_table(conn: lancedb.AsyncConnection, judge: str) -> lancedb.AsyncTable | None:
+    """The verdicts table, dropped first when another describer judged its pairs: each model's
+    P(yes) reads on a scale of its own (`gguf_models.Generator.same_concept`)."""
+    return await _made_by(conn, VERDICTS, judge)
+
+
+async def plan(collection: str, model: str, judge: str) -> int:
     """Add the pairs `sections.vocabulary.to_judge` finds, and the verdicts table lacks, as yet
-    unasked; returns how many it added."""
+    unasked by `judge`; returns how many it added."""
     conn = await _connect(collection, create=True)
     assert conn is not None
     variants, _, _, vectors = await _matrix(conn, model)
     pairs = await anyio.to_thread.run_sync(vocabulary.to_judge, variants, vectors)
-    table = await _table(conn, VERDICTS)
+    table = await _verdict_table(conn, judge)
     known = await _read(table, ["a", "b"])
     asked = (
         set()
@@ -207,18 +221,19 @@ async def plan(collection: str, model: str) -> int:
         schema=_VERDICTS,
     )
     if table is None:
-        await conn.create_table(VERDICTS, data=data, schema=_VERDICTS)
+        schema = _VERDICTS.with_metadata({MODEL_KEY: judge.encode()})
+        await conn.create_table(VERDICTS, data=data.cast(schema), schema=schema)
     elif new:
-        await table.add(data)
+        await table.add(data.cast(await table.schema()))
     return len(new)
 
 
-async def judge_missing(collection: str, judge: Judge, limit: int) -> int:
-    """Ask the describer about up to `limit` pairs not yet asked, both orders each; returns how
-    many, 0 once every pair has its verdict."""
+async def judge_missing(collection: str, judge: Judge, model: str, limit: int) -> int:
+    """Ask the describer `model` about up to `limit` pairs not yet asked, both orders each;
+    returns how many, 0 once every pair has its verdict."""
     conn = await _connect(collection, create=True)
     assert conn is not None
-    table = await _table(conn, VERDICTS)
+    table = await _verdict_table(conn, model)
     if table is None:
         return 0
     found = await table.query().where("same IS NULL").select(["a", "b"]).limit(limit).to_arrow()
@@ -233,13 +248,13 @@ async def judge_missing(collection: str, judge: Judge, limit: int) -> int:
     same = [await anyio.to_thread.run_sync(ask, a, b) for a, b in pairs]
     data = pa.table(
         {"a": [a for a, _ in pairs], "b": [b for _, b in pairs], "same": same}, schema=_VERDICTS
-    )
+    ).cast(await table.schema())
     await table.merge_insert(["a", "b"]).when_matched_update_all().execute(data)
     return len(pairs)
 
 
-async def _verdicts(conn: lancedb.AsyncConnection) -> dict[Pair, float]:
-    found = await _read(await _table(conn, VERDICTS), ["a", "b", "same"])
+async def _verdicts(conn: lancedb.AsyncConnection, judge: str) -> dict[Pair, float]:
+    found = await _read(await _verdict_table(conn, judge), ["a", "b", "same"])
     if found is None:
         return {}
     return {
@@ -251,15 +266,16 @@ async def _verdicts(conn: lancedb.AsyncConnection) -> dict[Pair, float]:
     }
 
 
-async def build(collection: str, model: str) -> int:
-    """Cluster the variants into preferred terms and rewrite the `terms` table, then compact the
-    tables the run appended to; returns how many terms."""
+async def build(collection: str, model: str, judge: str, same_concept: float) -> int:
+    """Cluster the variants into preferred terms by `judge`'s verdicts and its bar for one
+    concept, and rewrite the `terms` table, then compact the tables the run appended to; returns
+    how many terms."""
     conn = await _connect(collection, create=True)
     assert conn is not None
     variants, uses, shown, vectors = await _matrix(conn, model)
-    verdicts = await _verdicts(conn)
+    verdicts = await _verdicts(conn, judge)
     preferred = await anyio.to_thread.run_sync(
-        vocabulary.cluster, variants, uses, vectors, verdicts
+        vocabulary.cluster, variants, uses, vectors, verdicts, same_concept
     )
     found = vocabulary.terms(variants, uses, shown, preferred)
     at = {one: index for index, one in enumerate(variants)}

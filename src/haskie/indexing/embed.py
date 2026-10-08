@@ -24,11 +24,21 @@ first. The setting stays for the day CoreML handles dynamic sizes well.
 Building a session holds the GIL for its whole duration (measured: the loop that owns the request
 freezes for it), and CoreML adds a model compilation to that. CoreML keeps its compiled models in
 `home.MODEL_CACHE`, so only the first build of a model pays for it.
+
+Two lifetimes. A search model (the embedding profile's, a reranker) stays loaded for the life of
+the process: every search needs it at once. A knowledge model (`gguf_models.ON_DEMAND`: the
+describer, the vocabulary's embedder) is loaded when it is first asked, and freed once nobody has
+used it for a while (`free_idle`, which `models` calls): it serves indexing alone, and the
+describer holds 2.8 GB.
 """
 
 import ctypes
 import threading
-from functools import cache
+import time
+from collections import Counter
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from functools import cache, partial
 from pathlib import Path
 from typing import Any
 
@@ -166,13 +176,103 @@ def _check_runs(name: str, accelerator: Accelerator) -> None:
         raise RuntimeError(hardware.nowhere(name))
 
 
+type Key = tuple[str, Accelerator]
+
+
+class OnDemand:
+    """Knowledge models, loaded when first asked and freed once idle (see the module). A model in
+    use is never freed: `use` counts its users, so a describe batch keeps its describer for its
+    whole length, and each use pushes its idle time back."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._models: dict[Key, Any] = {}
+        self._users: Counter[Key] = Counter()
+        self._last: dict[Key, float] = {}
+        self._building: dict[Key, threading.Lock] = {}
+
+    def _take(self, key: Key, build: Callable[[], Any]) -> Any:
+        with self._lock:
+            building = self._building.setdefault(key, threading.Lock())
+        # One build of a model at a time, a waiter getting the one just built. Not under
+        # `_MODEL_LOCK`, which every search takes: a search never waits out a load of seconds.
+        with building:
+            with self._lock:
+                if key in self._models:
+                    self._users[key] += 1
+                    return self._models[key]
+            model = build()
+            with self._lock:
+                self._models[key] = model
+                self._users[key] += 1
+            return model
+
+    @contextmanager
+    def use(self, key: Key, build: Callable[[], Any]) -> Iterator[Any]:
+        model = self._take(key, build)
+        try:
+            yield model
+        finally:
+            with self._lock:
+                self._users[key] -= 1
+                self._last[key] = time.monotonic()
+
+    def loaded(self, name: str) -> bool:
+        with self._lock:
+            return any(key[0] == name for key in self._models)
+
+    def free_idle(self, idle_seconds: float) -> list[str]:
+        """Free every model nobody is using and nobody used for `idle_seconds`; their names. A
+        model is closed outside the lock: no caller can take it once it is out of the table."""
+        now = time.monotonic()
+        with self._lock:
+            idle = [
+                key
+                for key in self._models
+                if not self._users[key] and now - self._last[key] >= idle_seconds
+            ]
+            freed = [self._models.pop(key) for key in idle]
+            for key in idle:
+                self._last.pop(key, None)
+                self._users.pop(key, None)
+        for model in freed:
+            if (close := getattr(model, "close", None)) is not None:
+                close()
+        return [name for name, _ in idle]
+
+
+_on_demand = OnDemand()
+
+
+def loaded(name: str) -> bool:
+    """Whether knowledge model `name` is in memory now (`OnDemand`)."""
+    return _on_demand.loaded(name)
+
+
+def free_idle(idle_seconds: float) -> list[str]:
+    """Free the knowledge models idle for `idle_seconds`; their names (`OnDemand.free_idle`)."""
+    return _on_demand.free_idle(idle_seconds)
+
+
+@contextmanager
+def _embedder(name: str, accelerator: Accelerator) -> Iterator[Any]:
+    """The embedder `name` is, held for the length of the block: a knowledge model is loaded on
+    demand and counted as in use, a search model is the one loaded for the process."""
+    if name not in gguf_models.ON_DEMAND:
+        yield _model(name, accelerator)
+        return
+    _check_runs(name, accelerator)
+    with _on_demand.use((name, accelerator), partial(gguf_models.GgufEmbedder, name)) as model:
+        yield model
+
+
 def embed_texts(model: EmbeddingModel, texts: list[str]) -> list[list[float]]:
     """Document-side embeddings (one vector per text), each after the model's document prefix."""
     if not texts:
         return []
-    embedder = _model(model.name, model.accelerator)
     order = by_length(texts)
-    vectors = embedder.embed([model.document_prefix + texts[i] for i in order])
+    with _embedder(model.name, model.accelerator) as embedder:
+        vectors = list(embedder.embed([model.document_prefix + texts[i] for i in order]))
     return in_order(order, [_cut(model, v).tolist() for v in vectors])
 
 
@@ -194,8 +294,9 @@ def in_order[T](order: list[int], results: list[T]) -> list[T]:
 def embed_query(model: EmbeddingModel, text: str) -> list[float]:
     """Query-side embedding, after the model's query prefix. `query_embed` rather than `embed`:
     a multi-task model picks its query adapter there (`mlx_models.JinaV5Embedder`)."""
-    embedder = _model(model.name, model.accelerator)
-    return _cut(model, next(iter(embedder.query_embed(model.query_prefix + text)))).tolist()
+    with _embedder(model.name, model.accelerator) as embedder:
+        vector = next(iter(embedder.query_embed(model.query_prefix + text)))
+    return _cut(model, vector).tolist()
 
 
 def _cut(model: EmbeddingModel, vector: np.ndarray) -> np.ndarray:
@@ -209,7 +310,8 @@ def _cut(model: EmbeddingModel, vector: np.ndarray) -> np.ndarray:
 
 def warm(name: str, accelerator: Accelerator) -> None:
     """Load the model now, downloading it on a cold cache, so the first embed does not stall."""
-    _model(name, accelerator)
+    with _embedder(name, accelerator):
+        pass
 
 
 def warm_reranker(name: str, accelerator: Accelerator) -> None:
@@ -217,30 +319,29 @@ def warm_reranker(name: str, accelerator: Accelerator) -> None:
 
 
 def warm_generator(name: str, accelerator: Accelerator) -> None:
-    _generator(name, accelerator)
+    with _generator(name, accelerator):
+        pass
 
 
-def _generator(name: str, accelerator: Accelerator) -> gguf_models.GgufGenerator:
+@contextmanager
+def _generator(name: str, accelerator: Accelerator) -> Iterator[gguf_models.GgufGenerator]:
+    """The generator `name` is, a knowledge model: loaded on demand, held for the block."""
     _check_runs(name, accelerator)
-    with _MODEL_LOCK:
-        return _build_generator(name)
-
-
-@cache
-def _build_generator(name: str) -> gguf_models.GgufGenerator:
-    """One per process: loading it is the warm-up (`models`)."""
-    return gguf_models.GgufGenerator(name)
+    with _on_demand.use((name, accelerator), partial(gguf_models.GgufGenerator, name)) as model:
+        yield model
 
 
 def reply(name: str, accelerator: Accelerator, prompt: str, max_tokens: int) -> str:
     """The generator's greedy reply to one prompt (`gguf_models.GgufGenerator`)."""
-    return _generator(name, accelerator).reply(prompt, max_tokens)
+    with _generator(name, accelerator) as model:
+        return model.reply(prompt, max_tokens)
 
 
 def yes(name: str, accelerator: Accelerator, prompt: str) -> float:
     """How likely the generator's answer to a yes-or-no question is yes
     (`gguf_models.GgufGenerator.yes`)."""
-    return _generator(name, accelerator).yes(prompt)
+    with _generator(name, accelerator) as model:
+        return model.yes(prompt)
 
 
 def rerank_scores(

@@ -44,6 +44,7 @@ IO or the LanceDB commit around it.
 """
 
 import bisect
+from collections.abc import Sequence
 from functools import partial
 
 import anyio
@@ -71,8 +72,8 @@ from haskie.indexing import (
 )
 from haskie.indexing.segment import CutReason, SpanKind
 from haskie.sections import build, generated, vocabulary
-from haskie.sections.descriptors import Description, Run
-from haskie.settings import Accelerator, ChunkSettings, Descriptors
+from haskie.sections.descriptors import Description
+from haskie.settings import Accelerator, ChunkSettings, Descriptors, PipelineSettings
 
 JOINER = "\n\n"  # between convert parts in the assembled markdown
 # About one printed page of markdown: what a page is where the text has no page markers to count
@@ -315,39 +316,82 @@ async def plan_describe(doc: Document, cache_id: str, by: Descriptors) -> list[B
 
 
 async def describe_ready(
-    embedding: EmbeddingModel | None, by: Descriptors, accelerator: Accelerator
+    embedding: EmbeddingModel | None, by: Descriptors, settings: PipelineSettings
 ) -> None:
     """Fail fast when the model strategy `by` describes with is not loaded, as `embed_batch`
     does: the describer for llm, the embedding model c-TF-IDF reranks its candidates with. A
     describer the hardware setting leaves nowhere to run is permanent: it would never load."""
     if by == Descriptors.LLM:
-        if hardware.device(gguf_models.DESCRIBER, accelerator) is None:
+        describer = gguf_models.generator(settings).name
+        if hardware.device(describer, settings.accelerator) is None:
             # the settings changed under a run asked for llm: its model never warms here
-            raise PermanentError(hardware.nowhere(gguf_models.DESCRIBER))
-        await models.require_ready(models.ModelKind.DESCRIBER, gguf_models.DESCRIBER)
+            raise PermanentError(hardware.nowhere(describer))
+        await models.require_ready(models.ModelKind.DESCRIBER, describer)
     elif embedding is not None:
         await models.require_ready(models.ModelKind.EMBEDDING, embedding.name)
+
+
+def describe_order(sections: Sequence[build.Section]) -> list[int]:
+    """The positions of `sections` in the order the llm strategy describes them: deepest first,
+    in document order within a depth, so a section's subsections are described before it reads
+    their outline (`generated.Generated`). A describe batch is a run of this order."""
+    return sorted(range(len(sections)), key=lambda at: (-sections[at].depth, at))
+
+
+# A describe batch's scratch file: each section it described, by id. A batch an older build wrote
+# is a list in document order instead, of descriptors alone before section descriptions.
+type DescribedBatch = dict[str, Description] | list[Description | list[str]]
+
+
+async def _batches(doc: Document, cache_id: str, count: int) -> list[DescribedBatch]:
+    """The scratch files of the first `count` describe batches, in order."""
+    return [
+        msgspec.json.decode(
+            await anyio.Path(embed_cache.descriptors_path(doc.id, cache_id, seq)).read_bytes(),
+            type=DescribedBatch,
+        )
+        for seq in range(count)
+    ]
+
+
+async def _described(doc: Document, cache_id: str, batches: int) -> dict[str, Description]:
+    """What the first `batches` describe batches wrote, by section id; an older build's batch
+    names no ids, so it counts for nothing here."""
+    found: dict[str, Description] = {}
+    for batch in await _batches(doc, cache_id, batches):
+        if isinstance(batch, dict):
+            found.update(batch)
+    return found
 
 
 async def describe_batch(
     doc: Document,
     cache_id: str,
     embedding: EmbeddingModel | None,
-    by: Descriptors,
-    accelerator: Accelerator,
+    settings: PipelineSettings,
     batch: Batch,
 ) -> int:
-    """Write descriptors for sections [start, end) by strategy `by`
-    into a scratch file of the batch; returns how many sections it described."""
-    await describe_ready(embedding, by, accelerator)
+    """Write descriptors for sections [start, end) by the settings' strategy into a scratch file
+    of the batch; returns how many sections it described. The llm strategy counts them in
+    `describe_order` and reads what the batches before wrote, for the outline of a section above
+    them; c-TF-IDF in document order."""
+    by = settings.descriptors
+    await describe_ready(embedding, by, settings)
     span = slice(batch.start, batch.end)
     if by == Descriptors.LLM:
         found = await embed_cache.inputs(doc.id, cache_id, vectors=False)
-        strategy = generated.Generated(_describer_reply(accelerator))
+        picked = [found.sections[at] for at in describe_order(found.sections)[span]]
+        earlier = await _described(doc, cache_id, batch.seq)
+        known = [
+            (build.run(one), earlier[one.id].descriptors)
+            for one in found.sections
+            if one.id in earlier
+        ]
+        strategy = generated.Generated(_describer_reply(settings), known)
         # a worker thread without a CPU slot: the describer runs on the GPU, one prompt at a time,
         # and documents waiting their turn there must not hold the slots searches need
         described = await anyio.to_thread.run_sync(
-            build.describe, found.sections[span], found.prose, None, None, strategy
+            build.describe, picked, found.prose, None, None, strategy
         )
     else:
         embedder = None if embedding is None else partial(embed.embed_texts, embedding)
@@ -358,24 +402,22 @@ async def describe_batch(
         )
     path = embed_cache.descriptors_path(doc.id, cache_id, batch.seq)
     await anyio.Path(path.parent).mkdir(parents=True, exist_ok=True)
-    about = [Description(one.descriptors, one.description) for one in described]
+    about = {one.id: Description(one.descriptors, one.description) for one in described}
     await home.atomic_write(path, msgspec.json.encode(about))
     return len(described)
 
 
 async def describe_sections_batch(
-    doc: Document, cache_id: str, accelerator: Accelerator, batch: Batch
+    doc: Document, cache_id: str, settings: PipelineSettings, batch: Batch
 ) -> int:
     """Write prose descriptions independently of section descriptors."""
-    await describe_ready(None, Descriptors.LLM, accelerator)
+    await describe_ready(None, Descriptors.LLM, settings)
     found = await embed_cache.inputs(doc.id, cache_id, vectors=False)
-    reply = _describer_reply(accelerator)
+    reply = _describer_reply(settings)
 
     def describe() -> list[str]:
         return [
-            generated.describe_section(
-                Run(tuple(one.headings), one.seq_start - 1, one.seq_end - 1), found.prose, reply
-            )
+            generated.describe_section(build.run(one), found.prose, reply)
             for one in found.sections[batch.start : batch.end]
         ]
 
@@ -401,19 +443,30 @@ async def finalize_section_descriptions(doc: Document, cache_id: str, count: int
     return len(described)
 
 
-async def finalize_describe(doc: Document, cache_id: str, by: Descriptors, count: int) -> int:
+async def finalize_describe(
+    doc: Document, cache_id: str, by: Descriptors, count: int, describer: str | None = None
+) -> int:
     """Put the descriptions and descriptors from `count` batches on the sections of one cached
-    embedding, written by `by`, then drop the scratch files; returns how many sections it
-    described. The drop comes last, so a retry still finds its input."""
+    embedding, written by `by` (and for llm by the model `describer`), then drop the scratch
+    files; returns how many sections it described. The drop comes last, so a retry still finds
+    its input."""
     found = await embed_cache.read_sections(doc.id, cache_id)
-    descriptions: list[Description] = []
+    by_id: dict[str, Description] = {}
+    # a workflow resumed after an upgrade may hold batches an older build wrote, in document
+    # order: they came before the ones this build wrote, so they are the first sections
+    in_order: list[Description] = []
     legacy = False
-    for seq in range(count):
-        path = anyio.Path(embed_cache.descriptors_path(doc.id, cache_id, seq))
-        # A workflow resumed after an upgrade may still have descriptors-only batches.
-        batch = msgspec.json.decode(await path.read_bytes(), type=list[Description | list[str]])
+    for batch in await _batches(doc, cache_id, count):
+        if isinstance(batch, dict):
+            by_id.update(batch)
+            continue
         legacy |= any(isinstance(one, list) for one in batch)
-        descriptions.extend(Description(one) if isinstance(one, list) else one for one in batch)
+        in_order.extend(Description(one) if isinstance(one, list) else one for one in batch)
+    if len(by_id) + len(in_order) != len(found):
+        raise ValueError(f"{len(by_id) + len(in_order)} sections described of {len(found)}")
+    descriptions = [
+        by_id[one.id] if one.id in by_id else in_order[at] for at, one in enumerate(found)
+    ]
     described = [
         msgspec.structs.replace(
             one, descriptors=each.descriptors, description=each.description or one.description
@@ -422,40 +475,38 @@ async def finalize_describe(doc: Document, cache_id: str, by: Descriptors, count
     ]
     # Old llm batches have no descriptions: publish them, but let the next index fill them.
     completed_by = None if legacy and by == Descriptors.LLM else by
-    await embed_cache.write_descriptors(doc.id, cache_id, described, completed_by)
+    await embed_cache.write_descriptors(doc.id, cache_id, described, completed_by, describer)
     await home.remove_tree(embed_cache.scratch_dir(doc.id, cache_id))
     return len(described)
 
 
-async def summarize(doc: Document, cache_id: str, accelerator: Accelerator) -> str:
+async def summarize(doc: Document, cache_id: str, settings: PipelineSettings) -> str:
     """What the document is about, in a few sentences the describer writes from the sections of
     one cached embedding, once the llm strategy described them (`generated.summarize`)."""
-    await describe_ready(None, Descriptors.LLM, accelerator)
+    await describe_ready(None, Descriptors.LLM, settings)
     sections = await embed_cache.read_sections(doc.id, cache_id)
     # off the CPU budget, as `describe_batch` asks the describer
-    return await anyio.to_thread.run_sync(
-        generated.summarize, sections, _describer_reply(accelerator)
-    )
+    return await anyio.to_thread.run_sync(generated.summarize, sections, _describer_reply(settings))
 
 
-async def summarize_collection(descriptions: list[str], accelerator: Accelerator) -> str:
+async def summarize_collection(descriptions: list[str], settings: PipelineSettings) -> str:
     """What a collection is about, in a few sentences the describer writes from its documents'
     descriptions (`generated.summarize_collection`)."""
-    await describe_ready(None, Descriptors.LLM, accelerator)
+    await describe_ready(None, Descriptors.LLM, settings)
     return await anyio.to_thread.run_sync(
-        generated.summarize_collection, descriptions, _describer_reply(accelerator)
+        generated.summarize_collection, descriptions, _describer_reply(settings)
     )
 
 
-def _describer_reply(accelerator: Accelerator) -> generated.Reply:
-    """The llm strategy's model, asked one prompt at a time."""
-    return partial(embed.reply, gguf_models.DESCRIBER, accelerator)
+def _describer_reply(settings: PipelineSettings) -> generated.Reply:
+    """The llm strategy's model, the one the settings pick, asked one prompt at a time."""
+    return partial(embed.reply, gguf_models.generator(settings).name, settings.accelerator)
 
 
 # --- vocabulary -----------------------------------------------------------------
 
 VOCABULARY_EMBED = 1024  # variants one step embeds: about 5 s at 5 ms a variant (M4 Pro)
-VOCABULARY_JUDGE = 32  # pairs one step asks about: about 6 s at two 93 ms prompts a pair
+VOCABULARY_JUDGE = 32  # pairs one step asks about: 6 to 14 s at two 100 to 215 ms prompts a pair
 
 
 def vocabulary_embedder(accelerator: Accelerator) -> EmbeddingModel:
@@ -469,46 +520,52 @@ def vocabulary_embedder(accelerator: Accelerator) -> EmbeddingModel:
     )
 
 
-async def vocabulary_ready(accelerator: Accelerator) -> None:
+async def vocabulary_ready(settings: PipelineSettings) -> None:
     """Fail fast when a model the vocabulary needs is not loaded, as `describe_ready` does: the
     embedder and the describer, which judges. One the hardware setting leaves nowhere to run is
     permanent."""
     for kind, name in (
         (models.ModelKind.VOCABULARY, gguf_models.VOCABULARY_EMBEDDER),
-        (models.ModelKind.DESCRIBER, gguf_models.DESCRIBER),
+        (models.ModelKind.DESCRIBER, gguf_models.generator(settings).name),
     ):
-        if hardware.device(name, accelerator) is None:
+        if hardware.device(name, settings.accelerator) is None:
             raise PermanentError(hardware.nowhere(name))
         await models.require_ready(kind, name)
 
 
-async def embed_vocabulary(collection: str, accelerator: Accelerator) -> int:
+async def embed_vocabulary(collection: str, settings: PipelineSettings) -> int:
     """Embed the next `VOCABULARY_EMBED` variants the collection's vocabulary lacks; how many."""
-    await vocabulary_ready(accelerator)
-    model = vocabulary_embedder(accelerator)
+    await vocabulary_ready(settings)
+    model = vocabulary_embedder(settings.accelerator)
     embedder = partial(embed.embed_texts, model)
     return await collection_vocabulary.embed_missing(
         collection, model.cache_name, embedder, VOCABULARY_EMBED
     )
 
 
-async def plan_vocabulary(collection: str, accelerator: Accelerator) -> int:
+async def plan_vocabulary(collection: str, settings: PipelineSettings) -> int:
     """Queue the pairs of the collection's vocabulary the describer has not judged; how many."""
-    model = vocabulary_embedder(accelerator)
-    return await collection_vocabulary.plan(collection, model.cache_name)
+    model = vocabulary_embedder(settings.accelerator)
+    judge = gguf_models.generator(settings).name
+    return await collection_vocabulary.plan(collection, model.cache_name, judge)
 
 
-async def judge_vocabulary(collection: str, accelerator: Accelerator) -> int:
+async def judge_vocabulary(collection: str, settings: PipelineSettings) -> int:
     """Ask the describer about the next `VOCABULARY_JUDGE` pairs; how many."""
-    await vocabulary_ready(accelerator)
-    judge = partial(embed.yes, gguf_models.DESCRIBER, accelerator)
-    return await collection_vocabulary.judge_missing(collection, judge, VOCABULARY_JUDGE)
+    await vocabulary_ready(settings)
+    describer = gguf_models.generator(settings).name
+    judge = partial(embed.yes, describer, settings.accelerator)
+    return await collection_vocabulary.judge_missing(collection, judge, describer, VOCABULARY_JUDGE)
 
 
-async def build_vocabulary(collection: str, accelerator: Accelerator) -> int:
-    """Cluster the collection's variants into preferred terms; how many terms."""
-    model = vocabulary_embedder(accelerator)
-    return await collection_vocabulary.build(collection, model.cache_name)
+async def build_vocabulary(collection: str, settings: PipelineSettings) -> int:
+    """Cluster the collection's variants into preferred terms, by the describer's bar for one
+    concept (`gguf_models.Generator.same_concept`); how many terms."""
+    model = vocabulary_embedder(settings.accelerator)
+    judge = gguf_models.generator(settings)
+    return await collection_vocabulary.build(
+        collection, model.cache_name, judge.name, judge.same_concept
+    )
 
 
 # --- index ----------------------------------------------------------------------

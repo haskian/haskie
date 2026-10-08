@@ -151,8 +151,8 @@ from haskie.indexing.dbos_names import (
 from haskie.indexing.pipeline import Batch
 from haskie.search import log
 from haskie.settings import (
-    Accelerator,
     ChunkSettings,
+    Describer,
     Descriptors,
     PipelineSettings,
     UserSettings,
@@ -393,6 +393,8 @@ def stage_caps(indexing: PipelineSettings) -> dict[Stage, int]:
 # The boot's background chores in flight, if any (`_start_background`). An event loop keeps only a
 # weak reference to a task, so the module holds the strong one and `stop` cancels it.
 _background: asyncio.Task[None] | None = None
+# frees the knowledge models once idle (`models.free_idle_forever`), from `start` to `stop`
+_sweeper: asyncio.Task[None] | None = None
 # The loop `start` ran on: Litestar's, or a test's. `apply_settings` belongs on it (see
 # `apply_settings_from_workflow`).
 _app_loop: asyncio.AbstractEventLoop | None = None
@@ -428,6 +430,8 @@ async def start() -> None:
     # so they run on DBOS's own background loop and never share Litestar's.
     await anyio.to_thread.run_sync(DBOS.launch)
     _start_background()
+    global _sweeper
+    _sweeper = _app_loop.create_task(models.free_idle_forever(), name="haskie-free-idle-models")
     try:
         await apply_settings(await load_user_settings())
     except InvalidInput as exc:
@@ -452,12 +456,13 @@ async def stop() -> bool:
     True when DBOS stopped. False when a signal hurried the shutdown past it: DBOS is then still
     running workflows on its own threads until the process exits.
     """
-    global _background
-    if _background is not None:
-        adopting, _background = _background, None
-        adopting.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await adopting
+    global _background, _sweeper
+    for task in (_background, _sweeper):
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+    _background = _sweeper = None
     stopped = await _destroy_dbos()
     # After DBOS, so nothing is still submitting extraction work, unless the shutdown was
     # hurried; then a step still asking for the pool finds it closed.
@@ -806,23 +811,14 @@ async def try_batch(stage: Stage, batch: Batch, ctx: Context) -> BatchResult:
         )
     if stage == Stage.DESCRIBE_SECTIONS:
         return await _guarded(
-            pipeline.describe_sections_batch(
-                ctx.document, ctx.cache_id, ctx.pipeline.accelerator, batch
-            )
+            pipeline.describe_sections_batch(ctx.document, ctx.cache_id, ctx.pipeline, batch)
         )
     if stage == Stage.DESCRIBE_DOCUMENT:
         return await _guarded(_summarize(ctx, False))
     if stage == Stage.DESCRIBE:
         # its model, the embedding model or the describer, can still be on its way (`run_batch`)
         return await _guarded(
-            pipeline.describe_batch(
-                ctx.document,
-                ctx.cache_id,
-                ctx.embedding,
-                ctx.pipeline.descriptors,
-                ctx.pipeline.accelerator,
-                batch,
-            )
+            pipeline.describe_batch(ctx.document, ctx.cache_id, ctx.embedding, ctx.pipeline, batch)
         )
     return await _guarded(_index_batch(batch, ctx))
 
@@ -861,15 +857,20 @@ async def try_finalize_embed(params: embed_cache.Params, ctx: Context, count: in
 
 
 @retried_step
-async def described_by(doc: str, cache_id: str) -> Descriptors | None:
-    return await embed_cache.described_by(doc, cache_id)
+async def described_by(
+    doc: str, cache_id: str, describer: Describer | None = None
+) -> Descriptors | None:
+    """The strategy the cached entry is described by; None for llm files another describer
+    wrote than `describer`, the one the run is asked to write with (`embed_cache.described_by`)."""
+    name = None if describer is None else gguf_models.DESCRIBERS[describer].name
+    return await embed_cache.described_by(doc, cache_id, name)
 
 
 @retried_step
 async def describer_ready(ctx: Context) -> BatchResult:
     """Whether this process can describe by the run's strategy yet (see `_awaiting_model`)."""
     by = ctx.pipeline.descriptors
-    return await _guarded(pipeline.describe_ready(ctx.embedding, by, ctx.pipeline.accelerator))
+    return await _guarded(pipeline.describe_ready(ctx.embedding, by, ctx.pipeline))
 
 
 @retried_step
@@ -881,12 +882,15 @@ async def try_finalize_section_descriptions(ctx: Context, count: int) -> BatchRe
 async def try_finalize_describe(ctx: Context, count: int) -> BatchResult:
     """Put the descriptors every describe batch wrote on the sections (see `pipeline`)."""
     by = ctx.pipeline.descriptors
-    return await _guarded(pipeline.finalize_describe(ctx.document, ctx.cache_id, by, count))
+    describer = gguf_models.describer(ctx.pipeline)
+    return await _guarded(
+        pipeline.finalize_describe(ctx.document, ctx.cache_id, by, count, describer)
+    )
 
 
 async def _summarize(ctx: Context, replace: bool) -> int:
     doc = ctx.document.id
-    summarize = partial(pipeline.summarize, ctx.document, ctx.cache_id, ctx.pipeline.accelerator)
+    summarize = partial(pipeline.summarize, ctx.document, ctx.cache_id, ctx.pipeline)
     if replace:
         text = await summarize()
         if not text:
@@ -1122,6 +1126,7 @@ async def _ensure_embedding(ctx: Context) -> str:
     workflow. A cancel of its own run is final."""
     params = embed_cache.params(ctx.document, ctx.chunking, ctx.embedding)
     by = ctx.pipeline.descriptors
+    describer = ctx.pipeline.describer if by == Descriptors.LLM else None
     own = embed_id(DBOS.workflow_id or "", ctx.document.id)
     while True:
         with (
@@ -1131,7 +1136,7 @@ async def _ensure_embedding(ctx: Context) -> str:
             ),
         ):
             handle = await DBOS.enqueue_workflow_async(
-                EMBEDDING_QUEUE, ensure_embedding, ctx.document.id, params, by
+                EMBEDDING_QUEUE, ensure_embedding, ctx.document.id, params, by, describer
             )
         try:
             return await handle.get_result(polling_interval_sec=TASK_POLL)
@@ -1194,13 +1199,18 @@ async def import_document(doc: str) -> DocumentStatus:
 
 @DBOS.workflow(name=EMBED_WORKFLOW)
 async def ensure_embedding(
-    doc: str, params: embed_cache.Params, by: Descriptors | None = None
+    doc: str,
+    params: embed_cache.Params,
+    by: Descriptors | None = None,
+    describer: Describer | None = None,
 ) -> str:
     """One cached embedding of one document, with its sections, computed when missing, and their
-    descriptors by strategy `by`, written by a describe stage of their own when missing or written
-    by another strategy; returns its cache id. `by` is None in a run recorded before it was an
-    argument, which describes by the settings. Described by llm, a document without a description
-    gets one in the same operation, after the section descriptions and descriptors are saved.
+    descriptors by strategy `by` and, for llm, model `describer`, written by a describe stage of
+    their own when missing or written by another strategy or model; returns its cache id. `by` is
+    None in a run recorded before it was an argument, which describes by the settings, and so is
+    `describer`, which takes whatever model the settings name and redescribes no other one's.
+    Described by llm, a document without a description gets one in the same operation, after the
+    section descriptions and descriptors are saved.
 
     The chunk settings come from `params`, not from any collection: the collection's settings may
     change between the enqueue and the run, and what was asked for is what the id names. The
@@ -1211,7 +1221,7 @@ async def ensure_embedding(
         cache_id = embed_cache.key(params)
         ctx: Context | None = None
         if await cache_lookup(params) is None:
-            ctx = await _embedding_context(doc, params, by)
+            ctx = await _embedding_context(doc, params, by, describer)
             if ctx.embedding is not None:
                 # here rather than in the slices: a download takes minutes, and a slice waiting
                 # it out would hold a slot of `task.embedding` and run into its own timeout
@@ -1223,9 +1233,9 @@ async def ensure_embedding(
         if by is None:
             ctx = ctx or await _embedding_context(doc, params)
             by = ctx.pipeline.descriptors
-        if await described_by(doc, cache_id) != by:
+        if await described_by(doc, cache_id, describer) != by:
             # a hit too checks the model: c-TF-IDF would rerank its vectors by another model's
-            ctx = ctx or await _embedding_context(doc, params, by)
+            ctx = ctx or await _embedding_context(doc, params, by, describer)
             # not a step: a run recorded before this line resumes on the step log it has, and
             # the guarded write is a no-op once the import has moved on
             await document.mark_describing(doc)
@@ -1299,10 +1309,10 @@ async def _summarize_collection(collection: str) -> int:
     descriptions = await document.descriptions_of(set(await found.member_ids()))
     if not descriptions:
         raise PermanentError("no document of the collection has a description to read")
-    accelerator = (await load_user_settings()).pipeline.accelerator
+    settings = (await load_user_settings()).pipeline
     # by document id: the order the model reads them in is the same on every run
     text = await pipeline.summarize_collection(
-        [descriptions[doc] for doc in sorted(descriptions)], accelerator
+        [descriptions[doc] for doc in sorted(descriptions)], settings
     )
     if not text:
         raise PermanentError("the describer wrote no description of this collection")
@@ -1319,12 +1329,15 @@ async def try_summarize_collection(collection: str) -> BatchResult:
 
 
 async def _embedding_context(
-    doc: str, params: embed_cache.Params, by: Descriptors | None = None
+    doc: str,
+    params: embed_cache.Params,
+    by: Descriptors | None = None,
+    describer: Describer | None = None,
 ) -> Context:
     """The context an embedding run computes or describes under: the settings now, with the chunk
-    settings and the cache id `params` name, and the descriptor strategy `by` when the run was
-    asked for one. A model changed since `params` were asked for fails the run, and its parent
-    with it."""
+    settings and the cache id `params` name, and the descriptor strategy `by` and model
+    `describer` when the run was asked for them. A model changed since `params` were asked for
+    fails the run, and its parent with it."""
     ctx = await load_context(doc, None)
     current = embed_cache.model_of(ctx.embedding)
     if current != params.model:
@@ -1332,6 +1345,8 @@ async def _embedding_context(
     pipeline_by = (
         ctx.pipeline if by is None else msgspec.structs.replace(ctx.pipeline, descriptors=by)
     )
+    if describer is not None:
+        pipeline_by = msgspec.structs.replace(pipeline_by, describer=describer)
     return msgspec.structs.replace(
         ctx,
         chunking=ChunkSettings.of(params),
@@ -1471,26 +1486,26 @@ async def _vocabulary_step(collection: str, call: Callable[[], Awaitable[int]]) 
 
 
 @retried_step
-async def try_embed_vocabulary(collection: str, accelerator: Accelerator) -> BatchResult:
-    embed = partial(pipeline.embed_vocabulary, collection, accelerator)
+async def try_embed_vocabulary(collection: str, settings: PipelineSettings) -> BatchResult:
+    embed = partial(pipeline.embed_vocabulary, collection, settings)
     return await _guarded(_vocabulary_step(collection, embed))
 
 
 @retried_step
-async def plan_vocabulary(collection: str, accelerator: Accelerator) -> int:
-    plan = partial(pipeline.plan_vocabulary, collection, accelerator)
+async def plan_vocabulary(collection: str, settings: PipelineSettings) -> int:
+    plan = partial(pipeline.plan_vocabulary, collection, settings)
     return await _vocabulary_step(collection, plan)
 
 
 @retried_step
-async def try_judge_vocabulary(collection: str, accelerator: Accelerator) -> BatchResult:
-    judge = partial(pipeline.judge_vocabulary, collection, accelerator)
+async def try_judge_vocabulary(collection: str, settings: PipelineSettings) -> BatchResult:
+    judge = partial(pipeline.judge_vocabulary, collection, settings)
     return await _guarded(_vocabulary_step(collection, judge))
 
 
 @retried_step
-async def finish_vocabulary(collection: str, accelerator: Accelerator) -> int:
-    build = partial(pipeline.build_vocabulary, collection, accelerator)
+async def finish_vocabulary(collection: str, settings: PipelineSettings) -> int:
+    build = partial(pipeline.build_vocabulary, collection, settings)
     return await _vocabulary_step(collection, build)
 
 
@@ -1502,17 +1517,17 @@ async def build_vocabulary(collection: str) -> int:
     so a crash or a restart repeats one batch, and a run after one more document pays for what it
     brought. 0 for a collection deleted while the run waited."""
     with logs.bound(workflow_id=DBOS.workflow_id, collection=collection):
-        accelerator = (await pipeline_settings()).accelerator
+        settings = await pipeline_settings()
         if await collect_vocabulary(collection) is None:
             return 0
-        embed = partial(try_embed_vocabulary, collection, accelerator)
+        embed = partial(try_embed_vocabulary, collection, settings)
         while _value(await _awaiting_model(embed)):
             pass
-        await plan_vocabulary(collection, accelerator)
-        judge = partial(try_judge_vocabulary, collection, accelerator)
+        await plan_vocabulary(collection, settings)
+        judge = partial(try_judge_vocabulary, collection, settings)
         while _value(await _awaiting_model(judge)):
             pass
-        return await finish_vocabulary(collection, accelerator)
+        return await finish_vocabulary(collection, settings)
 
 
 # The debounce key is the collection name, so a burst of documents coalesces into one run, as
@@ -2034,7 +2049,7 @@ async def _describer_runs() -> None:
     """Refuse a description no run could write: another descriptor strategy than llm never
     downloads the describer, and the hardware setting may leave it nowhere to run."""
     user = await load_user_settings()
-    describer = gguf_models.describer(user.pipeline.descriptors)
+    describer = gguf_models.describer(user.pipeline)
     if describer is None:
         raise Conflict("describing with AI needs the llm section descriptors, set in Settings")
     if hardware.device(describer, user.pipeline.accelerator) is None:

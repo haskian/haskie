@@ -619,6 +619,41 @@ async def test_written_descriptors_round_trip_with_their_strategy(tmp_path: Path
     assert [one.id for one in read] == [one.id for one in found], "the sections stay"
 
 
+QWEN, GEMMA = "unsloth/Qwen3.5-4B-GGUF", "ggml-org/gemma-4-E2B-it-GGUF"
+
+
+@pytest.mark.parametrize(
+    ("name", "by", "written_with", "asked_for", "expected"),
+    [
+        ("llm by the model asked for", Descriptors.LLM, QWEN, QWEN, Descriptors.LLM),
+        ("llm by another model: described again", Descriptors.LLM, GEMMA, QWEN, None),
+        ("llm, no model asked for: any counts", Descriptors.LLM, GEMMA, None, Descriptors.LLM),
+        # a file written before the model was named: Gemma-4-E2B, the one describer then
+        ("llm by an unnamed model, asked for Gemma", Descriptors.LLM, None, GEMMA, Descriptors.LLM),
+        ("llm by an unnamed model, asked for Qwen", Descriptors.LLM, None, QWEN, None),
+        ("c-TF-IDF names no model", Descriptors.C_TF_IDF, None, QWEN, Descriptors.C_TF_IDF),
+    ],
+)
+async def test_the_model_llm_descriptors_were_written_with_is_kept(
+    tmp_path: Path,
+    name: str,
+    by: Descriptors,
+    written_with: str | None,
+    asked_for: str | None,
+    expected: Descriptors | None,
+) -> None:
+    """Switching the describer re-describes a document on its next index: llm descriptors another
+    model wrote count as not described for the model asked for."""
+    doc = await import_row(DOC, BODY)
+    params = msgspec.structs.replace(BASE, document_id=doc.id)
+    cache_id = await embed_cache.write(params, _parts(tmp_path / "scratch", [_book()]), 4)
+    found = await embed_cache.read_sections(doc.id, cache_id)
+    await embed_cache.write_descriptors(doc.id, cache_id, found, by, written_with)
+
+    assert await embed_cache.described_by(doc.id, cache_id, asked_for) == expected, name
+    assert await embed_cache.described_by(doc.id, cache_id) == by, f"{name}: any model"
+
+
 @pytest.mark.parametrize("by", [Descriptors.C_TF_IDF, Descriptors.LLM])
 async def test_old_sections_read_without_descriptions_and_llm_needs_refresh(
     tmp_path: Path, by: Descriptors

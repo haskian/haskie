@@ -30,11 +30,11 @@ which embeds the descriptors of a collection's vocabulary (`sections.vocabulary`
 file, on 184 descriptor pairs labelled by hand, told synonyms from other concepts at AUC 0.87 and
 from antonyms at 0.96, against 0.85 and 0.43 for granite-97m.
 
-One GGUF file is a generator, not an embedder: Gemma-4-E2B-it (`DESCRIBER`), which writes a
-section's descriptors when the settings ask for them (`sections.generated`). Its ggml-org Q4_0 file
-was judged blind on 200 book sections against the Q8_0 file and the mlx-community 4-bit build:
-4.04, 4.01 and 3.86 of 5, against 2.13 for c-TF-IDF, at 0.51 s a section on an M4 Pro (0.57 s
-for Q8_0). It is 2.8 GB.
+Two GGUF files are generators, not embedders: Qwen3.5-4B and Gemma-4-E2B-it (`DESCRIBERS`), one
+of which the settings pick to write sections' descriptors (`sections.generated`). Gemma's ggml-org
+Q4_0 file was judged blind on 200 book sections against its Q8_0 file and the mlx-community 4-bit
+build: 4.04, 4.01 and 3.86 of 5, against 2.13 for c-TF-IDF. Each answers a yes-or-no question by
+the logits of its first answer token, its thinking off (`GgufGenerator.yes`).
 
 The `gguf` extra installs llama-cpp-python on Apple Silicon only. PyPI ships it as source, so the
 install compiles llama.cpp with Metal: about 30 s, with the Xcode command-line tools and cmake.
@@ -42,6 +42,7 @@ install compiles llama.cpp with Metal: about 30 s, with the Xcode command-line t
 
 import functools
 import importlib.util
+import re
 import threading
 from collections.abc import Iterator, Sequence
 from itertools import batched
@@ -50,7 +51,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from haskie.settings import Descriptors
+from haskie.settings import Describer, Descriptors, PipelineSettings
 
 MAX_TOKENS = 1024  # the longest text read, in tokens: see the module docstring
 SEQUENCES = 64  # texts one micro-batch holds, as many as fit its tokens
@@ -82,21 +83,58 @@ HELPERS: dict[str, Pin] = {
         "370f27d7550e0def9b39c1f16d3fbaa13aa67728", "Qwen3-Embedding-0.6B-Q8_0.gguf", 32768
     ),
 }
-DESCRIBER = "ggml-org/gemma-4-E2B-it-GGUF"  # the generator that writes descriptors (see above)
-GENERATORS: dict[str, Pin] = {
-    DESCRIBER: Pin("b4243c156154b6dca9324415f8c7ccc098b4aed1", "gemma-4-E2B-it-Q4_0.gguf", 131072),
+
+
+class Generator(NamedTuple):
+    """A describer: its GGUF file, and its bar for one concept in a collection's vocabulary, the
+    mean P(yes) of a pair's two orders (`sections.vocabulary.cluster`)."""
+
+    name: str
+    pin: Pin
+    same_concept: float
+
+
+# The generators the llm descriptor strategy writes with, by the setting that picks one
+# (`settings.Describer`). Each a Q4_0 file on llama.cpp, judged blind with the production prompt on
+# 60 sections of every length (Sonnet, 1-5): Qwen3.5-4B 4.23, Gemma-4-E2B 3.63, at 1.42 and
+# 0.67 s a section on an M4 Pro, 2.8 and 3.0 GB in memory. Each bar is set on 367 labelled pairs,
+# under the cosine gate, where each merges 78% of the synonyms: Gemma lets 17% of the other
+# concepts through, Qwen 12%; neither an antonym. Qwen ranks synonyms above other concepts at
+# AUC 0.87, Gemma at 0.84.
+DESCRIBERS: dict[Describer, Generator] = {
+    Describer.QWEN_3_5_4B: Generator(
+        "unsloth/Qwen3.5-4B-GGUF",
+        Pin("e87f176479d0855a907a41277aca2f8ee7a09523", "Qwen3.5-4B-Q4_0.gguf", 262144),
+        0.12,
+    ),
+    Describer.GEMMA_4_E2B: Generator(
+        "ggml-org/gemma-4-E2B-it-GGUF",
+        Pin("b4243c156154b6dca9324415f8c7ccc098b4aed1", "gemma-4-E2B-it-Q4_0.gguf", 131072),
+        0.15,
+    ),
 }
+GENERATORS: dict[str, Pin] = {one.name: one.pin for one in DESCRIBERS.values()}
+
+# The knowledge models: loaded when first asked and freed once idle (`embed.OnDemand`), unlike the
+# embedding profiles' files, which a search needs at once (`models.ModelGroup`).
+ON_DEMAND: frozenset[str] = frozenset(GENERATORS) | frozenset(HELPERS)
 
 
-def describer(by: Descriptors) -> str | None:
-    """The model strategy `by` writes its descriptors with; None for one that needs no model."""
-    return DESCRIBER if by == Descriptors.LLM else None
+def generator(settings: PipelineSettings) -> Generator:
+    """The describer the settings pick, which also judges the vocabulary, whatever the strategy."""
+    return DESCRIBERS[settings.describer]
+
+
+def describer(settings: PipelineSettings) -> str | None:
+    """The model the settings write descriptors with; None for a strategy that needs no model."""
+    return generator(settings).name if settings.descriptors == Descriptors.LLM else None
 
 
 # what one prompt and its reply take: a section's excerpt is at most `generated.EXCERPT_CHARS`,
 # about 1,500 tokens of prose; a longer prompt is cut to fit (`GgufGenerator.reply`)
 GENERATOR_TOKENS = 4096
 CHAT_TOKENS = 32  # what the chat template wraps a prompt in (Gemma's takes 10)
+_THINKING = re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL)  # a reasoning block, if one leaks
 ANSWER_TOKENS = 4  # of a yes-or-no reply read for the answer (`GgufGenerator.yes`)
 ANSWER_CHOICES = 10  # the likeliest tokens at one of them a yes or a no must be among
 
@@ -168,6 +206,11 @@ class GgufEmbedder:
     def query_embed(self, text: str) -> Iterator[Any]:
         return self.embed([text])
 
+    def close(self) -> None:
+        """Free the weights and the context, on the GPU too (`embed.OnDemand.free_idle`)."""
+        with self._lock:
+            self._model.close()
+
     def _fit(self, text: str) -> str:
         """`text` cut to what the context holds with the model's own tokens around it. llama.cpp's
         cut keeps the first tokens and drops the end token with the rest, and a vector pooled
@@ -214,8 +257,9 @@ class GgufGenerator:
         `ANSWER_TOKENS` tokens are read. 0.5 when none did."""
         from llama_cpp import llama_get_logits_ith
 
-        chat, yes, no = self._answers
-        text = chat(messages=[{"role": "user", "content": prompt}]).prompt
+        yes, no = self._answers
+        text = self._chat(messages=[{"role": "user", "content": prompt}], enable_thinking=False)
+        text = text.prompt
         with self._lock:
             tokens = self._model.tokenize(text.encode(), add_bos=False, special=True)
             self._model.reset()
@@ -233,39 +277,49 @@ class GgufGenerator:
         return 0.5
 
     @functools.cached_property
-    def _answers(self) -> tuple[Any, np.ndarray, np.ndarray]:
-        """The chat template `create_chat_completion` applies, the file's own as llama-cpp-python
-        reads it, for the prompts `yes` evaluates itself; and the tokens that read "yes" and "no"
-        in any spelling ("Yes", " yes"). Once, on the first question: the vocabulary is read a
-        token at a time."""
+    def _chat(self) -> Any:
+        """The file's own chat template, as llama-cpp-python reads it, for the prompts `reply` and
+        `yes` render with thinking off: Qwen3.5 thinks by default, Gemma's template ignores the
+        flag. Qwen's file names no start token."""
         from llama_cpp.llama_chat_format import Jinja2ChatFormatter
 
         model = self._model
-        chat = Jinja2ChatFormatter(
+        start = model.token_bos()
+        return Jinja2ChatFormatter(
             template=model.metadata["tokenizer.chat_template"],
             eos_token=model._model.token_get_text(model.token_eos()),
-            bos_token=model._model.token_get_text(model.token_bos()),
+            bos_token=model._model.token_get_text(start) if start >= 0 else "",
         )
+
+    @functools.cached_property
+    def _answers(self) -> tuple[np.ndarray, np.ndarray]:
+        """The tokens that read "yes" and "no" in any spelling ("Yes", " yes"). Once, on the first
+        question: the vocabulary is read a token at a time."""
+        model = self._model
         words = [
             model.detokenize([token]).decode(errors="ignore").strip().lower()
             for token in range(model.n_vocab())
         ]
         yes = np.array([token for token, word in enumerate(words) if word == "yes"])
         no = np.array([token for token, word in enumerate(words) if word == "no"])
-        return chat, yes, no
+        return yes, no
+
+    def close(self) -> None:
+        """Free the weights and the context, on the GPU too (`embed.OnDemand.free_idle`)."""
+        with self._lock:
+            self._model.close()
 
     def reply(self, prompt: str, max_tokens: int) -> str:
         """The greedy reply to `prompt`, cut at its end to what the context holds beside the
         reply: an excerpt is bounded in characters, and digits or symbols take a token each (6,000
-        characters of numbers measured 5,672 tokens), which llama.cpp refuses past the context."""
+        characters of numbers measured 5,672 tokens), which llama.cpp refuses past the context.
+        Thinking is off (`_chat`); a reply that opens one anyway has it dropped."""
         room = GENERATOR_TOKENS - CHAT_TOKENS - max_tokens
         with self._lock:
             tokens = self._model.tokenize(prompt.encode(), add_bos=False)
             if len(tokens) > room:
                 prompt = self._model.detokenize(tokens[:room]).decode(errors="ignore")
-            answer = self._model.create_chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=0,  # greedy: a section described twice is described alike
-            )
-        return answer["choices"][0]["message"]["content"] or ""
+            text = self._chat(messages=[{"role": "user", "content": prompt}], enable_thinking=False)
+            asked = self._model.tokenize(text.prompt.encode(), add_bos=False, special=True)
+            answer = self._model.create_completion(asked, max_tokens=max_tokens, temperature=0)
+        return _THINKING.sub("", answer["choices"][0]["text"]).strip()

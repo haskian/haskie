@@ -296,7 +296,7 @@ async def _stranded(settings: UserSettings) -> str:
         used.append((await embedders())[settings.embedding].name)
     if settings.search.reranker != Reranker.NONE:
         used.append(settings.search.reranker_model)
-    if describer := gguf_models.describer(settings.pipeline.descriptors):
+    if describer := gguf_models.describer(settings.pipeline):
         used.append(describer)
     return "; ".join(
         hardware.nowhere(name) for name in used if hardware.device(name, accelerator) is None

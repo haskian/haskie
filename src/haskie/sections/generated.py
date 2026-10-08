@@ -10,6 +10,14 @@ often code identifiers and names, while the model names concepts. It sees one se
 so it does not set a section apart from the ones beside it. Topics already named in the heading
 path remain eligible descriptors.
 
+A long section with subsections is described after them, from their outline beside its excerpt
+(`OUTLINE_PROMPT`): each subsection's heading with the descriptors it was given. Past
+`OUTLINE_FROM_CHARS` of prose, an excerpt of six chunks says little about the rest. Judged blind
+on 120 parent sections, the outline scored +0.52 over the excerpt alone above 48,000 characters
+(29 sections), and nothing below it: +0.04 from 12,000 to 24,000 characters, and -0.10 [-0.33,
++0.15] on 48 parents of 4 to 15 chunks. Descriptors rolled up from the subsections instead, with
+no prompt, lost: they name single subsections, not what the section is about as a whole.
+
 Once every section has its descriptors, the same model writes what the whole document is about,
 in a few sentences (`summarize`): no 4,096-token context holds a book, so it reads the book's
 section descriptions and descriptors, summarizing groups before combining them when needed.
@@ -39,6 +47,24 @@ Include relevant topics even when the heading already names them. Do not use gen
 as chapter, example, figure. Answer with the descriptors only, separated by " | ".
 
 Heading path: {{heading}}
+
+Section text:
+{{text}}"""
+OUTLINE_CHARS = 3000  # of a section's outline: with the excerpt, about 2,500 tokens of context
+# of a section's prose, past which its subsections' outline joins its excerpt: eight excerpts.
+# Read off the same judged sections the gain was measured on: a starting point, not an optimum.
+OUTLINE_FROM_CHARS = 8 * EXCERPT_CHARS
+OUTLINE_PROMPT = f"""Below is one section of a book: the outline of its subsections, each with \
+the topics it covers, and excerpts of its text. Write up to {DESCRIPTORS} descriptors: short noun \
+phrases (1 to 3 words) that together tell a reader what topics this whole section covers. Name \
+what the section as a whole is about, not one subsection. Be specific. Include relevant topics \
+even when the heading already names them. Do not use generic words such as chapter, example, \
+figure. Answer with the descriptors only, separated by " | ".
+
+Heading path: {{heading}}
+
+Outline of its subsections:
+{{outline}}
 
 Section text:
 {{text}}"""
@@ -77,6 +103,41 @@ def parse(answer: str) -> list[str]:
     return [phrase for phrase in phrases if phrase][:DESCRIPTORS]
 
 
+type Described = tuple[Run, list[str]]  # a section already described, and its descriptors
+
+
+def subsections(run: Run, known: Sequence[Described]) -> list[Described]:
+    """The sections of `known` under `run`, at any depth, in document order: deeper, inside its
+    chunks and under its headings."""
+    below = (
+        one
+        for one in known
+        if one[0].depth > run.depth
+        and run.first <= one[0].first
+        and one[0].last <= run.last
+        and one[0].headings[: run.depth] == run.headings
+    )
+    return sorted(below, key=lambda one: (one[0].first, one[0].depth))
+
+
+def subsection_outline(run: Run, below: Sequence[Described]) -> str:
+    """The subsections `below` as the model reads them: each heading indented by its depth under
+    `run`, with its descriptors. Deeper headings are left out until it fits `OUTLINE_CHARS`, then
+    it is cut there, so a long chapter still shows its sections."""
+    text = ""
+    for deepest in range(max(one.depth for one, _ in below), run.depth, -1):
+        text = "\n".join(
+            "  " * (one.depth - run.depth - 1)
+            + f"- {one.headings[-1]}"
+            + (f" ({', '.join(topics)})" if topics else "")
+            for one, topics in below
+            if one.depth <= deepest
+        )
+        if len(text) <= OUTLINE_CHARS:
+            return text
+    return text[:OUTLINE_CHARS]
+
+
 def describe_section(run: Run, texts: Sequence[str], reply: Reply) -> str:
     """One section's prose summary, with no model call when there is no prose."""
     text = excerpt(texts[run.first : run.last + 1])
@@ -89,10 +150,14 @@ def describe_section(run: Run, texts: Sequence[str], reply: Reply) -> str:
 
 
 class Generated:
-    """Each section described by `reply`, one prompt each (see the module)."""
+    """Each section described by `reply`, one prompt each (see the module). `known` holds the
+    sections described before these, whose descriptors the outline of a section above them reads;
+    each section `pick` describes joins them, so `runs` deepest first describe a section after its
+    subsections."""
 
-    def __init__(self, reply: Reply) -> None:
+    def __init__(self, reply: Reply, known: Sequence[Described] = ()) -> None:
         self._reply = reply
+        self._known = known
 
     def pick(
         self,
@@ -101,16 +166,27 @@ class Generated:
         vectors: np.ndarray | None,
         embed: Embed | None,
     ) -> list[Description]:
-        return [self._describe(run, texts[run.first : run.last + 1]) for run in runs]
+        known = list(self._known)
+        picked: list[Description] = []
+        for run in runs:
+            about = self._describe(run, texts[run.first : run.last + 1], known)
+            known.append((run, about.descriptors))
+            picked.append(about)
+        return picked
 
-    def _describe(self, run: Run, texts: Sequence[str]) -> Description:
+    def _describe(self, run: Run, texts: Sequence[str], known: Sequence[Described]) -> Description:
         text = excerpt(texts)
         if not text.strip():
             return Description()  # a section of code or tables alone: nothing to read
         heading = " > ".join(run.headings) or "(the whole document)"
-        return Description(
-            descriptors=parse(self._reply(PROMPT.format(heading=heading, text=text), REPLY_TOKENS))
-        )
+        # the size first: finding the subsections scans every section described so far
+        below = subsections(run, known) if sum(map(len, texts)) > OUTLINE_FROM_CHARS else []
+        if below:
+            outline = subsection_outline(run, below)
+            prompt = OUTLINE_PROMPT.format(heading=heading, outline=outline, text=text)
+        else:
+            prompt = PROMPT.format(heading=heading, text=text)
+        return Description(descriptors=parse(self._reply(prompt, REPLY_TOKENS)))
 
 
 # --- the whole document -------------------------------------------------------------

@@ -13,7 +13,7 @@ import type { PageProps } from '../App'
 import { errorText } from '../format'
 import { useOperation } from '../hooks/useOperation'
 import { href } from '../router'
-import { BulkStatus, BusyButton, choices, docFor, EmbedderFacts, Field, Num, Picker, profileOptions, SearchField, Shell, Toggle, visibleExpansionFields, visibleSearchFields, type NumericKeys } from '../ui'
+import { BulkStatus, BusyButton, choices, DescriberFields, docFor, EmbedderFacts, Field, Num, Picker, profileOptions, SearchField, Shell, Toggle, visibleExpansionFields, visibleSearchFields, type NumericKeys } from '../ui'
 import { classicBackground, setBackground as storeBackground } from './settings/background'
 import './Settings.css'
 
@@ -189,14 +189,7 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
             />
             <span className="faint">{skipOcr.description}</span>
           </div>
-          <Field label={docFor(docs, 'pipeline.descriptors').title} help={docFor(docs, 'pipeline.descriptors').description}>
-            <Picker
-              ariaLabel={docFor(docs, 'pipeline.descriptors').title}
-              options={choices(options.descriptors)}
-              value={settings.pipeline.descriptors}
-              onChange={(descriptors) => pipeline({ descriptors })}
-            />
-          </Field>
+          <DescriberFields value={settings.pipeline} options={options} onChange={pipeline} />
         </section>
 
         <section id="chunking">

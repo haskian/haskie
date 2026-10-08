@@ -84,6 +84,16 @@ section is about.
   Both fields are saved in the sections cache. Each section stage checkpoints batches of
   sixteen sections and shows its own progress. Topics already named in the heading remain
   eligible descriptors in both strategies.
+  The descriptor stage runs deepest sections first (`pipeline.describe_order`). A section with
+  subsections and more than 48,000 characters of prose (eight excerpts) is described after them,
+  from their outline beside its excerpt: each subsection's heading with the descriptors it got,
+  at most 3,000 characters, deeper headings dropped first. A batch reads what the batches before
+  it wrote, and each scratch file names its sections by id, so the last step puts every list back
+  on its own section. Judged blind on 120 parent sections, the outline scored +0.52 over the
+  excerpt alone above 48,000 characters (29 sections), and nothing below: +0.04 from 12,000 to
+  24,000, and -0.10 [-0.33, +0.15] on 48 parents of 4 to 15 chunks. The bar was read off those
+  same sections. Descriptors rolled up from the subsections without a prompt scored worse than
+  the model's own: they name single subsections.
   The earlier five-descriptor prompt scored 4.04 of 5 on 200 sections of four technical books,
   against 2.13 for c-TF-IDF, at 0.51 s a section on an M4 Pro. Its model downloads like the others,
   as a `describer`, and each batch waits for it. The document stage uses the saved section

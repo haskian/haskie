@@ -83,6 +83,21 @@ it in a background task and reports it ready only after that. A search that need
 downloading, warming or failed fails fast with a 503. While it downloads, the message names the
 download operation.
 
+Models come in two groups, as the status bar shows them:
+
+- **Search**: the embedding model and a reranker. Warmed at boot, and loaded for the life of the
+  server, since every search needs them at once.
+- **Knowledge**: the describer (Qwen3.5-4B or Gemma-4-E2B, a setting) and the vocabulary's embedder
+  (Qwen3-Embedding-0.6B), required under llm descriptors. Downloaded at boot but loaded only when
+  indexing first asks for one, and freed once nobody used it for 5 minutes (`models.IDLE_SECONDS`,
+  checked every 30 s). A model in use is never freed: a describe batch keeps its describer to the
+  end. The next run that asks loads it again, in a second or two. The describer alone holds 2.8 to
+  3.0 GB.
+
+Each model shows as an icon in its group: a turning green gear while it is in memory, a white
+check when it is downloaded but not loaded, a grey spinner while it downloads or loads, and a
+cross when it failed. The hint lists each one's name, kind and state.
+
 ## Shutdown
 
 Every stage of a shutdown has a bound, and each stage past the first is harder than the one

@@ -15,6 +15,7 @@ from haskie.settings import (
     NO_EMBEDDING,
     Accelerator,
     Chunker,
+    Describer,
     Descriptors,
     FieldDoc,
     FillValues,
@@ -55,6 +56,7 @@ class Init(msgspec.Struct):
     profile: str  # a key of `Options.embedding_profiles`
     search: SearchSettings = msgspec.field(default_factory=first_run_search)
     descriptors: Descriptors = PipelineSettings().descriptors  # one of `Options.descriptors`
+    describer: Describer = PipelineSettings().describer  # one of `Options.describers`
 
 
 class Options(msgspec.Struct):
@@ -64,7 +66,8 @@ class Options(msgspec.Struct):
     parsers: tuple[Parser, ...]
     chunkers: tuple[Chunker, ...]
     accelerators: tuple[Accelerator, ...]
-    descriptors: tuple[Descriptors, ...]  # llm only where its model runs (`hardware.device`)
+    descriptors: tuple[Descriptors, ...]  # llm only where a describer runs (`hardware.device`)
+    describers: tuple[Describer, ...]  # the llm strategy's models that run here
     search_modes: tuple[SearchMode, ...]
     fusions: tuple[Fusion, ...]
     score_folds: tuple[ScoreFold, ...]
@@ -119,7 +122,7 @@ async def post_init(data: Init) -> UserSettings:
     settings = UserSettings(
         embedding=data.profile,
         search=data.search,
-        pipeline=PipelineSettings(descriptors=data.descriptors),
+        pipeline=PipelineSettings(descriptors=data.descriptors, describer=data.describer),
     )
     await catalogue.check(settings)
     if not await init_user_settings(settings):
@@ -154,16 +157,17 @@ async def get_options() -> Options:
     embedders = await catalogue.embedders()
     rerankers = await catalogue.rerankers()
     accelerator = (await load_user_settings()).pipeline.accelerator
+    describers = tuple(
+        one
+        for one, generator in gguf_models.DESCRIBERS.items()
+        if hardware.device(generator.name, accelerator) is not None
+    )
     return Options(
         parsers=tuple(Parser),
         chunkers=tuple(Chunker),
         accelerators=tuple(Accelerator),
-        descriptors=tuple(
-            one
-            for one in Descriptors
-            if (describer := gguf_models.describer(one)) is None
-            or hardware.device(describer, accelerator) is not None
-        ),
+        descriptors=tuple(one for one in Descriptors if one != Descriptors.LLM or describers),
+        describers=describers,
         search_modes=tuple(SearchMode),
         fusions=tuple(Fusion),
         score_folds=tuple(ScoreFold),

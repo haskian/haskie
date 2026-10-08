@@ -23,7 +23,7 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | --- | --- | --- |
 | `Shell` | `<Shell current="documents" counts={counts} side={<Groups />}>{page}</Shell>` | Page frame, logo, nav |
 | `Logo` | `<Logo />` | The mark and wordmark, linking to Explore |
-| `Statusbar` | `<Statusbar status={status} />` | Fixed strip; polls `/api/operations/activity` itself |
+| `Statusbar` | `<Statusbar status={status} refreshStatus={refresh} />` | Fixed strip; polls `/api/operations/activity` itself, and the model status too while knowledge models are on; reads both at once when a page starts work |
 | `Picker` | `<Picker options={scopes} value={scope} onChange={setScope} />` | `<details>` dropdown, each option a label plus a `sub` |
 | `Tabs` | `<Tabs tabs={[{ id: 'match', label: 'Match' }]} selected={tab} onSelect={setTab} />` | The strip only; the caller renders the panels |
 | `Modal` | `<Modal open={open} onClose={close} title={doc} subtitle="collection">{panels}</Modal>` | Native `<dialog>` with reserved bottom status space |
@@ -53,6 +53,7 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `DropOverlay` | `<DropOverlay onFiles={upload} />` | Document-level drag listeners plus the overlay |
 | `ModelFacts` / `EmbedderFacts` | `<ModelFacts name={name} metadata={metadata} />`, `<EmbedderFacts model={model} metadata={metadata} />` | A model's facts under its picker; nothing for the full-text-only profile |
 | `Num` / `SearchField` | `<Num … />`, `<SearchField … />` | A number setting in the design's `.field`; one search setting, as Settings and the first run show it |
+| `DescriberFields` | `<DescriberFields value={…} options={…} onChange={…} />` | Who describes the sections, and the describer model when it is a language model, as Settings and the first run show them |
 
 ## Modules
 

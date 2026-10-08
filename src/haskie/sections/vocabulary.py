@@ -22,11 +22,12 @@ forms: "Event-driven architecture" and "event-driven architectures", "architectu
   "coupling" at every bar that merged anything else.
 - **Judged** (`JUDGE_PROMPT`). Every other pair of neighbours at a cosine of `JUDGE_COSINE` or
   more is asked of the describer, in both orders, and is one concept when the mean of its two
-  P(yes) is `SAME_CONCEPT` or more. On the labelled pairs that keeps 78% of synonyms, 17% of the
-  other concepts (all of them close neighbours, "data validation" and "input validation"), and no
-  antonym; the model alone said yes to 73% of the other concepts when the prompt did not say what
-  is not the same, and Qwen's cosine alone, at the bar that keeps 90% of synonyms, lets 32% of
-  the other concepts and 11% of the antonyms through.
+  P(yes) reaches the describer's bar (`gguf_models.Generator.same_concept`). On the labelled pairs
+  that keeps 78% of synonyms, no antonym, and 12% (Qwen3.5-4B) or 17% (Gemma-4-E2B) of the other
+  concepts, all of them close neighbours ("data validation" and "input validation"). Gemma alone
+  said yes to 73% of the other concepts when the prompt did not say what is not the same, and the
+  embedder's cosine alone, at the bar that keeps 90% of synonyms, lets 32% of the other concepts
+  and 11% of the antonyms through.
 - **Clustering** (`cluster`). Variants in order of use, most used first; each joins the nearest
   preferred term it is one concept with, or becomes one itself. Only preferred terms take
   variants, so a cluster never grows by a chain of near neighbours, and every variant points
@@ -46,7 +47,6 @@ from haskie.search.probe import stem
 INSTRUCTION = "Instruct: Retrieve semantically similar text\nQuery:"  # Qwen's own, before a text
 NEIGHBOURS = 32  # the nearest variants each is compared with
 JUDGE_COSINE = 0.93  # a pair of neighbours at or over it is judged
-SAME_CONCEPT = 0.15  # the mean P(yes) of a pair's two orders at or over which it is one concept
 JUDGE_PROMPT = """Two descriptors, short phrases that say what a section of a technical book is \
 about:
 A: {a}
@@ -131,9 +131,11 @@ def cluster(
     uses: Sequence[int],
     vectors: np.ndarray,
     verdicts: Mapping[Pair, float],
+    same_concept: float,
 ) -> list[int]:
-    """Each variant's preferred term, by index (see the module). A pair `verdicts` lacks is not
-    one concept. Deterministic: ties in use go to the shorter variant, then the first in order."""
+    """Each variant's preferred term, by index (see the module). A pair whose verdict reaches
+    `same_concept` is one concept; one `verdicts` lacks is not. Deterministic: ties in use go to
+    the shorter variant, then the first in order."""
     ids, cosines = neighbours(vectors)
     order = sorted(
         range(len(variants)), key=lambda at: (-uses[at], len(variants[at]), variants[at])
@@ -145,7 +147,7 @@ def cluster(
             if preferred[other] != other or cosine <= best_cosine:
                 continue  # not a preferred term (yet), or no nearer than one found
             one, two = variants[at], variants[other]
-            judged = cosine >= JUDGE_COSINE and verdicts.get(pair(one, two), 0.0) >= SAME_CONCEPT
+            judged = cosine >= JUDGE_COSINE and verdicts.get(pair(one, two), 0.0) >= same_concept
             if same_words(one, two) or judged:
                 best, best_cosine = int(other), float(cosine)
         preferred[at] = best

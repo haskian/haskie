@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from conftest import (
+    DESCRIBER,
     MD,
     WAIT,
     attach_document,
@@ -32,7 +33,9 @@ from haskie.errors import HaskieError, NotReady, Unavailable
 from haskie.indexing import dbos_names, embed, gguf_models, models, operations, workflows
 from haskie.indexing.models import ModelKind, ModelLoading
 from haskie.settings import (
+    Accelerator,
     CollectionOverrides,
+    Describer,
     Descriptors,
     Fusion,
     PipelineSettings,
@@ -352,6 +355,20 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
             [],
             [
                 ("embedding", "ibm-granite/granite-embedding-97m-multilingual-r2"),
+                ("describer", "unsloth/Qwen3.5-4B-GGUF"),
+                ("vocabulary", "Qwen/Qwen3-Embedding-0.6B-GGUF"),
+            ],
+        ),
+        (
+            "descriptors the faster describer writes",
+            UserSettings(
+                embedding="none",
+                pipeline=PipelineSettings(
+                    descriptors=Descriptors.LLM, describer=Describer.GEMMA_4_E2B
+                ),
+            ),
+            [],
+            [
                 ("describer", "ggml-org/gemma-4-E2B-it-GGUF"),
                 ("vocabulary", "Qwen/Qwen3-Embedding-0.6B-GGUF"),
             ],
@@ -387,15 +404,13 @@ async def test_the_describer_is_downloaded_by_its_own_loader(dbos, monkeypatch) 
     statuses = await models.ensure_models(user)
 
     assert [(status.kind, status.name) for status in statuses] == [
-        ("describer", gguf_models.DESCRIBER),
+        ("describer", DESCRIBER),
         ("vocabulary", gguf_models.VOCABULARY_EMBEDDER),
     ]
-    wanted = [(ModelKind.DESCRIBER, gguf_models.DESCRIBER)]
+    wanted = [(ModelKind.DESCRIBER, DESCRIBER)]
     wanted.append((ModelKind.VOCABULARY, gguf_models.VOCABULARY_EMBEDDER))
     await await_terminal([models._model_id(kind, name) for kind, name in wanted])
-    assert sorted(loaded) == sorted(
-        [gguf_models.DESCRIBER, f"embed {gguf_models.VOCABULARY_EMBEDDER}"]
-    )
+    assert sorted(loaded) == sorted([DESCRIBER, f"embed {gguf_models.VOCABULARY_EMBEDDER}"])
     for kind, name in wanted:
         await models.require_ready(kind, name)  # no raise
 
@@ -411,21 +426,21 @@ async def test_a_downloaded_model_nothing_requires_warms_when_asked_for(dbos, mo
         UserSettings(embedding="none", pipeline=PipelineSettings(descriptors=Descriptors.LLM))
     )
     await models.ensure_models(user)
-    workflow_id = models._model_id(ModelKind.DESCRIBER, gguf_models.DESCRIBER)
+    workflow_id = models._model_id(ModelKind.DESCRIBER, DESCRIBER)
     await await_terminal([workflow_id])
     await save_user_settings(UserSettings(embedding="none"))  # nothing requires it now
     models._ready.clear()  # a restart: the files stay, the caches do not
     loaded.clear()
 
     with pytest.raises(NotReady, match="is loading in this process"):
-        await models.require_ready(ModelKind.DESCRIBER, gguf_models.DESCRIBER)
+        await models.require_ready(ModelKind.DESCRIBER, DESCRIBER)
 
     async def warm() -> bool:
         return models.is_warm(workflow_id)
 
     await until(warm, "the ask never warmed the model")
-    assert loaded == [gguf_models.DESCRIBER]
-    await models.require_ready(ModelKind.DESCRIBER, gguf_models.DESCRIBER)  # no raise
+    assert loaded == [DESCRIBER]
+    await models.require_ready(ModelKind.DESCRIBER, DESCRIBER)  # no raise
 
 
 async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> None:
@@ -550,3 +565,103 @@ async def test_a_downloaded_model_is_warmed_after_restart_before_search_uses_it(
 
     await until(loaded, "never warmed")
     await models.require_ready(ModelKind.EMBEDDING, model_name)  # no raise: the search may run now
+
+
+async def test_a_knowledge_model_waits_for_its_first_use_and_is_freed_once_idle(
+    dbos, monkeypatch
+) -> None:
+    """Downloaded at boot, a knowledge model is not loaded: `downloaded`, in its group. The first
+    run that asks loads it (`ready`); once nobody used it for `IDLE_SECONDS`, `free_idle` frees
+    it and it is `downloaded` again, and the next ask loads it again. A search model is warmed at
+    boot and never freed."""
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+    built: list[str] = []
+
+    class Model:
+        def __init__(self, name: str) -> None:
+            built.append(name)
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(gguf_models, "GgufGenerator", Model)
+    monkeypatch.setattr(gguf_models, "GgufEmbedder", Model)
+    monkeypatch.setattr(embed, "_on_demand", embed.OnDemand())
+    monkeypatch.setattr(embed, "warm", lambda name, accelerator: None)  # the search model
+    user = await save_user_settings(
+        UserSettings(
+            embedding="granite-97m-multilingual",
+            pipeline=PipelineSettings(descriptors=Descriptors.LLM),
+        )
+    )
+    monkeypatch.setattr(models, "load_model", _noop_load)
+    await models.ensure_models(user)
+    ids = [models._model_id(kind, name) for kind, name in await models.required(user)]
+    await await_terminal(ids)
+    models._ready.clear()  # a restart: records SUCCESS, every cache cold
+    await models.ensure_models(user)  # the boot: warms the search model alone
+    describer = models._model_id(ModelKind.DESCRIBER, DESCRIBER)
+
+    async def states() -> dict[str, tuple[str, str]]:
+        return {one.name: (one.group, one.state) for one in await models.model_statuses()}
+
+    async def warm() -> bool:
+        return (await states())[(await default_model()).name][1] == "ready"
+
+    await until(warm, "the search model never warmed")
+    assert (await states())[DESCRIBER] == ("knowledge", "downloaded")
+    assert (await states())[gguf_models.VOCABULARY_EMBEDDER] == ("knowledge", "downloaded")
+    assert (await states())[(await default_model()).name][0] == "search"
+    assert built == [], "no knowledge model loaded at boot"
+
+    with pytest.raises(ModelLoading, match="loading in this process"):
+        await models.require_ready(ModelKind.DESCRIBER, DESCRIBER)
+    await until(lambda: _async(models.is_warm(describer)), "the ask never loaded it")
+    assert built == [DESCRIBER]
+    assert (await states())[DESCRIBER][1] == "ready"
+
+    assert models.free_idle() == [], "used a moment ago: kept"
+    monkeypatch.setattr(models, "IDLE_SECONDS", 0)
+    assert models.free_idle() == [DESCRIBER]
+    assert (await states())[DESCRIBER][1] == "downloaded"
+    assert not models.is_warm(describer), "forgotten, so the next ask loads it again"
+    with pytest.raises(ModelLoading):
+        await models.require_ready(ModelKind.DESCRIBER, DESCRIBER)
+    await until(lambda: _async(models.is_warm(describer)), "the second ask never loaded it")
+    assert built == [DESCRIBER] * 2
+
+
+async def _noop_load(kind: ModelKind, name: str) -> None:
+    """The download, stood in for: its record says SUCCESS, nothing is loaded."""
+
+
+async def _async(value: bool) -> bool:
+    return value
+
+
+def test_a_knowledge_model_in_use_is_never_freed(monkeypatch) -> None:
+    """A describe batch holds its model across many prompts: `free_idle` skips one in use however
+    long ago it was taken, frees it once released and idle, and closes what it frees."""
+    monkeypatch.setattr(gguf_models, "available", lambda: True)
+    closed: list[str] = []
+
+    class Model:
+        def __init__(self, name: str) -> None:
+            assert not embed._MODEL_LOCK.locked(), "a search would wait out the load"
+            self.name = name
+
+        def close(self) -> None:
+            closed.append(self.name)
+
+    on_demand = embed.OnDemand()
+    key = (DESCRIBER, Accelerator.AUTO)
+    with on_demand.use(key, lambda: Model(DESCRIBER)) as model:
+        assert on_demand.loaded(DESCRIBER)
+        assert on_demand.free_idle(0) == [], "in use"
+        with on_demand.use(key, lambda: pytest.fail("built twice")) as again:
+            assert again is model, "the loaded one, shared"
+    assert on_demand.free_idle(3600) == [], "released a moment ago"
+    assert on_demand.free_idle(0) == [DESCRIBER]
+    assert closed == [DESCRIBER] and not on_demand.loaded(DESCRIBER)
+    assert on_demand.free_idle(0) == [], "nothing left to free"

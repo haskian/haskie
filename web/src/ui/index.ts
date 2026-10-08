@@ -25,6 +25,7 @@ export { effectiveSearch, SEARCH_BOUNDS, visibleExpansionFields, visibleSearchFi
 export { anchorIndex, type Anchor } from './anchor'
 export { SearchBox } from './SearchBox'
 export { Num, SearchField } from './SearchField'
+export { DescriberFields, type Describing } from './DescriberFields'
 export { SearchTook } from './SearchTook'
 export { SearchPanel } from './SearchPanel'
 export { Logo, Shell, type NavCounts } from './Shell'

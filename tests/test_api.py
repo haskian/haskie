@@ -57,6 +57,7 @@ from haskie.tables import documents as documents_table
 from haskie.tables import searches
 
 from conftest import (  # isort: skip
+    DESCRIBER,
     LOOPBACK_URL,
     Gate,
     NO_MODELS,
@@ -907,8 +908,9 @@ async def test_the_options_offer_gguf_models_only_where_they_run(
     offered = set(options["embedding_profiles"]) & gguf
     assert offered == (gguf if offer else set()), name
     assert gguf <= set(options["embedding_metadata"]), "metadata, offered or not"
-    # the llm descriptors' describer is a GGUF model too
+    # the llm descriptors' describers are GGUF models too
     assert options["descriptors"] == (["c-tf-idf", "llm"] if offer else ["c-tf-idf"]), name
+    assert options["describers"] == (["qwen3.5-4b", "gemma-4-e2b"] if offer else []), name
 
 
 @pytest.mark.parametrize(
@@ -992,9 +994,9 @@ async def test_init_stores_what_was_picked(
     picked = (search["mode"], search["reranker"], search["reranker_model"])
     assert (*picked, settings["pipeline"]["descriptors"]) == expected, name
     if expected[-1] == "llm":
-        await wait_for(f"dl:describer:{gguf_models.DESCRIBER}")
+        await wait_for(f"dl:describer:{DESCRIBER}")
         await wait_for(f"dl:vocabulary:{gguf_models.VOCABULARY_EMBEDDER}")
-        assert sorted(loaded) == sorted([gguf_models.DESCRIBER, gguf_models.VOCABULARY_EMBEDDER]), (
+        assert sorted(loaded) == sorted([DESCRIBER, gguf_models.VOCABULARY_EMBEDDER]), (
             f"{name}: the first run starts the downloads of the describer and the vocabulary's"
         )
 
@@ -1009,7 +1011,7 @@ async def test_init_refuses_llm_descriptors_where_their_model_cannot_run(
     response = await client.post("/api/init", json={**NO_MODELS, "descriptors": "llm"})
 
     assert response.status_code == 422, response.text
-    assert gguf_models.DESCRIBER in response.json()["detail"]
+    assert DESCRIBER in response.json()["detail"]
     assert (await client.get("/api/status")).json()["initialized"] is False
     retried = await client.post("/api/init", json={**NO_MODELS, "descriptors": "c-tf-idf"})
     assert retried.status_code == 201, retried.text
@@ -3567,7 +3569,7 @@ async def test_a_renamed_collection_keeps_its_own_vocabulary(
         )
         await conn.create_table(vocabulary.DESCRIPTORS, data=data)
         await vocabulary.embed_missing(name, "test", lambda texts: [[1.0, 0.0]] * len(texts), 10)
-        assert await vocabulary.build(name, "test") == 1
+        assert await vocabulary.build(name, "test", "judge", 0.5) == 1
         if legacy:
             table = await conn.open_table(vocabulary.TERMS)
             old = (await table.query().to_arrow()).replace_schema_metadata(None)

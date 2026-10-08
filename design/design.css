@@ -438,6 +438,7 @@ body.over .drop-overlay { opacity: 1; }
 .statusbar-counts b + b::before { content: "/"; margin-right: var(--sp-1); color: rgba(255, 255, 255, 0.4); }
 .statusbar-counts .running, .statusbar-counts .done { color: var(--ok); }
 .statusbar-counts .queued { color: rgba(255, 255, 255, 0.5); }
+.statusbar-counts .idle { color: var(--paper); } /* a model on disk, not in memory */
 .statusbar .hint { top: calc(100% + var(--sp-2)); bottom: auto; left: auto; right: 0; max-width: none; transform: translateY(-4px); background: var(--paper); color: var(--ink); font-family: var(--font-sans); text-transform: none; letter-spacing: 0; gap: var(--sp-3); }
 .statusbar-item:hover > .hint { transform: translateY(0); }
 .statusbar-item:has(~ .spacer) > .hint { left: 0; right: auto; } /* left of the gap: opens rightwards, into the page */

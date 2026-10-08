@@ -126,6 +126,11 @@ def chunk_id(document_id: str, seq: int) -> str:
     return _hashed(f"{document_id}/c/{seq}")
 
 
+def run(section: Section) -> descriptors.Run:
+    """A section as a strategy sees it: its headings and its chunks, 0-based, both ends in."""
+    return descriptors.Run(tuple(section.headings), section.seq_start - 1, section.seq_end - 1)
+
+
 def describe(
     found: Sequence[Section],
     texts: Sequence[str],
@@ -135,12 +140,7 @@ def describe(
 ) -> list[Section]:
     """Sections with their descriptors and descriptions. `texts` holds each chunk's `prose` in
     `seq` order, `vectors` each section's unit vector, None without a model."""
-    picked = strategy.pick(
-        texts,
-        [descriptors.Run(tuple(one.headings), one.seq_start - 1, one.seq_end - 1) for one in found],
-        vectors,
-        embed,
-    )
+    picked = strategy.pick(texts, [run(one) for one in found], vectors, embed)
     return [
         msgspec.structs.replace(one, descriptors=about.descriptors, description=about.description)
         for one, about in zip(found, picked, strict=True)

@@ -11,9 +11,10 @@ import numpy as np
 import pytest
 
 from haskie.indexing import embed, gguf_models
-from haskie.settings import Accelerator
+from haskie.settings import Accelerator, Describer
 
 SHORT, LONG = "test/short-GGUF", "test/long-GGUF"
+DESCRIBER = gguf_models.DESCRIBERS[Describer.QWEN_3_5_4B].name
 
 
 @pytest.fixture(autouse=True)
@@ -55,7 +56,7 @@ class Llama:
     # or, `by_char`, one token a character with none around it (the generator's prompt)
     by_char = False
 
-    def tokenize(self, text: bytes, add_bos: bool = True) -> list[int]:
+    def tokenize(self, text: bytes, add_bos: bool = True, special: bool = False) -> list[int]:
         if self.by_char:
             return list(text)
         words = [7] * len(text.split())
@@ -69,9 +70,33 @@ class Llama:
             return bytes(tokens)
         return b" ".join(b"w" for _ in range(len(tokens) * self.grows))
 
-    def create_chat_completion(self, messages: list[dict], **options: object) -> dict:
-        self.calls.append(([messages[0]["content"]], options))
-        return {"choices": [{"message": {"content": "Topic one | Topic two"}}]}
+    # what the generator renders its prompts with (`GgufGenerator._chat`)
+    metadata = {"tokenizer.chat_template": "{{ messages[0]['content'] }}"}
+    _model = types.SimpleNamespace(token_get_text=lambda token: "</s>")
+
+    def token_eos(self) -> int:
+        return 2
+
+    def token_bos(self) -> int:
+        return -1  # as Qwen's file, which names no start token
+
+    def create_completion(self, tokens: list[int], **options: object) -> dict:
+        self.calls.append(([self.detokenize(tokens).decode()], options))
+        return {"choices": [{"text": "<think>\n\n</think>\n\nTopic one | Topic two"}]}
+
+
+class Formatter:
+    """`Jinja2ChatFormatter`, stood in for with the llama_cpp module: the prompt as it is, and the
+    flags it was rendered with."""
+
+    def __init__(self, template: str, eos_token: str, bos_token: str) -> None:
+        self.bos_token = bos_token
+
+    def __call__(self, messages: list[dict], **flags: object) -> types.SimpleNamespace:
+        Formatter.flags = flags
+        return types.SimpleNamespace(prompt=messages[0]["content"])
+
+    flags: dict[str, object] = {}
 
 
 @pytest.fixture
@@ -79,6 +104,8 @@ def llama(monkeypatch) -> type[Llama]:
     """The extra may not be installed where the suite runs: the module is stood in for whole."""
     Llama.built = []
     monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(Llama=Llama))
+    chat_format = types.SimpleNamespace(Jinja2ChatFormatter=Formatter)
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_chat_format", chat_format)
     monkeypatch.setattr(gguf_models, "_download", lambda repo: Path(f"/models/{repo}.gguf"))
     return Llama
 
@@ -190,10 +217,11 @@ def test_the_generator_fits_its_prompt_to_the_context(
     """An excerpt is bounded in characters, and digits take a token each: llama.cpp refuses a
     prompt past the context, so it is cut, keeping the instructions at its start."""
     monkeypatch.setattr(llama, "by_char", True)
-    generator = gguf_models.GgufGenerator(gguf_models.DESCRIBER)
+    generator = gguf_models.GgufGenerator(DESCRIBER)
     prompt = "Write descriptors. " + "7" * (length - 19)
 
-    assert generator.reply(prompt, 60) == "Topic one | Topic two", name
+    assert generator.reply(prompt, 60) == "Topic one | Topic two", f"{name}: thinking dropped"
+    assert Formatter.flags == {"enable_thinking": False}, "rendered with thinking off"
 
     (options,) = llama.built
     assert (options["n_ctx"], options["n_gpu_layers"]) == (gguf_models.GENERATOR_TOKENS, -1)

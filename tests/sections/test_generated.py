@@ -126,6 +126,105 @@ def test_each_section_is_one_prompt_with_its_heading_path() -> None:
     assert SAGAS in prompts[1] and QUORUMS not in prompts[1], "its own chunks only"
 
 
+# A chapter of chunks 0 to 3: two sections, the first with a subsection, and a sibling chapter.
+CHAPTER = Run(("Book", "Sagas"), 0, 3)
+ORCHESTRATION = Run(("Book", "Sagas", "Orchestration"), 0, 1)
+TIMEOUTS = Run(("Book", "Sagas", "Orchestration", "Timeouts"), 1, 1)
+RECOVERY = Run(("Book", "Sagas", "Recovery"), 2, 3)
+QUORUM = Run(("Book", "Quorums"), 4, 4)
+
+
+@pytest.mark.parametrize(
+    ("name", "run", "known", "expected"),
+    [
+        (
+            "every section under it, at any depth, in document order",
+            CHAPTER,
+            [(RECOVERY, []), (TIMEOUTS, []), (QUORUM, []), (ORCHESTRATION, [])],
+            [ORCHESTRATION, TIMEOUTS, RECOVERY],
+        ),
+        ("not itself, nor a sibling", ORCHESTRATION, [(ORCHESTRATION, []), (RECOVERY, [])], []),
+        ("a leaf has none", TIMEOUTS, [(CHAPTER, []), (ORCHESTRATION, [])], []),
+        (
+            "the whole document holds every section",
+            Run((), 0, 4),
+            [(QUORUM, []), (CHAPTER, [])],
+            [CHAPTER, QUORUM],
+        ),
+        ("nothing known", CHAPTER, [], []),
+    ],
+)
+def test_subsections(name: str, run: Run, known: list, expected: list[Run]) -> None:
+    assert [one for one, _ in generated.subsections(run, known)] == expected, name
+
+
+def test_an_outline_indents_by_depth_and_names_each_subsections_topics() -> None:
+    below = [
+        (ORCHESTRATION, ["Saga coordinator"]),
+        (TIMEOUTS, ["Step deadlines", "Retries"]),
+        (RECOVERY, []),
+    ]
+    assert generated.subsection_outline(CHAPTER, below) == (
+        "- Orchestration (Saga coordinator)\n  - Timeouts (Step deadlines, Retries)\n- Recovery"
+    )
+
+
+@pytest.mark.parametrize(
+    ("topics", "cut"),
+    [
+        pytest.param(1600, False, id="too long whole: the deeper headings go first"),
+        pytest.param(4000, True, id="too long even so: cut at the limit"),
+    ],
+)
+def test_an_outline_too_long_drops_depth_then_cuts(topics: int, cut: bool) -> None:
+    long = "x" * topics
+    below: list[generated.Described] = [
+        (ORCHESTRATION, [long]),
+        (TIMEOUTS, [long]),
+        (RECOVERY, ["Undo"]),
+    ]
+    outline = generated.subsection_outline(CHAPTER, below)
+    if cut:
+        assert len(outline) == generated.OUTLINE_CHARS
+        assert outline.startswith("- Orchestration (")
+    else:
+        assert outline.splitlines() == [f"- Orchestration ({long})", "- Recovery (Undo)"]
+
+
+def test_a_long_section_with_subsections_reads_their_outline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deepest first, as the pipeline orders them: a leaf gets the plain prompt, and a section
+    above it, longer than `OUTLINE_FROM_CHARS`, the outline of what was described under it, in this
+    pick or before it (`known`)."""
+    monkeypatch.setattr(generated, "OUTLINE_FROM_CHARS", 0)
+    prompts: dict[str, str] = {}
+
+    def reply(prompt: str, max_tokens: int) -> str:
+        heading = prompt.split("Heading path: ", 1)[1].split("\n", 1)[0]
+        prompts[heading] = prompt
+        return f"{heading.rsplit(' > ', 1)[-1]} topic"
+
+    texts = [SAGAS, QUORUMS, SAGAS, QUORUMS]
+    known = [(RECOVERY, ["Compensation"])]  # described by an earlier batch
+
+    picked = generated.Generated(reply, known).pick(
+        texts, [TIMEOUTS, ORCHESTRATION, CHAPTER], None, None
+    )
+
+    assert picked == [Description(["Timeouts topic"]), Description(["Orchestration topic"]),
+                      Description(["Sagas topic"])]  # fmt: skip
+    assert "Outline of its subsections" not in prompts["Book > Sagas > Orchestration > Timeouts"]
+    assert "- Timeouts (Timeouts topic)" in prompts["Book > Sagas > Orchestration"]
+    chapter = prompts["Book > Sagas"]
+    assert "Name what the section as a whole is about" in chapter
+    assert chapter.split("Outline of its subsections:\n", 1)[1].split("\n\n", 1)[0] == (
+        "- Orchestration (Orchestration topic)\n"
+        "  - Timeouts (Timeouts topic)\n"
+        "- Recovery (Compensation)"
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "answer", "expected"),
     [
@@ -305,3 +404,33 @@ def test_a_collection_too_large_reads_each_description_cut_to_its_share() -> Non
     )
     share = generated.COLLECTION_CHARS // 100
     assert f"1. Book 0 {'x' * (share - len('Book 0 '))}\n2. Book 1" in prompts[0]
+
+
+@pytest.mark.parametrize(
+    ("over", "outline"),
+    [
+        pytest.param(0, False, id="at the bar: the excerpt alone"),
+        pytest.param(1, True, id="one character over it: the outline too"),
+    ],
+)
+def test_the_outline_starts_past_its_bar(
+    monkeypatch: pytest.MonkeyPatch, over: int, outline: bool
+) -> None:
+    """Below `OUTLINE_FROM_CHARS` the outline gained nothing when judged: the plain prompt."""
+    texts = [SAGAS, QUORUMS, SAGAS, QUORUMS]
+    monkeypatch.setattr(generated, "OUTLINE_FROM_CHARS", len("".join(texts)) - over)
+    prompts: list[str] = []
+
+    def reply(prompt: str, max_tokens: int) -> str:
+        prompts.append(prompt)
+        return "Topic"
+
+    generated.Generated(reply, [(RECOVERY, ["Compensation"])]).pick(texts, [CHAPTER], None, None)
+
+    (prompt,) = prompts
+    assert ("- Recovery (Compensation)" in prompt) is outline
+    assert ("Outline of its subsections" in prompt) is outline
+
+
+def test_the_outline_bar_is_eight_excerpts() -> None:
+    assert generated.OUTLINE_FROM_CHARS == 8 * generated.EXCERPT_CHARS == 48_000

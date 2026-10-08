@@ -3,6 +3,7 @@
 // document and `mise run check` proves is still current. Nothing here explains what a field
 // means, because the definitions the UI shows come from /api/options.docs.
 import type { components, operations } from './schema'
+import { workStarted } from './hooks/workStarted'
 
 // One OpenAPI document describes both directions, so a msgspec field with a default counts as
 // "not required" there. On the wire every field is present, and the UI sends whole objects back,
@@ -143,6 +144,14 @@ export type Page<T> = Omit<Wire<'Page_haskie.document.document.Listed_'>, 'items
 // What an import may say about the document it creates. Everything is optional: the file name
 // and the user's conversion defaults answer for whatever is left out.
 type ImportOptions = Partial<Omit<Wire<'ImportRequest'>, 'staging_id' | 'path'>>
+
+/** `request` for a call that starts background work: once accepted, the status bar hears of it
+ *  (`workStarted`), since the work may load a knowledge model it would otherwise show late. */
+async function starts<T>(url: string, init?: RequestInit): Promise<T> {
+  const answer = await request<T>(url, init)
+  workStarted()
+  return answer
+}
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init)
@@ -285,13 +294,13 @@ export const api = {
     request<CollectionInfo>(`${collectionPath(name)}/description`, json('PUT', { description })),
   // Queued: its documents with none are described first, then the collection, replacing its own.
   generateCollectionDescription: (name: string) =>
-    request<BulkStarted>(`${collectionPath(name)}/description/generate`, { method: 'POST' }),
+    starts<BulkStarted>(`${collectionPath(name)}/description/generate`, { method: 'POST' }),
   renameCollection: (name: string, to: string) => request<CollectionInfo>(`${collectionPath(name)}/name`, json('PUT', { name: to })),
   collection: (name: string) => request<CollectionInfo>(collectionPath(name)),
   deleteCollection: (name: string) => request<BulkStarted>(collectionPath(name), { method: 'DELETE' }),
   saveCollectionOverrides: (name: string, s: CollectionOverrides) =>
     request<CollectionInfo>(`${collectionPath(name)}/overrides`, json('PUT', s)),
-  indexCollection: (name: string) => request<BulkStarted>(`${collectionPath(name)}/index`, { method: 'POST' }),
+  indexCollection: (name: string) => starts<BulkStarted>(`${collectionPath(name)}/index`, { method: 'POST' }),
   collectionCoverUrl: (name: string) => `${collectionPath(name)}/cover`,
 
   // The collection's members: one document row each, plus how far this collection indexed it.
@@ -301,10 +310,10 @@ export const api = {
   },
   // Adds the membership and indexes it; the document itself is already imported.
   attachDocument: (name: string, doc: string) =>
-    request<BulkStarted>(`${collectionPath(name)}/documents`, json('POST', { document: doc })),
+    starts<BulkStarted>(`${collectionPath(name)}/documents`, json('POST', { document: doc })),
   // Drops the membership and the collection's chunks of it. The document and its embeddings stay.
   detachDocument: (name: string, doc: string) => request<void>(memberPath(name, doc), { method: 'DELETE' }),
-  reindexMember: (name: string, doc: string) => request<BulkStarted>(`${memberPath(name, doc)}/index`, { method: 'POST' }),
+  reindexMember: (name: string, doc: string) => starts<BulkStarted>(`${memberPath(name, doc)}/index`, { method: 'POST' }),
 
   documents: (q: PageRequest & { status?: DocumentStatus } = {}) => {
     const { status, ...page } = q
@@ -320,12 +329,12 @@ export const api = {
     return request<Staged>('/api/documents/staging', { method: 'POST', body })
   },
   // Upload step two: name the staged bytes and start the import pipeline.
-  importStaged: (req: ImportOptions & { staging_id: string }) => request<ImportedDocument>('/api/documents/import', json('POST', req)),
+  importStaged: (req: ImportOptions & { staging_id: string }) => starts<ImportedDocument>('/api/documents/import', json('POST', req)),
   // Import a file the server can already read, by path; the file is copied, not moved.
-  importPath: (path: string, opts: ImportOptions = {}) => request<ImportedDocument>('/api/documents/import', json('POST', { path, ...opts })),
+  importPath: (path: string, opts: ImportOptions = {}) => starts<ImportedDocument>('/api/documents/import', json('POST', { path, ...opts })),
   deleteDocument: (doc: string) => request<BulkStarted>(documentPath(doc), { method: 'DELETE' }),
   // Re-run a failed or cancelled import; the backend refuses any other status.
-  reimportDocument: (doc: string) => request<BulkStarted>(`${documentPath(doc)}/import`, { method: 'POST' }),
+  reimportDocument: (doc: string) => starts<BulkStarted>(`${documentPath(doc)}/import`, { method: 'POST' }),
   documentCollections: (doc: string) => request<string[]>(`${documentPath(doc)}/collections`),
   documentEmbeddings: (doc: string) => request<EmbeddingEntry[]>(`${documentPath(doc)}/embeddings`),
   documentSections: (doc: string) => request<Sections>(`${documentPath(doc)}/sections`),
@@ -334,7 +343,7 @@ export const api = {
     request<ImportedDocument>(`${documentPath(doc)}/description`, json('PUT', { description })),
   // Queued: the describer writes it in the background, replacing the one there.
   generateDescription: (doc: string) =>
-    request<BulkStarted>(`${documentPath(doc)}/description/generate`, { method: 'POST' }),
+    starts<BulkStarted>(`${documentPath(doc)}/description/generate`, { method: 'POST' }),
   // Some lines of the converted markdown: what an `also_in` place reads back when it is opened.
   lines: (doc: string, lineStart: number, lineEnd: number) =>
     request<Lines>(`${documentPath(doc)}/lines${pageQuery({}, { line_start: String(lineStart), line_end: String(lineEnd) })}`),

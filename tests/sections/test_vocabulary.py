@@ -7,7 +7,9 @@ import numpy as np
 import pytest
 
 from haskie.sections import vocabulary
-from haskie.sections.vocabulary import JUDGE_COSINE, SAME_CONCEPT, Term
+from haskie.sections.vocabulary import JUDGE_COSINE, Term
+
+SAME_CONCEPT = 0.15  # a describer's bar for one concept (`gguf_models.Generator.same_concept`)
 
 
 def at_angles(*degrees: float) -> np.ndarray:
@@ -70,8 +72,8 @@ def test_same_words(name: str, a: str, b: str, expected: bool) -> None:
 def test_distinct_topics_need_a_verdict_even_with_similar_vectors(variants: list[str]) -> None:
     vectors = at_angles(0, 1)
     assert vocabulary.to_judge(variants, vectors) == [vocabulary.pair(*variants)]
-    assert vocabulary.cluster(variants, [2, 1], vectors, {}) == [0, 1]
-    assert vocabulary.cluster(variants, [2, 1], at_angles(0, 90), {}) == [0, 1]
+    assert vocabulary.cluster(variants, [2, 1], vectors, {}, SAME_CONCEPT) == [0, 1]
+    assert vocabulary.cluster(variants, [2, 1], at_angles(0, 90), {}, SAME_CONCEPT) == [0, 1]
 
 
 @pytest.mark.parametrize("count", [0, 1])
@@ -163,7 +165,7 @@ def test_cluster(
     verdicts: dict[tuple[str, str], float],
     expected: list[int],
 ) -> None:
-    found = vocabulary.cluster(variants, uses, at_angles(*degrees), verdicts)
+    found = vocabulary.cluster(variants, uses, at_angles(*degrees), verdicts, SAME_CONCEPT)
     assert found == expected, name
 
 
