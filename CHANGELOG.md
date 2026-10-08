@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.33.0 - 2026-10-08
+#### Features
+- enrich section metadata and operation feedback (#45) - (970f894) - Črtomir Majer
+
+- - -
+
 ## v0.32.2 - 2026-10-07
 #### Refactoring
 - (**cli**) share client installation lifecycle steps (#48) - (f80f278) - Črtomir Majer
