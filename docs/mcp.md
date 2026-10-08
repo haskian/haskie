@@ -6,7 +6,7 @@ The two search tools (`search_excerpts`, `search_sections`) are twins of
 their REST routes, under `/api/agent/` and left out of the OpenAPI document. Each runs the same
 search and answers with fewer fields (`api/agent.py`): no offsets, chunk numbers, lines or pages
 beside the `location` that names them, and no empty list or map. The web UI keeps the whole
-answer. The skill that `haskie install claude` writes is the full tool reference for agents:
+answer. Both agent installers write the shared tool reference:
 [`SKILL.md`](../src/haskie/claude_code/skills/haskie/SKILL.md).
 
 ## Tools
@@ -17,6 +17,48 @@ answer. The skill that `haskie install claude` writes is the full tool reference
 | catalogue | `list_collections`, `get_collection`, `list_collection_documents`, `list_documents`, `get_document` |
 | write | `add_document`, `add_document_to_collection`, `remove_document_from_collection`, `describe_document` |
 | log and gaps | `list_searches`, `list_gaps`, `replay_gaps`, `review_gaps`, `report_gap` ([Gaps](gaps.md)) |
+
+### Capabilities and scope
+
+| Tool | What it does |
+| --- | --- |
+| `search_sections` | Maps a topic across sections and documents without returning their body text. Descriptors and related sections help choose where to read. Pass a returned section `id` to `search_excerpts`. |
+| `search_excerpts` | Returns cited passages grouped by section. Takes one question or up to five parts of one question. Parts take turns at the result slots, and excerpts identify the parts they cover. `document_ids` and `section_ids` narrow the search. |
+| `set_session_collections` | Replaces the collection scope for subsequent searches in the session. |
+| `list_collections`, `get_collection`, `list_collection_documents` | Browse collections, descriptions, settings and membership states. |
+| `list_documents`, `get_document` | Browse imported documents and their import states. |
+| `add_document` | Imports a local file by absolute path or a staged upload. Import runs in the background. |
+| `add_document_to_collection`, `remove_document_from_collection` | Queue indexing or removal of a collection membership. Detaching keeps the imported document. |
+| `describe_document` | Sets or clears the document description shown in section maps. |
+| `report_gap` | Records that a recent search did not answer the question, fully or in part. |
+| `list_searches`, `list_gaps` | Review search history and missing coverage. |
+| `replay_gaps`, `review_gaps` | Ask gap questions again, then resolve, dismiss or reopen them. |
+
+Search scope uses the explicit `collections` argument, else the session's selection, else all
+searchable collections. The response's `searched` field names the actual scope. Document and
+section filters narrow it further. A search scoped to a few sections cannot establish that the
+whole library lacks an answer. See [scope and ranking](search.md#the-shared-ranking).
+
+Use one `session_id` for a conversation so its searches and changes appear together in Sessions.
+Search, gap reporting and document/membership changes accept it. The installed instructions and
+tool schemas describe which calls require it. The session hook supplies an ID; the Codex rule
+also describes a fallback when no hook announcement is available.
+
+### Reading and citing results
+
+Each excerpt has a `header` and `location`, with locations such as
+`manual.pdf p.12 L240-265`. These identify the document, PDF page and lines in the full converted
+Markdown file. `markdown_file` points to that file for deeper reading. The excerpt's spans retain
+the locations of individual passages.
+
+`also_in` preserves places that passed a repeat test: `duplicate`, `contained` or `equivalent`.
+A repeat can be in the same document. Check the document before treating it as another source.
+The `related` sections of a map are suggestions for more reading and have not passed that test.
+
+For a question with several parts, inspect `aspects` and `uncovered` to see which parts received
+evidence. The scores and tags do not establish that a passage answers the question. Read it
+before citing it. The [tool reference](../src/haskie/claude_code/skills/haskie/SKILL.md) describes
+arguments and result fields; [search](search.md#several-questions-at-once) explains allocation.
 
 Everything else stays in the web UI and the REST API: managing collections, re-indexing,
 deleting or re-importing documents, operations and settings.

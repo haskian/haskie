@@ -5,6 +5,11 @@ current step, not the run. So imports, indexing, deletes, maintenance, model dow
 and restores run as [DBOS](https://docs.dbos.dev) workflows, recorded step by step in the same
 SQLite file as the rest of the app. Model warm-ups after boot are plain background tasks.
 
+DBOS supplies durable execution without a separate job broker. Its
+[Python project documentation](https://github.com/dbos-inc/dbos-transact-py) describes checkpointed
+workflows and recovery. haskie chooses the step boundaries, cache keys and queue limits described
+below; these determine how much work a restart repeats and which collections share an embedding.
+
 ## Operations, jobs and tasks
 
 haskie counts work in three words:
@@ -75,7 +80,8 @@ the settings' is described again, so *Index all* applies a changed setting to a 
 Every strategy reads prose only: code blocks and tables name identifiers and values, not what a
 section is about.
 
-- **llm.** Gemma-4-E2B (ggml-org's Q4_0 GGUF, 2.8 GB, on llama.cpp on the Apple GPU) runs
+- **llm.** The selected describer, Qwen3.5-4B or Gemma-4-E2B, runs through llama.cpp on the
+  Apple GPU. The models use roughly 2.8–3.0 GB; see [model loads](runtime.md#model-loads). It runs
   three stages in the same import or index operation: **Describe sections**, **Section
   descriptors**, then **Describe document**. The first writes one-to-two-sentence descriptions;
   the second writes up to six topics. They use separate prompts with reply budgets of 120
@@ -94,7 +100,7 @@ section is about.
   24,000, and -0.10 [-0.33, +0.15] on 48 parents of 4 to 15 chunks. The bar was read off those
   same sections. Descriptors rolled up from the subsections without a prompt scored worse than
   the model's own: they name single subsections.
-  The earlier five-descriptor prompt scored 4.04 of 5 on 200 sections of four technical books,
+  Gemma-4-E2B's earlier five-descriptor prompt scored 4.04 of 5 on 200 sections of four technical books,
   against 2.13 for c-TF-IDF, at 0.51 s a section on an M4 Pro. Its model downloads like the others,
   as a `describer`, and each batch waits for it. The document stage uses the saved section
   descriptions and descriptors to write two to five sentences (`generated.summarize`). Long

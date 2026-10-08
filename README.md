@@ -19,6 +19,8 @@ without reading whole documents into its context.
 haskie runs on your machine and connects to Codex and Claude Code. You choose the sources.
 Your agent uses them to reason about your work.
 
+Read [why haskie exists](docs/why-haskie.md) for the reasoning and research behind it.
+
 ## Mission
 
 Make knowledge easy for people to curate and for AI agents to explore. Help agents see the wider
@@ -108,6 +110,9 @@ For Codex, review and trust the installed session hook in Codex before starting 
 For example: *“Which orders qualify for a refund under our returns policy?”*
 The search-first rule tells your agent to consult your collections and cite the passages it uses.
 If they do not answer the question, it should say so before looking elsewhere.
+
+See [setup and operation](docs/setup.md) for hardware and model choices. The
+[user guide](docs/user-guide.md) covers curation, search views and supported file extensions.
 
 ## Connect your agent
 

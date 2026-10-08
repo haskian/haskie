@@ -6,6 +6,12 @@ Downloaded model weights are the exception: they sit in the Hugging Face cache, 
 the ONNX models under `haskie-onnx` in it, as plain files, since ONNX Runtime refuses external
 data behind the cache's links.
 
+Each collection has a local LanceDB table for vector and full-text search. This keeps hybrid
+retrieval in an embedded store with no separate database server to operate. Lance's columnar
+format is designed for efficient random access; its authors describe the encoding trade-offs in
+[Lance: Efficient Random Access in Columnar Storage through Adaptive Structural Encodings](https://arxiv.org/abs/2504.15247).
+The choice of one table per collection and a single writer is haskie's own design.
+
 ```
 ~/.haskie/
   haskie.db               SQLite (WAL): settings, documents, collections, memberships,

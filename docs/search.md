@@ -21,6 +21,13 @@ flowchart LR
 
 ## The shared ranking
 
+Vectors retrieve by meaning; BM25 retrieves by words, including identifiers an embedding may
+miss. A cross-encoder can then score each query and candidate together. Anthropic's contextual
+retrieval experiment combined these ideas with model-generated chunk context. Its top-20
+retrieval failure rate fell from 5.7% to 2.9% with contextual embeddings and contextual BM25,
+then to 1.9% with reranking [12]. These are that experiment's results. haskie uses heading frames
+and its own models, so those gains are not a haskie benchmark.
+
 1. **Scope.** The `collections` argument, else the session's collections, else all of them, and
    only collections with a document to search: an indexed member, or one being indexed again,
    that is not on its way out. Naming one without any is refused (409), since its empty answer
@@ -432,6 +439,16 @@ off until an evaluation shows it returns more answer per character than the fold
 
 ## Folding repeats
 
+The goal is to reserve result slots for distinct evidence while retaining every folded place's
+citation. Ross and colleagues tested exact duplicates, paraphrases and diverse document genres
+on the synthetic FictionalQA dataset. Their 2026 preprint found no significant correctness gain
+from duplicates or paraphrases, while diverse documents improved correctness by 17–47% [13].
+This motivates evaluating diversity; it does not guarantee the same gain for real collections.
+
+Folding differs from a diversity reranker such as maximal marginal relevance: it keeps the
+ranked result's slot and groups repeats under it rather than reordering for novelty. The same
+ordered inputs and settings produce the same groups. The following rules describe how.
+
 A pointwise reranker scores one passage at a time, so it cannot see that two results repeat each
 other [1]. `search/collapse.py` folds them in the chunk and passage pipelines, once per search, as
 the last fold before the answer. The fold walks the results best first and compares each one only
@@ -610,3 +627,7 @@ Code: `search/flow.py`, `search/retrieval.py`, `search/passage.py`, `search/coll
 11. Grootendorst, M. "Representation models": `KeyBERTInspired` and `MaximalMarginalRelevance`.
     BERTopic documentation, 2026.
     https://maartengr.github.io/BERTopic/getting_started/representation/representation.html
+12. Anthropic. "Introducing Contextual Retrieval." September 2024.
+    [Study and methodology](https://www.anthropic.com/engineering/contextual-retrieval).
+13. Ross, J. J. et al. "How retriever redundancy and diversity impact RAG effectiveness."
+    2026, preprint. [Paper](https://arxiv.org/abs/2608.13956).

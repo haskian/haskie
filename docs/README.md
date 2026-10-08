@@ -1,7 +1,21 @@
 # haskie docs
 
-How haskie works, one topic per page. Each page has diagrams and names the code it describes.
-Start with the architecture, then follow a document from import to a cited answer.
+Guides for using haskie and understanding its design. Start with setup for your first library,
+or read the rationale for the product choices and their research sources.
+
+## Using haskie
+
+| page | what it covers |
+| --- | --- |
+| [Why haskie exists](why-haskie.md) | trusted sources, personal taste, focused context, human research models and the evidence behind the design |
+| [Setup and operation](setup.md) | installation, hardware, models, agent connections, commands and upgrades |
+| [User guide](user-guide.md) | importing, collections, previews, Explore, activity, gap replay and supported formats |
+| [MCP, Codex and Claude Code](mcp.md) | installation details, tool capabilities, scopes, citations and a session end to end |
+
+## How it works
+
+Follow a document from import to a cited answer. These pages describe the implementation and
+link its design choices to research where applicable.
 
 | page | what it covers |
 | --- | --- |
@@ -13,7 +27,6 @@ Start with the architecture, then follow a document from import to a cited answe
 | [Gaps](gaps.md) | the search log, which searches found no answer, and how the bars were measured |
 | [Storage](storage.md) | the home directory, the metadata database, schema changes |
 | [REST API](rest-api.md) | routes, intake, errors, paging |
-| [MCP and Claude Code](mcp.md) | the tools, what the installer adds, a session end to end |
 | [Runtime](runtime.md) | async IO, CPU work in threads, two event loops, model loads |
 
-For setup and the development commands, see [CONTRIBUTING.md](../CONTRIBUTING.md).
+For development setup and commands, see [CONTRIBUTING.md](../CONTRIBUTING.md).
