@@ -15,7 +15,7 @@ import { errorText, matchesText, needleOf } from '../../format'
 import { useOperation } from '../../hooks/useOperation'
 import { usePoll } from '../../hooks/usePoll'
 import { useRun } from '../../hooks/useRun'
-import { BulkStatus, BusyButton, DescriptionBox, documentIcon, Kv, Modal, ModalStatus, RenameForm, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
+import { BulkStatus, BusyButton, DescriptionBox, documentIcon, Kv, ListPane, Modal, ModalStatus, RenameForm, SearchBox, SearchPanel, Tabs, type TabDef } from '../../ui'
 import { plural } from '../../ui/match'
 import { candidateDocuments, otherCollections } from './candidates'
 import { SettingsForm } from './SettingsForm'
@@ -167,64 +167,54 @@ function CollectionBody({
       <div id={TABS[0].id} role="tabpanel" className="modal-panel collection-panel" hidden={tab !== TABS[0].id}>
         <SearchBox value={filter} onChange={setFilter} placeholder="Search documents" />
         <div className="split">
-          <section className="pane">
-            <span className="pane-head mono muted">In collection · {shownMembers.length}</span>
-            <div className="pane-body">
-              <ul className="list">
-                {shownMembers.map((member) => {
-                  const Icon = documentIcon(member.document.suffix)
-                  return (
-                    <li className="list-item" key={member.document.name}>
-                      <Icon className="icon" />
-                      <span className="list-text">
-                        <DocumentName document={member.document} />
-                        <span className="sub">{member.error === null ? member.status : `${member.status} · ${member.error}`}</span>
-                      </span>
-                      <AlsoIn collections={elsewhere.get(member.document.name) ?? []} />
-                      <button
-                        className="btn btn-ghost"
-                        type="button"
-                        aria-label="Remove"
-                        disabled={busy}
-                        onClick={() => void run(() => api.detachDocument(name, member.document.name))}
-                      >
-                        <Minus className="icon" />
-                      </button>
-                    </li>
-                  )
-                })}
-              </ul>
-            </div>
-          </section>
-          <section className="pane">
-            <span className="pane-head mono muted">Available · {shownCandidates.length}</span>
-            <div className="pane-body">
-              <ul className="list">
-                {shownCandidates.map((doc) => {
-                  const Icon = documentIcon(doc.suffix)
-                  return (
-                    <li className="list-item" key={doc.name}>
-                      <Icon className="icon" />
-                      <span className="list-text">
-                        <DocumentName document={doc} />
-                        {doc.pages != null && <span className="sub">{plural(doc.pages, 'page')}</span>}
-                      </span>
-                      <AlsoIn collections={doc.collections} />
-                      <button
-                        className="btn btn-ghost"
-                        type="button"
-                        aria-label="Add"
-                        disabled={busy}
-                        onClick={() => void run(() => api.attachDocument(name, doc.name))}
-                      >
-                        <Plus className="icon" />
-                      </button>
-                    </li>
-                  )
-                })}
-              </ul>
-            </div>
-          </section>
+          <ListPane head="In collection" count={shownMembers.length}>
+            {shownMembers.map((member) => {
+              const Icon = documentIcon(member.document.suffix)
+              return (
+                <li className="list-item" key={member.document.name}>
+                  <Icon className="icon" />
+                  <span className="list-text">
+                    <DocumentName document={member.document} />
+                    <span className="sub">{member.error === null ? member.status : `${member.status} · ${member.error}`}</span>
+                  </span>
+                  <AlsoIn collections={elsewhere.get(member.document.name) ?? []} />
+                  <button
+                    className="btn btn-ghost"
+                    type="button"
+                    aria-label="Remove"
+                    disabled={busy}
+                    onClick={() => void run(() => api.detachDocument(name, member.document.name))}
+                  >
+                    <Minus className="icon" />
+                  </button>
+                </li>
+              )
+            })}
+          </ListPane>
+          <ListPane head="Available" count={shownCandidates.length}>
+            {shownCandidates.map((doc) => {
+              const Icon = documentIcon(doc.suffix)
+              return (
+                <li className="list-item" key={doc.name}>
+                  <Icon className="icon" />
+                  <span className="list-text">
+                    <DocumentName document={doc} />
+                    {doc.pages != null && <span className="sub">{plural(doc.pages, 'page')}</span>}
+                  </span>
+                  <AlsoIn collections={doc.collections} />
+                  <button
+                    className="btn btn-ghost"
+                    type="button"
+                    aria-label="Add"
+                    disabled={busy}
+                    onClick={() => void run(() => api.attachDocument(name, doc.name))}
+                  >
+                    <Plus className="icon" />
+                  </button>
+                </li>
+              )
+            })}
+          </ListPane>
         </div>
       </div>
 

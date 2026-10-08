@@ -14,7 +14,8 @@ use; see `operations.py` for the read model that never does.
 Layout:
 - `import_document` per imported document, on `operation.indexing`: convert, then pre-warm the
   embedding cache under the user's default chunk settings (most collections use them, so
-  attaching to one is then free). Ends at document status `imported`; no collection is touched.
+  attaching to one is then free). Ends at document status `imported`, then queues an index in each
+  collection holding the document: none on a first import, every one on a re-import.
 - `ensure_embedding` per (document, `embed_cache.Params`), on `operation.embedding`, deduplicated
   by the cache id: whoever asks for a missing embedding first computes it, everyone else asking for
   the same one meanwhile waits on that run. This is the only place chunks and vectors are
@@ -97,7 +98,7 @@ from datetime import datetime
 from enum import StrEnum
 from functools import partial
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import anyio
 import anyio.to_thread
@@ -1053,6 +1054,18 @@ def embed_id(parent_id: str, doc: str) -> str:
     return f"{EMBED_PREFIX}:{doc}:{run_id(parent_id)}"
 
 
+def index_id(collection: str, doc: str, tail: str) -> str:
+    """The id of one member's index, the grammar `pipeline_names` reads back."""
+    return f"{COLLECTION_DOCUMENT_PREFIX}:{collection}:{doc}:{tail}"
+
+
+def reindex_id(import_id: str, collection: str, doc: str) -> str:
+    """The id of the index an import queues in one collection holding its document. Derived, so a
+    replay re-attaches to it; its tail is its own, not the import's, or `embed_id` would hand the
+    index the import's finished embedding run under other chunk settings."""
+    return index_id(collection, doc, uuid5(NAMESPACE_URL, f"{import_id}:{collection}").hex)
+
+
 def _slice_count(stage: Stage, ctx: Context) -> int:
     """Slices this stage may be cut into. The index stage is never sliced (see `INDEX_QUEUE`), nor
     is describe: c-TF-IDF is one batch, and the llm describer answers one prompt at a time."""
@@ -1183,10 +1196,14 @@ async def _outcome(
 @DBOS.workflow(name=IMPORT_WORKFLOW)
 async def import_document(doc: str) -> DocumentStatus:
     """convert, then pre-warm the embedding cache under the user's default chunk settings;
-    document status mirrors the stage. Collection-independent: nothing is written to any table."""
+    document status mirrors the stage. Writes no collection's table itself: once `imported`, it
+    queues an index in each collection holding the document, which a re-import's rebuild needs."""
     with logs.bound(workflow_id=DBOS.workflow_id, document_id=doc):
-        # first step, so a deduplicated submit changes nothing
+        # first step, so a deduplicated submit changes nothing. `queued` refuses an attach and a
+        # description, and takes the document out of search: a re-import rewrites the markdown
+        # its rows point into, and drops the cache its last import's work reads.
         await set_status(doc, DocumentStatus.QUEUED)
+        await cancel_document_work(doc, DBOS.workflow_id)
         set_state = partial(set_status, doc)
         async with _outcome(
             set_state, DocumentStatus.IMPORTED, DocumentStatus.ERROR, None, doc, "import"
@@ -1197,6 +1214,15 @@ async def import_document(doc: str) -> DocumentStatus:
             await _stage(Stage.CONVERT, ctx)
             await set_status(doc, DocumentStatus.EMBEDDING)
             await _ensure_embedding(ctx)
+            # Read before `imported`, while an attach is still refused, so it is the whole list:
+            # an attach after `imported` queues an index of its own.
+            holding = await memberships(doc)
+        # Queued after `imported`, which the index asks for. A first import has no collection
+        # yet; a re-import replaced the cache each collection holding it was indexed from.
+        for collection in holding:
+            await _enqueue_index(
+                collection, doc, reindex_id(DBOS.workflow_id or "", collection, doc)
+            )
         return DocumentStatus.IMPORTED
 
 
@@ -1595,17 +1621,23 @@ async def remove_from_collection_index(collection: str, doc: str) -> None:
 
 
 @retried_step
-async def cancel_document_work(doc: str) -> None:
-    """Cancel every import, embedding run, description and collection index of the document. One
-    call: DBOS writes CANCELLED for the whole list, children included, before it returns.
-    Retried: it is a series of DBOS writes, and cancelling again is a no-op."""
-    await DBOS.cancel_workflows_async(await _active_document_workflows(doc), cancel_children=True)
+async def cancel_document_work(doc: str, keep: str | None = None) -> None:
+    """Cancel every import, embedding run, description and collection index of the document but
+    `keep`, the workflow asking, and mark each membership being indexed `cancelled`. One call:
+    DBOS writes CANCELLED for the whole list, children included, before it returns. Retried: it
+    is a series of writes, and cancelling again is a no-op."""
+    holding = await document.collections_of(doc)
+    active = [one for one in await _active_document_workflows(doc, holding) if one != keep]
+    await DBOS.cancel_workflows_async(active, cancel_children=True)
+    for collection in holding:
+        await Collection(collection).cancel_index(doc)
 
 
 @retried_step
 async def memberships(doc: str) -> list[str]:
     """The collections holding the document at this moment. Recorded, so a replay walks the same
-    list; an attach after this snapshot is refused by the `deleting` status set before it."""
+    list. For a delete, an attach after this snapshot is refused by the `deleting` status set
+    before it; for an import, it queues an index of its own."""
     return await document.collections_of(doc)
 
 
@@ -1682,9 +1714,7 @@ async def enqueue_page(collection: str, after: str | None, bulk_id: str) -> Bulk
     last: str | None = None
     for doc in await member_page(collection, after):
         last = doc
-        await _enqueue_index(
-            collection, doc, f"{COLLECTION_DOCUMENT_PREFIX}:{collection}:{doc}:{bulk_id[-32:]}"
-        )
+        await _enqueue_index(collection, doc, index_id(collection, doc, bulk_id[-32:]))
         done += 1
     return BulkProgress(done=done, last=last)
 
@@ -1865,13 +1895,14 @@ async def enqueue_operation(
     return handle.workflow_id
 
 
-# An import runs from a fresh document (`queued`) and from one whose import ended without its
-# markdown (`error`, `cancelled`). Any other status means a pipeline or a delete is writing
-# the same files right now, or that the markdown is already there.
+# An import runs from a fresh document (`queued`), from one whose import ended without its
+# markdown (`error`, `cancelled`), and again from one `imported`, which replaces all it built. Any
+# other status means a pipeline or a delete is writing the same files right now.
 IMPORTABLE: tuple[DocumentStatus, ...] = (
     DocumentStatus.QUEUED,
     DocumentStatus.ERROR,
     DocumentStatus.CANCELLED,
+    DocumentStatus.IMPORTED,
 )
 
 
@@ -1881,10 +1912,12 @@ async def start_import(row: Document) -> str:
     children share one prefix.
 
     The only admission rule for an import, so a re-import goes through here too rather than
-    repeating the check at the route."""
+    repeating the check at the route. The import itself moves the document back to `queued` and
+    cancels its work in flight (`import_document`), so a crash cannot leave one half done."""
     if row.status not in IMPORTABLE:
         raise Conflict(
-            f"document is {row.status}; only a queued, failed or cancelled import runs: {row.name}"
+            f"document is {row.status}; only a queued, imported, failed or cancelled document "
+            f"is imported: {row.name}"
         )
     return await enqueue_import(row.id)
 
@@ -1912,7 +1945,7 @@ async def _enqueue_index(collection: str, doc: str, workflow_id: str | None = No
         index_collection_document,
         collection,
         doc,
-        workflow_id=workflow_id or f"{COLLECTION_DOCUMENT_PREFIX}:{collection}:{doc}:{uuid4().hex}",
+        workflow_id=workflow_id or index_id(collection, doc, uuid4().hex),
         dedup_id=f"index:{collection}:{doc}",
     )
 
@@ -1991,17 +2024,17 @@ async def _active_collection_workflows(
     )
 
 
-async def _active_document_workflows(doc: str) -> list[str]:
+async def _active_document_workflows(doc: str, holding: list[str]) -> list[str]:
     """Every active workflow of one document, whichever collection it runs for.
 
     A collection index id names the collection before the document, so one prefix query per
-    collection the document is in filters them in the database instead of listing every active
-    index workflow and splitting the ids here."""
+    collection the document is in (`holding`, which the caller has read) filters them in the
+    database instead of listing every active index workflow and splitting the ids here."""
     ids = await _active_ids(  # the import, the embedding runs and the descriptions
         [IMPORT_WORKFLOW, EMBED_WORKFLOW, SUMMARIZE_DOCUMENT_WORKFLOW],
         [f"{prefix}:{doc}:" for prefix in (IMPORT_PREFIX, EMBED_PREFIX, SUMMARIZE_DOCUMENT_PREFIX)],
     )
-    for collection in await document.collections_of(doc):
+    for collection in holding:
         ids.extend(await _active_collection_workflows(collection, doc))
     return ids
 

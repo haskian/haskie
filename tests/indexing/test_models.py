@@ -372,21 +372,21 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
             [],
             [
                 ("embedding", "ibm-granite/granite-embedding-97m-multilingual-r2"),
-                ("describer", "unsloth/Qwen3.5-4B-GGUF"),
+                ("describer", "ggml-org/gemma-4-E2B-it-GGUF"),
                 ("vocabulary", "Qwen/Qwen3-Embedding-0.6B-GGUF"),
             ],
         ),
         (
-            "descriptors the faster describer writes",
+            "descriptors the other describer writes",
             UserSettings(
                 embedding="none",
                 pipeline=PipelineSettings(
-                    ocr=False, descriptors=Descriptors.LLM, describer=Describer.GEMMA_4_E2B
+                    ocr=False, descriptors=Descriptors.LLM, describer=Describer.QWEN_3_5_4B
                 ),
             ),
             [],
             [
-                ("describer", "ggml-org/gemma-4-E2B-it-GGUF"),
+                ("describer", "unsloth/Qwen3.5-4B-GGUF"),
                 ("vocabulary", "Qwen/Qwen3-Embedding-0.6B-GGUF"),
             ],
         ),

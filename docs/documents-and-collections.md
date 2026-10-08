@@ -74,6 +74,7 @@ stateDiagram-v2
     describing --> cancelled
     error --> queued: re-import
     cancelled --> queued: re-import
+    imported --> queued: re-import
     queued --> deleting: delete
     converting --> deleting: delete
     embedding --> deleting: delete
@@ -85,8 +86,12 @@ stateDiagram-v2
 ```
 
 Any failure lands in `error`: a parser error, an OCR policy failure, or retries run out. A
-re-import runs from `queued`, `error` or `cancelled`, with the `parser` and `skip_ocr_pages` the
-document was imported with. To change either, delete it and import it again. A delete is accepted
+re-import runs from `queued`, `error`, `cancelled` or `imported`, with the `parser` and
+`skip_ocr_pages` the document was imported with. To change either, delete it and import it again.
+From `imported` it rebuilds the document under the settings of now: it moves back to `queued`,
+cancels the document's work in flight (its indexes, embedding runs and description), and imports
+it again. Until it is `imported` again, search leaves the document out. Then every collection
+holding it indexes it again. The document's description stays. A delete is accepted
 in any state. The original suffix is kept in the name, because it decides the route:
 
 - PDFs convert page by page with pdf-inspector. It judges a heading by its font. So a typeset

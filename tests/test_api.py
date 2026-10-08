@@ -37,7 +37,7 @@ from haskie.collection.collection import Collection
 from haskie.collection.index import CollectionIndex
 from haskie.document import cover, document
 from haskie.document.document import DocumentStatus
-from haskie.indexing import embed_cache, gguf_models, mlx_models
+from haskie.indexing import embed_cache, gguf_models, mlx_models, workflows
 from haskie.indexing.chunk import Chunk, Piece, split
 from haskie.indexing.segment import PieceType
 from haskie.paging import Order
@@ -310,12 +310,6 @@ def _requested(lines: list[dict]) -> list[str]:
             "re-import an unknown document -> not found",
             "POST", "/api/documents/ghost.md/import", None, None,
             404, "document not found: ghost.md",
-        ),
-        (
-            # the route defers the rule to `start_import`, so this is that message
-            "re-import a document that did not fail -> conflict",
-            "POST", "/api/documents/guide.md/import", None, None,
-            409, "only a queued, failed or cancelled import runs: guide.md",
         ),
         (
             "describe an unknown document with AI -> not found",
@@ -912,7 +906,7 @@ async def test_the_options_offer_gguf_models_only_where_they_run(
     assert gguf <= set(options["embedding_metadata"]), "metadata, offered or not"
     # the llm descriptors' describers are GGUF models too
     assert options["descriptors"] == (["c-tf-idf", "llm"] if offer else ["c-tf-idf"]), name
-    assert options["describers"] == (["qwen3.5-4b", "gemma-4-e2b"] if offer else []), name
+    assert options["describers"] == (["gemma-4-e2b", "qwen3.5-4b"] if offer else []), name
 
 
 @pytest.mark.parametrize(
@@ -1107,20 +1101,43 @@ async def test_import_by_path_copies_the_file(client: AsyncTestClient, tmp_path:
     assert (await wait_import(client, "paper.md"))["status"] == "imported"
 
 
-async def test_a_failed_import_can_be_re_run(client: AsyncTestClient, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("name", "status", "code"),
+    [
+        ("a failed import runs again and clears its error", DocumentStatus.ERROR, 202),
+        ("an imported document is rebuilt", DocumentStatus.IMPORTED, 202),
+        ("a document being deleted is refused", DocumentStatus.DELETING, 409),
+    ],
+)
+async def test_a_reimport_by_the_status_it_starts_from(
+    client: AsyncTestClient, name: str, status: DocumentStatus, code: int
+) -> None:
+    """The route imports a document again from `error` or `imported`: a fresh cache, its error
+    cleared, and every collection holding it indexes it again. One being deleted is refused."""
     await client.post("/api/init", json=NO_MODELS)
-    row = await stage_and_import(client, "guide.md", MD.encode(), wait=False)
-    listing = (await client.get("/api/operations", params={"kind": "document"})).json()
-    operation_id = listing["items"][0]["id"]
-    assert await wait_for(operation_id) == "imported"
-    await document.set_status(await id_of(row["name"]), DocumentStatus.ERROR, "converter fell over")
+    row = await stage_and_import(client, "guide.md", MD.encode())
+    await client.post("/api/collections", json={"name": "notes"})
+    await attach_via_api(client, "notes", row["name"])
+    doc = await id_of(row["name"])
+    built = (await client.get(f"/api/documents/{row['name']}/embeddings")).json()[0]["created_at"]
+    error = "converter fell over" if status == DocumentStatus.ERROR else None
+    await document.set_status(doc, status, error)
 
     again = await client.post(f"/api/documents/{row['name']}/import")
 
-    assert again.status_code == 202, again.text
-    assert again.json()["operation_id"] != operation_id
-    assert await wait_for(again.json()["operation_id"]) == "imported"
-    assert (await client.get(f"/api/documents/{row['name']}")).json()["error"] is None
+    assert again.status_code == code, f"{name}: {again.text}"
+    if code == 409:
+        assert "document is deleting" in again.text, name
+        return
+    import_id = again.json()["operation_id"]
+    assert await wait_for(import_id) == "imported", name
+    assert await wait_for(workflows.reindex_id(import_id, "notes", doc)) == "indexed", name
+    found = (await client.get(f"/api/documents/{row['name']}")).json()
+    assert (found["status"], found["error"]) == ("imported", None), name
+    cached = (await client.get(f"/api/documents/{row['name']}/embeddings")).json()
+    assert all(entry["created_at"] > built for entry in cached), f"{name}: computed again"
+    members = (await client.get("/api/collections/notes/documents")).json()["items"]
+    assert [(m["document"]["name"], m["status"]) for m in members] == [("guide.md", "indexed")]
 
 
 # --- membership -----------------------------------------------------------------------

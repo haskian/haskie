@@ -66,11 +66,15 @@ class MemberStatus(StrEnum):
 
 
 # A document on its way out of a collection, by either road: its membership is being removed, or
-# the document is being deleted. Its rows stay in the table until the removal queued for them runs,
-# so a search reads around it. `for_search` leaves them out, and so does `holding`.
+# the document is no longer `imported`. That is a delete, or a re-import, which rewrites the
+# markdown the rows point into and indexes them again once it ends. Its rows stay in the table
+# until then, so a search reads around it. `for_search` leaves them out, and so does `holding`.
 _REMOVING = collection_documents.c.status == MemberStatus.REMOVING
-_DELETING = documents.c.status == document.DocumentStatus.DELETING
-LEAVING = (_REMOVING, _DELETING)
+# an IN rather than `!=`, so `idx_documents_status` bounds the read (see `_leaving_query`)
+_UNAVAILABLE = documents.c.status.in_(
+    [status for status in document.DocumentStatus if status != document.DocumentStatus.IMPORTED]
+)
+LEAVING = (_REMOVING, _UNAVAILABLE)
 # being written into or taken out of the collection right now: the states a poll waits on
 ACTIVE_MEMBER_STATUSES: tuple[MemberStatus, ...] = (
     MemberStatus.PENDING,
@@ -210,14 +214,14 @@ def _leaving_query(names: list[str]) -> CompoundSelect:
     (`LEAVING`): one select per road, joined by UNION rather than one OR across the two tables.
     An OR over the join reads every membership of the collections to find a set that is almost
     always empty; each select alone is bound by an index, the membership's by
-    `idx_collection_documents_status` and the document's by `idx_documents_status`. The deleting
+    `idx_collection_documents_status` and the document's by `idx_documents_status`. The document's
     road is a subquery, not a join: joined on the id, the planner reads every membership first."""
     member = collection_documents.c
     pairs = select(member.collection, member.document_id).where(
         member.collection.in_(list(set(names)))
     )
-    deleting = select(documents.c.id).where(_DELETING)
-    return union(pairs.where(_REMOVING), pairs.where(member.document_id.in_(deleting)))
+    unavailable = select(documents.c.id).where(_UNAVAILABLE)
+    return union(pairs.where(_REMOVING), pairs.where(member.document_id.in_(unavailable)))
 
 
 async def _leaving(conn: AsyncConnection, names: list[str]) -> dict[str, frozenset[str]]:

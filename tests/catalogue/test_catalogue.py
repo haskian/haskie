@@ -355,7 +355,7 @@ async def stand_ins(monkeypatch: pytest.MonkeyPatch) -> None:
             UserSettings(
                 pipeline=PipelineSettings(accelerator=Accelerator.CPU, descriptors=Descriptors.LLM)
             ),
-            "unsloth/Qwen3.5-4B-GGUF runs on gguf on the Apple GPU",
+            "ggml-org/gemma-4-E2B-it-GGUF runs on gguf on the Apple GPU",
         ),
         (
             "descriptors an llm writes, where llama.cpp runs",
