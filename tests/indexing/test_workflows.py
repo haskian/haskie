@@ -363,8 +363,7 @@ async def test_attach_indexes_the_document_into_the_collection(dbos, tmp_path: P
 
 async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> None:
     """One import per document, one embedding run per cache id, one index per collection, each
-    with a task per micro-batch. The index is deduplicated while it runs; a second import is
-    refused instead, because the document's status has left `queued` by then."""
+    with a task per micro-batch. The index is deduplicated while it runs."""
     await _use(dbos, workers=2, batch_pages=10, index_group_parts=1)
     collection = await Collection.create("q")
     await collection.set_overrides(CollectionOverrides(chunk_size=60))
@@ -374,8 +373,6 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
 
     first = await dbos.start_import(pdf)
     assert await wait_for(first) == "imported"
-    with pytest.raises(Conflict, match="document is imported; only a queued, failed or cancelled"):
-        await dbos.start_import(await document.get(pdf.id))
     indexing = await dbos.attach("q", pdf.id)
     assert await dbos.start_index_collection_document("q", pdf.id) == indexing, "deduplicated"
     assert await wait_for(indexing) == "indexed"
@@ -1642,31 +1639,143 @@ async def _import_id(doc: str) -> str:
     return found.workflow_id
 
 
-async def test_reimport_reconverts_and_drops_the_stale_cache(dbos, tmp_path: Path) -> None:
-    """Re-importing rewrites the markdown every cached embedding was chunked from, so the whole
-    cache of the document goes first (rows and files) and only the fresh pre-warm is left."""
-    collection = await Collection.create("stale")
-    await collection.set_overrides(CollectionOverrides(chunk_size=60))
+async def test_reimporting_an_imported_document_rebuilds_it_in_every_collection(
+    dbos, tmp_path: Path
+) -> None:
+    """An imported document is imported again on request. The markdown every cached embedding was
+    chunked from is rewritten, so the whole cache goes first, rows and files. Once it is
+    `imported`, every collection holding it indexes it again under its own chunk settings, which
+    computes its entry again, and its rows are replaced, not added to."""
+    names = ["plain", "small"]
+    for name in names:
+        await Collection.create(name)
+    await Collection("small").set_overrides(CollectionOverrides(chunk_size=60))
     doc = await import_document(dbos, "a.md", MD, tmp_path)
-    await attach_document(dbos, "stale", doc.name)
-    before = await embed_cache.entries(doc.id)
-    assert len(before) == 2, "the import's default params and the collection's"
-    assert _cache_files(doc) == _files_of(before[0].id) | _files_of(before[1].id)
-    await document.set_status(doc.id, DocumentStatus.ERROR, "boom")
+    for name in names:
+        await attach_document(dbos, name, doc.name)
+    built = max(e.created_at for e in await embed_cache.entries(doc.id))
+    rows = [(await Collection(name).info()).index for name in names]
 
-    assert await wait_for(await dbos.start_import(await document.get(doc.id))) == "imported"
+    import_id = await dbos.start_import(await document.get(doc.id))
 
+    assert await wait_for(import_id) == "imported"
+    reindexed = [workflows.reindex_id(import_id, name, doc.id) for name in names]
+    assert [await wait_for(i) for i in reindexed] == ["indexed"] * 2
     after = await embed_cache.entries(doc.id)
-    default = (await load_user_settings()).conversion.chunk_size
-    assert [e.chunk_size for e in after] == [default], "only the fresh pre-warm is left"
-    assert _cache_files(doc) == _files_of(after[0].id)
-    assert (await document.named(doc.name)).status == "imported"
-    assert (
-        await embed_cache.lookup(
-            embed_cache.params(await document.named(doc.name), ChunkSettings(chunk_size=60), None)
-        )
-        is None
-    ), "the collection's entry is a miss until it is indexed again"
+    assert sorted(e.chunk_size for e in after) == sorted(
+        [60, (await load_user_settings()).conversion.chunk_size]
+    ), "the pre-warm and the small collection's own"
+    assert all(e.created_at > built for e in after), "every entry was computed again"
+    assert _cache_files(doc) == _files_of(after[0].id) | _files_of(after[1].id), "no stale file"
+    for name, before in zip(names, rows, strict=True):
+        assert (await Collection(name).member(doc.id)).status == "indexed", name
+        index = (await Collection(name).info()).index
+        assert index is not None and before is not None
+        assert index.num_rows == before.num_rows, f"{name}: the old rows were replaced"
+        hits = await search_with(name, "lancedb", SearchOverrides(limit=5))
+        assert {h.document for h in hits} == {doc.name}, name
+
+
+async def test_a_first_import_queues_no_index(dbos, tmp_path: Path) -> None:
+    """With no collection holding the document, the import ends at `imported` and queues nothing."""
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    assert await _workflow_ids(dbos_names.COLLECTION_DOCUMENT_WORKFLOW) == []
+    assert doc.status == "imported"
+
+
+async def test_a_reimport_cancels_the_index_in_flight_and_indexes_again(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """The re-import drops the cache the running index reads, so it cancels that index first and
+    marks the member `cancelled`. Its own index takes the member to `indexed` again."""
+    await _use(dbos, workers=2, batch_pages=1, index_group_parts=1)
+    collection = await Collection.create("busy")
+    doc = await import_document(dbos, "p.pdf", text_pdf(["one", "two"]), tmp_path)
+    gate = Gate(seq=0)
+    monkeypatch.setattr(pipeline, "index_batch", gate.wrap(pipeline.index_batch))
+    stale = await dbos.attach("busy", doc.id)
+    assert await wait_event(gate.entered)
+
+    import_id = await dbos.start_import(await document.get(doc.id))
+
+    await await_terminal([stale])
+    assert await _statuses([stale]) == ["CANCELLED"]
+    gate.release.set()
+    assert await wait_for(import_id) == "imported"
+    assert await wait_for(workflows.reindex_id(import_id, "busy", doc.id)) == "indexed"
+    assert (await collection.member(doc.id)).status == "indexed"
+    await _drain()
+
+
+async def test_a_failed_reimport_leaves_the_document_out_of_search(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """A re-import that fails after it dropped the markdown and the cache ends in `error`, and
+    queues no index. Search leaves the document out from the moment it is `queued` again, so its
+    old rows never point into a file that is gone."""
+    await Collection.create("kept")
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    await attach_document(dbos, "kept", doc.name)
+    assert {h.document for h in await collection_hits("kept", "lancedb")} == {doc.name}
+
+    async def broken(doc_, batch):
+        raise PermanentError("the converter fell over")
+
+    monkeypatch.setattr(pipeline, "convert_batch", broken)
+    import_id = await dbos.start_import(await document.get(doc.id))
+
+    with pytest.raises(workflows.PipelineError, match="the converter fell over"):
+        await wait_for(import_id)
+    assert (await document.named(doc.name)).status == "error"
+    assert not doc.markdown.exists(), "the convert started over and wrote nothing"
+    reindex = workflows.reindex_id(import_id, "kept", doc.id)
+    assert reindex not in await _member_workflows("kept"), "no index queued"
+    assert await collection_hits("kept", "lancedb") == [], "out of search, not a missing file"
+
+
+async def test_a_replayed_reimport_re_attaches_to_its_indexes(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """The index a re-import queues in each collection has an id derived from the import, so an
+    import that crashes between two collections re-attaches to the first index on replay instead
+    of queueing it twice."""
+    names = ["first", "second"]
+    for name in names:
+        await Collection.create(name)
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    for name in names:
+        await attach_document(dbos, name, doc.name)
+    real = workflows._enqueue_index
+    calls: list[str] = []
+    entered, release = threading.Event(), threading.Event()
+
+    async def gated(collection: str, doc_: str, workflow_id: str | None = None) -> str:
+        calls.append(collection)
+        if len(calls) == 2:  # the first collection's index queued; stop the import right here
+            entered.set()
+            assert await wait_event(release), "the test never released the enqueue"
+        return await real(collection, doc_, workflow_id)
+
+    monkeypatch.setattr(workflows, "_enqueue_index", gated)
+    import_id = await dbos.start_import(await document.get(doc.id))
+    assert await wait_event(entered), "the import never reached its second collection"
+    # as in `test_index_collection_workflow_is_idempotent_on_replay`: the old executor writes
+    # nothing while the restart migrates the file
+    first = workflows.reindex_id(import_id, "first", doc.id)
+    await await_terminal([first])
+    DBOS.destroy(workflow_completion_timeout_sec=0)  # crash, between two collections
+    await dbos.start()
+
+    assert await wait_for(import_id) == "imported"
+    release.set()  # the old executor's enqueue returns the index the replay already queued
+
+    reindexed = [workflows.reindex_id(import_id, name, doc.id) for name in names]
+    assert [await wait_for(i) for i in reindexed] == ["indexed"] * 2
+    for name, index in zip(names, reindexed, strict=True):
+        ids = await _member_workflows(name)
+        assert [i for i in ids if i == index] == [index], f"{name}: queued once"
+        assert len(ids) == 2, f"{name}: the attach and the re-import's index"
+    await _drain()
 
 
 async def test_ensure_embedding_fails_permanently_under_another_model(dbos, tmp_path: Path) -> None:
@@ -2435,7 +2544,7 @@ async def test_attaching_while_a_delete_runs_is_refused(dbos, tmp_path: Path, mo
 
     with pytest.raises(Conflict, match="a.md"):  # `Collection.add` takes only an imported document
         await dbos.attach("third", doc.id)
-    with pytest.raises(Conflict, match="document is deleting; only a queued, failed or cancelled"):
+    with pytest.raises(Conflict, match="document is deleting; only a queued, imported, failed"):
         await dbos.start_import(await document.get(doc.id))
 
     release.set()

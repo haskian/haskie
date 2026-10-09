@@ -80,7 +80,7 @@ the settings' is described again, so *Index all* applies a changed setting to a 
 Every strategy reads prose only: code blocks and tables name identifiers and values, not what a
 section is about.
 
-- **llm.** The selected describer, Qwen3.5-4B or Gemma-4-E2B, runs through llama.cpp on the
+- **llm.** The selected describer, Gemma-4-E2B (the default) or Qwen3.5-4B, runs through llama.cpp on the
   Apple GPU. The models use roughly 2.8–3.0 GB; see [model loads](runtime.md#model-loads). It runs
   three stages in the same import or index operation: **Describe sections**, **Section
   descriptors**, then **Describe document**. The first writes one-to-two-sentence descriptions;

@@ -87,7 +87,7 @@ Models come in three groups, as the status bar shows them:
 
 - **Search**: the embedding model and a reranker. Warmed at boot, and loaded for the life of the
   server, since every search needs them at once.
-- **Knowledge**: the describer (Qwen3.5-4B or Gemma-4-E2B, a setting) and the vocabulary's embedder
+- **Knowledge**: the describer (Gemma-4-E2B by default, or Qwen3.5-4B, a setting) and the vocabulary's embedder
   (Qwen3-Embedding-0.6B), required under llm descriptors. Downloaded at boot but loaded only when
   indexing first asks for one, and freed once nobody used it for 5 minutes (`models.IDLE_SECONDS`,
   checked every 30 s). A model in use is never freed: a describe batch keeps its describer to the

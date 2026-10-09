@@ -36,7 +36,7 @@ Settings lists profiles compatible with the selected hardware. The
   parameters. A multilingual embedder does not make an English reranker multilingual.
 - **Section descriptors.** `c-tf-idf` extracts distinctive terms and runs on all supported
   platforms. `llm` uses a local language model on Apple Silicon for section descriptions,
-  descriptors and document summaries. Choose Qwen3.5-4B or Gemma-4-E2B; the describer is roughly
+  descriptors and document summaries. Choose Gemma-4-E2B (the default) or Qwen3.5-4B; the describer is roughly
   2.8–3.0 GB, and vocabulary processing needs a separate embedding model. See
   [indexing](indexing.md#the-three-workflows) for generation and downloads.
 - **Chunking.** The default uses document structure and 1,200-character chunks. Collections can

@@ -39,7 +39,7 @@ DELAY_SWEEP_SECONDS = 0.05  # how often a debounced workflow is promoted (see `_
 # nothing, so a test that searches starts here unless it is about a model.
 NO_MODELS = {"profile": "none", "search": {"reranker": "none"}}
 # the model the default settings write llm descriptors with
-DESCRIBER = "unsloth/Qwen3.5-4B-GGUF"
+DESCRIBER = "ggml-org/gemma-4-E2B-it-GGUF"
 
 # Still on its way, including a debounced run waiting out its period (DELAYED). Only the suite
 # waits on that: the app counts `dbos_names.ACTIVE_STATUS`, where a debounce is not yet work.

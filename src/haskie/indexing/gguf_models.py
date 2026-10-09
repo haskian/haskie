@@ -102,15 +102,15 @@ class Generator(NamedTuple):
 # concepts through, Qwen 12%; neither an antonym. Qwen ranks synonyms above other concepts at
 # AUC 0.87, Gemma at 0.84.
 DESCRIBERS: dict[Describer, Generator] = {
-    Describer.QWEN_3_5_4B: Generator(
-        "unsloth/Qwen3.5-4B-GGUF",
-        Pin("e87f176479d0855a907a41277aca2f8ee7a09523", "Qwen3.5-4B-Q4_0.gguf", 262144),
-        0.12,
-    ),
     Describer.GEMMA_4_E2B: Generator(
         "ggml-org/gemma-4-E2B-it-GGUF",
         Pin("b4243c156154b6dca9324415f8c7ccc098b4aed1", "gemma-4-E2B-it-Q4_0.gguf", 131072),
         0.15,
+    ),
+    Describer.QWEN_3_5_4B: Generator(
+        "unsloth/Qwen3.5-4B-GGUF",
+        Pin("e87f176479d0855a907a41277aca2f8ee7a09523", "Qwen3.5-4B-Q4_0.gguf", 262144),
+        0.12,
     ),
 }
 GENERATORS: dict[str, Pin] = {one.name: one.pin for one in DESCRIBERS.values()}

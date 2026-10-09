@@ -1,4 +1,4 @@
-import { ExternalLink, Library, Plus, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { ExternalLink, Library, Plus, RefreshCw, Sparkles, Trash2, Upload, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -24,7 +24,7 @@ import { useOptions } from "../hooks/useOptions";
 import { usePaged } from "../hooks/usePaged";
 import { usePoll } from "../hooks/usePoll";
 import { useRun } from "../hooks/useRun";
-import { href, navigate, type Route } from "../router";
+import { navigate, type Route } from "../router";
 import {
   BulkStatus,
   BusyButton,
@@ -45,6 +45,7 @@ import {
 import "./Documents.css";
 import { embeddingLabel } from "./documents/embedding";
 import { groupByDay, groupByStatus, unfiledFirst } from "./documents/group";
+import { CollectionsTab } from "./documents/Collections";
 import { pagesLabel } from "./documents/pages";
 import { SectionsTab } from "./documents/Sections";
 import { Duplicate, JustImported, SimilarDocuments } from "./documents/Similar";
@@ -343,8 +344,9 @@ export function Documents({
   );
 }
 
-// An import can only be re-run from a state it stopped in; the backend refuses every other status.
-const RETRYABLE: readonly DocumentStatus[] = ["error", "cancelled"];
+// An import re-runs from a state it stopped in, failed or done (a rebuild); the backend refuses
+// every other status, which a pipeline or a delete is writing right now.
+const REIMPORTABLE: readonly DocumentStatus[] = ["error", "cancelled", "imported"];
 
 const CONTENT_TAB = "modal-content";
 const COLLECTIONS_TAB = "modal-collections";
@@ -372,6 +374,7 @@ function DocumentModal({
   const [tab, setTab] = useState(CONTENT_TAB);
   const [row, setRow] = useState<Document | null>(null);
   const [collections, setCollections] = useState<string[]>([]);
+  const [allCollections, setAllCollections] = useState<string[] | null>(null);
   const [embeddings, setEmbeddings] = useState<EmbeddingEntry[]>([]);
   const [similar, setSimilar] = useState<Similar | null>(null);
   const [sections, setSections] = useState<Sections | null>(null);
@@ -403,6 +406,13 @@ function DocumentModal({
     if (!similarOpen || doc === null || similar !== null) return;
     api.similarDocuments(doc).then(setSimilar).catch((cause: unknown) => setError(errorText(cause)));
   }, [similarOpen, doc, similar, setError]);
+
+  // Read when the tab is first opened, like Similar, and once: nothing here adds or drops one.
+  const collectionsOpen = tab === COLLECTIONS_TAB;
+  useEffect(() => {
+    if (!collectionsOpen || allCollections !== null) return;
+    api.collectionNames().then(setAllCollections).catch((cause: unknown) => setError(errorText(cause)));
+  }, [collectionsOpen, allCollections, setError]);
 
   // Read when the tab is first opened, like Similar: a long book has hundreds of sections.
   const sectionsOpen = tab === SECTIONS_TAB;
@@ -444,6 +454,18 @@ function DocumentModal({
     describing
       .start("summarize_document", () => api.generateDescription(row.name))
       .catch((cause: unknown) => setError(errorText(cause)));
+  };
+
+  const reimport = () => {
+    if (row === null) return;
+    if (
+      row.status === "imported" &&
+      !window.confirm(
+        "Import it again? Its chunks, sections and descriptors are rebuilt, and every collection holding it indexes it again.",
+      )
+    )
+      return;
+    void run(() => api.reimportDocument(row.name).then(onChanged));
   };
 
   const remove = () => {
@@ -505,21 +527,20 @@ function DocumentModal({
         role="tabpanel"
         hidden={tab !== COLLECTIONS_TAB}
       >
-        {tab === COLLECTIONS_TAB && collections.length === 0 ? (
-          <ModalStatus>In no collection yet.</ModalStatus>
-        ) : (
-          <ul className="list">
-            {collections.map((name) => (
-              <li className="list-item" key={name}>
-                <Library className="icon" />
-                <span className="list-text">
-                  <a href={href({ name: "collections", collection: name })}>
-                    {name}
-                  </a>
-                </span>
-              </li>
-            ))}
-          </ul>
+        {row !== null && allCollections !== null && (
+          <CollectionsTab
+            held={collections}
+            all={allCollections}
+            attachable={row.status === "imported"}
+            busy={busy}
+            // The gallery re-reads too: its tile counts the collections.
+            onAttach={(collection) =>
+              void run(() => api.attachDocument(collection, row.name).then(onChanged))
+            }
+            onDetach={(collection) =>
+              void run(() => api.detachDocument(collection, row.name).then(onChanged))
+            }
+          />
         )}
       </div>
       <div id={SIMILAR_TAB} role="tabpanel" hidden={tab !== SIMILAR_TAB}>
@@ -580,14 +601,10 @@ function DocumentModal({
               <ExternalLink className="icon" />
               Open original
             </a>
-            {RETRYABLE.includes(row.status) && (
-              <button
-                className="btn"
-                type="button"
-                disabled={busy}
-                onClick={() => run(() => api.reimportDocument(row.name))}
-              >
-                Retry import
+            {REIMPORTABLE.includes(row.status) && (
+              <button className="btn" type="button" disabled={busy} onClick={reimport}>
+                <RefreshCw className="icon" />
+                {row.status === "imported" ? "Re-import" : "Retry import"}
               </button>
             )}
             <BusyButton
@@ -604,8 +621,9 @@ function DocumentModal({
             {deletion.operation !== null && <BulkStatus operation={deletion.operation} />}
           </div>
         )}
-        {error !== null && <ModalStatus tone="error">{error}</ModalStatus>}
       </div>
+      {/* Below every panel: an add or remove on the Collections tab fails there too. */}
+      {error !== null && <ModalStatus tone="error">{error}</ModalStatus>}
     </Modal>
   );
 }

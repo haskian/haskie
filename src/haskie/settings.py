@@ -266,10 +266,10 @@ DESCRIBER = Meta(
     title="Describer",
     description=(
         "The language model the llm descriptors are written with, on llama.cpp on the Apple GPU. "
-        "qwen3.5-4b: Qwen3.5-4B (2.6 GB download, 2.8 GB in memory, Apache 2.0); judged best, "
-        "+0.6 of 5 over gemma-4-e2b on 60 sections, about 1.4 s a section. gemma-4-e2b: "
-        "Gemma-4-E2B (2.8 GB download, 3.0 GB in memory, Apache 2.0); twice as fast, about 0.7 s "
-        "a section. A change re-describes a document the next time it is embedded or indexed; "
+        "gemma-4-e2b: Gemma-4-E2B (2.8 GB download, 3.0 GB in memory, Apache 2.0); about 0.7 s a "
+        "section. qwen3.5-4b: Qwen3.5-4B (2.6 GB download, 2.8 GB in memory, Apache 2.0); judged "
+        "+0.6 of 5 over gemma-4-e2b on 60 sections, at half the speed, about 1.4 s a section. "
+        "A change re-describes a document the next time it is embedded or indexed; "
         '"Index all" re-describes a collection.'
     ),
 )
@@ -695,7 +695,7 @@ class PipelineSettings(msgspec.Struct):
     preview_workers: Annotated[int, PREVIEW_WORKERS] = 2
     accelerator: Annotated[Accelerator, ACCELERATOR] = Accelerator.AUTO
     descriptors: Annotated[Descriptors, DESCRIPTORS] = Descriptors.C_TF_IDF
-    describer: Annotated[Describer, DESCRIBER] = Describer.QWEN_3_5_4B
+    describer: Annotated[Describer, DESCRIBER] = Describer.GEMMA_4_E2B
     ocr: Annotated[bool, OCR] = True
 
     def __post_init__(self) -> None:

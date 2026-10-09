@@ -176,12 +176,15 @@ async def delete_document(document: str) -> BulkStarted:
 @post("/api/documents/{document:str}/import", status_code=202)
 @audit.audited("document.reimport")
 async def reimport_document(document: str) -> BulkStarted:
-    """Run a document's import again after it failed or was cancelled.
+    """Run a document's import again: after it failed or was cancelled, or to rebuild one imported.
 
-    `start_import` refuses the rest with a conflict. A document already imported has its markdown
-    and its cache. One still converting or embedding is being written right now, so a re-run would
-    race it. A queued document is let through: the deduplication returns the import already queued
-    for it.
+    A re-import converts the source again and replaces everything built from it: the markdown, the
+    chunks and their vectors, the sections, their descriptions and descriptors. Then every
+    collection holding the document indexes it again. Its own description stays.
+
+    `start_import` refuses the rest with a conflict. One still converting, embedding, describing
+    or being deleted is being written right now, so a re-run would race it. A queued document is let
+    through: the deduplication returns the import already queued for it.
     """
     operation_id = await workflows.start_import(await documents.named(document))
     audit.attach(operation_id=operation_id)
