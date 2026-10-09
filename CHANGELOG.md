@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.34.0 - 2026-10-09
+#### Features
+- (**document**) read scanned PDF pages and images with on-device OCR (#53) - (defc616) - Črtomir Majer
+
+- - -
+
 ## v0.33.1 - 2026-10-08
 #### Bug Fixes
 - (**backup**) keep the last progress count the last one written (#51) - (7732336) - Črtomir Majer
