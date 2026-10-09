@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.36.0 - 2026-10-09
+#### Features
+- re-import documents and add them to collections from their modal (#52) - (25c5f5f) - Črtomir Majer
+
+- - -
+
 ## v0.35.0 - 2026-10-09
 #### Features
 - (**document**) show how a PDF's pages were converted in its info (#54) - (88e6d35) - Črtomir Majer
