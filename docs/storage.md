@@ -75,6 +75,8 @@ erDiagram
         text parser
         text description
         int pages
+        int pages_ocr
+        int pages_unread
     }
     collections {
         text name PK

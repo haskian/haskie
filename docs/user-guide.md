@@ -94,6 +94,8 @@ other models while the Read scans with OCR setting is on (the default). A PDF pa
 text on, such as a blank page, is skipped by default and the rest is indexed. A PDF with no text
 on any page fails with an explanation. Disabling the skip setting makes any such page fail the
 import. An image OCR reads no text on is imported with nothing to search.
+A PDF's info shows how many of its pages converted, how many of those OCR read, and how many
+were not converted.
 
 Documents imported before haskie had OCR keep their old markdown: their images and skipped
 scans stay unsearchable. Delete such a document and import it again to read them.

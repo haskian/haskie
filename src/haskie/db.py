@@ -31,7 +31,7 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from haskie import home, tables
 from haskie.errors import HaskieError
 
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
 """`pragma user_version` of the schema in `tables.py`.
 
 A home stamped with it has these tables and columns and is opened as it is. A stamp that
@@ -74,6 +74,10 @@ UPGRADES: dict[int, str] = {
         + schema_ddl([tables.installations])
         + "insert into installations select agent, directory from installations_v35;"
         "drop table installations_v35;"
+    ),
+    36: (
+        "alter table documents add column pages_ocr integer;"
+        "alter table documents add column pages_unread integer;"
     ),
 }
 """The script that lifts a schema from each version to the next. Additive changes only: a column

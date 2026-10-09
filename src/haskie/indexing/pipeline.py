@@ -179,9 +179,11 @@ async def _ocr() -> bool:
     return True
 
 
-async def finalize_convert(doc: Document, batches: list[Batch], ocr_total: int) -> int | None:
+async def finalize_convert(
+    doc: Document, batches: list[Batch], ocr_total: int
+) -> convert.PageCounts | None:
     """Apply the OCR policy over the whole document, then stream parts into one markdown file.
-    Returns a PDF's page count, None for other formats."""
+    Returns a PDF's page counts, None for other formats."""
     total = None
     if doc.source_path().suffix.lower() == ".pdf":
         total = sum(b.end - b.start for b in batches)
@@ -192,8 +194,9 @@ async def finalize_convert(doc: Document, batches: list[Batch], ocr_total: int) 
     ]
     # one replace, so a reader never sees a half-assembled document; the parts are already
     # in memory one at a time during convert, so holding the joined text adds no new bound
-    await home.atomic_write(doc.markdown, JOINER.join(parts))
-    return total
+    markdown = JOINER.join(parts)
+    await home.atomic_write(doc.markdown, markdown)
+    return None if total is None else convert.page_counts(markdown, total)
 
 
 # --- embed ------------------------------------------------------------------------

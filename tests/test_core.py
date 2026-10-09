@@ -809,9 +809,10 @@ async def test_a_preview_built_from_the_file_gives_way_once_the_markdown_is_writ
     assert (late.converted, late.ocr_pages) == (True, []), "built again, from the markdown"
     assert "scanned words" in (doc.preview_dir / "preview.md").read_text(), "OCR's text, shown"
 
-    await document.set_converted(doc.id, 2)
+    await document.set_converted(doc.id, convert.PageCounts(pages=2, ocr=1, unread=0))
     row = await document.named(doc.name)
     assert (row.preview, row.pages) == (None, 2), "a conversion's end drops the kept preview"
+    assert (row.pages_ocr, row.pages_unread) == (1, 0), "and records the page counts"
 
 
 @pytest.mark.anyio
@@ -3317,8 +3318,10 @@ async def test_convert_batch_reads_scans_while_ocr_and_its_model_allow(
     batches = await pipeline.plan_convert(doc, 10)
 
     assert await pipeline.convert_batch(doc, batches[0]) == unread, name
-    await pipeline.finalize_convert(doc, batches, unread)
+    counts = await pipeline.finalize_convert(doc, batches, unread)
     assert shows in doc.markdown.read_text(), name
+    pdf = convert.PageCounts(pages=2, ocr=1 - unread, unread=unread)
+    assert counts == (pdf if file == "scan.pdf" else None), "a PDF's pages counted, by how read"
     assert bool(asked) == (on and file != "notes.md"), "OCR is asked only for what it can read"
 
 
@@ -4097,24 +4100,34 @@ def test_migrate_creates_the_schema_once_and_refuses_every_other_home(
     conn.close()
 
 
-def test_a_home_from_before_page_counts_is_upgraded_in_place(tmp_path: Path) -> None:
-    """Schema 34 had no `documents.pages`. The upgrade adds it and keeps every row, and the
+@pytest.mark.parametrize(
+    ("name", "version", "lacks"),
+    [
+        ("schema 34: no page count", 34, ["pages", "pages_ocr", "pages_unread"]),
+        ("schema 36: no OCR page counts", 36, ["pages_ocr", "pages_unread"]),
+    ],
+)
+def test_a_home_from_before_page_counts_is_upgraded_in_place(
+    name: str, version: int, lacks: list[str], tmp_path: Path
+) -> None:
+    """The upgrade adds the `documents` columns an older schema lacks and keeps every row, and the
     upgraded file has the same columns, in the same order, as a fresh one."""
     fresh = sqlite3.connect(str(tmp_path / "fresh.db"))
     db.migrate(fresh)
     older = sqlite3.connect(str(tmp_path / "older.db"))
     db.migrate(older)
     older.executescript(
-        "alter table documents drop column pages;"
-        "insert into documents (id, name, suffix, size) values ('a', 'a.pdf', '.pdf', 1);"
+        "".join(f"alter table documents drop column {column};" for column in lacks)
+        + "insert into documents (id, name, suffix, size) values ('a', 'a.pdf', '.pdf', 1);"
         "drop table sessions;"  # only a second run of the schema script would rebuild it
-        "pragma user_version = 34;"
+        f"pragma user_version = {version};"
     )
 
     db.migrate(older)
 
-    assert older.execute("pragma user_version").fetchone() == (db.SCHEMA_VERSION,)
-    assert older.execute("select name, pages from documents").fetchall() == [("a.pdf", None)]
+    assert older.execute("pragma user_version").fetchone() == (db.SCHEMA_VERSION,), name
+    added = older.execute(f"select name, {', '.join(lacks)} from documents").fetchall()
+    assert added == [("a.pdf", *[None] * len(lacks))], name
     assert "sessions" not in _tables(older), "upgraded, not created again"
     columns = "select name, type, \"notnull\", dflt_value from pragma_table_info('documents')"
     assert older.execute(columns).fetchall() == fresh.execute(columns).fetchall()
@@ -4124,7 +4137,7 @@ def test_a_home_from_before_page_counts_is_upgraded_in_place(tmp_path: Path) -> 
 
 # The schema `tables.py` generates at this `SCHEMA_VERSION`: a SHA-256 of its DDL statements,
 # sorted, because a table's indexes are a set and come out in no fixed order.
-SCHEMA_PIN = (36, "86b85d5044c0ffcb35ac0a0451fa9bb738472b3c22b89d48085d29fb8526a55d")
+SCHEMA_PIN = (37, "58410275b14283274f18cf83346f8c1e9cf596a575749b6dcfc80102c6f4b273")
 
 
 def test_a_table_change_comes_with_a_new_schema_version() -> None:

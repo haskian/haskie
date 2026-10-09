@@ -1156,6 +1156,8 @@ export interface components {
             /** @default  */
             description: string;
             pages?: number | null;
+            pages_ocr?: number | null;
+            pages_unread?: number | null;
         };
         /** DocumentCounts */
         DocumentCounts: {
@@ -1455,6 +1457,8 @@ export interface components {
             /** @default  */
             description: string;
             pages?: number | null;
+            pages_ocr?: number | null;
+            pages_unread?: number | null;
             collections?: string[];
         };
         /** LoggedQuestion */

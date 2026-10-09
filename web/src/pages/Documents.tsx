@@ -45,6 +45,7 @@ import {
 import "./Documents.css";
 import { embeddingLabel } from "./documents/embedding";
 import { groupByDay, groupByStatus, unfiledFirst } from "./documents/group";
+import { pagesLabel } from "./documents/pages";
 import { SectionsTab } from "./documents/Sections";
 import { Duplicate, JustImported, SimilarDocuments } from "./documents/Similar";
 import { fresh, importedNames, importLabel, staged as stagedFrom, waitingAfter, type StagedFile } from "./documents/staged";
@@ -455,6 +456,7 @@ function DocumentModal({
       .catch((cause: unknown) => setError(errorText(cause)));
   };
 
+  const pages = row === null ? null : pagesLabel(row);
   const rows: [string, ReactNode][] =
     row === null
       ? []
@@ -463,6 +465,7 @@ function DocumentModal({
           ["Updated", dateTime(row.updated_at)],
           ["Status", row.status],
           ["Source", `${row.suffix} · ${bytes.format(row.size)}`],
+          ...(pages === null ? [] : [["Pages", pages] as [string, ReactNode]]),
           ["Parser", row.parser],
           ["Skip pages OCR cannot read", row.skip_ocr_pages ? "yes" : "no"],
           [

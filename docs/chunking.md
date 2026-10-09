@@ -145,7 +145,9 @@ language setting is needed.
 
 ## Page markers
 
-Page markers (`<!-- page 3 -->`, which the converter writes) are metadata. Every step reads one as
+Page markers (`<!-- page 3 -->`, which the converter writes) are metadata. A marker can note how
+its page was read: `<!-- page 3: read by OCR -->`, or `<!-- page 3: needs OCR, skipped -->` for a
+page left out. The count of pages OCR read is taken from those notes. Every step reads a marker as
 whitespace. So a marker never decides a gap, and no piece or chunk starts or ends on one. Inside a
 chunk, `convert.without_markers` takes it out of the text. The text that is embedded, indexed and
 shown has no markers, and a blank line around a marker stays one blank line. The chunk's offsets
