@@ -86,11 +86,17 @@ resource limits. Model status distinguishes downloading, loading, ready and fail
 | OpenDocument | `.odt` `.ods` `.odp` |
 | Other documents | `.epub` `.rtf` |
 | Text | `.md` `.markdown` `.txt` `.csv` `.json` `.html` `.htm` |
-| Images | `.png` `.jpg` `.jpeg` `.gif` `.webp` `.svg`; stored and previewed, with no searchable text. |
+| Images | `.png` `.jpg` `.jpeg` `.gif` `.webp` `.svg`; their text is read with OCR, SVG aside. |
 
-Optical character recognition (OCR) is not available. By default, scanned PDF pages are skipped
-and the remaining text is indexed. A PDF with only scanned pages fails with an explanation.
-Disabling the skip setting makes any page requiring OCR fail the import.
+Optical character recognition (OCR) runs on your device, with PP-OCRv6 small. It reads PDF
+pages that carry no text, such as scans, and images. Its model, about 31 MB, downloads with the
+other models while the Read scans with OCR setting is on (the default). A PDF page OCR reads no
+text on, such as a blank page, is skipped by default and the rest is indexed. A PDF with no text
+on any page fails with an explanation. Disabling the skip setting makes any such page fail the
+import. An image OCR reads no text on is imported with nothing to search.
+
+Documents imported before haskie had OCR keep their old markdown: their images and skipped
+scans stay unsearchable. Delete such a document and import it again to read them.
 
 ## Where to go next
 

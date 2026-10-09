@@ -30,9 +30,11 @@ export function Statusbar({ status, refreshStatus }: { status: Status; refreshSt
 
   // search: the embedding model and a reranker when one is on, loaded for the life of the server;
   // knowledge: the models indexing asks (the describer, the vocabulary's embedder), loaded on
-  // first use and freed once idle, and only there when the settings ask a language model
+  // first use and freed once idle, and only there when the settings ask a language model;
+  // conversion: the OCR model, there while OCR is on, usable once downloaded
   const search = status.models.filter((model) => model.group === 'search')
   const knowledge = status.models.filter((model) => model.group === 'knowledge')
+  const conversion = status.models.filter((model) => model.group === 'conversion')
 
   // A knowledge model changes state with the work that loads it, and is freed once idle: the
   // models are read again with the queues while work runs, or while one is in memory or on its way.
@@ -62,6 +64,7 @@ export function Statusbar({ status, refreshStatus }: { status: Status; refreshSt
       </span>
       <Models label="Search" models={search} none="full-text only" />
       {knowledge.length > 0 && <Models label="Knowledge" models={knowledge} />}
+      {conversion.length > 0 && <Models label="OCR" models={conversion} />}
       <span className="spacer" />
       <a className="statusbar-item" href={href({ name: 'operations' })}>
         <Activity className="icon" />

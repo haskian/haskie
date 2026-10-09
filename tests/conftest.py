@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import anyio
@@ -180,6 +181,52 @@ def template_home(tmp_path_factory: pytest.TempPathFactory, fast_runtime: None) 
     finally:
         connection.close()
     return path
+
+
+# One OCR call: the 1-based pages it asked for (None for every page), and whether it was offline
+type OcrCall = tuple[list[int] | None, bool]
+
+
+def ocr_reads(texts: dict[int, str]):
+    """A stand-in for `pdf_inspector`'s OCR, either entry point: on each 1-based page asked for
+    (every page in `texts` when none are) it reads `texts[page]`, else nothing, as the real one
+    reads nothing on a blank page. Records every call (`OcrCall`)."""
+    calls: list[OcrCall] = []
+
+    def ocr(
+        _source: object,
+        *,
+        mode: str,
+        page_numbers: list[int] | None = None,
+        dpi: float = 150.0,
+        offline: bool = False,
+    ):
+        assert mode == "force"
+        calls.append((page_numbers, offline))
+        pages = page_numbers if page_numbers is not None else sorted(texts)
+        return SimpleNamespace(
+            pages=[SimpleNamespace(page_number=n, markdown=texts.get(n, "")) for n in pages]
+        )
+
+    return ocr, calls
+
+
+def use_ocr(monkeypatch: pytest.MonkeyPatch, texts: dict[int, str]) -> list[OcrCall]:
+    """`ocr_reads(texts)` in place of both of `pdf_inspector`'s OCR entry points; its calls."""
+    import pdf_inspector
+
+    ocr, calls = ocr_reads(texts)
+    monkeypatch.setattr(pdf_inspector, "process_pdf_with_ocr", ocr)
+    monkeypatch.setattr(pdf_inspector, "process_pdf_with_ocr_bytes", ocr)
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def ocr_reads_nothing(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """OCR's model is a download, so outside `network` tests OCR reads nothing, as it does on
+    the blank pages the suite's PDFs stand scans in with (`text_pdf`)."""
+    if not request.node.get_closest_marker("network"):
+        use_ocr(monkeypatch, {})
 
 
 @pytest.fixture(autouse=True)

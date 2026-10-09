@@ -140,15 +140,27 @@ def _download(repo: str, revision: str, files: Sequence[str]) -> Path:
     return target
 
 
-@cache
+# `cache` has no lock: two threads asking at once would both set up, and ONNX Runtime refuses a
+# second registration of the plugin ("library is already registered under webgpu"). The boot did
+# that, warming the search models on worker threads while the event loop read their devices.
+_setting_up = threading.Lock()
+
+
 def runtime() -> Any:
     """ONNX Runtime, with its telemetry off and the WebGPU plugin registered where it is
-    installed. Every path to it goes through here first, a session included.
+    installed. Every path to it goes through here first, a session included, from any thread.
 
     Its telemetry (Microsoft's 1DS SDK) uploads usage events from a thread of its own, and a
     process that exits mid-upload crashes in that thread: `recursive_mutex lock failed`, or a
     segmentation fault (macOS crash reports of the test workers: 4 of 6 runs; none of 8 with it
     off). A local app has no business sending them either."""
+    with _setting_up:
+        return _set_up()
+
+
+@cache
+def _set_up() -> Any:
+    """`runtime`, once per process."""
     import onnxruntime
 
     onnxruntime.disable_telemetry_events()

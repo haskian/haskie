@@ -10,7 +10,7 @@ const DOCUMENT: Document = {
   size: 421_888,
   status: 'imported',
   error: null,
-  preview: { kind: 'pdf', truncated: false, pages: 12, ocr_pages: [3, 4] },
+  preview: { kind: 'pdf', truncated: false, pages: 12, ocr_pages: [3, 4], converted: true },
   parser: 'anydoc',
   skip_ocr_pages: true,
   created_at: 1_547_901_120,

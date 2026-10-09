@@ -321,7 +321,7 @@ describe('stageInfo', () => {
       name: 'a conversion sums the pages that needed OCR',
       stage: 'convert',
       rows: [task({ stage: 'convert', seq: 0, result: 2 }), task({ stage: 'convert', seq: 1, result: 3 })],
-      expected: '5 OCR pages',
+      expected: '5 unread pages',
     },
     {
       name: 'an embed sums its chunks, ignoring the batches still running',

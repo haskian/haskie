@@ -56,10 +56,10 @@ from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import vocabulary as collection_vocabulary
 from haskie.collection.collection import Collection
 from haskie.collection.index import Row
-from haskie.document import convert
+from haskie.document import convert, ocr
 from haskie.document.bookmarks import Bookmark
 from haskie.document.document import Document
-from haskie.errors import PermanentError
+from haskie.errors import PermanentError, Unavailable
 from haskie.indexing import (
     chunk,
     embed,
@@ -73,7 +73,13 @@ from haskie.indexing import (
 from haskie.indexing.segment import CutReason, SpanKind
 from haskie.sections import build, generated, vocabulary
 from haskie.sections.descriptors import Description
-from haskie.settings import Accelerator, ChunkSettings, Descriptors, PipelineSettings
+from haskie.settings import (
+    Accelerator,
+    ChunkSettings,
+    Descriptors,
+    PipelineSettings,
+    load_user_settings_or_none,
+)
 
 JOINER = "\n\n"  # between convert parts in the assembled markdown
 # About one printed page of markdown: what a page is where the text has no page markers to count
@@ -134,22 +140,43 @@ async def plan_convert(doc: Document, batch_pages: int) -> list[Batch]:
 
 
 async def convert_batch(doc: Document, batch: Batch) -> int:
-    """Write one part file; returns how many of its pages need OCR. `parser` and
-    `skip_ocr_pages` are the document's own, fixed at import."""
+    """Write one part file; returns how many of its pages are left unread: no text, and none OCR
+    read. `parser` and `skip_ocr_pages` are the document's own, fixed at import; OCR follows the
+    setting when the batch runs (`_ocr`).
+
+    While the OCR model is on its way, a PDF or image batch raises `ModelLoading` before any
+    work, so the workflow waits for the model without a slot."""
     source = doc.source_path()
-    if source.suffix.lower() == ".pdf":
-        markdown, ocr_pages, _ = await cpu.off_interpreter(
+    suffix = source.suffix.lower()
+    ocr = suffix in convert.OCR_SUFFIXES and await _ocr()
+    if suffix == ".pdf":
+        markdown, unread, _ = await cpu.off_interpreter(
             convert.pdf_pages_markdown,
             source,
             list(range(batch.start, batch.end)),
             doc.skip_ocr_pages,
             batch.bookmarks,
+            ocr,
         )
     else:
-        markdown = await cpu.on_cpu(convert.to_markdown, source, doc.parser)
-        ocr_pages = []
+        markdown = await cpu.on_cpu(convert.to_markdown, source, doc.parser, ocr)
+        unread = []
     await home.atomic_write(doc.part_path(batch.seq), markdown)
-    return len(ocr_pages)
+    return len(unread)
+
+
+async def _ocr() -> bool:
+    """Whether OCR reads a conversion's scans; raises `ModelLoading` while its model is on its
+    way. Off, a home nobody has set up yet (it downloads no model, `workflows.start`), or a model
+    whose download failed reads none, and those pages fall to `skip_ocr_pages`."""
+    settings = await load_user_settings_or_none()
+    if settings is None or not settings.pipeline.ocr:
+        return False
+    try:
+        await models.require_ready(models.ModelKind.OCR, ocr.MODEL)
+    except Unavailable:
+        return False
+    return True
 
 
 async def finalize_convert(doc: Document, batches: list[Batch], ocr_total: int) -> int | None:

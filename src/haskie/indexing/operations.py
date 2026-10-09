@@ -228,7 +228,7 @@ class Task(msgspec.Struct):
     page_start: int
     page_end: int
     status: RunStatus
-    result: int | None  # convert: pages needing OCR; describe: sections; embed/index: chunks
+    result: int | None  # convert: pages left unread; describe: sections; embed/index: chunks
     error: str | None
     # what a task of a collection's description covers: a document's name, or the collection
     name: str | None = None

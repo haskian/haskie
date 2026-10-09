@@ -12,18 +12,20 @@ SUCCESS record still has cold caches. `_ready` holds the ids this process has lo
 `ensure_models` warms the rest in a background task (a local read, no network), and
 `require_ready` (which every search calls) answers from `_ready`, not from the record alone.
 
-Two groups (`ModelGroup`). The search models (the embedding model, the rerankers) are warmed at
+Three groups (`ModelGroup`). The search models (the embedding model, the rerankers) are warmed at
 boot and stay loaded: a search needs them at once. The knowledge models (the describer, the
 vocabulary's embedder) serve indexing alone: downloaded at boot but loaded on first use, and freed
 once idle for `IDLE_SECONDS` (`free_idle`, which `workflows` runs every `SWEEP_SECONDS`). A freed
-one is `downloaded`, and the next run that asks loads it again through the same wait.
+one is `downloaded`, and the next run that asks loads it again through the same wait. The
+conversion model (OCR, while the `ocr` setting is on) is usable once downloaded: each conversion
+loads it in its own worker, so this process never holds it.
 
 Loading a model is CPU work, not IO, so it goes through `cpu.on_cpu`: a worker thread, under one
 slot of the CPU budget, whichever event loop asked for it.
 
 Depends on leaf modules only (`cpu`, `embed`, `gguf_models`, `settings`, `catalogue`,
-`dbos_names`): `index` and `pipeline` import this module, so it must not reach back into them or
-into `workflows`.
+`dbos_names`, `document.ocr`): `index` and `pipeline` import this module, so it must not
+reach back into them or into `workflows`.
 `collection` is read through a function-local import for the same reason (see
 `_collection_rerankers`).
 """
@@ -40,12 +42,13 @@ from dbos import WorkflowStatus as DbosWorkflowStatus
 
 from haskie import cpu
 from haskie.catalogue import catalogue
+from haskie.document import ocr
 from haskie.errors import HaskieError, NotReady, Unavailable
 from haskie.indexing import embed, gguf_models, hardware
 from haskie.indexing.dbos_names import ACTIVE_STATUS, DOWNLOAD_WORKFLOW, RunStatus, root_cause
 from haskie.indexing.hardware import Device
 from haskie.logs import get_logger
-from haskie.settings import Reranker, UserSettings, load_user_settings
+from haskie.settings import Reranker, UserSettings, load_user_settings, load_user_settings_or_none
 
 _log = get_logger(__name__)
 
@@ -75,11 +78,19 @@ class ModelKind(StrEnum):
     DESCRIBER = "describer"  # writes section descriptors (`gguf_models.DESCRIBERS`)
     # embeds them for a collection's vocabulary (`gguf_models.VOCABULARY_EMBEDDER`)
     VOCABULARY = "vocabulary"
+    OCR = "ocr"  # reads scanned pages and images (`ocr.MODEL`)
 
 
 class ModelGroup(StrEnum):
     SEARCH = "search"  # loaded for the life of the process
     KNOWLEDGE = "knowledge"  # loaded on first use, freed once idle
+    CONVERSION = "conversion"  # usable once downloaded: each conversion worker loads its own
+
+
+def _resident(kind: "ModelKind") -> bool:
+    """Whether a model of `kind` is usable only once loaded in this process. One that is not is
+    usable once downloaded: nothing warms it, and its state is `downloaded` (`_model_status`)."""
+    return GROUPS[kind] != ModelGroup.CONVERSION
 
 
 GROUPS: dict[ModelKind, ModelGroup] = {
@@ -87,6 +98,7 @@ GROUPS: dict[ModelKind, ModelGroup] = {
     ModelKind.RERANKER: ModelGroup.SEARCH,
     ModelKind.DESCRIBER: ModelGroup.KNOWLEDGE,
     ModelKind.VOCABULARY: ModelGroup.KNOWLEDGE,
+    ModelKind.OCR: ModelGroup.CONVERSION,
 }
 
 IDLE_SECONDS = 300  # a knowledge model nobody used for this long is freed
@@ -128,6 +140,7 @@ async def warm_model(kind: ModelKind, name: str) -> None:
         ModelKind.RERANKER: embed.warm_reranker,
         ModelKind.DESCRIBER: embed.warm_generator,
         ModelKind.VOCABULARY: embed.warm,
+        ModelKind.OCR: ocr.fetch,  # a download only: nothing loads in this process
     }[kind]
     await cpu.on_cpu(warm, name, accelerator)
 
@@ -159,7 +172,8 @@ async def ensure_model(kind: ModelKind, name: str) -> ModelState:
     except Exception as exc:
         # flat message and a one-argument class: DBOS stores and rebuilds it without our traceback
         raise HaskieError(root_cause(exc)) from exc
-    _mark_ready(_model_id(kind, name))  # the download ran here, so this process can search with it
+    if _resident(kind):
+        _mark_ready(_model_id(kind, name))  # the download ran here, so this process can use it
     return ModelState.READY
 
 
@@ -180,6 +194,8 @@ async def required(settings: UserSettings) -> list[tuple[ModelKind, str]]:
         wanted.append((ModelKind.DESCRIBER, describer))
         # the describer judges the vocabulary's pairs too, and this embeds its descriptors
         wanted.append((ModelKind.VOCABULARY, gguf_models.VOCABULARY_EMBEDDER))
+    if settings.pipeline.ocr:
+        wanted.append((ModelKind.OCR, ocr.MODEL))
     return list(dict.fromkeys(wanted))
 
 
@@ -337,7 +353,9 @@ def _model_status(kind: ModelKind, name: str, workflow) -> ModelStatus:
     if workflow is not None:
         state = _STATE.get(workflow.status, ModelState.LOADING)
     workflow_id = _model_id(kind, name)
-    if state == ModelState.READY and not (is_warm(workflow_id) or embed.loaded(name)):
+    if state == ModelState.READY and not _resident(kind):
+        state = ModelState.DOWNLOADED
+    elif state == ModelState.READY and not (is_warm(workflow_id) or embed.loaded(name)):
         idle = GROUPS[kind] == ModelGroup.KNOWLEDGE and workflow_id not in _warming
         state = ModelState.DOWNLOADED if idle else ModelState.LOADING
     error = str(workflow.error) if workflow is not None and workflow.error else None
@@ -347,7 +365,9 @@ def _model_status(kind: ModelKind, name: str, workflow) -> ModelStatus:
 async def model_statuses() -> list[ModelStatus]:
     """One status per required model. `ensure_models` builds the same list off the records it
     just read, rather than reading them again."""
-    settings = await load_user_settings()
+    settings = await load_user_settings_or_none()
+    if settings is None:
+        return []  # a home nobody has set up yet asks for no model (`workflows.start`)
     wanted = await required(settings)
     return _statuses(wanted, await _download_records(wanted), settings)
 
@@ -382,6 +402,8 @@ async def require_ready(kind: ModelKind, name: str) -> None:
         raise Unavailable(f"{kind} model {name} failed to load: {status.error}")
     if status.state == ModelState.PENDING:
         raise ModelLoading(f"{kind} model {name} is not loaded yet; check /api/status")
+    if status.state == ModelState.DOWNLOADED and not _resident(kind):
+        return
     if found and found[0].status == RunStatus.SUCCESS:
         # downloaded, warming up or waiting for its first use (see `_model_status`); warmed here,
         # since the boot warms only the search models the settings require now, and a run

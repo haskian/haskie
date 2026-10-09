@@ -1096,8 +1096,8 @@ export interface components {
             chunk_frame: boolean;
             parser?: components["schemas"]["Parser"];
             /**
-             * Skip pages that need OCR
-             * @description Chosen when a document is imported. PDF pages with no extractable text (scans, images) are dropped and replaced by a marker comment in the Markdown instead of failing the document. A document where every page needs OCR still fails. Off: any such page fails the document.
+             * Skip pages OCR cannot read
+             * @description Chosen when a document is imported. A PDF page with no extractable text that OCR reads no text on either (blank, or OCR off or unavailable) is dropped and replaced by a marker comment in the Markdown instead of failing the document. A PDF with no text on any page still fails. Off: any such page fails the document.
              * @default true
              */
             skip_ocr_pages: boolean;
@@ -1573,12 +1573,12 @@ export interface components {
          * ModelGroup
          * @enum {string}
          */
-        ModelGroup: "search" | "knowledge";
+        ModelGroup: "search" | "knowledge" | "conversion";
         /**
          * ModelKind
          * @enum {string}
          */
-        ModelKind: "embedding" | "reranker" | "describer" | "vocabulary";
+        ModelKind: "embedding" | "reranker" | "describer" | "vocabulary" | "ocr";
         /**
          * ModelState
          * @enum {string}
@@ -1842,6 +1842,12 @@ export interface components {
             accelerator?: components["schemas"]["Accelerator"];
             descriptors?: components["schemas"]["Descriptors"];
             describer?: components["schemas"]["Describer"];
+            /**
+             * Read scans with OCR
+             * @description Optical character recognition on this device: PP-OCRv6 small reads the PDF pages that carry no text, such as scans, and images (SVG aside). On: its model downloads with the other models (about 31 MB), and a PDF or image conversion waits for it. Applies to the documents converted from then on. Off: those pages are left unread, and Skip pages OCR cannot read decides what happens to them.
+             * @default true
+             */
+            ocr: boolean;
         };
         /** Position */
         Position: {
@@ -1855,6 +1861,8 @@ export interface components {
             truncated: boolean;
             pages?: number | null;
             ocr_pages?: number[];
+            /** @default false */
+            converted: boolean;
         };
         /**
          * PreviewKind
@@ -1967,7 +1975,7 @@ export interface components {
          * Runtime
          * @enum {string}
          */
-        Runtime: "onnx" | "mlx" | "gguf";
+        Runtime: "onnx" | "mlx" | "gguf" | "pdf_inspector";
         /**
          * ScoreFold
          * @description How the scores of a passage's matched chunks, or a document's, fold into one. sum: every matched chunk adds, so more evidence ranks higher (Vespa's chunk example). max: the best chunk alone (Elasticsearch semantic_text). harmonic: between the best and twice it, so more chunks lift a result but many weak ones never outrank one strong one.

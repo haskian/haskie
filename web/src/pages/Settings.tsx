@@ -150,6 +150,7 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
 
   const profiles = profileOptions(options.embedding_profiles, options.embedding_metadata)
   const skipOcr = docFor(docs, 'conversion.skip_ocr_pages')
+  const ocr = docFor(docs, 'pipeline.ocr')
   const frame = docFor(docs, 'conversion.chunk_frame')
 
   return (
@@ -181,6 +182,10 @@ export function Settings({ route, counts, refreshStatus }: PageProps) {
               onChange={(parser) => update({ conversion: { ...settings.conversion, parser } })}
             />
           </Field>
+          <div className="field">
+            <Toggle label={ocr.title} checked={settings.pipeline.ocr} onChange={(on) => pipeline({ ocr: on })} />
+            <span className="faint">{ocr.description}</span>
+          </div>
           <div className="field">
             <Toggle
               label={skipOcr.title}

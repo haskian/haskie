@@ -14,6 +14,7 @@ import random
 import sqlite3
 import sys
 import threading
+import time
 import types
 import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -44,11 +45,12 @@ from conftest import (
     remove_collection,
     text_pdf,
     until,
+    use_ocr,
 )
 from sqlalchemy import event, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
-from haskie import audit, db, home, ids, logs, tables
+from haskie import audit, cpu, db, home, ids, logs, tables
 from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import index as index_module
 from haskie.collection import maintenance
@@ -65,7 +67,7 @@ from haskie.collection.index import (
     _partitions,
     row_score,
 )
-from haskie.document import convert, document
+from haskie.document import convert, document, ocr
 from haskie.document.document import Document, DocumentStatus
 from haskie.errors import (
     Conflict,
@@ -296,45 +298,12 @@ async def test_init_user_settings_creates_the_row_once() -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "pages", "skip", "expect"),
-    [
-        ("mixed, skip off -> refused", ["one", None, "two", None], False, "raise"),
-        (
-            "mixed, skip on -> text pages kept, OCR pages marked",
-            ["one", None, "two", None],
-            True,
-            "ok",
-        ),
-        ("all OCR, skip on -> still fails", [None, None], True, "raise"),
-        ("no OCR pages, skip on -> unchanged", ["one", "two"], True, "ok"),
-    ],
-)
-def test_skip_ocr_pages(tmp_path: Path, name: str, pages: list, skip: bool, expect: str) -> None:
-    pdf = tmp_path / "doc.pdf"
-    pdf.write_bytes(text_pdf(pages))
-    markdown, ocr_pages, total = convert.pdf_pages_markdown(pdf, skip_ocr_pages=skip)
-    if expect == "raise":
-        with pytest.raises(PermanentError, match="need OCR"):
-            convert.check_ocr_policy(len(ocr_pages), total, skip)
-        return
-    convert.check_ocr_policy(len(ocr_pages), total, skip)  # no raise: the policy accepts it
-    for i, text in enumerate(pages, start=1):
-        if text is None:
-            assert f"<!-- page {i}: needs OCR, skipped -->" in markdown, name
-        else:
-            assert text in markdown, name
-    preview = convert.build_preview(pdf, tmp_path / "prev", Parser.ANYDOC)
-    assert preview.ocr_pages == [i for i, t in enumerate(pages, start=1) if t is None], name
-
-
-@pytest.mark.parametrize(
     ("name", "filename", "content", "parser", "expected"),
     [
         ("markdown -> read as text", "n.md", MD.encode(), "anydoc", MD),
         ("plain parser reads any text file", "n.md", b"# H\n", "plain", "# H\n"),
         ("html -> raw source", "p.html", b"<h1>T</h1>", "anydoc", "<h1>T</h1>"),
         ("office file -> anydoc markdown", "r.docx", None, "anydoc", "Quarterly report"),
-        ("image -> no extractable text", "pic.png", PNG_1X1, "anydoc", ""),
     ],
 )
 def test_to_markdown_by_suffix(
@@ -819,6 +788,30 @@ async def test_document_page_sorts_filters_and_resumes_by_keyset() -> None:
 
     with pytest.raises(InvalidInput, match="unknown sort"):
         await document.page(PageRequest(sort="colour"))
+
+
+@pytest.mark.anyio
+async def test_a_preview_built_from_the_file_gives_way_once_the_markdown_is_written() -> None:
+    """The right pane comes from the converted markdown, OCR's text included, once there is one.
+    A preview built before came from the file, without OCR: it stands until the markdown is
+    written, then the next open builds it again. A conversion's end drops a kept preview too
+    (`set_converted`), as a re-import of a failed document converts it again."""
+    doc = await import_row("scan.pdf", text_pdf(["one", None]))
+
+    _, early = await document.ensure_preview(doc)
+    row = await document.named(doc.name)
+    assert (early.converted, early.ocr_pages, row.preview) == (False, [2], early), "kept"
+    _, again = await document.ensure_preview(row)
+    assert again == early, "and it stands while there is no markdown"
+
+    doc.markdown.write_text("<!-- page 1 -->\n\none\n\n<!-- page 2 -->\n\nscanned words\n")
+    _, late = await document.ensure_preview(await document.named(doc.name))
+    assert (late.converted, late.ocr_pages) == (True, []), "built again, from the markdown"
+    assert "scanned words" in (doc.preview_dir / "preview.md").read_text(), "OCR's text, shown"
+
+    await document.set_converted(doc.id, 2)
+    row = await document.named(doc.name)
+    assert (row.preview, row.pages) == (None, 2), "a conversion's end drops the kept preview"
 
 
 @pytest.mark.anyio
@@ -3254,13 +3247,103 @@ async def test_a_pdf_converts_in_batches_cut_where_its_bookmarks_start(
     assert [b.seq for b in batches] == list(range(len(expected)))
 
 
+async def _ocr_model(monkeypatch: pytest.MonkeyPatch, on: bool, model: str | None) -> list:
+    """OCR on or off in the stored settings, and its model ready (None), `failed` or `coming`;
+    the kinds the conversion asks for."""
+    from haskie.errors import Unavailable
+    from haskie.indexing import models
+
+    raised = {
+        "failed": Unavailable("ocr model failed"),
+        "coming": models.ModelLoading("on its way"),
+    }
+    asked: list[models.ModelKind] = []
+
+    async def require_ready(kind: models.ModelKind, name: str) -> None:
+        assert name == ocr.MODEL
+        asked.append(kind)
+        if model is not None:
+            raise raised[model]
+
+    monkeypatch.setattr(models, "require_ready", require_ready)
+    await save_user_settings(UserSettings(pipeline=PipelineSettings(ocr=on)))
+    return asked
+
+
+def _png() -> bytes:
+    from PIL import Image
+
+    picture = io.BytesIO()
+    Image.new("RGB", (40, 20), "white").save(picture, format="PNG")
+    return picture.getvalue()
+
+
 @pytest.mark.anyio
-async def test_convert_batch_of_a_pdf_reports_pages_needing_ocr() -> None:
-    doc = await import_row("scan.pdf", text_pdf(["text page", None]))
+@pytest.mark.parametrize(
+    ("name", "file", "on", "model", "texts", "unread", "shows"),
+    [
+        ("model ready: the scan is read", "scan.pdf", True, None, {2: "words"}, 0, "words"),
+        ("model ready, OCR reads nothing: skipped", "scan.pdf", True, None, {}, 1, "skipped"),
+        ("OCR off: the scan is left unread", "scan.pdf", False, None, {2: "words"}, 1, "skipped"),
+        (
+            "model failed: the scan is left unread",
+            "scan.pdf",
+            True,
+            "failed",
+            {2: "w"},
+            1,
+            "skipped",
+        ),
+        ("model ready: the image is read", "shot.png", True, None, {1: "words"}, 0, "words"),
+        ("markdown: OCR never asked", "notes.md", True, "coming", {}, 0, "alpha body"),
+    ],
+)
+async def test_convert_batch_reads_scans_while_ocr_and_its_model_allow(
+    name: str,
+    file: str,
+    on: bool,
+    model: str | None,
+    texts: dict[int, str],
+    unread: int,
+    shows: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setting decides whether OCR reads; its model decides when. A failed download reads
+    nothing, and a file OCR cannot read anything in never asks."""
+    use_ocr(monkeypatch, texts)
+    asked = await _ocr_model(monkeypatch, on, model)
+    content = {"scan.pdf": text_pdf(["text page", None]), "shot.png": _png(), "notes.md": MD}
+    doc = await import_row(file, content[file])
     batches = await pipeline.plan_convert(doc, 10)
 
-    assert await pipeline.convert_batch(doc, batches[0]) == 1
-    assert "needs OCR, skipped" in doc.part_path(0).read_text()
+    assert await pipeline.convert_batch(doc, batches[0]) == unread, name
+    await pipeline.finalize_convert(doc, batches, unread)
+    assert shows in doc.markdown.read_text(), name
+    assert bool(asked) == (on and file != "notes.md"), "OCR is asked only for what it can read"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("file", ["text.pdf", "shot.png"])
+async def test_a_pdf_or_image_batch_waits_for_the_ocr_model_before_any_work(
+    file: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While the model is on its way, the batch waits for it before reading the file: the wait
+    sleeps durably without a slot, and a batch run again would only redo the work."""
+    from haskie.indexing import models
+
+    calls = use_ocr(monkeypatch, {})
+    await _ocr_model(monkeypatch, True, "coming")
+    doc = await import_row(file, text_pdf(["one", "two"]) if file == "text.pdf" else _png())
+    batches = await pipeline.plan_convert(doc, 10)
+    extracted: list[str] = []
+    monkeypatch.setattr(cpu, "off_interpreter", lambda *a: extracted.append("pdf"))
+    monkeypatch.setattr(cpu, "on_cpu", lambda *a: extracted.append("image"))
+
+    with pytest.raises(models.ModelLoading):
+        await pipeline.convert_batch(doc, batches[0])
+
+    assert (extracted, calls) == ([], []), "nothing read, by the converter or by OCR"
+    assert not doc.part_path(0).exists(), "nothing written"
 
 
 @pytest.mark.anyio
@@ -4196,6 +4279,35 @@ def test_an_nvidia_provider_whose_library_is_missing_does_not_load(tmp_path: Pat
         embed.nvidia_loads.cache_clear()
 
 
+def _stand_in_runtime(
+    monkeypatch: pytest.MonkeyPatch, plugin: bool, register: Callable[[str, str], None]
+) -> types.SimpleNamespace:
+    """ONNX Runtime stood in for, with the WebGPU plugin installed or not, and set up afresh: a
+    cache of its own, so the process's real runtime, set up already, is not set up again."""
+    import functools
+    import importlib.util
+
+    calls: list[str] = []
+    stand_in = types.SimpleNamespace(
+        calls=calls,
+        disable_telemetry_events=lambda: calls.append("off"),
+        register_execution_provider_library=register,
+    )
+    webgpu = types.SimpleNamespace(get_library_path=lambda: "/lib/webgpu.dylib")
+    monkeypatch.setitem(sys.modules, "onnxruntime", stand_in)
+    monkeypatch.setitem(sys.modules, "onnxruntime_ep_webgpu", webgpu)
+    found = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda module: (
+            (object() if plugin else None) if module == "onnxruntime_ep_webgpu" else found(module)
+        ),
+    )
+    monkeypatch.setattr(onnx_models, "_set_up", functools.cache(onnx_models._set_up.__wrapped__))
+    return stand_in
+
+
 @pytest.mark.parametrize(
     ("name", "plugin", "expected"),
     [
@@ -4211,34 +4323,44 @@ def test_onnx_runtime_comes_with_its_telemetry_off_once(
     name: str, plugin: bool, expected: list[str], monkeypatch
 ) -> None:
     """Its telemetry thread crashed processes exiting mid-upload (`onnx_models.runtime`)."""
-    import importlib.util
-
-    calls: list[str] = []
-    stand_in = types.SimpleNamespace(
-        disable_telemetry_events=lambda: calls.append("off"),
-        register_execution_provider_library=lambda key, path: calls.append(
-            f"register {key} {path}"
-        ),
+    stand_in = _stand_in_runtime(
+        monkeypatch, plugin, lambda key, path: stand_in.calls.append(f"register {key} {path}")
     )
-    webgpu = types.SimpleNamespace(get_library_path=lambda: "/lib/webgpu.dylib")
-    monkeypatch.setitem(sys.modules, "onnxruntime", stand_in)
-    monkeypatch.setitem(sys.modules, "onnxruntime_ep_webgpu", webgpu)
-    found = importlib.util.find_spec
-    monkeypatch.setattr(
-        importlib.util,
-        "find_spec",
-        lambda module: (
-            (object() if plugin else None) if module == "onnxruntime_ep_webgpu" else found(module)
-        ),
-    )
-    onnx_models.runtime.cache_clear()
-    try:
-        assert embed.onnx_runtime() is stand_in
-        assert embed.onnx_runtime() is stand_in
-    finally:
-        onnx_models.runtime.cache_clear()
 
-    assert calls == expected, name
+    assert embed.onnx_runtime() is stand_in
+    assert embed.onnx_runtime() is stand_in
+
+    assert stand_in.calls == expected, name
+
+
+def test_onnx_runtime_is_set_up_once_when_threads_ask_at_once(monkeypatch) -> None:
+    """The boot warms the search models on worker threads while the event loop reads their
+    devices, each asking for the runtime first. ONNX Runtime refuses a second registration of
+    the WebGPU plugin, and the boot failed with "library is already registered under webgpu"."""
+    registered: list[str] = []
+
+    def register(key: str, _path: str) -> None:
+        time.sleep(0.05)  # long enough for every other thread to arrive meanwhile
+        if key in registered:
+            raise RuntimeError(f"library is already registered under {key}")
+        registered.append(key)
+
+    stand_in = _stand_in_runtime(monkeypatch, True, register)
+    barrier = threading.Barrier(8)
+    answers: list[object] = []
+
+    def ask() -> None:
+        barrier.wait()
+        answers.append(onnx_models.runtime())
+
+    threads = [threading.Thread(target=ask) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert registered == ["webgpu"], "registered once"
+    assert answers == [stand_in] * 8, "and every thread got the runtime, none an error"
 
 
 @pytest.mark.parametrize(

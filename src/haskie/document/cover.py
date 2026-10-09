@@ -26,7 +26,7 @@ from xml.etree import ElementTree
 import anyio
 
 from haskie import cpu, home, logs
-from haskie.document.convert import IMAGE_SUFFIXES
+from haskie.document.convert import RASTER_SUFFIXES
 from haskie.document.document import Document
 
 log = logs.get_logger(__name__)
@@ -34,8 +34,8 @@ log = logs.get_logger(__name__)
 COVER_PX = 480  # its side: a gallery card is 228 CSS pixels square, twice that on a retina screen
 JPEG_QUALITY = 85
 JPEG = "image/jpeg"
-# the suffixes whose files can carry a cover page; SVG is left out, as Pillow cannot read it
-PAGE_SUFFIXES = {".pdf", ".epub"} | (IMAGE_SUFFIXES - {".svg"})
+# the suffixes whose files can carry a cover page: an SVG has no pixels for Pillow to read
+PAGE_SUFFIXES = {".pdf", ".epub"} | RASTER_SUFFIXES
 # an EPUB is a zip: a cover image that inflates past this is refused, not read into memory
 MAX_EPUB_IMAGE_BYTES = 64 * 1024 * 1024
 FACET_LIGHT = 0.12  # how far a facet is lightened or darkened, as a share of its colour

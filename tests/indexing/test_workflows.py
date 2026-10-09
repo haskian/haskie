@@ -3324,7 +3324,7 @@ async def test_an_unreadable_settings_row_does_not_stop_the_boot(dbos, monkeypat
     forget_settings()  # the row was written behind the loader's back, as another build would
     applied: list[UserSettings] = []
 
-    async def apply_settings(value: UserSettings) -> None:
+    async def apply_settings(value: UserSettings, initialized: bool = True) -> None:
         applied.append(value)
 
     monkeypatch.setattr(workflows, "apply_settings", apply_settings)
@@ -3343,7 +3343,7 @@ async def test_settings_rejected_while_applying_fall_back_to_defaults_at_boot(
     stored = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
     applied: list[UserSettings] = []
 
-    async def apply_settings(value: UserSettings) -> None:
+    async def apply_settings(value: UserSettings, initialized: bool = True) -> None:
         applied.append(value)
         if len(applied) == 1:
             raise InvalidInput("cpu_budget must be >= 1, got 0")

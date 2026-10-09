@@ -28,7 +28,11 @@ async def _imported(dbos, tmp_path: Path, pages: int) -> str:
     # minute expires under them on a loaded machine: the maintenance run the index asked for wakes
     # up and enqueues its own child on `task.indexing`, which is then a row nobody asked for.
     indexing = PipelineSettings(
-        cpu_budget=6, batch_pages=1, index_group_parts=1, maintenance_idle_seconds=3600
+        cpu_budget=6,
+        batch_pages=1,
+        index_group_parts=1,
+        maintenance_idle_seconds=3600,
+        ocr=False,  # its model would be one more download among the runs
     )
     await dbos.apply_settings(await save_user_settings(UserSettings(pipeline=indexing)))
     row = await import_document(

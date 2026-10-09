@@ -263,9 +263,11 @@ you need the machine back.
 ## Failure and recovery
 
 - A **transient** failure (a busy database, for example) gets 3 attempts in total, with backoff.
-- A **permanent** failure fails at once: a file the parser cannot read, or a PDF whose pages need
-  optical character recognition (OCR). With `skip_ocr_pages` on (the default), only a PDF where
-  every page needs OCR fails. Unsupported file types are refused at import, before any operation
+- A **permanent** failure fails at once: a file the parser cannot read, or a PDF with pages that
+  optical character recognition (OCR) reads no text on. With `skip_ocr_pages` on (the default),
+  only a PDF with no text on any page fails. OCR reads nothing when the `ocr` setting is off, or
+  when its model failed to download. While the model is still on its way, a PDF or image
+  batch waits for it, durably and without a slot. Unsupported file types are refused at import, before any operation
   starts.
 - An embedding model that is still downloading or warming up is not a failure. The embedding
   run sleeps durably until the model is ready, before it cuts any slice. A batch that still finds
