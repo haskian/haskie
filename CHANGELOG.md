@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.35.0 - 2026-10-09
+#### Features
+- (**document**) show how a PDF's pages were converted in its info (#54) - (88e6d35) - Črtomir Majer
+
+- - -
+
 ## v0.34.0 - 2026-10-09
 #### Features
 - (**document**) read scanned PDF pages and images with on-device OCR (#53) - (defc616) - Črtomir Majer
