@@ -126,9 +126,11 @@ and the tool reference.
 
 ## Supported files and limits
 
-Import PDFs, Office and OpenDocument files, EPUB, RTF, Markdown, plain text, CSV, JSON and HTML.
-Images can be stored and previewed. Optical character recognition (OCR) is not available:
-scanned PDF pages are skipped, and a PDF with only scanned pages cannot be indexed.
+Import PDFs, Office and OpenDocument files, EPUB, RTF, Markdown, plain text, CSV, JSON, HTML and
+images.
+Optical character recognition (OCR) runs on your device. It reads scanned PDF pages and
+images (SVG aside). Its model, about 31 MB, downloads with the other models. Documents imported
+before OCR keep their old text until you delete them and import them again.
 
 haskie is early software for one user on one machine. It has no login and listens on `127.0.0.1`
 by default. Keep it off public networks. It retrieves your chosen sources; it does not fact-check

@@ -594,11 +594,15 @@ async def cancel_import(id: str) -> None:
     )
 
 
-async def set_pages(id: str, pages: int) -> None:
-    """Record the page count its conversion found. Not a change to the document, so
-    `updated_at` stays (see `set_status`)."""
+async def set_converted(id: str, pages: int | None) -> None:
+    """Record what a conversion changed: the page count it found (a PDF's; None leaves it), and
+    no preview, so the next open builds one from the markdown just written, OCR's text included
+    (`ensure_preview`). Not a change to the document, so `updated_at` stays (see `set_status`)."""
+    values: dict[str, Any] = {"preview": None}
+    if pages is not None:
+        values["pages"] = pages
     async with db.connect() as conn:
-        await conn.execute(update(documents).where(documents.c.id == id).values(pages=pages))
+        await conn.execute(update(documents).where(documents.c.id == id).values(**values))
 
 
 async def fill_pages() -> int:
@@ -714,6 +718,15 @@ def configure_preview_slots(workers: int) -> None:
     _preview_slots.total_tokens = workers
 
 
+async def _current(row: Document) -> convert.Preview | None:
+    """The row's preview, when it stands: one built from the file alone does not once the
+    conversion has written the markdown, which carries OCR's text."""
+    preview = row.preview
+    if preview is None or preview.converted or not await anyio.Path(row.markdown).exists():
+        return preview
+    return None
+
+
 async def ensure_preview(row: Document) -> tuple[Document, convert.Preview]:
     """Build the side-by-side preview (first pages only for PDF) once, on first open.
 
@@ -727,17 +740,22 @@ async def ensure_preview(row: Document) -> tuple[Document, convert.Preview]:
 
     `row` is the document as the caller has just read it: an open of a document whose preview
     is built costs no second read.
+
+    A preview built before the conversion wrote the markdown came from the file, without OCR
+    (`Preview.converted`): once the markdown is there, the next open builds it again from that.
+    A conversion's end drops a kept preview too (`set_converted`), as a re-import of a failed
+    document converts it again.
     """
-    if row.preview is not None:
-        return row, row.preview
+    if (preview := await _current(row)) is not None:
+        return row, preview
     id = row.id
     # setdefault, with no await in between, so two readers of one document take the same lock
     lock = _preview_locks.setdefault(id, anyio.Lock())
     async with lock:
         try:
             info = await get(id)  # another reader may have built it while we waited
-            if info.preview is not None:
-                return info, info.preview
+            if (preview := await _current(info)) is not None:
+                return info, preview
             try:
                 with anyio.fail_after(PREVIEW_WAIT_SECONDS):
                     await _preview_slots.acquire()
@@ -754,6 +772,7 @@ async def ensure_preview(row: Document) -> tuple[Document, convert.Preview]:
                     info.preview_dir,
                     info.parser,
                     info.skip_ocr_pages,
+                    info.markdown,
                 )
                 async with db.connect() as conn:
                     await conn.execute(

@@ -49,9 +49,12 @@ from haskie.settings import (
 
 pytestmark = pytest.mark.anyio
 
+# OCR is on by default and its model is required then: off wherever a test is about other models
+NO_OCR = PipelineSettings(ocr=False)
+
 
 async def test_no_model_is_required_for_full_text_only(dbos) -> None:
-    assert await models.ensure_models(UserSettings(embedding="none")) == []
+    assert await models.ensure_models(UserSettings(embedding="none", pipeline=NO_OCR)) == []
     assert await models.model_statuses() == [], "and the stored settings ask for none either"
 
 
@@ -108,7 +111,9 @@ async def test_model_state_decides_whether_search_may_run(
             assert await wait_event(blocked)
 
     monkeypatch.setattr(models, "load_model", load_model)
-    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    user = await save_user_settings(
+        UserSettings(embedding="granite-97m-multilingual", pipeline=NO_OCR)
+    )
     model_name = (await default_model()).name
 
     if outcome != "missing":
@@ -141,7 +146,9 @@ async def test_ensure_models_retries_a_model_that_failed(dbos, monkeypatch) -> N
             raise RuntimeError("connection reset")
 
     monkeypatch.setattr(models, "load_model", load_model)
-    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    user = await save_user_settings(
+        UserSettings(embedding="granite-97m-multilingual", pipeline=NO_OCR)
+    )
     model_name = (await default_model()).name
 
     await models.ensure_models(user)
@@ -171,7 +178,9 @@ async def test_require_ready_answers_from_the_process_that_loaded_the_model(
             raise RuntimeError("connection reset")
 
     monkeypatch.setattr(models, "load_model", load_model)
-    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    user = await save_user_settings(
+        UserSettings(embedding="granite-97m-multilingual", pipeline=NO_OCR)
+    )
     model_name = (await default_model()).name
     await models.ensure_models(user)
     await await_terminal([models._model_id(ModelKind.EMBEDDING, model_name)])
@@ -201,6 +210,7 @@ async def test_embed_stage_precomputes_vectors_and_hybrid_search_uses_them(
         UserSettings(
             embedding="granite-97m-multilingual",
             search=SearchSettings(reranker=Reranker.CROSS_ENCODER),
+            pipeline=NO_OCR,
         )
     )
     await models.ensure_models(user)
@@ -252,14 +262,16 @@ async def test_embed_stage_precomputes_vectors_and_hybrid_search_uses_them(
 
 @pytest.mark.network
 async def test_models_are_idempotent_and_fail_fast_when_missing(dbos, monkeypatch) -> None:
-    plain = UserSettings(embedding="none")
+    plain = UserSettings(embedding="none", pipeline=NO_OCR)
     assert await models.ensure_models(plain) == [], "nothing required for full-text only"
     with pytest.raises(NotReady, match="not loaded yet"):
         await models.require_ready(
             ModelKind.EMBEDDING, "ibm-granite/granite-embedding-97m-multilingual-r2"
         )
 
-    wanted = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    wanted = await save_user_settings(
+        UserSettings(embedding="granite-97m-multilingual", pipeline=NO_OCR)
+    )
     (status,) = await models.ensure_models(wanted)
     assert status.state in ("loading", "ready")
     await wait_for(models._model_id(ModelKind.EMBEDDING, status.name))
@@ -275,6 +287,7 @@ async def test_models_are_idempotent_and_fail_fast_when_missing(dbos, monkeypatc
         UserSettings(
             embedding="none",
             search=SearchSettings(reranker=Reranker.CROSS_ENCODER, reranker_model="nope/x"),
+            pipeline=NO_OCR,
         )
     )
     await models.ensure_models(broken)
@@ -292,7 +305,9 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
 ) -> None:
     """The index has vectors, so a hybrid query needs the model; a request must fail fast with
     503 semantics rather than block on a download."""
-    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    user = await save_user_settings(
+        UserSettings(embedding="granite-97m-multilingual", pipeline=NO_OCR)
+    )
     await models.ensure_models(user)
     await await_terminal([models._model_id(ModelKind.EMBEDDING, (await default_model()).name)])
     collection = await Collection.create("busy")
@@ -309,10 +324,10 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
 @pytest.mark.parametrize(
     ("name", "user", "collection_rerankers", "expected"),
     [
-        ("full text only", UserSettings(embedding="none"), [], []),
+        ("full text only", UserSettings(embedding="none", pipeline=NO_OCR), [], []),
         (
             "an embedding profile",
-            UserSettings(embedding="granite-97m-multilingual"),
+            UserSettings(embedding="granite-97m-multilingual", pipeline=NO_OCR),
             [],
             [("embedding", "ibm-granite/granite-embedding-97m-multilingual-r2")],
         ),
@@ -321,6 +336,7 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
             UserSettings(
                 embedding="granite-97m-multilingual",
                 search=SearchSettings(reranker=Reranker.CROSS_ENCODER),
+                pipeline=NO_OCR,
             ),
             [],
             [
@@ -330,7 +346,7 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
         ),
         (
             "a collection override nobody else asks for",
-            UserSettings(embedding="none"),
+            UserSettings(embedding="none", pipeline=NO_OCR),
             ["Alibaba-NLP/gte-reranker-modernbert-base"],
             [("reranker", "Alibaba-NLP/gte-reranker-modernbert-base")],
         ),
@@ -339,6 +355,7 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
             UserSettings(
                 embedding="none",
                 search=SearchSettings(reranker=Reranker.CROSS_ENCODER),
+                pipeline=NO_OCR,
             ),
             ["cross-encoder/ettin-reranker-32m-v1", "Alibaba-NLP/gte-reranker-modernbert-base"],
             [
@@ -350,7 +367,7 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
             "descriptors an llm writes",
             UserSettings(
                 embedding="granite-97m-multilingual",
-                pipeline=PipelineSettings(descriptors=Descriptors.LLM),
+                pipeline=PipelineSettings(ocr=False, descriptors=Descriptors.LLM),
             ),
             [],
             [
@@ -364,13 +381,22 @@ async def test_search_rejects_a_query_while_the_embedding_model_loads(
             UserSettings(
                 embedding="none",
                 pipeline=PipelineSettings(
-                    descriptors=Descriptors.LLM, describer=Describer.GEMMA_4_E2B
+                    ocr=False, descriptors=Descriptors.LLM, describer=Describer.GEMMA_4_E2B
                 ),
             ),
             [],
             [
                 ("describer", "ggml-org/gemma-4-E2B-it-GGUF"),
                 ("vocabulary", "Qwen/Qwen3-Embedding-0.6B-GGUF"),
+            ],
+        ),
+        (
+            "OCR on, as by default: its model, after the others",
+            UserSettings(embedding="granite-97m-multilingual"),
+            [],
+            [
+                ("embedding", "ibm-granite/granite-embedding-97m-multilingual-r2"),
+                ("ocr", "pp-ocrv6-small"),
             ],
         ),
     ],
@@ -398,7 +424,9 @@ async def test_the_describer_is_downloaded_by_its_own_loader(dbos, monkeypatch) 
     monkeypatch.setattr(embed, "warm_generator", lambda name, accelerator: loaded.append(name))
     monkeypatch.setattr(embed, "warm", lambda name, accelerator: loaded.append(f"embed {name}"))
     user = await save_user_settings(
-        UserSettings(embedding="none", pipeline=PipelineSettings(descriptors=Descriptors.LLM))
+        UserSettings(
+            embedding="none", pipeline=PipelineSettings(ocr=False, descriptors=Descriptors.LLM)
+        )
     )
 
     statuses = await models.ensure_models(user)
@@ -423,12 +451,16 @@ async def test_a_downloaded_model_nothing_requires_warms_when_asked_for(dbos, mo
     monkeypatch.setattr(embed, "warm_generator", lambda name, accelerator: loaded.append(name))
     monkeypatch.setattr(embed, "warm", lambda name, accelerator: None)  # the vocabulary's
     user = await save_user_settings(
-        UserSettings(embedding="none", pipeline=PipelineSettings(descriptors=Descriptors.LLM))
+        UserSettings(
+            embedding="none", pipeline=PipelineSettings(ocr=False, descriptors=Descriptors.LLM)
+        )
     )
     await models.ensure_models(user)
     workflow_id = models._model_id(ModelKind.DESCRIBER, DESCRIBER)
     await await_terminal([workflow_id])
-    await save_user_settings(UserSettings(embedding="none"))  # nothing requires it now
+    await save_user_settings(
+        UserSettings(embedding="none", pipeline=NO_OCR)
+    )  # nothing requires it now
     models._ready.clear()  # a restart: the files stay, the caches do not
     loaded.clear()
 
@@ -455,7 +487,7 @@ async def test_collection_reranker_override_is_downloaded(dbos, monkeypatch) -> 
             search=SearchOverrides(reranker=Reranker.CROSS_ENCODER, reranker_model=override)
         )
     )
-    user = await save_user_settings(UserSettings(embedding="none"))
+    user = await save_user_settings(UserSettings(embedding="none", pipeline=NO_OCR))
 
     assert await Collection.reranker_overrides(user.search) == [override]
     (status,) = await models.ensure_models(user)
@@ -483,6 +515,7 @@ async def test_downloads_list_one_row_per_required_model(dbos, monkeypatch) -> N
         UserSettings(
             embedding="granite-97m-multilingual",
             search=SearchSettings(reranker=Reranker.CROSS_ENCODER),
+            pipeline=NO_OCR,
         )
     )
 
@@ -508,7 +541,9 @@ async def test_restart_does_not_create_a_second_download_record(dbos, monkeypatc
     """The files stay on disk and the record is durable, so a restart reuses both: one row per
     model, however often the dev server reloads."""
     monkeypatch.setattr(embed, "warm", lambda name, accelerator: None)
-    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    user = await save_user_settings(
+        UserSettings(embedding="granite-97m-multilingual", pipeline=NO_OCR)
+    )
     workflow_id = models._model_id(ModelKind.EMBEDDING, (await default_model()).name)
     await models.ensure_models(user)
     await await_terminal([workflow_id])
@@ -545,7 +580,9 @@ async def test_a_downloaded_model_is_warmed_after_restart_before_search_uses_it(
 
     monkeypatch.setattr(models, "load_model", load_model)
     monkeypatch.setattr(embed, "warm", warm)
-    user = await save_user_settings(UserSettings(embedding="granite-97m-multilingual"))
+    user = await save_user_settings(
+        UserSettings(embedding="granite-97m-multilingual", pipeline=NO_OCR)
+    )
     model_name = (await default_model()).name
     await models.ensure_models(user)
     await await_terminal([models._model_id(ModelKind.EMBEDDING, model_name)])
@@ -592,7 +629,7 @@ async def test_a_knowledge_model_waits_for_its_first_use_and_is_freed_once_idle(
     user = await save_user_settings(
         UserSettings(
             embedding="granite-97m-multilingual",
-            pipeline=PipelineSettings(descriptors=Descriptors.LLM),
+            pipeline=PipelineSettings(ocr=False, descriptors=Descriptors.LLM),
         )
     )
     monkeypatch.setattr(models, "load_model", _noop_load)
@@ -665,3 +702,33 @@ def test_a_knowledge_model_in_use_is_never_freed(monkeypatch) -> None:
     assert on_demand.free_idle(0) == [DESCRIBER]
     assert closed == [DESCRIBER] and not on_demand.loaded(DESCRIBER)
     assert on_demand.free_idle(0) == [], "nothing left to free"
+
+
+async def test_the_ocr_model_is_usable_once_downloaded_and_after_a_restart(
+    dbos, monkeypatch
+) -> None:
+    """OCR has a group of its own: downloaded with the others, and usable as soon as it is on
+    disk, since each conversion loads it in its own worker. A restart finds it usable without
+    loading anything, and the status says so: downloaded, on the CPU."""
+    from haskie.document import ocr
+    from haskie.indexing.hardware import Device
+
+    fetched: list[str] = []
+    monkeypatch.setattr(ocr, "fetch", lambda name, _: fetched.append(name))
+    user = await save_user_settings(UserSettings(embedding="none"))
+    workflow_id = models._model_id(ModelKind.OCR, ocr.MODEL)
+
+    await models.ensure_models(user)
+    await await_terminal([workflow_id])
+    models._ready.clear()  # a new process
+    (status,) = await models.ensure_models(user)  # its boot
+
+    assert (status.kind, status.group, status.state, status.device) == (
+        "ocr",
+        "conversion",
+        "downloaded",  # never in this process's memory: each conversion loads it
+        Device.CPU,
+    )
+    assert fetched == [ocr.MODEL], "downloaded once, and nothing loaded at the restart"
+    assert not models.is_warm(workflow_id), "nor marked as loaded in this process"
+    await models.require_ready(ModelKind.OCR, ocr.MODEL)  # no raise

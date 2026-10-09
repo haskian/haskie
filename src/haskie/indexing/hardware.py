@@ -4,6 +4,7 @@ follow the same facts: a runtime runs both kinds on the same hardware."""
 
 from enum import StrEnum
 
+from haskie.document import ocr
 from haskie.indexing import gguf_models, mlx_models, onnx_models
 from haskie.settings import Accelerator
 
@@ -12,6 +13,8 @@ class Runtime(StrEnum):
     ONNX = "onnx"  # ONNX Runtime (`onnx_models`)
     MLX = "mlx"  # Apple's MLX: the `mlx` extra, on Apple Silicon only
     GGUF = "gguf"  # llama.cpp on Metal: the `gguf` extra, on Apple Silicon only
+    # OCR (`document.ocr`): its own ONNX Runtime, on its default provider, the CPU; no choice
+    PDF_INSPECTOR = "pdf_inspector"
 
 
 class Device(StrEnum):
@@ -30,6 +33,8 @@ COREML_RUNS: frozenset[str] = frozenset()
 
 
 def runtime(name: str) -> Runtime:
+    if name == ocr.MODEL:
+        return Runtime.PDF_INSPECTOR
     if mlx_models.pinned(name):
         return Runtime.MLX
     return Runtime.GGUF if gguf_models.pin(name) else Runtime.ONNX
@@ -41,6 +46,8 @@ def device(name: str, accelerator: Accelerator) -> Device | None:
     llama.cpp runs slower than ONNX (see `gguf_models`). The loaders refuse a model this answers
     None for, the options list only models it answers a device for, and the status reports it."""
     match runtime(name):
+        case Runtime.PDF_INSPECTOR:
+            return Device.CPU
         case Runtime.MLX:
             installed = mlx_models.available()
         case Runtime.GGUF:
@@ -69,7 +76,10 @@ def nowhere(name: str) -> str:
 
 def devices(name: str) -> tuple[Device, ...]:
     """Every device model `name` can run on, when the settings let it choose."""
-    if runtime(name) != Runtime.ONNX:
-        return (Device.APPLE_SILICON,)
-    # Apple Silicon through WebGPU, whether or not CoreML runs the model
-    return (Device.CPU, Device.APPLE_SILICON, Device.GPU)
+    match runtime(name):
+        case Runtime.PDF_INSPECTOR:
+            return (Device.CPU,)
+        case Runtime.ONNX:
+            # Apple Silicon through WebGPU, whether or not CoreML runs the model
+            return (Device.CPU, Device.APPLE_SILICON, Device.GPU)
+    return (Device.APPLE_SILICON,)

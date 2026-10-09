@@ -83,7 +83,7 @@ it in a background task and reports it ready only after that. A search that need
 downloading, warming or failed fails fast with a 503. While it downloads, the message names the
 download operation.
 
-Models come in two groups, as the status bar shows them:
+Models come in three groups, as the status bar shows them:
 
 - **Search**: the embedding model and a reranker. Warmed at boot, and loaded for the life of the
   server, since every search needs them at once.
@@ -93,6 +93,11 @@ Models come in two groups, as the status bar shows them:
   checked every 30 s). A model in use is never freed: a describe batch keeps its describer to the
   end. The next run that asks loads it again, in a second or two. The describer alone holds 2.8 to
   3.0 GB.
+- **OCR**: PP-OCRv6 small, while the `ocr` setting is on (the default). Downloaded at boot
+  with the others, about 31 MB, into `haskie-ocr` in the Hugging Face cache. Usable once
+  downloaded: each conversion loads it in its own worker, and reads offline. A PDF or image
+  conversion waits for the model while it is still on its way. A home nobody has set up yet
+  downloads no model, OCR's included.
 
 Each model shows as an icon in its group: a turning green gear while it is in memory, a white
 check when it is downloaded but not loaded, a grey spinner while it downloads or loads, and a

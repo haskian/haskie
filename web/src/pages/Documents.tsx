@@ -464,7 +464,7 @@ function DocumentModal({
           ["Status", row.status],
           ["Source", `${row.suffix} · ${bytes.format(row.size)}`],
           ["Parser", row.parser],
-          ["Skip OCR pages", row.skip_ocr_pages ? "yes" : "no"],
+          ["Skip pages OCR cannot read", row.skip_ocr_pages ? "yes" : "no"],
           [
             "Embeddings",
             embeddings.length === 0

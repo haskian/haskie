@@ -157,6 +157,7 @@ from haskie.settings import (
     PipelineSettings,
     UserSettings,
     load_user_settings,
+    load_user_settings_or_none,
 )
 
 _log = logs.get_logger(__name__)
@@ -432,12 +433,14 @@ async def start() -> None:
     _start_background()
     global _sweeper
     _sweeper = _app_loop.create_task(models.free_idle_forever(), name="haskie-free-idle-models")
+    stored = await load_user_settings_or_none()
     try:
-        await apply_settings(await load_user_settings())
+        # a home nobody has set up yet asks for no model: the first run picks them
+        await apply_settings(stored or UserSettings(), initialized=stored is not None)
     except InvalidInput as exc:
         # boot must not depend on a settings row another build wrote; the UI can fix it
         _log.error("settings_invalid_at_boot", error=str(exc))
-        await apply_settings(UserSettings())
+        await apply_settings(UserSettings(), initialized=False)
     # after apply_settings: a schedule may only name a queue the system database already carries
     await _register_schedule()
     # also prune once per boot: a desktop app is rarely running at 03:17, so a run that only ever
@@ -613,9 +616,9 @@ _QUEUES: tuple[Queue, ...] = (
 )
 
 
-async def apply_settings(settings: UserSettings) -> None:
+async def apply_settings(settings: UserSettings, initialized: bool = True) -> None:
     """Queue limits, the CPU budget and the preview build pool follow the settings; required
-    models start loading.
+    models start loading, once the home is `initialized`.
 
     `configure_preview_slots` builds primitives of the loop it is called on, and previews are
     built on that same loop: this runs either at startup or inside a settings request, both of
@@ -633,7 +636,8 @@ async def apply_settings(settings: UserSettings) -> None:
                 OPERATION_POLL if queue.name.startswith("operation.") else TASK_POLL
             ),
         )
-    await models.ensure_models(settings)
+    if initialized:
+        await models.ensure_models(settings)
     await schedule_pending_maintenance(indexing.maintenance_idle_seconds)
 
 
@@ -831,10 +835,9 @@ async def try_finalize_convert(batches: list[Batch], ocr_total: int, ctx: Contex
 
 
 async def _finalize_convert(batches: list[Batch], ocr_total: int, ctx: Context) -> None:
-    """Assemble the markdown, and record a PDF's page count on the document."""
+    """Assemble the markdown, and record what it changed on the document (`set_converted`)."""
     pages = await pipeline.finalize_convert(ctx.document, batches, ocr_total)
-    if pages is not None:
-        await document.set_pages(ctx.document.id, pages)
+    await document.set_converted(ctx.document.id, pages)
 
 
 @retried_step

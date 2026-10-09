@@ -147,9 +147,9 @@ export function taskState(task: Task): 'done' | 'error' | 'todo' {
   return task.status === 'ERROR' ? 'error' : 'todo'
 }
 
-const RESULT_UNITS: Record<Stage, string> = { convert: 'OCR pages', embed: 'chunks', describe: 'sections', describe_sections: 'sections', describe_document: 'documents', index: 'chunks' }
+const RESULT_UNITS: Record<Stage, string> = { convert: 'unread pages', embed: 'chunks', describe: 'sections', describe_sections: 'sections', describe_document: 'documents', index: 'chunks' }
 
-/** What a job produced, summed over its tasks: OCR pages for a conversion, sections for a
+/** What a job produced, summed over its tasks: unread pages for a conversion, sections for a
  *  description, chunks otherwise. */
 export function stageInfo(stage: Stage, rows: Task[]): string {
   const results = rows.filter((task) => task.result !== null)

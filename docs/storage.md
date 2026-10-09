@@ -4,7 +4,8 @@ Your data lives in one home directory, `~/.haskie` by default (`--home` or `HASK
 it). You can back it up ([Backup and restore](#backup-and-restore)), inspect it or delete it.
 Downloaded model weights are the exception: they sit in the Hugging Face cache, outside the home:
 the ONNX models under `haskie-onnx` in it, as plain files, since ONNX Runtime refuses external
-data behind the cache's links.
+data behind the cache's links, and the OCR model under `haskie-ocr` (`PDF_INSPECTOR_MODEL_CACHE`
+moves it).
 
 Each collection has a local LanceDB table for vector and full-text search. This keeps hybrid
 retrieval in an embedded store with no separate database server to operate. Lance's columnar

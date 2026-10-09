@@ -154,12 +154,12 @@ CHUNK_FRAME = Meta(
     ),
 )
 SKIP_OCR_PAGES = Meta(
-    title="Skip pages that need OCR",
+    title="Skip pages OCR cannot read",
     description=(
-        "Chosen when a document is imported. PDF pages with no extractable text (scans, images) "
-        "are dropped and replaced by a marker comment in the Markdown instead of failing the "
-        "document. A document where every page needs OCR still fails. Off: any such page fails "
-        "the document."
+        "Chosen when a document is imported. A PDF page with no extractable text that OCR reads "
+        "no text on either (blank, or OCR off or unavailable) is dropped and replaced by a marker "
+        "comment in the Markdown instead of failing the document. A PDF with no text on any page "
+        "still fails. Off: any such page fails the document."
     ),
 )
 CPU_BUDGET = Meta(
@@ -271,6 +271,16 @@ DESCRIBER = Meta(
         "Gemma-4-E2B (2.8 GB download, 3.0 GB in memory, Apache 2.0); twice as fast, about 0.7 s "
         "a section. A change re-describes a document the next time it is embedded or indexed; "
         '"Index all" re-describes a collection.'
+    ),
+)
+OCR = Meta(
+    title="Read scans with OCR",
+    description=(
+        "Optical character recognition on this device: PP-OCRv6 small reads the PDF pages that "
+        "carry no text, such as scans, and images (SVG aside). On: its model downloads with the "
+        "other models (about 31 MB), and a PDF or image conversion waits for it. "
+        "Applies to the documents converted from then on. Off: those pages are left unread, and "
+        "Skip pages OCR cannot read decides what happens to them."
     ),
 )
 # How deep any search reads. A passage or a document row is folded from several chunks, so the scan
@@ -686,6 +696,7 @@ class PipelineSettings(msgspec.Struct):
     accelerator: Annotated[Accelerator, ACCELERATOR] = Accelerator.AUTO
     descriptors: Annotated[Descriptors, DESCRIPTORS] = Descriptors.C_TF_IDF
     describer: Annotated[Describer, DESCRIBER] = Describer.QWEN_3_5_4B
+    ocr: Annotated[bool, OCR] = True
 
     def __post_init__(self) -> None:
         _at_least(

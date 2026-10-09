@@ -753,9 +753,11 @@ async def test_collection_reranker_override_starts_its_download(
     listed = (await ready.get("/api/status")).json()["models"]
     here = hardware.device(override, Accelerator.AUTO)  # the CPU, or Apple Silicon by WebGPU
     assert here is not None
-    assert [(m["kind"], m["name"], m["state"], m["device"]) for m in listed] == [
-        ("reranker", override, "ready", here.value)
-    ], "and /api/status reports it like any other required model, with where it runs"
+    assert [
+        (m["kind"], m["name"], m["state"], m["device"]) for m in listed if m["kind"] != "ocr"
+    ] == [("reranker", override, "ready", here.value)], (
+        "and /api/status reports it like any other required model, with where it runs"
+    )
 
 
 async def test_status_reports_an_unreadable_settings_row(ready: AsyncTestClient) -> None:

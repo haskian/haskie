@@ -894,6 +894,7 @@ describe('Statusbar', () => {
   const minilm = { kind: 'reranker' as const, name: 'Xenova/ms-marco-MiniLM-L-6-v2', state: 'loading' as const, group: 'search' as const, error: null, device: 'cpu' as const }
   const qwen = { kind: 'describer' as const, name: 'unsloth/Qwen3.5-4B-GGUF', state: 'ready' as const, group: 'knowledge' as const, error: null, device: 'apple_silicon' as const }
   const embedder = { kind: 'vocabulary' as const, name: 'Qwen/Qwen3-Embedding-0.6B-GGUF', state: 'downloaded' as const, group: 'knowledge' as const, error: null, device: 'apple_silicon' as const }
+  const ocr = { kind: 'ocr' as const, name: 'pp-ocrv6-small', state: 'loading' as const, group: 'conversion' as const, error: null, device: 'cpu' as const }
   check([
     {
       name: 'a loaded search model is a turning green gear and its count, its name in the hint only',
@@ -926,6 +927,14 @@ describe('Statusbar', () => {
         '</svg>1</b><b class="running" aria-label="loaded">',
         'downloaded, loaded when used',
         '<span class="muted">vocabulary</span>',
+      ],
+    },
+    {
+      name: 'the OCR model has a group of its own',
+      element: <Statusbar status={status([bge, qwen, ocr])} />,
+      contains: [
+        '<span class="muted">OCR</span><span class="statusbar-counts"><b class="queued" aria-label="loading">',
+        '<span>pp-ocrv6-small</span><span class="muted">ocr</span>',
       ],
     },
     {

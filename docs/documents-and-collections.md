@@ -101,7 +101,7 @@ in any state. The original suffix is kept in the name, because it decides the ro
   became 251, nested as its table of contents is. Without such bookmarks, pdf-inspector's
   headings stand.
 - Text and HTML files are read as they are.
-- Images are stored and previewed, with no text to index.
+- Images are stored and previewed, and their text is read with OCR, SVG aside.
 - Everything else converts with anydoc, or is read as raw text when the document's `parser` is
   `plain`.
 
