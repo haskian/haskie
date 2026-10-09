@@ -17,6 +17,8 @@ const DOCUMENT: Document = {
   updated_at: 1_547_901_180,
   description: 'Notes on area lights and soft shadow falloff.',
   pages: 12,
+  pages_ocr: 0,
+  pages_unread: 0,
   id: '9e107d9d372bb6826bd81d3542a419d6',
   collections: ['lighting'],
 }

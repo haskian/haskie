@@ -109,6 +109,10 @@ class Document(msgspec.Struct):
     updated_at: float = 0.0
     description: str = ""  # what the document is, in the importer's words
     pages: int | None = None  # a PDF's page count, set by its conversion
+    # of those pages, the ones OCR read and the ones left with no text: None for a PDF converted
+    # before they were counted, and for other formats
+    pages_ocr: int | None = None
+    pages_unread: int | None = None
 
     @property
     def root(self) -> Path:
@@ -594,13 +598,13 @@ async def cancel_import(id: str) -> None:
     )
 
 
-async def set_converted(id: str, pages: int | None) -> None:
-    """Record what a conversion changed: the page count it found (a PDF's; None leaves it), and
+async def set_converted(id: str, counts: convert.PageCounts | None) -> None:
+    """Record what a conversion changed: the page counts it found (a PDF's; None leaves them), and
     no preview, so the next open builds one from the markdown just written, OCR's text included
     (`ensure_preview`). Not a change to the document, so `updated_at` stays (see `set_status`)."""
     values: dict[str, Any] = {"preview": None}
-    if pages is not None:
-        values["pages"] = pages
+    if counts is not None:
+        values |= {"pages": counts.pages, "pages_ocr": counts.ocr, "pages_unread": counts.unread}
     async with db.connect() as conn:
         await conn.execute(update(documents).where(documents.c.id == id).values(**values))
 

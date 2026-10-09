@@ -62,6 +62,7 @@ from conftest import (
     stand_in_describer,
     text_pdf,
     until,
+    use_ocr,
     wait_event,
     wait_for,
 )
@@ -398,6 +399,44 @@ async def test_pipeline_cuts_a_pdf_into_micro_batches(dbos, tmp_path: Path) -> N
     assert full[hit.char_start : hit.char_end] == hit.text
     assert await dbos.start_index_collection_document("q", pdf.id) != indexing, "dedup ends"
     await _drain()
+
+
+@pytest.mark.parametrize(
+    ("name", "file", "texts", "counts"),
+    [
+        (
+            "a PDF in slices: its pages counted over all of them, by how they were read",
+            text_pdf(["alpha", None, "gamma", None, None]),
+            {2: "scanned words", 5: "more scanned words"},
+            (5, 2, 1),
+        ),
+        ("a PDF of text alone", text_pdf(["alpha", "beta"]), {}, (2, 0, 0)),
+        ("not a PDF: no pages to count", MD, {}, (None, None, None)),
+    ],
+)
+async def test_an_import_records_how_its_pages_were_read(
+    name: str,
+    file: bytes | str,
+    texts: dict[int, str],
+    counts: tuple,
+    dbos,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_ocr(monkeypatch, texts)
+    require_ready = models.require_ready
+
+    async def ocr_ready(kind: models.ModelKind, model: str) -> None:
+        if kind != models.ModelKind.OCR:
+            await require_ready(kind, model)
+
+    monkeypatch.setattr(models, "require_ready", ocr_ready)
+    await _use(dbos, workers=2, batch_pages=1)
+    suffix = ".pdf" if isinstance(file, bytes) else ".md"
+
+    doc = await import_document(dbos, f"doc{suffix}", file, tmp_path)
+
+    assert (doc.pages, doc.pages_ocr, doc.pages_unread) == counts, name
 
 
 async def test_start_import_and_attach_validate_before_they_enqueue(dbos, tmp_path: Path) -> None:

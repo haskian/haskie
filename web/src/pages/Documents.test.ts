@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { Document, DocumentStatus, EmbeddingEntry, ImportedDocument, Staged } from '../api'
 import { embeddingLabel } from './documents/embedding'
 import { groupByDay, groupByStatus, unfiledFirst } from './documents/group'
+import { pagesLabel } from './documents/pages'
 import { fresh, importedNames, importLabel, staged, waitingAfter, type StagedFile } from './documents/staged'
 
 // One real row, overridden per case: the listing hands the page whole documents, so the fixtures do too.
@@ -18,6 +19,8 @@ const DOC: Document = {
   updated_at: 1_547_907_180,
   description: 'Notes on area lights and soft shadow falloff.',
   pages: 3,
+  pages_ocr: 0,
+  pages_unread: 0,
   id: '9e107d9d372bb6826bd81d3542a419d6',
   collections: ['lighting', 'rendering'],
 }
@@ -159,6 +162,24 @@ describe('embeddingLabel', () => {
   for (const testCase of cases) {
     test(testCase.name, () => {
       expect(embeddingLabel(testCase.value)).toBe(testCase.expected)
+    })
+  }
+})
+
+describe('pagesLabel', () => {
+  const cases: Array<{ name: string; value: Document; expected: string | null }> = [
+    { name: 'not a PDF: no pages to count', value: doc({ suffix: '.md', pages: null, pages_ocr: null, pages_unread: null }), expected: null },
+    { name: 'converted before the counts were kept: the page count alone', value: doc({ pages_ocr: null, pages_unread: null }), expected: '3' },
+    { name: 'every page from its text', value: DOC, expected: '3 of 3 converted' },
+    {
+      name: 'some pages read by OCR, some not converted',
+      value: doc({ pages: 120, pages_ocr: 15, pages_unread: 5 }),
+      expected: '115 of 120 converted · 15 read by OCR · 5 not converted',
+    },
+  ]
+  for (const testCase of cases) {
+    test(testCase.name, () => {
+      expect(pagesLabel(testCase.value)).toBe(testCase.expected)
     })
   }
 })

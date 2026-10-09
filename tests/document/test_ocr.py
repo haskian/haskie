@@ -42,7 +42,7 @@ def _scan(lines: list[str], size: tuple[int, int] = (1700, 900)) -> Image.Image:
             True,
             False,
             [],
-            ["one", f"<!-- page 2 -->\n\n{SCANNED}"],
+            ["one", f"<!-- page 2: read by OCR -->\n\n{SCANNED}"],
             None,
         ),
         (
@@ -52,7 +52,7 @@ def _scan(lines: list[str], size: tuple[int, int] = (1700, 900)) -> Image.Image:
             True,
             True,
             [2],
-            ["<!-- page 2: needs OCR, skipped -->", f"<!-- page 3 -->\n\n{SCANNED}"],
+            ["<!-- page 2: needs OCR, skipped -->", f"<!-- page 3: read by OCR -->\n\n{SCANNED}"],
             None,
         ),
         (
@@ -107,6 +107,9 @@ def test_a_pdf_page_with_no_text_is_read_by_ocr_or_left_to_the_policy(
     markdown, found, total = convert.pdf_pages_markdown(pdf, skip_ocr_pages=skip, ocr=on)
 
     assert (found, total) == (unread, len(pages)), name
+    counts = convert.page_counts(markdown, total)
+    noted = len(unread) if skip else 0  # a page the policy did not skip fails the conversion
+    assert (counts.ocr, counts.unread) == (len(scans) - len(unread), noted), name
     assert all(part in markdown for part in expected), (name, markdown)
     assert ("skipped" in markdown) == (skip and bool(unread)), name
     assert calls == ([(scans, True)] if on and scans else []), "one offline call, for the scans"

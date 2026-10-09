@@ -66,9 +66,33 @@ def _breaks(whitespace: str) -> tuple[int, int]:
     return whitespace.count("\n"), len(whitespace)
 
 
-def page_marker(page: int, skipped: bool = False) -> str:
-    """The marker ahead of one 1-based page; `skipped` notes a page left out for needing OCR."""
-    return f"<!-- page {page}: needs OCR, skipped -->" if skipped else f"<!-- page {page} -->"
+# What a page marker notes about its page: OCR read its text, or it was left out for needing OCR
+# that read nothing. A PDF's page counts are read off them (`page_counts`).
+OCR_READ = "read by OCR"
+OCR_SKIPPED = "needs OCR, skipped"
+
+
+def page_marker(page: int, note: str | None = None) -> str:
+    """The marker ahead of one 1-based page, with what it `note`s about the page."""
+    return f"<!-- page {page}: {note} -->" if note else f"<!-- page {page} -->"
+
+
+class PageCounts(msgspec.Struct, frozen=True):
+    """What a PDF's conversion made of its pages."""
+
+    pages: int
+    ocr: int  # pages the converter found no text on and OCR read
+    unread: int  # pages left out with no text, even after OCR
+
+
+def page_counts(markdown: str, pages: int) -> PageCounts:
+    """The counts of a PDF of `pages` pages, converted to `markdown`, off its markers' notes. An
+    unread page the policy did not skip failed the conversion (`check_ocr_policy`), so every
+    unread page of a converted PDF is noted skipped."""
+    markers = [(int(found[1]), found[0]) for found in PAGE_MARKER.finditer(markdown)]
+    ocr = sum(marker == page_marker(page, OCR_READ) for page, marker in markers)
+    unread = sum(marker == page_marker(page, OCR_SKIPPED) for page, marker in markers)
+    return PageCounts(pages=pages, ocr=ocr, unread=unread)
 
 
 class PreviewKind(StrEnum):
@@ -175,8 +199,9 @@ def pdf_pages_markdown(
     pages converted). A page is left unread when the converter finds no text on it and OCR reads
     none either.
 
-    With `ocr`, a page the converter finds no text on is read by OCR (`ocr.read`). With
-    skip_ocr_pages an unread page becomes a marker comment; otherwise its (empty) text stays.
+    With `ocr`, a page the converter finds no text on is read by OCR (`ocr.read`), and its marker
+    notes it. With skip_ocr_pages an unread page becomes a marker comment; otherwise its (empty)
+    text stays.
     Policy decisions (fail or not) belong to check_ocr_policy over the whole document.
 
     `marks` are the PDF's bookmarks (`pdf_bookmarks`), at least those of these pages and the page
@@ -219,10 +244,11 @@ def pdf_pages_markdown(
         needs_ocr = one.needs_ocr and number not in read
         if needs_ocr:
             ocr_pages.append(number)
-        skipped = needs_ocr and skip_ocr_pages
-        parts.append(
-            page_marker(number, True) if skipped else f"{page_marker(number)}\n\n{markdown}"
-        )
+        if needs_ocr and skip_ocr_pages:
+            parts.append(page_marker(number, OCR_SKIPPED))
+        else:
+            note = OCR_READ if number in read else None
+            parts.append(f"{page_marker(number, note)}\n\n{markdown}")
     return "\n\n".join(parts), ocr_pages, len(parts)
 
 
@@ -306,5 +332,5 @@ def _first_pages(markdown: str, pages: int) -> tuple[str, list[int]]:
     from haskie.document.render import split_pages  # `render` reads this module's markers
 
     kept = [(page, body) for page, body in split_pages(markdown) if page and page <= pages]
-    unread = [page for page, body in kept if body.startswith(page_marker(page, True))]
+    unread = [page for page, body in kept if body.startswith(page_marker(page, OCR_SKIPPED))]
     return "".join(body for _, body in kept).rstrip() + "\n", unread

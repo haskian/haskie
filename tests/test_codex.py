@@ -253,10 +253,14 @@ async def test_codex_refresh_alongside_claude(state: str, tmp_path: Path) -> Non
 
 def test_upgrade_keeps_claude_installations_and_accepts_codex(tmp_path: Path) -> None:
     with sqlite3.connect(tmp_path / "old.db") as connection:
+        db.migrate(connection)  # a whole home, then taken back to schema 35
         connection.executescript(
+            "drop table installations;"
             "create table installations (agent text check (agent in ('claude')), "
             "directory text, primary key (agent, directory));"
             "insert into installations values ('claude', '/home/user/.claude');"
+            "alter table documents drop column pages_ocr;"
+            "alter table documents drop column pages_unread;"
             "pragma user_version = 35;"
         )
         db.migrate(connection)

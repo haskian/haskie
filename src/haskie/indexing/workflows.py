@@ -836,8 +836,8 @@ async def try_finalize_convert(batches: list[Batch], ocr_total: int, ctx: Contex
 
 async def _finalize_convert(batches: list[Batch], ocr_total: int, ctx: Context) -> None:
     """Assemble the markdown, and record what it changed on the document (`set_converted`)."""
-    pages = await pipeline.finalize_convert(ctx.document, batches, ocr_total)
-    await document.set_converted(ctx.document.id, pages)
+    counts = await pipeline.finalize_convert(ctx.document, batches, ocr_total)
+    await document.set_converted(ctx.document.id, counts)
 
 
 @retried_step
