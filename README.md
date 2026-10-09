@@ -126,7 +126,8 @@ and the tool reference.
 
 ## Supported files and limits
 
-Import PDFs, Office and OpenDocument files, EPUB, RTF, Markdown, plain text, CSV, JSON and HTML.
+Import PDFs, Office and OpenDocument files, EPUB, RTF, Markdown, plain text, CSV, JSON, HTML and
+images.
 Optical character recognition (OCR) runs on your device. It reads scanned PDF pages and
 images (SVG aside). Its model, about 31 MB, downloads with the other models. Documents imported
 before OCR keep their old text until you delete them and import them again.
