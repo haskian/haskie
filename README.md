@@ -16,6 +16,8 @@ taste. Import books, research, standards, product requirements, business rules a
 Your choices guide how it designs, codes and reviews. It finds relevant passages and cites them
 without reading whole documents into its context.
 
+![haskie connects its web UI, knowledge base and local models to Claude Code and Codex through MCP](design/haskie-overview.png)
+
 haskie runs on your machine and connects to Codex and Claude Code. You choose the sources.
 Your agent uses them to reason about your work.
 
