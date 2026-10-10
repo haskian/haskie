@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.36.1 - 2026-10-10
+#### Documentation
+- illustrate haskie architecture in README (#55) - (25cbcf1) - Črtomir Majer
+
+- - -
+
 ## v0.36.0 - 2026-10-09
 #### Features
 - re-import documents and add them to collections from their modal (#52) - (25c5f5f) - Črtomir Majer
