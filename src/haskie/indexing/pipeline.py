@@ -20,7 +20,10 @@ where a section is longer, when there are pages to cut at (`parts.cuts`):
   `embeddings/<id>.tmp/NNNNNN.descriptors.json`: the descriptors of a run of sections, sixteen a
   batch for the llm strategy, all of them in one for c-TF-IDF (`plan_describe`).
   `finalize_describe` puts them on the sections file and drops the scratch files. After it, the llm
-  strategy writes what the whole document is about (`summarize`).
+  strategy writes what the whole document is about (`summarize`). An llm entry written before
+  sections had descriptions keeps its descriptors, and its descriptions are filled in later,
+  without blocking an index (`fill_section_descriptions`), from batches in a folder of their
+  own (`embed_cache.fill_dir`).
 - vocabulary (once per burst of documents a collection indexes, under the llm strategy): its
   sections' descriptors embedded, the close pairs judged by the describer, and the variants
   clustered into preferred terms (`collection/vocabulary.py`, `sections.vocabulary`). Embedding and
@@ -438,9 +441,10 @@ async def describe_batch(
 
 
 async def describe_sections_batch(
-    doc: Document, cache_id: str, settings: PipelineSettings, batch: Batch
+    doc: Document, cache_id: str, settings: PipelineSettings, batch: Batch, fill: bool = False
 ) -> int:
-    """Write prose descriptions independently of section descriptors."""
+    """Write prose descriptions independently of section descriptors; into the fill's own
+    folder for a `fill` (`embed_cache.fill_dir`)."""
     await describe_ready(None, Descriptors.LLM, settings)
     found = await embed_cache.inputs(doc.id, cache_id, vectors=False)
     reply = _describer_reply(settings)
@@ -452,25 +456,41 @@ async def describe_sections_batch(
         ]
 
     descriptions = await anyio.to_thread.run_sync(describe)
-    path = embed_cache.descriptions_path(doc.id, cache_id, batch.seq)
+    path = embed_cache.descriptions_path(doc.id, cache_id, batch.seq, fill)
     await anyio.Path(path.parent).mkdir(parents=True, exist_ok=True)
     await home.atomic_write(path, msgspec.json.encode(descriptions))
     return len(descriptions)
 
 
-async def finalize_section_descriptions(doc: Document, cache_id: str, count: int) -> int:
-    """Publish section descriptions before extracting their descriptors."""
-    found = await embed_cache.read_sections(doc.id, cache_id)
+async def _section_descriptions(
+    doc: Document, cache_id: str, count: int, fill: bool = False
+) -> list[str]:
+    """What the first `count` section description batches wrote, in document order."""
     descriptions: list[str] = []
     for seq in range(count):
-        path = anyio.Path(embed_cache.descriptions_path(doc.id, cache_id, seq))
+        path = anyio.Path(embed_cache.descriptions_path(doc.id, cache_id, seq, fill))
         descriptions.extend(msgspec.json.decode(await path.read_bytes(), type=list[str]))
-    described = [
-        msgspec.structs.replace(one, description=text)
-        for one, text in zip(found, descriptions, strict=True)
-    ]
-    await embed_cache.write_descriptors(doc.id, cache_id, described, None)
-    return len(described)
+    return descriptions
+
+
+async def finalize_section_descriptions(doc: Document, cache_id: str, count: int) -> int:
+    """Publish section descriptions before extracting their descriptors."""
+    descriptions = await _section_descriptions(doc, cache_id, count)
+    await embed_cache.write_descriptions(doc.id, cache_id, descriptions)
+    return len(descriptions)
+
+
+async def fill_section_descriptions(doc: Document, cache_id: str, count: int) -> int:
+    """Publish the section descriptions a fill's batches wrote on a cached embedding that has
+    none, beside the descriptors it keeps, then drop the fill's folder; returns how many it
+    wrote. 0 when a full describe wrote its own meanwhile, and they stand."""
+    written = 0
+    if await embed_cache.lacks_descriptions(doc.id, cache_id):
+        descriptions = await _section_descriptions(doc, cache_id, count, fill=True)
+        await embed_cache.write_descriptions(doc.id, cache_id, descriptions)
+        written = len(descriptions)
+    await home.remove_tree(embed_cache.fill_dir(doc.id, cache_id))
+    return written
 
 
 async def finalize_describe(
@@ -503,7 +523,8 @@ async def finalize_describe(
         )
         for one, each in zip(found, descriptions, strict=True)
     ]
-    # Old llm batches have no descriptions: publish them, but let the next index fill them.
+    # Old llm batches have no descriptions: publish them undescribed, so the next index describes
+    # the entry again. Only a run recorded before descriptions existed, resumed, meets this.
     completed_by = None if legacy and by == Descriptors.LLM else by
     await embed_cache.write_descriptors(doc.id, cache_id, described, completed_by, describer)
     await home.remove_tree(embed_cache.scratch_dir(doc.id, cache_id))

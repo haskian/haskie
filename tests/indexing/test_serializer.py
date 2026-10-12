@@ -42,6 +42,7 @@ CONTEXT = Context(
     pipeline=PipelineSettings(cpu_budget=4, batch_pages=2),
     collection=None,
     cache_id="3f1c9a",
+    fill=True,
 )
 BATCHES = [Batch(seq=0, start=0, end=2), Batch(seq=1, start=2, end=4, line_offset=87)]
 INPUT = {"args": (Stage.EMBED, BATCHES, CONTEXT), "kwargs": {}}
@@ -62,6 +63,7 @@ CONTEXT_FIELDS: list[Field] = [
     ("pipeline", object, None),
     ("collection", str | None, None),
     ("cache_id", str, ""),
+    ("fill", bool, False),
 ]
 
 
@@ -86,7 +88,7 @@ def _document(args: tuple) -> tuple:
             workflows,
             _changed(Context, CONTEXT_FIELDS[:-1]),
             _context,
-            {k: v for k, v in msgspec.structs.asdict(CONTEXT).items() if k != "cache_id"},
+            {k: v for k, v in msgspec.structs.asdict(CONTEXT).items() if k != "fill"},
         ),
         (
             "a field added since takes its default, and every later field keeps its value",

@@ -40,6 +40,7 @@ from conftest import (
     import_row,
     index_hits,
     legacy_index,
+    legacy_sections,
     maintenance_state,
     refresh_settled,
     remove_collection,
@@ -2979,6 +2980,38 @@ async def test_finalizing_resumed_batches_keeps_both_old_and_new_metadata(
         None if by == Descriptors.LLM else by
     )
     assert not old.parent.exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "lacking", [True, False], ids=["lacking-descriptions-filled", "described-before-the-fill"]
+)
+async def test_a_fill_writes_only_missing_descriptions_and_drops_only_its_own_batches(
+    dbos, lacking: bool
+) -> None:
+    """A fill puts its batches on sections that have no descriptions and keeps their
+    descriptors. Sections a describe wrote first keep that describe's. Either way the fill drops
+    its own folder, and a describe's batches beside it stay."""
+    doc = await import_row("g.md")
+    await _convert(doc)
+    cache_id = await _embed(doc, SMALL)
+    found = await embed_cache.read_sections(doc.id, cache_id)
+    if lacking:
+        legacy_sections(doc.id, cache_id)
+    fill = embed_cache.descriptions_path(doc.id, cache_id, 0, fill=True)
+    describe = embed_cache.descriptions_path(doc.id, cache_id, 0)
+    for batch, text in ((fill, "Filled."), (describe, "Described.")):
+        batch.parent.mkdir(parents=True, exist_ok=True)
+        batch.write_bytes(msgspec.json.encode([text] * len(found)))
+
+    written = await pipeline.fill_section_descriptions(doc, cache_id, 1)
+
+    read = await embed_cache.read_sections(doc.id, cache_id)
+    assert written == (len(found) if lacking else 0)
+    assert [one.descriptors for one in read] == [one.descriptors for one in found]
+    assert [one.description for one in read] == ["Filled." if lacking else ""] * len(found)
+    assert not embed_cache.fill_dir(doc.id, cache_id).exists(), "its own folder is gone"
+    assert describe.exists(), "a describe's batch beside it stays"
 
 
 @pytest.mark.anyio

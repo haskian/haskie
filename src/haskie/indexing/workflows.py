@@ -49,7 +49,8 @@ Layout:
   documents costs the caller one insert instead of ten thousand, and nothing blocks an HTTP
   request for minutes.
 - `summarize_document_workflow` per description the describer writes, one a person asks for or
-  one an llm describe stage queues, and `summarize_collection_workflow` per collection description
+  one an index queues for an llm entry made before sections had descriptions, which it fills in
+  first, and `summarize_collection_workflow` per collection description
   a person asks for, on `operation.describing`, one at a time: the describer answers one prompt at
   a time anyway, and a run waiting for it to download must not hold a slot another queue needs.
 - `backup.create_backup` / `backup.restore_backup` on `operation.backup`, one at a time: every
@@ -296,6 +297,7 @@ class Context(msgspec.Struct):
     pipeline: PipelineSettings
     collection: str | None = None  # the index stage's target; None for an import or an embed
     cache_id: str = ""  # the embedding being computed (embed) or read (index)
+    fill: bool = False  # a fill of the descriptions an older entry lacks (`embed_cache.fill_dir`)
 
 
 class BatchResult(msgspec.Struct):
@@ -816,7 +818,9 @@ async def try_batch(stage: Stage, batch: Batch, ctx: Context) -> BatchResult:
         )
     if stage == Stage.DESCRIBE_SECTIONS:
         return await _guarded(
-            pipeline.describe_sections_batch(ctx.document, ctx.cache_id, ctx.pipeline, batch)
+            pipeline.describe_sections_batch(
+                ctx.document, ctx.cache_id, ctx.pipeline, batch, ctx.fill
+            )
         )
     if stage == Stage.DESCRIBE_DOCUMENT:
         return await _guarded(_summarize(ctx, False))
@@ -880,6 +884,16 @@ async def describer_ready(ctx: Context) -> BatchResult:
 @retried_step
 async def try_finalize_section_descriptions(ctx: Context, count: int) -> BatchResult:
     return await _guarded(pipeline.finalize_section_descriptions(ctx.document, ctx.cache_id, count))
+
+
+@retried_step
+async def lacks_descriptions(doc: str, cache_id: str) -> bool:
+    return await embed_cache.lacks_descriptions(doc, cache_id)
+
+
+@retried_step
+async def try_fill_section_descriptions(ctx: Context, count: int) -> BatchResult:
+    return await _guarded(pipeline.fill_section_descriptions(ctx.document, ctx.cache_id, count))
 
 
 @retried_step
@@ -1052,6 +1066,12 @@ def embed_id(parent_id: str, doc: str) -> str:
     """The id of the `ensure_embedding` run one import or index workflow asks for as its own (see
     `_ensure_embedding`); `operations` folds that run into its parent by it."""
     return f"{EMBED_PREFIX}:{doc}:{run_id(parent_id)}"
+
+
+def fill_id(parent_id: str, doc: str) -> str:
+    """The id of the description run an embedding run queues for an older entry it hit (see
+    `ensure_embedding`); a replay re-attaches to it."""
+    return f"{SUMMARIZE_DOCUMENT_PREFIX}:{doc}:{run_id(parent_id)}"
 
 
 def index_id(collection: str, doc: str, tail: str) -> str:
@@ -1238,8 +1258,13 @@ async def ensure_embedding(
     their own when missing or written by another strategy or model; returns its cache id. `by` is
     None in a run recorded before it was an argument, which describes by the settings, and so is
     `describer`, which takes whatever model the settings name and redescribes no other one's.
-    Described by llm, a document without a description gets one in the same operation, after the
-    section descriptions and descriptors are saved.
+    Described by llm in this run, a document without a description gets one in the same
+    operation, after the section descriptions and descriptors are saved.
+
+    An llm hit written before sections had descriptions keeps its descriptors: this run queues a
+    `summarize_document_workflow` that fills the descriptions in, then the document's, and
+    returns at once. DBOS records that run as a child of this one, so cancelling the index that
+    started this run cancels the fill too, until the next index of the document queues it again.
 
     The chunk settings come from `params`, not from any collection: the collection's settings may
     change between the enqueue and the run, and what was asked for is what the id names. The
@@ -1277,19 +1302,53 @@ async def ensure_embedding(
             _value(await try_finalize_describe(ctx, count))
             if by == Descriptors.LLM:
                 await _stage(Stage.DESCRIBE_DOCUMENT, ctx)
+        elif by == Descriptors.LLM and await lacks_descriptions(doc, cache_id):
+            # Queued, not awaited: the index reads no description, and a book's take the
+            # describer hours. A restore of entries made before descriptions met this.
+            await enqueue_operation(
+                DESCRIBING_QUEUE,
+                summarize_document_workflow,
+                doc,
+                cache_id,
+                replace=False,
+                fill=True,
+                workflow_id=fill_id(DBOS.workflow_id or "", doc),
+                dedup_id=f"fill-descriptions:{cache_id}",
+            )
         return cache_id
 
 
 @DBOS.workflow(name=SUMMARIZE_DOCUMENT_WORKFLOW)
-async def summarize_document_workflow(doc: str, cache_id: str, replace: bool) -> int:
+async def summarize_document_workflow(
+    doc: str, cache_id: str, replace: bool, fill: bool = False
+) -> int:
     """The document's description, written by the describer from the sections of one cached
     embedding; 1 when it wrote one. With `replace` a person asked for it, and it replaces the one
-    there (`start_summarize_document`); without, a previously queued automatic run writes
-    one only where there is none. Waits for the describer like a describe
-    stage does."""
+    there (`start_summarize_document`); without, an automatic run writes one only where there is
+    none. With `fill`, the descriptions the sections lack are written first, beside the
+    descriptors they keep: an index queues it for an entry made before sections had descriptions
+    (`ensure_embedding`). Waits for the describer like a describe stage does."""
     with logs.bound(workflow_id=DBOS.workflow_id, document_id=doc):
         ctx = msgspec.structs.replace(await load_context(doc, None), cache_id=cache_id)
+        if fill:
+            await _fill_section_descriptions(ctx)
         return _value(await _awaiting_model(partial(try_summarize, ctx, replace)))
+
+
+async def _fill_section_descriptions(ctx: Context) -> None:
+    """The section description stage alone, then its batches put on the sections. By the
+    describer the settings name, whichever strategy they name now: only llm writes
+    descriptions. Skipped when a describe of the entry wrote them while this run waited."""
+    if not await lacks_descriptions(ctx.document.id, ctx.cache_id):
+        return
+    llm = msgspec.structs.replace(
+        ctx,
+        pipeline=msgspec.structs.replace(ctx.pipeline, descriptors=Descriptors.LLM),
+        fill=True,
+    )
+    _value(await _awaiting_model(partial(describer_ready, llm)))
+    count = len(await _stage(Stage.DESCRIBE_SECTIONS, llm))
+    _value(await try_fill_section_descriptions(llm, count))
 
 
 @DBOS.workflow(name=SUMMARIZE_COLLECTION_WORKFLOW)
@@ -1881,7 +1940,7 @@ async def daily_maintenance(scheduled_time: datetime, context: Any) -> None:
 
 
 async def enqueue_operation(
-    queue: str, workflow: Callable, *args: Any, workflow_id: str, dedup_id: str
+    queue: str, workflow: Callable, *args: Any, workflow_id: str, dedup_id: str, **kwargs: Any
 ) -> str:
     """Enqueue one workflow under an explicit id and return that id.
 
@@ -1891,7 +1950,7 @@ async def enqueue_operation(
         SetWorkflowID(workflow_id),
         SetEnqueueOptions(deduplication_id=dedup_id, duplication_policy="return-existing"),
     ):
-        handle = await DBOS.enqueue_workflow_async(queue, workflow, *args)
+        handle = await DBOS.enqueue_workflow_async(queue, workflow, *args, **kwargs)
     return handle.workflow_id
 
 
