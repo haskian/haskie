@@ -31,7 +31,6 @@ import anyio
 import anyio.from_thread
 import anyio.to_thread
 import msgspec
-import pyarrow.parquet as pq
 import pytest
 from conftest import (
     DESCRIBER,
@@ -55,6 +54,7 @@ from conftest import (
     id_of,
     import_document,
     import_row,
+    legacy_sections,
     maintenance_state,
     restart_dbos,
     save_llm_descriptors,
@@ -1134,9 +1134,8 @@ async def test_a_hit_another_describer_wrote_is_described_again_with_the_one_set
         assert set(asked) == ({expected} if expected else set()), describer
 
 
-@pytest.mark.parametrize("legacy_llm", [False, True], ids=["another-strategy", "old-llm-cache"])
 async def test_a_hit_another_strategy_described_is_described_again_from_the_cache(
-    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_llm: bool
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A changed descriptor strategy re-describes an entry on its next index, from the cache: the
     run waits for the describer, then writes its descriptors, and embeds nothing again."""
@@ -1144,15 +1143,6 @@ async def test_a_hit_another_strategy_described_is_described_again_from_the_cach
     spy = _spy_embed(monkeypatch)
     monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
     doc = await import_document(dbos, "a.md", MD, tmp_path)
-    if legacy_llm:
-        (entry,) = await embed_cache.entries(doc.id)
-        path = embed_cache.sections_path(doc.id, entry.id)
-        old = (
-            pq.read_table(path)
-            .drop(["description"])
-            .replace_schema_metadata({b"descriptors": b"llm"})
-        )
-        pq.write_table(old, path)
     await (await Collection.create("again")).add(doc.id)
     prompts: list[str] = []
 
@@ -1187,6 +1177,114 @@ async def test_a_hit_another_strategy_described_is_described_again_from_the_cach
     assert {one.description for one in described if one.descriptors} == {"Explains the topics."}
     # two prompts per section with prose, and one for the document's missing description
     assert len(prompts) - 1 == 2 * sum(bool(one.descriptors) for one in described) > 0
+
+
+@pytest.mark.parametrize(
+    "by", [Descriptors.LLM, Descriptors.C_TF_IDF], ids=["llm-hit-filled-after", "c-tf-idf-hit-left"]
+)
+async def test_an_old_hit_is_indexed_at_once_and_only_llm_descriptions_filled_in_after(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, by: Descriptors
+) -> None:
+    """An entry written before sections had descriptions, as a restore brings back, is indexed
+    without waiting for the describer. Under llm the index queues one description run per entry,
+    whoever else indexes it meanwhile; that run writes the section descriptions alone, keeps the
+    descriptors, then the document's missing description. Under c-TF-IDF nothing is queued."""
+    monkeypatch.setattr(gguf_models, "available", lambda: True)  # llama.cpp stood in for
+    spy = _spy_embed(monkeypatch)
+    monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    (entry,) = await embed_cache.entries(doc.id)
+    legacy_sections(doc.id, entry.id, by)
+    before = await embed_cache.read_sections(doc.id, entry.id)
+    await (await Collection.create("first")).add(doc.id)
+    await (await Collection.create("second")).add(doc.id)
+    asked: list[int] = []
+
+    def reply(name: str, accelerator, prompt: str, max_tokens: int) -> str:
+        asked.append(max_tokens)
+        return "Explains the topics." if max_tokens == generated.SECTION_TOKENS else "A summary."
+
+    monkeypatch.setattr(embed, "reply", reply)
+    if by == Descriptors.LLM:
+        await save_llm_descriptors()
+
+    job_id = await dbos.start_index_collection_document("first", doc.id)
+    assert await wait_for(job_id) == "indexed", "indexed with the describer still away"
+    steps = await _steps(workflows.embed_id(job_id, doc.id))
+    assert ("lacks_descriptions" in steps) == (by == Descriptors.LLM), steps
+    assert "describer_ready" not in steps, steps
+    if by == Descriptors.C_TF_IDF:
+        await _drain()
+        assert await _workflow_ids(dbos_names.SUMMARIZE_DOCUMENT_WORKFLOW) == []
+        assert asked == [] and await embed_cache.lacks_descriptions(doc.id, entry.id)
+        assert await embed_cache.read_sections(doc.id, entry.id) == before
+        return
+    fill = workflows.fill_id(workflows.embed_id(job_id, doc.id), doc.id)
+
+    async def waiting() -> bool:
+        return (await _steps(fill)).count("describer_ready") >= 2
+
+    await until(waiting, "the description run never waited for the describer")
+    again = await dbos.start_index_collection_document("second", doc.id)
+    assert await wait_for(again) == "indexed"
+    assert await _workflow_ids(dbos_names.SUMMARIZE_DOCUMENT_WORKFLOW) == [fill], "one per entry"
+    assert asked == [], "nothing asked while the describer was on its way"
+
+    models._mark_ready(models._model_id(models.ModelKind.DESCRIBER, DESCRIBER))
+    handle = await DBOS.retrieve_workflow_async(fill)
+    assert await handle.get_result(polling_interval_sec=workflows.TASK_POLL) == 1
+    await _drain()
+
+    after = await embed_cache.read_sections(doc.id, entry.id)
+    assert [one.descriptors for one in after] == [one.descriptors for one in before], "kept"
+    described = [one for one in after if one.description]
+    assert described and {one.description for one in described} == {"Explains the topics."}
+    assert asked.count(generated.SECTION_TOKENS) == len(described), "no descriptor was asked for"
+    assert asked.count(generated.SUMMARY_TOKENS) == 1, "then the document's description"
+    assert (await document.named(doc.name)).description == "A summary."
+    assert await embed_cache.described_by(doc.id, entry.id) == Descriptors.LLM
+    assert not await embed_cache.lacks_descriptions(doc.id, entry.id)
+    assert not embed_cache.fill_dir(doc.id, entry.id).exists(), "its batches' folder is gone"
+    assert sum(spy.calls.values()) == 1, "nothing embedded again"
+
+
+async def test_a_fill_describes_by_llm_whatever_strategy_is_set_when_it_runs(
+    dbos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fill queued under llm that runs after the settings went back to c-TF-IDF still waits
+    for the describer and writes the descriptions: only llm writes them. One that finds them
+    written already asks the describer nothing."""
+    summaries = stand_in_describer(monkeypatch, lambda prompt: "A summary.")
+    doc = await import_document(dbos, "a.md", MD, tmp_path)
+    (entry,) = await embed_cache.entries(doc.id)
+    legacy_sections(doc.id, entry.id, Descriptors.LLM)
+    assert (await load_user_settings()).pipeline.descriptors == Descriptors.C_TF_IDF
+
+    async def fill() -> tuple[int, list[str]]:
+        workflow_id = f"{workflows.SUMMARIZE_DOCUMENT_PREFIX}:{doc.id}:{uuid4().hex}"
+        await workflows.enqueue_operation(
+            workflows.DESCRIBING_QUEUE,
+            workflows.summarize_document_workflow,
+            doc.id,
+            entry.id,
+            replace=False,
+            fill=True,
+            workflow_id=workflow_id,
+            dedup_id=f"fill-descriptions:{entry.id}",
+        )
+        handle = await DBOS.retrieve_workflow_async(workflow_id)
+        result = await handle.get_result(polling_interval_sec=workflows.TASK_POLL)
+        return result, await _steps(workflow_id)
+
+    written, steps = await fill()
+    assert "describer_ready" in steps and "try_fill_section_descriptions" in steps, steps
+    read = await embed_cache.read_sections(doc.id, entry.id)
+    assert {one.description for one in read if one.descriptors} == {"Explains alpha and beta."}
+    assert (written, len(summaries)) == (1, 1), "and the document's missing description"
+
+    _, again = await fill()
+    assert again[:2] == ["load_context", "lacks_descriptions"], again
+    assert "describer_ready" not in again, "already filled: the describer is not asked"
 
 
 async def test_an_embedding_run_describes_by_the_strategy_it_was_asked_for(

@@ -13,7 +13,7 @@ import msgspec
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
-from conftest import id_of, import_row
+from conftest import id_of, import_row, legacy_sections
 from sqlalchemy import delete, select
 
 from haskie import db, ids
@@ -655,24 +655,38 @@ async def test_the_model_llm_descriptors_were_written_with_is_kept(
 
 
 @pytest.mark.parametrize("by", [Descriptors.C_TF_IDF, Descriptors.LLM])
-async def test_old_sections_read_without_descriptions_and_llm_needs_refresh(
+async def test_old_sections_keep_their_descriptors_and_get_descriptions_filled_in(
     tmp_path: Path, by: Descriptors
 ) -> None:
+    """A sections file written before descriptions existed still counts as described by its
+    strategy, and says it lacks them. Writing them keeps the descriptors and the strategy, and a
+    second write replaces the first."""
     doc = await import_row(DOC, BODY)
     params = msgspec.structs.replace(BASE, document_id=doc.id)
     cache_id = await embed_cache.write(params, _parts(tmp_path / "scratch", [_book()]), 4)
     found = await embed_cache.read_sections(doc.id, cache_id)
     described = [msgspec.structs.replace(one, descriptors=["Compensating steps"]) for one in found]
-    await embed_cache.write_descriptors(doc.id, cache_id, described, by)
+    await embed_cache.write_descriptors(doc.id, cache_id, described, by, QWEN)
     path = embed_cache.sections_path(doc.id, cache_id)
-    old = pq.read_table(path).drop(["description"])
-    pq.write_table(old, path)
+    old = legacy_sections(doc.id, cache_id)
 
     assert await embed_cache.read_sections(doc.id, cache_id) == described
     assert await embed_cache.lookup(params) == cache_id, "chunk embeddings remain reusable"
-    assert await embed_cache.described_by(doc.id, cache_id) == (
-        None if by == Descriptors.LLM else by
-    )
+    assert await embed_cache.described_by(doc.id, cache_id, QWEN) == by, "descriptors stand"
+    assert await embed_cache.lacks_descriptions(doc.id, cache_id)
+
+    first = [f"Section {at}." for at in range(len(found))]
+    await embed_cache.write_descriptions(doc.id, cache_id, first)
+    read = await embed_cache.read_sections(doc.id, cache_id)
+    assert [one.descriptors for one in read] == [["Compensating steps"]] * len(found)
+    assert [one.description for one in read] == first
+    assert pq.read_schema(path).metadata == old.schema.metadata, "strategy and model kept"
+    assert await embed_cache.described_by(doc.id, cache_id, QWEN) == by
+    assert not await embed_cache.lacks_descriptions(doc.id, cache_id)
+
+    other = ["Another describer's."] * len(found)
+    await embed_cache.write_descriptions(doc.id, cache_id, other)
+    assert [one.description for one in await embed_cache.read_sections(doc.id, cache_id)] == other
 
 
 async def test_each_chunking_keeps_its_own_sections(tmp_path: Path) -> None:

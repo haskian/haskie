@@ -339,8 +339,9 @@ already on top.
 
 Under llm, each section also carries a `description`: one or two sentences generated alongside
 its descriptors. REST and MCP section search return it. The UI shows it only beside the tags in
-the document's Sections tab. It is empty for c-TF-IDF, sections without prose,
-and older caches until their next index. Vocabulary compaction changes only the descriptors.
+the document's Sections tab. It is empty for c-TF-IDF, sections without prose, and older llm
+caches until the `summarize_document` operation their next index queues has run. Vocabulary
+compaction changes only the descriptors.
 
 Measured on three books (1.9 MB of markdown, bge-small), eight questions: the whole search took
 35 to 50 ms warm, `map_sections` 12 to 17 ms of it. Against the top sections by relevance on the

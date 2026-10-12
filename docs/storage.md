@@ -219,8 +219,9 @@ document in order.
 The sections go into their own file beside the chunks (`<id>.sections.parquet`), each with its
 id, parent, headings, where it runs, its descriptors and its `description`. The description is
 empty under c-TF-IDF and for sections without prose. Older files without this column read with
-empty descriptions; older llm files are described again on their next index, without recomputing
-chunk embeddings. The file is written before the entry's
+empty descriptions. An older llm file keeps its descriptors: its next index queues a
+`summarize_document` operation that writes the descriptions, without recomputing chunk
+embeddings. The file is written before the entry's
 row, so a cache hit has both. Its schema metadata names the strategy that wrote the descriptors
 (`descriptors`); a file the merge just wrote has none, until the describe step rewrites it. Each chunking of a document keeps its own, as its section ids are
 its own. A membership names the entry its rows were indexed from
@@ -256,7 +257,9 @@ archive of a schema version this build cannot upgrade. The rows are replaced in 
 and the folders swapped beside it, so a failure leaves what was there. While it runs, every request but a GET
 gets 503, MCP calls included. Every collection is then indexed again from the restored embedding
 cache, with nothing embedded again if the settings name the same model, and every document the
-backup caught mid-import is imported again. Both are durable workflows: after a crash they resume
+backup caught mid-import is imported again. Sections an older build described without section
+descriptions keep their descriptors; their descriptions are written afterwards, without holding
+up the indexes ([Descriptors](indexing.md)). Both are durable workflows: after a crash they resume
 at the step they stopped in. The nightly round removes the upload of a restore that never ran,
 such as one cancelled while it waited.
 

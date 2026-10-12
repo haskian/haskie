@@ -840,6 +840,23 @@ def legacy_index(path: Path, doc: str, text: str, heading: str = "H"):
     return table
 
 
+def legacy_sections(doc: str, cache_id: str, by: str | None = None):
+    """Turn a cached entry's sections file into one written before sections had descriptions:
+    no `description` column, and with `by` the strategy its metadata names. Returns the table as
+    it was, for the test to compare with."""
+    import pyarrow.parquet as pq
+
+    from haskie.indexing import embed_cache
+
+    path = embed_cache.sections_path(doc, cache_id)
+    table = pq.read_table(path)
+    old = table.drop(["description"])
+    if by is not None:
+        old = old.replace_schema_metadata({b"descriptors": by.encode()})
+    pq.write_table(old, path)
+    return table
+
+
 async def import_document(dbos, name: str, content: bytes | str, tmp_dir: Path):
     """Import one file and wait for its pipeline; returns the document row. What most workflow
     and API tests start from."""

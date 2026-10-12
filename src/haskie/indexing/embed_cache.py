@@ -34,7 +34,9 @@ Each entry also keeps its document's sections (`sections_path`, `sections.build`
 merge, and described by a stage of their own (`pipeline.describe_batch`), which reads both files
 back (`inputs`). The sections file's schema metadata names the strategy that wrote its descriptors
 (`described_by`), so an entry described by another strategy than the settings now ask for is
-described again, from the cache, without embedding anything again."""
+described again, from the cache, without embedding anything again. A file written before sections
+had descriptions keeps its descriptors: only its descriptions are written, later
+(`lacks_descriptions`)."""
 
 import hashlib
 import time
@@ -150,9 +152,18 @@ def descriptors_path(doc: str, id: str, seq: int) -> Path:
     return scratch_dir(doc, id) / f"{home.part_name(seq)}.descriptors.json"
 
 
-def descriptions_path(doc: str, id: str, seq: int) -> Path:
-    """The prose descriptions one section batch wrote, before descriptors are extracted."""
-    return scratch_dir(doc, id) / f"{home.part_name(seq)}.descriptions.json"
+def fill_dir(doc: str, id: str) -> Path:
+    """Where a fill of the section descriptions an older entry lacks leaves its batches. Apart
+    from `scratch_dir`: a describe of the same entry may run beside it, and each run drops its
+    own folder whole."""
+    return document.embeddings_dir(doc) / f"{id}.fill.tmp"
+
+
+def descriptions_path(doc: str, id: str, seq: int, fill: bool = False) -> Path:
+    """The prose descriptions one section batch wrote, before descriptors are extracted; in
+    `fill_dir` for a fill."""
+    folder = fill_dir(doc, id) if fill else scratch_dir(doc, id)
+    return folder / f"{home.part_name(seq)}.descriptions.json"
 
 
 def sections_path(doc: str, id: str) -> Path:
@@ -300,6 +311,8 @@ def _merge(document_id: str, parts: list[Path], target: Path, dims: int | None) 
 _DESCRIBED_BY = b"descriptors"
 _DESCRIBED_WITH = b"describer"
 _FIRST_DESCRIBER = gguf_models.DESCRIBERS[Describer.GEMMA_4_E2B].name
+# The sections' column a file written before section descriptions existed lacks.
+_DESCRIPTION = "description"
 
 
 def _write_sections(
@@ -308,10 +321,26 @@ def _write_sections(
     metadata = {} if by is None else {_DESCRIBED_BY: by.encode()}
     if by is not None and describer is not None:
         metadata[_DESCRIBED_WITH] = describer.encode()
+    _write_table(path, found, metadata)
+
+
+def _write_table(path: Path, found: list[build.Section], metadata: dict[bytes, bytes]) -> None:
     schema = _SECTIONS.with_metadata(metadata) if metadata else _SECTIONS
     table = pa.Table.from_pylist([msgspec.to_builtins(one) for one in found], schema=schema)
     with home.atomic_replace(path) as tmp:
         pq.write_table(table, tmp)
+
+
+def _write_descriptions(path: Path, descriptions: list[str]) -> None:
+    """Put `descriptions` on the sections in `path`, in document order, keeping their descriptors
+    and the strategy the file names."""
+    table = pq.read_table(path)
+    found = msgspec.convert(table.to_pylist(), list[build.Section])
+    described = [
+        msgspec.structs.replace(one, description=text)
+        for one, text in zip(found, descriptions, strict=True)
+    ]
+    _write_table(path, described, table.schema.metadata or {})
 
 
 def _document_vector(merged: Merged) -> bytes | None:
@@ -370,11 +399,8 @@ async def write(p: Params, parts: list[Path], dims: int | None) -> str:
 
 
 def _described_by(path: Path, describer: str | None) -> Descriptors | None:
-    schema = pq.read_schema(path)
-    metadata = schema.metadata or {}
+    metadata = pq.read_schema(path).metadata or {}
     found = metadata.get(_DESCRIBED_BY)
-    if found == Descriptors.LLM.encode() and "description" not in schema.names:
-        return None  # the next index fills descriptions without re-embedding the chunks
     written_with = metadata.get(_DESCRIBED_WITH, _FIRST_DESCRIBER.encode()).decode()
     if found == Descriptors.LLM.encode() and describer is not None and written_with != describer:
         return None  # another describer wrote them: the next index describes them again
@@ -382,9 +408,19 @@ def _described_by(path: Path, describer: str | None) -> Descriptors | None:
 
 
 async def described_by(doc: str, id: str, describer: str | None = None) -> Descriptors | None:
-    """The completed strategy; None before describing, for llm files needing descriptions, and,
-    when `describer` names the model llm should write with, for llm files another one wrote."""
+    """The completed strategy; None before describing, and, when `describer` names the model llm
+    should write with, for llm files another one wrote."""
     return await anyio.to_thread.run_sync(_described_by, sections_path(doc, id), describer)
+
+
+def _lacks_descriptions(path: Path) -> bool:
+    return _DESCRIPTION not in pq.read_schema(path).names
+
+
+async def lacks_descriptions(doc: str, id: str) -> bool:
+    """Whether the sections were written before they had descriptions: their descriptors stand,
+    and the descriptions are filled in apart (`write_descriptions`)."""
+    return await anyio.to_thread.run_sync(_lacks_descriptions, sections_path(doc, id))
 
 
 class Described(msgspec.Struct):
@@ -434,6 +470,12 @@ async def write_descriptors(
     by the model `describer`."""
     path = sections_path(doc, id)
     await anyio.to_thread.run_sync(_write_sections, path, described, by, describer)
+
+
+async def write_descriptions(doc: str, id: str, descriptions: list[str]) -> None:
+    """Put the section descriptions on the sections of one cached embedding, one per section in
+    document order, and keep their descriptors."""
+    await anyio.to_thread.run_sync(_write_descriptions, sections_path(doc, id), descriptions)
 
 
 def _read_sections(path: Path) -> list[build.Section]:

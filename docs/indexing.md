@@ -88,7 +88,16 @@ section is about.
   and 90 tokens. Both read the section's heading path and up to 6,000 characters of its prose
   (`sections/generated.py`). A longer section is read as six chunks spread over its span.
   Both fields are saved in the sections cache. Each section stage checkpoints batches of
-  sixteen sections and shows its own progress. Topics already named in the heading remain
+  sixteen sections and shows its own progress. An llm entry written before sections had
+  descriptions keeps its descriptors: the index reads it at once and queues a
+  `summarize_document` operation on `operation.describing`, one per entry. That operation runs
+  **Describe sections** alone, puts the descriptions beside the descriptors, then writes the
+  document's description if it has none. Its batches sit in a folder of their own, so a describe
+  of the same entry, asked for after a settings change, never touches them. It skips the work
+  when such a describe wrote the descriptions while it waited. DBOS records it as a child of the
+  first index's embedding run, so cancelling that index cancels it too, until the next index of
+  the document queues it again. A restore of an older backup is searchable as soon as its
+  indexes are written, and the descriptions follow. Topics already named in the heading remain
   eligible descriptors in both strategies.
   The descriptor stage runs deepest sections first (`pipeline.describe_order`). A section with
   subsections and more than 48,000 characters of prose (eight excerpts) is described after them,
@@ -108,7 +117,8 @@ section is about.
   those summaries are combined until one remains. Every section with metadata contributes.
   Each sentence starts with a verb ("Explains how ..."), never with "This document is" or the
   book's title, and front and back matter are left out. The automatic document description
-  completes within the original operation. A description someone wrote, before or meanwhile, is
+  completes within the operation that describes the sections; for an older entry, that is the
+  queued fill above. A description someone wrote, before or meanwhile, is
   never replaced. *Describe with AI* in a document's Info tab asks for one on demand and replaces
   what is there (`POST /api/documents/{name}/description/generate`), from the newest cache entry
   llm described, else the newest. *Describe with AI* on a collection
@@ -227,7 +237,7 @@ membership reads `removing` until it has run (see
 | `operation.indexing` | twice `cpu_budget`, at most 64 | one import or index orchestrator per document |
 | `operation.embedding` | same | `ensure_embedding`, one per cache id |
 | `operation.collection` | 2 | index all, delete a collection, delete a document |
-| `operation.describing` | 1 | document or collection descriptions requested with *Describe with AI* |
+| `operation.describing` | 1 | document or collection descriptions requested with *Describe with AI*, and the section descriptions an older llm entry lacks |
 | `operation.downloads` | 2 | model downloads |
 | `operation.maintenance` | 4 | maintenance orchestrators and nightly housekeeping |
 | `operation.backup` | 1 | backups and restores (`backup.py`), never two at once |
