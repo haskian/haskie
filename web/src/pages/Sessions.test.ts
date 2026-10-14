@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { SessionEvent, SessionSummary } from '../api'
 import { groupByStatus, tileSub } from './sessions/group'
-import { historySub, searchLines, type SearchLine } from './sessions/history'
+import { historySub, matchesSearch, searchLines, type SearchLine } from './sessions/history'
 
 const search: SessionEvent = {
   ts: 1_758_460_000,
@@ -69,11 +69,29 @@ describe('searchLines', () => {
   }
 })
 
+describe('matchesSearch', () => {
+  const imported: SessionEvent = { ...search, action: 'import', subject: 'lamp.pdf', detail: {}, operation_id: 'imp:lamp.pdf:1' }
+  const cases: Array<{ name: string; needle: string; value: SessionEvent; expected: boolean }> = [
+    { name: 'no filter keeps a search', needle: '', value: asked, expected: true },
+    { name: 'no filter keeps any other action', needle: '', value: imported, expected: true },
+    { name: 'a hit in the context', needle: 'lamp scene', value: asked, expected: true },
+    { name: 'a hit in the second question', needle: 'pcf', value: asked, expected: true },
+    { name: 'a search that holds neither', needle: 'refraction', value: asked, expected: false },
+    { name: 'another action has nothing to match, even by its subject', needle: 'lamp', value: imported, expected: false },
+    { name: 'a search with no questions recorded', needle: 'shadow', value: { ...search, detail: { scope: 'text', hits: 0, documents: [] } }, expected: false },
+  ]
+  for (const one of cases) {
+    test(one.name, () => {
+      expect(matchesSearch(one.needle, one.value)).toBe(one.expected)
+    })
+  }
+})
+
 const NOW = 1_758_460_000
-const fresh: SessionSummary = { id: 'claude-code a3f9', collections: ['A–E', 'K–O'], last_at: NOW - 120 }
-const stale: SessionSummary = { id: 'cursor 7b21', collections: ['P–T'], last_at: NOW - 3600 }
-const older: SessionSummary = { id: 'agent 91dd', collections: [], last_at: NOW - 7200 }
-const unused: SessionSummary = { id: 'claude-desktop c04e', collections: [], last_at: null }
+const fresh: SessionSummary = { id: 'claude-code a3f9', collections: ['A–E', 'K–O'], last_at: NOW - 120, searches: 0 }
+const stale: SessionSummary = { id: 'cursor 7b21', collections: ['P–T'], last_at: NOW - 3600, searches: 0 }
+const older: SessionSummary = { id: 'agent 91dd', collections: [], last_at: NOW - 7200, searches: 0 }
+const unused: SessionSummary = { id: 'claude-desktop c04e', collections: [], last_at: null, searches: 0 }
 
 describe('groupByStatus', () => {
   const cases: Array<{ name: string; value: SessionSummary[]; expected: Array<[string, string[]]> }> = [

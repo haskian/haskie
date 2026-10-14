@@ -494,15 +494,15 @@ async def history(session_id: str, limit: int) -> list[session.SessionEvent]:
     ]
 
 
-async def last_searched() -> dict[str, float]:
-    """When each session last searched, in unix seconds; a session that never did is absent."""
+async def searched() -> dict[str, session.SearchTally]:
+    """How many times and when last each session searched; a session that never did is absent."""
     async with db.read() as conn:
         rows = await conn.execute(
-            select(searches.c.session_id, func.max(searches.c.ts))
+            select(searches.c.session_id, func.count(), func.max(searches.c.ts))
             .where(searches.c.session_id.is_not(None))
             .group_by(searches.c.session_id)
         )
-        return dict(rows.tuples().all())
+        return {session_id: session.SearchTally(count, ts) for session_id, count, ts in rows}
 
 
 async def recent_questions(limit: int) -> list[str]:

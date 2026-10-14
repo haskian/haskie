@@ -22,13 +22,3 @@ export function Toggle({ label, checked, onChange, disabled, id }: BoxProps) {
     </label>
   )
 }
-
-/** A checkbox: one item of a set. */
-export function Check({ label, checked, onChange, disabled, id }: BoxProps) {
-  return (
-    <label className="check">
-      <input type="checkbox" id={id} checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
-      {label}
-    </label>
-  )
-}

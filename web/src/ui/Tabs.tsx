@@ -1,6 +1,7 @@
 export interface TabDef {
   id: string // also the id of the panel the caller renders
   label: string
+  count?: number // shown after the label as a tag, the way a question shows Q1
 }
 
 /**
@@ -29,6 +30,8 @@ export function Tabs({
           onClick={() => onSelect(tab.id)}
         >
           {tab.label}
+          {/* The space keeps the label and the count two words to a screen reader. */}
+          {tab.count !== undefined && <> <span className="descriptor">{tab.count}</span></>}
         </button>
       ))}
     </div>

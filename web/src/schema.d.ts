@@ -2260,6 +2260,7 @@ export interface components {
             id: string;
             collections: string[];
             last_at: number | null;
+            searches: number;
         };
         /**
          * Signal

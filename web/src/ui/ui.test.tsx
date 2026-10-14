@@ -23,7 +23,7 @@ import { Statusbar } from './Statusbar'
 import { Jobs, type JobBar } from './Jobs'
 import { Tabs } from './Tabs'
 import { Tile } from './Tile'
-import { Check, Toggle } from './Toggle'
+import { Toggle } from './Toggle'
 
 interface MarkupCase {
   name: string
@@ -255,6 +255,12 @@ describe('Tabs', () => {
       name: 'the selected tab is the only one marked',
       element: <Tabs tabs={tabs} selected="tab-sections" onSelect={noop} />,
       contains: ['aria-selected="false" aria-controls="tab-matches">Excerpts · 6', 'aria-selected="true" aria-controls="tab-sections">Sections · 3'],
+      missing: ['class="descriptor"'],
+    },
+    {
+      name: 'a count follows its label as a tag',
+      element: <Tabs tabs={[{ id: 'session-history', label: 'Search history', count: 0 }]} selected="session-history" onSelect={noop} />,
+      contains: ['aria-controls="session-history">Search history <span class="descriptor">0</span></button>'],
     },
     {
       name: 'no tabs renders an empty strip',
@@ -520,7 +526,7 @@ describe('Field', () => {
   ])
 })
 
-describe('Toggle and Check', () => {
+describe('Toggle', () => {
   check([
     {
       name: 'a checked toggle is a switch',
@@ -535,12 +541,6 @@ describe('Toggle and Check', () => {
     },
     { name: 'id reaches the input', element: <Toggle label="Classic" checked onChange={noop} id="bg-classic" />, contains: ['id="bg-classic"'] },
     { name: 'a toggle may be disabled', element: <Toggle label="A" checked={false} disabled onChange={noop} />, contains: ['disabled=""'] },
-    {
-      name: 'a check is a plain checkbox',
-      element: <Check label="A–E" checked onChange={noop} />,
-      contains: ['<label class="check">', 'type="checkbox"', 'checked=""', '>A–E</label>'],
-      missing: ['role="switch"'],
-    },
   ])
 })
 

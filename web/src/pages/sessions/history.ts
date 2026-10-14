@@ -1,4 +1,5 @@
 import type { SessionEvent } from '../../api'
+import { matchesText } from '../../format'
 
 /** One tagged line of a search row: its context, then each question numbered as the results
  *  number them ("Q2"). */
@@ -12,6 +13,11 @@ export function searchLines(event: SessionEvent): SearchLine[] {
     ...(questions ?? []).map((question, at) => ({ tag: `Q${at + 1}`, text: question, context: false })),
   ]
 }
+
+/** Whether a history row passes a `needleOf` filter: a search whose context or a question holds
+ *  it. Other actions ask nothing, so any filter hides them. */
+export const matchesSearch = (needle: string, event: SessionEvent): boolean =>
+  matchesText(needle, ...searchLines(event).map((line) => line.text))
 
 /** The line under a history row's subject: what the action came to, in the words of its kind. */
 export function historySub(event: SessionEvent): string {

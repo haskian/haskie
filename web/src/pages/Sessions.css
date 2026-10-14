@@ -6,10 +6,6 @@
   gap: var(--sp-3);
   align-content: start;
 }
-.session-panel .check {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
 
 /* A query, a document name and an API message are whatever the agent sent: they wrap, never widen. */
 .session-query,
