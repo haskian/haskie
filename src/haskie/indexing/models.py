@@ -31,6 +31,7 @@ reach back into them or into `workflows`.
 """
 
 import asyncio
+import contextvars
 import threading
 from enum import StrEnum
 
@@ -396,7 +397,13 @@ async def require_ready(kind: ModelKind, name: str) -> None:
     workflow_id = _model_id(kind, name)
     if is_warm(workflow_id):
         return
-    found = await DBOS.list_workflows_async(workflow_ids=[workflow_id])
+    # From an empty context: called inside a step, DBOS hands the step's own context to the
+    # thread that runs the query, and decides there, after the query, whether to log it as a
+    # workflow step. A shutdown that cancels the step meanwhile makes that context look like the
+    # workflow body again, so the lookup takes the step's place in the log, and recovery fails.
+    found = await asyncio.create_task(
+        DBOS.list_workflows_async(workflow_ids=[workflow_id]), context=contextvars.Context()
+    )
     status = _model_status(kind, name, found[0] if found else None)
     if status.state == ModelState.ERROR:
         raise Unavailable(f"{kind} model {name} failed to load: {status.error}")

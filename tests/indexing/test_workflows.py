@@ -69,6 +69,7 @@ from conftest import (
 from dbos import DBOS, SetWorkflowID
 from dbos._error import DBOSAwaitedWorkflowCancelledError
 from dbos._registrations import get_dbos_func_name
+from dbos._sys_db import SystemDatabase
 from sqlalchemy import func, insert, select, update
 
 from haskie import audit, backup, db, home, paging, settings, shutdown
@@ -77,7 +78,7 @@ from haskie.catalogue.catalogue import EmbeddingModel
 from haskie.collection import maintenance
 from haskie.collection.collection import Collection
 from haskie.collection.index import CollectionIndex
-from haskie.document import convert, document
+from haskie.document import convert, document, ocr
 from haskie.document.document import Document, DocumentStatus
 from haskie.errors import (
     Conflict,
@@ -2395,6 +2396,47 @@ async def test_import_resumes_after_a_crash_without_duplicating_chunks(
     await attach_document(dbos, "dur", doc.name)
     table = await (await Collection("dur").index())._existing()
     assert table is not None and await table.count_rows() == await _cached_rows(doc.name) > 0
+
+
+async def test_a_lookup_that_outlives_its_cancelled_step_records_nothing(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """A convert step asks DBOS whether the OCR model is ready, and the process stops while that
+    query is still running in its worker thread. The thread finishes after the step is cancelled,
+    and must not write itself into the step log in the step's place: the import would then fail on
+    recovery with `DBOSUnexpectedStepError`, a step recorded where another was expected."""
+    await _use(dbos, workers=1, batch_pages=1)
+    doc = await import_row("p.pdf", text_pdf(["alpha one"]), tmp_path)
+    ocr_model = [models._model_id(models.ModelKind.OCR, ocr.MODEL)]
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    held = threading.local()
+    real_list, real_call = SystemDatabase.list_workflows, SystemDatabase.call_function_as_step
+
+    def list_workflows(self, **kwargs):
+        if kwargs.get("workflow_ids") == ocr_model and not entered.is_set():
+            held.on = True
+            entered.set()
+            release.wait(WAIT)
+        return real_list(self, **kwargs)
+
+    def call_function_as_step(self, fn, function_name, ctx):
+        try:
+            return real_call(self, fn, function_name, ctx)
+        finally:
+            if getattr(held, "on", False):
+                finished.set()  # the thread's last write, if any, is behind it
+
+    monkeypatch.setattr(SystemDatabase, "list_workflows", list_workflows)
+    monkeypatch.setattr(SystemDatabase, "call_function_as_step", call_function_as_step)
+
+    job_id = await dbos.start_import(doc)
+    assert await wait_event(entered), "the convert step never asked for the OCR model"
+    DBOS.destroy(workflow_completion_timeout_sec=0)  # cancels the step; its thread runs on
+    release.set()
+    assert await wait_event(finished), "the held lookup never returned"
+    await dbos.start()
+
+    assert await wait_for(job_id) == "imported"
 
 
 async def test_adopt_orphans_resumes_only_stale_in_flight_workflows(
