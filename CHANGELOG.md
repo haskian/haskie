@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.37.0 - 2026-10-14
+#### Features
+- (**sessions**) filter a session's search history and count its searches (#57) - (2c39d39) - Črtomir Majer
+
+- - -
+
 ## v0.36.3 - 2026-10-14
 #### Bug Fixes
 - (**indexing**) keep a model lookup out of a cancelled step's log (#58) - (2586752) - Črtomir Majer
