@@ -1874,6 +1874,8 @@ async def test_session_history_holds_every_action_newest_first(
     assert listed["s2"]["collections"] == ["notes"], "the import created it, the put filled it"
     assert listed["s2"]["last_at"] == history[0]["ts"], "last seen at its newest event"
     assert listed["s1"]["last_at"] is not None, "the fixture put its selection: an event too"
+    assert listed["s2"]["searches"] == 2, "its two searches; the unsessioned one is not its"
+    assert listed["s1"]["searches"] == 0, "a session that never searched counts none"
     assert (await ready.get("/api/sessions/never-set/history")).json() == []
 
     (tmp_path / "plain.md").write_text("# Plain\n")

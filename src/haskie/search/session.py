@@ -7,6 +7,7 @@ the search counts its chunks once whichever collections hold them (`retrieval.fa
 
 import time
 from enum import StrEnum
+from typing import NamedTuple
 
 import msgspec
 from sqlalchemy import delete, func, literal, select
@@ -97,17 +98,26 @@ async def collections_for(session: str) -> list[str]:
 
 
 class SessionSummary(msgspec.Struct):
-    """One session as the listing shows it: its selection, and when it was last seen doing
-    anything (None for one that did nothing yet)."""
+    """One session as the listing shows it: its selection, when it was last seen doing
+    anything (None for one that did nothing yet), and how many times it searched."""
 
     id: str
     collections: list[str]
     last_at: float | None  # unix seconds of its newest event
+    # every search ever, where the history holds only the newest `MAX_HISTORY` events
+    searches: int
 
 
-async def summaries(last_searched: dict[str, float]) -> list[SessionSummary]:
-    """Every session with its collections and its latest event or search, in id order; the page
-    sorts. `last_searched` is when each session last searched (`log.last_searched`)."""
+class SearchTally(NamedTuple):
+    """How much one session searched: how many times, and when last, in unix seconds."""
+
+    count: int
+    last_at: float
+
+
+async def summaries(searched: dict[str, SearchTally]) -> list[SessionSummary]:
+    """Every session with its collections, its latest event or search, and its search count, in
+    id order; the page sorts. `searched` holds each session that searched (`log.searched`)."""
     loaded = await load()
     async with db.read() as conn:
         rows = await conn.execute(
@@ -115,10 +125,14 @@ async def summaries(last_searched: dict[str, float]) -> list[SessionSummary]:
                 session_events.c.session_id
             )
         )
-        last = dict(last_searched)
+        last = {session_id: one.last_at for session_id, one in searched.items()}
         for session_id, ts in rows:
             last[session_id] = max(ts, last.get(session_id, ts))
-    return [SessionSummary(id, collections, last.get(id)) for id, collections in loaded.items()]
+    none = SearchTally(0, 0.0)
+    return [
+        SessionSummary(id, collections, last.get(id), searched.get(id, none).count)
+        for id, collections in loaded.items()
+    ]
 
 
 class EventDetail(msgspec.Struct, omit_defaults=True):

@@ -25,7 +25,7 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `Logo` | `<Logo />` | The mark and wordmark, linking to Explore |
 | `Statusbar` | `<Statusbar status={status} refreshStatus={refresh} />` | Fixed strip; polls `/api/operations/activity` itself, and the model status too while knowledge models are on; reads both at once when a page starts work |
 | `Picker` | `<Picker options={scopes} value={scope} onChange={setScope} />` | `<details>` dropdown, each option a label plus a `sub` |
-| `Tabs` | `<Tabs tabs={[{ id: 'match', label: 'Match' }]} selected={tab} onSelect={setTab} />` | The strip only; the caller renders the panels |
+| `Tabs` | `<Tabs tabs={[{ id: 'match', label: 'Match' }]} selected={tab} onSelect={setTab} />` | The strip only; the caller renders the panels. An optional `count` follows the label as a tag |
 | `Modal` | `<Modal open={open} onClose={close} title={doc} subtitle="collection">{panels}</Modal>` | Native `<dialog>` with reserved bottom status space |
 | `ModalStatus` | `<ModalStatus tone="error">{error}</ModalStatus>` | Message and severity icon in the owning modal’s footer; inline outside modals. Render panel-specific messages only while that panel is selected |
 | `Tile` | `<Tile icon={FileText} name={doc.name} sub={sub} description={doc.description} cover={api.coverUrl(doc.name)} onClick={open} />` | One card in a gallery, with an optional cover behind it. On hover, `hint` shows below the name and detail, `description` alone |
@@ -41,7 +41,7 @@ import { Field, Picker, Tabs, Tile } from '../ui'
 | `Jobs` | `<Jobs jobs={jobs} variant="glass" stripes />` | One weighted bar per job of an operation |
 | `Kv` | `<Kv rows={[['Status', doc.status], ['Size', bytes.format(doc.size)]]} />` | Key and value rows |
 | `Field` | `<Field label="Chunk size" help={docs['conversion.chunk_size'].description}><input className="input" /></Field>` | A labelled form control with the setting's help text |
-| `Toggle` / `Check` | `<Toggle label="Classic background" checked={on} onChange={setOn} />` | `Toggle` renders `role="switch"` |
+| `Toggle` | `<Toggle label="Classic background" checked={on} onChange={setOn} />` | `Toggle` renders `role="switch"` |
 | `Mark` | `<Mark text={hit.text} query={q} />` | Wraps the query's terms in `<mark>` |
 | `DocumentPanes` | `<DocumentPanes doc={name} preview={doc.preview} />` | Source pane plus streamed markdown |
 | `Skeleton` | `<Skeleton />` | The shape of a document while it loads |

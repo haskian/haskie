@@ -41,8 +41,8 @@ class SessionCollections(msgspec.Struct):
 
 @get("/api/sessions")
 async def list_sessions() -> list[session.SessionSummary]:
-    """Every session: its collections and when it last did anything."""
-    return await session.summaries(await log.last_searched())
+    """Every session: its collections, when it last did anything, and how often it searched."""
+    return await session.summaries(await log.searched())
 
 
 @put("/api/sessions/{session_id:str}", mcp_tool="set_session_collections")

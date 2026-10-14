@@ -74,23 +74,10 @@
         <form method="dialog"><button class="btn btn-ghost" aria-label="Close"><i data-lucide="x" class="icon"></i></button></form>
       </div>
       <div class="tabs" role="tablist">
-        <button class="tab" role="tab" aria-selected="true" aria-controls="session-collections">Collections</button>
-        <button class="tab" role="tab" aria-controls="session-search">Search</button>
-        <button class="tab" role="tab" aria-controls="session-history">History</button>
+        <button class="tab" role="tab" aria-selected="true" aria-controls="session-history">Search history <span class="descriptor">3</span></button>
       </div>
-      <div id="session-collections" role="tabpanel" class="session-panel">
-        <ul class="list">
-          <li class="list-item"><i data-lucide="library" class="icon"></i><span class="list-text"><label class="check"><input type="checkbox" checked><span>A–E</span></label><span class="sub">12 documents</span></span></li>
-          <li class="list-item"><i data-lucide="library" class="icon"></i><span class="list-text"><label class="check"><input type="checkbox"><span>F–J</span></label><span class="sub">8 documents</span></span></li>
-          <li class="list-item"><i data-lucide="library" class="icon"></i><span class="list-text"><label class="check"><input type="checkbox" checked><span>K–O</span></label><span class="sub">5 documents</span></span></li>
-          <li class="list-item"><i data-lucide="library" class="icon"></i><span class="list-text"><label class="check"><input type="checkbox"><span>P–T</span></label><span class="sub">3 documents</span></span></li>
-          <li class="list-item"><i data-lucide="library" class="icon"></i><span class="list-text"><label class="check"><input type="checkbox"><span>U–Z</span></label><span class="sub">2 documents</span></span></li>
-        </ul>
-      </div>
-      <div id="session-search" role="tabpanel" class="session-panel" hidden>
-        <form class="input-group" role="search" onsubmit="return false"><input class="input" id="session-q" type="search" placeholder="Search this session" /><button class="btn btn-ghost" type="button" aria-label="Clear" onclick="const box = this.previousElementSibling; box.value = ''; box.dispatchEvent(new Event('input')); box.focus()"><i data-lucide="x" class="icon"></i></button></form>
-      </div>
-      <div id="session-history" role="tabpanel" class="session-panel" hidden>
+      <div id="session-history" role="tabpanel" class="session-panel">
+        <form class="input-group" role="search" onsubmit="return false"><input class="input" type="search" placeholder="Filter by context or question" /><button class="btn btn-ghost" type="button" aria-label="Clear" onclick="const box = this.previousElementSibling; box.value = ''; box.dispatchEvent(new Event('input')); box.focus()"><i data-lucide="x" class="icon"></i></button></form>
         <ul class="list">
           <li class="list-item"><i data-lucide="search" class="icon"></i><span class="list-text"><span class="session-query">shadow mapping cascades</span><span class="sub">12 hits in 3 documents via explore · 48 ms · 2 min ago</span><span class="sub session-docs">Lamp · Cube · Shadow</span></span></li>
           <li class="list-item"><i data-lucide="list-checks" class="icon"></i><span class="list-text"><span class="session-query">A–E, K–O</span><span class="sub">searches these collections · 3 min ago</span></span></li>

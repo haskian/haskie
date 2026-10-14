@@ -1,13 +1,13 @@
-import { Bot, FilePlus, Library, ListChecks, Minus, Pencil, Plus, Search, type LucideIcon } from 'lucide-react'
+import { Bot, FilePlus, ListChecks, Minus, Pencil, Plus, Search, type LucideIcon } from 'lucide-react'
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { api, MAX_PAGE_SIZE, type CollectionSummary, type SessionAction, type SessionEvent, type SessionSummary } from '../api'
+import { api, type SessionAction, type SessionEvent, type SessionSummary } from '../api'
 import type { PageProps } from '../App'
 import { navigate, type Route } from '../router'
-import { Check, Field, GallerySection, Modal, ModalStatus, SearchBox, SearchPanel, Shell, Tabs, Tile, type TabDef } from '../ui'
+import { Field, GallerySection, Modal, ModalStatus, SearchBox, Shell, Tabs, Tile, type TabDef } from '../ui'
 import './Sessions.css'
 import { errorText, matchesText, needleOf, relative } from '../format'
 import { groupByStatus, tileSub } from './sessions/group'
-import { historySub, searchLines } from './sessions/history'
+import { historySub, matchesSearch, searchLines } from './sessions/history'
 
 const ACTION_ICONS: Record<SessionAction, LucideIcon> = {
   search: Search,
@@ -17,12 +17,6 @@ const ACTION_ICONS: Record<SessionAction, LucideIcon> = {
   describe: Pencil,
   collections: ListChecks,
 }
-
-const TABS: TabDef[] = [
-  { id: 'session-collections', label: 'Collections' },
-  { id: 'session-search', label: 'Search' },
-  { id: 'session-history', label: 'History' },
-]
 
 /** A session is the set of collections an agent searches under one id: a gallery banded by activity, one modal per session. */
 export function Sessions({ route, counts }: PageProps<Extract<Route, { name: 'sessions' }>>) {
@@ -35,9 +29,10 @@ export function Sessions({ route, counts }: PageProps<Extract<Route, { name: 'se
 
   // "2 min ago" and the Active band are measured from the moment the list was read
   const refresh = useCallback(() => api.sessions().then((sessions) => setLoaded({ sessions, now: Date.now() / 1000 })), [])
+  // Read again as a session opens, so its search count is as fresh as the history it reads.
   useEffect(() => {
     refresh().catch((cause: unknown) => setError(errorText(cause)))
-  }, [refresh])
+  }, [refresh, route.session])
 
   const startCreating = () => {
     setNewId('')
@@ -51,7 +46,6 @@ export function Sessions({ route, counts }: PageProps<Extract<Route, { name: 'se
     try {
       await api.saveSession(id, [])
       setCreating(false)
-      await refresh()
       navigate({ name: 'sessions', session: id })
     } catch (cause) {
       setCreateError(errorText(cause))
@@ -64,7 +58,7 @@ export function Sessions({ route, counts }: PageProps<Extract<Route, { name: 'se
     loaded.sessions.filter((one) => matchesText(needle, one.id)),
     loaded.now,
   )
-  const chosen = loaded.sessions.find((one) => one.id === route.session)?.collections ?? []
+  const searches = loaded.sessions.find((one) => one.id === route.session)?.searches
   const close = useCallback(() => navigate({ name: 'sessions' }), [])
 
   return (
@@ -90,7 +84,7 @@ export function Sessions({ route, counts }: PageProps<Extract<Route, { name: 'se
           </GallerySection>
         ))}
       </div>
-      <SessionModal id={route.session} chosen={chosen} onClose={close} onSaved={refresh} />
+      <SessionModal id={route.session} searches={searches} onClose={close} />
       <Modal open={creating} onClose={() => setCreating(false)} title="New session" subtitle="session">
         {/* A form, so Enter creates the way the browser already does it. */}
         <form className="session-panel modal-scroll" onSubmit={create}>
@@ -112,83 +106,39 @@ export function Sessions({ route, counts }: PageProps<Extract<Route, { name: 'se
   )
 }
 
-function SessionModal({
-  id,
-  chosen,
-  onClose,
-  onSaved,
-}: {
-  id: string | undefined
-  chosen: string[]
-  onClose: () => void
-  onSaved: () => Promise<unknown>
-}) {
+function SessionModal({ id, searches, onClose }: { id: string | undefined; searches: number | undefined; onClose: () => void }) {
   return (
     <Modal open={id !== undefined} onClose={onClose} title={id ?? ''} subtitle="session">
-      {id !== undefined && <SessionBody key={id} id={id} chosen={chosen} onSaved={onSaved} />}
+      {id !== undefined && <SessionBody key={id} id={id} searches={searches} />}
     </Modal>
   )
 }
 
-function SessionBody({ id, chosen, onSaved }: { id: string; chosen: string[]; onSaved: () => Promise<unknown> }) {
-  const [collections, setCollections] = useState<CollectionSummary[]>([])
-  const [tab, setTab] = useState<string>(TABS[0].id)
+/** A session's history as read at one instant: "2 min ago" is measured from it, so every row shares it. */
+type LoadedHistory = { events: SessionEvent[]; now: number }
+
+const HISTORY_TAB = 'session-history'
+
+/** `searches` counts every search, where the history holds only the newest events. */
+function SessionBody({ id, searches }: { id: string; searches: number | undefined }) {
+  const [history, setHistory] = useState<LoadedHistory | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [searched, setSearched] = useState(0) // bumps after each search here, so the history re-reads
 
   useEffect(() => {
     api
-      .collections({ page_size: MAX_PAGE_SIZE, sort: 'name' })
-      .then((page) => setCollections(page.items))
+      .sessionHistory(id)
+      .then((events) => setHistory({ events, now: Date.now() / 1000 }))
       .catch((cause: unknown) => setError(errorText(cause)))
-  }, [])
+  }, [id])
 
-  // Every change is saved at once: a session is one small list, and the agent may read it back
-  // between two clicks. The kept order is the caller's; a new pick goes to the end.
-  const toggle = (name: string, on: boolean): void => {
-    const next = on ? [...chosen, name] : chosen.filter((one) => one !== name)
-    setError(null)
-    api
-      .saveSession(id, next)
-      .then(() => onSaved())
-      .catch((cause: unknown) => setError(errorText(cause)))
-  }
-
-  const run = async (query: string) => {
-    const found = await api.explore(query, 'chunk', { session_id: id })
-    setSearched((count) => count + 1)
-    return found
-  }
+  // One tab: the strip stays as the panel's heading and carries the count.
+  const tab: TabDef = { id: HISTORY_TAB, label: 'Search history', count: searches }
 
   return (
     <>
-      <Tabs tabs={TABS} selected={tab} onSelect={setTab} />
-
-      <div id={TABS[0].id} role="tabpanel" className="session-panel" hidden={tab !== TABS[0].id}>
-        {error !== null && <ModalStatus tone="error">{error}</ModalStatus>}
-        <ul className="list">
-          {collections.map((collection) => (
-            <li className="list-item" key={collection.name}>
-              <Library className="icon" />
-              <span className="list-text">
-                <Check
-                  label={collection.name}
-                  checked={chosen.includes(collection.name)}
-                  onChange={(on) => toggle(collection.name, on)}
-                />
-                <span className="sub">{collection.counts.total} documents</span>
-              </span>
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      <div id={TABS[1].id} role="tabpanel" className="session-panel" hidden={tab !== TABS[1].id}>
-        <SearchPanel active={tab === TABS[1].id} run={run} placeholder="Search this session" plural="chunks" />
-      </div>
-
-      <div id={TABS[2].id} role="tabpanel" className="session-panel" hidden={tab !== TABS[2].id}>
-        {tab === TABS[2].id && <History id={id} version={searched} />}
+      <Tabs tabs={[tab]} selected={HISTORY_TAB} onSelect={() => {}} />
+      <div id={HISTORY_TAB} role="tabpanel" className="session-panel">
+        {error !== null ? <ModalStatus tone="error">{error}</ModalStatus> : history !== null && <History loaded={history} />}
       </div>
     </>
   )
@@ -209,40 +159,36 @@ function SearchLines({ event }: { event: SessionEvent }) {
   )
 }
 
-/** What the session did, newest first: each search, import, attach and selection, and what came of it. */
-function History({ id, version }: { id: string; version: number }) {
-  const [loaded, setLoaded] = useState<{ events: SessionEvent[]; now: number } | null>(null)
-  const [error, setError] = useState<string | null>(null)
+/** What the session did, newest first: each search, import, attach and selection, and what came of it.
+ *  A filter narrows it to the searches whose context or questions hold the text. */
+function History({ loaded }: { loaded: LoadedHistory }) {
+  const [filter, setFilter] = useState('')
 
-  // "2 min ago" is measured from the moment the list was read, so every row shares one instant
-  useEffect(() => {
-    api
-      .sessionHistory(id)
-      .then((events) => setLoaded({ events, now: Date.now() / 1000 }))
-      .catch((cause: unknown) => setError(errorText(cause)))
-  }, [id, version])
-
-  if (error !== null) return <ModalStatus tone="error">{error}</ModalStatus>
-  if (loaded === null) return null
   if (loaded.events.length === 0) return <ModalStatus>Nothing yet.</ModalStatus>
+  const needle = needleOf(filter)
+  const shown = loaded.events.filter((event) => matchesSearch(needle, event))
   return (
-    <ul className="list">
-      {loaded.events.map((event) => {
-        const Icon = ACTION_ICONS[event.action]
-        const docs = event.detail.documents ?? []
-        return (
-          <li className="list-item" key={`${event.ts}-${event.action}-${event.subject}`}>
-            <Icon className="icon" />
-            <span className="list-text">
-              {event.action === 'search' ? <SearchLines event={event} /> : <span className="session-query">{event.subject}</span>}
-              <span className="sub">
-                {historySub(event)} · {relative(event.ts, loaded.now)}
+    <>
+      <SearchBox value={filter} onChange={setFilter} placeholder="Filter by context or question" />
+      {shown.length === 0 && <ModalStatus>No search matches.</ModalStatus>}
+      <ul className="list">
+        {shown.map((event) => {
+          const Icon = ACTION_ICONS[event.action]
+          const docs = event.detail.documents ?? []
+          return (
+            <li className="list-item" key={`${event.ts}-${event.action}-${event.subject}`}>
+              <Icon className="icon" />
+              <span className="list-text">
+                {event.action === 'search' ? <SearchLines event={event} /> : <span className="session-query">{event.subject}</span>}
+                <span className="sub">
+                  {historySub(event)} · {relative(event.ts, loaded.now)}
+                </span>
+                {docs.length > 0 && <span className="sub session-docs">{docs.join(' · ')}</span>}
               </span>
-              {docs.length > 0 && <span className="sub session-docs">{docs.join(' · ')}</span>}
-            </span>
-          </li>
-        )
-      })}
-    </ul>
+            </li>
+          )
+        })}
+      </ul>
+    </>
   )
 }
