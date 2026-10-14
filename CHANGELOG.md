@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.36.3 - 2026-10-14
+#### Bug Fixes
+- (**indexing**) keep a model lookup out of a cancelled step's log (#58) - (2586752) - Črtomir Majer
+
+- - -
+
 ## v0.36.2 - 2026-10-12
 #### Bug Fixes
 - (**indexing**) index old llm cache entries at once after a restore (#56) - (a7d9b6f) - Črtomir Majer
