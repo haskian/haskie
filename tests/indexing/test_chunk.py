@@ -21,6 +21,8 @@ SMALL = ChunkSettings(chunk_size=40)
 
 
 def _check(text: str, settings: ChunkSettings, chunks: list[Chunk], byte_offset: int = 0) -> None:
+    if chunks and all(b.kind == "heading" for b in segment.blocks(text)):
+        settings = ChunkSettings(chunker=Chunker.TEXT, chunk_size=settings.chunk_size)  # `split`
     data = text.encode()
     for c in chunks:
         starts = [*(p.position for p in c.layout), len(c.text)]
@@ -229,10 +231,10 @@ def _split(text: str, settings: ChunkSettings) -> list[Chunk]:
         ),
         # headings
         (
-            "stacked headings with nothing under them make no chunk",
+            "stacked headings with nothing under them are all the text says: chunked as text",
             "# A\n## B\n### C\n#### D\n##### E\n",
             WIDE,
-            [],
+            [(["A"], ["# A\n## B\n### C\n#### D\n##### E"])],
         ),
         (
             "stacked headings open one section, filed under the deepest",
@@ -271,10 +273,10 @@ def _split(text: str, settings: ChunkSettings) -> list[Chunk]:
             [(["B"], ["Text."])],
         ),
         (
-            "a document of headings alone has no chunk",
+            "a document of headings alone is chunked as text",
             "# Book\n\n# Index\n\n## Terms\n",
             WIDE,
-            [],
+            [(["Book"], ["# Book\n\n", "# Index\n\n", "## Terms"])],
         ),
         (
             "every heading after text starts a new chunk, even when everything fits",
@@ -1087,7 +1089,12 @@ def test_the_pipeline_is_composed_from_the_settings(
 @pytest.mark.parametrize(
     ("name", "text", "settings", "expected"),
     [
-        ("headings alone at the top: no chunk", "# A\n## B\n", WIDE, []),
+        (
+            "a text of headings alone is chunked as text: its headings are all it says",
+            "# A\n## B\n",
+            WIDE,
+            [(["A"], [])],
+        ),
         (
             "an empty part and chapter still head the chapter after them",
             "# Part II\n\n## Chapter 5\n\n## Chapter 6\n\nText.",
@@ -1162,3 +1169,16 @@ def test_a_chunk_without_a_word_is_never_made(
     assert all(any(ch.isalnum() for ch in c.text) for c in chunks), (
         f"{name}: every chunk says a word"
     )
+
+
+def test_a_page_the_converter_read_as_headings_keeps_its_words() -> None:
+    """A PDF set all in one font can come out of the converter as headings alone, one line or
+    many: chunked as markdown it would make no chunk and be unsearchable."""
+    one_line = "<!-- page 1 -->\n\n# finch-agate ## Purpose Deduplicates the ledger. ## Port 21055"
+    many = "<!-- page 1 -->\n\n# finch-agate\n\n## Deduplicates the ledger.\n\n## Port 21055\n"
+    for text in (one_line, many):
+        chunks = chunk.split(text, WIDE)
+        assert chunks, text
+        joined = " ".join(c.text for c in chunks)
+        assert "finch-agate" in joined and "21055" in joined, text
+        assert all(c.page_start == 1 for c in chunks), text

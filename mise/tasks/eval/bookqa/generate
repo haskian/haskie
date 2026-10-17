@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description="Book QA eval, phase 1 (by hand, calls Claude): generate candidate question/answer records from the source books into evals/bookqa/candidates/. Args: [--source NAME] [--segments N] [--per-segment N] [--seed N] [--model M] [--dry-run] [--accept]"
+set -euo pipefail
+uv run python -m evals.bookqa.generate "$@"

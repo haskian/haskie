@@ -1,0 +1,4 @@
+{
+  "module": "bounded_buffer",
+  "evidence": ["little-book-of-semaphores.pdf"]
+}

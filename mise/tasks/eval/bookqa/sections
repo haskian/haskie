@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="Book QA eval: score search_sections - does a top section hold the answer (gold quote or judged passage), and do its descriptors name the answer's terms. No Claude."
+set -euo pipefail
+home="${HASKIE_EVAL_EMBED_HOME:-$PWD/evals/.haskie-eval-embed}"
+api="${HASKIE_EVAL_EMBED_URL:-http://127.0.0.1:8124}"
+uv run haskie run --home "$home" --port "${api##*:}" --no-browser
+uv run python -m evals.bookqa.sections --api "$api" "$@"
