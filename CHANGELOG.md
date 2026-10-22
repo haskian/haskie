@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.37.1 - 2026-10-22
+#### Bug Fixes
+- (**deps**) cap dbos below 3.3 (#59) - (11fd06a) - Črtomir Majer
+
+- - -
+
 ## v0.37.0 - 2026-10-14
 #### Features
 - (**sessions**) filter a session's search history and count its searches (#57) - (2c39d39) - Črtomir Majer
