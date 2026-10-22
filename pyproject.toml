@@ -34,7 +34,9 @@ dependencies = [
     "semantic-text-splitter>=0.32.0",
     "aiosqlite>=0.21.0",
     "sqlalchemy[asyncio]>=2.0.43",
-    "dbos>=3.0.0",
+    # 3.3 drops `garbage_collect`, which the retention step calls (`indexing/workflows.py`), and
+    # migrates the system tables `sysdb.py` reads.
+    "dbos>=3.0.0,<3.3",
     "structlog>=25.1.0",
     "typer>=0.15.0",
     "tomlkit>=0.13.0",

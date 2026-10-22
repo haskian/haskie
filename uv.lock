@@ -559,7 +559,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.21.0" },
-    { name = "dbos", specifier = ">=3.0.0" },
+    { name = "dbos", specifier = ">=3.0.0,<3.3" },
     { name = "firecrawl-anydoc", specifier = ">=0.2.4" },
     { name = "huggingface-hub", specifier = ">=0.30" },
     { name = "lancedb", specifier = ">=0.38.0" },
