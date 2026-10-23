@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.37.2 - 2026-10-23
+#### Bug Fixes
+- (**operations**) keep a batch that waited for its model as one task (#60) - (d905967) - Črtomir Majer
+
+- - -
+
 ## v0.37.1 - 2026-10-22
 #### Bug Fixes
 - (**deps**) cap dbos below 3.3 (#59) - (11fd06a) - Črtomir Majer
