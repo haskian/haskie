@@ -2318,6 +2318,40 @@ async def test_transient_step_failure_gives_up_after_max_attempts(
     )
 
 
+async def test_a_batch_that_waited_for_its_model_is_one_task(
+    dbos, tmp_path: Path, monkeypatch
+) -> None:
+    """A step that found the OCR model on its way ran no batch: the batches after it keep their
+    own status in the task list, not the one of the step before."""
+    monkeypatch.setattr(workflows, "MODEL_WAIT_SECONDS", 0.02)
+    await _use(dbos, workers=4, batch_pages=1, document_parallelism=1)
+    doc = await import_row("p.pdf", text_pdf([f"P{i}" for i in range(3)]), tmp_path)
+    real = pipeline.convert_batch
+    calls: list[int] = []
+
+    async def loading_once(doc_, batch):
+        calls.append(batch.seq)
+        if batch.seq == 1 and calls.count(1) == 1:
+            raise models.ModelLoading("on its way")
+        if batch.seq == 2:
+            raise PermanentError("all 1 pages need OCR")
+        return await real(doc_, batch)
+
+    monkeypatch.setattr(pipeline, "convert_batch", loading_once)
+    job_id = await dbos.start_import(doc)
+
+    with pytest.raises(workflows.PipelineError, match="PermanentError"):
+        await wait_for(job_id)
+
+    assert calls == [0, 1, 1, 2], "batch 1 ran again once its model was ready"
+    found = await operations.list_tasks(job_id)
+    assert {t.seq: t.status for t in found if t.stage == "convert"} == {
+        0: "SUCCESS",
+        1: "SUCCESS",
+        2: "ERROR",
+    }
+
+
 async def test_permanent_step_failure_is_not_retried(dbos, tmp_path: Path, monkeypatch) -> None:
     """A document that needs OCR fails the same way on every attempt, so it is reported at once
     instead of burning three attempts."""
