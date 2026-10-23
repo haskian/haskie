@@ -927,7 +927,7 @@ async def _stage_tasks(child) -> list[Task]:
     steps = [
         st
         for st in await DBOS.list_workflow_steps_async(child.workflow_id)
-        if st["function_name"] == STAGE_STEP
+        if st["function_name"] == STAGE_STEP and not _found_model_loading(st)
     ]
     out: list[Task] = []
     for i, batch in enumerate(batches):
@@ -962,7 +962,7 @@ async def description_tasks(run) -> list[Task]:
         step
         for step in steps
         if step["function_name"] in (MEMBER_STEP, COLLECTION_STEP)
-        and not (isinstance(step["output"], BatchResult) and step["output"].model_loading)
+        and not _found_model_loading(step)
     ]
     running = run.status == RunStatus.PENDING
     out: list[Task] = []
@@ -988,6 +988,12 @@ async def description_tasks(run) -> list[Task]:
             )
         )
     return out
+
+
+def _found_model_loading(step) -> bool:
+    """A step that only found its model on its way ran no task: the workflow slept and ran the
+    same task again in a later step (`workflows._awaiting_model`)."""
+    return isinstance(step["output"], BatchResult) and step["output"].model_loading
 
 
 def _step_outcome(step) -> tuple[int | None, str | None]:
